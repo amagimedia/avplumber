@@ -26,7 +26,6 @@ and build OBS as usual.
 
 Add avplumber source to some scene.
 
-Paste this script to the script field in source properties and change input URL:
-```
+Paste content of `examples/rtmp_input.txt` to the script field in source properties, change input URL and confirm.
 
-```
+After a few seconds, you should see and hear the input stream in OBS.
