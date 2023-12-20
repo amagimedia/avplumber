@@ -1,0 +1,15 @@
+[submodule "deps/avcpp"]
+	path = deps/avcpp
+	url = https://github.com/h4tr3d/avcpp
+[submodule "deps/flags.hh"]
+	path = deps/flags.hh
+	url = https://github.com/songgao/flags.hh
+[submodule "deps/readerwriterqueue"]
+	path = deps/readerwriterqueue
+	url = https://github.com/cameron314/readerwriterqueue
+[submodule "deps/json"]
+	path = deps/json
+	url = https://github.com/nlohmann/json
+[submodule "deps/cpr"]
+	path = deps/cpr
+	url = https://github.com/whoshuu/cpr

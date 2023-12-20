@@ -1,0 +1,12 @@
+diff --git a/plugins/CMakeLists.txt b/plugins/CMakeLists.txt
+index a39f35771..8c751f05e 100644
+--- a/plugins/CMakeLists.txt
++++ b/plugins/CMakeLists.txt
+@@ -45,6 +45,7 @@ elseif("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
+ 	add_subdirectory(linux-alsa)
+ 	add_subdirectory(decklink/linux)
+ 	add_subdirectory(vlc-video)
++	add_subdirectory(obs-avplumber-source)
+ 	add_subdirectory(sndio)
+ elseif("${CMAKE_SYSTEM_NAME}" MATCHES "FreeBSD")
+ 	add_subdirectory(linux-capture)

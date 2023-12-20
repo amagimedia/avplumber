@@ -1,0 +1,23 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.3.0
+    ports:
+      - "1935:1935"
+    environment:
+      MTX_PROTOCOLS: "tcp"
+    healthcheck:
+      test: bash -c "exec 6<> /dev/tcp/localhost/1935"
+
+  avplumber:
+    build: ../..
+    network_mode: host # needed only to make localhost work so we don't need separate example script for Docker
+    volumes:
+      - ../../examples:/scripts:ro
+    # note that depends_on is not needed here because avplumber will retry opening input if unavailable
+    command: -p 20200 -s /scripts/$script
+  
+  ffmpeg:
+    image: linuxserver/ffmpeg
+    depends_on:
+      - mediamtx
+    command: -re -f lavfi -i testsrc2=s=1280x720:r=25 -f lavfi -i anoisesrc=color=brown -c:v libx264 -g 50 -preset:v ultrafast -b:v 8M -c:a aac -f flv rtmp://mediamtx/live/input

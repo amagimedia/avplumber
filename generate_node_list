@@ -1,0 +1,25 @@
+#!/bin/busybox sh
+
+set -e
+
+echo '#include "src/graph_factory.hpp"'
+echo '#include "src/node_create_function.hpp"'
+
+for fn in $*; do
+    sed -e 's/^DECLNODE(\([^, ]\+\), *\([^) ]\+\)).*/class \2;/; t; d' < $fn
+    sed -e 's/^DECLNODE_ATD(\([^, ]\+\), *\([^) ]\+\)).*/std::shared_ptr<Node> createNodeATD_\2(NodeCreationInfo\&);\ntemplate<typename> class \2;/; t; d' < $fn
+done
+
+echo 'void initFactories(std::unordered_map<std::string, NodeFactoryFunction> &factories) {'
+
+et() { # explicit type specification
+    t="$1"
+    echo '\n    factories["$+{node}<'$t'>"] = \&createNode<$+{class}<'$t'>>;'
+}
+
+for fn in $*; do
+    perl -ne 's/^DECLNODE(_ALIAS)?\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNode<$+{class}>;/ && print' < $fn
+    perl -ne 's/^DECLNODE_ATD(_ALIAS)?\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};'"$(et av::Packet) $(et av::VideoFrame) $(et av::AudioSamples)"'/ && print' < $fn
+done
+
+echo '}'

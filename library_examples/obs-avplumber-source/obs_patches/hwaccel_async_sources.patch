@@ -1,0 +1,244 @@
+diff --git a/libobs/obs-source.c b/libobs/obs-source.c
+index 50c7deed1..540d8a7a2 100644
+--- a/libobs/obs-source.c
++++ b/libobs/obs-source.c
+@@ -19,6 +19,7 @@
+ #include <math.h>
+ 
+ #include "media-io/format-conversion.h"
++#include "media-io/media-io-defs.h"
+ #include "media-io/video-frame.h"
+ #include "media-io/audio-io.h"
+ #include "util/threading.h"
+@@ -1835,10 +1836,19 @@ static void upload_raw_frame(gs_texture_t *tex[MAX_AV_PLANES],
+ 	case CONVERT_422_A:
+ 	case CONVERT_444_A:
+ 	case CONVERT_444_A_PACK:
+-		for (size_t c = 0; c < MAX_AV_PLANES; c++) {
+-			if (tex[c])
+-				gs_texture_set_image(tex[c], frame->data[c],
+-						     frame->linesize[c], false);
++		if (frame->hw) {
++			for (size_t c = 0; c < MAX_AV_PLANES; c++) {
++				gs_texture_t *t = tex[c];
++				if (t) {
++					frame->hw->buffer_to_texture(frame->hw_opaque, t, frame->data[c], frame->linesize[c]);
++				}
++			}
++		} else {
++			for (size_t c = 0; c < MAX_AV_PLANES; c++) {
++				if (tex[c])
++					gs_texture_set_image(tex[c], frame->data[c],
++								frame->linesize[c], false);
++			}
+ 		}
+ 		break;
+ 
+@@ -2028,8 +2038,12 @@ bool update_async_textures(struct obs_source *source,
+ 
+ 	type = get_convert_type(frame->format, frame->full_range);
+ 	if (type == CONVERT_NONE) {
+-		gs_texture_set_image(tex[0], frame->data[0], frame->linesize[0],
+-				     false);
++		if (frame->hw) {
++			frame->hw->buffer_to_texture(frame->hw_opaque, tex[0], frame->data[0], frame->linesize[0]);
++		} else {
++			gs_texture_set_image(tex[0], frame->data[0], frame->linesize[0],
++					     false);
++		}
+ 		return true;
+ 	}
+ 
+@@ -2712,6 +2726,10 @@ static inline void copy_frame_data_plane(struct obs_source_frame *dst,
+ 					 const struct obs_source_frame *src,
+ 					 uint32_t plane, uint32_t lines)
+ {
++	if (src->hw && src->hw->copy_frame_data_plane_from_hw) {
++		src->hw->copy_frame_data_plane_from_hw(src->hw_opaque, dst, src, plane, lines);
++		return;
++	}
+ 	if (dst->linesize[plane] != src->linesize[plane]) {
+ 		for (uint32_t y = 0; y < lines; y++)
+ 			copy_frame_data_line(dst, src, plane, y);
+@@ -2722,8 +2740,10 @@ static inline void copy_frame_data_plane(struct obs_source_frame *dst,
+ }
+ 
+ static void copy_frame_data(struct obs_source_frame *dst,
+-			    const struct obs_source_frame *src)
++			    const struct obs_source_frame *src,
++				bool allow_borrow)
+ {
++	bool borrow = allow_borrow && src->hw && src->hw->borrows_frames;
+ 	dst->flip = src->flip;
+ 	dst->flags = src->flags;
+ 	dst->full_range = src->full_range;
+@@ -2734,6 +2754,15 @@ static void copy_frame_data(struct obs_source_frame *dst,
+ 		memcpy(dst->color_range_min, src->color_range_min, size);
+ 		memcpy(dst->color_range_max, src->color_range_max, size);
+ 	}
++	if (borrow) {
++		for (int i=0; i<MAX_AV_PLANES; i++) {
++			dst->data[i] = src->data[i];
++			dst->linesize[i] = src->linesize[i];
++		}
++		dst->hw = src->hw;
++		dst->hw_opaque = src->hw_opaque;
++		return;
++	}
+ 
+ 	switch (src->format) {
+ 	case VIDEO_FORMAT_I420:
+@@ -2787,7 +2816,7 @@ static void copy_frame_data(struct obs_source_frame *dst,
+ void obs_source_frame_copy(struct obs_source_frame *dst,
+ 			   const struct obs_source_frame *src)
+ {
+-	copy_frame_data(dst, src);
++	copy_frame_data(dst, src, false);
+ }
+ 
+ static inline bool async_texture_changed(struct obs_source *source,
+@@ -2872,8 +2901,16 @@ cache_video(struct obs_source *source, const struct obs_source_frame *frame)
+ 	if (!new_frame) {
+ 		struct async_frame new_af;
+ 
+-		new_frame = obs_source_frame_create(format, frame->width,
++		if (frame->hw && frame->hw->borrows_frames) {
++			// pass zero dimensions here, otherwise this function will malloc ram, which is not necessary for hw frame
++			new_frame = obs_source_frame_create(frame->format, 0, 0);
++			new_frame->height = frame->height;
++			new_frame->width = frame->width;
++		} else {
++			new_frame = obs_source_frame_create(format, frame->width,
+ 						    frame->height);
++		}
++
+ 		new_af.frame = new_frame;
+ 		new_af.used = true;
+ 		new_af.unused_count = 0;
+@@ -2886,7 +2923,7 @@ cache_video(struct obs_source *source, const struct obs_source_frame *frame)
+ 
+ 	pthread_mutex_unlock(&source->async_mutex);
+ 
+-	copy_frame_data(new_frame, frame);
++	copy_frame_data(new_frame, frame, true);
+ 
+ 	return new_frame;
+ }
+@@ -3046,7 +3083,7 @@ obs_source_preload_video_internal(obs_source_t *source,
+ 			frame->format, frame->width, frame->height);
+ 	}
+ 
+-	copy_frame_data(source->async_preload_frame, frame);
++	copy_frame_data(source->async_preload_frame, frame, true);
+ 
+ 	source->last_frame_ts = frame->timestamp;
+ }
+@@ -3146,7 +3183,7 @@ obs_source_set_video_frame_internal(obs_source_t *source,
+ 			frame->format, frame->width, frame->height);
+ 	}
+ 
+-	copy_frame_data(source->async_preload_frame, frame);
++	copy_frame_data(source->async_preload_frame, frame, true);
+ 	set_async_texture_size(source, source->async_preload_frame);
+ 	update_async_textures(source, source->async_preload_frame,
+ 			      source->async_textures, source->async_texrender);
+@@ -3424,6 +3461,14 @@ void remove_async_frame(obs_source_t *source, struct obs_source_frame *frame)
+ 
+ 		if (f->frame == frame) {
+ 			f->used = false;
++			if (frame->hw && frame->hw->borrows_frames) {
++				frame->hw->free_buffer(frame->hw_opaque, frame->data[0]);
++				for (size_t plane=0; plane<MAX_AV_PLANES; plane++) {
++					frame->data[plane] = NULL;
++					frame->linesize[plane] = 0;
++				}
++				frame->hw = NULL; // don't free again if called
++			}
+ 			break;
+ 		}
+ 	}
+diff --git a/libobs/obs.h b/libobs/obs.h
+index a2a7251d7..4541bab89 100644
+--- a/libobs/obs.h
++++ b/libobs/obs.h
+@@ -112,6 +112,11 @@ enum obs_allow_direct_render {
+ 	OBS_ALLOW_DIRECT_RENDERING,
+ };
+ 
++enum obs_hw_buffer_type {
++	OBS_HW_BUFFER_NONE = 0,      /**< buffer is in the main RAM, accessible from CPU */
++	OBS_HW_BUFFER_CUDA           /**< buffer pointer is a CUDA pointer to GPU, and borrows_frames must be true */
++};
++
+ enum obs_scale_type {
+ 	OBS_SCALE_DISABLE,
+ 	OBS_SCALE_POINT,
+@@ -221,6 +226,17 @@ struct obs_source_cea_708 {
+ 
+ #define OBS_SOURCE_FRAME_LINEAR_ALPHA (1 << 0)
+ 
++struct obs_hw_buffer {
++	enum obs_hw_buffer_type type;
++	bool borrows_frames; /**< true = API user must keep the frame in RAM until free_buffer is called */
++	void (*free_buffer)(void*, void*);
++	void (*buffer_to_texture)(void* opaque, gs_texture_t* tex, void* buf, size_t linesize);
++	void (*copy_frame_data_plane_from_hw)(void* opaque,
++					 struct obs_source_frame *dst,
++					 const struct obs_source_frame *src,
++					 uint32_t plane, uint32_t lines);
++};
++
+ /**
+  * Source asynchronous video output structure.  Used with
+  * obs_source_output_video to output asynchronous video.  Video is buffered as
+@@ -242,6 +258,8 @@ struct obs_source_frame {
+ 	uint64_t timestamp;
+ 
+ 	enum video_format format;
++	struct obs_hw_buffer *hw;
++	void* hw_opaque;
+ 	float color_matrix[16];
+ 	bool full_range;
+ 	float color_range_min[3];
+@@ -2375,7 +2393,13 @@ obs_source_frame_create(enum video_format format, uint32_t width,
+ static inline void obs_source_frame_destroy(struct obs_source_frame *frame)
+ {
+ 	if (frame) {
+-		bfree(frame->data[0]);
++		if (!frame->hw) {
++			bfree(frame->data[0]);
++		} else if (frame->hw->borrows_frames) {
++			frame->hw->free_buffer(frame->hw_opaque, frame->data[0]);
++		} else {
++			assert(false && "hw but not borrows_frames, unimplemented");
++		}
+ 		bfree(frame);
+ 	}
+ }
+diff --git a/libobs-opengl/gl-subsystem.h b/libobs-opengl/gl-subsystem.h
+index c851243bd..3920d091b 100644
+--- a/libobs-opengl/gl-subsystem.h
++++ b/libobs-opengl/gl-subsystem.h
+@@ -535,6 +535,8 @@ struct gs_texture {
+ 
+ 	gs_samplerstate_t *cur_sampler;
+ 	struct fbo_info *fbo;
++	
++    void (*on_destroy_callback)(struct gs_texture *itself);
+ };
+ 
+ struct gs_texture_2d {
+diff --git a/libobs-opengl/gl-texture2d.c b/libobs-opengl/gl-texture2d.c
+index eec3534cd..d3db3302d 100644
+--- a/libobs-opengl/gl-texture2d.c
++++ b/libobs-opengl/gl-texture2d.c
+@@ -148,6 +148,9 @@ void gs_texture_destroy(gs_texture_t *tex)
+ 	if (!tex)
+ 		return;
+ 
++	if (tex->on_destroy_callback)
++		tex->on_destroy_callback(tex);
++
+ 	if (tex->cur_sampler)
+ 		gs_samplerstate_destroy(tex->cur_sampler);
+ 

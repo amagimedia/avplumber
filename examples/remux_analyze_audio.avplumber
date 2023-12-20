@@ -1,0 +1,22 @@
+node.add { "type": "input", "url": "rtmp://localhost/live/input", "dst": "in10", "options": { "probesize": 3000000, "analyzeduration": 3000000 }, "group": "all", "auto_restart": "group", "name": "input", "timeout": 5, "initial_timeout": 8 }
+
+node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in", "a:0": "a_in" }, "group": "all", "auto_restart": "group" }
+
+node.add { "type": "packet_relay", "src": "v_in", "dst": "v_out", "group": "all", "name": "Video_Relay" }
+
+node.add { "type": "split", "src": "a_in", "dst": [ "a_to_relay", "a_to_dec" ], "group": "all" }
+
+node.add { "type": "packet_relay", "src": "a_to_relay", "dst": "a_out", "group": "all", "name": "Audio_Relay" }
+
+node.add { "type": "mux", "src": [ "v_out", "a_out" ], "dst": "mux0", "group": "all", "fix_timestamps": true }
+
+node.add { "type": "output", "format": "flv", "url": "rtmp://localhost/live/output", "src": "mux0", "auto_restart": "panic", "group": "all" }
+
+node.add { "type": "dec_audio", "src": "a_to_dec", "dst": "a_blackhole", "group": "all", "name": "Audio_Decoder" }
+node.add { "type": "null_sink", "src": "a_blackhole", "group": "all" }
+
+# empty URL will output to console
+stats.subscribe { "url": "", "name": "qwerty", "interval": 1, "streams": { "audio": [ { "q_pre_dec": "a_to_dec", "q_post_dec": "a_blackhole", "decoder": "Audio_Decoder" } ], "video": [ { "q_pre_dec": "v_in", "relay": "Video_Relay" } ] } }
+
+
+group.start all
