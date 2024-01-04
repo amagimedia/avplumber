@@ -40,4 +40,7 @@ public:
     void signal(uint64_t val = 1) {
         write(this->fd_, &val, sizeof val);
     }
+    int fd() const {
+        return fd_;
+    }
 };

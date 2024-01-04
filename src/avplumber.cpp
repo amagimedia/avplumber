@@ -19,6 +19,11 @@
 #include "output_control.hpp"
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
+#ifdef EMBED_IN_OBS
+    #include "instance_shared.hpp"
+    #include "TickSource.hpp"
+    #include "EventLoop.hpp"
+#endif
 
 #include <avcpp/av.h>
 #include <avcpp/avutils.h>
@@ -103,6 +108,9 @@ private:
     std::mutex cmd_run_lock_;
     std::mutex server_ready_;
     std::list<std::thread> detached_threads_;
+    #ifdef EMBED_IN_OBS
+        std::shared_ptr<TickSource> tick_source_;
+    #endif
 
 public:
     std::shared_ptr<NodeManager> manager() { return manager_; }
@@ -408,7 +416,18 @@ public:
                 ev->event().signal();
             });
         };
+
+        #ifdef EMBED_IN_OBS
+            tick_source_ = InstanceSharedObjects<TickSource>::get(manager_->instanceData(), "obs");
+        #endif
     }
+    #ifdef EMBED_IN_OBS
+    void tick() {
+        std::shared_ptr<TickSource> tick_source = tick_source_;
+        global_event_loop.fastExecute(av::Timestamp(10, av::Rational(1, 1000)), [tick_source](EventLoop&) { tick_source->tick(); });
+        //global_event_loop.execute([tick_source](EventLoop&) { tick_source->tick(); });
+    }
+    #endif
 };
 
 class TcpControlServer: public ControlServerBase {
@@ -547,6 +566,10 @@ void AVPlumber::unsetObsSourceAndWait() {
     while (inst.obs_source_used_by_.load()!=0) {
         wallclock.sleepms(30);
     }
+}
+
+void AVPlumber::obsTick() {
+    impl_->tick();
 }
 #endif
 

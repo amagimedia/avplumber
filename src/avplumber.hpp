@@ -36,6 +36,7 @@ public:
 #ifdef EMBED_IN_OBS
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
+    void obsTick();
 #endif
 
     void executeCommandsFromFile(const std::string path);

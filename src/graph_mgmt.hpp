@@ -23,6 +23,7 @@ public:
 
 class NodeManager;
 class NodeGroup;
+class TickSource;
 
 class NodeWrapper: public std::enable_shared_from_this<NodeWrapper> {
 public:
@@ -34,7 +35,8 @@ protected:
     std::unique_ptr<std::thread> thread_;
     std::shared_ptr<NodeManager> manager_;
     std::shared_ptr<NodeGroup> group_;
-    std::atomic_bool dowork_;
+    std::shared_ptr<TickSource> tick_source_;
+    std::atomic_bool dowork_ {false};
     std::atomic_bool finished_;
     std::atomic_bool stop_requested_;
 
@@ -45,6 +47,9 @@ protected:
     void threadFunction();
     inline bool threadWorks() {
         return ((thread_!=nullptr) && (!finished_));
+    }
+    bool isNonBlocking() {
+        return std::dynamic_pointer_cast<NonBlockingNodeBase>(node_) != nullptr;
     }
 public:
     void createNode();
@@ -64,7 +69,7 @@ public:
         return name_;
     }
     inline bool isWorking() {
-        return threadWorks();
+        return threadWorks() || (isNonBlocking() && node_!=nullptr && dowork_);
     }
     inline void doLocked(std::function<void()> cb) {
         std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);

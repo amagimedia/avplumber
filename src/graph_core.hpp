@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include "Event.hpp"
 #include "instance.hpp"
+#include "EventLoop.hpp"
 #include "edge_meta_utils.hpp"
 
 class EdgeBase;
@@ -25,6 +26,21 @@ public:
         return {};
     }*/
     virtual ~Node() {
+    }
+};
+
+class NonBlockingNodeBase: virtual public Node {
+public:
+    virtual void process() {
+        throw Error("process() called for non-blocking node. Use processNonBlocking(...)");
+    }
+    virtual void processNonBlocking(EventLoop&, bool ticks) = 0;
+};
+
+template<typename Child> class NonBlockingNode: public NonBlockingNodeBase {
+protected:
+    std::shared_ptr<Child> thisAsShared() {
+        return std::dynamic_pointer_cast<Child>(this->shared_from_this());
     }
 };
 
@@ -264,6 +280,7 @@ public:
     bool try_enqueue(const T &elem) {
         bool r = queue_.try_enqueue(elem);
         if (r) {
+            last_ts_ = elem.pts();
             ++occupied_;
             if (occupied_ > queue_limit_) {
                 queue_limit_ = occupied_;

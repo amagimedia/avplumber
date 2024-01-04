@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include "../instance_shared.hpp"
+#include "../EventLoop.hpp"
 
 class RealTimeTeam: public InstanceShared<RealTimeTeam> {
 protected:
@@ -46,7 +47,7 @@ public:
     }
 };
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T> {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>> {
 protected:
     bool ready_ = false;
     bool first_ = true;
@@ -65,73 +66,136 @@ protected:
     // TODO: master election in case of failure of master specified by user
 public:
     using NodeSISO<T, T>::NodeSISO;
-    virtual void process() {
-        bool emit = true;
-        T data = this->source_->get();
-        AVTS now_ts = wallclock.pts();
-        
-        // check whether there is next packet in the input queue 
-        T* ptr = this->source_->peek(0);
-        if (ptr==nullptr) {
-            // we'll probably wait for packet in next process() iteration
-            last_wait_ = wallclock.pts();
-        }
-        
-        AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
-        if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
-            if (team_) {
-                if (ready_) {
-                    offset_ = team_->getOffset(offset_);
-                } else {
-                    offset_ = team_->getOffset();
-                    ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
+    virtual void processNonBlocking(EventLoop& evl, bool ticks) {
+        bool process_next;
+        do {
+            process_next = false;
+            bool emit = true;
+            bool consume = true;
+            T* dataptr = this->source_->peek(0);
+            if (dataptr==nullptr) {
+                if (!ticks) {
+                    // TODO write some wrapper function or macro because copy-pasting the whole weak_ptr->lambda->shared_ptr logic is tedious
+                    std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
+                    //logstream << "scheduling source retry";
+                    evl.asyncWaitAndExecute(this->edgeSource()->edge()->producedEvent(), [wthis](EventLoop& evl) {
+                        //logstream << "edgeSource wakeup";
+                        std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
+                        if (!sthis) return;
+                        // retry when we have packet in source queue
+                        sthis->processNonBlocking(evl, false);
+                    });
                 }
+                return;
             }
-            if (ready_) {
-                AVTS diff = (pkt_ts - offset_) - now_ts;
-                if (diff < negative_time_tolerance_) {
-                    logstream << "negative time to wait " << diff << "ms, resyncing.";
-                    ready_ = false;
-                } else if (diff < negative_time_discard_) {
-                    logstream << "negative time to wait " << diff << "ms, discarding frame.";
-                    emit = false;
-                } else if (diff < discontinuity_threshold_) {
-                    if (now_ts - last_wait_ < max_no_wait_period_) {
-                        if (no_wait_notified_) {
-                            logstream << "input no longer queued, returning to realtime mode.";
-                            no_wait_notified_ = false;
-                        }
-                        wallclock.sleepAVTS(diff);
+            T &data = *dataptr;
+
+            AVTS now_ts = wallclock.pts();
+            
+            AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
+            if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
+                if (team_) {
+                    if (ready_) {
+                        offset_ = team_->getOffset(offset_);
                     } else {
-                        if (!no_wait_notified_) {
-                            logstream << "input queued constantly for " << (now_ts-last_wait_) << "ms, bypassing.";
-                            no_wait_notified_ = true;
+                        offset_ = team_->getOffset();
+                        ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
+                    }
+                }
+                if (ready_) {
+                    AVTS diff = (pkt_ts - offset_) - now_ts;
+                    if (diff < negative_time_tolerance_) {
+                        logstream << "negative time to wait " << diff << "ms, resyncing.";
+                        ready_ = false;
+                    } else if (diff < negative_time_discard_) {
+                        logstream << "negative time to wait " << diff << "ms, discarding frame.";
+                        emit = false;
+                    } else if (diff < discontinuity_threshold_) {
+                        if (now_ts - last_wait_ < max_no_wait_period_) {
+                            if (no_wait_notified_) {
+                                logstream << "input no longer queued, returning to realtime mode.";
+                                no_wait_notified_ = false;
+                            }
+                            if (diff > 0) {
+                                emit = false;
+                                consume = false;
+                                if (!ticks) {
+                                    //logstream << "need to wait " << diff;
+                                    std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
+                                    evl.schedule(av::Timestamp(now_ts + diff, wallclock.timeBase()), [wthis](EventLoop& evl) {
+                                        //logstream << "wait wakeup";
+                                        std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
+                                        if (!sthis) return;
+                                        // retry after waiting
+                                        sthis->processNonBlocking(evl, false);
+                                    });
+                                }
+                            }
+                        } else {
+                            if (!no_wait_notified_) {
+                                logstream << "input queued constantly for " << (now_ts-last_wait_) << "ms, bypassing.";
+                                no_wait_notified_ = true;
+                            }
+                            ready_ = false;
+                            first_ = true;
+                        }
+                    } else {
+                        // diff >= discontinuity_threshold_
+                        logstream << "discontinuity detected, " << diff << "ms, resyncing.";
+                        if (team_ && is_master_) {
+                            team_->reset();
                         }
                         ready_ = false;
                         first_ = true;
                     }
-                } else {
-                    // diff >= discontinuity_threshold_
-                    logstream << "discontinuity detected, " << diff << "ms, resyncing.";
-                    if (team_ && is_master_) {
-                        team_->reset();
+                }
+                if ((!ready_) && consume) {
+                    // offset_ must be set only when consuming, because it marks sync point
+                    offset_ = (pkt_ts - now_ts) - (first_ ? initial_jitter_margin_ : jitter_margin_);
+                    first_ = false;
+                    if (team_) {
+                        offset_ = team_->updateOffset(offset_);
                     }
-                    ready_ = false;
-                    first_ = true;
+                    ready_ = true;
                 }
             }
-            if (!ready_) {
-                offset_ = (pkt_ts - now_ts) - (first_ ? initial_jitter_margin_ : jitter_margin_);
-                first_ = false;
-                if (team_) {
-                    offset_ = team_->updateOffset(offset_);
+            if (emit) {
+                if (!this->sink_->put(data, true)) {
+                    if (!ticks) {
+                        std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
+                        evl.asyncWaitAndExecute(this->edgeSink()->edge()->consumedEvent(), [wthis](EventLoop& evl) {
+                            std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
+                            if (!sthis) return;
+                            // retry when we have space in sink
+                            sthis->processNonBlocking(evl, false);
+                        });
+                    }
+                    consume = false;
+                } else {
+                    if (!ticks) {
+                        std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
+                        evl.execute([wthis](EventLoop& evl) {
+                            std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
+                            if (!sthis) return;
+                            // process next packet
+                            sthis->processNonBlocking(evl, false);
+                        });
+                    } else {
+                        process_next = true;
+                    }
                 }
-                ready_ = true;
             }
-        }
-        if (emit) {
-            this->sink_->put(data);
-        }
+            if (consume) {
+                this->source_->pop();
+
+                // check whether there is next packet in the input queue 
+                T* ptr = this->source_->peek(0);
+                if (ptr==nullptr || last_wait_==0) {
+                    // we'll probably wait for packet in next process() iteration
+                    last_wait_ = wallclock.pts();
+                }
+            }
+        } while (process_next);
     }
     static std::shared_ptr<RealTimeSpeed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

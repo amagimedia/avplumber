@@ -95,7 +95,7 @@ static inline enum video_format convert_pixel_format(int f)
 	return VIDEO_FORMAT_NONE;
 }
 
-class ObsVideoSink: public NodeSingleInput<av::VideoFrame>, public IFlushable {
+class ObsVideoSink: public NodeSingleInput<av::VideoFrame>, public NonBlockingNode<ObsVideoSink>, public IFlushable {
 protected:
     InstanceData& app_instance_;
     struct obs_source_frame obs_frame_ = {0};
@@ -105,6 +105,7 @@ protected:
     uint_fast8_t planes_count_ = 0;
     AVTS prev_timestamp_ = 0;
     signed int timeout_ms_ = -1;
+    AVTS last_frame_emitted_at_ = 0;
     bool unbuffered_ = false;
     bool debug_timing_ = false;
     struct obs_hw_buffer obs_hw_;
@@ -321,10 +322,47 @@ public:
             obs_source_set_async_unbuffered(s, unbuffered_);
         });
     }
-    virtual void process() {
-        av::VideoFrame *pfrm = this->source_->peek(planes_count_ ? timeout_ms_ : -1);
+    virtual void processNonBlocking(EventLoop& evl, bool ticks) {
+        av::VideoFrame *pfrm = this->source_->peek(0);
+        if (pfrm==nullptr) {
+            logstream << "no frame";
+            bool timelimit = planes_count_ && (timeout_ms_>=0);
+            if (timelimit && !ticks) {
+                logstream << "timelimit " << timeout_ms_;
+                std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
+                evl.sleepAndExecute(timeout_ms_, [wthis](EventLoop& evl) {
+                    logstream << "sleeped";
+                    std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
+                    if (!sthis) return;
+                    // retry after waiting
+                    sthis->processNonBlocking(evl, false);
+                });
+            }
+            if (!ticks) {
+                std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
+                logstream << "waiting for frame";
+                evl.asyncWaitAndExecute(this->edgeSource()->edge()->producedEvent(), [wthis](EventLoop& evl) {
+                    logstream << "frame produced";
+                    std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
+                    if (!sthis) return;
+                    // retry when we have packet in source queue
+                    sthis->processNonBlocking(evl, false);
+                });
+            }
+            if ((!timelimit) || (wallclock.pts() < last_frame_emitted_at_ + timeout_ms_)) {
+                // not waited enough yet for timeout - don't proceed to outputting empty frame
+                logstream << "not waited enough yet for timeout";
+                return;
+            }
+        }
         if (pfrm && *pfrm) {
-            av::VideoFrame &frm = *pfrm;
+            logstream << "have frame";
+            av::VideoFrame frm = *pfrm;
+            if (ticks) {
+                while (this->source_->pop()) {}; // remove outstanding buffered packets
+            } else {
+                this->source_->pop();
+            }
             enum obs_hw_buffer_type hwbt;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
@@ -372,7 +410,15 @@ public:
                     FrameInfo *fi = findFreeFrame();
                     if (!fi) {
                         logstream << "too many frames buffered, waiting for obs to free some frames";
-                        wallclock.sleepms(40);
+                        if (!ticks) {
+                            std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
+                            evl.sleepAndExecute(40, [wthis](EventLoop& evl) {
+                                std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
+                                if (!sthis) return;
+                                // retry after waiting
+                                sthis->processNonBlocking(evl, false);
+                            });
+                        }
                         return;
                     }
                     fi->frame = frm;
@@ -389,6 +435,7 @@ public:
                 prepareEmptyFrame();
             }
             obs_frame_.timestamp = rescaleTS(frm.pts(), av::Rational(1, 1000000000)).timestamp();
+            last_frame_emitted_at_ = wallclock.pts();
         } else {
             // timeout or frame empty
             cur_pix_fmt_ = AV_PIX_FMT_NONE;
@@ -397,8 +444,14 @@ public:
         }
         prev_timestamp_ = obs_frame_.timestamp;
         outputFrame();
-        if (pfrm) {
-            this->source_->pop();
+        if (!ticks) {
+            std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
+            evl.execute([wthis](EventLoop& evl) {
+                std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
+                if (!sthis) return;
+                // process next packet
+                sthis->processNonBlocking(evl, false);
+            });
         }
     }
     virtual void flush() {

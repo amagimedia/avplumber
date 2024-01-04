@@ -147,7 +147,7 @@ public:
     }
 };
 
-template<typename OutputType> class NodeSingleOutput: public NodeWithOutputs<OutputType>, virtual public IInitAfterCreate {
+template<typename OutputType> class NodeSingleOutput: virtual public NodeWithOutputs<OutputType>, virtual public IInitAfterCreate {
 public:
     using SinkType = Sink<OutputType>;
 protected:

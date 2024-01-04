@@ -1,8 +1,13 @@
 #include "graph_mgmt.hpp"
+#include "EventLoop.hpp"
+#include "TickSource.hpp"
+#include "graph_core.hpp"
 #include "graph_factory.hpp"
+#include "instance_shared.hpp"
 #include <atomic>
 #include <exception>
 #include <limits>
+#include <memory>
 
 ///////////////////////////////////////////////////////////
 ////// NodeFactory
@@ -12,14 +17,14 @@ NodeFactory::NodeFactory(std::shared_ptr< EdgeManager > edgeman, InstanceData &i
 }
 
 std::shared_ptr< Node > NodeFactory::produce(const Parameters& params) {
-    std::string name = params["type"];
+    std::string type = params["type"];
     //logstream << "Producing " << name << std::endl;
-    if (factories_.count(name)!=1) {
-        throw Error("Unknown node type: " + name);
+    if (factories_.count(type)!=1) {
+        throw Error("Unknown node type: " + type);
     }
-    NodeFactoryFunction func = factories_[name];
+    NodeFactoryFunction func = factories_[type];
     if (func==nullptr) {
-        throw Error("Invalid factory function for " + name);
+        throw Error("Invalid factory function for " + type);
     }
     NodeCreationInfo nci {*edges_, params, instance_};
     std::shared_ptr<Node> r = func(nci);
@@ -32,7 +37,7 @@ std::shared_ptr< Node > NodeFactory::produce(const Parameters& params) {
 
 bool NodeWrapper::start() {
     std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
-    if (!threadWorks()) {
+    if (!isWorking()) {
         last_error_ = "";
         createNode();
         if (node_==nullptr) {
@@ -46,9 +51,25 @@ bool NodeWrapper::start() {
             if (thread_ && thread_->joinable()) thread_->join();
         } catch (std::system_error&) {
         }
-        thread_ = make_unique<std::thread>(start_thread(name_, [this]() {
-            this->threadFunction();
-        }));
+
+        std::shared_ptr<NonBlockingNodeBase> nbnode = std::dynamic_pointer_cast<NonBlockingNodeBase>(node_);
+        if (nbnode) {
+            if (tick_source_!=nullptr) {
+                tick_source_->add(std::weak_ptr<NonBlockingNodeBase>(nbnode));
+            } else {
+                global_event_loop.execute([nbnode](EventLoop &evl) {
+                    nbnode->processNonBlocking(evl, false);
+                });
+            }
+        } else {
+            if (tick_source_!=nullptr) {
+                throw Error("tick_source can't be specified for blocking (threaded) node");
+            }
+            // this is blocking Node so it requires separate thread
+            thread_ = make_unique<std::thread>(start_thread(name_, [this]() {
+                this->threadFunction();
+            }));
+        }
         return true;
     } else {
         return false;
@@ -131,7 +152,9 @@ bool NodeWrapper::stop(bool inhibit_actions) {
         }
         return true;
     } else {
-        // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes is necessary:
+        dowork_ = false;
+        // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes
+        // and non-blocking nodes is necessary:
         if (node_ != nullptr) {
             logstream << "Destroying node " << name_ << " from stop()";
             node_ = nullptr;
@@ -685,6 +708,10 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
         name << std::hex << reinterpret_cast<std::uintptr_t>(this);
         name_ = name.str();
     }
+    if (params_.count("tick_source") > 0) {
+        tick_source_ = InstanceSharedObjects<TickSource>::get(manager->instanceData(), params["tick_source"]);
+    }
+
     if (early_create) {
         createNode();
     }
