@@ -325,13 +325,13 @@ public:
     virtual void processNonBlocking(EventLoop& evl, bool ticks) {
         av::VideoFrame *pfrm = this->source_->peek(0);
         if (pfrm==nullptr) {
-            logstream << "no frame";
+            //logstream << "no frame";
             bool timelimit = planes_count_ && (timeout_ms_>=0);
             if (timelimit && !ticks) {
-                logstream << "timelimit " << timeout_ms_;
+                //logstream << "timelimit " << timeout_ms_;
                 std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
                 evl.sleepAndExecute(timeout_ms_, [wthis](EventLoop& evl) {
-                    logstream << "sleeped";
+                    //logstream << "sleeped";
                     std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
                     if (!sthis) return;
                     // retry after waiting
@@ -340,9 +340,9 @@ public:
             }
             if (!ticks) {
                 std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
-                logstream << "waiting for frame";
+                //logstream << "waiting for frame";
                 evl.asyncWaitAndExecute(this->edgeSource()->edge()->producedEvent(), [wthis](EventLoop& evl) {
-                    logstream << "frame produced";
+                    //logstream << "frame produced";
                     std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
                     if (!sthis) return;
                     // retry when we have packet in source queue
@@ -351,12 +351,12 @@ public:
             }
             if ((!timelimit) || (wallclock.pts() < last_frame_emitted_at_ + timeout_ms_)) {
                 // not waited enough yet for timeout - don't proceed to outputting empty frame
-                logstream << "not waited enough yet for timeout";
+                //logstream << "not waited enough yet for timeout";
                 return;
             }
         }
         if (pfrm && *pfrm) {
-            logstream << "have frame";
+            //logstream << "have frame";
             av::VideoFrame frm = *pfrm;
             if (ticks) {
                 while (this->source_->pop()) {}; // remove outstanding buffered packets
