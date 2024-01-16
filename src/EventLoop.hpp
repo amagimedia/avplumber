@@ -26,6 +26,8 @@ protected:
     std::list<std::pair<AVTS, Callable>> scheduled_;
     std::mutex scheduled_busy_;
     std::mutex busy_;
+    bool debug_timing_ = false;
+    AVTS debug_timing_tolerance_ = 2;
     bool executeSingleFromToDo() {
         Callable cb;
         if (!todo_.try_dequeue(cb)) {
@@ -65,11 +67,20 @@ protected:
                 if (!scheduled_.empty()) {
                     timeout_ms = scheduled_.front().first - wallclock.pts();
                     if (timeout_ms<0) {
+                        if (debug_timing_ && (timeout_ms <= -debug_timing_tolerance_)) {
+                            logstream << "should wait " << timeout_ms << "ms for scheduled, changing to 0";
+                        }
                         timeout_ms = 0;
                     }
                 }
             }
+            AVTS before_poll = wallclock.pts();
             int ret = poll(pfds, count, timeout_ms);
+            AVTS diff = wallclock.pts() - before_poll - timeout_ms;
+            if ( debug_timing_ && ( (ret==0 && abs(diff)>=debug_timing_tolerance_) || (diff>=debug_timing_tolerance_) ) ) {
+                logstream << "kernel is cheating on us! poll returned after ms diff " << diff << " timeout_ms " << timeout_ms;
+            }
+
             //logstream << "poll returned " << ret;
             if (!should_work_) {
                 return;
@@ -80,6 +91,10 @@ protected:
                 while (!scheduled_.empty()) {
                     if (scheduled_.front().first > now) {
                         break;
+                    }
+                    AVTS diff = scheduled_.front().first - now;
+                    if (debug_timing_ && (diff <= -debug_timing_tolerance_)) {
+                        logstream << "got scheduled too late diff " << diff << "ms";
                     }
                     todo_.enqueue(scheduled_.front().second);
                     scheduled_.pop_front();
@@ -115,6 +130,9 @@ protected:
     }
 public:
     EventLoop() {
+        const char* envstr = getenv("AVPLUMBER_WARN_BAD_TIMING");
+        debug_timing_ = envstr && envstr[0];
+        debug_timing_tolerance_ = atoi(envstr);
         delegated_execution_thread_ = start_thread("EventLoop", [this]() {
             threadFunction();
         });
@@ -169,6 +187,12 @@ public:
             }
             is_first = false;
             it++;
+        }
+        if (debug_timing_) {
+            AVTS diff = ts - wallclock.pts();
+            if (diff <= -debug_timing_tolerance_) {
+                logstream << "scheduling event from the past?! " << diff << " ms";
+            }
         }
         scheduled_.insert(it, std::pair(ts, cb));
         if (is_first) {
