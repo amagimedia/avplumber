@@ -76,7 +76,7 @@ protected:
             }
             AVTS before_poll = wallclock.pts();
             int ret = poll(pfds, count, timeout_ms);
-            AVTS diff = wallclock.pts() - before_poll - timeout_ms;
+            AVTS diff = timeout_ms>=0 ? (wallclock.pts() - before_poll - timeout_ms) : 0;
             if ( debug_timing_ && ( (ret==0 && abs(diff)>=debug_timing_tolerance_) || (diff>=debug_timing_tolerance_) ) ) {
                 logstream << "kernel is cheating on us! poll returned after ms diff " << diff << " timeout_ms " << timeout_ms;
             }
@@ -132,7 +132,9 @@ public:
     EventLoop() {
         const char* envstr = getenv("AVPLUMBER_WARN_BAD_TIMING");
         debug_timing_ = envstr && envstr[0];
-        debug_timing_tolerance_ = atoi(envstr);
+        if (debug_timing_) {
+            debug_timing_tolerance_ = atoi(envstr);
+        }
         delegated_execution_thread_ = start_thread("EventLoop", [this]() {
             threadFunction();
         });
