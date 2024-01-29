@@ -9,7 +9,18 @@ protected:
     std::unique_lock<decltype(busy_)> getLock() {
         return std::unique_lock<decltype(busy_)>(busy_);
     }
+    AVRational timebase_ = {0, 0};
 public:
+    void checkTimeBase(AVRational tb) {
+        auto lock = getLock();
+        if (timebase_.num==0 && timebase_.den==0) {
+            timebase_ = tb;
+        } else {
+            if ((tb.num != timebase_.num) || (tb.den != timebase_.den)) {
+                throw Error("all realtime nodes in a team must have the same timebase (tick_source)");
+            }
+        }
+    }
     AVTS updateOffset(AVTS local_offset) {
         auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
@@ -21,11 +32,11 @@ public:
         // we want to synchronize to the smallest offset because it ensures that sufficient data is buffered
         // for smooth playback of all streams
         if (local_offset < offset) {
-            logstream << "realtime team changing offset by " << (local_offset-offset) << "ms";
+            logstream << "realtime team changing offset by " << (local_offset-offset);
             offset_.store(local_offset, std::memory_order_relaxed);
             return local_offset;
         } else {
-            logstream << "realtime team ignoring offset diff " << (local_offset-offset) << "ms";
+            logstream << "realtime team ignoring offset diff " << (local_offset-offset);
             return offset;
         }
     }
@@ -38,9 +49,9 @@ public:
         AVTS r = offset_.load(std::memory_order_acquire);
         if ((local_offset != AV_NOPTS_VALUE) && (r != AV_NOPTS_VALUE)) {
             if (r < local_offset) {
-                logstream << "getting offset from team diff " << (r-local_offset) << "ms";
+                logstream << "getting offset from team diff " << (r-local_offset);
             } else if (r > local_offset) {
-                logstream << "STRANGE: local offset smaller than team offset by " << (r-local_offset) << "ms";
+                logstream << "STRANGE: local offset smaller than team offset by " << (r-local_offset);
             }
         }
         return r!=AV_NOPTS_VALUE ? r : local_offset;
@@ -55,18 +66,48 @@ protected:
     AVTS max_no_wait_period_ = INT64_MAX;
     AVTS last_wait_ = 0;
     AVTS offset_;
+    AVTS tick_period_ = 0;
+    AVTS now_ts_ = AV_NOPTS_VALUE;
     AVTS negative_time_tolerance_ = -250;
-    AVTS negative_time_discard_;
+    AVTS negative_time_discard_ = AV_NOPTS_VALUE;
     AVTS discontinuity_threshold_ = 1000;
     AVTS jitter_margin_ = 0;
     AVTS initial_jitter_margin_ = 0;
-    AVRational tb_to_rescale_ts_ = wallclock.timeBase();
+    AVRational timebase_;
+    AVRational tb_to_rescale_ts_;
+    uint64_t tick_drifted_for_ = 0;
     std::shared_ptr<RealTimeTeam> team_;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
+
+    std::string printDuration(AVTS duration) {
+        return std::to_string(duration) +
+            ((timebase_.num==1 && timebase_.den==1000) ? "ms" : ("*"+std::to_string(timebase_.num)+"/"+std::to_string(timebase_.den)));
+    }
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) {
+        AVTS now_ts_wclk = wallclock.pts();
+        AVTS now_ts_wclk_scaled = rescaleTS({now_ts_wclk, wallclock.timeBase()}, timebase_).timestamp();
+        if (now_ts_ == AV_NOPTS_VALUE) {
+            now_ts_ = now_ts_wclk_scaled;
+        } else if (tick_period_ && ticks) {
+            now_ts_ += tick_period_;
+            AVTS drift = now_ts_ - now_ts_wclk_scaled;
+            if (abs(drift) >= tick_period_) {
+                tick_drifted_for_++;
+                if (tick_drifted_for_ >= 240) {
+                    logstream << "tick clock drifted from wallclock by " << printDuration(drift) << ", resyncing tick clock";
+                    now_ts_ = now_ts_wclk_scaled;
+                    tick_drifted_for_ = 0;
+                }
+            } else {
+                tick_drifted_for_ = 0;
+            }
+        } else {
+            now_ts_ = now_ts_wclk_scaled;
+        }
+        
         bool process_next;
         do {
             process_next = false;
@@ -89,9 +130,8 @@ public:
                 return;
             }
             T &data = *dataptr;
-
-            AVTS now_ts = wallclock.pts();
             
+            AVTS now_ts = now_ts_;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (team_) {
@@ -105,10 +145,10 @@ public:
                 if (ready_) {
                     AVTS diff = (pkt_ts - offset_) - now_ts;
                     if (diff < negative_time_tolerance_) {
-                        logstream << "negative time to wait " << diff << "ms, resyncing.";
+                        logstream << "negative time to wait " << printDuration(diff) << ", resyncing.";
                         ready_ = false;
                     } else if (diff < negative_time_discard_) {
-                        logstream << "negative time to wait " << diff << "ms, discarding frame.";
+                        logstream << "negative time to wait " << printDuration(diff) << ", discarding frame.";
                         emit = false;
                     } else if (diff < discontinuity_threshold_) {
                         if (now_ts - last_wait_ < max_no_wait_period_) {
@@ -120,10 +160,8 @@ public:
                                 emit = false;
                                 consume = false;
                                 if (!ticks) {
-                                    //logstream << "need to wait " << diff;
                                     std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
-                                    evl.schedule(av::Timestamp(now_ts + diff, wallclock.timeBase()), [wthis](EventLoop& evl) {
-                                        //logstream << "wait wakeup";
+                                    evl.schedule(av::Timestamp(now_ts + diff, timebase_), [wthis](EventLoop& evl) {
                                         std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
                                         if (!sthis) return;
                                         // retry after waiting
@@ -133,7 +171,7 @@ public:
                             }
                         } else {
                             if (!no_wait_notified_) {
-                                logstream << "input queued constantly for " << (now_ts-last_wait_) << "ms, bypassing.";
+                                logstream << "input queued constantly for " << printDuration(now_ts-last_wait_) << ", bypassing.";
                                 no_wait_notified_ = true;
                             }
                             ready_ = false;
@@ -141,7 +179,7 @@ public:
                         }
                     } else {
                         // diff >= discontinuity_threshold_
-                        logstream << "discontinuity detected, " << diff << "ms, resyncing.";
+                        logstream << "discontinuity detected, " << printDuration(diff) << ", resyncing.";
                         if (team_ && is_master_) {
                             team_->reset();
                         }
@@ -201,36 +239,54 @@ public:
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<RealTimeSpeed> r = NodeSISO<T, T>::template createCommon<RealTimeSpeed>(edges, params);
+        AVRational timebase = wallclock.timeBase();
+        if (params.count("tick_period")) {
+            int tb_den_mult = 4;
+            timebase = parseRatio(params["tick_period"]);
+            r->tick_period_ = tb_den_mult;
+            while ((tb_den_mult%2)==0 && (timebase.num%2)==0) {
+                tb_den_mult /= 2;
+                timebase.num /= 2;
+            }
+            timebase.den *= tb_den_mult;
+            logstream << "tick period " << r->tick_period_ << ", timebase " << timebase.num << "/" << timebase.den;
+        }
+        r->timebase_ = timebase;
+        r->tb_to_rescale_ts_ = timebase;
+        auto secondsToTs = [timebase](float seconds) -> AVTS {
+            return seconds*(float)timebase.den / (float)timebase.num + 0.5;
+        };
         if (params.count("leak_after")) {
-            r->max_no_wait_period_ = wallclock.secondsToAVTS(params["leak_after"]);
+            r->max_no_wait_period_ = secondsToTs(params["leak_after"]);
         }
         if (params.count("speed")) {
             float speed = params["speed"];
-            AVRational tb = wallclock.timeBase();
-            r->tb_to_rescale_ts_ = { tb.num, int(float(tb.den)/speed + 0.5f) };
+            r->tb_to_rescale_ts_ = { timebase.num, int(float(timebase.den)/speed + 0.5f) };
         }
         if (params.count("negative_time_tolerance")) {
-            r->negative_time_tolerance_ = -wallclock.secondsToAVTS(params["negative_time_tolerance"]);
+            r->negative_time_tolerance_ = -secondsToTs(params["negative_time_tolerance"]);
         }
         if (params.count("negative_time_discard")) {
-            r->negative_time_discard_ = -wallclock.secondsToAVTS(params["negative_time_discard"]);
-        } else {
+            r->negative_time_discard_ = -secondsToTs(params["negative_time_discard"]);
+        }
+        if (r->negative_time_discard_ == AV_NOPTS_VALUE) {
             r->negative_time_discard_ = r->negative_time_tolerance_;
         }
         if (params.count("discontinuity_threshold")) {
-            r->discontinuity_threshold_ = wallclock.secondsToAVTS(params["discontinuity_threshold"]);
+            r->discontinuity_threshold_ = secondsToTs(params["discontinuity_threshold"]);
         }
         if (params.count("jitter_margin")) {
-            r->jitter_margin_ = wallclock.secondsToAVTS(params["jitter_margin"]);
+            r->jitter_margin_ = secondsToTs(params["jitter_margin"]);
         }
         if (params.count("initial_jitter_margin")) {
-            r->initial_jitter_margin_ = wallclock.secondsToAVTS(params["initial_jitter_margin"]);
+            r->initial_jitter_margin_ = secondsToTs(params["initial_jitter_margin"]);
         } else {
             r->initial_jitter_margin_ = r->jitter_margin_;
         }
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["team"]);
         }
+        r->team_->checkTimeBase(timebase);
         if (params.count("master")) {
             r->is_master_ = params["master"];
         }
