@@ -54,6 +54,7 @@ bool NodeWrapper::start() {
 
         std::shared_ptr<NonBlockingNodeBase> nbnode = std::dynamic_pointer_cast<NonBlockingNodeBase>(node_);
         if (nbnode) {
+            nbnode->start();
             if (tick_source_!=nullptr) {
                 tick_source_->add(std::weak_ptr<NonBlockingNodeBase>(nbnode));
             } else {

@@ -797,6 +797,12 @@ In some versions of netcat it doesn't work. Try this:
 watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
 ```
 
+If you have big queues, they may occupy multiple lines in terminal. To make them shorter:
+
+```
+while true; do echo -e 'queues.stats\nbye\n\n' | nc localhost 20200 | sed -E 's/#{16}/\$/g; s/\.{16}/,/g' ; sleep 0.1; done
+```
+
 ### Find non-empty queues
 
 open log file in less, press `/` or `?` and use this regular expression:
