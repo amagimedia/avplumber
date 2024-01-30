@@ -2,6 +2,7 @@
 #include "Event.hpp"
 #include "util.hpp"
 #include "avutils.hpp"
+#include "instance_shared.hpp"
 #include <concurrentqueue/concurrentqueue.h>
 #include <atomic>
 #include <deque>
@@ -15,7 +16,7 @@ class EventLoop;
 
 using Callable = std::function<void(EventLoop&)>;
 
-class EventLoop {
+class EventLoop: public InstanceShared<EventLoop> {
 protected:
     std::thread delegated_execution_thread_;
     Event wakeup_;
@@ -207,5 +208,3 @@ public:
         schedule(addTS(wallclock.ts(), av::Timestamp(ms, {1, 1000})), cb);
     }
 };
-
-extern EventLoop global_event_loop;

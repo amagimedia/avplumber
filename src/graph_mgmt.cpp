@@ -1,4 +1,5 @@
 #include "graph_mgmt.hpp"
+#include "Event.hpp"
 #include "EventLoop.hpp"
 #include "TickSource.hpp"
 #include "graph_core.hpp"
@@ -58,13 +59,16 @@ bool NodeWrapper::start() {
             if (tick_source_!=nullptr) {
                 tick_source_->add(std::weak_ptr<NonBlockingNodeBase>(nbnode));
             } else {
-                global_event_loop.execute([nbnode](EventLoop &evl) {
+                if (event_loop_==nullptr) {
+                    event_loop_ = InstanceSharedObjects<EventLoop>::get(manager_->instanceData(), "default");
+                }
+                event_loop_->execute([nbnode](EventLoop &evl) {
                     nbnode->processNonBlocking(evl, false);
                 });
             }
         } else {
-            if (tick_source_!=nullptr) {
-                throw Error("tick_source can't be specified for blocking (threaded) node");
+            if (tick_source_!=nullptr || event_loop_!=nullptr) {
+                throw Error("tick_source or event_loop can't be specified for blocking (threaded) node");
             }
             // this is blocking Node so it requires separate thread
             thread_ = make_unique<std::thread>(start_thread(name_, [this]() {
@@ -711,6 +715,12 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
     }
     if (params_.count("tick_source") > 0) {
         tick_source_ = InstanceSharedObjects<TickSource>::get(manager->instanceData(), params["tick_source"]);
+    }
+    if (params_.count("event_loop") > 0) {
+        event_loop_ = InstanceSharedObjects<EventLoop>::get(manager->instanceData(), params["event_loop"]);
+    }
+    if (tick_source_ && event_loop_) {
+        throw Error("tick_source and event_loop can't be specified at the same time");
     }
 
     if (early_create) {

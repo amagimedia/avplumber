@@ -36,6 +36,7 @@ protected:
     std::shared_ptr<NodeManager> manager_;
     std::shared_ptr<NodeGroup> group_;
     std::shared_ptr<TickSource> tick_source_;
+    std::shared_ptr<EventLoop> event_loop_;
     std::atomic_bool dowork_ {false};
     std::atomic_bool finished_;
     std::atomic_bool stop_requested_;

@@ -418,14 +418,15 @@ public:
         };
 
         #ifdef EMBED_IN_OBS
-            tick_source_ = InstanceSharedObjects<TickSource>::get(manager_->instanceData(), "obs");
+        std::shared_ptr<EventLoop> evl = InstanceSharedObjects<EventLoop>::get(manager_->instanceData(), "obs_tick");
+        tick_source_ = std::make_shared<TickSource>(evl);
+        InstanceSharedObjects<TickSource>::put(manager_->instanceData(), "obs", tick_source_);
         #endif
     }
     #ifdef EMBED_IN_OBS
     void tick() {
-        std::shared_ptr<TickSource> tick_source = tick_source_;
-        global_event_loop.fastExecute(av::Timestamp(10, av::Rational(1, 1000)), [tick_source](EventLoop&) { tick_source->tick(); });
-        //global_event_loop.execute([tick_source](EventLoop&) { tick_source->tick(); });
+        //logstream << "tick!";
+        tick_source_->fastTick();
     }
     #endif
 };

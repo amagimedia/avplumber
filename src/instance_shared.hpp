@@ -10,7 +10,7 @@
 class InstanceData;
 
 template<typename Child>
-class InstanceShared: public std::enable_shared_from_this<InstanceShared<Child>> {
+class InstanceShared/*: public std::enable_shared_from_this<InstanceShared<Child>>*/ {
 };
 
 class InstanceSharedObjectsDestructors {
