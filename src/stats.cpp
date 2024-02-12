@@ -687,7 +687,11 @@ protected:
             jglobal["stalled_seconds"] = (wallclock.ts() - last_frame_rtc_).seconds();
         }
         if ( (!stats_video_.empty()) && (!stats_audio_.empty()) ) {
-            jglobal["AV_diff"] = (stats_audio_.front()->lastTS() - stats_video_.front()->lastTS()).seconds();
+            av::Timestamp last_ts_audio = stats_audio_.front()->lastTS();
+            av::Timestamp last_ts_video = stats_video_.front()->lastTS();
+            if (last_ts_audio.isValid() && last_ts_video.isValid()) {
+                jglobal["AV_diff"] = addTS(last_ts_audio, negateTS(last_ts_video)).seconds();
+            }
         }
         jglobal["name"] = name_;
         auto sen = sentinel_.node<ISentinel>();
