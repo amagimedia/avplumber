@@ -161,6 +161,11 @@ bool NodeWrapper::stop(bool inhibit_actions) {
         // node is destroyed in thread function only if it was started, so a special case for not-yet-started nodes
         // and non-blocking nodes is necessary:
         if (node_ != nullptr) {
+            std::shared_ptr<IFlushable> node_flushable = std::dynamic_pointer_cast<IFlushable>(node_);
+            if (node_flushable) {
+                logstream << "Flushing node " << name_ << " from stop()";
+                node_flushable->flush();
+            }
             logstream << "Destroying node " << name_ << " from stop()";
             node_ = nullptr;
             finished_ = true;
