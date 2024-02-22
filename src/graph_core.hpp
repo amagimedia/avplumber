@@ -3,6 +3,7 @@
 #include "util.hpp"
 #include "avutils.hpp"
 #include <json.hpp>
+#include <mutex>
 #include <readerwriterqueue/readerwriterqueue.h>
 #include <unordered_map>
 #include "Event.hpp"
@@ -30,11 +31,60 @@ public:
 };
 
 class NonBlockingNodeBase: virtual public Node {
+protected:
+    std::atomic_bool nonblk_should_work_ = true;
+    std::shared_ptr<EventLoop> event_loop_ = nullptr;
+    std::mutex process_mutex_;
+    bool tickful_;
+    #define processInEventLoop(how, ...) \
+        if (event_loop_==nullptr) { \
+            logstream << "BUG: event_loop_ unset, can't use!"; \
+            return; \
+        } \
+        std::weak_ptr<NonBlockingNodeBase> wthis(std::dynamic_pointer_cast<NonBlockingNodeBase>(this->shared_from_this())); \
+        event_loop_->how(__VA_ARGS__, [wthis](EventLoop& evl) { \
+            std::shared_ptr<NonBlockingNodeBase> sthis = wthis.lock(); \
+            if (!sthis) return; \
+            sthis->wrappedProcessNonBlocking(evl, false); \
+        });
+    void processWhenSignalled(Event &event) {
+        processInEventLoop(asyncWaitAndExecute, event);
+    }
+    void sleepAndProcess(int ms) {
+        processInEventLoop(sleepAndExecute, ms);
+    }
+    void scheduleProcess(av::Timestamp when) {
+        processInEventLoop(schedule, when);
+    }
+    void yieldAndProcess() {
+        std::weak_ptr<NonBlockingNodeBase> wthis(std::dynamic_pointer_cast<NonBlockingNodeBase>(this->shared_from_this()));
+        event_loop_->execute([wthis](EventLoop& evl) {
+            std::shared_ptr<NonBlockingNodeBase> sthis = wthis.lock();
+            if (!sthis) return;
+            sthis->wrappedProcessNonBlocking(evl, false);
+        });
+    }
+    #undef processInEventLoop
 public:
+    void setEventLoop(std::shared_ptr<EventLoop> event_loop, bool tickful) {
+        event_loop_ = event_loop;
+        tickful_ = tickful;
+    }
+
     virtual void process() {
-        throw Error("process() called for non-blocking node. Use processNonBlocking(...)");
+        throw Error("process() called for non-blocking node. Use wrappedProcessNonBlocking(...)");
     }
     virtual void processNonBlocking(EventLoop&, bool ticks) = 0;
+
+    void wrappedProcessNonBlocking(EventLoop& evl, bool ticks) {
+        std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
+        if (!this->nonblk_should_work_) return;
+        processNonBlocking(evl, ticks);
+    }
+    void prohibitProcessNonBlocking() {
+        std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
+        this->nonblk_should_work_ = false;
+    }
 };
 
 template<typename Child> class NonBlockingNode: public NonBlockingNodeBase {

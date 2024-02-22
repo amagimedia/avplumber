@@ -328,26 +328,12 @@ public:
             //logstream << "no frame";
             bool timelimit = planes_count_ && (timeout_ms_>=0);
             if (timelimit && !ticks) {
-                //logstream << "timelimit " << timeout_ms_;
-                std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
-                evl.sleepAndExecute(timeout_ms_, [wthis](EventLoop& evl) {
-                    //logstream << "sleeped";
-                    std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
-                    if (!sthis) return;
-                    // retry after waiting
-                    sthis->processNonBlocking(evl, false);
-                });
+                // retry after waiting
+                this->sleepAndProcess(timeout_ms_);
             }
             if (!ticks) {
-                std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
-                //logstream << "waiting for frame";
-                evl.asyncWaitAndExecute(this->edgeSource()->edge()->producedEvent(), [wthis](EventLoop& evl) {
-                    //logstream << "frame produced";
-                    std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
-                    if (!sthis) return;
-                    // retry when we have packet in source queue
-                    sthis->processNonBlocking(evl, false);
-                });
+                // retry when we have packet in source queue
+                this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
             }
             if ((!timelimit) || (wallclock.pts() < last_frame_emitted_at_ + timeout_ms_)) {
                 // not waited enough yet for timeout - don't proceed to outputting empty frame
@@ -411,13 +397,7 @@ public:
                     if (!fi) {
                         logstream << "too many frames buffered, waiting for obs to free some frames";
                         if (!ticks) {
-                            std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
-                            evl.sleepAndExecute(40, [wthis](EventLoop& evl) {
-                                std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
-                                if (!sthis) return;
-                                // retry after waiting
-                                sthis->processNonBlocking(evl, false);
-                            });
+                            this->sleepAndProcess(40);
                         }
                         return;
                     }
@@ -445,16 +425,12 @@ public:
         prev_timestamp_ = obs_frame_.timestamp;
         outputFrame();
         if (!ticks) {
-            std::weak_ptr<ObsVideoSink> wthis(this->thisAsShared());
-            evl.execute([wthis](EventLoop& evl) {
-                std::shared_ptr<ObsVideoSink> sthis = wthis.lock();
-                if (!sthis) return;
-                // process next packet
-                sthis->processNonBlocking(evl, false);
-            });
+            // process next packet
+            this->yieldAndProcess();
         }
     }
     virtual void flush() {
+        this->prohibitProcessNonBlocking();
         prepareEmptyFrame();
         outputFrame();
         

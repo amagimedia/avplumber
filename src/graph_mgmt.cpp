@@ -55,15 +55,18 @@ bool NodeWrapper::start() {
 
         std::shared_ptr<NonBlockingNodeBase> nbnode = std::dynamic_pointer_cast<NonBlockingNodeBase>(node_);
         if (nbnode) {
-            nbnode->start();
             if (tick_source_!=nullptr) {
+                nbnode->setEventLoop(nullptr, true);
+                nbnode->start();
                 tick_source_->add(std::weak_ptr<NonBlockingNodeBase>(nbnode));
             } else {
                 if (event_loop_==nullptr) {
                     event_loop_ = InstanceSharedObjects<EventLoop>::get(manager_->instanceData(), "default");
                 }
+                nbnode->setEventLoop(event_loop_, false);
+                nbnode->start();
                 event_loop_->execute([nbnode](EventLoop &evl) {
-                    nbnode->processNonBlocking(evl, false);
+                    nbnode->wrappedProcessNonBlocking(evl, false);
                 });
             }
         } else {

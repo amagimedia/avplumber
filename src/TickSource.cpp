@@ -11,7 +11,7 @@ void TickSource::tick(EventLoop &evl) {
         evl.execute([wptr](EventLoop& evloop) {
             std::shared_ptr<NonBlockingNodeBase> node = wptr.lock();
             if (node!=nullptr) {
-                node->processNonBlocking(evloop, true);
+                node->wrappedProcessNonBlocking(evloop, true);
             }
         });
     }

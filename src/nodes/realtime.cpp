@@ -116,16 +116,8 @@ public:
             T* dataptr = this->source_->peek(0);
             if (dataptr==nullptr) {
                 if (!ticks) {
-                    // TODO write some wrapper function or macro because copy-pasting the whole weak_ptr->lambda->shared_ptr logic is tedious
-                    std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
-                    //logstream << "scheduling source retry";
-                    evl.asyncWaitAndExecute(this->edgeSource()->edge()->producedEvent(), [wthis](EventLoop& evl) {
-                        //logstream << "edgeSource wakeup";
-                        std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
-                        if (!sthis) return;
-                        // retry when we have packet in source queue
-                        sthis->processNonBlocking(evl, false);
-                    });
+                    // retry when we have packet in source queue
+                    this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
                 return;
             }
@@ -160,13 +152,8 @@ public:
                                 emit = false;
                                 consume = false;
                                 if (!ticks) {
-                                    std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
-                                    evl.schedule(av::Timestamp(now_ts + diff, timebase_), [wthis](EventLoop& evl) {
-                                        std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
-                                        if (!sthis) return;
-                                        // retry after waiting
-                                        sthis->processNonBlocking(evl, false);
-                                    });
+                                    // retry after waiting
+                                    this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
                             }
                         } else {
@@ -200,24 +187,14 @@ public:
             if (emit) {
                 if (!this->sink_->put(data, true)) {
                     if (!ticks) {
-                        std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
-                        evl.asyncWaitAndExecute(this->edgeSink()->edge()->consumedEvent(), [wthis](EventLoop& evl) {
-                            std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
-                            if (!sthis) return;
-                            // retry when we have space in sink
-                            sthis->processNonBlocking(evl, false);
-                        });
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                     }
                     consume = false;
                 } else {
                     if (!ticks) {
-                        std::weak_ptr<RealTimeSpeed> wthis(this->thisAsShared());
-                        evl.execute([wthis](EventLoop& evl) {
-                            std::shared_ptr<RealTimeSpeed> sthis = wthis.lock();
-                            if (!sthis) return;
-                            // process next packet
-                            sthis->processNonBlocking(evl, false);
-                        });
+                        // process next packet
+                        this->yieldAndProcess();
                     } else {
                         process_next = true;
                     }
