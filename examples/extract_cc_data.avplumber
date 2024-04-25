@@ -1,0 +1,18 @@
+node.add { "type": "input", "url": "rtmp://localhost/live/closed_captions", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+queue.plan_capacity v_in 600
+queue.plan_capacity a0_in 600
+node.add { "type": "demux", "src": "in10", "wait_for_keyframe": false, "routing": { "?v:0": "v_in", "?a:0": "a0_in" }, "group": "in", "auto_restart": "group" }
+queue.plan_capacity v_out 15
+node.add { "type": "dec_video", "src": "v_in", "dst": "v_out", "group": "in", "name": "Video_Dec", "auto_restart": "group", "optional": true }
+queue.plan_capacity a_out 240
+queue.plan_capacity a0_sink 7
+node.add { "type": "dec_audio", "src": "a0_in", "dst": "a0_out", "group": "in", "name": "Audio0_Dec", "auto_restart": "group", "optional": true }
+node.add { "type": "realtime<av::AudioSamples>", "team": "rt", "discontinuity_threshold": 30, "negative_time_tolerance": 0.02, "negative_time_discard": 0.02, "jitter_margin": 0.1, "initial_jitter_margin": 0.1, "src": "a0_out", "dst": "a0_sink", "group": "g1", "name": "RTSync_a0", "auto_restart": "on" }
+queue.plan_capacity videosink 7
+node.add { "type": "realtime<av::VideoFrame>", "team": "rt", "discontinuity_threshold": 30, "negative_time_tolerance": 0.02, "negative_time_discard": 0.02, "jitter_margin": 0.1, "initial_jitter_margin": 0.1, "src": "v_out", "dst": "videosink", "group": "g1", "name": "RTSync_v", "auto_restart": "on" }
+node.add { "type": "extract_cc_data", "src": "videosink", "dst": "ccpkts", "group": "g1", "auto_restart": "on" }
+node.add { "type": "mux", "group": "g1", "src": ["ccpkts"], "dst": "ccmuxed", "allow_no_encoder": true }
+node.add { "type": "output", "group": "g1", "src": "ccmuxed", "format": "data", "url": "udp://localhost:19999" }
+node.add { "type": "null_sink", "name": "audiosink", "src": "a0_sink", "group": "g1", "auto_restart": "on" }
+group.start g1
+detach retry group.start in

@@ -20,6 +20,7 @@ private:
     AVTS sync_wait_max_ms_ = 2500;
     std::unique_ptr<MultiEventWait> event_wait_;
     bool fix_timestamps_ = false;
+    bool allow_no_encoder_ = false;
     av::Timestamp global_shift_ = {0, {1, 1}};
     void calculateGlobalShift() {
         bool severe = false;
@@ -214,19 +215,25 @@ public:
     virtual void initFromFormatContext(av::FormatContext &octx) {
         for (StreamInfo &s: streams_) {
             std::shared_ptr<IEncoder> enc = s.edge->findNodeUp<IEncoder>();
-            if (enc==nullptr) {
+            if (enc==nullptr && !allow_no_encoder_) {
                 throw Error("Muxer init failed: No encoder above in chain!");
             }
-            av::Codec &codec = enc->encodingCodec();
+            av::Codec codec;
+            if (enc!=nullptr) {
+                codec = enc->encodingCodec();
+            }
             av::Stream deststream = octx.addStream(codec);
             s.stream_index = deststream.index();
-            enc->setOutput(deststream, octx);
+            if (enc!=nullptr) {
+                enc->setOutput(deststream, octx);
+            }
         }
     }
     virtual void initFromFormatContextPostOpenPreWriteHeader(av::FormatContext &octx) {
         for (StreamInfo &s: streams_) {
             std::shared_ptr<IEncoder> enc = s.edge->findNodeUp<IEncoder>();
             if (enc==nullptr) {
+                if (allow_no_encoder_) return;
                 throw Error("Muxer post-open-pre-writeheader init failed: No encoder above in chain!");
             }
             av::Stream deststream = octx.stream(s.stream_index);
@@ -237,6 +244,7 @@ public:
         for (StreamInfo &s: streams_) {
             std::shared_ptr<IEncoder> enc = s.edge->findNodeUp<IEncoder>();
             if (enc==nullptr) {
+                if (allow_no_encoder_) return;
                 throw Error("Muxer post-open init failed: No encoder above in chain!");
             }
             av::Stream deststream = octx.stream(s.stream_index);
@@ -254,6 +262,9 @@ public:
         }
         if (params.count("ts_sort_wait")) {
             r->sync_wait_max_ms_ = params["ts_sort_wait"].get<float>() * 1000.0;
+        }
+        if (params.count("allow_no_encoder")) {
+            r->allow_no_encoder_ = params["allow_no_encoder"];
         }
         for (std::string sname: params["src"]) {
             std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(sname);
