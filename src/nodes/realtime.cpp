@@ -262,8 +262,8 @@ public:
         }
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["team"]);
+            r->team_->checkTimeBase(timebase);
         }
-        r->team_->checkTimeBase(timebase);
         if (params.count("master")) {
             r->is_master_ = params["master"];
         }
