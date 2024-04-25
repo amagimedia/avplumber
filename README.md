@@ -304,6 +304,8 @@ Most nodes have also their specific parameters which are specified on the same l
 
 -   `url` (string of URL)
 -   `options` (dictionary) - options for libavformat
+-   `timeout` (float, seconds) - packet read timeout
+-   `initial_timeout` (float, seconds) - URL open timeout
 
 ### `realtime`
 
@@ -425,7 +427,7 @@ Recommended options for displaying live video:
 
 ### `extract_timestamps`
 
-Set PTS to timecode in video frame's side data.
+Set PTS to timecode from video frame's side data.
 
 1 input, 1 output: `av::VideoFrame`
 
