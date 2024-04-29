@@ -1,7 +1,18 @@
 # avplumber - make your own libav processing graph
 
-avplumber is a graph-based modular environment for processing video & audio streams, raw or encoded.
-Frames or packets can be processed using nodes. Nodes for common tasks are provided, most of them based on FFmpeg libraries (libav). It's also fairly easy to write custom ones in C++.
+avplumber is a graph-based real-time processing framework. Graph can be reconfigured on the fly using a text API. Most nodes are based on FFmpeg's libavcodec, libavformat & libavfilter. You can create entire transcoding & filtering chain in it, replacing FFmpeg in many use cases.
+
+avplumber was created because we were experienced with FFmpeg and wanted to have its features, plus more flexibility. For example, it is possible to:
+
+* encode once and send encoded packets to multiple outputs.
+* filter video (using FFmpeg's filter graph syntax) in multiple threads. It is possible since FFmpeg 6.0, but we needed this feature long before its release.
+* maintain output timestamps continuity **and** audio-video synchronization even when input timestamps jump.
+* insert fallback slate ("we'll be back shortly") when input stream breaks.
+
+Furthermore, it was designed to allow easy prototyping of new video & audio processing blocks (nodes in graph) without writing so much boilerplate code that is needed in case of libavfilter or GStreamer.
+
+So does it replace FFmpeg in all use cases? Not at all. It is targetted at live use - currently it can't seek the input at all. Also, subtitles aren't supported due to limitations of the underlying library - avcpp.
+
 
 ## Quick start
 
