@@ -1,5 +1,6 @@
 # How to develop your own node for avplumber
 
+Before trying to understand this document or avplumber's source code, read all the [README](../README.md) (except node descriptions).
 
 ## Directory structure
 
@@ -7,7 +8,7 @@ Source codes of all nodes reside in `src/nodes/` directory. Each `.cpp` file cor
 
 There are also subdirectories, included conditionally depending on flags set in `Makefile`. For example, if your node is useful only for debugging purposes (e.g. it is intentionally corrupting packets to test recovery code), you should put it in `debug/` directory.
 
-Directories are scanned using a shell script (`generate_nodes_list`) and a `find` command inside `Makefile`, when `make` is run. There is no index file in sources (it is generated automatically when compiling), so you don't need to update anything after adding `.cpp` file to `src/nodes/` directory or subdirectory.
+Directories are scanned using a shell script (`generate_node_list`) and a `find` command inside `Makefile`, when `make` is run. There is no index file in sources (it is generated automatically when compiling), so you don't need to update anything after adding `.cpp` file to `src/nodes/` directory or subdirectory.
 
 
 ## Node source file
@@ -27,7 +28,7 @@ After class or class template is defined, `DECLNODE` macros need to be used to e
 
 They serve 2 functions:
 
-* `generate_nodes_list` scrips searches for them in all nodes sources and generates the nodes index
+* `generate_node_list` scrips searches for them in all nodes sources and generates the nodes index
 * they are parsed by C++ preprocessor (as every macro in C/C++ source code), generating code needed for node creation
 
 Available macros:
