@@ -305,6 +305,13 @@ Each node is described by a JSON object consisting of the following fields:
   * `true` - ignore exceptions (return 20x) and pretend nothing bad happened
   * `false` (default) - fail the whole operation (e.g. starting a group)
 
+Some node types are non-blocking, which means that there is no separate thread to run the node, but it processes data in an event-based manner, which is configurable using the following fields:
+
+* `event_loop` (string, name of instance-shared object) - name of the event loop, if not specified, `default` event loop will be used. Each event loop works in a separate thread.
+* `tick_source` (string, name of instance-shared object) - name of the tick source. If not specified, node will work in tickless manner, waking up only when necessary (e.g. a node above in graph has put some data into queue). On the other hand, if this field is specified, the tick source will wake up the node at regular intervals synchronized to some external clock. This reduces latency and jitter. Currently useful only in [`OBS avplumber plugin`](library_examples/obs-avplumber-source/README.md) - specify `obs` as a `tick_source` to synchronize a non-blocking nodes to the video mixer's FPS.
+
+The tick source has its own event loop (or may even bypass it and call the node in its own thread to reduce latency) so you can't specify `event_loop` and `tick_source` at the same time.
+
 Most nodes have also their specific parameters which are specified on the same level as the fields above.
 
 ## Node types
