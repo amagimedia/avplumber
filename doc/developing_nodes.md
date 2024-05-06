@@ -56,7 +56,7 @@ avplumber supported only blocking nodes for a very long time, thus even nodes th
 
 ## Node API
 
-Every node class needs to inherit from `Node`. If the node is blocking, the only virtual function that absolutely needs to be overriden is `process`. Example: `firewall` node which doesn't allow packets or frames without PTS to pass:
+Every node class needs to be derived from `Node`. If the node is blocking, the only virtual function that absolutely needs to be overriden is `process`. Example: `firewall` node which doesn't allow packets or frames without PTS to pass:
 
 ```c++
     virtual void process() {
@@ -66,9 +66,85 @@ Every node class needs to inherit from `Node`. If the node is blocking, the only
     }
 ```
 
-If the node is non-blocking, the function to override is `processNonBlocking`.
+This method will be executed in node thread's main loop - `NodeWrapper::threadFunction` (`src/graph_mgmt.cpp`)
 
-Also, static method `create` needs to be defined in the class.
+### Non-blocking node API
+
+If the node is non-blocking, it should be derived from `NonBlockingNode` and the function to override is `processNonBlocking`. See `src/nodes/realtime.cpp` for an example.
+
+If [`tick_source`](../README.md#non-blocking-nodes) is not specified, `processNonBlocking` is called once with argument `ticks = false` when starting node and it is node's responsibility to add events to the event loop. `NonBlockingNode` defines some convenience functions (wrappers for `EventLoop`'s methods) that will call `processNonBlocking` again when certain event happens:
+
+* `processWhenSignalled(Event &event)` - when event is signalled, for example queue has data available or space available
+* `sleepAndProcess(int ms)` - after `ms` milliseconds
+* `scheduleProcess(av::Timestamp when)` - at `when` timestamp from wallclock. Use `wallclock.ts()` to get current timestamp.
+* `yieldAndProcess()` - puts `processNonBlocking` at the end of the event loop.
+
+If `tick_source` is specified, `processNonBlocking` is called with argument `ticks = true` on each tick. You can still use the functions mentioned above if you want to run the `processNonBlocking` sooner than the next tick, but usually it shouldn't be needed.
+
+Example of using signals:
+
+```c++
+    virtual void processNonBlocking(EventLoop& evl, bool ticks) {
+        T* dataptr = this->source_->peek(0);
+        if (dataptr==nullptr) {
+            // no data available in queue
+            if (!ticks) {
+                // retry when we have packet in source queue
+                this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
+            }
+            // if ticks==true, processNonBlocking will be called automatically with next tick
+            // no need to schedule it
+            return;
+        }
+        T &data = *dataptr;
+
+        // ...
+        // process the data
+        // ...
+
+        // put it in the sink queue:
+        if (this->sink_->put(data, true)) {
+            // put returned true, success, remove this packet from the source queue
+            this->source_->pop();
+            if (!ticks) {
+                // process next packet
+                this->yieldAndProcess();
+            }
+        } else {
+            // put returned false, no space in queue
+            if (!ticks) {
+                // retry when we have space in sink
+                // note that the whole processNonBlocking will be run again
+                // so it is not a good idea to do it if the processing is stateful (e.g. encoding or decoding)
+                this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+            }
+        }
+    }
+```
+
+If your processing is stateful, you can:
+
+* write your node as a regular blocking node, or
+* use the underlying function `evl.asyncWaitAndExecute` directly. Pass the packet to put in the queue in lambda's captured variables, as a value (not a reference). Do not capture `this` or `this->shared_from_this()` because it can lead to use-after-free memory corruption or a memory leak. Capture a weak pointer (`std::weak_ptr`) instead.
+
+
+### `create` static method
+
+Static method `create` needs to be defined in the class. It parses the data from node definition (JSON object) and creates the node object. `NodeSISO` has a helper static method `createCommon`. Example of its usage:
+
+```c++
+    static std::shared_ptr<Firewall> create(NodeCreationInfo &nci) {
+        EdgeManager &edges = nci.edges;
+        const Parameters &params = nci.params;
+        return NodeSISO<T, T>::template createCommon<Firewall>(edges, params);
+    }
+```
+
+If your constructor requires additional parameters, they can be passed after `edges` and `params` in `createCommon`.
+
+#### Refactor needed
+
+By the way, if you look at the source code of `createCommon` or other methods from the file `src/graph_base.hpp`, and abstract source/sink classes in `src/graph_core.hpp`, you'll notice that we're creating source and sink objects wrapping the edges. The idea was to have multiple possible implementation of sources and sinks, not only edges (queues). In practice it was never used and some nodes use edges directly, so it should be refactored - simplified, to reduce unnecessary boilerplate code. Pull requests welcome! (if you don't have time for coding but have an idea of possible architecture, that's welcome, too)
 
 
 ## Helper derived classes
@@ -91,7 +167,13 @@ These bases define their own constructors, you should call them in your construc
 
 You should generally use one or more of these bases, since they override virtual methods and implement interfaces important for internal avplumber operation. If you want to implement them on your own (because you need, for example, mixed data types on input or output), look at `src/nodes/filters.cpp` and `src/graph_base.hpp` for inspiration.
 
-Thanks to multiple inheritance, you can use most of these bases in non-blocking nodes, too. See `src/nodes/realtime.cpp` for example.
+Thanks to multiple inheritance, you can use most (all?) of these bases in non-blocking nodes, too. See `src/nodes/realtime.cpp` for example.
 
 
-TBC...
+## Interfaces
+
+Interfaces are defined in `src/graph_interfaces.hpp`. They're used:
+
+* for node management (`src/graph_mgmt.cpp`): main loop (`NodeWrapper::threadFunction`) flow depends on what interfaces the node implements; `IInterruptible` can be used to stop the node bypassing any locks ([`node.interrupt`](../README.md#nodes-management--control) command)
+* for graph traversal, usually when a node needs to know something about stream metadata. `EdgeBase` (in `src/graph_core.hpp`) and `NodeSingleInput` (in `src/graph_base.hpp`) contain `findNodeUp` method, which finds the nearest node, up in the graph, implementing a specific interface. [Graph topology](../README.md#topology) required by existing nodes is summarized in the README.
+* for statistics extraction. Signal presence information is taken from `ISentinel`. Video & audio parameters are taken from `IDecoder`.

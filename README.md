@@ -84,8 +84,13 @@ for example:
 
 Some nodes require that other node implementing specific features (an *interface*) is placed before (up) or after (down) it:
 
+* `input` before `demux`
 * `mux` before `output`
-* encoder (`enc_video`/`enc_audio`) before `mux`
+* video format metadata source before `enc_video`. It can be `dec_video`, `assume_video_format`, `rescale_video` or `filter_video`
+* FPS metadata source before `enc_video`, `extract_timestamps` and `filter_video`. It can be `dec_video`, `force_fps`, `filter_video` or `sentinel_video`
+* audio metadata source before `enc_audio` and `sentinel_audio`. It can be `dec_audio`, `assume_audio_format` or `filter_audio`
+* time base source before `bsf`, `enc_video`, `enc_audio`, `extract_timestamps`, `filter_video`, `filter_audio`, `sentinel_video`, `sentinel_audio`. It can be `assume_video_format`, `assume_audio_format`, `dec_video`, `dec_audio`, `filter_video`, `filter_audio`, `force_fps`, `packet_relay` or `resample_audio`
+* encoder (`enc_video`/`enc_audio`), `bsf` or `packet_relay` before `mux`
 
 ## Control methods
 avplumber is controlled using text commands on TCP socket, so it can be controlled manually using `netcat` or `telnet`. `--port` argument specifies the port to listen on.
