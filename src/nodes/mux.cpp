@@ -10,6 +10,7 @@ private:
         AVTS idle_since = AV_NOPTS_VALUE; // timebase: milliseconds
         bool idle = false; // flags that this input was idle in latest iteration of process()
         bool warned = false;
+        bool known_to_be_broken = false;
         av::Timestamp prev_dts = NOTS;
         av::Rational stream_tb {0, 0};
         AVTS shift = 0;
@@ -87,22 +88,30 @@ public:
         for (StreamInfo &s: streams_) {
             s.idle = true;
             av::Packet *pkt = s.edge->peek();
-            if (pkt==nullptr) continue;
-            av::Timestamp pkt_ts = pkt->dts();
-            if (pkt_ts.isNoPts()) pkt_ts = pkt->pts();
-            if (pkt_ts.isNoPts()) {
-                // packet without PTS
-                // drop as invalid
-                s.edge->pop();
-                continue;
+            bool has_packet = pkt != nullptr;
+            av::Timestamp pkt_ts = NOTS;
+            if (has_packet) {
+                pkt_ts = pkt->dts();
+                if (pkt_ts.isNoPts()) pkt_ts = pkt->pts();
+                if (pkt_ts.isNoPts()) {
+                    // packet without PTS
+                    // drop as invalid
+                    s.edge->pop();
+                    has_packet = false;
+                }
             }
-            s.idle = false;
-            s.idle_since = AV_NOPTS_VALUE;
-            s.warned = false;
-            candidates++;
-            if ( least_ts.isNoPts() || (pkt_ts < least_ts) ) {
-                least_ts = pkt_ts;
-                least_ts_si = &s;
+            if (has_packet) {
+                s.idle = false;
+                s.known_to_be_broken = false;
+                s.idle_since = AV_NOPTS_VALUE;
+                s.warned = false;
+                candidates++;
+                if ( least_ts.isNoPts() || (pkt_ts < least_ts) ) {
+                    least_ts = pkt_ts;
+                    least_ts_si = &s;
+                }
+            } else {
+                if (s.known_to_be_broken) candidates++;
             }
         }
         bool have_all = (candidates == streams_.size());
@@ -157,7 +166,15 @@ public:
                 }
                 // wait for next packet
                 // if timeout occured (no more packets arrived), emit without re-checking
-                should_emit = !(event_wait_->wait(max_wait));
+                bool got_packet = event_wait_->wait(max_wait);
+                should_emit = !got_packet;
+                if (!got_packet) {
+                    for (StreamInfo &s: streams_) {
+                        if (s.idle) {
+                            s.known_to_be_broken = true;
+                        }
+                    }
+                }
             }
         } else { // have_all==true
             should_emit = true;
