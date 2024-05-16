@@ -22,8 +22,9 @@ void TickSource::fastTick() {
     event_loop_->fastExecute(av::Timestamp(200, av::Rational(1, 1000)), [sthis](EventLoop& evl) { sthis->tick(evl); });
 }
 
-void TickSource::add(std::weak_ptr<NonBlockingNodeBase> node) {
+void TickSource::add(std::shared_ptr<NonBlockingNodeBase> node) {
+    node->setEventLoop(event_loop_, true);
     std::lock_guard<decltype(busy_)> lock(busy_);
     nodes_.erase(std::remove_if(nodes_.begin(), nodes_.end(), [](std::weak_ptr<NonBlockingNodeBase> &p) { return p.expired(); }), nodes_.end());
-    nodes_.push_back(node);
+    nodes_.push_back(std::weak_ptr<NonBlockingNodeBase>(node));
 }

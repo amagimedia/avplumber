@@ -77,6 +77,10 @@ protected:
     AVRational tb_to_rescale_ts_;
     uint64_t tick_drifted_for_ = 0;
     std::shared_ptr<RealTimeTeam> team_;
+    std::shared_ptr<EdgeBase> input_ts_queue_;
+    float max_buffered_ = 10;
+    float min_buffered_ = 3;
+    bool flushing_ = false;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
 
@@ -119,6 +123,13 @@ public:
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
+                if (flushing_) {
+                    logstream << "done flushing";
+                    if (team_ && is_master_) {
+                        team_->reset();
+                    }
+                }
+                flushing_ = false;
                 return;
             }
             T &data = *dataptr;
@@ -126,7 +137,32 @@ public:
             AVTS now_ts = now_ts_;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
-                if (team_) {
+                if (input_ts_queue_ != nullptr) {
+                    av::Timestamp input_ts = input_ts_queue_->lastTS();
+                    if (input_ts.isValid()) {
+                        float buffered = addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds();
+                        if ((buffered > max_buffered_) || (flushing_ && (buffered > min_buffered_))) {
+                            if (!flushing_) {
+                                logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
+                            }
+                            ready_ = false;
+                            first_ = true;
+                            flushing_ = true;
+                            this->source_->pop();
+                            this->yieldAndProcess();
+                            return;
+                        } else {
+                            if (flushing_) {
+                                logstream << "done flushing";
+                                if (team_ && is_master_) {
+                                    team_->reset();
+                                }
+                            }
+                            flushing_ = false;
+                        }
+                    }
+                }
+                if (emit && team_) {
                     if (ready_) {
                         offset_ = team_->getOffset(offset_);
                     } else {
@@ -266,6 +302,18 @@ public:
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];
+        }
+        if (params.count("input_ts_queue")) {
+            r->input_ts_queue_ = edges.findAny(params["input_ts_queue"]);
+            if (r->input_ts_queue_ == nullptr) {
+                throw Error("input_ts_queue doesn't exist");
+            }
+        }
+        if (params.count("max_buffered")) {
+            r->max_buffered_ = params["max_buffered"];
+        }
+        if (params.count("min_buffered")) {
+            r->min_buffered_ = params["min_buffered"];
         }
         return r;
     }
