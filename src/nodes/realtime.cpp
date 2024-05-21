@@ -10,6 +10,7 @@ protected:
         return std::unique_lock<decltype(busy_)>(busy_);
     }
     AVRational timebase_ = {0, 0};
+    bool flushing_ = false;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -54,7 +55,17 @@ public:
                 logstream << "STRANGE: local offset smaller than team offset by " << (r-local_offset);
             }
         }
-        return r!=AV_NOPTS_VALUE ? r : local_offset;
+        //return r!=AV_NOPTS_VALUE ? r : local_offset;
+        return r;
+    }
+    void startFlushing() {
+        flushing_ = true;
+    }
+    void stopFlushing() {
+        flushing_ = false;
+    }
+    bool isFlushing() {
+        return flushing_;
     }
 };
 
@@ -78,13 +89,15 @@ protected:
     uint64_t tick_drifted_for_ = 0;
     std::shared_ptr<RealTimeTeam> team_;
     std::shared_ptr<EdgeBase> input_ts_queue_;
-    float max_buffered_ = 10;
-    float min_buffered_ = 3;
-    bool flushing_ = false;
+    float max_buffered_ = 5.5;
+    float min_buffered_ = 0.5;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
 
     std::string printDuration(AVTS duration) {
+        if (duration==AV_NOPTS_VALUE) {
+            return "NOTS";
+        }
         return std::to_string(duration) +
             ((timebase_.num==1 && timebase_.den==1000) ? "ms" : ("*"+std::to_string(timebase_.num)+"/"+std::to_string(timebase_.den)));
     }
@@ -123,13 +136,6 @@ public:
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
-                if (flushing_) {
-                    logstream << "done flushing";
-                    if (team_ && is_master_) {
-                        team_->reset();
-                    }
-                }
-                flushing_ = false;
                 return;
             }
             T &data = *dataptr;
@@ -139,26 +145,26 @@ public:
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
-                    if (input_ts.isValid()) {
+                    if (input_ts.isValid() && team_) {
                         float buffered = addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds();
-                        if ((buffered > max_buffered_) || (flushing_ && (buffered > min_buffered_))) {
-                            if (!flushing_) {
+                        if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
+                            if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
+                                team_->startFlushing();
                             }
                             ready_ = false;
                             first_ = true;
-                            flushing_ = true;
                             this->source_->pop();
                             this->yieldAndProcess();
                             return;
                         } else {
-                            if (flushing_) {
+                            if (team_->isFlushing()) {
                                 logstream << "done flushing";
-                                if (team_ && is_master_) {
+                                if (is_master_) {
                                     team_->reset();
                                 }
+                                team_->stopFlushing();
                             }
-                            flushing_ = false;
                         }
                     }
                 }
@@ -167,8 +173,8 @@ public:
                         offset_ = team_->getOffset(offset_);
                     } else {
                         offset_ = team_->getOffset();
-                        ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                     }
+                    ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                 }
                 if (ready_) {
                     AVTS diff = (pkt_ts - offset_) - now_ts;
