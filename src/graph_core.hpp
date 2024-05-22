@@ -275,6 +275,7 @@ public:
         } while(true);
     }
     virtual void waitEmpty() = 0;
+    virtual int occupied() = 0;
     virtual ~EdgeBase() {
     }
 };
@@ -353,7 +354,7 @@ public:
     size_t capacity() {
         return queue_limit_;
     }
-    int occupied() {
+    virtual int occupied() final {
         //return queue_.size_approx();
         return occupied_;
     }

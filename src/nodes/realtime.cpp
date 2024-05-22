@@ -10,7 +10,7 @@ protected:
         return std::unique_lock<decltype(busy_)>(busy_);
     }
     AVRational timebase_ = {0, 0};
-    bool flushing_ = false;
+    std::atomic_bool flushing_ = false;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -89,6 +89,7 @@ protected:
     uint64_t tick_drifted_for_ = 0;
     std::shared_ptr<RealTimeTeam> team_;
     std::shared_ptr<EdgeBase> input_ts_queue_;
+    std::list<std::shared_ptr<EdgeBase>> intermediate_queues_;
     float max_buffered_ = 5.5;
     float min_buffered_ = 0.5;
     bool is_master_ = true; // by default everyone is master and can resync
@@ -145,8 +146,13 @@ public:
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
+                    bool anything_buffered = input_ts_queue_->occupied() > 0;
+                    for (auto q: intermediate_queues_) {
+                        if (anything_buffered) break;
+                        anything_buffered |= (q->occupied() > 0);
+                    }
                     if (input_ts.isValid() && team_) {
-                        float buffered = addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds();
+                        float buffered = anything_buffered ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
                         if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
                             if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
@@ -313,6 +319,15 @@ public:
             r->input_ts_queue_ = edges.findAny(params["input_ts_queue"]);
             if (r->input_ts_queue_ == nullptr) {
                 throw Error("input_ts_queue doesn't exist");
+            }
+        }
+        if (params.count("intermediate_queues")) {
+            for (const std::string &qname: jsonToStringList(params["intermediate_queues"])) {
+                std::shared_ptr<EdgeBase> q = edges.findAny(qname);
+                if (q==nullptr) {
+                    throw Error("queue " + qname + " from intermediate_queues doesn't exist");
+                }
+                r->intermediate_queues_.push_back(q);
             }
         }
         if (params.count("max_buffered")) {
