@@ -19,6 +19,7 @@
 #include "output_control.hpp"
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
+#include "RealTimeTeam.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -415,6 +416,10 @@ public:
             node->onFinished([ev](std::shared_ptr<NodeWrapper>, bool) {
                 ev->event().signal();
             });
+        };
+        commands_["realtime.team.reset"] = [this](ClientStream &cs, std::string &arg) {
+            std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
+            team->reset();
         };
 
         #ifdef EMBED_IN_OBS
