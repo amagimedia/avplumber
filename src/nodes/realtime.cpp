@@ -102,6 +102,23 @@ protected:
         return std::to_string(duration) +
             ((timebase_.num==1 && timebase_.den==1000) ? "ms" : ("*"+std::to_string(timebase_.num)+"/"+std::to_string(timebase_.den)));
     }
+    bool anythingBuffered() {
+        bool anything_buffered = input_ts_queue_->occupied() > 0;
+        for (auto q: intermediate_queues_) {
+            if (anything_buffered) break;
+            anything_buffered |= (q->occupied() > 0);
+        }
+        return anything_buffered;
+    }
+    void maybeStopFlushing() {
+        if (team_->isFlushing()) {
+            logstream << "done flushing";
+            if (is_master_) {
+                team_->reset();
+            }
+            team_->stopFlushing();
+        }
+    }
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) {
@@ -137,6 +154,9 @@ public:
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
+                if (!anythingBuffered()) {
+                    maybeStopFlushing();
+                }
                 return;
             }
             T &data = *dataptr;
@@ -146,13 +166,9 @@ public:
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
-                    bool anything_buffered = input_ts_queue_->occupied() > 0;
-                    for (auto q: intermediate_queues_) {
-                        if (anything_buffered) break;
-                        anything_buffered |= (q->occupied() > 0);
-                    }
+
                     if (input_ts.isValid() && team_) {
-                        float buffered = anything_buffered ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
+                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
                         if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
                             if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
@@ -164,13 +180,7 @@ public:
                             this->yieldAndProcess();
                             return;
                         } else {
-                            if (team_->isFlushing()) {
-                                logstream << "done flushing";
-                                if (is_master_) {
-                                    team_->reset();
-                                }
-                                team_->stopFlushing();
-                            }
+                            maybeStopFlushing();
                         }
                     }
                 }
