@@ -1,4 +1,4 @@
-node.add { "type": "input", "url": "rtmp://localhost/live/closed_captions", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/cbcdemo", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
 queue.plan_capacity v_in 600
 queue.plan_capacity a0_in 600
 node.add { "type": "demux", "src": "in10", "wait_for_keyframe": false, "routing": { "?v:0": "v_in", "?a:0": "a0_in" }, "group": "in", "auto_restart": "group" }
