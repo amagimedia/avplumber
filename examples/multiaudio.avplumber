@@ -1,0 +1,22 @@
+node.add {"url":"srt://test-streamer-s3dev.aws-dev.intranet:10007","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"type":"input","auto_restart":"group","name":"input","group":"in","dst":"in_mux0"}
+
+queue.plan_capacity a0 600
+queue.plan_capacity a1 600
+queue.plan_capacity a2 600
+queue.plan_capacity adec0 7
+queue.plan_capacity adec1 7
+queue.plan_capacity adec2 7
+
+node.add {"wait_for_keyframe":false,"routing":{"?a:0":"a0", "?a:1":"a1", "?a:2":"a2"},"type":"demux","auto_restart":"group","name":"demux","group":"in","src":"in_mux0"}
+
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode0","group":"in","src":"a0","dst":"adec0" }
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode1","group":"in","src":"a1","dst":"adec1" }
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode2","group":"in","src":"a2","dst":"adec2" }
+
+node.add { "type": "null_sink", "src": "adec0", "group": "g1" }
+node.add { "type": "null_sink", "src": "adec1", "group": "g1" }
+node.add { "type": "null_sink", "src": "adec2", "group": "g1" }
+
+group.start g1
+detach retry group.start in
+
