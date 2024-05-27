@@ -1,0 +1,6 @@
+node.add { "type": "input", "url": "srt://ingest-1-dev.tellyo.com:9000?streamid=output/live/freshchanneldinozaurasrt2341a4c1", "group": "in", "auto_restart": "group", "dst": "in10" }
+queue.plan_capacity din 600
+node.add { "type": "demux", "src": "in10", "wait_for_keyframe": false, "routing": { "?d:0": "din" }, "group": "in", "auto_restart": "group" }
+node.add { "type": "parse_scte35", "src": "din", "group": "g1", "name": "SCTE_Parser", "auto_restart": "on" }
+group.start g1
+detach retry group.start in

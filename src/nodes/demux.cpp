@@ -102,6 +102,8 @@ public:
                 mediatype = AVMEDIA_TYPE_VIDEO;
             } else if ( (typetag=='a') || (typetag=='A') ) {
                 mediatype = AVMEDIA_TYPE_AUDIO;
+            } else if (typetag == 'd' || typetag == 'D') {
+                mediatype = AVMEDIA_TYPE_DATA;    
             } else if (typetag>='0' && typetag<='9') {
                 absolute_index = true;
             } else {
