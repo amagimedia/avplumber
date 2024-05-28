@@ -69,7 +69,7 @@ public:
 
     jack_default_audio_sample_t *buf[as.channelsCount()];
 
-    if (as.isPlanar()) {
+    if (!as.isPlanar()) {
         return;
     }
 
