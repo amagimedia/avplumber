@@ -13,9 +13,13 @@ node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode0","gro
 node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode1","group":"in","src":"a1","dst":"adec1" }
 node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode2","group":"in","src":"a2","dst":"adec2" }
 
-node.add { "type": "null_sink", "src": "adec0", "group": "g1" }
-node.add { "type": "null_sink", "src": "adec1", "group": "g1" }
-node.add { "type": "null_sink", "src": "adec2", "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec0", "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec1", "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec2", "group": "g1" }
+
+#node.add { "type": "null_sink", "src": "adec0", "group": "g1" }
+#node.add { "type": "null_sink", "src": "adec1", "group": "g1" }
+#node.add { "type": "null_sink", "src": "adec2", "group": "g1" }
 
 group.start g1
 detach retry group.start in
