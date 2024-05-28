@@ -195,6 +195,8 @@ protected:
     Event consumed_;
     std::atomic_bool finish_producer_{false};
     std::atomic_bool finish_consumer_{false};
+    av::Timestamp last_ts_ = NOTS;
+
     static void setNodePointer(std::weak_ptr<Node> &dest, std::weak_ptr<Node> source, std::atomic_bool &flag_to_reset) {
         // TODO? here we don't protect against race conditions but they won't happen anyway
         // unless someone really screws up the graph and uses the same node name in different groups
@@ -223,6 +225,9 @@ public:
     }
     void setConsumer(std::weak_ptr<Node> cons) {
         setNodePointer(consumer_, cons, finish_consumer_);
+    }
+    av::Timestamp lastTS() {
+        return last_ts_;
     }
     template<typename MD> std::shared_ptr<MD> metadata(bool create_if_empty = false) {
         // TODO? race conditions as in setNodePointer
@@ -270,6 +275,7 @@ public:
         } while(true);
     }
     virtual void waitEmpty() = 0;
+    virtual int occupied() = 0;
     virtual ~EdgeBase() {
     }
 };
@@ -283,7 +289,6 @@ protected:
     int queue_limit_;
     std::list<WiretapCallback> wiretap_callbacks_;
     std::atomic_int occupied_{0};
-    av::Timestamp last_ts_ = NOTS;
 
     // try_func returns whether item appeared in the queue
     // wait_func waits and returns false if timeout, true otherwise
@@ -300,6 +305,7 @@ protected:
             signal_event.signal();
             return true;
         } else {
+            logstream << "resetting flag";
             alt_finish = false; // reset flag
             return false;
         }
@@ -348,16 +354,13 @@ public:
     size_t capacity() {
         return queue_limit_;
     }
-    int occupied() {
+    virtual int occupied() final {
         //return queue_.size_approx();
         return occupied_;
     }
     int free() {
         //return capacity() - occupied();
         return queue_limit_ - occupied_;
-    }
-    av::Timestamp lastTS() {
-        return last_ts_;
     }
     decltype(queue_)& queue() {
         return queue_;

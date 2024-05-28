@@ -409,10 +409,10 @@ protected:
     }
     T getBackup(const av::Timestamp req_len, const av::Timestamp frame_pts) {
         //logstream << "CORR BUP! ";
+        setCard(true);
         if ( freezable() && last_no_card_pts_.isValid() && ( addTS(frame_pts, negateTS(last_no_card_pts_)).seconds() < max_freeze_sec_ ) && last_frame_.isComplete() ) {
             return last_frame_;
         } else {
-            setCard(true);
             card_frames_count_++;
             if ((card_frames_count_ % 64) == 0) {
                 mspec_.reloadBackupFrame();
