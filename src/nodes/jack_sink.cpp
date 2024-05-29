@@ -4,6 +4,7 @@
 #include <string>
 
 class JackSink : public NodeSingleInput<av::AudioSamples> {
+
 protected:
   int channels_count;
   std::string port_basename;
@@ -20,10 +21,17 @@ public:
 
   void prepare() {
     jack_status_t status;
-    jack_client = jack_client_open(client_name.c_str(), JackNullOption, &status);
+    jack_client =
+        jack_client_open(client_name.c_str(), JackNoStartServer, &status);
     if (jack_client == nullptr) {
       throw Error("unable to create jack client, status: " +
                   std::to_string(status));
+    }
+
+    jack_set_process_callback(jack_client, jack_process_callback, this);
+
+    if (jack_activate(jack_client) != 0) {
+      throw Error("cannot activate client");
     }
 
     jack_ports = (jack_port_t **)malloc(sizeof(jack_port_t *) * channels_count);
@@ -38,13 +46,13 @@ public:
         throw Error("unable to register jack port");
       }
 
-      // Will it be neccessary to link in/out ports inside avplumber?
+      /*Will it be neccessary to link in/out ports inside avplumber?
       std::string in_port = port_basename + "_in" + std::to_string(i);
       int connect_res =
           jack_connect(jack_client, out_port.c_str(), in_port.c_str());
       if (connect_res > 1) {
         throw Error("could not link in/out jack port");
-      }
+      }*/
     }
   }
 
@@ -61,18 +69,31 @@ public:
   }
 
   using NodeSingleInput<av::AudioSamples>::NodeSingleInput;
+
+  static int jack_process_callback(jack_nframes_t nframes, void *p) {
+    auto *t = (JackSink *)(p);
+    t->jack_process(nframes);
+    return 0;
+  }
+
   virtual void process() override {
+    // do we need to do sth here?
+  }
+
+  void jack_process(jack_nframes_t nframes) {
     av::AudioSamples as = this->source_->get();
     if (!as.isComplete())
       return;
 
     // logstream << "got audio samples: " << as.samplesCount() << " "
     //          << as.channelsCount() << " " << as.channelsLayoutString();
-
-    jack_default_audio_sample_t *buf[as.channelsCount()];
-
     if (!as.isPlanar()) {
       logstream << "audio input not planar";
+      return;
+    }
+
+    if (nframes != as.samplesCount()) {
+      // handle that?
       return;
     }
 
@@ -81,17 +102,17 @@ public:
         throw Error("no jack_port");
       }
 
-      buf[i] = (jack_default_audio_sample_t *)jack_port_get_buffer(
-          jack_ports[i], as.samplesCount());
-      if (buf[i] == nullptr) {
+      jack_default_audio_sample_t *buf =
+          (jack_default_audio_sample_t *)jack_port_get_buffer(
+              jack_ports[i], as.samplesCount());
+      if (buf == nullptr) {
         throw Error("failed to get jack buffer");
       }
-      memset(buf[i], 0, as.samplesCount() * sizeof(buf[i]));
-      for (int j = 0; j < as.samplesCount(); j++) {
-        buf[i][j] = (as.data() + i * as.samplesCount())[j];
-      }
-    }
+      
+      memcpy(buf, as.data() + i * as.samplesCount(), as.samplesCount());
+    } 
   }
+
 
   static std::shared_ptr<JackSink> create(NodeCreationInfo &nci) {
 
