@@ -13,9 +13,9 @@ node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode0","gro
 node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode1","group":"in","src":"a1","dst":"adec1" }
 node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode2","group":"in","src":"a2","dst":"adec2" }
 
-node.add { "type": "jack_sink", "src": "adec0", "port_basename": "s0", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "adec1", "port_basename": "s1", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "adec2", "port_basename": "s2", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec0", "client_name": "OBS", "port_basename": "Source 1/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec1", "client_name": "OBS", "port_basename": "Source 2/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "adec2", "client_name": "OBS", "port_basename": "Source 3/audio", "channels_count": 2, "group": "g1" }
 
 group.start g1
 detach retry group.start in

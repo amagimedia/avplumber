@@ -7,6 +7,7 @@ class JackSink : public NodeSingleInput<av::AudioSamples> {
 protected:
   int channels_count;
   std::string port_basename;
+  std::string client_name;
 
   jack_client_t *jack_client;
   jack_port_t **jack_ports;
@@ -19,7 +20,7 @@ public:
 
   void prepare() {
     jack_status_t status;
-    jack_client = jack_client_open("test_client", JackNullOption, &status);
+    jack_client = jack_client_open(client_name.c_str(), JackNullOption, &status);
     if (jack_client == nullptr) {
       throw Error("unable to create jack client, status: " +
                   std::to_string(status));
@@ -27,7 +28,7 @@ public:
 
     jack_ports = (jack_port_t **)malloc(sizeof(jack_port_t *) * channels_count);
     for (int i = 0; i < channels_count; i++) {
-      std::string out_port = port_basename + "_out" + std::to_string(i);
+      std::string out_port = port_basename + "_out " + std::to_string(i + 1);
 
       jack_ports[i] =
           jack_port_register(jack_client, out_port.c_str(),
@@ -105,9 +106,11 @@ public:
     if (params.count("channels_count")) {
       r->channels_count = params["channels_count"];
     }
-
     if (params.count("port_basename")) {
       r->port_basename = params["port_basename"];
+    }
+    if (params.count("client_name")) {
+      r->client_name = params["client_name"];
     }
 
     r->prepare();
