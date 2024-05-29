@@ -109,7 +109,7 @@ public:
         throw Error("failed to get jack buffer");
       }
       
-      memcpy(buf, as.data() + i * as.samplesCount(), as.samplesCount());
+      memcpy(buf, as.data() + i * as.samplesCount(), as.samplesCount()*sizeof(float));
     } 
   }
 
