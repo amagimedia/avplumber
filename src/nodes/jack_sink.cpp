@@ -19,7 +19,6 @@ public:
 
   void prepare() {
     jack_status_t status;
-    logstream << "open client";
     jack_client = jack_client_open("test_client", JackNullOption, &status);
     if (jack_client == nullptr) {
       throw Error("unable to create jack client, status: " +
@@ -39,12 +38,12 @@ public:
       }
 
       // Will it be neccessary to link in/out ports inside avplumber?
-      /*std::string in_port = port_basename + "_in" + std::to_string(i);
+      std::string in_port = port_basename + "_in" + std::to_string(i);
       int connect_res =
           jack_connect(jack_client, out_port.c_str(), in_port.c_str());
       if (connect_res > 1) {
         throw Error("could not link in/out jack port");
-      }*/
+      }
     }
   }
 
@@ -54,10 +53,10 @@ public:
         jack_port_unregister(jack_client, jack_ports[i]);
       }
     }
-
     if (jack_client) {
       jack_client_close(jack_client);
     }
+    free(jack_ports);
   }
 
   using NodeSingleInput<av::AudioSamples>::NodeSingleInput;
