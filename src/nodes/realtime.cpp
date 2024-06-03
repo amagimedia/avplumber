@@ -88,7 +88,7 @@ public:
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
-                if (!anythingBuffered()) {
+                if (input_ts_queue_ != nullptr && !anythingBuffered()) {
                     maybeStopFlushing();
                 }
                 return;
