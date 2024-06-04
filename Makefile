@@ -30,8 +30,8 @@ endif
 
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp
-DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -l:libklscte35.a -ljack
+DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -ljack
 
 ifeq ($(HAVE_CUDA),1)
 nodes_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
@@ -94,6 +94,8 @@ clean:
 clean_deps:
 	rm -r deps/cpr/build || true
 	rm -r deps/avcpp/build || true
+	rm -r deps/libklvanc/src/.libs/ || true
+	rm -r deps/libklscte35/src/.libs/ || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -104,6 +106,14 @@ deps/avcpp/build/src/libavcpp.a:
 	mkdir -p deps/avcpp/build
 	cd deps/avcpp/build && PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCMAKE_CXX_FLAGS="$(CXXFLAGS)" -DCMAKE_EXE_LINKER_FLAGS="$(LFLAGS)" -DCMAKE_AR=`which gcc-ar` -DCMAKE_RANLIB=`which gcc-ranlib` ..
 	$(MAKE) -C deps/avcpp/build avcpp-static VERBOSE=1
+
+deps/libklvanc/src/.libs/libklvanc.a:
+	rm -r deps/libklvanc/src/.libs/ || true
+	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no && make
+
+deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
+	rm -r deps/libklscte35/src/.libs/ || true
+	export CFLAGS="-I$(shell readlink -f deps/include)" && export LFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no && make
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<

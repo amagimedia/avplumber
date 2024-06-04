@@ -1,5 +1,7 @@
 #include "node_common.hpp"
+extern "C" {
 #include <libavcodec/packet.h>
+}
 #include <libklscte35/scte35.h>
 
 class SCTE35Parser: public NodeSingleInput<av::Packet> {
@@ -20,6 +22,8 @@ public:
 
         scte35_splice_info_section_unpackFrom(&s, payload, frm->size);
         scte35_splice_info_section_print(&s);
+
+        // TODO send via http
     }
 
     static std::shared_ptr<SCTE35Parser> create(NodeCreationInfo &nci) {
