@@ -1,6 +1,5 @@
 #pragma once
 
-#include "picture_buffer.hpp"
 #include <assert.h>
 #include <atomic>
 #include <algorithm>
@@ -75,6 +74,7 @@ public:
         write_pos_(movefrom.write_pos_.load()),
         buffer_(movefrom.buffer_)
         {
+        movefrom.buffer_ = nullptr;
     }
     size_t size() const { return size_; }
     size_t fillCount() const {
@@ -193,8 +193,10 @@ public:
         return RingBufferView<Elem, T>(*this);
     }
     ~RingBuffer() {
-        delete[] buffer_;
-        buffer_ = nullptr;
+        if (buffer_ != nullptr) {
+            delete[] buffer_;
+            buffer_ = nullptr;
+        }
     }
 };
 

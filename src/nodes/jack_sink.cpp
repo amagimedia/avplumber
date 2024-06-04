@@ -10,7 +10,7 @@ extern "C" {
 class JackSink : public NodeSingleInput<av::AudioSamples> {
 
 protected:
-  size_t ring_buffer_size_ = 3072;
+  size_t ring_buffer_size_ = 131072;
   int channels_count_ = 2;
   std::string port_basename_;
   std::string client_name_;
@@ -35,12 +35,6 @@ public:
                   std::to_string(status));
     }
 
-    jack_set_process_callback(jack_client_, jack_process_callback, this);
-
-    if (jack_activate(jack_client_) != 0) {
-      throw Error("cannot activate client");
-    }
-
     channel_buffers_.reserve(channels_count_);
     jack_ports_ = (jack_port_t **)malloc(sizeof(jack_port_t *) * channels_count_);
     for (int i = 0; i < channels_count_; i++) {
@@ -55,7 +49,6 @@ public:
       if (jack_ports_[i] == nullptr) {
         throw Error("unable to register jack port");
       }
-
       /*Will it be neccessary to link in/out ports inside avplumber?
       std::string in_port = port_basename + "_in" + std::to_string(i);
       int connect_res =
@@ -64,9 +57,15 @@ public:
         throw Error("could not link in/out jack port");
       }*/
     }
+
+    jack_set_process_callback(jack_client_, jack_process_callback, this);
+    if (jack_activate(jack_client_) != 0) {
+      throw Error("cannot activate client");
+    }
   }
 
   ~JackSink() {
+    jack_deactivate(jack_client_);
     for (int i = 0; i < channels_count_; i++) {
       if (jack_ports_[i]) {
         jack_port_unregister(jack_client_, jack_ports_[i]);

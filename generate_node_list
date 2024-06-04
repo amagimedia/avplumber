@@ -1,4 +1,4 @@
-#!/usr/sbin/busybox sh
+#!/bin/bash
 
 set -e
 
