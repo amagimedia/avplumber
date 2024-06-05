@@ -3,6 +3,7 @@
 #include <avcpp/pixelformat.h>
 #include <avcpp/codec.h>
 #include <avcpp/formatcontext.h>
+#include <jack/types.h>
 #include "video_parameters.hpp"
 #include "audio_parameters.hpp"
 
@@ -141,6 +142,11 @@ public:
     virtual void setPreferredPixelFormat(av::PixelFormat) WARN_NOT_OVERRIDEN;
     virtual void setPreferredResolution(int width, int height) WARN_NOT_OVERRIDEN;
 #undef WARN_NOT_OVERRIDEN
+};
+
+class IJackSink {
+public:
+  virtual void jack_process(jack_nframes_t nframes) = 0;  
 };
 
 struct EdgeMetadata {
