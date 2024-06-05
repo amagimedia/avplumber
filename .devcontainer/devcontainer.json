@@ -1,0 +1,10 @@
+{
+	"build": { "dockerfile": "Dockerfile" },
+	"customizations": {
+		"vscode": {
+			"extensions": ["llvm-vs-code-extensions.vscode-clangd"]
+		}
+	},
+	"postCreateCommand": "bear -- make",
+	"forwardPorts": [3000]
+}
