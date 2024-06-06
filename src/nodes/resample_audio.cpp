@@ -54,6 +54,7 @@ protected:
     }
     void out(av::AudioSamples &out_samples) {
         if (out_samples.samplesCount()>0) {
+            assert(out_samples.sampleRate() == dst_params_.sample_rate);
             inside_resampler_ = addTS(inside_resampler_, { -out_samples.samplesCount(), {1, out_samples.sampleRate()} });
             if (!next_out_ts_.isValid()) {
                 throw Error("Trying to output samples without knowing next PTS!");
