@@ -20,7 +20,7 @@ protected:
     auto start = std::chrono::high_resolution_clock::now();
     for (const auto &sptr : jc->sinks_) {
       auto s = sptr.lock();
-      s->jack_process(nframes);
+      if (s) s->jack_process(nframes);
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -30,6 +30,22 @@ protected:
 
 public:
 
+  JackClient(std::string name) {
+    client_name_ = name;
+    jack_status_t status;
+    jack_client_ =
+        jack_client_open(client_name_.c_str(), JackNoStartServer, &status);
+    if (jack_client_ == nullptr) {
+      throw Error("unable to create jack client, status: " +
+                  std::to_string(status));
+    }
+
+    jack_set_process_callback(jack_client_, jack_process_callback, this);
+    if (jack_activate(jack_client_) != 0) {
+      throw Error("cannot activate client");
+    }
+  }
+
   ~JackClient() {
     jack_deactivate(jack_client_);
     if (jack_client_) {
@@ -37,33 +53,20 @@ public:
     }
   }
 
-  void setClientName(std::string name) { client_name_ = name; }
-
   void addSink(std::weak_ptr<IJackSink> sink) {
     if (!sinks_.empty()) {
-      sinks_.erase(std::remove_if(
+      sinks_.erase(
+        std::remove_if(
           sinks_.begin(), sinks_.end(),
-          [](std::weak_ptr<IJackSink> &s) { return s.expired(); }),
-          sinks_.end());
+          [](std::weak_ptr<IJackSink> &s) { return s.expired(); }
+        ),
+        sinks_.end()
+      );
     }
     sinks_.push_back(sink);
   }
 
   jack_client_t *instance() {
-    if (!jack_client_) {
-      jack_status_t status;
-      jack_client_ =
-          jack_client_open(client_name_.c_str(), JackNoStartServer, &status);
-      if (jack_client_ == nullptr) {
-        throw Error("unable to create jack client, status: " +
-                    std::to_string(status));
-      }
-
-      jack_set_process_callback(jack_client_, jack_process_callback, this);
-      if (jack_activate(jack_client_) != 0) {
-        throw Error("cannot activate client");
-      }
-    }
     return jack_client_;
   }
 };

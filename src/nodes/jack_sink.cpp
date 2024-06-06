@@ -8,16 +8,16 @@
 extern "C" {
 #include <libavutil/samplefmt.h>
 }
-#include "../RingBuffer.hpp"
 
 #include <boost/lockfree/spsc_queue.hpp>
 
-typedef boost::lockfree::spsc_queue<float, boost::lockfree::capacity<96 * 1024> > spsc_queue;
+static constexpr size_t ring_buffer_size = 16 * 1024;
+typedef boost::lockfree::spsc_queue<float, boost::lockfree::capacity<ring_buffer_size> > spsc_queue;
 
 class JackSink : public NodeSingleInput<av::AudioSamples>, public IJackSink {
 
 protected:
-  size_t ring_buffer_size_ = 96 * 1024;
+  static float ZEROS[ring_buffer_size];
   int channels_count_ = 2;
   std::string port_basename_;
   std::string ardour_port_basename_;
@@ -25,16 +25,13 @@ protected:
   std::shared_ptr<JackClient> jack_client_;
   std::vector<jack_port_t *> jack_ports_;
 
-  //std::vector<RingBuffer<float>> channel_buffers_;
-  std::vector<spsc_queue> channel_buffers_ { 2 };
-
+  std::unique_ptr<spsc_queue[]> channel_buffers_;
 
 public:
   void prepare() {
-    //channel_buffers_.reserve(channels_count_);
+    channel_buffers_ = std::make_unique<spsc_queue[]>(channels_count_);
     jack_ports_.reserve(channels_count_);
     for (int i = 0; i < channels_count_; i++) {
-      //channel_buffers_.push_back(RingBuffer<float>(ring_buffer_size_));
       std::string out_port = port_basename_ + "_out " + std::to_string(i + 1);
       jack_port_t *port =
           jack_port_register(jack_client_->instance(), out_port.c_str(),
@@ -84,17 +81,13 @@ public:
     for (int ch = 0; ch < channels_count_; ch++) {
       if (ch < as.channelsCount()) {
         float *src_buffer = reinterpret_cast<float *>(as.data(ch));
-        /*if (!channel_buffers_[ch].writeFrom(src_buffer,
-                                            src_buffer + as.samplesCount())) {
-          logstream << "ringbuffer overflow";
-        }*/
         if (!channel_buffers_[ch].write_available()) {
           logstream << "ringbuffer overflow";
           return;
         }
         channel_buffers_[ch].push(src_buffer, as.samplesCount());
       } else {
-        //[ch].fill(as.samplesCount(), 0);
+        channel_buffers_[ch].push(ZEROS, ZEROS + as.samplesCount());
       }
     }
   }
@@ -115,11 +108,9 @@ public:
         throw Error("failed to get jack buffer");
       }
 
-      /*if (!channel_buffers_[ch].readTo(buf, buf + nframes)) {
-        std::fill(buf, buf + nframes, 0);
-      }*/
       if (!channel_buffers_[ch].read_available()) {
-        logstream << "ringbuffer underflow";
+        //logstream << "ringbuffer underflow";
+        std::fill(buf, buf + nframes, 0);
       }
       channel_buffers_[ch].pop(buf, nframes);
     }
@@ -146,17 +137,21 @@ public:
     }
     if (params.count("client_name")) {
       std::string name = params["client_name"];
+      InstanceSharedObjects<JackClient>::emplace(nci.instance, name, InstanceSharedObjects<JackClient>::PolicyIfExists::Ignore, name);
       r->jack_client_ =
           InstanceSharedObjects<JackClient>::get(nci.instance, name);
 
       std::weak_ptr<JackSink> w(r);
-      r->jack_client_->setClientName(name);
       r->jack_client_->addSink(w);
+    } else {
+      throw Error("client_name not specified");
     }
 
     r->prepare();
     return r;
   }
 };
+
+float JackSink::ZEROS[ring_buffer_size] = {0};
 
 DECLNODE(jack_sink, JackSink);

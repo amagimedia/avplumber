@@ -22,9 +22,13 @@ node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_form
 node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"type":"resample_audio","auto_restart":"panic","name":"Audio_Resample1","group":"in","src":"adec1","dst":"ares1"}
 node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"type":"resample_audio","auto_restart":"panic","name":"Audio_Resample2","group":"in","src":"adec2","dst":"ares2"}
 
-node.add { "type": "jack_sink", "src": "ares0", "client_name": "avp", "port_basename": "Source 1/audio", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "ares1", "client_name": "avp", "port_basename": "Source 2/audio", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "ares2", "client_name": "avp", "port_basename": "Source 3/audio", "channels_count": 2, "group": "g1" }
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares0","dst":"art0"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares1","dst":"art1"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares2","dst":"art2"}
+
+node.add { "type": "jack_sink", "src": "art0", "client_name": "avp", "port_basename": "Source 1/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art1", "client_name": "avp", "port_basename": "Source 2/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art2", "client_name": "avp", "port_basename": "Source 3/audio", "channels_count": 2, "group": "g1" }
 
 group.start g1
 detach retry group.start in
