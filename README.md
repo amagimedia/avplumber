@@ -61,6 +61,10 @@ Public API is contained in [`src/avplumber.hpp`](src/avplumber.hpp).
 
 Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https://github.com/obsproject/obs-studio) supporting video decoder to texture direct VRAM copy.
 
+### Developing custom nodes
+
+See [doc/developing_nodes.md](doc/developing_nodes.md)
+
 ## Graph
 An avplumber instance consists of a [directed acyclic graph](https://en.wikipedia.org/wiki/Directed_acyclic_graph) of interconnected nodes.
 
