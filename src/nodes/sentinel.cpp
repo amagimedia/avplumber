@@ -5,6 +5,7 @@
 
 #include <avcpp/codeccontext.h>
 #include <avcpp/videorescaler.h>
+#include <ios>
 #include <memory>
 
 class PTSCorrectorCommon: public InstanceShared<PTSCorrectorCommon> {
@@ -17,17 +18,42 @@ protected:
     av::Timestamp clk_ = NOTS;
     AVTS clk_wallclock_ = AV_NOPTS_VALUE;
     av::Timestamp last_discontinuity_ = NOTS;
+    av::Timestamp wallclock_offset_ = NOTS;
+    std::ofstream timeshift_history_file_;
     ThreadedRESTEndpoint rest_;
     bool reporting_ = false;
-    void reportTimeshiftChange() {
-        if (!reporting_) return;
-        Parameters jobj;
-        jobj["changed_at"] = rtcTS().seconds() - start_ts_.seconds();
-        jobj["input_pts_offset"] = timeshift_.seconds() - start_ts_.seconds();
-        jobj["output_pts_offset"] = start_ts_.seconds();
-        rest_.send("", jobj.dump());
-    }
 public:
+    void wallclockOffsetChanged(av::Timestamp offset) {
+        wallclock_offset_ = offset;
+    }
+    void reportTimeshiftChange() {
+        long changed_at = rescaleTS(addTS(rtcTS(), negateTS(start_ts_)), {1, 1000}).timestamp();
+        
+        long input_pts_offset = rescaleTS(addTS(timeshift_, negateTS(start_ts_)), {1, 1000}).timestamp();
+        
+        long wallclock_offset = 0;
+        if (wallclock_offset_.isValid()) {
+            wallclock_offset = rescaleTS(addTS(wallclock_offset_, negateTS(start_ts_)), {1, 1000}).timestamp();
+        }
+        long output_pts_offset = rescaleTS(start_ts_, {1, 1000}).timestamp();
+        
+        if (timeshift_history_file_.is_open()) {
+            timeshift_history_file_ << changed_at << " " << input_pts_offset << " " << wallclock_offset << " " << output_pts_offset << "\n";
+            timeshift_history_file_.flush();
+        }
+        if (reporting_) {
+            Parameters jobj;
+            jobj["changed_at"] = changed_at;
+            jobj["input_pts_offset"] = input_pts_offset;
+            jobj["wallclock_offset"] = wallclock_offset;
+            jobj["output_pts_offset"] = output_pts_offset;
+            std::string json_str = jobj.dump();
+            rest_.send("", json_str);
+        }
+    }
+    void openHistoryFile(const std::string path) {
+        timeshift_history_file_.open(path, std::ios_base::app);
+    }
     void addTimebase(av::Rational tb) {
         if ( (timebase_.getNumerator()==0) || (timebase_<tb) ) {
             timebase_ = tb;
@@ -375,6 +401,12 @@ protected:
     // is card boolean is the LSB
     // timestamp is the rest
 
+    bool track_wallclock_ = false;
+    float max_wallclock_drift_ = 0.5;
+    float wallclock_drift_grace_period_ = 3;
+    av::Timestamp wallclock_offset_drifted_since_ = NOTS;
+    av::Timestamp wallclock_offset_ = NOTS;
+
     enum class FrameSource: int {
         None = -1,
         Backup = 0,
@@ -468,6 +500,32 @@ protected:
             card_status_ = is_card | (ts << 1);
         }
     }
+    void handleWallclockOffset(const av::Timestamp output_pts, const av::Timestamp now_wallclock) {
+        if (!track_wallclock_) return;
+        av::Timestamp new_offset = addTS(output_pts, negateTS(now_wallclock));
+        bool report = false;
+        if (wallclock_offset_.isValid()) {
+            float diff = abs(addTS(new_offset, negateTS(wallclock_offset_)).seconds());
+            if (diff > max_wallclock_drift_) {
+                if (wallclock_offset_drifted_since_.isNoPts()) {
+                    wallclock_offset_drifted_since_ = now_wallclock;
+                } else {
+                    float drifted_for = addTS(now_wallclock, negateTS(wallclock_offset_drifted_since_)).seconds();
+                    if (drifted_for > wallclock_drift_grace_period_) {
+                        report = true;
+                    }
+                }
+            }
+        } else {
+            report = true;
+        }
+        if (report) {
+            wallclock_offset_ = new_offset;
+            corr_->wallclockOffsetChanged(new_offset);
+            corr_->reportTimeshiftChange();
+        }
+    }
+
 public:
     virtual void setPreferredPixelFormat(av::PixelFormat pix_fmt) {
         setPreferredPixelFormatIfPossible<>(pix_fmt);
@@ -496,6 +554,7 @@ public:
         T* pfrm = this->source_->peek(get_limit_ms);
         if (pfrm != nullptr) {
             T &frm = *pfrm;
+            av::Timestamp frame_wallclock = wallclock.absolute_ts();
             if (frm.isComplete() && frm.pts().isValid()) {
                 // success, we have frame
                 setFrameSource(FrameSource::Input);
@@ -659,6 +718,7 @@ public:
                 } // end lock
                 if (!suspend_output) {
                     setCard(false);
+                    handleWallclockOffset(ts, frame_wallclock);
                     outputFrame(frm, ts); // we don't need overflow prevention logic here because we're outside the lock - we can block without causing Bad Things(TM)
                     last_no_card_pts_ = ts;
                     if (freezable()) last_frame_ = frm;
@@ -828,6 +888,9 @@ public:
         if (params.count("reporting_url")) {
             corr->setReportingURL(params.at("reporting_url"));
         }
+        if (params.count("history_file")) {
+            corr->openHistoryFile(params.at("history_file"));
+        }
         if (params.count("lock_timeshift")) {
             if (params.at("lock_timeshift")) {
                 corr->lockTimeshift();
@@ -838,6 +901,15 @@ public:
             std::string pict_buf_name = params["initial_picture_buffer"];
             std::shared_ptr<PictureBuffer> pictbuf = InstanceSharedObjects<PictureBuffer>::get(nci.instance, pict_buf_name);
             r->setInitialPictureBuffer(pictbuf->getFrame());
+        }
+        if (params.count("track_wallclock")) {
+            r->track_wallclock_ = params["track_wallclock"];
+        }
+        if (params.count("max_wallclock_drift")) {
+            r->max_wallclock_drift_ = params["max_wallclock_drift"];
+        }
+        if (params.count("wallclock_drift_grace_period")) {
+            r->wallclock_drift_grace_period_ = params["wallclock_drift_grace_period"];
         }
         return r;
     }

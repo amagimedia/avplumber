@@ -66,6 +66,9 @@ public:
     AVTS pts() {
         return std::chrono::duration_cast<TimeUnit>(Clock::now()-start).count();
     }
+    av::Timestamp absolute_ts() {
+        return av::Timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), {1, 1000});
+    }
     av::Timestamp ts() {
         return av::Timestamp(pts(), timeBase());
     }
