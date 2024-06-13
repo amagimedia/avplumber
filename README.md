@@ -34,6 +34,17 @@ and in a different terminal:
 
 and you can type some commands (see [Control protocol](#control-protocol)) or paste a script (e.g. from `examples/` directory)
 
+### Development on Windows
+
+Development on Windows can be done using Docker and VSCode Dev Containers.
+
+1. Enable symbolic links by following [these steps](https://stackoverflow.com/a/59761201).
+2. Clone this repo `git clone --recursive https://github.com/amagimedia/avplumber`
+3. Open it in VSCode
+4. Open Command Palette and run *Dev Containers: Reopen in Container* command
+
+Development container comes with all required dependencies and clangd installed.
+
 ### Demo
 
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
