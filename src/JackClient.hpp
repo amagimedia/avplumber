@@ -17,14 +17,10 @@ protected:
 
   static int jack_process_callback(jack_nframes_t nframes, void *p) {
     auto *jc = (JackClient *)(p);
-    auto start = std::chrono::high_resolution_clock::now();
     for (const auto &sptr : jc->sinks_) {
       auto s = sptr.lock();
       if (s) s->jack_process(nframes);
     }
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    //logstream << "jack process duration" << " " << duration.count();
     return 0;
   }
 

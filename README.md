@@ -715,6 +715,21 @@ multiple inputs, 1 output: `av::Packet`
 -   `url` (string of URL) - mandatory
 -   `options` (dictionary) - format options that will be passed to libavformat
 
+### `jack_sink`
+
+1 input: `av::AudioSamples` (sample format must be `fltp`, sample rate must be equal to JACK's)
+
+Output audio to [JACK Audio Connection Kit](https://jackaudio.org/) server. Can be used for both inter-app routing and outputting audio to the sound card. Note that JACK has its own clock (soundcard clock or in case of dummy device - OS monotonic clock) so in long running streams underruns or overruns may occur, unless the stream's clock and JACK clock are synchronized (for example, input is AES67 RTP and the hardware audio interface is synchronized to AES67 master clock using wordclock or S/PDIF).
+
+Both sample format and sample rate must match configuration of the JACK server (sample format is always `fltp` in JACK). Use [`resample_audio`](#resample_audio) node to convert.
+
+This node has an internal buffer to ensure that JACK thread can run in real time. In case of bursty streams (e.g. coming from the Internet) this buffering may be insufficinent. The [`realtime`](#realtime) node with a small `negative_time_tolerance` (below JACK period size) will help in such cases.
+
+-   `channels_count` (int, default 2) - number of JACK ports to create. If incoming audio stream has less channels, the remaining ones will be filled with silence. If more, the excessive channels will be discarded.
+-   `port_prefix` (string, default empty string) - if specified, will append channel index to this string and it'll become the JACK port name. If unspecified, JACK port name will be only the channel index.
+-   `connect_port_prefix` (string) - if specified, will append port number to this string and try to connect to an input port with that name in the JACK graph
+-   `client_name` (string) - mandatory, name of the JACK client. If multiple `jack_sink` nodes are created with the same client name, ports will belong to the same JACK client (make sure to set `port_prefix` in such cases). If they have different client names, multiple JACK clients will be created. What is better depends on the use case - multiple JACK clients allow parallel processing but put more overhead on the CPU.
+
 ### `raw_output`
 
 Write stream of raw packets or frames to file or pipe. Unlike `output`

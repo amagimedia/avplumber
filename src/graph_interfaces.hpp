@@ -3,7 +3,6 @@
 #include <avcpp/pixelformat.h>
 #include <avcpp/codec.h>
 #include <avcpp/formatcontext.h>
-#include <jack/types.h>
 #include "video_parameters.hpp"
 #include "audio_parameters.hpp"
 
@@ -146,7 +145,7 @@ public:
 
 class IJackSink {
 public:
-  virtual void jack_process(jack_nframes_t nframes) = 0;  
+  virtual void jack_process(size_t nframes) = 0;  
 };
 
 struct EdgeMetadata {

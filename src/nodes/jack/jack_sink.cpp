@@ -19,8 +19,8 @@ class JackSink : public NodeSingleInput<av::AudioSamples>, public IJackSink {
 protected:
   static float ZEROS[ring_buffer_size];
   int channels_count_ = 2;
-  std::string port_basename_;
-  std::string ardour_port_basename_;
+  std::string port_prefix_;
+  std::string connect_port_prefix_;
 
   std::shared_ptr<JackClient> jack_client_;
   std::vector<jack_port_t *> jack_ports_;
@@ -32,7 +32,7 @@ public:
     channel_buffers_ = std::make_unique<spsc_queue[]>(channels_count_);
     jack_ports_.reserve(channels_count_);
     for (int i = 0; i < channels_count_; i++) {
-      std::string out_port = port_basename_ + "_out " + std::to_string(i + 1);
+      std::string out_port = port_prefix_ + std::to_string(i + 1);
       jack_port_t *port =
           jack_port_register(jack_client_->instance(), out_port.c_str(),
                              JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
@@ -42,9 +42,9 @@ public:
       }
       jack_ports_.push_back(port);
 
-      if (!ardour_port_basename_.empty()) {
+      if (!connect_port_prefix_.empty()) {
         std::string in_port =
-            ardour_port_basename_ + "_in " + std::to_string(i);
+            connect_port_prefix_ + std::to_string(i);
         int connect_res = jack_connect(jack_client_->instance(),
                                        out_port.c_str(), in_port.c_str());
         if (connect_res > 1) {
@@ -68,11 +68,6 @@ public:
       return;
     }
 
-    if (!as.isPlanar()) {
-      logstream << "audio input not planar";
-      return;
-    }
-
     if (as.sampleFormat().get() != AV_SAMPLE_FMT_FLTP) {
       logstream << "audio input not compatible with jack (must be fltp)";
       return;
@@ -92,7 +87,7 @@ public:
     }
   }
 
-  void jack_process(jack_nframes_t nframes) override {
+  void jack_process(size_t nframes) override {
     if (jack_ports_.size() != channels_count_) {
       return;
     }
@@ -129,11 +124,11 @@ public:
     if (params.count("channels_count")) {
       r->channels_count_ = params["channels_count"];
     }
-    if (params.count("port_basename")) {
-      r->port_basename_ = params["port_basename"];
+    if (params.count("port_prefix")) {
+      r->port_prefix_ = params["port_prefix"];
     }
-    if (params.count("ardour_port_basename")) {
-      r->ardour_port_basename_ = params["ardour_port_basename"];
+    if (params.count("connect_port_prefix")) {
+      r->connect_port_prefix_ = params["connect_port_prefix"];
     }
     if (params.count("client_name")) {
       std::string name = params["client_name"];

@@ -31,7 +31,13 @@ endif
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -L/usr/lib64/pipewire-0.3/jack -ljack
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
+
+ifeq ($(HAVE_JACK),1)
+nodes_src += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
+override CXXFLAGS += -DHAVE_JACK=1
+override LIBS_FLAGS += -ljack
+endif
 
 ifeq ($(HAVE_CUDA),1)
 nodes_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
@@ -109,11 +115,11 @@ deps/avcpp/build/src/libavcpp.a:
 
 deps/libklvanc/src/.libs/libklvanc.a:
 	rm -r deps/libklvanc/src/.libs/ || true
-	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no && make
+	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no --enable-static && make
 
 deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
 	rm -r deps/libklscte35/src/.libs/ || true
-	export CFLAGS="-I$(shell readlink -f deps/include)" && export LFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no && make
+	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
