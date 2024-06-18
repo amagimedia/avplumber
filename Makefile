@@ -16,15 +16,15 @@ BUILD_DATE_FILE = builddate.h
 #SRCDIR = $(dir $(firstword $(MAKEFILE_LIST)))src
 SRCDIR = src
 
-nodes_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
+NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 
 ifeq ($(EMBED_IN),obs)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/obs -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/obs -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DEMBED_IN_OBS=1 -I$(LIBOBS_INCLUDE_DIR) -I$(LIBOBS_INCLUDE_DIR)/../deps/glad/include
 endif
 
 ifeq ($(BUILD_TYPE),Debug)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/debug -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/debug -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DSYNCMETER=1
 endif
 
@@ -34,13 +34,13 @@ DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/lib
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
 
 ifeq ($(HAVE_JACK),1)
-nodes_src += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DHAVE_JACK=1
 override LIBS_FLAGS += -ljack
 endif
 
 ifeq ($(HAVE_CUDA),1)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
@@ -48,7 +48,7 @@ endif
 
 EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
-CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(nodes_SRC)
+CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 CPPSRC_ALL = $(CPPSRC_EXE)
 
@@ -76,8 +76,8 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	$(CXX) $(CXXFLAGS) -c -o $@ $< -include $(BUILD_DATE_FILE)
 
 
-$(nodes_list_file): ./generate_node_list $(nodes_SRC)
-	./generate_node_list $(nodes_SRC) > $(nodes_list_file)
+$(nodes_list_file): ./generate_node_list $(NODES_SRC)
+	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
 $(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)

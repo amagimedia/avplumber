@@ -1,6 +1,6 @@
-#include "../JackClient.hpp"
-#include "../graph_interfaces.hpp"
-#include "node_common.hpp"
+#include "../../JackClient.hpp"
+#include "../../graph_interfaces.hpp"
+#include "../node_common.hpp"
 #include <jack/jack.h>
 #include <jack/types.h>
 #include <memory>
