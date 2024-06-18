@@ -1,5 +1,5 @@
 #include "node_common.hpp"
-#include <libavutil/channel_layout.h>
+#include <mutex>
 
 class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
                    public IStoppable, public IInterruptible, public IReturnsObjects {
@@ -8,6 +8,11 @@ protected:
     std::atomic_bool should_end_ {false};
     AVTS wait_start_;
     AVTS wait_max_ = AV_NOPTS_VALUE;
+
+    SeekTarget seek_target_;
+    bool need_seek_ = false;
+    std::mutex seek_mutex_;
+
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
     void closeInput(bool warn = true) {
@@ -57,7 +62,25 @@ public:
     virtual void enableStream(size_t index) {
         ictx_.stream(index).raw()->discard = AVDISCARD_DEFAULT;
     }
+    virtual void seek(SeekTarget target) {
+        auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
+        seek_target_ = target;
+        need_seek_ = true;
+    }
     virtual void process() {
+        {
+            auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
+            if (need_seek_) {
+                ictx_.flush();
+                avformat_flush(ictx_.raw());
+                if (seek_target_.ts.isValid()) {
+                    ictx_.seek(seek_target_.ts);
+                } else {
+                    ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
+                }
+                need_seek_ = false;
+            }
+        }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
         if (pkt.isNull()) {
@@ -87,6 +110,7 @@ public:
         pkt.setDts(addTS(pkt.dts(), shift_));
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
+        logstream << "got pts " << pkt.pts() << " dts " << pkt.dts();
         this->sink_->put(pkt);
     }
     virtual void stop() {

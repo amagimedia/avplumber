@@ -1,4 +1,5 @@
 #pragma once
+#include "avutils.hpp"
 #include "util.hpp"
 #include <avcpp/pixelformat.h>
 #include <avcpp/codec.h>
@@ -42,6 +43,17 @@ public:
     virtual void stopSinks() = 0;
 };
 
+struct SeekTarget {
+    av::Timestamp ts = NOTS;
+    size_t bytes = 0;
+    static SeekTarget from_timestamp(av::Timestamp ts) {
+        return { ts: ts, bytes: 0 };
+    }
+    static SeekTarget from_bytes(size_t bytes) {
+        return { ts: NOTS, bytes: bytes };
+    }
+};
+
 class IStreamsInput {
 public:
     virtual size_t streamsCount() = 0;
@@ -49,6 +61,12 @@ public:
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
+    virtual void seek(SeekTarget target) = 0;
+};
+
+class IFlushAndSeek {
+public:
+    virtual void flushAndSeek(SeekTarget target) = 0;
 };
 
 class INeedsOutputFrameSize {
@@ -70,6 +88,7 @@ public:
     virtual std::string codecName() const = 0;
     virtual std::string codecMediaTypeString() const = 0;
     virtual std::string fieldOrderString() const = 0;
+    virtual void discardUntil(av::Timestamp pts) = 0;
 };
 
 class IMuxer {

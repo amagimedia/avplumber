@@ -16,6 +16,8 @@ protected:
     av::PixelFormat pixel_format_ = AV_PIX_FMT_NONE;
     bool pixel_format_optional_ = false;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+    av::Timestamp discard_until_ = NOTS;
+    std::mutex discard_until_mutex_;
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -179,7 +181,20 @@ public:
                             logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
                         }
                         last_pts_ = frm.pts();
-                        this->sink_->put(frm);
+                        bool put = true;
+                        {
+                            auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+                            if (discard_until_.isValid()) {
+                                if (frm.pts() >= discard_until_) {
+                                    discard_until_ = NOTS;
+                                } else {
+                                    put = false;
+                                }
+                            }
+                        }
+                        if (put) {
+                            this->sink_->put(frm);
+                        }
                     }
                     dec_errors_ = 0;
                 } catch (std::exception &e) {
@@ -199,6 +214,10 @@ public:
                 this->source_->pop();
             }
         }
+    }
+    virtual void discardUntil(av::Timestamp pts) {
+        auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+        discard_until_ = pts;
     }
     virtual ~Decoder() {
         try {

@@ -1,0 +1,11 @@
+node.add { "type": "input", "url": "/home/teowoz/rec.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in" }, "group": "g1", "auto_restart": "group" }
+node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"g1","src":"v_in","dst":"Video_Decode_out"}
+
+node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.002, "jitter_margin": 0.1, "src": "Video_Decode_out", "dst": "v_rt", "group": "g1", "name": "RTSync_1" }
+node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "v_rt", "dst": "v_ts", "group": "g1"}
+
+node.add {"type":"enc_video","auto_restart":"group","name":"Video_Encode","group":"g1","src":"v_ts","dst":"v_outenc", "codec": "wrapped_avframe"}
+node.add { "type": "mux", "src": [ "v_outenc" ], "dst": "mux0-1", "group": "g1" }
+node.add { "type": "output", "format": "xv", "url": "OUT 1", "src": "mux0-1", "auto_restart": "panic", "group": "g1" }
+group.start g1

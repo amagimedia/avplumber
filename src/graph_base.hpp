@@ -4,13 +4,26 @@
 #include "MultiEventWait.hpp"
 #include "graph_core.hpp"
 #include <avcpp/dictionary.h>
+#include <memory>
 #include "graph_interfaces.hpp"
 
-template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate {
+template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate, public IFlushAndSeek {
 public:
     using SourceType = Source<InputType>;
 protected:
     std::unique_ptr<SourceType> source_;
+    void executeUpstream(std::function<void(EdgeBase&, std::shared_ptr<Node>)> cb) {
+        std::shared_ptr<EdgeBase> edge = sourceEdge();
+        while (edge) {
+            auto node = edge->producer().lock();
+            cb(*edge, node);
+            if (node) {
+                edge = node->sourceEdge();
+            } else {
+                break;
+            }
+        }
+    }
 public:
     SourceType& source() {
         return *source_;
@@ -50,6 +63,32 @@ public:
         if (esrc!=nullptr) {
             esrc->edge()->setConsumer(this->shared_from_this());
         }
+    }
+    virtual void flushAndSeek(SeekTarget target) {
+        executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.startFlushing();
+            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+            if (target.ts.isValid() && dec) {
+                dec->discardUntil(target.ts);
+            }
+            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            if (input) {
+                input->seek(target);
+            }
+        });
+        while(true) {
+            bool flushed = true;
+            executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
+                flushed &= edge.isFlushed();
+            });
+            if (flushed) {
+                break;
+            }
+            wallclock.sleepms(5);
+        }
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.stopFlushing();
+        });
     }
     virtual ~NodeSingleInput() {
     }
@@ -236,8 +275,8 @@ public:
         T* ptr = this->source_->peek();
         if (ptr!=nullptr) {
             T data = *ptr;
-            this->source_->pop();
             this->sink_->put(data);
+            this->source_->pop();
         }
     }
     virtual ~TransparentNode() {

@@ -4,6 +4,7 @@
 #include "avutils.hpp"
 #include <json.hpp>
 #include <mutex>
+#include <shared_mutex>
 #include <readerwriterqueue/readerwriterqueue.h>
 #include <unordered_map>
 #include "Event.hpp"
@@ -196,6 +197,8 @@ protected:
     std::atomic_bool finish_producer_{false};
     std::atomic_bool finish_consumer_{false};
     av::Timestamp last_ts_ = NOTS;
+    std::atomic_bool flushing_{false};
+    std::atomic_bool flushed_{false};
 
     static void setNodePointer(std::weak_ptr<Node> &dest, std::weak_ptr<Node> source, std::atomic_bool &flag_to_reset) {
         // TODO? here we don't protect against race conditions but they won't happen anyway
@@ -228,6 +231,16 @@ public:
     }
     av::Timestamp lastTS() {
         return last_ts_;
+    }
+    void startFlushing() {
+        flushed_ = false;
+        flushing_ = true;
+    }
+    void stopFlushing() {
+        flushing_ = false;
+    }
+    bool isFlushed() {
+        return flushed_;
     }
     template<typename MD> std::shared_ptr<MD> metadata(bool create_if_empty = false) {
         // TODO? race conditions as in setNodePointer
@@ -315,6 +328,29 @@ protected:
         event.signal();
     }
 
+    bool popInternal() {
+        if (queue_.pop()) {
+            occupied_--;
+            consumed_.signal();
+            return true;
+        } else {
+            return false;
+        }
+    }
+    bool maybeFlush() {
+        bool r = false;
+        if (flushing_) {
+            while (true) {
+                if (popInternal()) {
+                    r = true;
+                } else {
+                    break;
+                }
+            };
+            flushed_ = true;
+        }
+        return r;
+    }
     bool try_dequeue(T &elem) {
         bool r = queue_.try_dequeue(elem);
         if (r) {
@@ -334,6 +370,9 @@ public:
         wiretap_callbacks_.push_back(cb);
     }
     bool try_enqueue(const T &elem) {
+        if (flushing_) {
+            return true;
+        }
         bool r = queue_.try_enqueue(elem);
         if (r) {
             last_ts_ = elem.pts();
@@ -397,6 +436,7 @@ public:
         return queue_.peek();
     }
     T* wait_peek(const int timeout_ms = -1) {
+        maybeFlush();
         T* r = queue_.peek();
         if (timeout_ms==0) return r;
         if (r != nullptr) return r;
@@ -413,18 +453,15 @@ public:
         return r;
     }
     bool pop() {
-        if (queue_.pop()) {
-            occupied_--;
-            consumed_.signal();
-            return true;
-        } else {
-            return false;
-        }
+        bool r = maybeFlush();
+        return popInternal() || r;
     }
     void wait_dequeue(T &elem) {
+        maybeFlush();
         waitDo([this, &elem]() { return try_dequeue(elem); }, [this]() { produced_.wait(); return true; }, finish_consumer_, consumed_);
     }
     bool wait_dequeue_timed_ms(T &elem, const unsigned int msec) {
+        maybeFlush();
         return waitDo([this, &elem]() { return try_dequeue(elem); }, [this, msec]() { return produced_.wait(msec) > 0; }, finish_consumer_, consumed_);
     }
     virtual void waitEmpty() override {
@@ -436,7 +473,7 @@ public:
                 // no consumer
                 // so empty the queue artificially.
                 logstream << "Warning: waitEmpty() called for queue without consumer. Discarding " << occupied_.load() << " items.";
-                while (pop()) {};
+                while (popInternal()) {};
             }
         }
     }
