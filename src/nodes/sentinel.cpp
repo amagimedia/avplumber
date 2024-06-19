@@ -14,7 +14,6 @@ protected:
     av::Timestamp timeshift_ = NOTS;
     av::Rational timebase_ = {0, 1};
     bool lock_timeshift_ = false;
-    const av::Timestamp start_ts_ = {10, {1,1}};
     av::Timestamp clk_ = NOTS;
     AVTS clk_wallclock_ = AV_NOPTS_VALUE;
     av::Timestamp last_discontinuity_ = NOTS;
@@ -23,6 +22,7 @@ protected:
     ThreadedRESTEndpoint rest_;
     bool reporting_ = false;
 public:
+    av::Timestamp start_ts_ = {10, {1,1}};
     void wallclockOffsetChanged(av::Timestamp offset) {
         wallclock_offset_ = offset;
     }
@@ -910,6 +910,9 @@ public:
         }
         if (params.count("wallclock_drift_grace_period")) {
             r->wallclock_drift_grace_period_ = params["wallclock_drift_grace_period"];
+        }
+        if (params.count("start_ts")) {
+            corr->start_ts_ = av::Timestamp(AVTS(params["start_ts"].get<float>()*1000.0f+0.5f), {1, 1000});
         }
         return r;
     }
