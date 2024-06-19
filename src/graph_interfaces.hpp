@@ -143,6 +143,11 @@ public:
 #undef WARN_NOT_OVERRIDEN
 };
 
+class IJackSink {
+public:
+  virtual void jack_process(size_t nframes) = 0;  
+};
+
 struct EdgeMetadata {
     virtual ~EdgeMetadata() {
     }

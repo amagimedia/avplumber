@@ -16,3 +16,9 @@
 [submodule "deps/concurrentqueue"]
 	path = deps/concurrentqueue
 	url = https://github.com/cameron314/concurrentqueue
+[submodule "deps/libklvanc"]
+	path = deps/libklvanc
+	url = https://github.com/stoth68000/libklvanc
+[submodule "deps/libklscte35"]
+	path = deps/libklscte35
+	url = https://github.com/stoth68000/libklscte35

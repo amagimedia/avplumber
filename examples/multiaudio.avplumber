@@ -1,0 +1,35 @@
+node.add {"url":"srt://test-streamer-s3dev.aws-dev.intranet:10007","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"type":"input","auto_restart":"group","name":"input","group":"in","dst":"in_mux0"}
+
+queue.plan_capacity a0 600
+queue.plan_capacity a1 600
+queue.plan_capacity a2 600
+
+queue.plan_capacity adec0 7
+queue.plan_capacity adec1 7
+queue.plan_capacity adec2 7
+
+queue.plan_capacity ares0 300
+queue.plan_capacity ares1 300
+queue.plan_capacity ares2 300
+
+node.add {"wait_for_keyframe":false,"routing":{"?a:0":"a0", "?a:1":"a1", "?a:2":"a2"},"type":"demux","auto_restart":"group","name":"demux","group":"in","src":"in_mux0"}
+
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode0","group":"in","src":"a0","dst":"adec0" }
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode1","group":"in","src":"a1","dst":"adec1" }
+node.add { "type":"dec_audio","auto_restart":"group","name":"Audio_Decode2","group":"in","src":"a2","dst":"adec2" }
+
+node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"type":"resample_audio","auto_restart":"panic","name":"Audio_Resample0","group":"in","src":"adec0","dst":"ares0"}
+node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"type":"resample_audio","auto_restart":"panic","name":"Audio_Resample1","group":"in","src":"adec1","dst":"ares1"}
+node.add {"dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"type":"resample_audio","auto_restart":"panic","name":"Audio_Resample2","group":"in","src":"adec2","dst":"ares2"}
+
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares0","dst":"art0"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares1","dst":"art1"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares2","dst":"art2"}
+
+node.add { "type": "jack_sink", "src": "art0", "client_name": "avp", "port_basename": "Source 1/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art1", "client_name": "avp", "port_basename": "Source 2/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art2", "client_name": "avp", "port_basename": "Source 3/audio", "channels_count": 2, "group": "g1" }
+
+group.start g1
+detach retry group.start in
+
