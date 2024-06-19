@@ -100,8 +100,8 @@ clean:
 clean_deps:
 	rm -r deps/cpr/build || true
 	rm -r deps/avcpp/build || true
-	rm -r deps/libklvanc/src/.libs/ || true
-	rm -r deps/libklscte35/src/.libs/ || true
+	cd deps/libklvanc && git clean -xdf || true
+	cd deps/libklscte35 && git clean -xdf || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -114,11 +114,11 @@ deps/avcpp/build/src/libavcpp.a:
 	$(MAKE) -C deps/avcpp/build avcpp-static VERBOSE=1
 
 deps/libklvanc/src/.libs/libklvanc.a:
-	rm -r deps/libklvanc/src/.libs/ || true
+	cd deps/libklvanc && git clean -xdf || true
 	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no --enable-static && make
 
 deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
-	rm -r deps/libklscte35/src/.libs/ || true
+	cd deps/libklscte35 && git clean -xdf || true
 	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
