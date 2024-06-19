@@ -1,6 +1,6 @@
 FROM alpine:3.19 as builder
 
-RUN apk add ffmpeg-dev git g++ cmake build-base curl-dev openssl-dev libssl3 boost-dev perl bash
+RUN apk add ffmpeg-dev git g++ cmake build-base curl-dev openssl-dev libssl3 boost-dev perl bash automake autoconf
 
 # We build dependencies first because they'll probably change less often than src/
 # so we can use Docker build cache to save some time

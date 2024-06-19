@@ -367,9 +367,6 @@ protected:
     const double max_streams_diff_ = 0.001;
     bool lock_timeshift_ = false;
     unsigned int timeshift_desync_frames_ = 0;
-    unsigned int disco_meter_ = 0;
-    unsigned int disco_count_ = 0;
-    unsigned int good_count_ = 0;
     unsigned int card_frames_count_ = 0;
     bool last_success_ = true;
     bool try_without_filling_ = false;
@@ -496,12 +493,6 @@ public:
         } else {
             get_limit_ms = sink_full_ ? 150 : 22;
         }
-        if (last_source_ == FrameSource::Backup) {
-            disco_count_ = 10000;
-            disco_meter_ = 200;
-            // if backup frames have been outputted,
-            // assume that stream is bad
-        }
         T* pfrm = this->source_->peek(get_limit_ms);
         if (pfrm != nullptr) {
             T &frm = *pfrm;
@@ -555,7 +546,7 @@ public:
                         if (disco_before_sync) {
                             corr_->nowDiscontinuity();
                         }
-                        if ( /*(!next_ts_.isValid()) ||*/ (desync && isDiscontinuity(newts)) || (timeshift_desync_frames_ > 0) ) {
+                        if ( (desync && isDiscontinuity(newts)) || (timeshift_desync_frames_ > 0) ) {
                             // first frame
                             // or discontinuity
                             // or desync lasts too long
@@ -584,19 +575,6 @@ public:
                             } // else no discontinuity at all
                         }
 
-                        if (disco) {
-                            if (disco_meter_<100) disco_meter_ = 99; // start with 100, increase with discontinuity, decrease with good frame
-                            if (disco_meter_<200) disco_meter_++;
-                            good_count_ = 0;
-                        } else {
-                            if (good_count_<0x10000000) good_count_++;
-                            if (disco_meter_>0) disco_meter_--;
-                        }
-                        if (disco_meter_ > 0) {
-                            if (disco_count_<0x10000000) disco_count_++;
-                        } else {
-                            disco_count_ = 0;
-                        }
 
                         // Correct PTS:
                         if (disco) {
@@ -612,35 +590,19 @@ public:
                                 av::Timestamp rtc = corr_->rtcTS();
                                 bool should_fill = false;
                                 if (!try_without_filling_) {
-                                    /*if (disco_count_>30) {
-                                        // fill if discontinuity affects more than ... frames
-                                        should_fill = true;
-                                        logstream << "Filling enabled because of long discontinuity";
-                                    } else*/ if (disco_before_sync) {
-                                        // or we have discontinuity right now
-                                        /*av::Timestamp diff = ts - next_ts_;
-                                        // fill max 2 seconds
-                                        if ( diff.seconds() < 2 ) {
-                                            should_fill = true;
-                                        } else {
-                                            logstream << diff.seconds() << " seconds of difference. Not filling.";
-                                        }*/
+                                    if (disco_before_sync) {
+                                        // we have discontinuity right now
                                         should_fill = true;
                                         logstream << "Filling enabled because of input discontinuity";
                                     } else if (corr_->wasDiscontinuityRecently()) {
                                         should_fill = true;
                                         logstream << "Filling enabled because of discontinuity in other stream";
                                     }
-                                    /*if ( ts > rtc ) {
-                                        should_fill = false;
-                                        logstream << "Filling disabled because this stream isn't late";
-                                    }*/
                                 } else {
                                     suspend_output = true;
                                     try_without_filling_ = false;
                                 }
                                 if (should_fill) {
-                                    #if 1
                                     logstream << "PTS jumped forward, filling with backup frames. " << next_ts_ << " -> " << ts;
                                     // fill stream with backup frames
                                     // fast-forward next_ts_ until we reach current PTS
@@ -667,14 +629,7 @@ public:
                                         updateLocalTimeshiftPreCorr();
                                         ts = next_ts_;
                                     }
-                                    //disco_count_ = 0; // next try without filling
                                     try_without_filling_ = true;
-                                    #else
-                                    logstream << "Filling required, switching to backup frames";
-                                    pfrm = nullptr;
-                                    last_success_ = false;
-                                    suspend_output = true;
-                                    #endif
                                 } else {
                                     logstream << "PTS jumped forward " << next_ts_ << " -> " << ts;
                                     // shift it backwards
@@ -684,7 +639,7 @@ public:
                             }
                             // Synchronize corr_ to local_timeshift_
                             // TODO: less naive way of doing it
-                            /*if (!suspend_output)*/ corr_->setTimeshift(local_timeshift_);
+                            corr_->setTimeshift(local_timeshift_);
                         } else if (desync) {
                             // change global timeshift if desync
                             // even if there's no discontinuity
@@ -731,7 +686,6 @@ public:
             setFrameSource(FrameSource::Backup);
             auto lock = corr_->getLock();
             av::Timestamp rtc = corr_->rtcTS();
-            //av::Timestamp gen_ts = next_ts_;
             if (!next_ts_.isValid()) {
                 next_ts_ = corr_->startTS(timebase_);
                 logstream << "Notice: setting next_ts_ from start TS = " << next_ts_ << std::endl;
@@ -762,9 +716,7 @@ public:
                     }
                     if ((--lim)<=0) break;
                 }
-            } /*else {
-                logstream << "Why not timeout? last_success_=" << last_success_ << ", stalled for " << rtc << " - " << next_ts_ << " = " << stalled_sec << ", max " << max_stalled_sec_;
-            }*/
+            }
             last_success_ = false;
         }
         #undef updateLocalTimeshiftPreCorr

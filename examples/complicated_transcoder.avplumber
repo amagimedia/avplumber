@@ -1,9 +1,8 @@
 # this script will transcode rtmp://localhost/live/input to rtmp://localhost/live/output
 
-#queue.plan_capacity in_a 700
-#queue.plan_capacity Audio_Encode_out 700
-#queue.plan_capacity in_v_dec 240
-queue.plan_capacity * 600
+queue.plan_capacity in_a 700
+queue.plan_capacity Audio_Encode_out 700
+queue.plan_capacity in_v_dec 240
 node.add {"url":"https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
 node.add {"routing":{"v:0":"slate_vpkt"},"type":"demux","auto_restart":"off","name":"slate_demux","group":"slate_loader","src":"slate_input"}
 node.add {"type":"dec_video","auto_restart":"off","name":"slate_decoder","group":"slate_loader","src":"slate_vpkt","dst":"slate_vfrm"}
@@ -17,8 +16,8 @@ group.stop slate_loader
 node.add {"url":"/home/jp/Downloads/pbtv.ts","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"type":"input","auto_restart":"group","name":"input","group":"in","dst":"in_mux0"}
 
 node.add {"wait_for_keyframe":true,"routing":{"v:0":"in_v_prere","?a:0":"in_a_prere"},"type":"demux","auto_restart":"group","name":"demux","group":"in","src":"in_mux0"}
-node.add {"leak_after":120, "speed":1.02,"type":"realtime","auto_restart":"group","group":"in","src":"in_v_prere","dst":"in_v"}
-node.add {"leak_after":120, "speed":1.02,"type":"realtime","auto_restart":"group","group":"in","src":"in_a_prere","dst":"in_a"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"in_v_prere","dst":"in_v"}
+node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"in_a_prere","dst":"in_a"}
 node.add {"optional":true,"type":"dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"in_a","dst":"adec"}
 node.add {"type":"split","auto_restart":"group","group":"in","src":"in_v","dst":["in_v_dec"]}
 node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"in","src":"in_v_dec","dst":"Video_Decode_out"}

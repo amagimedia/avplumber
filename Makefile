@@ -16,25 +16,31 @@ BUILD_DATE_FILE = builddate.h
 #SRCDIR = $(dir $(firstword $(MAKEFILE_LIST)))src
 SRCDIR = src
 
-nodes_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
+NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 
 ifeq ($(EMBED_IN),obs)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/obs -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/obs -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DEMBED_IN_OBS=1 -I$(LIBOBS_INCLUDE_DIR) -I$(LIBOBS_INCLUDE_DIR)/../deps/glad/include
 endif
 
 ifeq ($(BUILD_TYPE),Debug)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/debug -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/debug -maxdepth 1 -name '*.cpp')
 override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp
-DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
+DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
 
+ifeq ($(HAVE_JACK),1)
+NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
+override CXXFLAGS += -DHAVE_JACK=1
+override LIBS_FLAGS += -ljack
+endif
+
 ifeq ($(HAVE_CUDA),1)
-nodes_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
@@ -42,7 +48,7 @@ endif
 
 EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
-CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(nodes_SRC)
+CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 CPPSRC_ALL = $(CPPSRC_EXE)
 
@@ -70,8 +76,8 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	$(CXX) $(CXXFLAGS) -c -o $@ $< -include $(BUILD_DATE_FILE)
 
 
-$(nodes_list_file): ./generate_node_list $(nodes_SRC)
-	./generate_node_list $(nodes_SRC) > $(nodes_list_file)
+$(nodes_list_file): ./generate_node_list $(NODES_SRC)
+	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
 $(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)
@@ -94,6 +100,8 @@ clean:
 clean_deps:
 	rm -r deps/cpr/build || true
 	rm -r deps/avcpp/build || true
+	rm -r deps/libklvanc/src/.libs/ || true
+	rm -r deps/libklscte35/src/.libs/ || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -104,6 +112,14 @@ deps/avcpp/build/src/libavcpp.a:
 	mkdir -p deps/avcpp/build
 	cd deps/avcpp/build && PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCMAKE_CXX_FLAGS="$(CXXFLAGS)" -DCMAKE_EXE_LINKER_FLAGS="$(LFLAGS)" -DCMAKE_AR=`which gcc-ar` -DCMAKE_RANLIB=`which gcc-ranlib` ..
 	$(MAKE) -C deps/avcpp/build avcpp-static VERBOSE=1
+
+deps/libklvanc/src/.libs/libklvanc.a:
+	rm -r deps/libklvanc/src/.libs/ || true
+	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no --enable-static && make
+
+deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
+	rm -r deps/libklscte35/src/.libs/ || true
+	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
