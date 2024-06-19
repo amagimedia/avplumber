@@ -40,7 +40,7 @@ node.add {"codec":"libx264","options":{"preset":"ultrafast","b":"8500k","minrate
 node.add {"type":"split","auto_restart":"panic","name":"venc_fhd_split","group":"out","src":"venc_fhd","dst":["venc_fhd_hls"]}
 node.add {"type":"mux","auto_restart":"panic","name":"Mux_fhd","group":"out","src":["venc_fhd_hls","aenc1"],"dst":"muxed_v_fhd"}
 #node.add {"format":"mpegts","url":"srt://localhost:9000?streamid=publish:output","options":{},"type":"output","auto_restart":"panic","name":"Out_fhd","group":"out","src":"muxed_v_fhd"}
-node.add {"format":"flv","url":"rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/pbtv2","options":{},"type":"output","auto_restart":"panic","name":"Out_fhd","group":"out","src":"muxed_v_fhd"}
+node.add {"format":"flv","url":"rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/pbtv","options":{},"type":"output","auto_restart":"panic","name":"Out_fhd","group":"out","src":"muxed_v_fhd"}
 
 node.add {"drop":true,"type":"split","auto_restart":"off","name":"RawOutSplit_a_0","group":"out","src":"Audio0_to_s16_out","dst":[]}
 node.add {"drop":true,"type":"split","auto_restart":"off","name":"RawOutSplit_v_fhd","group":"out","src":"splittosplit_fhd","dst":[]}
