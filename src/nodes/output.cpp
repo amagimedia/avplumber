@@ -1,8 +1,20 @@
 #include "node_common.hpp"
+#include <fstream>
+
+#pragma pack(push)
+#pragma pack(1)
+struct SeekTableEntry {
+    int64_t timestamp_ms;
+    uint64_t bytes;
+};
+#pragma pack(pop)
 
 class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag {
 protected:
     av::FormatContext octx_;
+    bool write_seek_table_ = false;
+    std::ofstream seek_table_text_;
+    std::ofstream seek_table_bin_;
     bool should_close_ = false;
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
@@ -12,6 +24,17 @@ public:
     virtual void process() {
         av::Packet pkt = this->source_->get();
         if (pkt) {
+            if (write_seek_table_ && octx_.raw() && octx_.raw()->pb) {
+                int64_t cur_pos = avio_tell(octx_.raw()->pb);
+                int64_t ts_ms = pkt.dts().timestamp({1, 1000});
+                if (seek_table_text_.is_open()) {
+                    seek_table_text_ << ts_ms << " " << cur_pos << "\n";
+                }
+                if (seek_table_bin_.is_open()) {
+                    SeekTableEntry entry { ts_ms, uint64_t(cur_pos) };
+                    seek_table_bin_.write(reinterpret_cast<char*>(&entry), sizeof(entry));
+                }
+            }
             octx_.writePacket(pkt);
         }
     }
@@ -58,6 +81,15 @@ public:
         edge->setConsumer(r);
         
         muxer->initFromFormatContextPostOpen(octx);
+
+        if (params.count("seek_table")) {
+            r->seek_table_bin_.open(params["seek_table"], std::ios::binary);
+            r->write_seek_table_ = true;
+        }
+        if (params.count("seek_table_text")) {
+            r->seek_table_text_.open(params["seek_table_text"]);
+            r->write_seek_table_ = true;
+        }
         
         return r;
     }
