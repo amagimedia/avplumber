@@ -28,6 +28,7 @@ protected:
     float min_buffered_ = 0.5;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
+    bool set_pts_ = false;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -96,6 +97,7 @@ public:
             T &data = *dataptr;
             
             AVTS now_ts = now_ts_;
+            AVTS new_pts = now_ts;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
@@ -147,6 +149,8 @@ public:
                                     // retry after waiting
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
+                            } else {
+                                new_pts += diff;
                             }
                         } else {
                             if (!no_wait_notified_) {
@@ -175,9 +179,21 @@ public:
                     }
                     ready_ = true;
                 }
+            } else {
+                emit = false;
             }
             if (emit) {
+                av::Timestamp orig_pts = data.pts();
+                if (set_pts_) {
+                    data.setTimeBase(av::Rational());
+                    data.setPts({new_pts, timebase_});
+                }
                 if (!this->sink_->put(data, true)) {
+                    if (set_pts_) {
+                        // putting failed, restore original PTS because we will process this frame next time
+                        data.setTimeBase(av::Rational());
+                        data.setPts(orig_pts);
+                    }
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
@@ -279,6 +295,9 @@ public:
         }
         if (params.count("min_buffered")) {
             r->min_buffered_ = params["min_buffered"];
+        }
+        if (params.count("set_pts")) {
+            r->set_pts_ = params["set_pts"];
         }
         return r;
     }

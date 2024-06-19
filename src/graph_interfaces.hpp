@@ -61,7 +61,8 @@ public:
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
-    virtual void seek(SeekTarget target) = 0;
+    virtual void seekAndPause(SeekTarget target) = 0;
+    virtual void resumeAfterSeek() = 0;
 };
 
 class IFlushAndSeek {

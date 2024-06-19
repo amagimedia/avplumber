@@ -73,7 +73,7 @@ public:
             }
             std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
             if (input) {
-                input->seek(target);
+                input->seekAndPause(target);
             }
         });
         while(true) {
@@ -88,6 +88,10 @@ public:
         }
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
+            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            if (input) {
+                input->resumeAfterSeek();
+            }
         });
     }
     virtual ~NodeSingleInput() {

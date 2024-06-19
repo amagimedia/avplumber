@@ -1,4 +1,4 @@
-node.add { "type": "input", "url": "/home/teowoz/rec.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "input", "url": "/storage/teo/video/testsrc2-tcr-12Mbps-1080p-5000.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
 node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in" }, "group": "g1", "auto_restart": "group" }
 node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"g1","src":"v_in","dst":"Video_Decode_out"}
 

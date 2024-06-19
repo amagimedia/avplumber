@@ -12,6 +12,8 @@ protected:
     SeekTarget seek_target_;
     bool need_seek_ = false;
     std::mutex seek_mutex_;
+    Event seek_resume_;
+    int video_stream_ = -1;
 
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
@@ -62,24 +64,38 @@ public:
     virtual void enableStream(size_t index) {
         ictx_.stream(index).raw()->discard = AVDISCARD_DEFAULT;
     }
-    virtual void seek(SeekTarget target) {
+    virtual void seekAndPause(SeekTarget target) {
         auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
         seek_target_ = target;
         need_seek_ = true;
     }
+    virtual void resumeAfterSeek() {
+        seek_resume_.signal();
+    }
     virtual void process() {
+        bool seeked = false;
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
-                ictx_.flush();
-                avformat_flush(ictx_.raw());
+                //ictx_.flush();
+                //avformat_flush(ictx_.raw());
                 if (seek_target_.ts.isValid()) {
-                    ictx_.seek(seek_target_.ts);
+                    av::Rational tb = (video_stream_>=0) ? ictx_.stream(video_stream_).timeBase() : av::Rational(AV_TIME_BASE_Q);
+                    AVTS ts = seek_target_.ts.timestamp(tb);
+                    /*ictx_.seek(ts, video_stream_, AVSEEK_FLAG_BACKWARD);*/
+                    int ret = avformat_seek_file(ictx_.raw(), video_stream_, INT64_MIN, ts, ts + int(0.04f/tb.getDouble()+0.5f), 0);
+                    if (ret < 0) {
+                        logstream << "avformat_seek_file returned " << ret;
+                    }
                 } else {
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
                 }
                 need_seek_ = false;
+                seeked = true;
             }
+        }
+        if (seeked) {
+            seek_resume_.wait();
         }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
@@ -110,7 +126,7 @@ public:
         pkt.setDts(addTS(pkt.dts(), shift_));
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
-        logstream << "got pts " << pkt.pts() << " dts " << pkt.dts();
+        //logstream << "got pts " << pkt.pts() << " dts " << pkt.dts();
         this->sink_->put(pkt);
     }
     virtual void stop() {
@@ -186,6 +202,9 @@ public:
             AVCodecParameters &cpar = *stream.raw()->codecpar;
             obj["codec"] = avcodec_get_name(cpar.codec_id);
             if (stream.isVideo()) {
+                if (video_stream_<0) {
+                    video_stream_ = i;
+                }
                 obj["fps"] = std::to_string(stream.frameRate().getNumerator()) + '/' + std::to_string(stream.frameRate().getDenominator());
                 obj["width"] = cpar.width;
                 obj["height"] = cpar.height;

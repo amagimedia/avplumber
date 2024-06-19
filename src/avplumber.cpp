@@ -386,11 +386,7 @@ public:
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
         };
-        commands_["seek.bytes"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            size_t bytes = 0;
-            std::string sink_name;
-            ss >> bytes >> sink_name;
+        auto seek = [this](std::string sink_name, SeekTarget target) {
             std::shared_ptr<NodeWrapper> sink_nw = manager_->node(sink_name);
             if (!sink_nw) {
                 throw Error("unknown node");
@@ -403,7 +399,21 @@ public:
             if (!seekable) {
                 throw Error("node can't initiate seeking");
             }
-            seekable->flushAndSeek(SeekTarget::from_bytes(bytes));
+            seekable->flushAndSeek(target);
+        };
+        commands_["seek.bytes"] = [this, seek](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            size_t bytes = 0;
+            std::string sink_name;
+            ss >> bytes >> sink_name;
+            seek(sink_name, SeekTarget::from_bytes(bytes));
+        };
+        commands_["seek.ms"] = [this, seek](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            size_t bytes = 0;
+            std::string sink_name;
+            ss >> bytes >> sink_name;
+            seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(bytes, {1, 1000})));
         };
         commands_["output.start"] = [this](ClientStream &cs, std::string &args) {
             OutputControl::get(args, false)->start();
