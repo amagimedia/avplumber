@@ -177,3 +177,67 @@ Interfaces are defined in `src/graph_interfaces.hpp`. They're used:
 * for node management (`src/graph_mgmt.cpp`): main loop (`NodeWrapper::threadFunction`) flow depends on what interfaces the node implements; `IInterruptible` can be used to stop the node bypassing any locks ([`node.interrupt`](../README.md#nodes-management--control) command)
 * for graph traversal, usually when a node needs to know something about stream metadata. `EdgeBase` (in `src/graph_core.hpp`) and `NodeSingleInput` (in `src/graph_base.hpp`) contain `findNodeUp` method, which finds the nearest node, up in the graph, implementing a specific interface. [Graph topology](../README.md#topology) required by existing nodes is summarized in the README.
 * for statistics extraction. Signal presence information is taken from `ISentinel`. Video & audio parameters are taken from `IDecoder`.
+
+## Instance-shared objects
+
+As [summarized in the README](../README.md#instance-shared-objects), instance-shared objects can be used for storing state shared between nodes or even between instances.
+
+If your shared object is specific to a node and doesn't need separate commands for controlling it, you can specify it directly within node's `.cpp` source file (example: `src/nodes/sentinel.cpp`).
+
+If, on the other hand, it is to be used by multiple nodes and/or you want some commands to be able to create or control it, specify it in a separate `.hpp` file (example: `src/RealTimeTeam.hpp`)
+
+Instance-shared struct or class is, by convention, derived from `InstanceShared<typename>` ([CRTP](https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern)) from `src/instance_shared.hpp`. However, currently the base class isn't used for anything so it is not necessary (but may make documentation a little more organized once someone brave enough decides to run Doxygen on avplumber sources ;) )
+
+
+### Getting objects
+
+To find the instance-shared object with a given name, use the method from `src/instance_shared.hpp`:
+
+```c++
+InstanceSharedObjects<ObjectType>::get(nci.instance, name)
+```
+
+It will return the shared pointer (`std::shared_ptr<ObjectType>`) to the object. If its fields are changed, all nodes will see the change (because it is a regular `shared_ptr`). So make sure to use atomics and/or mutexes when simultaneous access is likely.
+
+* `ObjectType` is the typename of your shared object's struct or class
+* `nci.instance` is the `InstanceData` reference belonging to current avplumber instance. You can obtain it from `nci` which is node creation information given as an argument to the `create` static function of the node. Or from `NodeManager::instanceData()` from `src/graph_mgmt.hpp`. In case of defining a command inside `src/avplumber.cpp`, use `manager_->instanceData()`.
+* `name` is the unique name of this specific object, used as a key in the hash map.
+
+This assumes that either:
+* the instance-shared object has no-arguments constructor. It will be created if it doesn't exist yet.
+* or the instance-shared object has already been created by a different static method: `put` or `emplace`
+
+
+### Putting objects
+
+In simpler cases where instance-shared objects can be created implicitly, you don't need to think about putting the objects into the hash map. Just write an argumentless constructor or define desired default values for all fields, and the `get` static method will do the magic.
+
+However, if you need to create the node with some argument, you have the following options:
+
+```c++
+using ISOs = InstanceSharedObjects<ObjectType>;
+std::shared_ptr<ObjectType> shared_ptr_to_object = std::make_shared<ObjectType>(...arguments for constructor...)
+ISOs::put(nci.instance, name, shared_ptr_to_object, policy_if_exists)
+```
+
+or
+
+```c++
+using ISOs = InstanceSharedObjects<ObjectType>;
+ISOs::emplace(nci.instance, name, policy_if_exists, ...arguments for constructor...)
+```
+
+`policy_if_exists` can be:
+
+* `ISOs::PolicyIfExists::Overwrite` - overwrite existing object
+* `ISOs::PolicyIfExists::Ignore` - do not insert new object
+* `ISOs::PolicyIfExists::Throw` - throw an exception
+
+Probably `Ignore` is the most useful - it allows to lazily initialize the object when its name appears for the first time and then re-use it. Be aware that if you use `put` with `Ignore` policy, the object given to it will not end up in the hash table so you need to re-read the object using `get`. It is better to use `emplace` - it doesn't waste CPU cycles creating an object that will be soon discarded.
+
+### Circular references
+
+In some cases you want the instance-shared object to be able to 'call back' the nodes. However there is a risk of 2 types of circular references: compile time, when a node wants to access the shared object, which in turn wants to access the node; and runtime, when `shared_ptr` loop is created and causes a memory leak. Possible ways of solving it:
+
+* Store the callback (closure) inside the instanced-shared object. If it needs to access the node's data, the closure must contain `std::weak_ptr<NodeType>`, not `shared_ptr` or a raw pointer or reference. Otherwise the node object will never be destroyed or use-after-free memory corruption will occur. From the shared object, simply call the callback.
+* Declare an interface in `src/graph_interfaces.hpp`. Implement it in your node. Store `std::weak_ptr<Interface>` in the shared object. From the shared object, call methods of the node through the interface. This way, you don't need to split the node's source into separate `.cpp` and `.hpp` files.

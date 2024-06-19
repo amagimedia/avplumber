@@ -34,6 +34,17 @@ and in a different terminal:
 
 and you can type some commands (see [Control protocol](#control-protocol)) or paste a script (e.g. from `examples/` directory)
 
+### Development on Windows
+
+Development on Windows can be done using Docker and VSCode Dev Containers.
+
+1. Enable symbolic links by following [these steps](https://stackoverflow.com/a/59761201).
+2. Clone this repo `git clone --recursive https://github.com/amagimedia/avplumber`
+3. Open it in VSCode
+4. Open Command Palette and run *Dev Containers: Reopen in Container* command
+
+Development container comes with all required dependencies and clangd installed.
+
 ### Demo
 
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
@@ -60,6 +71,10 @@ avplumber can be built as a static library: `make static_library` will make `lib
 Public API is contained in [`src/avplumber.hpp`](src/avplumber.hpp).
 
 Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https://github.com/obsproject/obs-studio) supporting video decoder to texture direct VRAM copy.
+
+### Developing custom nodes
+
+See [doc/developing_nodes.md](doc/developing_nodes.md)
 
 ## Graph
 An avplumber instance consists of a [directed acyclic graph](https://en.wikipedia.org/wiki/Directed_acyclic_graph) of interconnected nodes.
@@ -241,6 +256,12 @@ Wait until queue is empty.
 
 ```output.stop output_group```
 
+### realtime nodes
+
+```realtime.team.reset team```
+
+Manually trigger reset of a realtime team.
+
 ### Hardware acceleration
 
 ```hwaccel.init { "name": "name", "type": "type" }```
@@ -361,6 +382,8 @@ Rate limit output packets/frames to wallclock. This way, DTS (in
 packets) or PTS (in frames) differences will equal wallclock differences
 at this node's sink.
 
+Also, allows inter-stream synchronization (as long as timestamps in them are synchronized) and automatic flushing if too much data is buffered in queues before this node.
+
 This node is non-blocking.
 
 1 input, 1 output: anything
@@ -374,6 +397,10 @@ This node is non-blocking.
 -   `speed` (float) - default 1, implemented by scaling wallclock's
     timebase (millisecond precision) so values between ~0.9995 and
     ~1.0006 are treated as 1.
+-   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
+
+Input tolerance parameters:
+
 -   `negative_time_tolerance` (float, seconds) - default `0.25`. Do not
     resync if newly arrived packet should have been emitted at most that
     much time in the past. 0 to disable and always resync in such
@@ -397,12 +424,21 @@ This node is non-blocking.
     `jitter_margin` to use for the first frame received after node start,
     after discontinuity or after `leak_after`-triggered bypass, **but
     not** after "*negative time to wait (...), resyncing*"
+
+Inter-stream synchronization parameters:
+
 -   `team` (string, name of instance-shared object) - if specified,
     realtime nodes with the same team will cooperate to have their
     output synchronized. Use only if timestamps are synchronized.
 -   `master` (bool) - default `true`. Only masters are allowed to resync in
     case of discontinuity. A team can have multiple masters.
--   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
+
+Automatic flushing parameters (experimental):
+
+-   `input_ts_queue` (string, name of queue) - which queue should be treated as the beginning of buffering chain. Usually should be set to the output of the demuxer. If unspecified, automatic flushing is disabled.
+-   `intermediate_queues` (list of strings) - list of intermediate queues that will be examined whether they contain packets
+-   `max_buffered` (float, seconds, default 5.5) - start flushing when the buffering chain has more than this amount buffered (calculated as difference between timestamp of last packet inserted into the `input_ts_queue` and timestamp of the frame coming to this node)
+-   `min_buffered` (float, seconds, default 0.5) - stop flushing when the buffering chain has less than this amount buffered, or `input_ts_queue` and `intermediate_queues` are all empty
 
 For each passing packet, time to wait is computed (how long should we
 sleep before outputting that packet, to maintain realtime output rate)
