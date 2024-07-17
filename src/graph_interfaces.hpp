@@ -165,7 +165,7 @@ public:
 
 class IJackSink {
 public:
-  virtual void jack_process(size_t nframes) = 0;  
+    virtual void jack_process(size_t nframes) = 0;  
 };
 
 struct EdgeMetadata {
