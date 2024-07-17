@@ -21,6 +21,7 @@
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
 #include "RealTimeTeam.hpp"
+#include "SpeedControlTeam.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -450,6 +451,14 @@ public:
         commands_["realtime.team.reset"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
             team->reset();
+        };
+        commands_["speed.set"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            float speed;
+            ss >> team_name >> speed;
+            std::shared_ptr<SpeedControlTeam> team = InstanceSharedObjects<SpeedControlTeam>::get(manager_->instanceData(), team_name);
+            team->setSpeed(speed);
         };
 
         #ifdef EMBED_IN_OBS

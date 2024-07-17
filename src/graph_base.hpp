@@ -64,7 +64,7 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
-    virtual void flushAndSeek(SeekTarget target) {
+    virtual void flushAndSeek(SeekTarget target) override {
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.startFlushing();
             std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
