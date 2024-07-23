@@ -9,48 +9,54 @@ protected:
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
-        T* dataptr = this->source_->peek(0);
-        if (dataptr==nullptr) {
-            // no data available in queue
-            if (!ticks) {
-                // retry when we have packet in source queue
-                this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
+        bool process_next;
+        do {
+            process_next = false;
+            T* dataptr = this->source_->peek(0);
+            if (dataptr==nullptr) {
+                // no data available in queue
+                if (!ticks) {
+                    // retry when we have packet in source queue
+                    this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
+                }
+                // if ticks==true, processNonBlocking will be called automatically with next tick
+                // no need to schedule it
+                return;
             }
-            // if ticks==true, processNonBlocking will be called automatically with next tick
-            // no need to schedule it
-            return;
-        }
-        T &frame = *dataptr;
+            T &frame = *dataptr;
 
-        av::Timestamp orig_pts = frame.pts();
-        av::Timestamp in_pts = orig_pts;
-        if (timebase_.getNumerator() && timebase_.getDenominator()) {
-            in_pts = rescaleTS(in_pts, timebase_);
-        }
-        av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
-        if (out_pts.isValid()) {
-            frame.setTimeBase(av::Rational());
-            frame.setPts(out_pts);
-        }
+            av::Timestamp orig_pts = frame.pts();
+            av::Timestamp in_pts = orig_pts;
+            if (timebase_.getNumerator() && timebase_.getDenominator()) {
+                in_pts = rescaleTS(in_pts, timebase_);
+            }
+            av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
+            if (out_pts.isValid()) {
+                frame.setTimeBase(av::Rational());
+                frame.setPts(out_pts);
+            }
 
-        // put it in the sink queue:
-        if (out_pts.isNoPts() || this->sink_->put(frame, true)) {
-            // put returned true, success, remove this packet from the source queue
-            this->source_->pop();
-            team_->setLastPTS(orig_pts);
-            if (!ticks) {
-                // process next packet
-                this->yieldAndProcess();
+            // put it in the sink queue:
+            if (out_pts.isNoPts() || this->sink_->put(frame, true)) {
+                // put returned true, success, remove this packet from the source queue
+                this->source_->pop();
+                team_->setLastPTS(orig_pts);
+                if (!ticks) {
+                    // process next packet
+                    this->yieldAndProcess();
+                } else {
+                    process_next = true;
+                }
+            } else {
+                // put returned false, no space in queue
+                frame.setTimeBase(av::Rational());
+                frame.setPts(orig_pts);
+                if (!ticks) {
+                    // retry when we have space in sink
+                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                }
             }
-        } else {
-            // put returned false, no space in queue
-            frame.setTimeBase(av::Rational());
-            frame.setPts(orig_pts);
-            if (!ticks) {
-                // retry when we have space in sink
-                this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-            }
-        }
+        } while (process_next);
     }
     static std::shared_ptr<Speed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
