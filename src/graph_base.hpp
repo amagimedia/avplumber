@@ -65,8 +65,10 @@ public:
         }
     }
     virtual void flushAndSeek(SeekTarget target) override {
+        // start flushing:
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.startFlushing();
+            edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
             if (target.ts.isValid() && dec) {
                 dec->discardUntil(target.ts);
@@ -75,7 +77,16 @@ public:
             if (input) {
                 input->seekAndPause(target);
             }
+            std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
+            if (input_reset) {
+                input_reset->resetInput();
+            }
         });
+        IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
+        if (this_reset) {
+            this_reset->resetInput();
+        }
+        // wait for flushed state:
         while(true) {
             bool flushed = true;
             executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
@@ -86,6 +97,7 @@ public:
             }
             wallclock.sleepms(5);
         }
+        // stop flushing and resume paused input:
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
             std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);

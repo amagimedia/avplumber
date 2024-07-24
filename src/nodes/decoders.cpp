@@ -165,7 +165,7 @@ public:
         //av::Packet pkt = this->source_->get();
         av::Packet *pktp = this->source_->peek();
         if (pktp==nullptr) {
-            flush();
+            //flush();
             return;
         }
         av::Packet &pkt = *pktp;

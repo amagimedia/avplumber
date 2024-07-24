@@ -70,6 +70,11 @@ public:
     virtual void flushAndSeek(SeekTarget target) = 0;
 };
 
+class IInputReset {
+public:
+    virtual void resetInput() = 0;
+};
+
 class INeedsOutputFrameSize {
 public:
     virtual void setOutputFrameSize(const size_t size) = 0;
