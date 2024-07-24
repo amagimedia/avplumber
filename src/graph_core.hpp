@@ -175,7 +175,7 @@ public:
         }
         if (drop_if_full) {
             if (!this->edge_->try_enqueue(data)) {
-                logstream << "Enqueue failed, queue full, dropping!";
+                //logstream << "Enqueue failed, queue full, dropping!";
                 return false;
             } else {
                 return true;
@@ -216,6 +216,11 @@ protected:
             }
         }
     }
+
+    static inline void signalAltFinish(std::atomic_bool &flag, Event &event) {
+        flag = true;
+        event.signal();
+    }
 public:
     std::weak_ptr<Node> producer() {
         return producer_;
@@ -242,6 +247,14 @@ public:
     bool isFlushed() {
         return flushed_;
     }
+
+    void finishProducer() {
+        signalAltFinish(finish_producer_, consumed_);
+    }
+    void finishConsumer() {
+        signalAltFinish(finish_consumer_, produced_);
+    }
+
     template<typename MD> std::shared_ptr<MD> metadata(bool create_if_empty = false) {
         // TODO? race conditions as in setNodePointer
         for (std::shared_ptr<EdgeMetadata> &mdptr: metadata_) {
@@ -322,10 +335,6 @@ protected:
             alt_finish = false; // reset flag
             return false;
         }
-    }
-    static inline void signalAltFinish(std::atomic_bool &flag, Event &event) {
-        flag = true;
-        event.signal();
     }
 
     bool popInternal() {
@@ -409,13 +418,6 @@ public:
     }
     Event& consumedEvent() {
         return consumed_;
-    }
-
-    void finishProducer() {
-        signalAltFinish(finish_producer_, consumed_);
-    }
-    void finishConsumer() {
-        signalAltFinish(finish_consumer_, produced_);
     }
 
     std::unique_ptr<EdgeSource<T>> makeSource() {

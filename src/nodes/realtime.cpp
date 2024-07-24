@@ -3,7 +3,7 @@
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>> {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset {
 protected:
     bool ready_ = false;
     bool first_ = true;
@@ -220,6 +220,11 @@ public:
             }
         } while (process_next);
     }
+    virtual void resetInput() override {
+        if (team_) {
+            team_->reset();
+        }
+    }
     static std::shared_ptr<RealTimeSpeed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
@@ -267,6 +272,9 @@ public:
             r->initial_jitter_margin_ = secondsToTs(params["initial_jitter_margin"]);
         } else {
             r->initial_jitter_margin_ = r->jitter_margin_;
+        }
+        if ((r->jitter_margin_ >= r->discontinuity_threshold_) || (r->initial_jitter_margin_ >= r->discontinuity_threshold_)) {
+            logstream << "WARNING: (initial_)jitter_margin >= discontinuity_threshold, it don't work correctly!";
         }
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["team"]);

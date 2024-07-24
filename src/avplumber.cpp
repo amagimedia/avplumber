@@ -22,6 +22,7 @@
 #include "named_event.hpp"
 #include "RealTimeTeam.hpp"
 #include "SpeedControlTeam.hpp"
+#include "PauseControlTeam.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -406,15 +407,23 @@ public:
             std::stringstream ss(arg);
             size_t bytes = 0;
             std::string sink_name;
-            ss >> bytes >> sink_name;
+            ss >> sink_name >> bytes;
             seek(sink_name, SeekTarget::from_bytes(bytes));
         };
         commands_["seek.ms"] = [this, seek](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
-            size_t bytes = 0;
+            size_t ms = 0;
             std::string sink_name;
-            ss >> bytes >> sink_name;
-            seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(bytes, {1, 1000})));
+            ss >> sink_name >> ms;
+            seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+        };
+        commands_["pause"] = [this](ClientStream &cs, std::string &arg) {
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
+            team->pause();
+        };
+        commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
+            team->resume();
         };
         commands_["output.start"] = [this](ClientStream &cs, std::string &args) {
             OutputControl::get(args, false)->start();
