@@ -127,8 +127,7 @@ public:
                     }
                 }
             }
-            last_ts_ = in_ts;
-            next_ts_ = addTS(in_ts, frame_delta_);
+
             pkt.setPts(in_ts);
             
             if (!this->sink_->put(pkt, true)) {
@@ -138,6 +137,8 @@ public:
                 }
                 return;
             } else {
+                last_ts_ = in_ts;
+                next_ts_ = addTS(in_ts, frame_delta_);
                 setLast(pkt, false);
             }
             total_out_++;
