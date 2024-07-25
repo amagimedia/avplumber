@@ -262,6 +262,32 @@ Wait until queue is empty.
 
 Manually trigger reset of a realtime team.
 
+### Playback control
+
+```pause team_name```
+
+Tell all `pause` nodes in a team `team_name` to pause (stop passing packets)
+
+```resume team_name```
+
+Tell all `pause` nodes in a team `team_name` to resume playback
+
+```seek.ms node_name timestamp_ms```
+
+Flush all queues between the `input` node and the `node_name` node and seek to given timestamp in milliseconds.
+
+```seek.bytes node_name bytes_offset```
+
+Flush all queues between the `input` node and the `node_name` node and seek to given position in the input file.
+
+```speed.set team_name speed```
+
+Set speed of the `speed` nodes belonging to the team `team_name` to `speed` (float).
+
+```speed.get team_name```
+
+Get current playback speed of the team `team_name`.
+
 ### Hardware acceleration
 
 ```hwaccel.init { "name": "name", "type": "type" }```
@@ -375,6 +401,7 @@ The tick source has its own event loop (or may even bypass it and call the node 
 -   `options` (dictionary) - options for libavformat
 -   `timeout` (float, seconds) - packet read timeout
 -   `initial_timeout` (float, seconds) - URL open timeout
+-   `preseek` (float, seconds, default 0) - how many seconds to preseek back to increase chance of finding a keyframe, when seek to timestamp (`seek.ms` command) is requested
 
 ### `realtime`
 
@@ -398,6 +425,7 @@ This node is non-blocking.
     timebase (millisecond precision) so values between ~0.9995 and
     ~1.0006 are treated as 1.
 -   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
+-   `set_pts` (bool, default false) - set PTS to wallclock timestamps corresponding to time when packets are outputted (or, more precisely, when they would be outputted if there was no jitter)
 
 Input tolerance parameters:
 
@@ -576,6 +604,24 @@ Supports parameters working the same as in `extract_timestamps` node:
     (mandatory for some filters), name of hwaccel previously created
     with `hwaccel.init`
 
+### `speed_video`, `speed_audio`
+
+Change timestamps so that playback speed changes in real-time.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`, respectively
+
+-   `team` (string, name of instance-shared object, default `"default"`) - team name that will be used for changing the speed using `speed.set` command
+-   `discard_when_speed_changed` (bool, default false) - discard frames when speed isn't equal to 1. Intended for audio streams.
+-   `timebase` (string of rational) - optional, if specified, will scale incoming timestamps to this timebase. Otherwise original timebase will be preserved. To get as smooth output as possible, set it to your native output timebase (1/fps).
+
+### `pause`
+
+Stop passing through frames/packets and resume on request (`pause`, `resume` commands).
+
+1 input, 1 output: anything
+
+-   `team` (string, name of instance-shared object, default `"default"`) - team name that will be used for control
+
 ### `force_fps`
 
 Duplicate and drop frames to achieve requested FPS
@@ -615,7 +661,7 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
 
 1 input, 1 output: `av::VideoFrame`/`av::AudioSamples`
 
--   `timeout` (float) - default 1, seconds to wait for input frame before
+-   `timeout` (float, seconds) - default 1, seconds to wait for input frame before
     inserting frozen or backup frame
 -   `correction_group` (string, name of instance-shared object) -
     optional, defaults to `"default"`, used for sharing the clock between
@@ -626,7 +672,8 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
         to output.
     -   `false` (default): start all output streams at exact PTS = 10
         seconds (hardcoded in `PTSCorrectorCommon` class)
--   `max_streams_diff` (float) - default `0.001`, tolerance in seconds
+-   `max_streams_diff` (float, seconds) - default `0.001`, tolerance in seconds
+-   `start_ts` (float, seconds) - default `10`, first output timestamp
 -   `lock_timeshift` (bool) - after receiving first PTS, maintain constant input-output PTS difference. Disabled by default. Enable only if you're sure that input timestamps are synchronized to real-time clock.
 -   `reporting_url` (optional, string of URL) - if specified, correction
     time shift changes will be reported to this URL as HTTP POST with
@@ -639,7 +686,7 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
     -   `input_pts_offset` - what sentinel needs to add to input
         timestamp to achieve output PTS, minus `output_pts_offset`
     -   `output_pts_offset` = first output PTS, constant through
-        processing, hardcoded in PTSCorrectorCommon class
+        processing, changeable using `start_ts` parameter
 
 For video only:
 
@@ -750,6 +797,14 @@ multiple inputs, 1 output: `av::Packet`
 -   `format` (string) - mandatory
 -   `url` (string of URL) - mandatory
 -   `options` (dictionary) - format options that will be passed to libavformat
+-   `seek_table` (string of file name) - if specified, binary file with native endianness with seek table will be written.
+-   `seek_table_text` (string of file name) - if specified, text file with seek table will be written.
+
+Format of binary seek table: 16-byte records containing:
+* timestamp of the frame in milliseconds: int64_t
+* bytes offset in the output file: uint64_t
+
+Format of text seek table: values as above separated by space, each record in one line
 
 ### `jack_sink`
 
@@ -851,6 +906,33 @@ In case of avplumber used as a library, each AVPlumber object is an avplumber in
 Global objects can be used to share state between nodes of
 different instances as long as they're within the same operating
 system's process.
+
+## Seeking infrastructure & playback control (experimental)
+
+Despite the architecture initially being designed solely for handling live streams, latest updates to avplumber bring playback control support.
+
+Seeking is complicated because queues need to be flushed to ensure that user doesn't have to wait for them to drain after requesting a seek. Also, we want to display frame after seek even when the player is paused. That's why seek commands (`seek.ms` and `seek.bytes`) need the name of the downmost node in the graph that limits output speed (in a video player it would be `realtime`). The graph is walked up, passing needed requests to decoder nodes and issuing the actual seek request to the `input` node.
+
+See `examples/video_player.avplumber` for a typical graph with playback control including seeking. Example control commands compatible with it:
+
+* `seek.ms rtsync 30000` - seek to DTS=30s
+* `pause p`, `resume p`
+* `speed.set s 0.25` - set speed to 4 times slower than realtime
+* `speed.set s 2` - set speed to 2 times faster than realtime
+
+### Fast seek
+
+If you want seeking to be as fast as possible, you'll need a specially encoded file. You can make it with avplumber, too.
+
+* Use intra-frame-only codec for `enc_video`
+* Specify `seek_table` option of the `output` node
+
+In your application controlling the player, parse the generated seek table and find byte offset corresponding to the timestamp you want to seek to. Then issue the command:
+
+`seek.bytes rtsync BYTES_OFFSET`
+
+Make sure that `preseek` is set to 0 (or unspecified) in the player's `input` node.
+
 
 ## Tips & tricks
 

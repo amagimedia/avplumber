@@ -13,6 +13,7 @@ protected:
     bool need_seek_ = false;
     std::mutex seek_mutex_;
     Event seek_resume_;
+    float preseek_ = 0;
     int video_stream_ = -1;
 
     av::Timestamp shift_ = NOTS;
@@ -81,11 +82,15 @@ public:
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.ts.isValid()) {
                     av::Rational tb = (video_stream_>=0) ? ictx_.stream(video_stream_).timeBase() : av::Rational(AV_TIME_BASE_Q);
-                    AVTS ts = seek_target_.ts.timestamp(tb);
+                    AVTS preseek = std::round(preseek_ * float(tb.getDenominator()) / float(tb.getNumerator()));
+                    // TODO: preseek may seek too far before needed timestamp, discard non-key frames before first keyframe in such case
+                    AVTS ts = seek_target_.ts.timestamp(tb) - preseek;
                     /*ictx_.seek(ts, video_stream_, AVSEEK_FLAG_BACKWARD);*/
                     int ret = avformat_seek_file(ictx_.raw(), video_stream_, INT64_MIN, ts, ts + int(0.04f/tb.getDouble()+0.5f), 0);
+                    //logstream << "video_stream_ " << video_stream_ << " timestamp " << ts;
+                    //int ret = av_seek_frame(ictx_.raw(), video_stream_, ts, AVSEEK_FLAG_BACKWARD);
                     if (ret < 0) {
-                        logstream << "avformat_seek_file returned " << ret;
+                        logstream << "av seek returned " << ret;
                     }
                 } else {
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
@@ -174,6 +179,7 @@ public:
         if (params.count("options") > 0) {
             opts = parametersToDict(params["options"]);
         }
+
         int timeout = 5;
         if (params.count("timeout") > 0) {
             timeout = (int)params["timeout"];
@@ -183,6 +189,11 @@ public:
             initial_timeout = (int)params["initial_timeout"];
         }
         setTimeout(initial_timeout);
+
+        if (params.count("preseek")) {
+            preseek_ = params["preseek"];
+        }
+
         ictx_.openInput(params["url"], opts, ifmt);
         ictx_.findStreamInfo();
         logstream << "Opened URL " << params["url"] << " . Streams:";

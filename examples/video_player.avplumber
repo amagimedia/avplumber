@@ -2,7 +2,7 @@ queue.plan_capacity * 1
 queue.plan_capacity v_in 63
 queue.plan_capacity Video_Decode_out 7
 
-node.add { "type": "input", "url": "https://tellyo-ndev-ie.s3-eu-west-1.amazonaws.com/sample_video/testsrc2-tcr-12Mbps-1080p-5000.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "timeout": -1 }
+node.add { "type": "input", "url": "https://tellyo-ndev-ie.s3-eu-west-1.amazonaws.com/sample_video/testsrc2-tcr-12Mbps-1080p-5000.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 4 }
 node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in" }, "group": "g1", "auto_restart": "group" }
 node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"g1","src":"v_in","dst":"Video_Decode_out"}
 
@@ -10,7 +10,7 @@ node.add {"type": "pause", "team": "p", "group": "g1", "src": "Video_Decode_out"
 node.add {"type": "speed_video", "team": "s", "group":"g1", "src": "pause_out", "dst":"speeded"}
 
 node.add {"type": "force_fps", "fps": "60", "group":"g1", "src": "speeded", "dst":"forcedfps"}
-node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "forcedfps", "dst": "v_rt", "group": "g1", "name": "RTSync_1", "set_pts": true }
+node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "forcedfps", "dst": "v_rt", "group": "g1", "name": "rtsync", "set_pts": true }
 #node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "v_rt", "dst": "v_ts", "group": "g1"}
 
 node.add {"type":"enc_video","auto_restart":"group","name":"Video_Encode","group":"g1","src":"v_rt","dst":"v_outenc", "codec": "wrapped_avframe"}
