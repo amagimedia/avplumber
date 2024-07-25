@@ -127,6 +127,44 @@ If your processing is stateful, you can:
 * write your node as a regular blocking node, or
 * use the underlying function `evl.asyncWaitAndExecute` directly. Pass the packet to put in the queue in lambda's captured variables, as a value (not a reference). Do not capture `this` or `this->shared_from_this()` because it can lead to use-after-free memory corruption or a memory leak. Capture a weak pointer (`std::weak_ptr`) instead.
 
+Note that the 2 options mentioned above create a hidden queue of size 1 on thread's stack or in the closure. The remaining options are:
+
+* check for space in the output queue before doing processing
+* undo data modifications when `put` call fails (that's what we do in `nodes/speed.cpp`)
+
+
+Note that in the above example, if `tick_source` is used (`ticks==true`), only one packet or frame will be processed per tick. If the input FPS is higher than FPS of the tick source, data may accumulate in the queue. Wrap then whole processing in a loop to fix this shortcoming (TODO: wouldn't calling yieldAndProcess without `!ticks` condition suffice?):
+
+```c++
+    virtual void processNonBlocking(EventLoop& evl, bool ticks) {
+        do {
+            T* dataptr = this->source_->peek(0);
+            if (dataptr==nullptr) {
+                if (!ticks) {
+                    this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
+                }
+                return; // this will exit the loop if no more input is available right now
+            }
+            T &data = *dataptr;
+
+            // ...
+            // process the data
+            // ...
+
+            if (this->sink_->put(data, true)) {
+                this->source_->pop();
+                if (!ticks) {
+                    this->yieldAndProcess();
+                }
+            } else {
+                if (!ticks) {
+                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                }
+                return; // we don't have space in sink queue so, if ticks==true, retry in next tick
+            }
+        } while (ticks); // loop only if have tick_source, otherwise yieldAndProcess will handle processing the next input data
+    }
+```
 
 ### `create` static method
 
