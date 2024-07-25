@@ -186,6 +186,7 @@ public:
                             auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
                             if (discard_until_.isValid()) {
                                 if (frm.pts() >= discard_until_) {
+                                    logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
                                     discard_until_ = NOTS;
                                 } else {
                                     put = false;
@@ -216,6 +217,7 @@ public:
         }
     }
     virtual void discardUntil(av::Timestamp pts) {
+        logstream << "will discard until " << pts;
         auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
         discard_until_ = pts;
     }
