@@ -446,6 +446,8 @@ class TcpControlServer: public ControlServerBase {
         boost::asio::streambuf buff;
         ClientPipe pipe;
         std::thread thread;
+        size_t pending_writes = 0;
+        bool self_destruct = false;
         Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_service &_io_service):
             control(_control), server(_server), io_service(_io_service), socket(_io_service),
             pipe([this]() {
@@ -456,9 +458,14 @@ class TcpControlServer: public ControlServerBase {
                         return;
                     }
                     if (pkt.type==ControlPacket::Data) {
-                        boost::asio::async_write(socket, boost::asio::buffer(pkt.data), [](const boost::system::error_code& error, const size_t) {
+                        pending_writes++;
+                        boost::asio::async_write(socket, boost::asio::buffer(pkt.data), [this](const boost::system::error_code& error, const size_t) {
+                            pending_writes--;
                             if (error) {
                                 logstream << "send error: " << error;
+                            }
+                            if (self_destruct) {
+                                server.clients_.erase(iter);
                             }
                         });
                     } else if (pkt.type==ControlPacket::End) {
@@ -466,12 +473,6 @@ class TcpControlServer: public ControlServerBase {
                             socket.close();
                         } catch (std::exception &e) {
                         }
-                        TcpControlServer &s = server;
-                        auto &ci = iter;
-                        io_service.post([&s, &ci]() {
-                            ci->thread.join();
-                            s.clients_.erase(ci);
-                        });
                     }
                 });
             }),
@@ -484,6 +485,20 @@ class TcpControlServer: public ControlServerBase {
                 if (error) {
                     logstream << "line receive error: " << error;
                     pipe.from_client.emplace(ControlPacket::End);
+                    // now we are sure that the this lambda won't run another time (receiveNextLine() is not called)
+                    TcpControlServer &s = server;
+                    auto &ci = iter;
+                    auto &pending = pending_writes;
+                    auto &destroy = self_destruct;
+                    io_service.post([&s, &ci, &pending, &destroy]() {
+                        ci->thread.join();
+                        // now we are sure that send_to_client won't be called (it's called only in ci->thread)
+                        if (pending == 0) {
+                            s.clients_.erase(ci);
+                        } else {
+                            destroy = true;
+                        }
+                    });
                     return;
                 }
                 auto buff_begin = boost::asio::buffers_begin(buff.data());
