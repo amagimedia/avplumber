@@ -1,12 +1,14 @@
 #include "node_common.hpp"
 
-class CCDataExtractor: public NodeSISO<av::VideoFrame, av::Packet> {
+class CCDataExtractor: public NodeSISO<av::VideoFrame, av::Packet>, public IPauseable {
 protected:
+    std::atomic_bool paused_ = false;
 
 public:
     using NodeSISO<av::VideoFrame, av::Packet>::NodeSISO;
     virtual void process() override {
         av::VideoFrame vfrm = this->source_->get();
+        if (paused_) return;
         if (!vfrm.isComplete()) return;
         AVFrame* frm = vfrm.raw();
         for (int i=0; i<frm->nb_side_data; i++) {
@@ -44,6 +46,14 @@ public:
         auto r = std::make_shared<CCDataExtractor>(make_unique<EdgeSource<av::VideoFrame>>(src_edge), make_unique<EdgeSink<av::Packet>>(dst_edge));
 
         return r;
+    }
+
+    void pause() override {
+        paused_ = true;
+    }
+
+    void resume() override {
+        paused_ = false;
     }
 };
 

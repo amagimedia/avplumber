@@ -416,6 +416,37 @@ public:
                 ev->event().signal();
             });
         };
+        commands_["cc.pause"] = [this](ClientStream &cs, std::string arg) {
+            auto nodes = manager_->nodes("extract_cc_data");
+
+            if (nodes.empty()) {
+                throw Error("no extract_cc_data node found");
+            }
+            if (nodes.size() > 1) {
+                throw Error("multiple extract_cc_data nodes found");
+            }
+            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
+            if (!node_pauseable) {
+                throw Error("node extract_cc_data is not pauseable");
+            }
+            node_pauseable->pause();
+        };
+
+        commands_["cc.resume"] = [this](ClientStream &cs, std::string arg) {
+            auto nodes = manager_->nodes("extract_cc_data");
+
+            if (nodes.empty()) {
+                throw Error("no extract_cc_data node found");
+            }
+            if (nodes.size() > 1) {
+                throw Error("multiple extract_cc_data nodes found");
+            }
+            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
+            if (!node_pauseable) {
+                throw Error("node extract_cc_data is not resumeable");
+            }
+            node_pauseable->resume();
+        };
 
         #ifdef EMBED_IN_OBS
         std::shared_ptr<EventLoop> evl = InstanceSharedObjects<EventLoop>::get(manager_->instanceData(), "obs_tick");

@@ -56,6 +56,12 @@ public:
     virtual void setOutputFrameSize(const size_t size) = 0;
 };
 
+class IPauseable {
+public:
+    virtual void pause() = 0;
+    virtual void resume() = 0;
+};
+
 class IEncoder {
 public:
     virtual av::Codec& encodingCodec() = 0;

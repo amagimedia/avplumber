@@ -424,6 +424,16 @@ std::shared_ptr< NodeWrapper > NodeManager::getNodeByName(const std::string& nam
     }
 }
 
+std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> NodeManager::getNodesByType(const std::string& type) {
+    auto lock = getLock();
+    std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> result;
+    for (const auto& [name, node] : nodes_index_) {
+        if (node->type() == type) {
+            result[name] = node;
+        }
+    }
+    return result;
+}
 
 bool NodeManager::nodeExists(const std::string& name) {
     return getNodeByName(name) != nullptr;
@@ -712,6 +722,7 @@ NodeWrapper::~NodeWrapper() {
 
 NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameters& params, const bool early_create):
     manager_(manager), finished_(false), params_(params) {
+    type_ = params_["type"];
     // SET NAME:
     if (params_.count("name") > 0) {
         name_ = params_["name"];

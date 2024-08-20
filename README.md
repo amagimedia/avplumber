@@ -173,6 +173,16 @@ node.object.get input programs
 [{"index":0,"streams":[0,3,4,5]},{"index":1,"streams":[1,3,4,5]},{"index":2,"streams":[2,3,4,5]}]
 ```
 
+### Closed Captions control
+
+```cc.pause```
+
+Pause Closed Captions processing. This command will return an error when no `extract_cc_data` node present or when there are multiple `extract_cc_data` nodes connected in graph.
+
+```cc.resume```
+
+Resume Closed Captions processing. This command will return an error when no `extract_cc_data` node present or when there are multiple `extract_cc_data` nodes connected in graph.
+
 ### Queues (edges)
 
 ```queue.plan_capacity queue_name capacity```
@@ -476,6 +486,10 @@ Supports parameters working the same as in `extract_timestamps` node:
 -   `team` - mandatory
 -   `passthrough_before_available`
 -   `drop_before_available`
+
+### `extract_cc_data`
+
+Extracts closed captions data encoded in video stream.
 
 ### `filter_video`, `filter_audio`
 
