@@ -1,7 +1,18 @@
 # avplumber - make your own libav processing graph
 
-avplumber is a graph-based modular environment for processing video & audio streams, raw or encoded.
-Frames or packets can be processed using nodes. Nodes for common tasks are provided, most of them based on FFmpeg libraries (libav). It's also fairly easy to write custom ones in C++.
+avplumber is a graph-based real-time processing framework. Graph can be reconfigured on the fly using a text API. Most nodes are based on FFmpeg's libavcodec, libavformat & libavfilter. You can create entire transcoding & filtering chain in it, replacing FFmpeg in many use cases.
+
+avplumber was created because we were experienced with FFmpeg and wanted to have its features, plus more flexibility. For example, it is possible to:
+
+* encode once and send encoded packets to multiple outputs.
+* filter video (using FFmpeg's filter graph syntax) in multiple threads. It is possible since FFmpeg 6.0, but we needed this feature long before its release.
+* maintain output timestamps continuity **and** audio-video synchronization even when input timestamps jump.
+* insert fallback slate ("we'll be back shortly") when input stream breaks.
+
+Furthermore, it was designed to allow easy prototyping of new video & audio processing blocks (nodes in graph) without writing so much boilerplate code that is needed in case of libavfilter or GStreamer.
+
+So does it replace FFmpeg in all use cases? Not at all. It is targetted at live use - currently it can't seek the input at all. Also, subtitles aren't supported due to limitations of the underlying library - avcpp.
+
 
 ## Quick start
 
@@ -22,6 +33,17 @@ and in a different terminal:
     nc localhost 20200
 
 and you can type some commands (see [Control protocol](#control-protocol)) or paste a script (e.g. from `examples/` directory)
+
+### Development on Windows
+
+Development on Windows can be done using Docker and VSCode Dev Containers.
+
+1. Enable symbolic links by following [these steps](https://stackoverflow.com/a/59761201).
+2. Clone this repo `git clone --recursive https://github.com/amagimedia/avplumber`
+3. Open it in VSCode
+4. Open Command Palette and run *Dev Containers: Reopen in Container* command
+
+Development container comes with all required dependencies and clangd installed.
 
 ### Demo
 
@@ -50,7 +72,14 @@ Public API is contained in [`src/avplumber.hpp`](src/avplumber.hpp).
 
 Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https://github.com/obsproject/obs-studio) supporting video decoder to texture direct VRAM copy.
 
-## Edges = queues
+### Developing custom nodes
+
+See [doc/developing_nodes.md](doc/developing_nodes.md)
+
+## Graph
+An avplumber instance consists of a [directed acyclic graph](https://en.wikipedia.org/wiki/Directed_acyclic_graph) of interconnected nodes.
+
+### Edges = queues
 Nodes in the graph are connected by edges. Edge is implemented as a queue. `queue.plan_capacity` can be used to change its size. Type of data inside queue is determinated automatically when the queue is created.
 
 Data types:
@@ -65,6 +94,18 @@ Some nodes support multiple input/output types - they work like templates/generi
 for example:
 
 ```split<av::VideoFrame>```
+
+### Topology
+
+Some nodes require that other node implementing specific features (an *interface*) is placed before (up) or after (down) it:
+
+* `input` before `demux`
+* `mux` before `output`
+* video format metadata source before `enc_video`. It can be `dec_video`, `assume_video_format`, `rescale_video` or `filter_video`
+* FPS metadata source before `enc_video`, `extract_timestamps` and `filter_video`. It can be `dec_video`, `force_fps`, `filter_video` or `sentinel_video`
+* audio metadata source before `enc_audio` and `sentinel_audio`. It can be `dec_audio`, `assume_audio_format` or `filter_audio`
+* time base source before `bsf`, `enc_video`, `enc_audio`, `extract_timestamps`, `filter_video`, `filter_audio`, `sentinel_video`, `sentinel_audio`. It can be `assume_video_format`, `assume_audio_format`, `dec_video`, `dec_audio`, `filter_video`, `filter_audio`, `force_fps`, `packet_relay` or `resample_audio`
+* encoder (`enc_video`/`enc_audio`), `bsf` or `packet_relay` before `mux`
 
 ## Control methods
 avplumber is controlled using text commands on TCP socket, so it can be controlled manually using `netcat` or `telnet`. `--port` argument specifies the port to listen on.
@@ -225,6 +266,12 @@ Wait until queue is empty.
 
 ```output.stop output_group```
 
+### realtime nodes
+
+```realtime.team.reset team```
+
+Manually trigger reset of a realtime team.
+
 ### Hardware acceleration
 
 ```hwaccel.init { "name": "name", "type": "type" }```
@@ -306,6 +353,28 @@ Each node is described by a JSON object consisting of the following fields:
 
 Most nodes have also their specific parameters which are specified on the same level as the fields above.
 
+### Non-blocking nodes
+
+Some node types are non-blocking, which means that there is no separate thread to run the node, but it processes data in an event-based manner, which is configurable using the following fields:
+
+* `event_loop` (string, name of instance-shared object) - name of the event loop, if not specified, `default` event loop will be used. Each event loop works in a separate thread.
+* `tick_source` (string, name of instance-shared object) - name of the tick source. If not specified, node will work in tickless manner, waking up only when necessary (e.g. a node above in graph has put some data into queue). On the other hand, if this field is specified, the tick source will wake up the node at regular intervals synchronized to some external clock. This reduces latency and jitter. Currently useful only in [`OBS avplumber plugin`](library_examples/obs-avplumber-source/README.md) - specify `obs` as a `tick_source` to synchronize a non-blocking node to the video mixer's FPS.
+
+The tick source has its own event loop (or may even bypass it and call the node in its own thread to reduce latency) so you can't specify both `event_loop` and `tick_source`.
+
+### Example JSON syntax for fields
+
+* string: `"string"`
+* string of URL: `"protocol://domain/path"`
+* string of rational: `"30000/1001"` (so-called 29.97 fps)
+* list of strings: `["string1", "string2", "string3"]`
+* dictionary (also known as map): `{"key1":"value1", "key2":"value2"}`
+* bool: `true` or `false`
+* int: `31337`
+* float: `1337.42`
+* name of an [instance-shared object](#instance-shared-objects): `"object"`
+* name of a global instance-shared object: `"@global_object"`
+
 ## Node types
 
 ### `input`
@@ -314,12 +383,18 @@ Most nodes have also their specific parameters which are specified on the same l
 
 -   `url` (string of URL)
 -   `options` (dictionary) - options for libavformat
+-   `timeout` (float, seconds) - packet read timeout
+-   `initial_timeout` (float, seconds) - URL open timeout
 
 ### `realtime`
 
 Rate limit output packets/frames to wallclock. This way, DTS (in
 packets) or PTS (in frames) differences will equal wallclock differences
 at this node's sink.
+
+Also, allows inter-stream synchronization (as long as timestamps in them are synchronized) and automatic flushing if too much data is buffered in queues before this node.
+
+This node is non-blocking.
 
 1 input, 1 output: anything
 
@@ -332,6 +407,10 @@ at this node's sink.
 -   `speed` (float) - default 1, implemented by scaling wallclock's
     timebase (millisecond precision) so values between ~0.9995 and
     ~1.0006 are treated as 1.
+-   `tick_period` (string of rational, seconds) - if specified and [`tick_source`](#non-blocking-nodes) is also specified, anti-jitter filter will be enabled, assuming that tick source emits a tick every `tick_period`. Generally should be set to 1/FPS, e.g. `1/60`. The filter maintains its own clock independent of wallclock, but will resync to the wallclock if it drifts too much. If unspecified, wallclock will be used.
+
+Input tolerance parameters:
+
 -   `negative_time_tolerance` (float, seconds) - default `0.25`. Do not
     resync if newly arrived packet should have been emitted at most that
     much time in the past. 0 to disable and always resync in such
@@ -355,11 +434,21 @@ at this node's sink.
     `jitter_margin` to use for the first frame received after node start,
     after discontinuity or after `leak_after`-triggered bypass, **but
     not** after "*negative time to wait (...), resyncing*"
+
+Inter-stream synchronization parameters:
+
 -   `team` (string, name of instance-shared object) - if specified,
     realtime nodes with the same team will cooperate to have their
     output synchronized. Use only if timestamps are synchronized.
 -   `master` (bool) - default `true`. Only masters are allowed to resync in
     case of discontinuity. A team can have multiple masters.
+
+Automatic flushing parameters (experimental):
+
+-   `input_ts_queue` (string, name of queue) - which queue should be treated as the beginning of buffering chain. Usually should be set to the output of the demuxer. If unspecified, automatic flushing is disabled.
+-   `intermediate_queues` (list of strings) - list of intermediate queues that will be examined whether they contain packets
+-   `max_buffered` (float, seconds, default 5.5) - start flushing when the buffering chain has more than this amount buffered (calculated as difference between timestamp of last packet inserted into the `input_ts_queue` and timestamp of the frame coming to this node)
+-   `min_buffered` (float, seconds, default 0.5) - stop flushing when the buffering chain has less than this amount buffered, or `input_ts_queue` and `intermediate_queues` are all empty
 
 For each passing packet, time to wait is computed (how long should we
 sleep before outputting that packet, to maintain realtime output rate)
@@ -435,7 +524,7 @@ Recommended options for displaying live video:
 
 ### `extract_timestamps`
 
-Set PTS to timecode in video frame's side data.
+Set PTS to timecode from video frame's side data.
 
 1 input, 1 output: `av::VideoFrame`
 
@@ -452,7 +541,7 @@ Set PTS to timecode in video frame's side data.
 -   `drop_before_available` (bool) - discard incoming packets before
     timecode is available. Disabled by default. Has lower priority than
     `passthrough_before_available`.
--   `timecodes` (list of strings), default `\["S12M"\]` - side data to get
+-   `timecodes` (list of strings), default `["S12M"]` - side data to get
     timecodes from. If specified timecode doesn't exist, next one in the
     list is tried. Possible items:
     -   `S12M.1` or `S12M` - SMPTE 12M = SEI
@@ -676,6 +765,21 @@ multiple inputs, 1 output: `av::Packet`
 -   `url` (string of URL) - mandatory
 -   `options` (dictionary) - format options that will be passed to libavformat
 
+### `jack_sink`
+
+1 input: `av::AudioSamples` (sample format must be `fltp`, sample rate must be equal to JACK's)
+
+Output audio to [JACK Audio Connection Kit](https://jackaudio.org/) server. Can be used for both inter-app routing and outputting audio to the sound card. Note that JACK has its own clock (soundcard clock or in case of dummy device - OS monotonic clock) so in long running streams underruns or overruns may occur, unless the stream's clock and JACK clock are synchronized (for example, input is AES67 RTP and the hardware audio interface is synchronized to AES67 master clock using wordclock or S/PDIF).
+
+Both sample format and sample rate must match configuration of the JACK server (sample format is always `fltp` in JACK). Use [`resample_audio`](#resample_audio) node to convert.
+
+This node has an internal buffer to ensure that JACK thread can run in real time. In case of bursty streams (e.g. coming from the Internet) this buffering may be insufficinent. The [`realtime`](#realtime) node with a small `negative_time_tolerance` (below JACK period size) will help in such cases.
+
+-   `channels_count` (int, default 2) - number of JACK ports to create. If incoming audio stream has less channels, the remaining ones will be filled with silence. If more, the excessive channels will be discarded.
+-   `port_prefix` (string, default empty string) - if specified, will append channel index to this string and it'll become the JACK port name. If unspecified, JACK port name will be only the channel index.
+-   `connect_port_prefix` (string) - if specified, will append port number to this string and try to connect to an input port with that name in the JACK graph
+-   `client_name` (string) - mandatory, name of the JACK client. If multiple `jack_sink` nodes are created with the same client name, ports will belong to the same JACK client (make sure to set `port_prefix` in such cases). If they have different client names, multiple JACK clients will be created. What is better depends on the use case - multiple JACK clients allow parallel processing but put more overhead on the CPU.
+
 ### `raw_output`
 
 Write stream of raw packets or frames to file or pipe. Unlike `output`
@@ -767,8 +871,8 @@ system's process.
 ### How to quickly change input on the fly
 
 ```
-node.interrupt input
-node.param.set input url "rtmp://new.stream/url"
+node.interrupt input
+node.param.set input url "rtmp://new.stream/url"
 ```
 
 Important: Execute the second command immediately after the first.
@@ -783,8 +887,8 @@ Note that if input is running normally (i.e. not starting right now),
 the following commands will do effectively the same:
 
 ```
-node.param.set input url "rtmp://new.stream/url"
-node.auto_restart input
+node.param.set input url "rtmp://new.stream/url"
+node.auto_restart input
 ```
 
 ### How to dump avplumber config from log
@@ -802,13 +906,13 @@ grep -Ev '^(EXT-X-MEDIA-SEQUENCE:[0-9]+|\[AVIOContext @ 0x[a-f0-9]+\] Statistics
 ### Watch queues fill in real time
 
 ```
-watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
 ```
 
 In some versions of netcat it doesn't work. Try this:
 
 ```
-watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
 ```
 
 If you have big queues, they may occupy multiple lines in terminal. To make them shorter:
@@ -829,7 +933,7 @@ open log file in less, press `/` or `?` and use this regular expression:
 
 Created by Teodor Wozniak <teodor.wozniak@amagi.com> https://lumifaza.org
 
-Copyright (c) 2018-2023 Amagi Media Labs Pvt. Ltd https://amagi.com
+Copyright (c) 2018-2024 Amagi Media Labs Pvt. Ltd https://amagi.com
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as
