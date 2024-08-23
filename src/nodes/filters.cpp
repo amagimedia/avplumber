@@ -337,7 +337,10 @@ public:
                                 if (do_shift_) {
                                     eq_.out(frmout);
                                 }
-                                this->sink_edges_[sink_index]->enqueue(frmout);
+                                if (!this->sink_edges_[sink_index]->enqueue(frmout)) {
+                                    this->finished_ = true;
+                                    return;
+                                }
                             } else {
                                 logstream << "WARNING: Invalid frame received from filter graph";
                             }

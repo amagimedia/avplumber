@@ -1,62 +1,7 @@
 #include "node_common.hpp"
 #include "../instance_shared.hpp"
 #include "../EventLoop.hpp"
-
-class RealTimeTeam: public InstanceShared<RealTimeTeam> {
-protected:
-    std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
-    std::mutex busy_;
-    std::unique_lock<decltype(busy_)> getLock() {
-        return std::unique_lock<decltype(busy_)>(busy_);
-    }
-    AVRational timebase_ = {0, 0};
-public:
-    void checkTimeBase(AVRational tb) {
-        auto lock = getLock();
-        if (timebase_.num==0 && timebase_.den==0) {
-            timebase_ = tb;
-        } else {
-            if ((tb.num != timebase_.num) || (tb.den != timebase_.den)) {
-                throw Error("all realtime nodes in a team must have the same timebase (tick_source)");
-            }
-        }
-    }
-    AVTS updateOffset(AVTS local_offset) {
-        auto lock = getLock();
-        AVTS offset = offset_.load(std::memory_order_relaxed);
-        // std::memory_order_relaxed because mutexed anyway
-        if (offset == AV_NOPTS_VALUE) {
-            offset_.store(local_offset, std::memory_order_relaxed);
-            return local_offset;
-        }
-        // we want to synchronize to the smallest offset because it ensures that sufficient data is buffered
-        // for smooth playback of all streams
-        if (local_offset < offset) {
-            logstream << "realtime team changing offset by " << (local_offset-offset);
-            offset_.store(local_offset, std::memory_order_relaxed);
-            return local_offset;
-        } else {
-            logstream << "realtime team ignoring offset diff " << (local_offset-offset);
-            return offset;
-        }
-    }
-    void reset() {
-        auto lock = getLock();
-        offset_.store(AV_NOPTS_VALUE, std::memory_order_relaxed);
-        logstream << "realtime team reset";
-    }
-    AVTS getOffset(AVTS local_offset = AV_NOPTS_VALUE) {
-        AVTS r = offset_.load(std::memory_order_acquire);
-        if ((local_offset != AV_NOPTS_VALUE) && (r != AV_NOPTS_VALUE)) {
-            if (r < local_offset) {
-                logstream << "getting offset from team diff " << (r-local_offset);
-            } else if (r > local_offset) {
-                logstream << "STRANGE: local offset smaller than team offset by " << (r-local_offset);
-            }
-        }
-        return r!=AV_NOPTS_VALUE ? r : local_offset;
-    }
-};
+#include "../RealTimeTeam.hpp"
 
 template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>> {
 protected:
@@ -77,12 +22,36 @@ protected:
     AVRational tb_to_rescale_ts_;
     uint64_t tick_drifted_for_ = 0;
     std::shared_ptr<RealTimeTeam> team_;
+    std::shared_ptr<EdgeBase> input_ts_queue_;
+    std::list<std::shared_ptr<EdgeBase>> intermediate_queues_;
+    float max_buffered_ = 5.5;
+    float min_buffered_ = 0.5;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
 
     std::string printDuration(AVTS duration) {
+        if (duration==AV_NOPTS_VALUE) {
+            return "NOTS";
+        }
         return std::to_string(duration) +
             ((timebase_.num==1 && timebase_.den==1000) ? "ms" : ("*"+std::to_string(timebase_.num)+"/"+std::to_string(timebase_.den)));
+    }
+    bool anythingBuffered() {
+        bool anything_buffered = input_ts_queue_->occupied() > 0;
+        for (auto q: intermediate_queues_) {
+            if (anything_buffered) break;
+            anything_buffered |= (q->occupied() > 0);
+        }
+        return anything_buffered;
+    }
+    void maybeStopFlushing() {
+        if (team_->isFlushing()) {
+            logstream << "done flushing";
+            if (is_master_) {
+                team_->reset();
+            }
+            team_->stopFlushing();
+        }
     }
 public:
     using NodeSISO<T, T>::NodeSISO;
@@ -119,6 +88,9 @@ public:
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
                 }
+                if (input_ts_queue_ != nullptr && !anythingBuffered()) {
+                    maybeStopFlushing();
+                }
                 return;
             }
             T &data = *dataptr;
@@ -126,13 +98,33 @@ public:
             AVTS now_ts = now_ts_;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
-                if (team_) {
+                if (input_ts_queue_ != nullptr) {
+                    av::Timestamp input_ts = input_ts_queue_->lastTS();
+
+                    if (input_ts.isValid() && team_) {
+                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
+                        if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
+                            if (!team_->isFlushing()) {
+                                logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
+                                team_->startFlushing();
+                            }
+                            ready_ = false;
+                            first_ = true;
+                            this->source_->pop();
+                            this->yieldAndProcess();
+                            return;
+                        } else {
+                            maybeStopFlushing();
+                        }
+                    }
+                }
+                if (emit && team_) {
                     if (ready_) {
                         offset_ = team_->getOffset(offset_);
                     } else {
                         offset_ = team_->getOffset();
-                        ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                     }
+                    ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                 }
                 if (ready_) {
                     AVTS diff = (pkt_ts - offset_) - now_ts;
@@ -266,6 +258,27 @@ public:
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];
+        }
+        if (params.count("input_ts_queue")) {
+            r->input_ts_queue_ = edges.findAny(params["input_ts_queue"]);
+            if (r->input_ts_queue_ == nullptr) {
+                throw Error("input_ts_queue doesn't exist");
+            }
+        }
+        if (params.count("intermediate_queues")) {
+            for (const std::string &qname: jsonToStringList(params["intermediate_queues"])) {
+                std::shared_ptr<EdgeBase> q = edges.findAny(qname);
+                if (q==nullptr) {
+                    throw Error("queue " + qname + " from intermediate_queues doesn't exist");
+                }
+                r->intermediate_queues_.push_back(q);
+            }
+        }
+        if (params.count("max_buffered")) {
+            r->max_buffered_ = params["max_buffered"];
+        }
+        if (params.count("min_buffered")) {
+            r->min_buffered_ = params["min_buffered"];
         }
         return r;
     }

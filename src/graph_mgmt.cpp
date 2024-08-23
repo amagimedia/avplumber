@@ -58,7 +58,7 @@ bool NodeWrapper::start() {
             if (tick_source_!=nullptr) {
                 nbnode->setEventLoop(nullptr, true);
                 nbnode->start();
-                tick_source_->add(std::weak_ptr<NonBlockingNodeBase>(nbnode));
+                tick_source_->add(nbnode);
             } else {
                 if (event_loop_==nullptr) {
                     event_loop_ = InstanceSharedObjects<EventLoop>::get(manager_->instanceData(), "default");

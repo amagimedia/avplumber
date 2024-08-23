@@ -13,7 +13,7 @@ protected:
 public:
     void tick(EventLoop &evl);
     void fastTick();
-    void add(std::weak_ptr<NonBlockingNodeBase> node);
+    void add(std::shared_ptr<NonBlockingNodeBase> node);
     TickSource(std::shared_ptr<EventLoop> evl): event_loop_(evl) {
     }
 };

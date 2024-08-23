@@ -62,4 +62,4 @@ template<typename T> std::shared_ptr<Node> createNode(NodeCreationInfo &nci) {
     }
 
 #define DECLNODE_ALIAS(nodetype, classname)
-#define DECLNODE_ATD_ALIAS(nodetype, classname)
+#define DECLNODE_ATD_ALIAS(nodetype, tplname)

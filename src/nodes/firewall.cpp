@@ -1,9 +1,6 @@
 #include "node_common.hpp"
 
 template <typename T> class Firewall: public NodeSISO<T, T> {
-protected:
-    bool ready_ = false;
-    AVTS offset_;
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void process() {
