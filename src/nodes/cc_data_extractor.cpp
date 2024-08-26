@@ -2,7 +2,7 @@
 
 class CCDataExtractor: public NodeSISO<av::VideoFrame, av::Packet>, public IPauseable {
 protected:
-    std::atomic_bool paused_ = false;
+    std::atomic_bool paused_ = true;
 
 public:
     using NodeSISO<av::VideoFrame, av::Packet>::NodeSISO;
