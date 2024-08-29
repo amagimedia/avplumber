@@ -464,7 +464,7 @@ class TcpControlServer: public ControlServerBase {
                             if (error) {
                                 logstream << "send error: " << error;
                             }
-                            if (self_destruct) {
+                            if (self_destruct && (pending_writes==0)) {
                                 server.clients_.erase(iter);
                             }
                         });
