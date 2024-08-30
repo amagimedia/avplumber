@@ -310,7 +310,6 @@ public:
                 backup_frame_ = vdec.decode(pkt);
                 break;
             }
-            vdec.close();
             ictx.close();
         } else if (params.count("backup_picture_buffer")==1) {
             pict_buf_name_ = params["backup_picture_buffer"];
@@ -477,6 +476,7 @@ protected:
         mspec_.gotFrame(frm);
         av::Timestamp prev_next_ts = next_ts_;
         av::Timestamp delta = mspec_.getDelta(frm);
+
         next_ts_ = addTS(ts, delta);
         if (next_ts_.timestamp() < 0) {
             logstream << "Warning: Setting next_ts to negative value: " << next_ts_ << ", PTS = " << ts << ", length = " << delta;
@@ -671,6 +671,7 @@ public:
                                         av::Timestamp buplen = addTSSameTB(rescaleTS(ts, timebase_), rescaleTS(negateTS(next_ts_), timebase_));
                                         T bup = getBackup(buplen, bupts);
                                         logstream << "Generating backup frame to fill at " << bupts;
+                                        setFrameTimestamps(bup, bupts, frm.pts(), frame_wallclock);
                                         if (outputFrame(bup, bupts, true)) {
                                             duration_filled = addTS(duration_filled, mspec_.getDelta(bup));
                                         } else {
@@ -719,6 +720,7 @@ public:
                 if (!suspend_output) {
                     setCard(false);
                     handleWallclockOffset(ts, frame_wallclock);
+                    setFrameTimestamps(frm, ts, frm.pts(), frame_wallclock);
                     outputFrame(frm, ts); // we don't need overflow prevention logic here because we're outside the lock - we can block without causing Bad Things(TM)
                     last_no_card_pts_ = ts;
                     if (freezable()) last_frame_ = frm;
@@ -770,6 +772,7 @@ public:
                     // so we should synchronize to last real sync point
                     //corr_->setTS(next_ts_);
                     //logstream << "Outputting backup frame PTS = " << frm.pts() << ", delta/length = " << mspec_.getDelta(frm);
+                    setFrameTimestamps(frm, next_ts_, av::NoPts, av::NoPts);
                     if (!outputFrame(frm, next_ts_, true)) {
                         sink_full_ = true;
                         break;
@@ -859,6 +862,45 @@ public:
     }
     template<typename ...Args> void setInitialPictureBuffer(Args...) {
         throw Error("initial_picture_buffer specified for non-video sentinel");
+    }
+
+    // mspec_.setFrameRate exists only for video streams, so we abuse it here for SFINAE
+    template<typename MSpec = decltype(mspec_), typename = decltype(&MSpec::setFrameRate)> void setFrameTimestamps(
+            av::VideoFrame& frm, const av::Timestamp& ts_in, const av::Timestamp& ts_out, const av::Timestamp& ts_wallclock) {
+        AVFrame* frame = frm.raw();
+
+        auto set_ts = [frame](const char* metadata_name, const av::Timestamp& ts) {
+            std::string value;
+            if (ts.isValid()) {
+                long t = ts.seconds() * 1000;
+                int ms = t % 1000; t /= 1000;
+                int s = t % 60; t /= 60;
+                int m = t % 60; t /= 60;
+                int h = t % 24; t /= 24;
+                std::string date;
+                if (t > 0) {
+                    std::stringstream s;
+                    time_t tt = (time_t)ts.seconds();
+                    tm tm;
+                    s << std::put_time(gmtime_r(&tt, &tm), "%Y-%m-%d ");
+                    date = s.str();
+                }
+
+                char result[64];
+                sprintf(result, "%s%02d:%02d:%02d.%03d", date.c_str(), h, m, s, ms);
+                value = result;
+            } else {
+                value = "unknown";
+            }
+            av_dict_set(&frame->metadata, metadata_name.c_str(), value.c_str(), 0);
+        };
+
+        set_ts("input_ts", ts_in);
+        set_ts("output_ts", ts_out);
+        set_ts("wallclock_ts", ts_wallclock);
+    }
+    template<typename ...Args> void setFrameTimestamps(Args...) {
+        // NOOP
     }
 
     static std::shared_ptr<PTSCorrectorNode> create(NodeCreationInfo &nci) {
