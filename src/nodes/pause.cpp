@@ -38,13 +38,15 @@ public:
             // put it in the sink queue:
             if (this->sink_->put(pkt, true)) {
                 // put returned true, success, remove this packet from the source queue
+                av::Timestamp pkt_ts = pkt.pts();
                 this->source_->pop();
                 pass_single_ = false;
                 if (!ticks) {
                     // process next packet
                     this->yieldAndProcess();
+                    team_->checkPause(pkt_ts);
                 } else {
-                    process_next = true;
+                    process_next = !team_->checkPause(pkt_ts);
                 }
             } else {
                 // put returned false, no space in queue
