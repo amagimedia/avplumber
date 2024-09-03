@@ -1,11 +1,13 @@
 #pragma once
 #include <atomic>
+#include <optional>
 #include "instance_shared.hpp"
 #include "graph_interfaces.hpp"
 
 class PauseControlTeam: public InstanceShared<PauseControlTeam> {
 protected:
     std::atomic_bool paused_ {false};
+    std::optional<av::Timestamp> pause_at_;
     std::vector<std::weak_ptr<IInputReset>> nodes_to_resume_;
     std::mutex mutex_;
 public:
@@ -14,6 +16,19 @@ public:
     }
     void pause() {
         paused_ = true;
+    }
+    void pause(const av::Timestamp& ts) {
+        pause_at_ = ts;
+    }
+    bool checkPause(const av::Timestamp& ts) {
+        if (pause_at_.has_value()) {
+            if (ts >= pause_at_.value()) {
+                pause_at_.reset();
+                pause();
+                return true;
+            }
+        }
+        return false;
     }
     void resume() {
         paused_ = false;

@@ -403,23 +403,61 @@ public:
             }
             seekable->flushAndSeek(target);
         };
-        commands_["seek.bytes"] = [this, seek](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            size_t bytes = 0;
-            std::string sink_name;
-            ss >> sink_name >> bytes;
-            seek(sink_name, SeekTarget::from_bytes(bytes));
+        auto seek_at = [this](std::string sink_name, SeekTarget when, SeekTarget target) {
+            std::shared_ptr<NodeWrapper> sink_nw = manager_->node(sink_name);
+            if (!sink_nw) {
+                throw Error("unknown node");
+            }
+            std::shared_ptr<Node> sink_node = sink_nw->node();
+            if (!sink_node) {
+                throw Error("node not running");
+            }
+            std::shared_ptr<ISeekAt> seekable = std::dynamic_pointer_cast<ISeekAt>(sink_node);
+            if (!seekable) {
+                throw Error("node doesn't support seek at commands");
+            }
+            if (!target.ts.isValid()) {
+                seekable->seekAtClear();
+            } else {
+                seekable->seekAtAdd(when, target);
+            }
         };
-        commands_["seek.ms"] = [this, seek](ClientStream &cs, std::string &arg) {
+        commands_["seek"] = [this, seek, seek_at](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             size_t ms = 0;
             std::string sink_name;
-            ss >> sink_name >> ms;
-            seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+            std::string command;
+            ss >> sink_name;
+            ss >> command;
+            if (command == "now") {
+                ss >> ms;
+                seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+            } else if (command == "at") {
+                size_t at;
+                ss >> at >> ms;
+                seek_at(sink_name,
+                    SeekTarget::from_timestamp(av::Timestamp(at, {1, 1000})),
+                    SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+            } else if (command == "clear") {
+                seek_at(sink_name, {}, {});
+            } else {
+                throw Error("invalid command parameters");
+            }
         };
         commands_["pause"] = [this](ClientStream &cs, std::string &arg) {
-            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
-            team->pause();
+            std::stringstream ss(arg);
+            std::string t, command;
+            ss >> t >> command;
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), t);
+            if (command == "now") {
+                team->pause();
+            } else if (command == "at") {
+                size_t at;
+                ss >> at;
+                team->pause(av::Timestamp(at, {1, 1000}));
+            } else {
+                throw Error("invalid command parameters");
+            }
         };
         commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);

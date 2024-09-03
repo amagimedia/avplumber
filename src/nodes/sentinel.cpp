@@ -892,7 +892,7 @@ public:
             } else {
                 value = "unknown";
             }
-            av_dict_set(&frame->metadata, metadata_name.c_str(), value.c_str(), 0);
+            av_dict_set(&frame->metadata, metadata_name, value.c_str(), 0);
         };
 
         set_ts("input_ts", ts_in);

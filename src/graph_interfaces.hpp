@@ -70,6 +70,12 @@ public:
     virtual void flushAndSeek(SeekTarget target) = 0;
 };
 
+class ISeekAt {
+public:
+    virtual void seekAtAdd(const SeekTarget& when, const SeekTarget& target) = 0;
+    virtual void seekAtClear() = 0;
+};
+
 class IInputReset {
 public:
     virtual void resetInput() = 0;
