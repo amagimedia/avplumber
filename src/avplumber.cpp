@@ -446,25 +446,27 @@ class TcpControlServer: public ControlServerBase {
         boost::asio::streambuf buff;
         ClientPipe pipe;
         std::thread thread;
-        size_t pending_writes = 0;
+        size_t pending_operations = 0;
         bool self_destruct = false;
         Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_service &_io_service):
             control(_control), server(_server), io_service(_io_service), socket(_io_service),
             pipe([this]() {
+                pending_operations++;
                 io_service.post([this]() {
+                    pending_operations--;
                     ControlPacket pkt;
                     if (!pipe.to_client.try_dequeue(pkt)) {
                         logstream << "BUG: nothing in to_client queue but send_to_client was called";
                         return;
                     }
                     if (pkt.type==ControlPacket::Data) {
-                        pending_writes++;
+                        pending_operations++;
                         boost::asio::async_write(socket, boost::asio::buffer(pkt.data), [this](const boost::system::error_code& error, const size_t) {
-                            pending_writes--;
+                            pending_operations--;
                             if (error) {
                                 logstream << "send error: " << error;
                             }
-                            if (self_destruct && (pending_writes==0)) {
+                            if (self_destruct && (pending_operations==0)) {
                                 server.clients_.erase(iter);
                             }
                         });
@@ -474,6 +476,9 @@ class TcpControlServer: public ControlServerBase {
                         } catch (std::exception &e) {
                         }
                     }
+                    if (self_destruct && (pending_operations==0)) {
+                        server.clients_.erase(iter);
+                    }
                 });
             }),
             thread(start_thread("control", [this]() {
@@ -481,14 +486,16 @@ class TcpControlServer: public ControlServerBase {
             })) {
         };
         void receiveNextLine() {
+            pending_operations++;
             boost::asio::async_read_until(socket, buff, '\n', [this](const boost::system::error_code& error, size_t size) {
+                pending_operations--;
                 if (error) {
                     logstream << "line receive error: " << error;
                     pipe.from_client.emplace(ControlPacket::End);
                     // now we are sure that the this lambda won't run another time (receiveNextLine() is not called)
                     TcpControlServer &s = server;
                     auto &ci = iter;
-                    auto &pending = pending_writes;
+                    auto &pending = pending_operations;
                     auto &destroy = self_destruct;
                     io_service.post([&s, &ci, &pending, &destroy]() {
                         ci->thread.join();
