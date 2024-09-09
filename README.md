@@ -264,21 +264,33 @@ Manually trigger reset of a realtime team.
 
 ### Playback control
 
-```pause team_name```
+```pause team_name now```
 
 Tell all `pause` nodes in a team `team_name` to pause (stop passing packets)
+
+```pause team_name at timestamp```
+
+Tell all `pause` nodes in a team `team_name` to pause (stop passing packets) at specified timestamp.
+Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
 
 ```resume team_name```
 
 Tell all `pause` nodes in a team `team_name` to resume playback
 
-```seek.ms node_name timestamp_ms```
+```seek node_name now timestamp```
 
-Flush all queues between the `input` node and the `node_name` node and seek to given timestamp in milliseconds.
+Flush all queues between the `input` node and the `node_name` node and seek to given timestamp.
+Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
 
-```seek.bytes node_name bytes_offset```
+```seek node_name at timestamp_when timestamp_to```
 
-Flush all queues between the `input` node and the `node_name` node and seek to given position in the input file.
+Flush all queues between the `input` node and the `node_name` node and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
+Multiple `seek at` commands may be specified and it will executed in order of adding.
+Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
+
+```seek node_name clear```
+
+Clears `seek at` queue.
 
 ```speed.set team_name speed```
 

@@ -8,6 +8,16 @@
 #include <ios>
 #include <memory>
 
+#pragma pack(push)
+#pragma pack(1)
+struct HistoryTableEntry {
+    int64_t changed_at;
+    int64_t input_pts_offset;
+    int64_t wallclock_offset;
+    int64_t output_pts_offset;
+};
+#pragma pack(pop)
+
 class PTSCorrectorCommon: public InstanceShared<PTSCorrectorCommon> {
 protected:
     std::recursive_mutex busy_;
@@ -18,6 +28,7 @@ protected:
     AVTS clk_wallclock_ = AV_NOPTS_VALUE;
     av::Timestamp last_discontinuity_ = NOTS;
     av::Timestamp wallclock_offset_ = NOTS;
+    std::ofstream timeshift_history_file_text_;
     std::ofstream timeshift_history_file_;
     ThreadedRESTEndpoint rest_;
     bool reporting_ = false;
@@ -37,8 +48,13 @@ public:
         }
         long output_pts_offset = rescaleTS(start_ts_, {1, 1000}).timestamp();
         
+        if (timeshift_history_file_text_.is_open()) {
+            timeshift_history_file_text_ << changed_at << " " << input_pts_offset << " " << wallclock_offset << " " << output_pts_offset << "\n";
+            timeshift_history_file_text_.flush();
+        }
         if (timeshift_history_file_.is_open()) {
-            timeshift_history_file_ << changed_at << " " << input_pts_offset << " " << wallclock_offset << " " << output_pts_offset << "\n";
+            HistoryTableEntry entry { changed_at, input_pts_offset, wallclock_offset, output_pts_offset };
+            timeshift_history_file_.write(reinterpret_cast<char*>(&entry), sizeof(entry));
             timeshift_history_file_.flush();
         }
         if (reporting_) {
@@ -50,6 +66,9 @@ public:
             std::string json_str = jobj.dump();
             rest_.send("", json_str);
         }
+    }
+    void openHistoryFileText(const std::string path) {
+        timeshift_history_file_text_.open(path, std::ios_base::app);
     }
     void openHistoryFile(const std::string path) {
         timeshift_history_file_.open(path, std::ios_base::app);
@@ -69,7 +88,7 @@ public:
             throw Error("NOPTS supplied as first PTS");
         }
         timeshift_ = {rtcTS(false).timestamp(timebase_) - ts.timestamp(timebase_), timebase_};
-        reportTimeshiftChange();
+        //reportTimeshiftChange();
     }
     void setTS(const av::Timestamp ts) {
         if ( (!clk_.isValid()) || (ts > clk_) ) {
@@ -671,7 +690,7 @@ public:
                                         av::Timestamp buplen = addTSSameTB(rescaleTS(ts, timebase_), rescaleTS(negateTS(next_ts_), timebase_));
                                         T bup = getBackup(buplen, bupts);
                                         logstream << "Generating backup frame to fill at " << bupts;
-                                        setFrameTimestamps(bup, bupts, frm.pts(), frame_wallclock);
+                                        setFrameTimestamps(bup, frm.pts(), bupts, frame_wallclock);
                                         if (outputFrame(bup, bupts, true)) {
                                             duration_filled = addTS(duration_filled, mspec_.getDelta(bup));
                                         } else {
@@ -720,7 +739,7 @@ public:
                 if (!suspend_output) {
                     setCard(false);
                     handleWallclockOffset(ts, frame_wallclock);
-                    setFrameTimestamps(frm, ts, frm.pts(), frame_wallclock);
+                    setFrameTimestamps(frm, frm.pts(), ts, frame_wallclock);
                     outputFrame(frm, ts); // we don't need overflow prevention logic here because we're outside the lock - we can block without causing Bad Things(TM)
                     last_no_card_pts_ = ts;
                     if (freezable()) last_frame_ = frm;
@@ -772,7 +791,7 @@ public:
                     // so we should synchronize to last real sync point
                     //corr_->setTS(next_ts_);
                     //logstream << "Outputting backup frame PTS = " << frm.pts() << ", delta/length = " << mspec_.getDelta(frm);
-                    setFrameTimestamps(frm, next_ts_, av::NoPts, av::NoPts);
+                    setFrameTimestamps(frm, av::NoPts, next_ts_, av::NoPts);
                     if (!outputFrame(frm, next_ts_, true)) {
                         sink_full_ = true;
                         break;
@@ -932,6 +951,9 @@ public:
         }
         if (params.count("history_file")) {
             corr->openHistoryFile(params.at("history_file"));
+        }
+        if (params.count("history_file_text")) {
+            corr->openHistoryFileText(params.at("history_file_text"));
         }
         if (params.count("lock_timeshift")) {
             if (params.at("lock_timeshift")) {

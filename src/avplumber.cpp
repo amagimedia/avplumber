@@ -388,7 +388,7 @@ public:
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
         };
-        auto seek = [this](std::string sink_name, SeekTarget target) {
+        auto seek = [this](std::string sink_name, StreamTarget target) {
             std::shared_ptr<NodeWrapper> sink_nw = manager_->node(sink_name);
             if (!sink_nw) {
                 throw Error("unknown node");
@@ -403,7 +403,7 @@ public:
             }
             seekable->flushAndSeek(target);
         };
-        auto seek_at = [this](std::string sink_name, SeekTarget when, SeekTarget target) {
+        auto seek_at = [this](std::string sink_name, StreamTarget when, StreamTarget target) {
             std::shared_ptr<NodeWrapper> sink_nw = manager_->node(sink_name);
             if (!sink_nw) {
                 throw Error("unknown node");
@@ -424,20 +424,17 @@ public:
         };
         commands_["seek"] = [this, seek, seek_at](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
-            size_t ms = 0;
+            std::string t1, t2;
             std::string sink_name;
             std::string command;
             ss >> sink_name;
             ss >> command;
             if (command == "now") {
-                ss >> ms;
-                seek(sink_name, SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+                ss >> t1;
+                seek(sink_name, StreamTarget::from_string(t1));
             } else if (command == "at") {
-                size_t at;
-                ss >> at >> ms;
-                seek_at(sink_name,
-                    SeekTarget::from_timestamp(av::Timestamp(at, {1, 1000})),
-                    SeekTarget::from_timestamp(av::Timestamp(ms, {1, 1000})));
+                ss >> t1 >> t2;
+                seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
             } else if (command == "clear") {
                 seek_at(sink_name, {}, {});
             } else {
@@ -452,9 +449,9 @@ public:
             if (command == "now") {
                 team->pause();
             } else if (command == "at") {
-                size_t at;
+                std::string at;
                 ss >> at;
-                team->pause(av::Timestamp(at, {1, 1000}));
+                team->pause(StreamTarget::from_string(at));
             } else {
                 throw Error("invalid command parameters");
             }
