@@ -43,14 +43,76 @@ public:
     virtual void stopSinks() = 0;
 };
 
-struct SeekTarget {
+struct StreamTarget {
     av::Timestamp ts = NOTS;
     size_t bytes = 0;
-    static SeekTarget from_timestamp(av::Timestamp ts) {
-        return { ts: ts, bytes: 0 };
+    bool wallclock = false;
+
+    static StreamTarget from_timestamp(av::Timestamp ts) {
+        return { ts: ts, bytes: 0, wallclock: false };
     }
-    static SeekTarget from_bytes(size_t bytes) {
-        return { ts: NOTS, bytes: bytes };
+    static StreamTarget from_wallclock(const std::string& s) {
+        // format: ISO8601: YYYY-MM-DDTHH:MM:SS:mmm
+        std::tm tm = {};
+        std::istringstream ss(s);
+        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+        int64_t t = timegm(&tm) * 1000;
+        size_t ms_sep = s.find('.');
+        if (ms_sep != std::string::npos) {
+            const char* ms_str = s.c_str() + ms_sep + 1;
+            int mmm = atoi(ms_str);
+            size_t l = strlen(ms_str);
+            // convert from values with more than 3 digits
+            while (l > 3) {
+                --l;
+                mmm /= 10;
+            }
+            // convert from values with less than 3 digits
+            while (l < 3) {
+                ++l;
+                mmm *= 10;
+            }
+            t += mmm;
+        }
+
+        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, wallclock: true };
+    }
+    static StreamTarget from_string(std::string& s) {
+        if (s.find('T') != std::string::npos) {
+            return StreamTarget::from_wallclock(s);
+        }
+        size_t t_sep = s.find(':');
+        if (t_sep != std::string::npos) {
+            // HH:MM:SS.mmm value
+            int hh, mm, ss = -1, mmm = 0;
+            int res = sscanf(s.c_str(), "%d:%d:%d", &hh, &mm, &ss);
+            if (ss < 0) {
+                // mm:ss format
+                ss = mm;
+                mm = hh;
+                hh = 0;
+            }
+            size_t ms_sep = s.find('.', t_sep + 1);
+            if (ms_sep != std::string::npos) {
+                const char* ms_str = s.c_str() + ms_sep + 1;
+                mmm = atoi(s.c_str() + ms_sep + 1);
+                size_t l = strlen(ms_str);
+                // convert from values with more than 3 digits
+                while (l > 3) {
+                    --l;
+                    mmm /= 10;
+                }
+                // convert from values with less than 3 digits
+                while (l < 3) {
+                    ++l;
+                    mmm *= 10;
+                }
+            }
+            int64_t ts = (((hh * 60) + mm) * 60 + ss) * 1000 + mmm;
+            return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+        }
+        // just a number (timestamp expressed in ms)
+        return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
     }
 };
 
@@ -61,18 +123,20 @@ public:
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
-    virtual void seekAndPause(SeekTarget target) = 0;
+    virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
+    virtual void fixInputTimestamp(StreamTarget& ts) = 0;
+    virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
 };
 
 class IFlushAndSeek {
 public:
-    virtual void flushAndSeek(SeekTarget target) = 0;
+    virtual void flushAndSeek(StreamTarget target) = 0;
 };
 
 class ISeekAt {
 public:
-    virtual void seekAtAdd(const SeekTarget& when, const SeekTarget& target) = 0;
+    virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) = 0;
     virtual void seekAtClear() = 0;
 };
 

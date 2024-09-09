@@ -64,7 +64,11 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
-    virtual void flushAndSeek(SeekTarget target) override {
+    virtual void flushAndSeek(StreamTarget target) override {
+        std::shared_ptr<IStreamsInput> input = findNodeUp<IStreamsInput>();
+        if (input) {
+            input->fixInputTimestamp(target);
+        }
         // start flushing:
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.startFlushing();

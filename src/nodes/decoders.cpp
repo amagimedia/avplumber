@@ -159,7 +159,12 @@ public:
         //dec_.close();
         //input_hold_ = nullptr;
         this->finished_ = true;
-    };
+    }
+    template<typename T=OutputFrame, typename=decltype(&T::pixelFormat)> void setFrameTimestamps(OutputFrame& frm) {
+        input_hold_->setFrameMetadataTimestamps(frm);
+    }
+    template<typename T> void setFrameTimestamps(T) {
+    }
     virtual void process() {
         // wait for packet
         //av::Packet pkt = this->source_->get();
@@ -194,6 +199,7 @@ public:
                             }
                         }
                         if (put) {
+                            setFrameTimestamps(frm);
                             this->sink_->put(frm);
                         }
                     }

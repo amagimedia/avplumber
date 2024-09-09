@@ -9,6 +9,14 @@ struct SeekTableEntry {
     int64_t timestamp_ms;
     uint64_t bytes;
 };
+
+struct TSOffsetEntry {
+    int64_t changed_at;
+    int64_t input_ts_diff;
+    int64_t wallclock_diff;
+    int64_t output_ts_diff;
+};
+
 #pragma pack(pop)
 
 class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
@@ -23,9 +31,13 @@ protected:
     std::mutex seek_table_mutex_;
     std::vector<SeekTableEntry> seek_table_;
     std::mutex seek_at_mutex_;
-    std::list<std::pair<av::Timestamp, SeekTarget>> seek_at_table_;
+    std::list<std::pair<av::Timestamp, StreamTarget>> seek_at_table_;
 
-    SeekTarget seek_target_;
+    std::string ts_offsets_url_;
+    std::mutex ts_offsets_mutex_;
+    std::vector<TSOffsetEntry> ts_offsets_;
+
+    StreamTarget seek_target_;
     bool need_seek_ = false;
     bool auto_resume_after_seek_ = false;
     std::mutex seek_mutex_;
@@ -45,7 +57,7 @@ protected:
         }
     }
 private:
-    void resolveSeekTarget(SeekTarget& st) {
+    void resolveSeekTarget(StreamTarget& st) {
         auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
         if (seek_table_.empty()) {
@@ -57,14 +69,89 @@ private:
 
         int64_t req_ts = st.ts.timestamp();
 
-        // TODO: binary search needed!
-        for (const auto& e: seek_table_) {
-            if (e.timestamp_ms >= req_ts) {
-                st.bytes = e.bytes;
-                st.ts = NOTS;
-                break;
+        logstream << "OUT ts: " << req_ts;
+
+        auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
+            return e.timestamp_ms < value;
+        });
+
+        if (it == seek_table_.cend()) {
+            it = std::prev(seek_table_.cend());
+        }
+
+        st.ts = NOTS;
+        st.bytes = it->bytes;
+
+        logstream << "OUT bytes " << st.bytes;
+    }
+
+    virtual void fixInputTimestamp(StreamTarget& ts) override
+    {
+        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+
+        if (!ts_offsets_.empty()) {
+            // correct timestamp
+            if (ts.wallclock) {
+                // convert wallclock ts -> output ts
+                int64_t new_ts = rescaleTS(ts.ts, {1, 1000}).timestamp();
+                auto it = std::upper_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](int64_t value, const TSOffsetEntry& e) {
+                    return value < e.changed_at - e.wallclock_diff;
+                });
+                if (it != ts_offsets_.cbegin()) {
+                    it = std::prev(it);
+                }
+
+                new_ts += it->wallclock_diff;
+                ts.wallclock = false;
+                ts.ts = av::Timestamp(new_ts, {1, 1000});
+            } else {
+                // convert input ts -> output ts
+                int64_t new_ts = rescaleTS(ts.ts, {1, 1000}).timestamp();
+                auto it = std::upper_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](int64_t value, const TSOffsetEntry& e) {
+                    return value <= e.changed_at - e.input_ts_diff;
+                });
+                if (it != ts_offsets_.cbegin()) {
+                    it = std::prev(it);
+                }
+
+                new_ts += it->input_ts_diff;
+                ts.ts = av::Timestamp(new_ts, {1, 1000});
             }
         }
+    }
+
+    void setFrameTimestamps(av::VideoFrame& frm, const av::Timestamp& ts_in, const av::Timestamp& ts_out, const av::Timestamp& ts_wallclock) {
+        AVFrame* frame = frm.raw();
+
+        auto set_ts = [frame](const char* metadata_name, const av::Timestamp& ts) {
+            std::string value;
+            if (ts.isValid()) {
+                long t = ts.seconds() * 1000;
+                int ms = t % 1000; t /= 1000;
+                int s = t % 60; t /= 60;
+                int m = t % 60; t /= 60;
+                int h = t % 24; t /= 24;
+                std::string date;
+                if (t > 0) {
+                    std::stringstream s;
+                    time_t tt = (time_t)ts.seconds();
+                    tm tm;
+                    s << std::put_time(gmtime_r(&tt, &tm), "%Y-%m-%d ");
+                    date = s.str();
+                }
+
+                char result[64];
+                sprintf(result, "%s%02d:%02d:%02d.%03d", date.c_str(), h, m, s, ms);
+                value = result;
+            } else {
+                value = "unknown";
+            }
+            av_dict_set(&frame->metadata, metadata_name, value.c_str(), 0);
+        };
+
+        set_ts("input_ts", ts_in);
+        set_ts("output_ts", ts_out);
+        set_ts("wallclock_ts", ts_wallclock);
     }
 public:
     StreamInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
@@ -87,6 +174,31 @@ public:
     av::FormatContext& ctx() {
         return ictx_;
     }
+    virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
+        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+
+        if (!ts_offsets_.empty()) {
+            av::Timestamp input_ts = frame.pts();
+            av::Timestamp output_ts = frame.pts();
+            av::Timestamp wallclock_ts = frame.pts();
+
+            auto it = std::upper_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), rescaleTS(output_ts, {1, 1000}).timestamp(), [](int64_t value, const TSOffsetEntry& e) {
+                return value <= e.changed_at;
+            });
+
+            if (it != ts_offsets_.cbegin()) {
+                it = std::prev(it);
+            }
+
+            int64_t ts_diff = 0;
+            if (it != ts_offsets_.cend()) {
+                input_ts = addTS(input_ts, negateTS(av::Timestamp(it->input_ts_diff, {1, 1000})));
+                wallclock_ts = addTS(wallclock_ts, negateTS(av::Timestamp(it->wallclock_diff, {1, 1000})));
+            }
+
+            setFrameTimestamps(frame, input_ts, output_ts, wallclock_ts);
+        }
+    }
     virtual av::FormatContext& formatContext() {
         return ictx_;
     }
@@ -104,14 +216,14 @@ public:
     virtual void enableStream(size_t index) {
         ictx_.stream(index).raw()->discard = AVDISCARD_DEFAULT;
     }
-    virtual void seekAndPause(SeekTarget target) {
+    virtual void seekAndPause(StreamTarget target) {
         auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
         seek_target_ = target;
         resolveSeekTarget(seek_target_);
         auto_resume_after_seek_ = false;
         need_seek_ = true;
     }
-    virtual void seek(SeekTarget target) {
+    virtual void seek(StreamTarget target) {
         auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
         seek_target_ = target;
         resolveSeekTarget(seek_target_);
@@ -121,7 +233,7 @@ public:
     virtual void resumeAfterSeek() {
         seek_resume_.signal();
     }
-    virtual void seekAtAdd(const SeekTarget& when, const SeekTarget& target) override {
+    virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
         seek_at_table_.push_back(std::make_pair(when.ts, target));
     }
@@ -130,6 +242,8 @@ public:
         seek_at_table_.clear();
     }
     void loadSeekTable() {
+        if (seek_table_url_.empty())
+            return;
         std::ifstream f(seek_table_url_, std::ios::binary);
         if (f) {
             auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
@@ -144,6 +258,26 @@ public:
             for (int idx = 0; idx < count; ++idx) {
                 SeekTableEntry* entry = (SeekTableEntry*)(buffer.data()) + idx;
                 seek_table_.push_back(*entry);
+            }
+        }
+    }
+    void loadTimestampOffsets() {
+        if (ts_offsets_url_.empty())
+            return;
+        std::ifstream f(ts_offsets_url_, std::ios::binary);
+        if (f) {
+            auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+            size_t start = sizeof(TSOffsetEntry) * ts_offsets_.size();
+            f.seekg(0, std::ios::end);
+            size_t count = static_cast<size_t>(f.tellg()) - start;
+            f.seekg(start);
+            std::vector<char> buffer(count);
+            f.read(buffer.data(), count);
+            count /= sizeof(TSOffsetEntry);
+            ts_offsets_.reserve(ts_offsets_.size() + count);
+            for (int idx = 0; idx < count; ++idx) {
+                TSOffsetEntry* entry = (TSOffsetEntry*)(buffer.data()) + idx;
+                ts_offsets_.push_back(*entry);
             }
         }
     }
@@ -207,7 +341,7 @@ public:
         pkt.setDts(addTS(pkt.dts(), shift_));
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
-        //logstream << "got pts " << pkt.pts() << " dts " << pkt.dts();
+
         this->sink_->put(pkt);
 
         // check if we have some planned seek
@@ -337,7 +471,15 @@ public:
                 seek_table_url_ += "+seek";
             }
         }
+        if (params.count("ts_offsets") > 0) {
+            ts_offsets_url_ = params["ts_offsets"];
+            if (ts_offsets_url_.empty()) {
+                ts_offsets_url_ = params["url"];
+                ts_offsets_url_ += "+history";
+            }
+        }
         loadSeekTable();
+        loadTimestampOffsets();
     }
     virtual Parameters getObject(const std::string name) {
         if (name=="streams") {

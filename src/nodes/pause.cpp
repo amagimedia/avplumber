@@ -1,4 +1,5 @@
 #include "node_common.hpp"
+#include "../graph_interfaces.hpp"
 #include "../PauseControlTeam.hpp"
 
 template<typename T> class Pause: public NodeSISO<T, T>, public NonBlockingNode<Pause<T>>, public IInputReset {
@@ -71,6 +72,11 @@ public:
         }
         r->team_ = InstanceSharedObjects<PauseControlTeam>::get(nci.instance, team);
         r->team_->addNode(std::weak_ptr<IInputReset>(r));
+
+        // find source of streams:
+        auto in_edge = edges.find<av::VideoFrame>(params["src"]);
+        std::shared_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
+        r->team_->setInputNode(streams_in);
         return r;
     }
 };
