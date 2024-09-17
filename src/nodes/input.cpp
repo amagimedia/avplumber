@@ -69,8 +69,6 @@ private:
 
         int64_t req_ts = st.ts.timestamp();
 
-        logstream << "OUT ts: " << req_ts;
-
         auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
             return e.timestamp_ms < value;
         });
@@ -81,8 +79,6 @@ private:
 
         st.ts = NOTS;
         st.bytes = it->bytes;
-
-        logstream << "OUT bytes " << st.bytes;
     }
 
     virtual void fixInputTimestamp(StreamTarget& ts) override
