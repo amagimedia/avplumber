@@ -3,6 +3,8 @@
 #include <iostream>
 #include <fstream>
 
+#include "../InputSeekTeam.hpp"
+
 #pragma pack(push)
 #pragma pack(1)
 struct SeekTableEntry {
@@ -32,6 +34,7 @@ protected:
     std::vector<SeekTableEntry> seek_table_;
     std::mutex seek_at_mutex_;
     std::list<std::pair<av::Timestamp, StreamTarget>> seek_at_table_;
+    std::shared_ptr<InputSeekTeam> team_;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -230,8 +233,10 @@ public:
         seek_resume_.signal();
     }
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
+        StreamTarget when_fixed = when;
+        fixInputTimestamp(when_fixed);
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
-        seek_at_table_.push_back(std::make_pair(when.ts, target));
+        seek_at_table_.push_back(std::make_pair(when_fixed.ts, target));
     }
     virtual void seekAtClear() override {
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
@@ -383,6 +388,10 @@ public:
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
         auto r = std::make_shared<StreamInput>(make_unique<EdgeSink<av::Packet>>(edge));
+        if (params.count("team")) {
+            r->team_ = InstanceSharedObjects<InputSeekTeam>::get(nci.instance, params["team"]);
+            r->team_->addSeekTarget(r);
+        }
         return r;
     }
     virtual void init(EdgeManager &edges, const Parameters &params) {
