@@ -114,6 +114,12 @@ struct StreamTarget {
         // just a number (timestamp expressed in ms)
         return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
     }
+    static StreamTarget live() {
+        return {};
+    }
+    bool isLive() {
+        return ts.isNoPts() && (bytes == 0) && !wallclock;
+    }
 };
 
 class IStreamsInput {

@@ -463,6 +463,8 @@ public:
                 seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
             } else if (command == "clear") {
                 seek_at(sink_name, {}, {});
+            } else if (command == "live") {
+                seek(sink_name, StreamTarget::live());
             } else {
                 throw Error("invalid command parameters");
             }
