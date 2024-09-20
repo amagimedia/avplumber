@@ -5,6 +5,8 @@
 
 #include "../InputSeekTeam.hpp"
 
+using namespace std::chrono_literals;
+
 #pragma pack(push)
 #pragma pack(1)
 struct SeekTableEntry {
@@ -21,6 +23,8 @@ struct TSOffsetEntry {
 
 #pragma pack(pop)
 
+constexpr auto LIVE_DELAY = 10'000;
+
 class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public ISeekAt {
 protected:
@@ -35,6 +39,8 @@ protected:
     std::mutex seek_at_mutex_;
     std::list<std::pair<av::Timestamp, StreamTarget>> seek_at_table_;
     std::shared_ptr<InputSeekTeam> team_;
+    std::thread seek_read_thread_;
+    Event seek_thread_wakeup_;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -59,6 +65,36 @@ protected:
             }
         }
     }
+
+    void seekThreadFun() {
+        time_t last_read = 0;;
+        while (seek_thread_wakeup_.wait()) {
+            if (should_end_ || finished_)
+                break;
+            // do not read more often than once per second
+            if (last_read >= time(nullptr)) {
+                while (seek_thread_wakeup_.wait(0)) ; {
+                }
+                std::this_thread::sleep_for(200ms);
+            }
+            loadSeekTable();
+            loadTimestampOffsets();
+            last_read = time(nullptr);
+        }
+    }
+
+    void checkSeekTable(const av::Timestamp& current_ts) {
+        if (!current_ts.isValid())
+            return;
+        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+        if (!seek_table_.empty()) {
+            av::Timestamp req_ts = rescaleTS(addTS(current_ts, av::Timestamp(LIVE_DELAY / 2, {1, 1000})), {1, 1000});
+            av::Timestamp last_ts = av::Timestamp(std::prev(seek_table_.cend())->timestamp_ms, {1, 1000});
+            if (req_ts > last_ts) {
+                seek_thread_wakeup_.signal();
+            }
+        }
+    }
 private:
     void resolveSeekTarget(StreamTarget& st) {
         auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
@@ -66,6 +102,16 @@ private:
         if (seek_table_.empty()) {
             // no seek table available, only seeks by time
             return;
+        }
+
+        if (st.isLive()) {
+            uint64_t t = seek_table_.crbegin()->timestamp_ms;
+            if (t < LIVE_DELAY) {
+                t = seek_table_.begin()->timestamp_ms;
+            } else {
+                t -= LIVE_DELAY;
+            }
+            st.ts = av::Timestamp(t, {1, 1000});
         }
 
         SeekTableEntry ste;
@@ -77,7 +123,7 @@ private:
         });
 
         if (it == seek_table_.cend()) {
-            it = std::prev(seek_table_.cend());
+            it = std::prev(it);
         }
 
         st.ts = NOTS;
@@ -86,6 +132,10 @@ private:
 
     virtual void fixInputTimestamp(StreamTarget& ts) override
     {
+        if (ts.isLive()) {
+            return;
+        }
+
         auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
 
         if (!ts_offsets_.empty()) {
@@ -247,18 +297,27 @@ public:
             return;
         std::ifstream f(seek_table_url_, std::ios::binary);
         if (f) {
-            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
-            size_t start = sizeof(SeekTableEntry) * seek_table_.size();
+            size_t start;
+            {
+                auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                start = sizeof(SeekTableEntry) * seek_table_.size();
+            }
             f.seekg(0, std::ios::end);
+            if (f.tellg() == std::streampos(-1))
+                return;
             size_t count = static_cast<size_t>(f.tellg()) - start;
+
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
             count /= sizeof(SeekTableEntry);
-            seek_table_.reserve(seek_table_.size() + count);
-            for (int idx = 0; idx < count; ++idx) {
-                SeekTableEntry* entry = (SeekTableEntry*)(buffer.data()) + idx;
-                seek_table_.push_back(*entry);
+            {
+                auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                seek_table_.reserve(seek_table_.size() + count);
+                for (int idx = 0; idx < count; ++idx) {
+                    SeekTableEntry* entry = (SeekTableEntry*)(buffer.data()) + idx;
+                    seek_table_.push_back(*entry);
+                }
             }
         }
     }
@@ -267,18 +326,24 @@ public:
             return;
         std::ifstream f(ts_offsets_url_, std::ios::binary);
         if (f) {
-            auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
-            size_t start = sizeof(TSOffsetEntry) * ts_offsets_.size();
+            size_t start;
+            {
+                auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+                start = sizeof(TSOffsetEntry) * ts_offsets_.size();
+            }
             f.seekg(0, std::ios::end);
             size_t count = static_cast<size_t>(f.tellg()) - start;
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
             count /= sizeof(TSOffsetEntry);
-            ts_offsets_.reserve(ts_offsets_.size() + count);
-            for (int idx = 0; idx < count; ++idx) {
-                TSOffsetEntry* entry = (TSOffsetEntry*)(buffer.data()) + idx;
-                ts_offsets_.push_back(*entry);
+            {
+                auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+                ts_offsets_.reserve(ts_offsets_.size() + count);
+                for (int idx = 0; idx < count; ++idx) {
+                    TSOffsetEntry* entry = (TSOffsetEntry*)(buffer.data()) + idx;
+                    ts_offsets_.push_back(*entry);
+                }
             }
         }
     }
@@ -354,6 +419,7 @@ public:
                 seek(e.second);
             }
         }
+        checkSeekTable(pkt.pts());
     }
     virtual void stop() {
         logstream << "Setting should_end_ to true";
@@ -374,6 +440,10 @@ public:
         //ictx_.setSocketTimeout(timeout);
     }
     virtual ~StreamInput() {
+        if (seek_read_thread_.joinable()) {
+            seek_thread_wakeup_.signal();
+            seek_read_thread_.join();
+        }
         #if 0 // see comment in process() "Got null packet"
         if (ictx_.isOpened()) {
             logstream << "BUG: input context still opened in destructor, closing";
@@ -475,6 +545,9 @@ public:
                 seek_table_url_ = params["url"];
                 seek_table_url_ += "+seek";
             }
+            seek_read_thread_ = start_thread("seek table read", [this]() {
+                this->seekThreadFun();
+            });
         }
         if (params.count("ts_offsets") > 0) {
             ts_offsets_url_ = params["ts_offsets"];

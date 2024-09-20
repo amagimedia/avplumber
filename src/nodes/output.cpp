@@ -16,6 +16,7 @@ protected:
     std::ofstream seek_table_text_;
     std::ofstream seek_table_bin_;
     bool should_close_ = false;
+    int last_flush_ = 0;
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
     av::FormatContext& ctx() {
@@ -29,10 +30,19 @@ public:
                 int64_t ts_ms = pkt.dts().timestamp({1, 1000});
                 if (seek_table_text_.is_open()) {
                     seek_table_text_ << ts_ms << " " << cur_pos << "\n";
+                    if (!last_flush_) {
+                        seek_table_text_.flush();
+                    }
                 }
-                if (seek_table_bin_.is_open()) {
+                if (seek_table_bin_ .is_open()) {
                     SeekTableEntry entry { ts_ms, uint64_t(cur_pos) };
                     seek_table_bin_.write(reinterpret_cast<char*>(&entry), sizeof(entry));
+                    if (!last_flush_) {
+                        seek_table_bin_.flush();
+                    }
+                }
+                if (last_flush_++ > 25) {
+                    last_flush_ = 0;
                 }
             }
             octx_.writePacket(pkt);

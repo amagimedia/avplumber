@@ -277,18 +277,26 @@ Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150
 
 Tell all `pause` nodes in a team `team_name` to resume playback
 
-```seek node_name now timestamp```
+```seek team_or_node_name live```
 
-Flush all queues between the `input` node and the `node_name` node and seek to given timestamp.
+Flush all queues between the `input` node and the `team_or_node_name` node/team and seek to live video.
+Live wideo is a video playback from recording which is still recorded. It is delayed 10 seconds after current time.
+Command can be executed both by node and team (when multiple inputs needs to be synchronized).
+
+```seek team_or_node_name now timestamp```
+
+Flush all queues between the `input` node and the `team_or_node_name` node/team and seek to given timestamp.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
+Command can be executed both by node and team (when multiple inputs needs to be synchronized).
 
-```seek node_name at timestamp_when timestamp_to```
+```seek team_or_node_name at timestamp_when timestamp_to```
 
-Flush all queues between the `input` node and the `node_name` node and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
+Flush all queues between the `input` node and the `team_or_node_name` node/team and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
 Multiple `seek at` commands may be specified and it will executed in order of adding.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
+Command can be executed both by node and team (when multiple inputs needs to be synchronized).
 
-```seek node_name clear```
+```seek team_or_node_name clear```
 
 Clears `seek at` queue.
 
