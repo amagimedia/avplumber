@@ -1,0 +1,23 @@
+node.add {"type":"input", "url":"rtmp://localhost/live/input" ,"initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"auto_restart":"group","name":"input","group":"g1","dst":"in_mux0"}
+
+queue.plan_capacity a0 600
+queue.plan_capacity adec0 7
+queue.plan_capacity ares0 300
+
+node.add {"type":"demux", "wait_for_keyframe":false,"routing":{"a:0":"a0"},"auto_restart":"group","name":"demux","group":"g1","src":"in_mux0"}
+
+node.add {"type":"dec_audio", "auto_restart":"group","name":"Audio_Decode0","group":"g1","src":"a0","dst":"adec0" }
+
+node.add {"timeout":10.0,"type":"sentinel_audio","auto_restart":"panic","name":"Audio_Sentinel","group":"out","src":"adec0","dst":"sent0"}
+
+node.add {"type":"resample_audio", "dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"s32","compensation":0, "auto_restart":"panic","name":"Audio_Resample0","group":"out","src":"sent0","dst":"atoenc"}
+
+node.add {"type":"enc_audio", "codec":"pcm_s32le","options":{"b":"320k"},"auto_restart":"panic","name":"Audio_Encode","group":"out","src":"atoenc","dst":"aenc0"}
+
+node.add {"type":"mux","auto_restart":"panic","name":"Mux","group":"out","src":["aenc0"],"dst":"muxed"}
+
+node.add { "type": "output", "format": "nut", "url": "/tmp/audio1.nut", "src": "muxed", "auto_restart": "panic", "group": "out" }
+
+group.start g1
+group.start out
+
