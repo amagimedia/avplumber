@@ -40,7 +40,7 @@ protected:
     std::list<std::pair<av::Timestamp, StreamTarget>> seek_at_table_;
     std::shared_ptr<InputSeekTeam> team_;
     std::thread seek_read_thread_;
-    Event seek_thread_wakeup_;
+    Event seek_thread_terminate_;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -67,34 +67,12 @@ protected:
     }
 
     void seekThreadFun() {
-        time_t last_read = 0;;
-        while (seek_thread_wakeup_.wait()) {
-            if (should_end_ || finished_)
-                break;
-            // do not read more often than once per second
-            if (last_read >= time(nullptr)) {
-                while (seek_thread_wakeup_.wait(0)) ; {
-                }
-                std::this_thread::sleep_for(200ms);
-            }
+        do {
             loadSeekTable();
             loadTimestampOffsets();
-            last_read = time(nullptr);
-        }
+        } while (!seek_thread_terminate_.wait(1000));
     }
 
-    void checkSeekTable(const av::Timestamp& current_ts) {
-        if (!current_ts.isValid())
-            return;
-        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
-        if (!seek_table_.empty()) {
-            av::Timestamp req_ts = rescaleTS(addTS(current_ts, av::Timestamp(LIVE_DELAY / 2, {1, 1000})), {1, 1000});
-            av::Timestamp last_ts = av::Timestamp(std::prev(seek_table_.cend())->timestamp_ms, {1, 1000});
-            if (req_ts > last_ts) {
-                seek_thread_wakeup_.signal();
-            }
-        }
-    }
 private:
     void resolveSeekTarget(StreamTarget& st) {
         auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
@@ -308,7 +286,10 @@ public:
             if (f.tellg() == std::streampos(-1))
                 return;
             size_t count = static_cast<size_t>(f.tellg()) - start;
-
+            if (count < sizeof(SeekTableEntry)) {
+                // no new data
+                return;
+            }
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -320,6 +301,7 @@ public:
                     SeekTableEntry* entry = (SeekTableEntry*)(buffer.data()) + idx;
                     seek_table_.push_back(*entry);
                 }
+                logstream << "seek table loaded, current video length: " << seek_table_.crbegin()->timestamp_ms << "ms";
             }
         }
     }
@@ -335,6 +317,10 @@ public:
             }
             f.seekg(0, std::ios::end);
             size_t count = static_cast<size_t>(f.tellg()) - start;
+            if (count < sizeof(SeekTableEntry)) {
+                // no new data
+                return;
+            }
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -421,7 +407,6 @@ public:
                 seek(e.second);
             }
         }
-        checkSeekTable(pkt.pts());
     }
     virtual void stop() {
         logstream << "Setting should_end_ to true";
@@ -443,7 +428,7 @@ public:
     }
     virtual ~StreamInput() {
         if (seek_read_thread_.joinable()) {
-            seek_thread_wakeup_.signal();
+            seek_thread_terminate_.signal();
             seek_read_thread_.join();
         }
         #if 0 // see comment in process() "Got null packet"
@@ -558,8 +543,6 @@ public:
                 ts_offsets_url_ += "+history";
             }
         }
-        loadSeekTable();
-        loadTimestampOffsets();
     }
     virtual Parameters getObject(const std::string name) {
         if (name=="streams") {
