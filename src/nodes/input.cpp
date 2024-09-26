@@ -156,8 +156,8 @@ private:
             } else {
                 // convert input ts -> output ts
                 int64_t new_ts = rescaleTS(ts.ts, {1, 1000}).timestamp();
-                auto it = std::upper_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](int64_t value, const TSOffsetEntry& e) {
-                    return value <= e.changed_at - e.input_ts_diff;
+                auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](const TSOffsetEntry& e, int64_t value) {
+                    return e.changed_at - e.input_ts_diff < value;
                 });
                 if (it != ts_offsets_.cbegin()) {
                     it = std::prev(it);
@@ -231,8 +231,8 @@ public:
             av::Timestamp output_ts = frame.pts();
             av::Timestamp wallclock_ts = frame.pts();
 
-            auto it = std::upper_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), rescaleTS(output_ts, {1, 1000}).timestamp(), [](int64_t value, const TSOffsetEntry& e) {
-                return value <= e.changed_at;
+            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), rescaleTS(output_ts, {1, 1000}).timestamp(), [](const TSOffsetEntry& e, int64_t value) {
+                return e.changed_at < value;
             });
 
             if (it != ts_offsets_.cbegin()) {
@@ -284,9 +284,11 @@ public:
     }
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
         StreamTarget when_fixed = when;
+        StreamTarget target_fixed = target;
         fixInputTimestamp(when_fixed);
+        fixInputTimestamp(target_fixed);
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
-        seek_at_table_.push_back(std::make_pair(when_fixed.ts, target));
+        seek_at_table_.push_back(std::make_pair(when_fixed.ts, target_fixed));
     }
     virtual void seekAtClear() override {
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
