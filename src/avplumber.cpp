@@ -260,11 +260,24 @@ public:
     void shutdown() {
         logstream << "Closing server sockets";
         servers_.clear();
-        logstream << "Shutting down NodeManager";
-        manager_->shutdown();
-        logstream << "Waiting for detached threads";
-        for (std::thread &thr: detached_threads_) {
-            thr.join();
+        if (manager_) {
+            logstream << "Shutting down NodeManager";
+            manager_->shutdown();
+        }
+        if (!detached_threads_.empty()) {
+            logstream << "Waiting for detached threads";
+            for (std::thread &thr: detached_threads_) {
+                thr.join();
+            }
+            detached_threads_.clear();
+        }
+        if (manager_) {
+            if (manager_.use_count() <= 1) {
+                logstream << "Destroying NodeManager";
+            } else {
+                logstream << "Warning: NodeManager is still being used somewhere";
+            }
+            manager_ = nullptr;
         }
         logstream << APP_VERSION << " says goodbye!";
     }
