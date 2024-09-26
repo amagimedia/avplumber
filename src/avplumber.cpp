@@ -391,61 +391,28 @@ public:
         };
         auto seek = [this](std::string team_node_name, StreamTarget target) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_node_name);
-            if (team) {
-                // execute by team
-                std::shared_ptr<IFlushAndSeek> seekable = std::dynamic_pointer_cast<IFlushAndSeek>(team);
-                if (!seekable) {
-                    throw Error("team can't initiate seeking");
-                }
-                seekable->flushAndSeek(target);
-            } else {
-                // execute by node
-                std::shared_ptr<NodeWrapper> sink_nw = manager_->node(team_node_name);
-                if (!sink_nw) {
-                    throw Error("unknown team/node");
-                }
-                std::shared_ptr<Node> sink_node = sink_nw->node();
-                if (!sink_node) {
-                    throw Error("node not running");
-                }
-                std::shared_ptr<IFlushAndSeek> seekable = std::dynamic_pointer_cast<IFlushAndSeek>(sink_node);
-                if (!seekable) {
-                    throw Error("node can't initiate seeking");
-                }
-                seekable->flushAndSeek(target);
+            if (!team) {
+                throw Error("unknown team");
             }
+            std::shared_ptr<IFlushAndSeek> seekable = std::dynamic_pointer_cast<IFlushAndSeek>(team);
+            if (!seekable) {
+                throw Error("team can't initiate seeking");
+            }
+            seekable->flushAndSeek(target);
         };
         auto seek_at = [this](std::string team_node_name, StreamTarget when, StreamTarget target) {
             std::shared_ptr<InputSeekTeam> team = InstanceSharedObjects<InputSeekTeam>::get(manager_->instanceData(), team_node_name);
-            if (team) {
-                // execute by team
-                std::shared_ptr<ISeekAt> seekable = std::dynamic_pointer_cast<ISeekAt>(team);
-                if (!seekable) {
-                    throw Error("team doesn't support seek at commands");
-                }
-                if (!target.ts.isValid()) {
-                    seekable->seekAtClear();
-                } else {
-                    seekable->seekAtAdd(when, target);
-                }
+            if (!team) {
+                throw Error("unknown team");
+            }
+            std::shared_ptr<ISeekAt> seekable = std::dynamic_pointer_cast<ISeekAt>(team);
+            if (!seekable) {
+                throw Error("team doesn't support seek at commands");
+            }
+            if (!target.ts.isValid()) {
+                seekable->seekAtClear();
             } else {
-                std::shared_ptr<NodeWrapper> sink_nw = manager_->node(team_node_name);
-                if (!sink_nw) {
-                    throw Error("unknown team/node");
-                }
-                std::shared_ptr<Node> sink_node = sink_nw->node();
-                if (!sink_node) {
-                    throw Error("node not running");
-                }
-                std::shared_ptr<ISeekAt> seekable = std::dynamic_pointer_cast<ISeekAt>(sink_node);
-                if (!seekable) {
-                    throw Error("node doesn't support seek at commands");
-                }
-                if (!target.ts.isValid()) {
-                    seekable->seekAtClear();
-                } else {
-                    seekable->seekAtAdd(when, target);
-                }
+                seekable->seekAtAdd(when, target);
             }
         };
         commands_["seek"] = [this, seek, seek_at](ClientStream &cs, std::string &arg) {
