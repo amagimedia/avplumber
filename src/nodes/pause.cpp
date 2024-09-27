@@ -75,7 +75,7 @@ public:
 
         // find source of streams:
         auto in_edge = edges.find<av::VideoFrame>(params["src"]);
-        std::shared_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
+        std::weak_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
         r->team_->setInputNode(streams_in);
         return r;
     }

@@ -41,7 +41,7 @@ public:
                         seek_table_bin_.flush();
                     }
                 }
-                if (last_flush_++ > 25) {
+                if (last_flush_++ > 10) {
                     last_flush_ = 0;
                 }
             }
