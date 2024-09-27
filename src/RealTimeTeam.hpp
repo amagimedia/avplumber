@@ -15,7 +15,7 @@ protected:
     std::atomic_bool flushing_ = false;
 
     std::mutex seek_mutex_;
-    std::list<std::shared_ptr<IFlushAndSeek>> seek_targets_;
+    std::list<std::weak_ptr<IFlushAndSeek>> seek_targets_;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -75,10 +75,13 @@ public:
     virtual void flushAndSeek(StreamTarget target) override {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         for (auto t: seek_targets_) {
-            t->flushAndSeek(target);
+            auto node = t.lock();
+            if (node) {
+                node->flushAndSeek(target);
+            }
         }
     }
-    void addSeekTarget(std::shared_ptr<IFlushAndSeek> target) {
+    void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         seek_targets_.push_back(target);
     }

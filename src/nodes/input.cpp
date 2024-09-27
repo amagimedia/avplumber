@@ -23,7 +23,7 @@ struct TSOffsetEntry {
 
 #pragma pack(pop)
 
-constexpr auto LIVE_DELAY = 10'000;
+constexpr auto LIVE_DELAY = 4'000;
 
 class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public ISeekAt {
