@@ -4,6 +4,7 @@ class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, publi
 protected:
     av::FormatContext octx_;
     bool should_close_ = false;
+    int errors_ = 0;
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
     av::FormatContext& ctx() {
@@ -12,7 +13,16 @@ public:
     virtual void process() {
         av::Packet pkt = this->source_->get();
         if (pkt) {
-            octx_.writePacket(pkt);
+            try {
+                octx_.writePacket(pkt);
+                errors_ = 0;
+            } catch (std::exception &e) {
+                logstream << "writePacket failed: " << e.what();
+                errors_++;
+                if (errors_>20) {
+                    throw;
+                }
+            }
         }
     }
     virtual void flush() {
