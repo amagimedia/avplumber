@@ -41,6 +41,7 @@ protected:
     std::shared_ptr<InputSeekTeam> team_;
     std::thread seek_read_thread_;
     Event seek_thread_terminate_;
+    Event seek_thread_ready_;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -67,9 +68,14 @@ protected:
     }
 
     void seekThreadFun() {
+        bool first_run = true;
         do {
             loadSeekTable();
             loadTimestampOffsets();
+            if (first_run) {
+                seek_thread_ready_.signal();
+                first_run = false;
+            }
         } while (!seek_thread_terminate_.wait(1000));
     }
 
@@ -532,9 +538,6 @@ public:
                 seek_table_url_ = params["url"];
                 seek_table_url_ += "+seek";
             }
-            seek_read_thread_ = start_thread("seek table read", [this]() {
-                this->seekThreadFun();
-            });
         }
         if (params.count("ts_offsets") > 0) {
             ts_offsets_url_ = params["ts_offsets"];
@@ -542,6 +545,16 @@ public:
                 ts_offsets_url_ = params["url"];
                 ts_offsets_url_ += "+history";
             }
+        }
+        if (!seek_table_url_.empty() || !ts_offsets_url_.empty()) {
+            seek_read_thread_ = start_thread("seek table read", [this]() {
+                this->seekThreadFun();
+            });
+            seek_thread_ready_.wait();
+        }
+        if (params.count("start_ts") > 0) {
+            std::string start = params["start_ts"];
+            seek(StreamTarget::from_string(start));
         }
     }
     virtual Parameters getObject(const std::string name) {
