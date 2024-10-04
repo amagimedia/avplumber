@@ -956,8 +956,8 @@ Make sure that `preseek` is set to 0 (or unspecified) in the player's `input` no
 ### How to quickly change input on the fly
 
 ```
-node.interrupt input
-node.param.set input url "rtmp://new.stream/url"
+node.interrupt input
+node.param.set input url "rtmp://new.stream/url"
 ```
 
 Important: Execute the second command immediately after the first.
@@ -972,8 +972,8 @@ Note that if input is running normally (i.e. not starting right now),
 the following commands will do effectively the same:
 
 ```
-node.param.set input url "rtmp://new.stream/url"
-node.auto_restart input
+node.param.set input url "rtmp://new.stream/url"
+node.auto_restart input
 ```
 
 ### How to dump avplumber config from log
@@ -991,13 +991,13 @@ grep -Ev '^(EXT-X-MEDIA-SEQUENCE:[0-9]+|\[AVIOContext @ 0x[a-f0-9]+\] Statistics
 ### Watch queues fill in real time
 
 ```
-watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
 ```
 
 In some versions of netcat it doesn't work. Try this:
 
 ```
-watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
 ```
 
 If you have big queues, they may occupy multiple lines in terminal. To make them shorter:

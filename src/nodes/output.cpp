@@ -17,6 +17,7 @@ protected:
     std::ofstream seek_table_bin_;
     bool should_close_ = false;
     int last_flush_ = 0;
+    int errors_ = 0;
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
     av::FormatContext& ctx() {
@@ -45,7 +46,16 @@ public:
                     last_flush_ = 0;
                 }
             }
-            octx_.writePacket(pkt);
+            try {
+                octx_.writePacket(pkt);
+                errors_ = 0;
+            } catch (std::exception &e) {
+                logstream << "writePacket failed: " << e.what();
+                errors_++;
+                if (errors_>20) {
+                    throw;
+                }
+            }
         }
     }
     virtual void flush() {
