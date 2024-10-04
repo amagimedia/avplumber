@@ -16,8 +16,9 @@ void abort_handler(int) {
 
 void stop_handler(int) {
     logstream << "SIGTERM or SIGINT received";
-    if (avp_ptr) {
-        avp_ptr->stopMainLoop();
+    auto avp = avp_ptr;
+    if (avp) {
+        avp->stopMainLoop();
     }
 }
 
@@ -59,6 +60,11 @@ int main(int argc, char **argv) {
         logstream << "Finished parsing file " << script_path;
     }
     avp.mainLoop();
+
+    // need this because otherwise race condition happens between
+    // InstanceSharedObjectsDestructors::callDestructors called in ~InstanceData
+    // and implicitly called (on exit) destructor of static field InstanceSharedObjectsDestructors::destructors_
+    avp_ptr = nullptr;
 
     return 0;
 }
