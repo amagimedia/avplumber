@@ -132,14 +132,16 @@ public:
         return timeshift_;
     }
 
-    void setTimeshift(const av::Timestamp ts) {
+    void setTimeshift(const av::Timestamp ts, bool report) {
         if (lock_timeshift_ && timeshift_.isValid()) {
             logstream << "ignoring setTimeshift - correction group locked " << timeshift_ << " -> " << ts;
             return;
         }
         logstream << "setTimeshift " << timeshift_ << " -> " << ts;
         timeshift_ = rescaleTS(ts, timebase_);
-        reportTimeshiftChange();
+        if (report) {
+            reportTimeshiftChange();
+        }
     }
     void lockTimeshift() {
         lock_timeshift_ = true;
@@ -410,11 +412,13 @@ protected:
     double max_freeze_sec_ = 5.0;
     const double max_streams_diff_ = 0.001;
     bool lock_timeshift_ = false;
-    unsigned int timeshift_desync_frames_ = 0;
     unsigned int card_frames_count_ = 0;
     bool last_success_ = true;
     bool try_without_filling_ = false;
     bool sink_full_ = false;
+    bool in_correction_ = false;
+    bool prev_in_correction_ = false;
+    bool write_history_ = false;
     std::atomic<uint64_t> card_status_ {0}; // to avoid unnecessary use of mutexes, both current card state and last change timestamp is stored in a single value
     // is card boolean is the LSB
     // timestamp is the rest
@@ -582,7 +586,8 @@ public:
                 //logstream << "corr in: stream " << frm.streamIndex() << " PTS = " << ts << std::endl;
                 if (ts.timebase() != timebase_) {
                     logstream << "Warning: timebase changed " << timebase_ << " -> " << ts.timebase() << " in the middle of stream! This may cause discontinuity, A/V desync and other weird things." << std::endl;
-                    timebase_ = ts.timebase();
+                write_history_ = true;
+                timebase_ = ts.timebase();
                     next_ts_ = rescaleTS(next_ts_, timebase_);
                     logstream << "Rescaling because of timebase change: Set next_ts_ = " << next_ts_;
                     local_timeshift_ = rescaleTS(local_timeshift_, timebase_);
@@ -611,9 +616,6 @@ public:
                         }
                         if (desync) {
                             logstream << "Timeshift difference: " << timeshift_diff << std::endl;
-                            timeshift_desync_frames_++;
-                        } else {
-                            timeshift_desync_frames_ = 0;
                         }
                         assert(local_timeshift_.timebase() == timebase_);
                         assert(ts.timebase() == timebase_);
@@ -624,7 +626,7 @@ public:
                         if (disco_before_sync) {
                             corr_->nowDiscontinuity();
                         }
-                        if ( (desync && isDiscontinuity(newts)) || (timeshift_desync_frames_ > 0) ) {
+                        if (desync) {
                             // first frame
                             // or discontinuity
                             // or desync lasts too long
@@ -633,14 +635,12 @@ public:
                             logstream << "Syncing: " << local_timeshift_ << " -> " << newshift << std::endl;
                             local_timeshift_ = newshift;
                             newts = addTSSameTB(ts, newshift);
-                        } else if (desync) {
-                            logstream << "Not syncing: desync frames = " << timeshift_desync_frames_;
                         }
                         //logstream << "  PTS " << ts << " -> " << newts << std::endl;
                         ts = newts;
 
-                        bool disco = isDiscontinuity(ts);
-                        if (disco) {
+                        bool disco_after_sync = isDiscontinuity(ts);
+                        if (disco_after_sync) {
                             if (disco_before_sync) {
                                 logstream << "Discontinuity detected (before & after sync)";
                             } else {
@@ -655,7 +655,7 @@ public:
 
 
                         // Correct PTS:
-                        if (disco) {
+                        if (disco_after_sync) {
                             //logstream << "pre-correct ts = " << ts;
                             if (ts < next_ts_) {
                                 // PTS jumped backwards
@@ -666,14 +666,12 @@ public:
                             } else {
                                 // PTS jumped forward
                                 av::Timestamp rtc = corr_->rtcTS();
-                                bool should_fill = false;
-                                if (!try_without_filling_) {
+                                bool should_fill = !try_without_filling_;
+                                if (should_fill) {
                                     if (disco_before_sync) {
                                         // we have discontinuity right now
-                                        should_fill = true;
                                         logstream << "Filling enabled because of input discontinuity";
                                     } else if (corr_->wasDiscontinuityRecently()) {
-                                        should_fill = true;
                                         logstream << "Filling enabled because of discontinuity in other stream";
                                     }
                                 } else {
@@ -689,7 +687,7 @@ public:
                                         av::Timestamp bupts = next_ts_;
                                         av::Timestamp buplen = addTSSameTB(rescaleTS(ts, timebase_), rescaleTS(negateTS(next_ts_), timebase_));
                                         T bup = getBackup(buplen, bupts);
-                                        logstream << "Generating backup frame to fill at " << bupts;
+                                        logstream << "Generating backup frame to fill at " << bupts << " " << bup.pts();
                                         setFrameTimestamps(bup, frm.pts(), bupts, frame_wallclock);
                                         if (outputFrame(bup, bupts, true)) {
                                             duration_filled = addTS(duration_filled, mspec_.getDelta(bup));
@@ -703,27 +701,26 @@ public:
                                             break;
                                         }
                                     }
-                                    if (true/*next_ts_ != ts*/) {
-                                        // align PTS to next_ts_
-                                        updateLocalTimeshiftPreCorr();
-                                        ts = next_ts_;
-                                    }
+                                    // align PTS to next_ts_
                                     try_without_filling_ = true;
                                 } else {
                                     logstream << "PTS jumped forward " << next_ts_ << " -> " << ts;
                                     // shift it backwards
-                                    updateLocalTimeshiftPreCorr();
-                                    ts = next_ts_;
                                 }
+                                updateLocalTimeshiftPreCorr();
+                                ts = next_ts_;
                             }
                             // Synchronize corr_ to local_timeshift_
                             // TODO: less naive way of doing it
-                            corr_->setTimeshift(local_timeshift_);
+                            in_correction_ = disco_before_sync || disco_after_sync || desync;
+                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_);
                         } else if (desync) {
                             // change global timeshift if desync
                             // even if there's no discontinuity
-                            corr_->setTimeshift(local_timeshift_);
+                            in_correction_ = disco_before_sync || disco_after_sync || desync;
+                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_);
                         }
+                        prev_in_correction_ = in_correction_;
                     } else {
                         // timeshift is unknown
                         // (this is first frame globally)
@@ -949,16 +946,13 @@ public:
         if (params.count("reporting_url")) {
             corr->setReportingURL(params.at("reporting_url"));
         }
-        if (params.count("history_file")) {
-            corr->openHistoryFile(params.at("history_file"));
-        }
-        if (params.count("history_file_text")) {
-            corr->openHistoryFileText(params.at("history_file_text"));
-        }
         if (params.count("lock_timeshift")) {
             if (params.at("lock_timeshift")) {
                 corr->lockTimeshift();
             }
+        }
+        if (params.count("start_ts")) {
+            corr->start_ts_ = av::Timestamp(AVTS(params["start_ts"].get<float>()*1000.0f+0.5f), {1, 1000});
         }
         auto r = NodeSISO<T, T>::template createCommon<PTSCorrectorNode>(edges, params, corr, params, max_stalled_sec, max_freeze_sec, forward_start_shift, max_streams_diff, nci.instance);
         if (params.count("initial_picture_buffer")) {
@@ -975,8 +969,13 @@ public:
         if (params.count("wallclock_drift_grace_period")) {
             r->wallclock_drift_grace_period_ = params["wallclock_drift_grace_period"];
         }
-        if (params.count("start_ts")) {
-            corr->start_ts_ = av::Timestamp(AVTS(params["start_ts"].get<float>()*1000.0f+0.5f), {1, 1000});
+        if (params.count("history_file")) {
+            r->write_history_ = true;
+            corr->openHistoryFile(params.at("history_file"));
+        }
+        if (params.count("history_file_text")) {
+            r->write_history_ = true;
+            corr->openHistoryFileText(params.at("history_file_text"));
         }
         return r;
     }
