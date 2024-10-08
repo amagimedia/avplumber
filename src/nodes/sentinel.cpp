@@ -26,6 +26,8 @@ protected:
     bool lock_timeshift_ = false;
     av::Timestamp clk_ = NOTS;
     AVTS clk_wallclock_ = AV_NOPTS_VALUE;
+    av::Timestamp next_history_report_ = NOTS;
+    av::Timestamp history_reporting_interval_ = NOTS;
     av::Timestamp last_discontinuity_ = NOTS;
     av::Timestamp wallclock_offset_ = NOTS;
     std::ofstream timeshift_history_file_text_;
@@ -38,6 +40,9 @@ public:
         wallclock_offset_ = offset;
     }
     void reportTimeshiftChange() {
+        if (history_reporting_interval_.isValid()) {
+            next_history_report_ = addTS(wallclock.absolute_ts(), history_reporting_interval_);
+        }
         long changed_at = rescaleTS(addTS(rtcTS(), negateTS(start_ts_)), {1, 1000}).timestamp();
         
         long input_pts_offset = rescaleTS(addTS(timeshift_, negateTS(start_ts_)), {1, 1000}).timestamp();
@@ -132,14 +137,18 @@ public:
         return timeshift_;
     }
 
-    void setTimeshift(const av::Timestamp ts, bool report) {
+    bool shouldReportNow() {
+        return history_reporting_interval_.isValid() && (next_history_report_ <= wallclock.absolute_ts());
+    }
+
+    void setTimeshift(const av::Timestamp ts, bool report, bool periodical_report) {
         if (lock_timeshift_ && timeshift_.isValid()) {
             logstream << "ignoring setTimeshift - correction group locked " << timeshift_ << " -> " << ts;
             return;
         }
         logstream << "setTimeshift " << timeshift_ << " -> " << ts;
         timeshift_ = rescaleTS(ts, timebase_);
-        if (report) {
+        if (report || (periodical_report && shouldReportNow())) {
             reportTimeshiftChange();
         }
     }
@@ -171,6 +180,9 @@ public:
         if (reporting_) {
             rest_.setMinimumInterval(1);
         }
+    }
+    void setReportingInterval(const av::Timestamp& interval) {
+        history_reporting_interval_ = interval;
     }
 };
 
@@ -586,8 +598,8 @@ public:
                 //logstream << "corr in: stream " << frm.streamIndex() << " PTS = " << ts << std::endl;
                 if (ts.timebase() != timebase_) {
                     logstream << "Warning: timebase changed " << timebase_ << " -> " << ts.timebase() << " in the middle of stream! This may cause discontinuity, A/V desync and other weird things." << std::endl;
-                write_history_ = true;
-                timebase_ = ts.timebase();
+                    write_history_ = true;
+                    timebase_ = ts.timebase();
                     next_ts_ = rescaleTS(next_ts_, timebase_);
                     logstream << "Rescaling because of timebase change: Set next_ts_ = " << next_ts_;
                     local_timeshift_ = rescaleTS(local_timeshift_, timebase_);
@@ -713,12 +725,12 @@ public:
                             // Synchronize corr_ to local_timeshift_
                             // TODO: less naive way of doing it
                             in_correction_ = disco_before_sync || disco_after_sync || desync;
-                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_);
+                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_, in_correction_ && write_history_);
                         } else if (desync) {
                             // change global timeshift if desync
                             // even if there's no discontinuity
                             in_correction_ = disco_before_sync || disco_after_sync || desync;
-                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_);
+                            corr_->setTimeshift(local_timeshift_, prev_in_correction_ && !in_correction_ && write_history_, in_correction_ && write_history_);
                         }
                         prev_in_correction_ = in_correction_;
                     } else {
@@ -976,6 +988,9 @@ public:
         if (params.count("history_file_text")) {
             r->write_history_ = true;
             corr->openHistoryFileText(params.at("history_file_text"));
+        }
+        if (params.count("history_report_interval")) {
+            corr->setReportingInterval(av::Timestamp(params["history_report_interval"].get<int64_t>(), {1, 1}));
         }
         return r;
     }
