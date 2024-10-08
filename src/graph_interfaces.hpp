@@ -44,12 +44,19 @@ public:
 };
 
 struct StreamTarget {
+    enum class ETargetType {
+        tt_Timestamp,
+        tt_Wallclock,
+        tt_Bytes,
+        tt_Live,
+        tt_Stop
+    };
     av::Timestamp ts = NOTS;
     size_t bytes = 0;
-    bool wallclock = false;
+    ETargetType type = ETargetType::tt_Timestamp;
 
     static StreamTarget from_timestamp(av::Timestamp ts) {
-        return { ts: ts, bytes: 0, wallclock: false };
+        return { ts: ts, bytes: 0, type: ETargetType::tt_Timestamp };
     }
     static StreamTarget from_wallclock(const std::string& s) {
         // format: ISO8601: YYYY-MM-DDTHH:MM:SS:mmm
@@ -75,7 +82,7 @@ struct StreamTarget {
             t += mmm;
         }
 
-        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, wallclock: true };
+        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, type: ETargetType::tt_Wallclock };
     }
     static StreamTarget from_string(std::string& s) {
         if (s.find('T') != std::string::npos) {
@@ -115,10 +122,25 @@ struct StreamTarget {
         return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
     }
     static StreamTarget live() {
-        return {};
+        return { type: ETargetType::tt_Live };
+    }
+    static StreamTarget stop() {
+        return { type: ETargetType::tt_Stop };
     }
     bool isLive() {
-        return ts.isNoPts() && (bytes == 0) && !wallclock;
+        return type == ETargetType::tt_Live;
+    }
+    bool isBytes() {
+        return type == ETargetType::tt_Bytes;
+    }
+    bool isStop() {
+        return type == ETargetType::tt_Stop;
+    }
+    bool isWallclock() {
+        return type == ETargetType::tt_Wallclock;
+    }
+    bool isTimestamp() {
+        return type == ETargetType::tt_Timestamp;
     }
 };
 
