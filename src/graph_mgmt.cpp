@@ -13,7 +13,7 @@
 ///////////////////////////////////////////////////////////
 ////// NodeFactory
 
-NodeFactory::NodeFactory(std::shared_ptr< EdgeManager > edgeman, InstanceData &inst): edges_(edgeman), instance_(inst) {
+NodeFactory::NodeFactory(std::shared_ptr<NodeManager> nodeman, InstanceData &inst): nodes_(nodeman), edges_(nodeman->edges()), instance_(inst) {
     initFactories(factories_);
 }
 
@@ -27,7 +27,7 @@ std::shared_ptr< Node > NodeFactory::produce(const Parameters& params) {
     if (func==nullptr) {
         throw Error("Invalid factory function for " + type);
     }
-    NodeCreationInfo nci {*edges_, params, instance_};
+    NodeCreationInfo nci {*edges_, params, instance_, *nodes_};
     std::shared_ptr<Node> r = func(nci);
     return r;
 }

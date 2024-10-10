@@ -144,9 +144,9 @@ protected:
         events.push_back(&stop_event_);
         event_wait_ = make_unique<MultiEventWait>(events);
     }
-    // This function MAY in some cases return -1
+    // This function MAY in some cases return -1 even with timeout_ms==-1
     // (e.g. if stop() is called)
-    int findSourceWithData() {
+    int findSourceWithData(int timeout_ms = -1) {
         while(true) {
             // find earliest packet (least PTS/DTS) in streams:
             av::Timestamp least_ts = NOTS;
@@ -162,7 +162,9 @@ protected:
                 }
             }
             if (least_ts_i<0 && !stopping_) {
-                event_wait_->wait();
+                if (!event_wait_->wait(timeout_ms)) {
+                    return -1;
+                }
             } else {
                 return least_ts_i;
             }
