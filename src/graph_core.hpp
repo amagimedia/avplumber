@@ -597,8 +597,11 @@ public:
     }
 };
 
+class NodeManager;
+
 struct NodeCreationInfo {
     EdgeManager &edges;
     const Parameters &params;
     InstanceData &instance;
+    NodeManager &nodes;
 };

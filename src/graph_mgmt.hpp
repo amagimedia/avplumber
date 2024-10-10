@@ -9,16 +9,19 @@
 #include "graph_factory.hpp"
 #include "instance.hpp"
 
+class NodeManager;
+
 class NodeFactory {
 public:
     using NodeFactoryFunction = ::NodeFactoryFunction;
 protected:
     std::unordered_map<std::string, NodeFactoryFunction> factories_;
+    std::shared_ptr<NodeManager> nodes_;
     std::shared_ptr<EdgeManager> edges_;
     InstanceData &instance_;
 public:
     std::shared_ptr<Node> produce(const Parameters &params);
-    NodeFactory(std::shared_ptr<EdgeManager> edgeman, InstanceData &inst);
+    NodeFactory(std::shared_ptr<NodeManager> nodeman, InstanceData &inst);
 };
 
 class NodeManager;
