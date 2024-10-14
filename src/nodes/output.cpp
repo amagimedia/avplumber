@@ -26,7 +26,7 @@ public:
     virtual void process() {
         av::Packet pkt = this->source_->get();
         if (pkt) {
-            if (write_seek_table_ && octx_.raw() && octx_.raw()->pb && (pkt.streamIndex() == 0)) {
+            if (write_seek_table_ && octx_.raw() && octx_.raw()->pb && (pkt.streamIndex() == 0) && (pkt.isKeyPacket())) {
                 int64_t cur_pos = avio_tell(octx_.raw()->pb);
                 int64_t ts_ms = pkt.dts().timestamp({1, 1000});
                 if (seek_table_text_.is_open()) {
