@@ -1,0 +1,29 @@
+#queue.plan_capacity * 200
+#queue.plan_capacity v_in 64
+#queue.plan_capacity Video_Decode_out 7
+#queue.plan_capacity v_in 200
+#queue.plan_capacity a_in 200
+#queue.plan_capacity v_outenc 200
+#queue.plan_capacity a_outenc 200
+
+node.add { "type": "input", "url": "udp://localhost:5000", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0 }
+node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in", "?a:0": "a_in" }, "group": "in", "auto_restart": "group" }
+node.add { "type": "dec_video","auto_restart":"group","name":"Video_Decode","group":"in","src":"v_in","dst":"Video_Decode_out"}
+node.add { "type": "dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"a_in","dst":"Audio_Decode_out", "optional": true}
+
+node.add { "type": "force_fps", "fps": "60", "group":"g1", "src": "Video_Decode_out", "dst":"forcedfps"}
+node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "forcedfps", "dst": "v_rt", "group": "g1", "name": "rtsync_video", "set_pts": false }
+node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "Audio_Decode_out", "dst": "a_rt", "group": "g1", "name": "rtsync_audio", "set_pts": false }
+node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "v_rt", "dst": "v_ts", "group": "g1", "history_file_text": "/home/video/output.ts.history.txt", "history_file": "/home/video/output.ts+history", "history_report_interval": 1, "track_wallclock": true, "start_ts": 0}
+node.add { "type": "assume_audio_format", "auto_restart": "panic", "group": "g1", "src": "a_rt", "dst": "a_sentinel_in"}
+node.add { "type": "sentinel_audio", "src": "a_sentinel_in", "dst": "a_rt_out", "group": "g1", "start_ts": 0}
+node.add { "type": "resample_audio", "dst_sample_rate": 48000, "dst_channel_layout": "stereo", "dst_sample_format": "fltp", "compensation":0, "auto_restart": "panic", "name": "Audio_Resample", "group":"g1", "src": "a_rt_out", "dst":"a_ts" }
+
+node.add { "type": "force_keyframe", "group": "g1", "src": "v_ts", "dst": "v_key", "interval_sec": "1/1" }
+node.add { "type": "enc_video","auto_restart":"group","name":"Video_Encode","group":"g1","src":"v_key","dst":"v_outenc", "codec": "libx264", "options": {"gop_size": 1, "profile": "baseline", "bframes": 0} }
+node.add { "type": "enc_audio","auto_restart":"group","name":"Audio_Encode","group":"g1","src":"a_ts","dst":"a_outenc", "codec": "aac" }
+node.add { "type": "mux", "src": [ "v_outenc", "a_outenc" ], "dst": "mux0-1", "group": "g1", "ts_sort_wait": 0 }
+node.add { "type": "output", "format": "mpegts", "url": "/home/video/output.ts", "src": "mux0-1", "auto_restart": "panic", "group": "g1", "seek_table_text": "/home/video/output.ts+txt", "seek_table": "/home/video/output.ts+seek" }
+
+group.start in
+group.start g1
