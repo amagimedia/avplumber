@@ -13,11 +13,11 @@
 ///////////////////////////////////////////////////////////
 ////// NodeFactory
 
-NodeFactory::NodeFactory(std::shared_ptr<NodeManager> nodeman, InstanceData &inst): nodes_(nodeman), edges_(nodeman->edges()), instance_(inst) {
+NodeFactory::NodeFactory(InstanceData &inst): instance_(inst) {
     initFactories(factories_);
 }
 
-std::shared_ptr< Node > NodeFactory::produce(const Parameters& params) {
+std::shared_ptr< Node > NodeFactory::produce(std::shared_ptr<NodeManager> nodeman, const Parameters& params) {
     std::string type = params["type"];
     //logstream << "Producing " << name << std::endl;
     if (factories_.count(type)!=1) {
@@ -27,7 +27,7 @@ std::shared_ptr< Node > NodeFactory::produce(const Parameters& params) {
     if (func==nullptr) {
         throw Error("Invalid factory function for " + type);
     }
-    NodeCreationInfo nci {*edges_, params, instance_, *nodes_};
+    NodeCreationInfo nci {*nodeman->edges(), params, instance_, *nodeman};
     std::shared_ptr<Node> r = func(nci);
     return r;
 }
@@ -88,7 +88,7 @@ void NodeWrapper::createNode() {
     std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     if (node_==nullptr) {
         auto produceObject = [&]() {
-            node_ = manager_->factory_->produce(params_);
+            node_ = manager_->factory_->produce(manager_, params_);
             if (node_==nullptr) {
                 throw Error("Node factory returned nullptr");
             }

@@ -117,7 +117,7 @@ public:
 template<typename T, typename = decltype(std::declval<T>().dts())> av::Timestamp getTS(T &frm) {
     return frm.dts();
 }
-template<typename T, typename...Args> av::Timestamp getTS(T &frm) {
+template<typename T, typename...Args> av::Timestamp getTS(T &frm, Args...args) {
     return frm.pts();
 }
 

@@ -49,10 +49,10 @@ public:
             // no source with data available
             return;
         }
-        source_states_[srci] = wallclock.pts();
+        source_states_[srci].last_packet_time = wallclock.pts();
         if (srci == current_source_) {
             T* dataptr = this->source_edges_[srci]->peek();
-            T &data = &dataptr;
+            T &data = *dataptr;
             this->sink_->put(data);
             this->source_edges_[srci]->pop();
         } else {
@@ -61,10 +61,10 @@ public:
     }
 
     static std::shared_ptr<SourceSwitcher> create(NodeCreationInfo &nci) {
-        std::shared_ptr<Edge<av::Packet>> out_edge = nci.edges.find<av::Packet>(nci.params["dst"]);
-        std::shared_ptr<SourceSwitcher> r = std::make_shared<SourceSwitcher>(make_unique<EdgeSink<av::Packet>>(out_edge));
+        std::shared_ptr<Edge<T>> out_edge = nci.edges.find<T>(nci.params["dst"]);
+        std::shared_ptr<SourceSwitcher> r = std::make_shared<SourceSwitcher>(make_unique<EdgeSink<T>>(out_edge));
         r->createSourcesFromParameters(nci.edges, nci.params);
-        r->source_states_.resize(r->source_edges_->size());
+        r->source_states_.resize(r->source_edges_.size());
 
         const Parameters &src_params = nci.params["src_params"];
         auto srcs = jsonToStringList(nci.params["src"]);
