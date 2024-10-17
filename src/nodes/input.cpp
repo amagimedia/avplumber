@@ -44,6 +44,8 @@ protected:
     std::thread seek_read_thread_;
     Event seek_thread_terminate_;
     Event seek_thread_ready_;
+    IStreamsInput::EPlaybackDirection play_direction_ = IStreamsInput::EPlaybackDirection::pd_Forward;
+    int64_t last_stream_position_ = -1;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -393,6 +395,7 @@ public:
                     }
                 } else if (seek_target_.isBytes()) {
                     logstream << "video_stream_ " << video_stream_ << " seek to position: " << seek_target_.bytes;
+                    last_stream_position_ = seek_target_.bytes;
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
                 } else if (seek_target_.isStop()) {
                     logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
@@ -400,6 +403,20 @@ public:
                 }
                 need_seek_ = false;
                 seeked = true;
+            } else {
+                if (play_direction_ == IStreamsInput::EPlaybackDirection::pd_Backward) {
+                    auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                    if (!seek_table_.empty()) {
+                        auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
+                            return e.bytes < value;
+                        });
+                        if (it != seek_table_.cbegin()) {
+                            it = std::prev(it);
+                        }
+                        last_stream_position_ = it->bytes;
+                        ictx_.seek(it->bytes, -1, AVSEEK_FLAG_BYTE);
+                    }
+                }
             }
         }
         if (seeked && !auto_resume_after_seek_) {
@@ -478,6 +495,12 @@ public:
         #else
         closeInput(true);
         #endif
+    }
+    void setPlaybackDirection(IStreamsInput::EPlaybackDirection dir) override {
+        if (play_direction_ != dir) {
+            play_direction_ = dir;
+            last_stream_position_ = avio_tell(ictx_.raw()->pb);
+        }
     }
     static std::shared_ptr<StreamInput> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

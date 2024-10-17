@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include "../SpeedControlTeam.hpp"
+#include "../RealTimeTeam.hpp"
 
 template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>> {
 protected:
@@ -73,6 +74,17 @@ public:
             r->discard_when_speed_changed_ = params["discard_when_speed_changed"];
         }
         r->team_ = InstanceSharedObjects<SpeedControlTeam>::get(nci.instance, team);
+        r->team_->addNode(r);
+        if (params.count("speed")) {
+            double speed = params["speed"].get<double>();
+            r->team_->setSpeed(speed);
+        }
+        if (params.count("sync_team")) {
+            std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
+            if (sync_team) {
+                r->team_->setSyncObj(sync_team);
+            }
+        }
         return r;
     }
 };
