@@ -49,10 +49,13 @@ struct StreamTarget {
         tt_Wallclock,
         tt_Bytes,
         tt_Live,
+        ff_FrameRelative,
+        ff_FrameAbsolute,
         tt_Stop
     };
     av::Timestamp ts = NOTS;
     size_t bytes = 0;
+    int64_t frame_number = 0;
     ETargetType type = ETargetType::tt_Timestamp;
 
     static StreamTarget from_timestamp(av::Timestamp ts) {
@@ -121,6 +124,12 @@ struct StreamTarget {
         // just a number (timestamp expressed in ms)
         return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
     }
+    static StreamTarget from_frames_relative(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::ff_FrameRelative };
+    }
+    static StreamTarget from_frames_absolute(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::ff_FrameAbsolute };
+    }
     static StreamTarget live() {
         return { type: ETargetType::tt_Live };
     }
@@ -146,6 +155,9 @@ struct StreamTarget {
 
 class IStreamsInput {
 public:
+    enum class EPlaybackDirection {
+        pd_Forward, pd_Backward
+    };
     virtual size_t streamsCount() = 0;
     virtual av::Stream stream(size_t) = 0;
     virtual void discardAllStreams() = 0;
@@ -155,6 +167,7 @@ public:
     virtual void resumeAfterSeek() = 0;
     virtual void fixInputTimestamp(StreamTarget& ts) = 0;
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
+    virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
 };
 
 class IFlushAndSeek {

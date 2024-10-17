@@ -182,7 +182,7 @@ public:
                 try {
                     OutputFrame frm = dec_.decode(pkt);
                     if (frm) {
-                        if ( last_pts_.isValid() && (last_pts_ > frm.pts()) ) {
+                        if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
                             logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
                         }
                         last_pts_ = frm.pts();
