@@ -77,6 +77,12 @@ public:
         for (auto t: seek_targets_) {
             auto node = t.lock();
             if (node) {
+                if (target.isFrameRelative()) {
+                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                    if (p_frame) {
+                        target = StreamTarget::from_frames_absolute(p_frame->getCurrentFrameNumber() + target.frame_number);
+                    }
+                }
                 node->flushAndSeek(target);
             }
         }

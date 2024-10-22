@@ -441,6 +441,19 @@ public:
             } else if (command == "at") {
                 ss >> t1 >> t2;
                 seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
+            } else if (command == "frame") {
+                ss >> t1;
+                if (!t1.empty()) {
+                    int64_t frame_number = std::stoll(t1);
+                    if ((t1[0] == '+') || (t1[0] == '-')) {
+                        // relative seek
+                        seek(sink_name, StreamTarget::from_frames_relative(frame_number));
+                    } else {
+                        // absolute seek
+                        seek(sink_name, StreamTarget::from_frames_absolute(frame_number));
+                    }
+                }
+                seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
             } else if (command == "clear") {
                 seek_at(sink_name, {}, {});
             } else if (command == "live") {

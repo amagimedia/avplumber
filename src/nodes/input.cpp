@@ -106,6 +106,19 @@ private:
             st.ts = av::Timestamp(t, {1, 1000});
         }
 
+        if (st.isFrameAbsolute()) {
+            int64_t frame = st.frame_number;
+            if (frame < 0)
+                frame = 0;
+            if (frame > seek_table_.size())
+                frame = seek_table_.size() - 1;
+
+            st.ts = NOTS;
+            st.bytes = seek_table_[frame].bytes;
+            st.type = StreamTarget::ETargetType::tt_Bytes;
+            return;
+        }
+
         SeekTableEntry ste;
 
         int64_t req_ts = st.ts.timestamp();
@@ -177,7 +190,7 @@ private:
         }
     }
 
-    void setFrameTimestamps(av::VideoFrame& frm, const av::Timestamp& ts_in, const av::Timestamp& ts_out, const av::Timestamp& ts_wallclock) {
+    void setFrameTimestamps(av::VideoFrame& frm, int64_t frame_index, const av::Timestamp& ts_in, const av::Timestamp& ts_out, const av::Timestamp& ts_wallclock) {
         AVFrame* frame = frm.raw();
 
         auto set_ts = [frame](const char* metadata_name, const av::Timestamp& ts) {
@@ -209,6 +222,9 @@ private:
         set_ts("input_ts", ts_in);
         set_ts("output_ts", ts_out);
         set_ts("wallclock_ts", ts_wallclock);
+        if (frame_index >= 0) {
+            av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
+        }
     }
 public:
     StreamInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
@@ -253,7 +269,20 @@ public:
                 wallclock_ts = addTS(wallclock_ts, negateTS(av::Timestamp(it->wallclock_diff, {1, 1000})));
             }
 
-            setFrameTimestamps(frame, input_ts, output_ts, wallclock_ts);
+            // get frame index
+            int64_t frame_index = -1;
+            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+
+            if (!seek_table_.empty()) {
+                int64_t req_ts = rescaleTS(frame.pts(), {1, 1000}).timestamp();
+                auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
+                    return e.timestamp_ms < value;
+                });
+
+                frame_index = static_cast<int64_t>(std::distance(seek_table_.cbegin(), it));
+            }
+
+            setFrameTimestamps(frame, frame_index, input_ts, output_ts, wallclock_ts);
         }
     }
     virtual av::FormatContext& formatContext() {

@@ -287,6 +287,13 @@ Live wideo is a video playback from recording which is still recorded. It is del
 Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given timestamp.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
 
+```seek team_name frame <frame number>```
+
+Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given frame number.
+When frame number is preceeded with `+` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame +10` - seek 10 frames forward from now).
+When frame number is preceeded with `-` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame -10` - seek 10 frames backward from now).
+When there is no sign before the frame number, it will seek tgo absolute frame number (starting from `0`).
+
 ```seek team_name at timestamp_when timestamp_to```
 
 Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
@@ -941,7 +948,7 @@ Seeking is complicated because queues need to be flushed to ensure that user doe
 
 See `examples/video_player.avplumber` for a typical graph with playback control including seeking. Example control commands compatible with it:
 
-* `seek now rtsync 30000` - seek to DTS=30s
+* `seek rtsync now 30000` - seek to DTS=30s
 * `pause p`, `resume p`
 * `speed.set s 0.25` - set speed to 4 times slower than realtime
 * `speed.set s 2` - set speed to 2 times faster than realtime
@@ -956,7 +963,7 @@ If you want seeking to be as fast as possible, you'll need a specially encoded f
 
 In your application controlling the player, parse the generated seek table and find byte offset corresponding to the timestamp you want to seek to. Then issue the command:
 
-`seek now rtsync <timestamp>`
+`seek rtsync now <timestamp>`
 
 Make sure that `preseek` is set to 0 (or unspecified) in the player's `input` node.
 
