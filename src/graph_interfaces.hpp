@@ -49,8 +49,8 @@ struct StreamTarget {
         tt_Wallclock,
         tt_Bytes,
         tt_Live,
-        ff_FrameRelative,
-        ff_FrameAbsolute,
+        tt_FrameRelative,
+        tt_FrameAbsolute,
         tt_Stop
     };
     av::Timestamp ts = NOTS;
@@ -125,10 +125,10 @@ struct StreamTarget {
         return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
     }
     static StreamTarget from_frames_relative(int64_t frames) {
-        return { frame_number: frames, type: ETargetType::ff_FrameRelative };
+        return { frame_number: frames, type: ETargetType::tt_FrameRelative };
     }
     static StreamTarget from_frames_absolute(int64_t frames) {
-        return { frame_number: frames, type: ETargetType::ff_FrameAbsolute };
+        return { frame_number: frames, type: ETargetType::tt_FrameAbsolute };
     }
     static StreamTarget live() {
         return { type: ETargetType::tt_Live };
@@ -150,6 +150,15 @@ struct StreamTarget {
     }
     bool isTimestamp() {
         return type == ETargetType::tt_Timestamp;
+    }
+    bool isFrameAbsolute() {
+        return type == ETargetType::tt_FrameAbsolute;
+    }
+    bool isFrameRelative() {
+        return type == ETargetType::tt_FrameRelative;
+    }
+    bool isFrame() {
+        return isFrameAbsolute() || isFrameRelative();
     }
 };
 
@@ -173,6 +182,11 @@ public:
 class IFlushAndSeek {
 public:
     virtual void flushAndSeek(StreamTarget target) = 0;
+};
+
+class IFrameNumber {
+public:
+    virtual int64_t getCurrentFrameNumber() = 0;
 };
 
 class ISeekAt {

@@ -63,7 +63,7 @@ public:
             }
             if (last_ts_.isValid()) {
                 av::Timestamp delta_from_last = in_ts - last_ts_;
-                bool discontinuity = (delta_from_last.seconds() > 0.5) || (delta_from_last.timestamp() < 0);
+                bool discontinuity = (delta_from_last.seconds() > 0.03) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
                     logstream << "Discontinuity " << last_ts_ << " -> " << in_ts;
                 }
