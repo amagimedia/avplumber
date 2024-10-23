@@ -1,6 +1,7 @@
 #include "node_common.hpp"
 #include "../graph_interfaces.hpp"
 #include "../PauseControlTeam.hpp"
+#include "../RealTimeTeam.hpp"
 
 template<typename T> class Pause: public NodeSISO<T, T>, public NonBlockingNode<Pause<T>>, public IInputReset {
 protected:
@@ -83,6 +84,12 @@ public:
         auto in_edge = edges.find<av::VideoFrame>(params["src"]);
         std::weak_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
         r->team_->setInputNode(streams_in);
+        if (params.count("sync_team")) {
+            std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
+            if (sync_team) {
+                r->team_->setSyncObj(sync_team);
+            }
+        }
         return r;
     }
 };

@@ -11,12 +11,18 @@ protected:
     std::vector<std::weak_ptr<IInputReset>> nodes_to_resume_;
     std::mutex mutex_;
     std::weak_ptr<IStreamsInput> input_;
+    std::weak_ptr<IFlushAndSeek> sync_obj_;
 public:
     bool isPaused() {
         return paused_;
     }
     void pause() {
         paused_ = true;
+
+        auto obj = sync_obj_.lock();
+        if (obj) {
+            obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+        }
     }
     void pause(const StreamTarget& target) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
@@ -61,5 +67,9 @@ public:
     void setInputNode(std::weak_ptr<IStreamsInput>& node) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
         input_ = node;
+    }
+    void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
+        std::lock_guard<decltype(mutex_)> lock(mutex_);
+        sync_obj_ = obj;
     }
 };
