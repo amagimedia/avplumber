@@ -5,6 +5,7 @@
 #include <atomic>
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixfmt.h>
 #include <mutex>
 #include <obs-module.h>
 
@@ -48,6 +49,12 @@ __attribute__((constructor)) void init(void) {
 }
 
 #endif // HAVE_CUDA
+
+//#ifdef HAVE_VAAPI
+#include <va/va.h>
+#include <va/va_drmcommon.h>
+#include <libavutil/hwcontext_vaapi.h>
+//#endif // HAVE_VAAPI
 
 // various parts of this code adapted from OBS source code: deps/media-playback/media-playback/media.c
 // Copyright (c) 2017 Hugh Bailey <obs.jim@gmail.com>
@@ -95,6 +102,15 @@ static inline enum video_format convert_pixel_format(int f)
 	return VIDEO_FORMAT_NONE;
 }
 
+static inline enum EGLint obs_color_format_to_drm(gs_color_format f) {
+    switch (f) {
+        case GS_R8: return DRM_FORMAT_R8;
+        case GS_R8G8: return DRM_FORMAT_RG88;
+        default:;
+    }
+    return DRM_FORMAT_INVALID;
+}
+
 class ObsVideoSink: public NodeSingleInput<av::VideoFrame>, public NonBlockingNode<ObsVideoSink>, public IFlushable {
 protected:
     InstanceData& app_instance_;
@@ -109,6 +125,7 @@ protected:
     bool unbuffered_ = false;
     bool debug_timing_ = false;
     struct obs_hw_buffer obs_hw_;
+    av::PixelFormat obs_hw_pixel_format_{AV_PIX_FMT_NONE};
     AVBufferRef* have_hw_info_for_ = nullptr;
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
@@ -173,21 +190,24 @@ protected:
         if (ctx == nullptr) return AV_PIX_FMT_NONE;
         return ctx->sw_format;
     }
+
     void prepareHwInfo(av::VideoFrame &frm) {
-        if (obs_hw_.type == OBS_HW_BUFFER_NONE) return;
+        if (obs_hw_pixel_format_ == AV_PIX_FMT_NONE) return;
         if (frm.raw()->hw_frames_ctx == have_hw_info_for_) return; // TODO: is this optimization safe?
-        if (obs_hw_.type == OBS_HW_BUFFER_CUDA) {
+
+        #define CB_COMMON \
+            assert(opaque != nullptr); \
+            FrameInfo &fi = *reinterpret_cast<FrameInfo*>(opaque); \
+            assert(fi.owner != nullptr); \
+            ObsVideoSink &self = *fi.owner;
+
+        if (obs_hw_pixel_format_ == AV_PIX_FMT_CUDA) {
             obs_hw_.borrows_frames = true;
             #ifdef HAVE_CUDA
                 //cuda_dev_ctx_ = (AVCUDADeviceContext*)((AVHWFramesContext*)frm.raw()->hw_frames_ctx->data)->device_ctx->hwctx;
                 if (!global_cu) {
                     throw Error("CUDA functions not ready");
                 }
-                #define CB_COMMON \
-                    assert(opaque != nullptr); \
-                    FrameInfo &fi = *reinterpret_cast<FrameInfo*>(opaque); \
-                    assert(fi.owner != nullptr); \
-                    ObsVideoSink &self = *fi.owner;
 
                 obs_hw_.free_buffer = [](void* opaque, void* buf) {
                     CB_COMMON
@@ -300,6 +320,34 @@ protected:
             #else
                 throw Error("FATAL BUG: got CUDA frame but not compiled with CUDA support");
             #endif
+        } else if (obs_hw_pixel_format_ == AV_PIX_FMT_VAAPI_VLD) {
+            obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
+                size_t plane = linesize; // abused
+                VADRMPRIMESurfaceDescriptor *prime = reinterpret_cast<VADRMPRIMESurfaceDescriptor*>(buf);
+                EGLint img_attr[] = {
+                    EGL_LINUX_DRM_FOURCC_EXT,      obs_color_format_to_drm(tex->format),
+                    EGL_WIDTH,                     gs_texture_get_width(tex),
+                    EGL_HEIGHT,                    gs_texture_get_height(tex),
+                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime.objects[prime.layers[0].object_index[plane]].fd,
+                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime.layers[0].offset[plane],
+                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime.layers[0].pitch[plane],
+                    EGL_NONE
+                };
+                // TODO get egl_display from obs
+                EGLImage image = eglCreateImageKHR(egl_display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, img_attr);
+                const GLuint gltex = *(GLuint *)gs_texture_get_obj(tex);
+                gl_bind_texture(GL_TEXTURE_2D, gltex);
+                gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+                if (!gl_success("glEGLImageTargetTexture2DOES")) {
+                    logstream << "glEGLImageTargetTexture2DOES failed, VAAPI data not copied to texture";
+                }
+                gl_bind_texture(GL_TEXTURE_2D, 0);
+            };
+            obs_hw_.free_buffer = [](void* opaque, void* buf) {
+                delete (VADRMPRIMESurfaceDescriptor*)buf;
+            };
         } else {
             throw Error("unsupported hwaccel");
         }
@@ -349,13 +397,13 @@ public:
             } else {
                 this->source_->pop();
             }
-            enum obs_hw_buffer_type hwbt;
+            enum av::PixelFormat hw_pixel_format;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
                 real_pixel_format = frm.pixelFormat().get();
-                hwbt = OBS_HW_BUFFER_NONE;
+                hw_pixel_format = AV_PIX_FMT_NONE;
             } else if (frm.pixelFormat().get()==AV_PIX_FMT_CUDA) {
-                hwbt = OBS_HW_BUFFER_CUDA;
+                hw_pixel_format = AV_PIX_FMT_CUDA;
             } else {
                 throw Error("got frame with unsupported hwaccel " + std::string(frm.pixelFormat().name()));
             }
@@ -389,10 +437,10 @@ public:
             }
 
             if (planes_count_) {
-                obs_hw_.type = hwbt;
-                obs_frame_.hw = hwbt==OBS_HW_BUFFER_NONE ? nullptr : &obs_hw_;
+                obs_hw_pixel_format_ = hw_pixel_format;
+                obs_frame_.hw = hw_pixel_format==AV_PIX_FMT_NONE ? nullptr : &obs_hw_;
                 prepareHwInfo(frm);
-                if (hwbt == OBS_HW_BUFFER_CUDA) {
+                if (hw_pixel_format == AV_PIX_FMT_CUDA) {
                     FrameInfo *fi = findFreeFrame();
                     if (!fi) {
                         logstream << "too many frames buffered, waiting for obs to free some frames";
@@ -405,9 +453,27 @@ public:
                     fi->owner.store(this, std::memory_order_release);
                     obs_frame_.hw_opaque = fi;
                 }
-                for (int i=0; i<planes_count_; i++) {
-                    obs_frame_.data[i] = frm.raw()->data[i];
-                    obs_frame_.linesize[i] = abs(frm.raw()->linesize[i]);
+                if (hw_pixel_format==AV_PIX_FMT_NONE || hw_pixel_format==AV_PIX_FMT_CUDA) {
+                    for (int i=0; i<planes_count_; i++) {
+                        obs_frame_.data[i] = frm.raw()->data[i];
+                        obs_frame_.linesize[i] = abs(frm.raw()->linesize[i]);
+                    }
+                } else if (hw_pixel_format==AV_PIX_FMT_VAAPI) {
+                    AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
+                    VASurfaceID va_surface = (uintptr_t)frame->data[3];
+                    VADRMPRIMESurfaceDescriptor prime;
+                    if (vaExportSurfaceHandle(hwctx->display, va_surface,
+                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                        prime) != VA_STATUS_SUCCESS)
+                        { logstream << "vaExportSurfaceHandle failed"; }
+                    vaSyncSurface(va_display, va_surface);
+                    for (int i=0; i<planes_count_; i++) {
+                        VADRMPRIMESurfaceDescriptor* prime_copy = new VADRMPRIMESurfaceDescriptor;
+                        *prime_copy = prime;
+                        obs_frame_.data[i] = (uint8_t*)prime_copy;
+                        obs_frame_.linesize[i] = i;
+                    }
                 }
                 obs_frame_.width = frm.width();
                 obs_frame_.height = frm.height();
