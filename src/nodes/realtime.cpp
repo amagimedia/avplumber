@@ -226,7 +226,6 @@ public:
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
-            logstream << "set last VIDEO frame " << frm->streamIndex() << ", pts: " << frm->pts() << " " << last_frame_number_;
         }
 
     }
