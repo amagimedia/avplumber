@@ -355,6 +355,7 @@ protected:
             #if HAVE_VAAPI
             obs_hw_.borrows_frames = true;
             obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
+                CB_COMMON
                 assert(tex->type==GS_TEXTURE_2D);
                 size_t plane = linesize; // not really, abused as plane index
                 VADRMPRIMESurfaceDescriptor *prime = reinterpret_cast<VADRMPRIMESurfaceDescriptor*>(buf);
@@ -374,7 +375,7 @@ protected:
                 gl_bind_texture(GL_TEXTURE_2D, gltex);
                 gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                this->EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+                self.EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
                 if (!gl_success("glEGLImageTargetTexture2DOES")) {
                     logstream << "glEGLImageTargetTexture2DOES failed, VAAPI data not copied to texture";
                 }
@@ -604,7 +605,7 @@ public:
         }
         #endif
         #if HAVE_VAAPI
-        r->EGLImageTargetTexture2DOES = (void *)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+        r->EGLImageTargetTexture2DOES = (void (*)(GLenum, GLeglImageOES))eglGetProcAddress("glEGLImageTargetTexture2DOES");
         #endif
         return r;
     }
