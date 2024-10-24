@@ -84,8 +84,10 @@ struct gl_platform {
     bool close_xdisplay;
 };
 
-// for struct graphics_subsystem
-#include "../../../../../../libobs/graphics/graphics-internal.h"
+struct graphics_subsystem {
+    void *module;
+    gs_device_t *device;
+}
 
 #endif // HAVE_VAAPI
 
