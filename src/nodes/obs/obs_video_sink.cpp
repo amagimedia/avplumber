@@ -61,6 +61,10 @@ __attribute__((constructor)) void init(void) {
 #if HAVE_VAAPI
 #include <va/va.h>
 #include <va/va_drmcommon.h>
+#include <drm/drm_fourcc.h>
+#include <GL/gl.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <libavutil/hwcontext_vaapi.h>
 #endif // HAVE_VAAPI
 
@@ -133,7 +137,7 @@ protected:
     bool unbuffered_ = false;
     bool debug_timing_ = false;
     struct obs_hw_buffer obs_hw_;
-    av::PixelFormat obs_hw_pixel_format_{AV_PIX_FMT_NONE};
+    AVPixelFormat obs_hw_pixel_format_ = AV_PIX_FMT_NONE;
     AVBufferRef* have_hw_info_for_ = nullptr;
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
@@ -209,7 +213,8 @@ protected:
             assert(fi.owner != nullptr); \
             ObsVideoSink &self = *fi.owner;
 
-        if ((HAVE_CUDA) && (obs_hw_pixel_format_ == AV_PIX_FMT_CUDA)) {
+        if (obs_hw_pixel_format_ == AV_PIX_FMT_CUDA) {
+            #if HAVE_CUDA
             obs_hw_.borrows_frames = true;
             //cuda_dev_ctx_ = (AVCUDADeviceContext*)((AVHWFramesContext*)frm.raw()->hw_frames_ctx->data)->device_ctx->hwctx;
             if (!global_cu) {
@@ -319,7 +324,11 @@ protected:
                 CUcontext dummy;
                 CHECK_CU(cu->cuCtxPopCurrent(&dummy));
             };
-        } else if ((HAVE_VAAPI) && (obs_hw_pixel_format_ == AV_PIX_FMT_VAAPI_VLD)) {
+            #else
+            throw Error("got CUDA frame but compiled without CUDA support");
+            #endif
+        } else if (obs_hw_pixel_format_ == AV_PIX_FMT_VAAPI) {
+            #if HAVE_VAAPI
             obs_hw_.borrows_frames = true;
             obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
                 size_t plane = linesize; // not really, abused as plane index
@@ -353,6 +362,9 @@ protected:
                 fi.owner.store(nullptr, std::memory_order_release);
             };
             obs_hw_.copy_frame_data_plane_from_hw = nullptr;
+            #else
+            throw Error("got VAAPI frame but compiled without VAAPI support");
+            #endif
         } else {
             throw Error("unsupported hwaccel");
         }
@@ -408,8 +420,8 @@ public:
             if (real_pixel_format==AV_PIX_FMT_NONE) {
                 real_pixel_format = frm.pixelFormat().get();
                 hw_pixel_format = AV_PIX_FMT_NONE;
-            } else if ((frm.pixelFormat().get()==AV_PIX_FMT_CUDA) || (frm.pixelFormat().get()==AV_PIX_FMT_VAAPI_VLD)) {
-                hw_pixel_format = frm.pixelFormat();
+            } else if ((frm.pixelFormat().get()==AV_PIX_FMT_CUDA) || (frm.pixelFormat().get()==AV_PIX_FMT_VAAPI)) {
+                hw_pixel_format = frm.pixelFormat().get();
             } else {
                 throw Error("got frame with unsupported hwaccel " + std::string(frm.pixelFormat().name()));
             }
@@ -466,14 +478,14 @@ public:
                     }
                 } else if (hw_pixel_format==AV_PIX_FMT_VAAPI) {
                     AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
-                    VASurfaceID va_surface = (uintptr_t)frame->data[3];
+                    VASurfaceID va_surface = (uintptr_t)frm->data[3];
                     VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
                     if (vaExportSurfaceHandle(hwctx->display, va_surface,
                         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                         VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
                         prime) != VA_STATUS_SUCCESS)
                         { logstream << "vaExportSurfaceHandle failed"; }
-                    vaSyncSurface(va_display, va_surface);
+                    vaSyncSurface(hwctx->display, va_surface);
                     for (int i=0; i<planes_count_; i++) {
                         obs_frame_.data[i] = (uint8_t*)prime;
                         obs_frame_.linesize[i] = i;
@@ -570,8 +582,10 @@ public:
     }
 };
 
+#if HAVE_CUDA
 CUcontext ObsVideoSink::global_cu_ctx = nullptr;
 std::unordered_map<gs_texture_t*, ObsVideoSink::TextureInfo> ObsVideoSink::global_textures;
 std::mutex ObsVideoSink::global_cu_ctx_create_mutex;
+#endif
 
 DECLNODE(obs_video_sink, ObsVideoSink);
