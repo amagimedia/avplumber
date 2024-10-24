@@ -49,7 +49,7 @@ endif
 
 ifeq ($(HAVE_VAAPI),1)
 override CXXFLAGS += -DHAVE_VAAPI=1
-override LIBS_FLAGS += -lva
+override LIBS_FLAGS += -lva -lGL -lEGL
 endif
 
 EXE = avplumber
