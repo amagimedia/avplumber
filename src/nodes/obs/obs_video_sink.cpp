@@ -1,3 +1,6 @@
+#define EGL_EGLEXT_PROTOTYPES 1
+#define GL_GLEXT_PROTOTYPES 1
+
 #include "../node_common.hpp"
 
 #include "../../../../../../libobs-opengl/gl-subsystem.h"
@@ -69,6 +72,20 @@ __attribute__((constructor)) void init(void) {
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <libavutil/hwcontext_vaapi.h>
+
+// TODO include it properly from obs sources
+struct gl_platform {
+    Display *xdisplay;
+    EGLDisplay edisplay;
+    EGLConfig config;
+    EGLContext context;
+    EGLSurface pbuffer;
+    bool close_xdisplay;
+};
+
+// for struct graphics_subsystem
+#include "../../../../../../libobs/graphics/graphics-internal.h"
+
 #endif // HAVE_VAAPI
 
 // various parts of this code adapted from OBS source code: deps/media-playback/media-playback/media.c
@@ -419,7 +436,7 @@ public:
             } else {
                 this->source_->pop();
             }
-            enum av::PixelFormat hw_pixel_format;
+            AVPixelFormat hw_pixel_format;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
                 real_pixel_format = frm.pixelFormat().get();
@@ -482,7 +499,7 @@ public:
                     }
                 } else if (hw_pixel_format==AV_PIX_FMT_VAAPI) {
                     AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
-                    VASurfaceID va_surface = (uintptr_t)frm->data[3];
+                    VASurfaceID va_surface = (uintptr_t)frm.raw()->data[3];
                     VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
                     if (vaExportSurfaceHandle(hwctx->display, va_surface,
                         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
