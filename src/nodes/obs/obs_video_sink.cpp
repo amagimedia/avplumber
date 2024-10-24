@@ -26,6 +26,7 @@
 struct gs_device {
   struct gl_platform *plat;
 };
+typedef struct gs_device gs_device_t;
 
 struct fbo_info;
 
