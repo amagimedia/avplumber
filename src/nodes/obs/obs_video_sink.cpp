@@ -71,6 +71,7 @@ __attribute__((constructor)) void init(void) {
 #include <GL/gl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <X11/Xlib.h>
 #include <libavutil/hwcontext_vaapi.h>
 
 // TODO include it properly from obs sources
@@ -159,6 +160,9 @@ protected:
     struct obs_hw_buffer obs_hw_;
     AVPixelFormat obs_hw_pixel_format_ = AV_PIX_FMT_NONE;
     AVBufferRef* have_hw_info_for_ = nullptr;
+    #if HAVE_VAAPI
+    void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
+    #endif
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
         av::VideoFrame frame;
@@ -370,7 +374,7 @@ protected:
                 gl_bind_texture(GL_TEXTURE_2D, gltex);
                 gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+                this->EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
                 if (!gl_success("glEGLImageTargetTexture2DOES")) {
                     logstream << "glEGLImageTargetTexture2DOES failed, VAAPI data not copied to texture";
                 }
@@ -598,6 +602,9 @@ public:
         } else {
             logstream << "not having CUDA functions, hwaccel output will not work";
         }
+        #endif
+        #if HAVE_VAAPI
+        r->EGLImageTargetTexture2DOES = (void *)eglGetProcAddress("glEGLImageTargetTexture2DOES");
         #endif
         return r;
     }
