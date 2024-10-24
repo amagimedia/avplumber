@@ -3,8 +3,6 @@
 
 #include "../node_common.hpp"
 
-#include "../../../../../../libobs-opengl/gl-subsystem.h"
-
 #include <atomic>
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
@@ -22,6 +20,47 @@
 #ifndef HAVE_VAAPI
 #define HAVE_VAAPI 0
 #endif
+
+#if (HAVE_CUDA || HAVE_VAAPI)
+
+struct gs_device {
+  struct gl_platform *plat;
+};
+
+struct fbo_info;
+
+struct gs_texture {
+  gs_device_t *device;
+  enum gs_texture_type type;
+  enum gs_color_format format;
+  GLenum gl_format;
+  GLenum gl_target;
+  GLenum gl_internal_format;
+  GLenum gl_type;
+  GLuint texture;
+  uint32_t levels;
+  bool is_dynamic;
+  bool is_render_target;
+  bool is_dummy;
+  bool gen_mipmaps;
+  
+  gs_samplerstate_t *cur_sampler;
+  struct fbo_info *fbo;
+  
+    void (*on_destroy_callback)(struct gs_texture *itself);
+};
+
+struct gs_texture_2d {
+  struct gs_texture base;
+
+  uint32_t width;
+  uint32_t height;
+  bool gen_mipmaps;
+  GLuint unpack_buffer;
+};
+
+#endif
+
 
 #if HAVE_CUDA
 #include <ffnvcodec/dynlink_loader.h>
