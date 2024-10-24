@@ -1,6 +1,7 @@
 
 BUILD_TYPE = Debug
-HAVE_CUDA = 1
+HAVE_CUDA = 0
+HAVE_VAAPI = 1
 
 ifeq ($(BUILD_TYPE),Debug)
 OPTIMIZATION_FLAGS = -O0 -ftrapv
@@ -44,6 +45,10 @@ NODES_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+endif
+
+ifeq ($(HAVE_VAAPI),1)
+override CXXFLAGS += -DHAVE_VAAPI=1
 endif
 
 EXE = avplumber
