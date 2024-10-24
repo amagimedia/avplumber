@@ -87,7 +87,7 @@ struct gl_platform {
 struct graphics_subsystem {
     void *module;
     gs_device_t *device;
-}
+};
 
 #endif // HAVE_VAAPI
 
