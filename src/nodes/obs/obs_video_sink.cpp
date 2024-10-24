@@ -68,7 +68,7 @@ static inline bool gl_success(const char *funcname)
   if (errorcode != GL_NO_ERROR) {
     int attempts = 8;
     do {
-      logstream << funcname << " failed, glGetError returned " << gl_error_to_str(errorcode) << " = 0x" << std::hex << errorcode;
+      logstream << funcname << " failed, glGetError returned 0x" << std::hex << errorcode;
       errorcode = glGetError();
 
       --attempts;
