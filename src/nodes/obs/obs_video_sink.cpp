@@ -23,6 +23,8 @@
 
 #if (HAVE_CUDA || HAVE_VAAPI)
 
+#include <GL/gl.h>
+
 struct gs_device {
   struct gl_platform *plat;
 };
@@ -59,6 +61,41 @@ struct gs_texture_2d {
   bool gen_mipmaps;
   GLuint unpack_buffer;
 };
+
+static inline bool gl_success(const char *funcname)
+{
+  GLenum errorcode = glGetError();
+  if (errorcode != GL_NO_ERROR) {
+    int attempts = 8;
+    do {
+      logstream << funcname << " failed, glGetError returned " << gl_error_to_str(errorcode) << " = 0x" << std::hex << errorcode;
+      errorcode = glGetError();
+
+      --attempts;
+      if (attempts == 0) {
+        logstream << "Too many GL errors, moving on";
+        break;
+      }
+    } while (errorcode != GL_NO_ERROR);
+    return false;
+  }
+
+  return true;
+} 
+
+
+static inline bool gl_tex_param_i(GLenum target, GLenum param, GLint val)
+{ 
+  glTexParameteri(target, param, val);
+  return gl_success("glTexParameteri");
+}
+
+static inline bool gl_bind_texture(GLenum target, GLuint texture)
+{ 
+  glBindTexture(target, texture);
+  return gl_success("glBindTexture");
+}
+
 
 #endif
 
@@ -108,7 +145,6 @@ __attribute__((constructor)) void init(void) {
 #include <va/va.h>
 #include <va/va_drmcommon.h>
 #include <drm/drm_fourcc.h>
-#include <GL/gl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <X11/Xlib.h>
