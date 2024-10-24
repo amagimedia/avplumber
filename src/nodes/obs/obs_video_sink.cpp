@@ -8,6 +8,9 @@
 #include <libavutil/pixfmt.h>
 #include <mutex>
 #include <obs-module.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <graphics/graphics.h>
 
 #ifndef HAVE_CUDA
 #define HAVE_CUDA 0
@@ -114,7 +117,7 @@ static inline enum video_format convert_pixel_format(int f)
 	return VIDEO_FORMAT_NONE;
 }
 
-static inline enum EGLint obs_color_format_to_drm(gs_color_format f) {
+static inline EGLint obs_color_format_to_drm(gs_color_format f) {
     switch (f) {
         case GS_R8: return DRM_FORMAT_R8;
         case GS_R8G8: return DRM_FORMAT_RG88;
@@ -331,18 +334,19 @@ protected:
             #if HAVE_VAAPI
             obs_hw_.borrows_frames = true;
             obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
+                assert(tex->type==GS_TEXTURE_2D);
                 size_t plane = linesize; // not really, abused as plane index
                 VADRMPRIMESurfaceDescriptor *prime = reinterpret_cast<VADRMPRIMESurfaceDescriptor*>(buf);
                 EGLint img_attr[] = {
                     EGL_LINUX_DRM_FOURCC_EXT,      obs_color_format_to_drm(tex->format),
                     EGL_WIDTH,                     gs_texture_get_width(tex),
                     EGL_HEIGHT,                    gs_texture_get_height(tex),
-                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime.objects[prime.layers[0].object_index[plane]].fd,
-                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime.layers[0].offset[plane],
-                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime.layers[0].pitch[plane],
+                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime->objects[prime->layers[0].object_index[plane]].fd,
+                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime->layers[0].offset[plane],
+                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime->layers[0].pitch[plane],
                     EGL_NONE
                 };
-                graphics_t* graphics = gs_get_context(void);
+                graphics_t* graphics = gs_get_context();
 
                 EGLImage image = eglCreateImageKHR(graphics->device->plat->edisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, img_attr);
                 const GLuint gltex = *(GLuint *)gs_texture_get_obj(tex);
