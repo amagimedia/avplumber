@@ -30,6 +30,7 @@ class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, pu
 protected:
     av::FormatContext ictx_;
     std::atomic_bool should_end_ {false};
+    bool input_url_set_ = false;
     AVTS wait_start_;
     AVTS wait_max_ = AV_NOPTS_VALUE;
     av::Timestamp stop_ts_ = NOTS;
@@ -397,6 +398,9 @@ public:
     virtual void process() {
         bool seeked = false;
 
+        if (!input_url_set_)
+            return;
+
         if (stop_ts_.isValid()) {
             if (stop_ts_ <= wallclock.absolute_ts()) {
                 stop();
@@ -567,6 +571,15 @@ public:
             preseek_ = params["preseek"];
         }
 
+        std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
+        edge->setProducer(this->shared_from_this());
+
+        input_url_set_ = !params["url"].get<std::string>().empty();
+        if (!input_url_set_) {
+            logstream << "Input node started without input url";
+            return;
+        }
+
         ictx_.openInput(params["url"], opts, ifmt);
         ictx_.findStreamInfo();
         logstream << "Opened URL " << params["url"] << " . Streams:";
@@ -574,8 +587,6 @@ public:
             av::Stream stream = ictx_.stream(i);
             logstream << i << ": " << ( stream.isVideo() ? "video" : (stream.isAudio() ? "audio" : "???") ) << " tb " << stream.timeBase();
         }
-        std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
-        edge->setProducer(this->shared_from_this());
         setTimeout(timeout);
 
         for (size_t i=0; i<ictx_.streamsCount(); i++) {
