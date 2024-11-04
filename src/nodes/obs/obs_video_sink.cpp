@@ -240,6 +240,7 @@ protected:
     AVBufferRef* have_hw_info_for_ = nullptr;
     #if HAVE_VAAPI
     void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
+	PFNEGLCREATEIMAGEKHRPROC EGLCreateImageKHR;
     #endif
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
@@ -435,20 +436,33 @@ protected:
             obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
                 CB_COMMON
                 assert(tex->type==GS_TEXTURE_2D);
+
+                if (!buf) {
+                    // export surface failed, nothing to do here
+                    return;
+                }
+
                 size_t plane = linesize; // not really, abused as plane index
                 VADRMPRIMESurfaceDescriptor *prime = reinterpret_cast<VADRMPRIMESurfaceDescriptor*>(buf);
                 EGLint img_attr[] = {
-                    EGL_LINUX_DRM_FOURCC_EXT,      obs_color_format_to_drm(tex->format),
+                    EGL_LINUX_DRM_FOURCC_EXT,      prime->layers[plane].drm_format,
                     EGL_WIDTH,                     gs_texture_get_width(tex),
                     EGL_HEIGHT,                    gs_texture_get_height(tex),
-                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime->objects[prime->layers[0].object_index[plane]].fd,
-                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime->layers[0].offset[plane],
-                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime->layers[0].pitch[plane],
+                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime->objects[prime->layers[plane].object_index[0]].fd,
+                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime->layers[plane].offset[0],
+                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime->layers[plane].pitch[0],
                     EGL_NONE
                 };
-                graphics_t* graphics = gs_get_context();
 
-                EGLImage image = eglCreateImageKHR(graphics->device->plat->edisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, img_attr);
+                AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(fi.frame.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
+                VASurfaceID va_surface = (VASurfaceID)(uintptr_t)fi.frame.raw()->data[3];
+                VAStatus va_sync_res = vaSyncSurface(hwctx->display, va_surface);
+                if (va_sync_res != VA_STATUS_SUCCESS) {
+                    logstream << "vaSyncSurface() error: " << vaErrorStr(va_sync_res);
+                }
+
+                graphics_t* graphics = gs_get_context();
+                EGLImage image = self.EGLCreateImageKHR(graphics->device->plat->edisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, img_attr);
                 const GLuint gltex = *(GLuint *)gs_texture_get_obj(tex);
                 gl_bind_texture(GL_TEXTURE_2D, gltex);
                 gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -461,7 +475,12 @@ protected:
             };
             obs_hw_.free_buffer = [](void* opaque, void* buf) {
                 CB_COMMON
-                delete (VADRMPRIMESurfaceDescriptor*)buf;
+
+                if (buf) {
+                    // when export texture faile, buf is nullptr
+                    delete (VADRMPRIMESurfaceDescriptor*)buf;
+                }
+
                 fi.frame = av::VideoFrame::null();
                 fi.owner.store(nullptr, std::memory_order_release);
             };
@@ -584,12 +603,16 @@ public:
                     AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
                     VASurfaceID va_surface = (uintptr_t)frm.raw()->data[3];
                     VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
-                    if (vaExportSurfaceHandle(hwctx->display, va_surface,
+                    VAStatus sts_export = vaExportSurfaceHandle(hwctx->display, va_surface,
                         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
-                        prime) != VA_STATUS_SUCCESS)
-                        { logstream << "vaExportSurfaceHandle failed"; }
-                    vaSyncSurface(hwctx->display, va_surface);
+                        VA_EXPORT_SURFACE_READ_ONLY,
+                        prime);
+                    if (sts_export != VA_STATUS_SUCCESS) {
+                        logstream << "vaExportSurfaceHandle failed: " << vaErrorStr(sts_export);
+                        delete prime;
+                        prime = nullptr;
+                    }
+
                     for (int i=0; i<planes_count_; i++) {
                         obs_frame_.data[i] = (uint8_t*)prime;
                         obs_frame_.linesize[i] = i;
@@ -684,6 +707,8 @@ public:
         #endif
         #if HAVE_VAAPI
         r->EGLImageTargetTexture2DOES = (void (*)(GLenum, GLeglImageOES))eglGetProcAddress("glEGLImageTargetTexture2DOES");
+        r->EGLCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+        r->frames_.resize(60);
         #endif
         return r;
     }
