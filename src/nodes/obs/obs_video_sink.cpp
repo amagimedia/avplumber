@@ -477,8 +477,10 @@ protected:
                 CB_COMMON
 
                 if (buf) {
-                    // when export texture faile, buf is nullptr
-                    delete (VADRMPRIMESurfaceDescriptor*)buf;
+                    VADRMPRIMESurfaceDescriptor* desc = (VADRMPRIMESurfaceDescriptor*)buf;
+                    for (int i = 0; i < desc->num_objects; i++)
+                        close(desc->objects[i].fd);
+                    delete desc;
                 }
 
                 fi.frame = av::VideoFrame::null();
