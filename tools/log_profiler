@@ -1,0 +1,94 @@
+#!/usr/bin/python3
+
+import sys, datetime, re
+from collections import namedtuple
+
+top_node = 'input'
+
+
+def parse_log_time(s):
+    return datetime.datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f %z')
+
+log_line_re = re.compile(r'.*?(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6} [\+\-]\d{4}) \[[^\]]*\] (?P<message>.+)')
+
+node_message_re = {
+    'creating': re.compile(r'Creating node (?P<node>[^ ]+) \.\.\.'),
+    'created':  re.compile(r'Creating node (?P<node>[^ ]+) done'),
+    'starting': re.compile(r'Starting node (?P<node>[^ ]+) \.\.\.'),
+    'started':  re.compile(r'Starting node (?P<node>[^ ]+) done')
+}
+
+start_time = None
+times = dict()
+
+def report_time(label, time):
+    outline += label + ' ' + str(ms) + ' '
+
+def meaningful_time(td):
+    for key in ('time', 'started', 'created'):
+        if key in td:
+            return td[key]
+    # fallback to now, it will be latest and last when sorted
+    return datetime.datetime.now().astimezone()
+
+
+def time_to_ms(time):
+    return round((time - start_time)/datetime.timedelta(milliseconds=1))
+
+def print_report():
+    global times
+    for k, v in times.items():
+        v['name'] = k
+    #print(times.values())
+    sorted_times = sorted(times.values(), key=meaningful_time)
+    if len(sorted_times)==0:
+        return
+    outline = str(start_time) + ': '
+    for element in sorted_times:
+        outline += element['name'] + ' '
+        if len(set(element.keys()) & set(node_message_re.keys())) > 0:
+            def mapfunc(key):
+                if key in element:
+                    return str(time_to_ms(element[key]))
+                else:
+                    return '---'
+            outline += '..'.join(map(mapfunc, node_message_re.keys()))
+        else:
+            outline += str(time_to_ms(element['time']))
+        outline += ' '
+    print(outline)
+    
+    times = {}
+
+
+for line in open(sys.argv[1]):
+    line_match = log_line_re.match(line)
+    if line_match is None:
+        continue
+    
+    #print(line_match)
+    time_str = line_match.group('time')
+    time = parse_log_time(time_str)
+    message = line_match.group('message').strip()
+
+
+    for key, msg_re in node_message_re.items():
+        match = msg_re.match(message)
+        if match is not None:
+            node_name = match.group('node')
+            if key=='creating' and node_name==top_node:
+                print_report()
+                start_time = time
+            node_times = times.setdefault(node_name, {})
+            node_times[key] = time
+    
+    if message.startswith('first frame in queue:'):
+        #print('first frame in queue')
+        before, after = message.split(':', maxsplit=1)
+        queue = after.strip()
+        times['FF:' + queue] = { 'time': time }
+    
+    if message == 'getting new resource associated with our texture':
+        times['CUDA_out'] = { 'time': time }
+
+print_report()
