@@ -136,6 +136,9 @@ public:
                 flushInternal();
                 AudioParameters prev_params = src_params_;
                 src_params_ = AudioParameters(in_samples);
+
+                // Drain the internal audio buffer to prevent -ve number of samples inside re-sampler
+                to_out_ = av::AudioSamples(nullptr);
                 createResampler();
                 drifts_ = std::vector<double>(drifts_size_, 0);
                 drift_index_ = 0;
