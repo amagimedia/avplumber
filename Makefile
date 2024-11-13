@@ -1,7 +1,7 @@
 
 BUILD_TYPE = Debug
-HAVE_CUDA = 0
-HAVE_VAAPI = 1
+HAVE_CUDA = 1
+HAVE_VAAPI = 0
 
 ifeq ($(BUILD_TYPE),Debug)
 OPTIMIZATION_FLAGS = -O0 -ftrapv
