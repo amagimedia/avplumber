@@ -1,6 +1,7 @@
 
 BUILD_TYPE = Debug
-HAVE_CUDA = 1
+HAVE_CUDA = 0
+HAVE_VAAPI = 1
 
 ifeq ($(BUILD_TYPE),Debug)
 OPTIMIZATION_FLAGS = -O0 -ftrapv
@@ -8,7 +9,7 @@ else
 OPTIMIZATION_FLAGS = -O3 -flto
 endif
 
-override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
+override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
 override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib $(OPTIMIZATION_FLAGS)
 PKG_CONFIG_PATH := /apps/ffmpeg/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
@@ -44,6 +45,11 @@ NODES_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+endif
+
+ifeq ($(HAVE_VAAPI),1)
+override CXXFLAGS += -DHAVE_VAAPI=1
+override LIBS_FLAGS += -lva -lGL -lEGL -lGLESv2
 endif
 
 EXE = avplumber
