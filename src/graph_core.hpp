@@ -300,6 +300,7 @@ public:
             node_shr = node_shr->sourceNode().lock();
         } while(true);
     }
+    virtual void addEnqueueCallback(std::function<void()>) = 0;
     virtual void waitEmpty() = 0;
     virtual int occupied() = 0;
     virtual ~EdgeBase() {
@@ -377,6 +378,12 @@ protected:
 public:
     void addWiretapCallback(WiretapCallback cb) {
         wiretap_callbacks_.push_back(cb);
+    }
+    virtual void addEnqueueCallback(std::function<void()> cb) override {
+        auto cb_wrapped = [cb](const T&) {
+            cb();
+        };
+        addWiretapCallback(cb_wrapped);
     }
     bool try_enqueue(const T &elem) {
         if (flushing_) {

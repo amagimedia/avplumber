@@ -382,6 +382,23 @@ public:
             }
             edge->waitEmpty();
         };
+        commands_["queue.log.first_frame"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string name;
+            ss >> name;
+            std::shared_ptr<EdgeBase> edge = manager_->edges()->findAny(name);
+            if (!edge) {
+                throw Error("No queue with this name");
+            }
+            std::shared_ptr<bool> already_logged = std::make_shared<bool>(false);
+            edge->addEnqueueCallback([name, already_logged]() {
+                if (*already_logged) {
+                    return;
+                }
+                logstream << "first frame in queue: " << name;
+                *already_logged = true;
+            });
+        };
         commands_["queues.stats"] = [this](ClientStream &cs, std::string&) {
             manager_->edges()->printEdgesStats(cs);
         };
