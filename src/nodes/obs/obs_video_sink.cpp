@@ -213,15 +213,6 @@ static inline enum video_format convert_pixel_format(int f)
 	return VIDEO_FORMAT_NONE;
 }
 
-static inline EGLint obs_color_format_to_drm(gs_color_format f) {
-    switch (f) {
-        case GS_R8: return DRM_FORMAT_R8;
-        case GS_R8G8: return DRM_FORMAT_RG88;
-        default:;
-    }
-    return DRM_FORMAT_INVALID;
-}
-
 class ObsVideoSink: public NodeSingleInput<av::VideoFrame>, public NonBlockingNode<ObsVideoSink>, public IFlushable {
 protected:
     InstanceData& app_instance_;
@@ -602,23 +593,27 @@ public:
                         obs_frame_.linesize[i] = abs(frm.raw()->linesize[i]);
                     }
                 } else if (hw_pixel_format==AV_PIX_FMT_VAAPI) {
-                    AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
-                    VASurfaceID va_surface = (uintptr_t)frm.raw()->data[3];
-                    VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
-                    VAStatus sts_export = vaExportSurfaceHandle(hwctx->display, va_surface,
-                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                        VA_EXPORT_SURFACE_READ_ONLY,
-                        prime);
-                    if (sts_export != VA_STATUS_SUCCESS) {
-                        logstream << "vaExportSurfaceHandle failed: " << vaErrorStr(sts_export);
-                        delete prime;
-                        prime = nullptr;
-                    }
+                    #if HAVE_VAAPI
+                        AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
+                        VASurfaceID va_surface = (uintptr_t)frm.raw()->data[3];
+                        VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
+                        VAStatus sts_export = vaExportSurfaceHandle(hwctx->display, va_surface,
+                            VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                            VA_EXPORT_SURFACE_READ_ONLY,
+                            prime);
+                        if (sts_export != VA_STATUS_SUCCESS) {
+                            logstream << "vaExportSurfaceHandle failed: " << vaErrorStr(sts_export);
+                            delete prime;
+                            prime = nullptr;
+                        }
 
-                    for (int i=0; i<planes_count_; i++) {
-                        obs_frame_.data[i] = (uint8_t*)prime;
-                        obs_frame_.linesize[i] = i;
-                    }
+                        for (int i=0; i<planes_count_; i++) {
+                            obs_frame_.data[i] = (uint8_t*)prime;
+                            obs_frame_.linesize[i] = i;
+                        }
+                    #else
+                        throw Error("got VAAPI frame but compiled without VAAPI support");
+                    #endif
                 }
                 obs_frame_.width = frm.width();
                 obs_frame_.height = frm.height();
