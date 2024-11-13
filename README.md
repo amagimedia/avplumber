@@ -214,6 +214,16 @@ node.object.get input programs
 [{"index":0,"streams":[0,3,4,5]},{"index":1,"streams":[1,3,4,5]},{"index":2,"streams":[2,3,4,5]}]
 ```
 
+### Closed Captions control
+
+```cc.pause```
+
+Pause Closed Captions processing. This command will return an error when no `extract_cc_data` node present or when there are multiple `extract_cc_data` nodes connected in graph.
+
+```cc.resume```
+
+Resume Closed Captions processing. This command will return an error when no `extract_cc_data` node present or when there are multiple `extract_cc_data` nodes connected in graph.
+
 ### Queues (edges)
 
 ```queue.plan_capacity queue_name capacity```
@@ -611,6 +621,10 @@ Supports parameters working the same as in `extract_timestamps` node:
 -   `passthrough_before_available`
 -   `drop_before_available`
 
+### `extract_cc_data`
+
+Extracts closed captions data encoded in video stream.
+
 ### `filter_video`, `filter_audio`
 
 1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`, respectively
@@ -891,6 +905,22 @@ Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for heade
 
 -   `pipe` (string) - mandatory, path to named pipe
 
+### `parse_scte35`
+
+Parse SCTE35 `SPLICE_INSERT` command.
+
+1 input: `av::Packet`, must be connected to SCTE35 data stream (e.g. `d:0` key in routing map of the `demux` node)
+
+-   `url` (string of URL) - if specified, JSON object with splice insert data will be HTTP POSTed to this url. If unspecified, the object will be printed to the log for debugging purposes.
+
+### `extract_cc_data`
+
+1 input: `av::VideoFrame`, 1 output: `av::Packet`
+
+Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
+
+no parameters
+
 ### `jittergen`
 
 Enabled only if avplumber is compiled with `BUILD_TYPE=Debug`. Delay packets
@@ -956,8 +986,8 @@ Make sure that `preseek` is set to 0 (or unspecified) in the player's `input` no
 ### How to quickly change input on the fly
 
 ```
-node.interrupt input
-node.param.set input url "rtmp://new.stream/url"
+node.interrupt input
+node.param.set input url "rtmp://new.stream/url"
 ```
 
 Important: Execute the second command immediately after the first.
@@ -972,8 +1002,8 @@ Note that if input is running normally (i.e. not starting right now),
 the following commands will do effectively the same:
 
 ```
-node.param.set input url "rtmp://new.stream/url"
-node.auto_restart input
+node.param.set input url "rtmp://new.stream/url"
+node.auto_restart input
 ```
 
 ### How to dump avplumber config from log
@@ -991,13 +1021,13 @@ grep -Ev '^(EXT-X-MEDIA-SEQUENCE:[0-9]+|\[AVIOContext @ 0x[a-f0-9]+\] Statistics
 ### Watch queues fill in real time
 
 ```
-watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats' | nc localhost 20200"
 ```
 
 In some versions of netcat it doesn't work. Try this:
 
 ```
-watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
+watch -n0.1 "echo 'queues.stats\nbye\n\n' | nc localhost 20200"
 ```
 
 If you have big queues, they may occupy multiple lines in terminal. To make them shorter:
