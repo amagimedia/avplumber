@@ -31,6 +31,7 @@ public:
     using OnFinishedHandler = std::function<void(std::shared_ptr<NodeWrapper>, bool)>;
 protected:
     std::string name_;
+    std::string type_;
     std::shared_ptr<Node> node_;
     std::unique_ptr<std::thread> thread_;
     std::shared_ptr<NodeManager> manager_;
@@ -68,6 +69,9 @@ public:
     }
     inline const std::string& name() {
         return name_;
+    }
+    inline const std::string& type() {
+        return type_;
     }
     inline bool isWorking() {
         return threadWorks() || (isNonBlocking() && node_!=nullptr && dowork_);
@@ -164,6 +168,7 @@ protected:
     
     bool nodeExists(const std::string &name);
     std::shared_ptr<NodeWrapper> getNodeByName(const std::string &name);
+    std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> getNodesByType(const std::string &type);
     void panic();
 public:
     NodeManager(const NodeManager&) = delete;
@@ -188,6 +193,9 @@ public:
             throw Error("Group " + name + " doesn't exist.");
         }
         return (*iter).second;
+    }
+    std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> nodes(const std::string &type) {
+        return getNodesByType(type);
     }
     decltype(edges_)& edges() {
         return edges_;
