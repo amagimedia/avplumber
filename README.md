@@ -833,6 +833,22 @@ Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for heade
 
 -   `pipe` (string) - mandatory, path to named pipe
 
+### `parse_scte35`
+
+Parse SCTE35 `SPLICE_INSERT` command.
+
+1 input: `av::Packet`, must be connected to SCTE35 data stream (e.g. `d:0` key in routing map of the `demux` node)
+
+-   `url` (string of URL) - if specified, JSON object with splice insert data will be HTTP POSTed to this url. If unspecified, the object will be printed to the log for debugging purposes.
+
+### `extract_cc_data`
+
+1 input: `av::VideoFrame`, 1 output: `av::Packet`
+
+Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
+
+no parameters
+
 ### `jittergen`
 
 Enabled only if avplumber is compiled with `BUILD_TYPE=Debug`. Delay packets
