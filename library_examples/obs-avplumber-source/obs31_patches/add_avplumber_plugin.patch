@@ -1,0 +1,10 @@
+diff --git a/plugins/CMakeLists.txt b/plugins/CMakeLists.txt
+index 1af782adc..0e454c94a 100644
+--- a/plugins/CMakeLists.txt
++++ b/plugins/CMakeLists.txt
+@@ -88,3 +88,6 @@ add_obs_plugin(vlc-video WITH_MESSAGE)
+ add_obs_plugin(win-capture PLATFORMS WINDOWS)
+ add_obs_plugin(win-dshow PLATFORMS WINDOWS)
+ add_obs_plugin(win-wasapi PLATFORMS WINDOWS)
++
++add_obs_plugin(avplumber-source)
