@@ -35,6 +35,7 @@ class AVPlumberSource {
 
     void doStop() {
         if (avplumber_) {
+            // no mutex needed - avplumber_ pointer changes only in the same thread
             avplumber_->shutdown();
             {
                 std::lock_guard<decltype(avplumber_create_destroy_)> lock(avplumber_create_destroy_);
@@ -43,6 +44,10 @@ class AVPlumberSource {
         }
     }
     void doStart() {
+        if (avplumber_) {
+            // no mutex needed - avplumber_ pointer changes only in the same thread
+            avplumber_->shutdown();
+        }
         {
             std::lock_guard<decltype(avplumber_create_destroy_)> lock(avplumber_create_destroy_);
             avplumber_ = std::unique_ptr<AVPlumber>(new AVPlumber());
@@ -79,6 +84,7 @@ class AVPlumberSource {
                     current_state_ = (desired==State::Restart) ? State::Stopped : desired;
                 } catch (std::exception &e) {
                     std::cerr << "State transition failed: " << e.what() << std::endl;
+                    mgmt_wakeup_.wait(500);
                 }
             }
         }
@@ -101,9 +107,12 @@ public:
         join();
     }*/
     void shutdownButReturnASAP() {
+        // this is called from different thread than management thread and must be mutexed approprietly
         {
             std::lock_guard<decltype(avplumber_create_destroy_)> lock(avplumber_create_destroy_);
-            avplumber_->unsetObsSourceAndWait();
+            if (avplumber_) {
+                avplumber_->unsetObsSourceAndWait();
+            }
         }
         goToState(State::Shutdown);
     }
@@ -111,7 +120,17 @@ public:
         mgmt_thread_.join();
     }
     void tick() {
-        avplumber_->obsTick();
+        // this is called from different thread than management thread and must be mutexed approprietly
+        if (avplumber_create_destroy_.try_lock()) {
+            try {
+                if (avplumber_ != nullptr) {
+                    avplumber_->obsTick();
+                }
+            } catch (std::exception &e) {
+                std::cerr << "tick handler failed: " << e.what() << std::endl;
+            }
+            avplumber_create_destroy_.unlock();
+        }
     }
     AVPlumberSource(obs_data_t *settings, obs_source_t *source):
         source_(source),
@@ -176,7 +195,8 @@ static const char *avplumber_source_getname (void *unused) {
 struct obs_source_info avplumber_source = {
     .id = "avplumber_source",
     .type = OBS_SOURCE_TYPE_INPUT,
-    .output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO,
+    // OBS_SOURCE_DO_NOT_DUPLICATE is necessary because of possible port collision of TCP control server
+    .output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE,
     .get_name = avplumber_source_getname,
     .create = avplumber_source_create,
     .destroy = avplumber_source_destroy,
