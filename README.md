@@ -16,6 +16,8 @@ So does it replace FFmpeg in all use cases? Not at all. It is targetted at live 
 
 ## Quick start
 
+Note: be sure to [check other branches](https://github.com/amagimedia/avplumber/branches/active) ([tree view](https://github.com/amagimedia/avplumber/network)) if you want to test latest features.
+
 Make sure to clone this repo with `--recursive` option.
 
     git clone --recursive https://github.com/amagimedia/avplumber
