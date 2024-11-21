@@ -578,10 +578,6 @@ Supports parameters working the same as in `extract_timestamps` node:
 -   `passthrough_before_available`
 -   `drop_before_available`
 
-### `extract_cc_data`
-
-Extracts closed captions data encoded in video stream.
-
 ### `filter_video`, `filter_audio`
 
 1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`, respectively
