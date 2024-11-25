@@ -665,6 +665,17 @@ public:
             return streams_object_;
         } else if (name=="programs") {
             return programs_object_;
+        } else if (name == "duration" ) {
+            Parameters res;
+            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+
+            if (seek_table_.empty()) {
+                auto duration = rescaleTS(ictx_.duration(), {1, 1000});
+                res["duration"] = duration.timestamp();
+            } else {
+                res["duration"] = seek_table_.crbegin()->timestamp_ms;
+            }
+            return res;
         } else {
             throw Error("Unknown object to get");
         }

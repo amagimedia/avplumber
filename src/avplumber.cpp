@@ -28,6 +28,12 @@
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
     #include "EventLoop.hpp"
+
+    #define PAUSE_TEAM "@pause-team"
+    #define SYNC_TEAM "@sync-team"
+    #define INPUT_NODE "input"
+    #define PAUSE_NODE "pause"
+    #define SINK_NODE "sink"
 #endif
 
 #include <avcpp/av.h>
@@ -513,36 +519,6 @@ public:
                 ev->event().signal();
             });
         };
-        commands_["cc.pause"] = [this](ClientStream &cs, std::string arg) {
-            auto nodes = manager_->nodes("extract_cc_data");
-
-            if (nodes.empty()) {
-                throw Error("no extract_cc_data node found");
-            }
-            if (nodes.size() > 1) {
-                throw Error("multiple extract_cc_data nodes found");
-            }
-            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
-            if (!node_pauseable) {
-                throw Error("node extract_cc_data is not pauseable");
-            }
-            node_pauseable->pause();
-        };
-        commands_["cc.resume"] = [this](ClientStream &cs, std::string arg) {
-            auto nodes = manager_->nodes("extract_cc_data");
-
-            if (nodes.empty()) {
-                throw Error("no extract_cc_data node found");
-            }
-            if (nodes.size() > 1) {
-                throw Error("multiple extract_cc_data nodes found");
-            }
-            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
-            if (!node_pauseable) {
-                throw Error("node extract_cc_data is not resumeable");
-            }
-            node_pauseable->resume();
-        };
         commands_["realtime.team.reset"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
             team->reset();
@@ -732,6 +708,52 @@ void AVPlumber::unsetObsSourceAndWait() {
 
 void AVPlumber::obsTick() {
     impl_->tick();
+}
+
+void AVPlumber::obs_pause() {
+    executeCommandsFromString("pause " PAUSE_TEAM " now");
+}
+
+void AVPlumber::obs_play() {
+    executeCommandsFromString("resume " PAUSE_TEAM);
+}
+
+int64_t AVPlumber::obs_get_time() {
+    try {
+        auto node = impl_->manager()->node(PAUSE_NODE)->node();
+        if (node) {
+            auto edge = node->sourceEdge();
+            return rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
+        }
+    }
+    catch(...) {
+    }
+    return 0;
+}
+
+void AVPlumber::obs_set_time(int64_t ms) {
+    char command[128];
+    sprintf(command, "seek %s now %ld", SYNC_TEAM, ms);
+    executeCommandsFromString(command);
+}
+
+void AVPlumber::obs_stop() {
+    // TODO:
+}
+
+void AVPlumber::obs_restart() {
+    // TODO:
+}
+
+int64_t AVPlumber::obs_get_duration() {
+    try {
+        auto node = impl_->manager()->node(INPUT_NODE);
+        auto duration = node->getObject("duration");
+        return duration["duration"];
+    }
+    catch(...) {
+        return 0;
+    }
 }
 #endif
 

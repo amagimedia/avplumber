@@ -37,6 +37,14 @@ public:
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
     void obsTick();
+
+    void obs_play();
+    void obs_pause();
+    void obs_stop();
+    void obs_restart();
+    int64_t obs_get_time();
+    void obs_set_time(int64_t ms);
+    int64_t obs_get_duration();
 #endif
 
     void executeCommandsFromFile(const std::string path);
