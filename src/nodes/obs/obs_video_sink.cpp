@@ -506,7 +506,7 @@ public:
     }
     virtual void processNonBlocking(EventLoop& evl, bool ticks) {
         av::VideoFrame *pfrm = this->source_->peek(0);
-        if (pfrm==nullptr) {
+        if (!pfrm) {
             //logstream << "no frame";
             bool timelimit = planes_count_ && (timeout_ms_>=0);
             if (timelimit && !ticks) {
@@ -526,11 +526,6 @@ public:
         if (pfrm && *pfrm) {
             //logstream << "have frame";
             av::VideoFrame frm = *pfrm;
-            if (ticks) {
-                while (this->source_->pop()) {}; // remove outstanding buffered packets
-            } else {
-                this->source_->pop();
-            }
             AVPixelFormat hw_pixel_format;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
@@ -630,6 +625,13 @@ public:
         }
         prev_timestamp_ = obs_frame_.timestamp;
         outputFrame();
+        if (pfrm) {
+            if (ticks) {
+                while (this->source_->pop()) {}; // remove outstanding buffered packets
+            } else {
+                this->source_->pop();
+            }
+        }
         if (!ticks) {
             // process next packet
             this->yieldAndProcess();
