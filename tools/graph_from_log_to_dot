@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+
+import json, fileinput, re, attr
+from collections import namedtuple
+
+exec_re = re.compile(r'^.+\[control\] Executing: (.+)$')
+
+def single_or_multi(item, cb):
+    if isinstance(item, list):
+        for x in item:
+            cb(x)
+    else:
+        cb(item)
+
+@attr.s
+class Edge:
+    source = attr.ib(default=None)
+    sink = attr.ib(default=None)
+
+edges = {}
+
+uniqid = 1
+
+print('digraph G {')
+
+for line in fileinput.input():
+    exec_match = exec_re.match(line)
+    if exec_match is None:
+        continue
+    cmd, args_str = exec_match.group(1).split(' ', maxsplit=1)
+    if cmd in ('node.add', 'node.add_start', 'node.add_create'):
+        node_obj = json.loads(args_str)
+        if 'name' in node_obj:
+            name = node_obj['name']
+            label = '"' + name + '"\n[' + node_obj['type'] +']'
+        else:
+            name = node_obj['type'] + '_' + str(uniqid)
+            uniqid += 1
+            label = '[' + node_obj['type'] + ']'
+        
+        def connect(json_key, edge_attr):
+            if not json_key in node_obj:
+                return
+            def f(x):
+                setattr(edges.setdefault(x, Edge()), edge_attr, name)
+            single_or_multi(node_obj[json_key], f)
+        
+        connect('src', 'sink')
+        connect('dst', 'source')
+        if 'routing' in node_obj:
+            for routing_dest in node_obj['routing'].values():
+                edges.setdefault(routing_dest, Edge()).source = name
+        
+        print('  ' + name + ' [label=' + json.dumps(label) + ',shape=box,style=filled,color=".7 .3 1.0"];')
+
+for name, edge in edges.items():
+    try:
+        print('  ' + edge.source + ' -> ' + edge.sink + ' [label=' + json.dumps(name) + '];')
+    except TypeError:
+        raise RuntimeError('Unused edge ' + name + ' = ' + repr(edge))
+
+print('}')
