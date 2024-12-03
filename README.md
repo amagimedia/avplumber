@@ -905,11 +905,21 @@ node.param.set input url "rtmp://new.stream/url"
 node.auto_restart input
 ```
 
-### How to dump avplumber config from log
+### Dump avplumber config from log
 
 ```
 sed -e 's/^.\+\[control\] Executing: \(.\+\)$/\1/; t; d' < log
 ```
+
+### Show nodes graph based on add node commands from log
+
+```
+./tools/graph_from_log_to_dot log > graph.dot
+dot -Tsvg graph.dot -o graph.svg
+xdg-open graph.svg
+```
+
+(may not work correctly with `detach` or `retry` commands, will not work with dangling edges, pull requests welcome!)
 
 ### View log without HLS muxer's spam
 
