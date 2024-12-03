@@ -21,7 +21,7 @@ public:
 
         auto obj = sync_obj_.lock();
         if (obj) {
-            obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+            //obj->flushAndSeek(StreamTarget::from_frames_relative(0));
         }
     }
     void pause(const StreamTarget& target) {
