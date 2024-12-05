@@ -259,14 +259,9 @@ void NodeWrapper::threadFunction() {
     }
 
     finished_ = true;
-    logstream << "Node " << name_ << " finished." << std::endl;
     if ((!on_finished_.empty()) && manager_->shouldWork()) {
+        logstream << "Node " << name_ << " finished, running callbacks";
         set_thread_name("~"+name_);
-        try {
-            thread_->detach(); // detach myself to call on_finished_ independently
-        } catch (std::exception &e) {
-            logstream << "unable to detach thread: " << e.what();
-        }
         for (auto &cb: on_finished_) {
             try {
                 cb(this->shared_from_this(), stop_requested_);
@@ -274,6 +269,9 @@ void NodeWrapper::threadFunction() {
                 logstream << "on_finished callback failed: " << e.what();
             }
         }
+        logstream << "End of threadFunction of node " << name_;
+    } else {
+        logstream << "Node " << name_ << " finished, end of threadFunction";
     }
 }
 
@@ -309,11 +307,16 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
         if (params.count("auto_restart") > 0) {
             auto_restart = params["auto_restart"];
         }
+
+        // we need to create threads for any blocking operations in onFinished callbacks
+        // otherwise deadlock may occur on NodeWrapper::thread_.join()
         if (auto_restart == "on") {
             nw->onFinished([](std::shared_ptr<NodeWrapper> n, bool requested) {
                 if (requested) return;
-                logstream << "Node " << n->name() << " finished, restarting.";
-                n->start();
+                logstream << "Node " << n->name() << " finished, restarting";
+                start_thread(std::string("R:") + n->name(), [n]() {
+                    n->start();
+                });
             });
         } else if (auto_restart == "group") {
             if (!in_group) {
@@ -322,14 +325,16 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
             nw->onFinished([](std::shared_ptr<NodeWrapper> n, bool requested) {
                 if (requested) return;
                 logstream << "Node " << n->name() << " initiated group auto-restart";
-                n->group()->restartNodes();
+                n->group()->restartNodes(); // non-blocking, we can call it in the same thread
                 logstream << "Auto-restart scheduled.";
             });
         } else if (auto_restart == "panic") {
             nw->onFinished([this](std::shared_ptr<NodeWrapper> n, bool requested) {
                 if (requested) return;
                 logstream << "Node " << n->name() << " finished but it should never finish (declared as auto_restart=panic)";
-                this->panic();
+                start_thread(std::string("PANIC:") + n->name(), [this]() {
+                    this->panic();
+                });
             });
         } else if (auto_restart == "off") {
             // don't do anything
@@ -694,7 +699,7 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
                     retry = true;
                 }
             } else if (retry) {
-                logstream << "BUG: currentState() != desired_state_ but retry==true, fixing to avoid infinite loop";
+                logstream << "BUG: currentState() == desired_state_ but retry==true, fixing to avoid infinite loop";
                 retry = false;
             }
         }
