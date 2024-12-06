@@ -38,7 +38,7 @@ public:
                     logstream << p;
                 }
                 if (json_active_) {
-                    rest_.send("", p);
+                    rest_.send("", p.dump());
                 }
             }
         }
