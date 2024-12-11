@@ -26,6 +26,7 @@ public:
         if (s.splice_command_type == SCTE35_COMMAND_TYPE__SPLICE_INSERT) {
             if (json_active_ || log_active_) {
                 Parameters p;
+                p["scte_event"]["pts_time"] = s.splice_insert.splice_time.pts_time;
                 p["scte_event"]["event_id"] = s.splice_insert.splice_event_id;
                 p["scte_event"]["immediate"] = !!s.splice_insert.splice_immediate_flag;
                 p["scte_event"]["cancel"] = !!s.splice_insert.splice_event_cancel_indicator;
@@ -38,7 +39,7 @@ public:
                     logstream << p;
                 }
                 if (json_active_) {
-                    rest_.send("", p);
+                    rest_.send("", p.dump());
                 }
             }
         }
