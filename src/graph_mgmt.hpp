@@ -85,6 +85,7 @@ public:
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);
+    void setObject(const std::string, const Parameters&);
 
     bool stopAndWait();
     void join();

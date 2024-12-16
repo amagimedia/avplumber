@@ -29,6 +29,7 @@ public:
             //rescaler_->rescale(out_frame, in_frame);
             av::VideoFrame out_frame = rescaler_->rescale(in_frame, av::throws());
             if (out_frame) {
+                av_dict_copy(&out_frame.raw()->metadata, in_frame.raw()->metadata, 0);
                 //logstream << "scale out: PTS = " << out_frame.pts() << std::endl;
                 this->sink_->put(out_frame);
             }

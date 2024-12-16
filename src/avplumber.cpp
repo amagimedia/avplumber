@@ -371,6 +371,17 @@ public:
             object_name = strutils::trim(object_name);
             cs << manager_->node(node_name)->getObject(object_name) << "\n";
         };
+        commands_["node.object.set"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string node_name, object_name, content;
+            ss >> node_name >> object_name;
+            std::getline(ss, content);
+
+            content = strutils::trim(content);
+
+            auto node = manager_->node(node_name);
+            node->setObject(object_name, json::parse(content));
+        };
         commands_["queue.plan_capacity"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string name;
