@@ -30,15 +30,17 @@ enum class ETimestampSource {
 };
 
 class StreamInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
-                   public IStoppable, public IInterruptible, public IReturnsObjects, public ISeekAt {
+                   public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt {
 protected:
     av::FormatContext ictx_;
     std::atomic_bool should_end_ {false};
     bool input_url_set_ = false;
     AVTS wait_start_;
     AVTS wait_max_ = AV_NOPTS_VALUE;
-    av::Timestamp stop_ts_ = NOTS;
+    av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
+    StreamTarget start_ts_;
+    StreamTarget stop_ts_ = StreamTarget::end();
 
     std::string seek_table_url_;
     std::mutex seek_table_mutex_;
@@ -53,6 +55,7 @@ protected:
     int64_t last_stream_position_ = -1;
     int64_t live_delay_ = 1'000;
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
+    bool loop_ = false;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -110,6 +113,12 @@ private:
             } else {
                 t -= live_delay_;
             }
+            st.ts = av::Timestamp(t, {1, 1000});
+            st.type = StreamTarget::ETargetType::tt_Timestamp;
+        }
+
+        if (st.isEnd()) {
+            uint64_t t = seek_table_.crbegin()->timestamp_ms;
             st.ts = av::Timestamp(t, {1, 1000});
             st.type = StreamTarget::ETargetType::tt_Timestamp;
         }
@@ -246,6 +255,9 @@ private:
                 }
                 break;
             case StreamTarget::ETargetType::tt_Live:
+                // do nothing;
+                return;
+            case StreamTarget::ETargetType::tt_End:
                 // do nothing;
                 return;
             case StreamTarget::ETargetType::tt_Stop:
@@ -519,8 +531,8 @@ public:
         if (!input_url_set_)
             return;
 
-        if (stop_ts_.isValid()) {
-            if (stop_ts_ <= wallclock.absolute_ts()) {
+        if (node_stop_ts_.isValid()) {
+            if (node_stop_ts_ <= wallclock.absolute_ts()) {
                 stop();
             }
             return;
@@ -550,7 +562,7 @@ public:
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
                 } else if (seek_target_.isStop()) {
                     logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
-                    stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+                    node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
                 }
                 need_seek_ = false;
                 seeked = true;
@@ -575,6 +587,10 @@ public:
         }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
+        if (pkt.isNull() && loop_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
+            seek(start_ts_);
+            return;
+        }
         if (pkt.isNull()) {
             this->finished_ = true;
             logstream << "Got null packet";
@@ -631,8 +647,26 @@ public:
                 }
             }
         }
-
         this->sink_->put(pkt);
+
+        // check if we have to stop/loop video
+        if (play_direction_ == EPlaybackDirection::pd_Forward) {
+            if (stop_ts_.ts.isValid() && (pkt.pts() >= stop_ts_.ts)) {
+                if (loop_) {
+                    seek(start_ts_);
+                } else {
+                    stop();
+                }
+            }
+        } else {
+            if (start_ts_.ts.isValid() && (pkt.pts() <= start_ts_.ts)) {
+                if (loop_) {
+                    seek(stop_ts_);
+                } else {
+                    stop();
+                }
+            }
+        }
 
         // check if we have some planned seek
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
@@ -798,6 +832,9 @@ public:
         if (params.count("live_delay") > 0) {
             live_delay_ = params["live_delay"].get<int64_t>();
         }
+        if (params.count("loop") > 0) {
+            loop_ = params["loop"];
+        }
         if (params.count("timestamp_source") > 0) {
             std::string ts_source = params["timestamp_source"];
             if (ts_source == "input") {
@@ -809,12 +846,15 @@ public:
             }
         }
         if (params.count("start_ts") > 0) {
-            std::string start = params["start_ts"];
-            seek(StreamTarget::from_string(start));
+            std::string s = params["start_ts"];
+            start_ts_ = StreamTarget::from_string(s);
+            fixInputTimestamp(start_ts_);
+            seek(start_ts_);
         }
         if (params.count("stop_ts") > 0) {
             std::string stop = params["stop_ts"];
-            seekAtAdd(StreamTarget:: from_string(stop), StreamTarget::stop());
+            stop_ts_ = StreamTarget::from_string(stop);
+            fixInputTimestamp(stop_ts_);
         }
         if (params.count("stop_delay") > 0) {
             stop_delay_ = av::Timestamp(params["stop_delay"].get<int64_t>(), {1, 1000});
@@ -838,6 +878,33 @@ public:
             return res;
         } else {
             throw Error("Unknown object to get");
+        }
+    }
+    virtual void setObject(const std::string name, const Parameters& p) {
+        if (name == "stream-limits") {
+            if (p.count("start") > 0) {
+                if (p["start"].is_null()) {
+                    start_ts_ = StreamTarget();
+                } else {
+                    std::string s = p["start"];
+                    StreamTarget ts = StreamTarget::from_string(s);
+                    fixInputTimestamp(ts);
+                    start_ts_ = ts;
+                }
+            }
+            if (p.count("stop") > 0) {
+                if (p["stop"].is_null()) {
+                    stop_ts_ = StreamTarget::end();
+                } else {
+                    std::string s = p["stop"];
+                    StreamTarget ts = StreamTarget::from_string(s);
+                    fixInputTimestamp(ts);
+                    stop_ts_ = ts;
+                }
+            }
+            if (p.count("loop") > 0) {
+                loop_ = p["loop"].get<bool>();
+            }
         }
     }
 };

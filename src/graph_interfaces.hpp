@@ -51,6 +51,7 @@ struct StreamTarget {
         tt_Live,
         tt_FrameRelative,
         tt_FrameAbsolute,
+        tt_End,
         tt_Stop
     };
     av::Timestamp ts = NOTS;
@@ -133,11 +134,17 @@ struct StreamTarget {
     static StreamTarget live() {
         return { type: ETargetType::tt_Live };
     }
+    static StreamTarget end() {
+        return { type: ETargetType::tt_End };
+    }
     static StreamTarget stop() {
         return { type: ETargetType::tt_Stop };
     }
     bool isLive() {
         return type == ETargetType::tt_Live;
+    }
+    bool isEnd() {
+        return type == ETargetType::tt_End;
     }
     bool isBytes() {
         return type == ETargetType::tt_Bytes;
@@ -289,6 +296,11 @@ public:
 class IReturnsObjects {
 public:
     virtual Parameters getObject(const std::string) = 0;
+};
+
+class IInputsObjects {
+public:
+    virtual void setObject(const std::string, const Parameters&) = 0;
 };
 
 class IPreferredFormatReceiver {
