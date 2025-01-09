@@ -16,6 +16,8 @@ So does it replace FFmpeg in all use cases? Not at all. It is targetted at live 
 
 ## Quick start
 
+Note: be sure to [check other branches](https://github.com/amagimedia/avplumber/branches/active) ([tree view](https://github.com/amagimedia/avplumber/network)) if you want to test latest features.
+
 Make sure to clone this repo with `--recursive` option.
 
     git clone --recursive https://github.com/amagimedia/avplumber
@@ -621,10 +623,6 @@ Supports parameters working the same as in `extract_timestamps` node:
 -   `passthrough_before_available`
 -   `drop_before_available`
 
-### `extract_cc_data`
-
-Extracts closed captions data encoded in video stream.
-
 ### `filter_video`, `filter_audio`
 
 1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`, respectively
@@ -1006,11 +1004,21 @@ node.param.set input url "rtmp://new.stream/url"
 node.auto_restart input
 ```
 
-### How to dump avplumber config from log
+### Dump avplumber config from log
 
 ```
 sed -e 's/^.\+\[control\] Executing: \(.\+\)$/\1/; t; d' < log
 ```
+
+### Show nodes graph based on add node commands from log
+
+```
+./tools/graph_from_log_to_dot log > graph.dot
+dot -Tsvg graph.dot -o graph.svg
+xdg-open graph.svg
+```
+
+(may not work correctly with `detach` or `retry` commands, will not work with dangling edges, pull requests welcome!)
 
 ### View log without HLS muxer's spam
 
