@@ -8,19 +8,19 @@ private:
     av::Timestamp next_ts_ = NOTS;
     T last_frame_;
     av::Rational timebase_;
-    bool frame_wasted_ = false;
+    bool last_unused_ = false;
     int dropped_ = 0;
     int duplicated_ = 0;
     int total_out_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
-    void setLast(T &frm, bool wasted) {
-        if (frame_wasted_) {
+    void setLast(T &frm, bool unused) {
+        if (last_unused_) {
             // if previous frame wasn't used and we have to overwrite it, increase dropped frames count
             dropped_++;
         }
         last_frame_ = frm;
-        frame_wasted_ = wasted;
+        last_unused_ = unused;
     }
 public:
     ForceFPS(std::unique_ptr<Source<T>> &&source, std::unique_ptr<Sink<T>> &&sink, const av::Rational fps, const av::Rational timebase): NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), timebase_(timebase) {
@@ -66,11 +66,13 @@ public:
                     // input frame rate too low
                     // duplicate previous frame
                     while (in_ts > next_ts_) {
-                        if (!frame_wasted_) {
+                        if (last_unused_) {
+                            av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
+                        } else {
                             // increase number of duplicated frames only if last_frame_ was already used
                             duplicated_++;
                         }
-                        frame_wasted_ = false;
+                        last_unused_ = false;
                         last_frame_.setPts(next_ts_);
                         total_out_++;
                         this->sink_->put(last_frame_);
@@ -104,6 +106,7 @@ public:
         last_ts_ = in_ts;
         next_ts_ = addTS(in_ts, frame_delta_);
         pkt.setPts(in_ts);
+        av_frame_remove_side_data(pkt.raw(), AV_FRAME_DATA_A53_CC);
         setLast(pkt, false);
         this->sink_->put(pkt);
         total_out_++;
