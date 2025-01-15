@@ -730,14 +730,13 @@ void AVPlumber::obs_play() {
 }
 
 int64_t AVPlumber::obs_get_time() {
-    try {
-        auto node = impl_->manager()->node(PAUSE_NODE)->node();
-        if (node) {
-            auto edge = node->sourceEdge();
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto n = node->node();
+        if (n) {
+            auto edge = n->sourceEdge();
             return rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
         }
-    }
-    catch(...) {
     }
     return 0;
 }
@@ -750,20 +749,19 @@ void AVPlumber::obs_set_time(int64_t ms) {
 
 void AVPlumber::obs_stop() {
     // TODO:
+    // executeCommandsFromString("group.stop g1");
 }
 
 void AVPlumber::obs_restart() {
     // TODO:
+    // executeCommandsFromString("group.restart g1");
 }
 
 int64_t AVPlumber::obs_get_duration() {
-    try {
-        auto node = impl_->manager()->node(INPUT_NODE);
+    auto node = impl_->manager()->node_if_exists(INPUT_NODE);
+    if (node) {
         auto duration = node->getObject("duration");
         return duration["duration"];
-    }
-    catch(...) {
-        return 0;
     }
 }
 #endif

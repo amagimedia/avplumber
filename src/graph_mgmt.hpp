@@ -188,6 +188,10 @@ public:
         }
         return p;
     }
+    std::shared_ptr<NodeWrapper> node_if_exists(const std::string &name) {
+        std::shared_ptr<NodeWrapper> p = getNodeByName(name);
+        return p;
+    }
     std::shared_ptr<NodeGroup> group(const std::string name) {
         auto lock = getLock();
         auto iter = groups_.find(name);
