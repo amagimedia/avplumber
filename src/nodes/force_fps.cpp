@@ -66,11 +66,11 @@ public:
                     // input frame rate too low
                     // duplicate previous frame
                     while (in_ts > next_ts_) {
-                        if (last_unused_) {
-                            av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
-                        } else {
+                        if (!last_unused_) {
                             // increase number of duplicated frames only if last_frame_ was already used
                             duplicated_++;
+                            // if used more than once, remove side data to prevent CC duplication
+                            av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
                         }
                         last_unused_ = false;
                         last_frame_.setPts(next_ts_);
@@ -106,10 +106,9 @@ public:
         last_ts_ = in_ts;
         next_ts_ = addTS(in_ts, frame_delta_);
         pkt.setPts(in_ts);
-        av_frame_remove_side_data(pkt.raw(), AV_FRAME_DATA_A53_CC);
-        setLast(pkt, false);
         this->sink_->put(pkt);
         total_out_++;
+        setLast(pkt, false);
         this->source_->pop();
         total_in_++;
         av::Timestamp now = wallclock.ts();
