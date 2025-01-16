@@ -1,5 +1,8 @@
 #include "node_common.hpp"
 #include <avcpp/videorescaler.h>
+extern "C" {
+#include <libavutil/frame.h>
+}
 #include "../util.hpp"
 #include "../video_parameters.hpp"
 
@@ -29,6 +32,16 @@ public:
             //rescaler_->rescale(out_frame, in_frame);
             av::VideoFrame out_frame = rescaler_->rescale(in_frame, av::throws());
             if (out_frame) {
+                for (int i=0; i<in_frame.raw()->nb_side_data; i++) {
+                    AVFrameSideData* sd_src = in_frame.raw()->side_data[i];
+                    if (sd_src==nullptr) continue;
+                    AVBufferRef *ref = av_buffer_ref(sd_src->buf);
+                    AVFrameSideData* sd_dst = av_frame_new_side_data_from_buf(out_frame.raw(), sd_src->type, ref);
+                    if (sd_dst==nullptr) {
+                        throw Error("failed to create side data in rescaled frame");
+                    }
+                    av_dict_copy(&(sd_dst->metadata), sd_src->metadata, 0);
+                }
                 //logstream << "scale out: PTS = " << out_frame.pts() << std::endl;
                 this->sink_->put(out_frame);
             }
