@@ -484,7 +484,7 @@ public:
         if (outlink_) {
             return outlink_->sample_rate;
         } else if (default_params_.sample_rate>0) {
-            return default_params_.sample_rate>0;
+            return default_params_.sample_rate;
         } else {
             throw Error("unknown filter output sample rate");
         }
