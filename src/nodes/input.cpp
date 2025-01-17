@@ -716,6 +716,23 @@ public:
             last_stream_position_ = avio_tell(ictx_.raw()->pb);
         }
     }
+    size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) override {
+        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+
+        if (seek_table_.empty() || (start_frame >= seek_table_.size())) {
+            throw Error("no seek table available");
+        }
+        int64_t ms = seek_table_.at(start_frame).timestamp_ms + rescaleTS(offset, {1, 1000}).timestamp();
+        auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), ms, [](const SeekTableEntry& e, size_t value) {
+            return e.timestamp_ms < value;
+        });
+
+        if (it == seek_table_.end()) {
+            throw Error("timetamp outside input duration");
+        }
+
+        return it - seek_table_.begin();
+    }
     static std::shared_ptr<StreamInput> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
@@ -830,7 +847,7 @@ public:
             seek_thread_ready_.wait();
         }
         if (params.count("live_delay") > 0) {
-            live_delay_ = params["live_delay"].get<int64_t>();
+            live_delay_ = int64_t(1000 * params["live_delay"].get<double>());
         }
         if (params.count("loop") > 0) {
             loop_ = params["loop"];
