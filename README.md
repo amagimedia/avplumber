@@ -306,13 +306,16 @@ Live wideo is a video playback from recording which is still recorded. It is del
 
 Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given timestamp.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
+When timestamp is preceeded with `+` sign, then it will seek to `<current time> + <timestamp>` (like `seek team +0:10` - seek 10s forward from now).
+When timestamp is preceeded with `-` sign, then it will seek to `<current time> + <timestamp>` (like `seek team frame -0:10` - seek 10s backward from now).
+When there is no sign before the timestamp, it will seek go absolute timestamp.
 
 ```seek team_name frame <frame number>```
 
 Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given frame number.
 When frame number is preceeded with `+` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame +10` - seek 10 frames forward from now).
 When frame number is preceeded with `-` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame -10` - seek 10 frames backward from now).
-When there is no sign before the frame number, it will seek tgo absolute frame number (starting from `0`).
+When there is no sign before the frame number, it will seek go absolute frame number (starting from `0`).
 
 ```seek team_name at timestamp_when timestamp_to```
 
@@ -445,7 +448,7 @@ The tick source has its own event loop (or may even bypass it and call the node 
 -   `options` (dictionary) - options for libavformat
 -   `timeout` (float, seconds) - packet read timeout
 -   `initial_timeout` (float, seconds) - URL open timeout
--   `live_delay` (int, miliseconds) - time to delay between latest available packet and currently displayed in live mode (default `1000`)
+-   `live_delay` (float, seconds) - time to delay between latest available packet and currently displayed in live mode (default `1`)
 -   `start_ts` (string) - start timestamp
 -   `stop_ts` (string) - stop timestamp
 -   `loop` (bool) - if set to true, video will be played in a loop
