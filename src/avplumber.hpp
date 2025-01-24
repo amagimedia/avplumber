@@ -29,6 +29,13 @@ typedef struct obs_source obs_source_t;
 class AVPlumber {
 private:
     ControlImpl* impl_;
+#ifdef EMBED_IN_OBS
+    std::string PAUSE_TEAM_;
+    std::string REALTIME_TEAM_;
+
+    void get_pause_team_name();
+    void get_realtime_team_name();
+#endif
 public:
     AVPlumber();
     ~AVPlumber();
@@ -38,6 +45,7 @@ public:
     void unsetObsSourceAndWait();
     void obsTick();
 
+    bool obs_is_paused();
     void obs_play();
     void obs_pause();
     void obs_stop();
