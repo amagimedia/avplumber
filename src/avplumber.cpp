@@ -29,10 +29,9 @@
     #include "TickSource.hpp"
     #include "EventLoop.hpp"
 
-    #define PAUSE_TEAM "@pause-team"
-    #define SYNC_TEAM "@sync-team"
     #define INPUT_NODE "input"
     #define PAUSE_NODE "pause"
+    #define REALTIME_NODE "realtime"
     #define SINK_NODE "sink"
 #endif
 
@@ -266,6 +265,9 @@ public:
         ost << "Queues: ";
         manager_->edges()->printEdgesStats(ost, true);
         logstream << ost.str();
+    }
+    void clearAllQueues() {
+        manager_->edges()->clearEdges();
     }
     void shutdown() {
         logstream << "Closing server sockets";
@@ -721,12 +723,59 @@ void AVPlumber::obsTick() {
     impl_->tick();
 }
 
+void AVPlumber::get_pause_team_name() {
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("team")) {
+            PAUSE_TEAM_ = p["team"];
+        }
+    }
+}
+
+void AVPlumber::get_realtime_team_name() {
+    auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("team")) {
+            REALTIME_TEAM_ = p["team"];
+        }
+    }
+}
+
 void AVPlumber::obs_pause() {
-    executeCommandsFromString("pause " PAUSE_TEAM " now");
+    if (PAUSE_TEAM_.empty()) {
+        get_pause_team_name();
+    }
+    if (!PAUSE_TEAM_.empty()) {
+        char cmd[128];
+        sprintf(cmd, "pause %s now", PAUSE_TEAM_.c_str());
+        executeCommandsFromString(cmd);
+    }
+}
+
+bool AVPlumber::obs_is_paused() {
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("paused")) {
+            bool paused = p["paused"];
+            return paused;
+        }
+    }
+
+    return false;
 }
 
 void AVPlumber::obs_play() {
-    executeCommandsFromString("resume " PAUSE_TEAM);
+    if (PAUSE_TEAM_.empty()) {
+        get_pause_team_name();
+    }
+    if (!PAUSE_TEAM_.empty()) {
+        char cmd[128];
+        sprintf(cmd, "resume %s", PAUSE_TEAM_.c_str());
+        executeCommandsFromString(cmd);
+    }
 }
 
 int64_t AVPlumber::obs_get_time() {
@@ -742,27 +791,36 @@ int64_t AVPlumber::obs_get_time() {
 }
 
 void AVPlumber::obs_set_time(int64_t ms) {
-    char command[128];
-    sprintf(command, "seek %s now %ld", SYNC_TEAM, ms);
-    executeCommandsFromString(command);
+    if (REALTIME_TEAM_.empty()) {
+        get_realtime_team_name();
+    }
+    if (!REALTIME_TEAM_.empty()) {
+        char command[128];
+        sprintf(command, "seek %s now %ld", REALTIME_TEAM_.c_str(), ms);
+        executeCommandsFromString(command);
+    }
 }
 
 void AVPlumber::obs_stop() {
-    // TODO:
-    // executeCommandsFromString("group.stop g1");
+    executeCommandsFromString("group.stop g1");
 }
 
 void AVPlumber::obs_restart() {
-    // TODO:
-    // executeCommandsFromString("group.restart g1");
+    impl_->clearAllQueues();
+    executeCommandsFromString("group.restart g1");
 }
 
 int64_t AVPlumber::obs_get_duration() {
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
-        auto duration = node->getObject("duration");
-        return duration["duration"];
+        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
+        if (n) {
+            auto duration = n->getObject("duration");
+            return duration["duration"];
+        }
     }
+
+    return 0;
 }
 #endif
 

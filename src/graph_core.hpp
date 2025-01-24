@@ -402,6 +402,9 @@ public:
     size_t capacity() {
         return queue_limit_;
     }
+    void clear() {
+        while (pop()) ;
+    }
     virtual int occupied() final {
         //return queue_.size_approx();
         return occupied_;
@@ -511,6 +514,13 @@ public:
             }
         }
     }
+    void clear() {
+        for (auto &kv: edges_) {
+            std::shared_ptr<Edge<T>> edge = kv.second;
+            if (edge==nullptr) continue;
+            edge->clear();
+        }
+    }
 };
 
 class EdgeManager {
@@ -593,6 +603,17 @@ public:
         auto lock = getLock();
         storage_.forEach([&ost, compact, &prefix](auto edges) {
             edges->printStats(ost, compact, prefix);
+        });
+    }
+    void clearEdges() {
+        bool we_are_global = this==&global_edge_manager_;
+        const std::string prefix = we_are_global ? "@" : "";
+        if (!we_are_global) {
+            global_edge_manager_.clearEdges();
+        }
+        auto lock = getLock();
+        storage_.forEach([](auto edges) {
+            edges->clear();
         });
     }
 };
