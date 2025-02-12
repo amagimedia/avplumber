@@ -30,7 +30,7 @@ public:
         uint64_t chl = AV_CH_LAYOUT_STEREO;
         if (params.count("sample_rate")) sr = params["sample_rate"];
         if (params.count("sample_format")) fmt = av::SampleFormat(params["sample_format"].get<std::string>());
-        if (params.count("channel_layout")) chl = av_get_channel_layout(params["channel_layout"].get<std::string>().c_str());
+        if (params.count("channel_layout")) chl = stringToChannelLayout(params["channel_layout"].get<std::string>().c_str());
         return NodeSISO<av::AudioSamples, av::AudioSamples>::template createCommon<AssumeAudioFormat>(edges, params, sr, fmt, chl);
     }
     virtual ~AssumeAudioFormat() {

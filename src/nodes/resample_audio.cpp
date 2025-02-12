@@ -1,3 +1,4 @@
+#include "channellayout.h"
 #include "node_common.hpp"
 #include <avcpp/audioresampler.h>
 #include <string>
@@ -292,10 +293,14 @@ public:
         if (have_channels) {
             if (params.count("dst_channel_layout")==1) {
                 std::string layout_s = params["dst_channel_layout"].get<std::string>();
-                dst_params.channel_layout = av_get_channel_layout(layout_s.c_str());
+                dst_params.channel_layout = stringToChannelLayout(layout_s);
             } else if (params.count("dst_channels")==1) {
                 int64_t cnt = params["dst_channels"].get<int>();
+#if API_NEW_CHANNEL_LAYOUT
+                dst_params.channel_layout = av::ChannelLayout(cnt).layout();
+#else
                 dst_params.channel_layout = av_get_channel_layout_nb_channels(cnt);
+#endif
             } else {
                 throw Error("No dst_channel_layout or dst_channels specified!");
             }
