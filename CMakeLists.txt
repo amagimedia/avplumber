@@ -17,6 +17,8 @@ else()
     set(OPTIMIZATION_FLAGS "-O3 -flto")
 endif()
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Include directories
 include_directories(
     deps/include
@@ -35,6 +37,22 @@ set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -L/apps/ff
 # Source files
 file(GLOB NODES_SRC src/nodes/*.cpp)
 
+set(CPPSRC
+    src/app_version.cpp
+    src/avplumber.cpp
+    src/util.cpp
+    src/avutils.cpp
+    src/graph_core.cpp
+    src/graph_mgmt.cpp
+    src/stats.cpp
+    src/output_control.cpp
+    src/instance_shared.cpp
+    src/hwaccel_mgmt.cpp
+    src/EventLoop.cpp
+    src/TickSource.cpp
+    ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
+)
+
 if(DEFINED EMBED_IN AND EMBED_IN STREQUAL obs)
     file(GLOB OBS_NODES_SRC src/nodes/obs/*.cpp)
     list(APPEND NODES_SRC ${OBS_NODES_SRC})
@@ -52,32 +70,22 @@ if(DEFINED HAVE_JACK AND HAVE_JACK EQUAL 1)
     file(GLOB JACK_NODES_SRC src/nodes/jack/*.cpp)
     list(APPEND NODES_SRC ${JACK_NODES_SRC})
     add_compile_definitions(HAVE_JACK=1)
-    list(APPEND LIBS_FLAGS jack)
+    list(APPEND SYSTEM_LIBS jack)
 endif()
 
 if(DEFINED HAVE_CUDA AND HAVE_CUDA EQUAL 1)
     file(GLOB CUDA_NODES_SRC src/nodes/cuda/*.cpp)
     list(APPEND NODES_SRC ${CUDA_NODES_SRC})
-    list(APPEND CPPSRC src/cuda.cpp)
+    list(APPEND CPPSRC src/cuda.cpp deps/cuda_loader/cuda_drvapi_dynlink.c)
     add_compile_definitions(HAVE_CUDA=1)
     list(APPEND DEPS_LIBS deps/cuda_loader/cuda_drvapi_dynlink.o)
 endif()
 
-set(CPPSRC
-    src/avplumber.cpp
-    src/util.cpp
-    src/avutils.cpp
-    src/graph_core.cpp
-    src/graph_mgmt.cpp
-    src/stats.cpp
-    src/output_control.cpp
-    src/instance_shared.cpp
-    src/hwaccel_mgmt.cpp
-    src/EventLoop.cpp
-    src/TickSource.cpp
-    ${NODES_SRC}
-)
+set(CPPSRC_ALL ${CPPSRC} ${NODES_SRC})
 
+execute_process(COMMAND /bin/date "+%Y-%m-%d %H:%M:%S %z" OUTPUT_VARIABLE COMPILE_DATE OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND git describe --abbrev --dirty --always --tags OUTPUT_VARIABLE GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
+set_property(SOURCE src/app_version.cpp APPEND PROPERTY COMPILE_DEFINITIONS COMPILE_DATE="${COMPILE_DATE}" GIT_VERSION="${GIT_VERSION}")
 
 include(ExternalProject)
 
@@ -85,8 +93,8 @@ ExternalProject_Add(
     klvanc
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklvanc
     SOURCE_DIR ${CMAKE_SOURCE_DIR}/deps/libklvanc
-    CONFIGURE_COMMAND cd ${CMAKE_SOURCE_DIR}/deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no --enable-static
-    BUILD_COMMAND cd ${CMAKE_SOURCE_DIR}/deps/libklvanc && make
+    CONFIGURE_COMMAND cd ${CMAKE_SOURCE_DIR}/deps/libklvanc && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklvanc && ${CMAKE_SOURCE_DIR}/deps/libklvanc/configure --enable-shared=no --enable-static
+    BUILD_COMMAND cd ${CMAKE_BINARY_DIR}/deps/libklvanc && make
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs/libklvanc.a
 )
@@ -95,8 +103,8 @@ ExternalProject_Add(
     klscte35
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklscte35
     SOURCE_DIR ${CMAKE_SOURCE_DIR}/deps/libklscte35
-    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_SOURCE_DIR}/deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs
-    BUILD_COMMAND cd ${CMAKE_SOURCE_DIR}/deps/libklvanc && make
+    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_SOURCE_DIR}/deps/libklscte35 && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && ${CMAKE_SOURCE_DIR}/deps/libklscte35/configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc
+    BUILD_COMMAND export CFLAGS=-I${CMAKE_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklscte35 && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && make
     INSTALL_COMMAND ""
     DEPENDS klvanc
     BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/deps/libklscte35/src/.libs/libklscte35.a
@@ -109,7 +117,7 @@ set(DEPS_LIBS
     ${CMAKE_BINARY_DIR}/deps/libklscte35/src/.libs/libklscte35.a
 )
 
-set(LIBS_FLAGS
+set(SYSTEM_LIBS
     pthread
     curl
     ssl
@@ -128,31 +136,30 @@ set(LIBS_FLAGS
 
 
 # Executable and static library
-add_executable(avplumber src/main.cpp ${CPPSRC})
-target_link_libraries(avplumber ${DEPS_LIBS} ${LIBS_FLAGS})
 
-add_library(avplumber_static STATIC ${CPPSRC})
-target_link_libraries(avplumber_static ${DEPS_LIBS} ${LIBS_FLAGS})
+add_library(avplumber_static STATIC ${CPPSRC_ALL})
+target_link_libraries(avplumber_static ${DEPS_LIBS} ${SYSTEM_LIBS})
 
+add_executable(avplumber src/main.cpp)
+target_link_libraries(avplumber avplumber_static)
 
-add_dependencies(avplumber klvanc klscte35)
 add_dependencies(avplumber_static klvanc klscte35)
 
 
 # Add dependencies as external projects
+set(CPR_USE_SYSTEM_CURL ON)
+set(BUILD_SHARED_LIBS OFF)
 add_subdirectory(deps/cpr)
-add_subdirectory(deps/avcpp)
 
-# Custom target for build date
-add_custom_target(builddate
-    COMMAND /bin/date '+#define COMPILE_DATE "%Y-%m-%d %H:%M:%S %z"' > builddate.h
-    COMMAND echo '#define GIT_VERSION "$(shell git describe --abbrev --dirty --always --tags)"' >> builddate.h
-    BYPRODUCTS builddate.h
-)
+set(AV_BUILD_EXAMPLES OFF)
+set(AV_ENABLE_STATIC ON)
+set(AV_ENABLE_SHARED OFF)
+add_subdirectory(deps/avcpp)
 
 # Custom command for generating node list
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
-    COMMAND ./generate_node_list ${NODES_SRC} > ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
+    COMMAND ${CMAKE_SOURCE_DIR}/generate_node_list ${NODES_SRC} > ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
     DEPENDS generate_node_list ${NODES_SRC}
 )
+set_property(SOURCE ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR})
