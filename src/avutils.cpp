@@ -1,6 +1,6 @@
 #include "avutils.hpp"
-
 #include "util.hpp"
+#include <avcpp/channellayout.h>
 
 void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align) {
     if (frm.sampleFormat().isPlanar()) {
@@ -67,4 +67,12 @@ std::string fieldOrderToString(AVFieldOrder fo) {
     if (fo==AV_FIELD_TB) r = "TB";
     if (fo==AV_FIELD_BT) r = "BT";
     return r;
+}
+
+uint64_t stringToChannelLayout(const std::string s) {
+#if API_NEW_CHANNEL_LAYOUT
+    return av::ChannelLayout(s.c_str()).layout();
+#else
+    return av_get_channel_layout(s.c_str());
+#endif
 }

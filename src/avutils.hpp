@@ -50,6 +50,7 @@ av::Dictionary parametersToDict(const json &params);
 
 std::string mediaTypeToString(AVMediaType mt);
 std::string fieldOrderToString(AVFieldOrder fo);
+uint64_t stringToChannelLayout(const std::string);
 
 class Wallclock {
 protected:
