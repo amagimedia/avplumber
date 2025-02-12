@@ -2,6 +2,7 @@
 #include <avcpp/sampleformat.h>
 #include <avcpp/rational.h>
 #include <avcpp/frame.h>
+#include <avcpp/channellayout.h>
 
 struct AudioParameters {
     int64_t channel_layout = -1;
@@ -26,7 +27,14 @@ struct AudioParameters {
     friend std::ostream& operator<< (std::ostream &stream, const AudioParameters &params) {
         if (params.isValid()) {
             char chlayout[64];
+#if API_NEW_CHANNEL_LAYOUT
+            AVChannelLayout new_layout{};
+            // TODO: not compatible with non-bitmask layouts
+            av_channel_layout_from_mask(&new_layout, params.channel_layout);
+            av_channel_layout_describe(&new_layout, chlayout, 63);
+#else
             av_get_channel_layout_string(chlayout, 63, -1, params.channel_layout);
+#endif
             stream << chlayout << ',' << params.sample_format << ',' << params.sample_rate << "Hz";
         } else {
             stream << "NO_AUDIO";

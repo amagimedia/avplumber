@@ -7,6 +7,9 @@
 #include <avcpp/videorescaler.h>
 #include <ios>
 #include <memory>
+extern "C" {
+#include "libavutil/channel_layout.h"
+}
 
 #pragma pack(push)
 #pragma pack(1)
@@ -242,7 +245,13 @@ public:
     }
     void setAudioParameters(const decltype(channel_layout_) channel_layout, int sample_rate, av::SampleFormat sample_format) {
         channel_layout_ = channel_layout;
+#if API_NEW_CHANNEL_LAYOUT
+        AVChannelLayout new_layout{};
+        av_channel_layout_from_mask(&new_layout, channel_layout);
+        channel_count_ = new_layout.nb_channels;
+#else
         channel_count_ = av_get_channel_layout_nb_channels(channel_layout);
+#endif
         sample_format_ = sample_format;
         sample_rate_ = sample_rate;
         size_t size = sample_format_.requiredBufferSize(channel_count_, max_len_, align_);

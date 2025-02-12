@@ -1,11 +1,14 @@
 #include "node_common.hpp"
+extern "C" {
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+}
 #include "../ts_equalizer.hpp"
 #include "../video_parameters.hpp"
 #include "../audio_parameters.hpp"
 #include "../hwaccel.hpp"
+#include <avcpp/channellayout.h>
 
 template<typename T> struct FilterMediaSpecific {
 };
@@ -471,10 +474,15 @@ public:
     virtual void initDefaults(const Parameters& params) {
         if (params.count("dst_channel_layout")==1) {
             std::string layout_s = params["dst_channel_layout"].get<std::string>();
-            default_params_.channel_layout = av_get_channel_layout(layout_s.c_str());
+            default_params_.channel_layout = stringToChannelLayout(layout_s);
         } else if (params.count("dst_channels")==1) {
             int64_t cnt = params["dst_channels"].get<int>();
+            AVChannelLayout new_layout{};
+#if API_NEW_CHANNEL_LAYOUT
+            default_params_.channel_layout = av::ChannelLayout(cnt).layout();
+#else
             default_params_.channel_layout = av_get_channel_layout_nb_channels(cnt);
+#endif
         }
         
         assign(sample_rate, "dst_sample_rate");
@@ -500,7 +508,12 @@ public:
     }
     virtual uint64_t channelLayout() {
         if (outlink_) {
+#if API_NEW_CHANNEL_LAYOUT
+            // TODO
+            return outlink_->ch_layout.order == AV_CHANNEL_ORDER_NATIVE ? outlink_->ch_layout.u.mask : 0;
+#else
             return outlink_->channel_layout;
+#endif
         } else if (default_params_.channel_layout>0) {
             return default_params_.channel_layout;
         } else {

@@ -1,6 +1,7 @@
 #include "node_common.hpp"
 #include <unordered_set>
 #include <avcpp/codeccontext.h>
+#include <avcpp/avutils.h>
 #include "../hwaccel.hpp"
 
 template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable {
@@ -239,7 +240,13 @@ protected:
         if (codecpar_) {
             codecpar_->sample_rate = metadata->sampleRate();
             codecpar_->format = metadata->sampleFormat().get();
+#if API_NEW_CHANNEL_LAYOUT
+            // TODO: support non-bitmask channel layouts
+            av_channel_layout_uninit(&codecpar_->ch_layout);
+            av_channel_layout_from_mask(&codecpar_->ch_layout, metadata->channelLayout());
+#else
             codecpar_->channel_layout = metadata->channelLayout();
+#endif
         }
 #endif
     }

@@ -507,9 +507,14 @@ public:
             } else if (stream.isAudio()) {
                 obj["sample_rate"] = cpar.sample_rate;
                 char chlayout[64] = {0};
+#if API_NEW_CHANNEL_LAYOUT
+                av_channel_layout_describe(&cpar.ch_layout, chlayout, 63);
+                obj["channels_count"] = cpar.ch_layout.nb_channels;
+#else
                 av_get_channel_layout_string(chlayout, 63, cpar.channels, cpar.channel_layout);
-                obj["channel_layout"] = chlayout;
                 obj["channels_count"] = cpar.channels;
+#endif
+                obj["channel_layout"] = chlayout;
                 obj["sample_format"] = av::SampleFormat((AVSampleFormat)cpar.format).name();
             }
             streams_object_.push_back(obj);
