@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(HAVE_CUDA ON CACHE BOOL "compile with CUDA support (built-in dynlink loader, no dependencies needed)")
 set(HAVE_JACK ON CACHE BOOL "compile with JACK support (system library needed)")
+set(HAVE_VAAPI ON CACHE BOOL "compile with VA-API support (system libraries needed: va GL EGL GLESv2)")
 
 # Set build type
 if(NOT CMAKE_BUILD_TYPE)
@@ -106,6 +107,11 @@ if(${HAVE_CUDA})
     set_property(SOURCE ${CPPSRC_ALL} APPEND PROPERTY COMPILE_DEFINITIONS HAVE_CUDA=1)
 endif()
 
+if(${HAVE_VAAPI})
+    set_property(SOURCE ${CPPSRC_ALL} APPEND PROPERTY COMPILE_DEFINITIONS HAVE_VAAPI=1)
+    list(APPEND SYSTEM_LIBS va GL EGL GLESv2)
+endif()
+
 if(DEFINED EMBED_IN AND EMBED_IN STREQUAL obs)
     set_property(SOURCE ${CPPSRC_ALL} APPEND PROPERTY COMPILE_DEFINITIONS EMBED_IN_OBS=1)
 endif()
@@ -120,8 +126,8 @@ include(ExternalProject)
 ExternalProject_Add(
     klvanc
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklvanc
-    SOURCE_DIR ${CMAKE_SOURCE_DIR}/deps/libklvanc
-    CONFIGURE_COMMAND cd ${CMAKE_SOURCE_DIR}/deps/libklvanc && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklvanc && ${CMAKE_SOURCE_DIR}/deps/libklvanc/configure --enable-shared=no --enable-static
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc
+    CONFIGURE_COMMAND cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklvanc && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc/configure --enable-shared=no --enable-static
     BUILD_COMMAND cd ${CMAKE_BINARY_DIR}/deps/libklvanc && make
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs/libklvanc.a
@@ -130,9 +136,9 @@ ExternalProject_Add(
 ExternalProject_Add(
     klscte35
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklscte35
-    SOURCE_DIR ${CMAKE_SOURCE_DIR}/deps/libklscte35
-    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_SOURCE_DIR}/deps/libklscte35 && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && ${CMAKE_SOURCE_DIR}/deps/libklscte35/configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc
-    BUILD_COMMAND export CFLAGS=-I${CMAKE_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklscte35 && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && make
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35
+    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35 && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35/configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc
+    BUILD_COMMAND export CFLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklscte35 && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && make
     INSTALL_COMMAND ""
     DEPENDS klvanc
     BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/deps/libklscte35/src/.libs/libklscte35.a
@@ -154,7 +160,7 @@ target_link_libraries(avplumber_static ${DEPS_LIBS} ${SYSTEM_LIBS})
 add_executable(avplumber src/main.cpp)
 target_link_libraries(avplumber avplumber_static)
 
-add_dependencies(avplumber_static klvanc klscte35)
+add_dependencies(avplumber_static klvanc klscte35 cpr::cpr avcpp::avcpp)
 
 
 # Add dependencies as external projects
@@ -170,7 +176,7 @@ add_subdirectory(deps/avcpp)
 # Custom command for generating node list
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
-    COMMAND ${CMAKE_SOURCE_DIR}/generate_node_list ${NODES_SRC} > ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/generate_node_list ${NODES_SRC} > ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
     DEPENDS generate_node_list ${NODES_SRC}
 )
-set_property(SOURCE ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR})
+set_property(SOURCE ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp APPEND PROPERTY INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})

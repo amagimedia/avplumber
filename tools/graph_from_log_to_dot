@@ -25,9 +25,13 @@ print('digraph G {')
 
 for line in fileinput.input():
     exec_match = exec_re.match(line)
-    if exec_match is None:
+    if exec_match is not None:
+        splits = exec_match.group(1).split(' ', maxsplit=1)
+    else:
+        splits = line.split(' ', maxsplit=1)
+    if len(splits) != 2:
         continue
-    cmd, args_str = exec_match.group(1).split(' ', maxsplit=1)
+    cmd, args_str = splits
     if cmd in ('node.add', 'node.add_start', 'node.add_create'):
         node_obj = json.loads(args_str)
         if 'name' in node_obj:
