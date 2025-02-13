@@ -2,7 +2,7 @@ queue.plan_capacity * 1
 queue.plan_capacity v_in 63
 queue.plan_capacity Video_Decode_out 7
 
-node.add { "type": "input", "url": "/home/video/recording.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0, "seek_table": "", "ts_offsets": "", "team": "@input-seek-team" }
+node.add { "type": "input_rec", "url": "/home/video/recording.ts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0, "seek_table": "", "ts_offsets": "", "team": "@input-seek-team" }
 node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in" }, "group": "g1", "auto_restart": "group" }
 node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"g1","src":"v_in","dst":"Video_Decode_out"}
 
