@@ -9,16 +9,17 @@
 #include "graph_factory.hpp"
 #include "instance.hpp"
 
+class NodeManager;
+
 class NodeFactory {
 public:
     using NodeFactoryFunction = ::NodeFactoryFunction;
 protected:
     std::unordered_map<std::string, NodeFactoryFunction> factories_;
-    std::shared_ptr<EdgeManager> edges_;
     InstanceData &instance_;
 public:
-    std::shared_ptr<Node> produce(const Parameters &params);
-    NodeFactory(std::shared_ptr<EdgeManager> edgeman, InstanceData &inst);
+    std::shared_ptr<Node> produce(std::shared_ptr<NodeManager> nodeman, const Parameters &params);
+    NodeFactory(InstanceData &inst);
 };
 
 class NodeManager;
@@ -84,6 +85,7 @@ public:
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);
+    void setObject(const std::string, const Parameters&);
 
     bool stopAndWait();
     void join();
@@ -177,13 +179,17 @@ public:
     void interrupt();
     void shutdown(); // do not use NodeManager after calling it
     Event &shutdownCompleteEvent() { return shutdown_complete_; }
-    NodeManager(): edges_(std::make_shared<EdgeManager>()), factory_(std::make_shared<NodeFactory>(edges_, instance_)) {
+    NodeManager(): edges_(std::make_shared<EdgeManager>()), factory_(std::make_shared<NodeFactory>(instance_)) {
     }
     std::shared_ptr<NodeWrapper> node(const std::string &name) {
         std::shared_ptr<NodeWrapper> p = getNodeByName(name);
         if (p==nullptr) {
             throw Error("Node " + name + " doesn't exist.");
         }
+        return p;
+    }
+    std::shared_ptr<NodeWrapper> node_if_exists(const std::string &name) {
+        std::shared_ptr<NodeWrapper> p = getNodeByName(name);
         return p;
     }
     std::shared_ptr<NodeGroup> group(const std::string name) {

@@ -26,9 +26,9 @@ node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src
 node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares1","dst":"art1"}
 node.add {"speed":1.0,"type":"realtime","auto_restart":"group","group":"in","src":"ares2","dst":"art2"}
 
-node.add { "type": "jack_sink", "src": "art0", "client_name": "avp", "port_basename": "Source 1/audio", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "art1", "client_name": "avp", "port_basename": "Source 2/audio", "channels_count": 2, "group": "g1" }
-node.add { "type": "jack_sink", "src": "art2", "client_name": "avp", "port_basename": "Source 3/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art0", "client_name": "avp", "port_prefix": "Source 1/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art1", "client_name": "avp", "port_prefix": "Source 2/audio", "channels_count": 2, "group": "g1" }
+node.add { "type": "jack_sink", "src": "art2", "client_name": "avp", "port_prefix": "Source 3/audio", "channels_count": 2, "group": "g1" }
 
 group.start g1
 detach retry group.start in

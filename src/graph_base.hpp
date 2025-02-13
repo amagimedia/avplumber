@@ -4,13 +4,26 @@
 #include "MultiEventWait.hpp"
 #include "graph_core.hpp"
 #include <avcpp/dictionary.h>
+#include <memory>
 #include "graph_interfaces.hpp"
 
-template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate {
+template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate, public IFlushAndSeek {
 public:
     using SourceType = Source<InputType>;
 protected:
     std::unique_ptr<SourceType> source_;
+    void executeUpstream(std::function<void(EdgeBase&, std::shared_ptr<Node>)> cb) {
+        std::shared_ptr<EdgeBase> edge = sourceEdge();
+        while (edge) {
+            auto node = edge->producer().lock();
+            cb(*edge, node);
+            if (node) {
+                edge = node->sourceEdge();
+            } else {
+                break;
+            }
+        }
+    }
 public:
     SourceType& source() {
         return *source_;
@@ -51,6 +64,52 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
+    virtual void flushAndSeek(StreamTarget target) override {
+        std::shared_ptr<IStreamsInput> input = findNodeUp<IStreamsInput>();
+        if (input) {
+            input->fixInputTimestamp(target);
+        }
+        // start flushing:
+        executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.startFlushing();
+            edge.finishConsumer(); // to wake up consumer that may be waiting for frame
+            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+            if (target.ts.isValid() && dec) {
+                dec->discardUntil(target.ts);
+            }
+            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            if (input) {
+                input->seekAndPause(target);
+            }
+            std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
+            if (input_reset) {
+                input_reset->resetInput();
+            }
+        });
+        IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
+        if (this_reset) {
+            this_reset->resetInput();
+        }
+        // wait for flushed state:
+        while(true) {
+            bool flushed = true;
+            executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
+                flushed &= edge.isFlushed();
+            });
+            if (flushed) {
+                break;
+            }
+            wallclock.sleepms(5);
+        }
+        // stop flushing and resume paused input:
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.stopFlushing();
+            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            if (input) {
+                input->resumeAfterSeek();
+            }
+        });
+    }
     virtual ~NodeSingleInput() {
     }
 };
@@ -58,7 +117,7 @@ public:
 template<typename T, typename = decltype(std::declval<T>().dts())> av::Timestamp getTS(T &frm) {
     return frm.dts();
 }
-template<typename T, typename...Args> av::Timestamp getTS(T &frm) {
+template<typename T, typename...Args> av::Timestamp getTS(T &frm, Args...args) {
     return frm.pts();
 }
 
@@ -85,9 +144,9 @@ protected:
         events.push_back(&stop_event_);
         event_wait_ = make_unique<MultiEventWait>(events);
     }
-    // This function MAY in some cases return -1
+    // This function MAY in some cases return -1 even with timeout_ms==-1
     // (e.g. if stop() is called)
-    int findSourceWithData() {
+    int findSourceWithData(int timeout_ms = -1) {
         while(true) {
             // find earliest packet (least PTS/DTS) in streams:
             av::Timestamp least_ts = NOTS;
@@ -103,7 +162,9 @@ protected:
                 }
             }
             if (least_ts_i<0 && !stopping_) {
-                event_wait_->wait();
+                if (!event_wait_->wait(timeout_ms)) {
+                    return -1;
+                }
             } else {
                 return least_ts_i;
             }
@@ -236,8 +297,8 @@ public:
         T* ptr = this->source_->peek();
         if (ptr!=nullptr) {
             T data = *ptr;
-            this->source_->pop();
             this->sink_->put(data);
+            this->source_->pop();
         }
     }
     virtual ~TransparentNode() {

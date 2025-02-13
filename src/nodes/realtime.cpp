@@ -3,7 +3,7 @@
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>> {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber {
 protected:
     bool ready_ = false;
     bool first_ = true;
@@ -28,6 +28,8 @@ protected:
     float min_buffered_ = 0.5;
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
+    bool set_pts_ = false;
+    std::atomic_int64_t last_frame_number_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -96,6 +98,7 @@ public:
             T &data = *dataptr;
             
             AVTS now_ts = now_ts_;
+            AVTS new_pts = now_ts;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
@@ -147,6 +150,8 @@ public:
                                     // retry after waiting
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
+                            } else {
+                                new_pts += diff;
                             }
                         } else {
                             if (!no_wait_notified_) {
@@ -175,15 +180,28 @@ public:
                     }
                     ready_ = true;
                 }
+            } else {
+                emit = false;
             }
             if (emit) {
+                av::Timestamp orig_pts = data.pts();
+                if (set_pts_) {
+                    data.setTimeBase(av::Rational());
+                    data.setPts({new_pts, timebase_});
+                }
                 if (!this->sink_->put(data, true)) {
+                    if (set_pts_) {
+                        // putting failed, restore original PTS because we will process this frame next time
+                        data.setTimeBase(av::Rational());
+                        data.setPts(orig_pts);
+                    }
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                     }
                     consume = false;
                 } else {
+                    setLastFrame(dataptr);
                     if (!ticks) {
                         // process next packet
                         this->yieldAndProcess();
@@ -203,6 +221,23 @@ public:
                 }
             }
         } while (process_next);
+    }
+    template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
+        auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
+        if (frame_no) {
+            last_frame_number_ = std::atoll(frame_no->value);
+        }
+
+    }
+    template<typename T2> void setLastFrame(T2) {
+    }
+    virtual int64_t getCurrentFrameNumber() override {
+        return last_frame_number_;
+    }
+    virtual void resetInput() override {
+        if (team_) {
+            team_->reset();
+        }
     }
     static std::shared_ptr<RealTimeSpeed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -252,9 +287,13 @@ public:
         } else {
             r->initial_jitter_margin_ = r->jitter_margin_;
         }
+        if ((r->jitter_margin_ >= r->discontinuity_threshold_) || (r->initial_jitter_margin_ >= r->discontinuity_threshold_)) {
+            logstream << "WARNING: (initial_)jitter_margin >= discontinuity_threshold, it don't work correctly!";
+        }
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["team"]);
             r->team_->checkTimeBase(timebase);
+            r->team_->addSeekTarget(r);
         }
         if (params.count("master")) {
             r->is_master_ = params["master"];
@@ -279,6 +318,9 @@ public:
         }
         if (params.count("min_buffered")) {
             r->min_buffered_ = params["min_buffered"];
+        }
+        if (params.count("set_pts")) {
+            r->set_pts_ = params["set_pts"];
         }
         return r;
     }

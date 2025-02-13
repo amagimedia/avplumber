@@ -1,14 +1,106 @@
-#include "../node_common.hpp"
+#define EGL_EGLEXT_PROTOTYPES 1
+#define GL_GLEXT_PROTOTYPES 1
 
-#include "../../../../../../libobs-opengl/gl-subsystem.h"
+#include "../node_common.hpp"
 
 #include <atomic>
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixfmt.h>
 #include <mutex>
 #include <obs-module.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <graphics/graphics.h>
 
-#ifdef HAVE_CUDA
+#ifndef HAVE_CUDA
+#define HAVE_CUDA 0
+#endif
+
+#ifndef HAVE_VAAPI
+#define HAVE_VAAPI 0
+#endif
+
+#if (HAVE_CUDA || HAVE_VAAPI)
+
+#include <GL/gl.h>
+
+struct gs_device {
+  struct gl_platform *plat;
+};
+typedef struct gs_device gs_device_t;
+
+struct fbo_info;
+
+struct gs_texture {
+  gs_device_t *device;
+  enum gs_texture_type type;
+  enum gs_color_format format;
+  GLenum gl_format;
+  GLenum gl_target;
+  GLenum gl_internal_format;
+  GLenum gl_type;
+  GLuint texture;
+  uint32_t levels;
+  bool is_dynamic;
+  bool is_render_target;
+  bool is_dummy;
+  bool gen_mipmaps;
+  
+  gs_samplerstate_t *cur_sampler;
+  struct fbo_info *fbo;
+  
+    void (*on_destroy_callback)(struct gs_texture *itself);
+};
+
+struct gs_texture_2d {
+  struct gs_texture base;
+
+  uint32_t width;
+  uint32_t height;
+  bool gen_mipmaps;
+  GLuint unpack_buffer;
+};
+
+static inline bool gl_success(const char *funcname)
+{
+  GLenum errorcode = glGetError();
+  if (errorcode != GL_NO_ERROR) {
+    int attempts = 8;
+    do {
+      logstream << funcname << " failed, glGetError returned 0x" << std::hex << errorcode;
+      errorcode = glGetError();
+
+      --attempts;
+      if (attempts == 0) {
+        logstream << "Too many GL errors, moving on";
+        break;
+      }
+    } while (errorcode != GL_NO_ERROR);
+    return false;
+  }
+
+  return true;
+} 
+
+
+static inline bool gl_tex_param_i(GLenum target, GLenum param, GLint val)
+{ 
+  glTexParameteri(target, param, val);
+  return gl_success("glTexParameteri");
+}
+
+static inline bool gl_bind_texture(GLenum target, GLuint texture)
+{ 
+  glBindTexture(target, texture);
+  return gl_success("glBindTexture");
+}
+
+
+#endif
+
+
+#if HAVE_CUDA
 #include <ffnvcodec/dynlink_loader.h>
 #include <libavutil/hwcontext_cuda.h>
 
@@ -48,6 +140,32 @@ __attribute__((constructor)) void init(void) {
 }
 
 #endif // HAVE_CUDA
+
+#if HAVE_VAAPI
+#include <va/va.h>
+#include <va/va_drmcommon.h>
+#include <drm/drm_fourcc.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <X11/Xlib.h>
+#include <libavutil/hwcontext_vaapi.h>
+
+// TODO include it properly from obs sources
+struct gl_platform {
+    Display *xdisplay;
+    EGLDisplay edisplay;
+    EGLConfig config;
+    EGLContext context;
+    EGLSurface pbuffer;
+    bool close_xdisplay;
+};
+
+struct graphics_subsystem {
+    void *module;
+    gs_device_t *device;
+};
+
+#endif // HAVE_VAAPI
 
 // various parts of this code adapted from OBS source code: deps/media-playback/media-playback/media.c
 // Copyright (c) 2017 Hugh Bailey <obs.jim@gmail.com>
@@ -109,7 +227,12 @@ protected:
     bool unbuffered_ = false;
     bool debug_timing_ = false;
     struct obs_hw_buffer obs_hw_;
+    AVPixelFormat obs_hw_pixel_format_ = AV_PIX_FMT_NONE;
     AVBufferRef* have_hw_info_for_ = nullptr;
+    #if HAVE_VAAPI
+    void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
+	PFNEGLCREATEIMAGEKHRPROC EGLCreateImageKHR;
+    #endif
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
         av::VideoFrame frame;
@@ -148,7 +271,7 @@ protected:
         return result;
     }
 
-    #ifdef HAVE_CUDA
+    #if HAVE_CUDA
     static CUcontext global_cu_ctx;
     struct TextureInfo {
         CUgraphicsResource cu_res = nullptr;
@@ -173,136 +296,195 @@ protected:
         if (ctx == nullptr) return AV_PIX_FMT_NONE;
         return ctx->sw_format;
     }
+
     void prepareHwInfo(av::VideoFrame &frm) {
-        if (obs_hw_.type == OBS_HW_BUFFER_NONE) return;
+        if (obs_hw_pixel_format_ == AV_PIX_FMT_NONE) return;
         if (frm.raw()->hw_frames_ctx == have_hw_info_for_) return; // TODO: is this optimization safe?
-        if (obs_hw_.type == OBS_HW_BUFFER_CUDA) {
+
+        #define CB_COMMON \
+            assert(opaque != nullptr); \
+            FrameInfo &fi = *reinterpret_cast<FrameInfo*>(opaque); \
+            assert(fi.owner != nullptr); \
+            ObsVideoSink &self = *fi.owner;
+
+        if (obs_hw_pixel_format_ == AV_PIX_FMT_CUDA) {
+            #if HAVE_CUDA
             obs_hw_.borrows_frames = true;
-            #ifdef HAVE_CUDA
-                //cuda_dev_ctx_ = (AVCUDADeviceContext*)((AVHWFramesContext*)frm.raw()->hw_frames_ctx->data)->device_ctx->hwctx;
-                if (!global_cu) {
-                    throw Error("CUDA functions not ready");
+            //cuda_dev_ctx_ = (AVCUDADeviceContext*)((AVHWFramesContext*)frm.raw()->hw_frames_ctx->data)->device_ctx->hwctx;
+            if (!global_cu) {
+                throw Error("CUDA functions not ready");
+            }
+
+            obs_hw_.free_buffer = [](void* opaque, void* buf) {
+                CB_COMMON
+                if (self.debug_timing_) {
+                    logstream << "free_buffer begin";
                 }
-                #define CB_COMMON \
-                    assert(opaque != nullptr); \
-                    FrameInfo &fi = *reinterpret_cast<FrameInfo*>(opaque); \
-                    assert(fi.owner != nullptr); \
-                    ObsVideoSink &self = *fi.owner;
+                fi.frame = av::VideoFrame::null();
+                fi.owner.store(nullptr, std::memory_order_release);
+                if (self.debug_timing_) {
+                    logstream << "free_buffer end";
+                }
+            };
+            obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
+                CB_COMMON
+                if (self.debug_timing_) {
+                    logstream << "buffer_to_texture begin";
+                }
+                auto cu = global_cu;
+                assert(tex->type==GS_TEXTURE_2D);
+                struct gs_texture_2d *tex2d = (struct gs_texture_2d*)tex;
 
-                obs_hw_.free_buffer = [](void* opaque, void* buf) {
-                    CB_COMMON
-                    if (self.debug_timing_) {
-                        logstream << "free_buffer begin";
-                    }
-                    fi.frame = av::VideoFrame::null();
-                    fi.owner.store(nullptr, std::memory_order_release);
-                    /*CHECK_CU(self.cu_->cuCtxPushCurrent(self.cuda_dev_ctx_->cuda_ctx));
-                    CHECK_CU(self.cu_->cuMemFree((CUdeviceptr)buf));
-                    CUcontext dummy;
-                    CHECK_CU(self.cu_->cuCtxPopCurrent(&dummy));*/
-                    if (self.debug_timing_) {
-                        logstream << "free_buffer end";
-                    }
-                };
-                obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
-                    CB_COMMON
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture begin";
-                    }
-                    auto cu = global_cu;
-                    assert(tex->type==GS_TEXTURE_2D);
-                    struct gs_texture_2d *tex2d = (struct gs_texture_2d*)tex;
-
-                    TextureInfo *ti;
-                    auto titer = global_textures.find(tex);
-                    CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
-                    if (titer == global_textures.end()) {
-                        // texture not yet in our map
-                        logstream << "getting new resource associated with our texture";
-                        titer = global_textures.emplace_hint(titer, std::pair<gs_texture_t*, TextureInfo>(tex, {}));
-                        ti = &titer->second;
-                        // from mpv's video/out/hwdec/hwdec_cuda_gl.c
-                        CHECK_CU(cu->cuGraphicsGLRegisterImage(&ti->cu_res, tex->texture, tex->gl_target, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD));
-                        CHECK_CU(cu->cuGraphicsMapResources(1, &ti->cu_res, 0));
-                        CHECK_CU(cu->cuGraphicsSubResourceGetMappedArray(&ti->cu_arr, ti->cu_res, 0, 0));
-                        CHECK_CU(cu->cuGraphicsUnmapResources(1, &ti->cu_res, 0));
-                        tex->on_destroy_callback = [](gs_texture_t *tex) {
-                            auto cu = global_cu;
-                            auto titer = global_textures.find(tex);
-                            if (titer != global_textures.end()) {
-                                CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
-                                logstream << "unregistering resource associated with our texture";
-                                CHECK_CU(cu->cuGraphicsUnregisterResource(titer->second.cu_res));
-                                CUcontext dummy;
-                                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
-                                global_textures.erase(titer);
-                            }
-                        };
-                        if (self.debug_timing_) {
-                            logstream << "done getting new resource";
+                TextureInfo *ti;
+                auto titer = global_textures.find(tex);
+                CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
+                if (titer == global_textures.end()) {
+                    // texture not yet in our map
+                    logstream << "getting new resource associated with our texture";
+                    titer = global_textures.emplace_hint(titer, std::pair<gs_texture_t*, TextureInfo>(tex, {}));
+                    ti = &titer->second;
+                    // from mpv's video/out/hwdec/hwdec_cuda_gl.c
+                    CHECK_CU(cu->cuGraphicsGLRegisterImage(&ti->cu_res, tex->texture, tex->gl_target, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD));
+                    CHECK_CU(cu->cuGraphicsMapResources(1, &ti->cu_res, 0));
+                    CHECK_CU(cu->cuGraphicsSubResourceGetMappedArray(&ti->cu_arr, ti->cu_res, 0, 0));
+                    CHECK_CU(cu->cuGraphicsUnmapResources(1, &ti->cu_res, 0));
+                    tex->on_destroy_callback = [](gs_texture_t *tex) {
+                        auto cu = global_cu;
+                        auto titer = global_textures.find(tex);
+                        if (titer != global_textures.end()) {
+                            CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
+                            logstream << "unregistering resource associated with our texture";
+                            CHECK_CU(cu->cuGraphicsUnregisterResource(titer->second.cu_res));
+                            CUcontext dummy;
+                            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+                            global_textures.erase(titer);
                         }
-                    } else {
-                        ti = &titer->second;
-                    }
-                    CUDA_MEMCPY2D cpy = {
-                        .srcY = 0,
-                        .srcMemoryType = CU_MEMORYTYPE_DEVICE,
-                        .srcDevice = (CUdeviceptr)buf,
-                        .srcPitch = linesize,
-                        .dstMemoryType = CU_MEMORYTYPE_ARRAY,
-                        .dstArray = ti->cu_arr,
-                        .WidthInBytes = tex2d->width * gs_get_format_bpp(tex->format) / 8,
-                        .Height = tex2d->height
                     };
                     if (self.debug_timing_) {
-                        logstream << "buffer_to_texture before cuMemcpy";
+                        logstream << "done getting new resource";
                     }
-                    if (!CHECK_CU(cu->cuMemcpy2DAsync(&cpy, 0))) {
-                        //logstream << "buffer_to_texture cuMemcpy success!";
-                    } else {
-                        logstream << "buffer_to_texture cuMemcpy failure";
-                    }
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture after cuMemcpy";
-                    }
-                    CUcontext dummy;
-                    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture end";
-                    }
+                } else {
+                    ti = &titer->second;
+                }
+                CUDA_MEMCPY2D cpy = {
+                    .srcY = 0,
+                    .srcMemoryType = CU_MEMORYTYPE_DEVICE,
+                    .srcDevice = (CUdeviceptr)buf,
+                    .srcPitch = linesize,
+                    .dstMemoryType = CU_MEMORYTYPE_ARRAY,
+                    .dstArray = ti->cu_arr,
+                    .WidthInBytes = tex2d->width * gs_get_format_bpp(tex->format) / 8,
+                    .Height = tex2d->height
                 };
-                obs_hw_.copy_frame_data_plane_from_hw = [](void* opaque,
-                                                           struct obs_source_frame *dst,
-                                                           const struct obs_source_frame *src,
-                                                           uint32_t plane, uint32_t lines) {
-                    auto cu = global_cu;
-                    CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
-                    CUDA_MEMCPY2D cpy = {
-                        .srcY = 0,
-                        .srcMemoryType = CU_MEMORYTYPE_DEVICE,
-                        .srcDevice = (CUdeviceptr)src->data[plane],
-                        .srcPitch = src->linesize[plane],
-                        .dstMemoryType = CU_MEMORYTYPE_HOST,
-                        .dstHost = dst->data[plane],
-                        .dstPitch = dst->linesize[plane],
-                        .WidthInBytes = std::min(src->linesize[plane], dst->linesize[plane]),
-                        .Height = lines
-                    };
-                    if (!CHECK_CU(cu->cuMemcpy2D(&cpy))) {
-                        //logstream << "copy_frame_data_plane_from_hw cuMemcpy success!";
-                    } else {
-                        logstream << "copy_frame_data_plane_from_hw cuMemcpy failure";
-                    }
-                    CUcontext dummy;
-                    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+                if (self.debug_timing_) {
+                    logstream << "buffer_to_texture before cuMemcpy";
+                }
+                if (!CHECK_CU(cu->cuMemcpy2DAsync(&cpy, 0))) {
+                    //logstream << "buffer_to_texture cuMemcpy success!";
+                } else {
+                    logstream << "buffer_to_texture cuMemcpy failure";
+                }
+                if (self.debug_timing_) {
+                    logstream << "buffer_to_texture after cuMemcpy";
+                }
+                CUcontext dummy;
+                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+                if (self.debug_timing_) {
+                    logstream << "buffer_to_texture end";
+                }
+            };
+            obs_hw_.copy_frame_data_plane_from_hw = [](void* opaque,
+                                                        struct obs_source_frame *dst,
+                                                        const struct obs_source_frame *src,
+                                                        uint32_t plane, uint32_t lines) {
+                auto cu = global_cu;
+                CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
+                CUDA_MEMCPY2D cpy = {
+                    .srcY = 0,
+                    .srcMemoryType = CU_MEMORYTYPE_DEVICE,
+                    .srcDevice = (CUdeviceptr)src->data[plane],
+                    .srcPitch = src->linesize[plane],
+                    .dstMemoryType = CU_MEMORYTYPE_HOST,
+                    .dstHost = dst->data[plane],
+                    .dstPitch = dst->linesize[plane],
+                    .WidthInBytes = std::min(src->linesize[plane], dst->linesize[plane]),
+                    .Height = lines
                 };
-                #undef CB_COMMON
+                if (!CHECK_CU(cu->cuMemcpy2D(&cpy))) {
+                    //logstream << "copy_frame_data_plane_from_hw cuMemcpy success!";
+                } else {
+                    logstream << "copy_frame_data_plane_from_hw cuMemcpy failure";
+                }
+                CUcontext dummy;
+                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            };
             #else
-                throw Error("FATAL BUG: got CUDA frame but not compiled with CUDA support");
+            throw Error("got CUDA frame but compiled without CUDA support");
+            #endif
+        } else if (obs_hw_pixel_format_ == AV_PIX_FMT_VAAPI) {
+            #if HAVE_VAAPI
+            obs_hw_.borrows_frames = true;
+            obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
+                CB_COMMON
+                assert(tex->type==GS_TEXTURE_2D);
+
+                if (!buf) {
+                    // export surface failed, nothing to do here
+                    return;
+                }
+
+                size_t plane = linesize; // not really, abused as plane index
+                VADRMPRIMESurfaceDescriptor *prime = reinterpret_cast<VADRMPRIMESurfaceDescriptor*>(buf);
+                EGLint img_attr[] = {
+                    EGL_LINUX_DRM_FOURCC_EXT,      prime->layers[plane].drm_format,
+                    EGL_WIDTH,                     gs_texture_get_width(tex),
+                    EGL_HEIGHT,                    gs_texture_get_height(tex),
+                    EGL_DMA_BUF_PLANE0_FD_EXT,     prime->objects[prime->layers[plane].object_index[0]].fd,
+                    EGL_DMA_BUF_PLANE0_OFFSET_EXT, prime->layers[plane].offset[0],
+                    EGL_DMA_BUF_PLANE0_PITCH_EXT,  prime->layers[plane].pitch[0],
+                    EGL_NONE
+                };
+
+                AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(fi.frame.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
+                VASurfaceID va_surface = (VASurfaceID)(uintptr_t)fi.frame.raw()->data[3];
+                VAStatus va_sync_res = vaSyncSurface(hwctx->display, va_surface);
+                if (va_sync_res != VA_STATUS_SUCCESS) {
+                    logstream << "vaSyncSurface() error: " << vaErrorStr(va_sync_res);
+                }
+
+                graphics_t* graphics = gs_get_context();
+                EGLImage image = self.EGLCreateImageKHR(graphics->device->plat->edisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, img_attr);
+                const GLuint gltex = *(GLuint *)gs_texture_get_obj(tex);
+                gl_bind_texture(GL_TEXTURE_2D, gltex);
+                gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                self.EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+                if (!gl_success("glEGLImageTargetTexture2DOES")) {
+                    logstream << "glEGLImageTargetTexture2DOES failed, VAAPI data not copied to texture";
+                }
+                gl_bind_texture(GL_TEXTURE_2D, 0);
+            };
+            obs_hw_.free_buffer = [](void* opaque, void* buf) {
+                CB_COMMON
+
+                if (buf) {
+                    VADRMPRIMESurfaceDescriptor* desc = (VADRMPRIMESurfaceDescriptor*)buf;
+                    for (int i = 0; i < desc->num_objects; i++)
+                        close(desc->objects[i].fd);
+                    delete desc;
+                }
+
+                fi.frame = av::VideoFrame::null();
+                fi.owner.store(nullptr, std::memory_order_release);
+            };
+            obs_hw_.copy_frame_data_plane_from_hw = nullptr;
+            #else
+            throw Error("got VAAPI frame but compiled without VAAPI support");
             #endif
         } else {
             throw Error("unsupported hwaccel");
         }
+        #undef CB_COMMON
         have_hw_info_for_ = frm.raw()->hw_frames_ctx;
     }
     void outputFrame() {
@@ -349,13 +531,13 @@ public:
             } else {
                 this->source_->pop();
             }
-            enum obs_hw_buffer_type hwbt;
+            AVPixelFormat hw_pixel_format;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
                 real_pixel_format = frm.pixelFormat().get();
-                hwbt = OBS_HW_BUFFER_NONE;
-            } else if (frm.pixelFormat().get()==AV_PIX_FMT_CUDA) {
-                hwbt = OBS_HW_BUFFER_CUDA;
+                hw_pixel_format = AV_PIX_FMT_NONE;
+            } else if ((frm.pixelFormat().get()==AV_PIX_FMT_CUDA) || (frm.pixelFormat().get()==AV_PIX_FMT_VAAPI)) {
+                hw_pixel_format = frm.pixelFormat().get();
             } else {
                 throw Error("got frame with unsupported hwaccel " + std::string(frm.pixelFormat().name()));
             }
@@ -389,10 +571,10 @@ public:
             }
 
             if (planes_count_) {
-                obs_hw_.type = hwbt;
-                obs_frame_.hw = hwbt==OBS_HW_BUFFER_NONE ? nullptr : &obs_hw_;
+                obs_hw_pixel_format_ = hw_pixel_format;
+                obs_frame_.hw = hw_pixel_format==AV_PIX_FMT_NONE ? nullptr : &obs_hw_;
                 prepareHwInfo(frm);
-                if (hwbt == OBS_HW_BUFFER_CUDA) {
+                if (hw_pixel_format == AV_PIX_FMT_CUDA || hw_pixel_format == AV_PIX_FMT_VAAPI) {
                     FrameInfo *fi = findFreeFrame();
                     if (!fi) {
                         logstream << "too many frames buffered, waiting for obs to free some frames";
@@ -405,9 +587,33 @@ public:
                     fi->owner.store(this, std::memory_order_release);
                     obs_frame_.hw_opaque = fi;
                 }
-                for (int i=0; i<planes_count_; i++) {
-                    obs_frame_.data[i] = frm.raw()->data[i];
-                    obs_frame_.linesize[i] = abs(frm.raw()->linesize[i]);
+                if (hw_pixel_format==AV_PIX_FMT_NONE || hw_pixel_format==AV_PIX_FMT_CUDA) {
+                    for (int i=0; i<planes_count_; i++) {
+                        obs_frame_.data[i] = frm.raw()->data[i];
+                        obs_frame_.linesize[i] = abs(frm.raw()->linesize[i]);
+                    }
+                } else if (hw_pixel_format==AV_PIX_FMT_VAAPI) {
+                    #if HAVE_VAAPI
+                        AVVAAPIDeviceContext* hwctx = ((AVVAAPIDeviceContext*)(((AVHWFramesContext*)(frm.raw()->hw_frames_ctx->data))->device_ctx->hwctx));
+                        VASurfaceID va_surface = (uintptr_t)frm.raw()->data[3];
+                        VADRMPRIMESurfaceDescriptor* prime = new VADRMPRIMESurfaceDescriptor;
+                        VAStatus sts_export = vaExportSurfaceHandle(hwctx->display, va_surface,
+                            VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                            VA_EXPORT_SURFACE_READ_ONLY,
+                            prime);
+                        if (sts_export != VA_STATUS_SUCCESS) {
+                            logstream << "vaExportSurfaceHandle failed: " << vaErrorStr(sts_export);
+                            delete prime;
+                            prime = nullptr;
+                        }
+
+                        for (int i=0; i<planes_count_; i++) {
+                            obs_frame_.data[i] = (uint8_t*)prime;
+                            obs_frame_.linesize[i] = i;
+                        }
+                    #else
+                        throw Error("got VAAPI frame but compiled without VAAPI support");
+                    #endif
                 }
                 obs_frame_.width = frm.width();
                 obs_frame_.height = frm.height();
@@ -470,7 +676,7 @@ public:
         r->debug_timing_ = debug_timing && debug_timing[0]; // env var is set and non-empty
 
         std::fill(reinterpret_cast<uint8_t*>(&r->obs_hw_), reinterpret_cast<uint8_t*>(&r->obs_hw_)+sizeof(obs_hw_), 0);
-        #ifdef HAVE_CUDA
+        #if HAVE_CUDA
         if (global_cu) {
             logstream << "have CUDA functions";
             r->frames_.resize(60);
@@ -496,12 +702,19 @@ public:
             logstream << "not having CUDA functions, hwaccel output will not work";
         }
         #endif
+        #if HAVE_VAAPI
+        r->EGLImageTargetTexture2DOES = (void (*)(GLenum, GLeglImageOES))eglGetProcAddress("glEGLImageTargetTexture2DOES");
+        r->EGLCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+        r->frames_.resize(60);
+        #endif
         return r;
     }
 };
 
+#if HAVE_CUDA
 CUcontext ObsVideoSink::global_cu_ctx = nullptr;
 std::unordered_map<gs_texture_t*, ObsVideoSink::TextureInfo> ObsVideoSink::global_textures;
 std::mutex ObsVideoSink::global_cu_ctx_create_mutex;
+#endif
 
 DECLNODE(obs_video_sink, ObsVideoSink);

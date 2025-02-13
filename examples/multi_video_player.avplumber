@@ -1,0 +1,24 @@
+node.add { "type": "input", "url": "/home/teowoz/rec.ts", "dst": "1.in10", "group": "g1", "auto_restart": "group", "name": "1.input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "1.in10", "routing": { "v:0": "1.v_in" }, "group": "g1", "auto_restart": "group" }
+node.add {"type":"dec_video","auto_restart":"group","name":"1.Video_Decode","group":"g1","src":"1.v_in","dst":"1.v_dec"}
+#node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "1.v_dec", "dst": "1.v_ts", "group": "out", "correction_group": "1"}
+node.add { "type": "realtime", "team": "1", "negative_time_tolerance": 0.002, "jitter_margin": 0.1, "src": "1.v_dec", "dst": "1.v_rt", "group": "out", "name": "1.RTSync" }
+
+
+
+node.add { "type": "input", "url": "/home/teowoz/rec.ts", "dst": "2.in10", "group": "g2", "auto_restart": "group", "name": "2.input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "2.in10", "routing": { "v:0": "2.v_in" }, "group": "g2", "auto_restart": "group" }
+node.add {"type":"dec_video","auto_restart":"group","name":"2.Video_Decode","group":"g2","src":"2.v_in","dst":"2.v_dec"}
+#node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "2.v_dec", "dst": "2.v_ts", "group": "out", "correction_group": "2"}
+node.add { "type": "realtime", "team": "2", "negative_time_tolerance": 0.002, "jitter_margin": 0.1, "src": "2.v_dec", "dst": "2.v_rt", "group": "out", "name": "2.RTSync" }
+
+
+
+node.add {"type":"filter_video","auto_restart":"group","group":"out", "src": ["1.v_rt", "2.v_rt"], "dst": "v_toenc", "graph":"vstack"}
+
+node.add {"type":"enc_video","auto_restart":"group","name":"Video_Encode","group":"out","src":"v_toenc","dst":"v_outenc", "codec": "wrapped_avframe"}
+node.add { "type": "mux", "src": [ "v_outenc" ], "dst": "mux0-1", "group": "out" }
+node.add { "type": "output", "format": "xv", "url": "OUT 1", "src": "mux0-1", "auto_restart": "panic", "group": "out" }
+group.start g1
+group.start g2
+group.start out

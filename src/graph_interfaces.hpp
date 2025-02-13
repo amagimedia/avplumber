@@ -1,4 +1,5 @@
 #pragma once
+#include "avutils.hpp"
 #include "util.hpp"
 #include <avcpp/pixelformat.h>
 #include <avcpp/codec.h>
@@ -42,13 +43,192 @@ public:
     virtual void stopSinks() = 0;
 };
 
+struct StreamTarget {
+    enum class ETargetType {
+        tt_Timestamp,
+        tt_TimestampRelative,
+        tt_Wallclock,
+        tt_Bytes,
+        tt_Live,
+        tt_FrameRelative,
+        tt_FrameAbsolute,
+        tt_End,
+        tt_Stop
+    };
+    av::Timestamp ts = NOTS;
+    size_t bytes = 0;
+    int64_t frame_number = 0;
+    ETargetType type = ETargetType::tt_Timestamp;
+
+    static StreamTarget from_timestamp(av::Timestamp ts) {
+        return { ts: ts, bytes: 0, type: ETargetType::tt_Timestamp };
+    }
+    static StreamTarget from_timestamp_relative(av::Timestamp ts) {
+        return { ts: ts, bytes: 0, type: ETargetType::tt_TimestampRelative };
+    }
+    static StreamTarget from_wallclock(const std::string& s) {
+        // format: ISO8601: YYYY-MM-DDTHH:MM:SS:mmm
+        std::tm tm = {};
+        std::istringstream ss(s);
+        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+        int64_t t = timegm(&tm) * 1000;
+        size_t ms_sep = s.find('.');
+        if (ms_sep != std::string::npos) {
+            const char* ms_str = s.c_str() + ms_sep + 1;
+            int mmm = atoi(ms_str);
+            size_t l = strlen(ms_str);
+            // convert from values with more than 3 digits
+            while (l > 3) {
+                --l;
+                mmm /= 10;
+            }
+            // convert from values with less than 3 digits
+            while (l < 3) {
+                ++l;
+                mmm *= 10;
+            }
+            t += mmm;
+        }
+
+        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, type: ETargetType::tt_Wallclock };
+    }
+    static StreamTarget from_string(std::string& s) {
+        if (s.find('T') != std::string::npos) {
+            return StreamTarget::from_wallclock(s);
+        }
+        size_t t_sep = s.find(':');
+        if (t_sep != std::string::npos) {
+            // HH:MM:SS.mmm value
+            bool is_relative = (s[0] == '+') || (s[0] == '-');
+            int hh, mm, ss, mmm = 0;
+            int res = sscanf(s.c_str(), "%d:%d:%d", &hh, &mm, &ss);
+            hh = std::abs(hh);
+            if (res == 2) {
+                // mm:ss format
+                ss = mm;
+                mm = hh;
+                hh = 0;
+            }
+            size_t ms_sep = s.find('.', t_sep + 1);
+            if (ms_sep != std::string::npos) {
+                const char* ms_str = s.c_str() + ms_sep + 1;
+                mmm = atoi(s.c_str() + ms_sep + 1);
+                size_t l = strlen(ms_str);
+                // convert from values with more than 3 digits
+                while (l > 3) {
+                    --l;
+                    mmm /= 10;
+                }
+                // convert from values with less than 3 digits
+                while (l < 3) {
+                    ++l;
+                    mmm *= 10;
+                }
+            }
+            int64_t ts = (((hh * 60) + mm) * 60 + ss) * 1000 + mmm;
+            if (is_relative) {
+                if (s[0] == '-')
+                    ts = -ts;
+                return StreamTarget::from_timestamp_relative(av::Timestamp(ts, {1, 1000}));
+            } else {
+                return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+            }
+        }
+        // just a number (timestamp expressed in ms)
+        bool is_relative = (s[0] == '+') || (s[0] == '-');
+        int64_t ts = std::abs(std::atoll(s.c_str()));
+        if (is_relative) {
+            if (s[0] == '-')
+                ts = -ts;
+            return StreamTarget::from_timestamp_relative(av::Timestamp(ts, {1, 1000}));
+        } else {
+            return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+        }
+    }
+    static StreamTarget from_frames_relative(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::tt_FrameRelative };
+    }
+    static StreamTarget from_frames_absolute(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::tt_FrameAbsolute };
+    }
+    static StreamTarget live() {
+        return { type: ETargetType::tt_Live };
+    }
+    static StreamTarget end() {
+        return { type: ETargetType::tt_End };
+    }
+    static StreamTarget stop() {
+        return { type: ETargetType::tt_Stop };
+    }
+    bool isLive() {
+        return type == ETargetType::tt_Live;
+    }
+    bool isEnd() {
+        return type == ETargetType::tt_End;
+    }
+    bool isBytes() {
+        return type == ETargetType::tt_Bytes;
+    }
+    bool isStop() {
+        return type == ETargetType::tt_Stop;
+    }
+    bool isWallclock() {
+        return type == ETargetType::tt_Wallclock;
+    }
+    bool isTimestamp() {
+        return type == ETargetType::tt_Timestamp;
+    }
+    bool isTimestampRelative() {
+        return type == ETargetType::tt_TimestampRelative;
+    }
+    bool isFrameAbsolute() {
+        return type == ETargetType::tt_FrameAbsolute;
+    }
+    bool isFrameRelative() {
+        return type == ETargetType::tt_FrameRelative;
+    }
+    bool isFrame() {
+        return isFrameAbsolute() || isFrameRelative();
+    }
+};
+
 class IStreamsInput {
 public:
+    enum class EPlaybackDirection {
+        pd_Forward, pd_Backward
+    };
     virtual size_t streamsCount() = 0;
     virtual av::Stream stream(size_t) = 0;
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
+    virtual void seekAndPause(StreamTarget target) = 0;
+    virtual void resumeAfterSeek() = 0;
+    virtual void fixInputTimestamp(StreamTarget& ts) = 0;
+    virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
+    virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
+    virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
+};
+
+class IFlushAndSeek {
+public:
+    virtual void flushAndSeek(StreamTarget target) = 0;
+};
+
+class IFrameNumber {
+public:
+    virtual int64_t getCurrentFrameNumber() = 0;
+};
+
+class ISeekAt {
+public:
+    virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) = 0;
+    virtual void seekAtClear() = 0;
+};
+
+class IInputReset {
+public:
+    virtual void resetInput() = 0;
 };
 
 class INeedsOutputFrameSize {
@@ -76,6 +256,7 @@ public:
     virtual std::string codecName() const = 0;
     virtual std::string codecMediaTypeString() const = 0;
     virtual std::string fieldOrderString() const = 0;
+    virtual void discardUntil(av::Timestamp pts) = 0;
 };
 
 class IMuxer {
@@ -141,6 +322,11 @@ public:
     virtual Parameters getObject(const std::string) = 0;
 };
 
+class IInputsObjects {
+public:
+    virtual void setObject(const std::string, const Parameters&) = 0;
+};
+
 class IPreferredFormatReceiver {
 #define WARN_NOT_OVERRIDEN { logstream << "Warning: Called NOOP " << __func__ << " which should be overriden."; }
 public:
@@ -151,7 +337,7 @@ public:
 
 class IJackSink {
 public:
-  virtual void jack_process(size_t nframes) = 0;  
+    virtual void jack_process(size_t nframes) = 0;  
 };
 
 struct EdgeMetadata {
