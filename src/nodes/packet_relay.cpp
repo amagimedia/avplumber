@@ -65,6 +65,9 @@ public:
         ensureVideo();
         return vdec_.pixelFormat();
     }
+    virtual void discardUntil(av::Timestamp pts) override {
+        logstream << "packet_relay ignoring discardUntil";
+    }
     PacketRelay(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<av::Packet>> &&sink, av::Stream source_stream): TransparentNode<av::Packet>(std::move(source), std::move(sink)), source_stream_(source_stream), in_decoder_(source_stream_), codec_(in_decoder_.codec()) {
         if (source_stream_.mediaType() == AVMEDIA_TYPE_VIDEO) {
             vdec_ = av::VideoDecoderContext(source_stream);

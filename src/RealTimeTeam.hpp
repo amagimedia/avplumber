@@ -4,7 +4,7 @@
 #include "instance_shared.hpp"
 #include "avutils.hpp"
 
-class RealTimeTeam: public InstanceShared<RealTimeTeam> {
+class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek {
 protected:
     std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
     std::mutex busy_;
@@ -13,6 +13,9 @@ protected:
     }
     AVRational timebase_ = {0, 0};
     std::atomic_bool flushing_ = false;
+
+    std::mutex seek_mutex_;
+    std::list<std::weak_ptr<IFlushAndSeek>> seek_targets_;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -68,5 +71,37 @@ public:
     }
     bool isFlushing() {
         return flushing_;
+    }
+    virtual void flushAndSeek(StreamTarget target) override {
+        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        for (auto t: seek_targets_) {
+            auto node = t.lock();
+            if (node) {
+                if (target.isFrameRelative()) {
+                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                    if (p_frame) {
+                        target = StreamTarget::from_frames_absolute(p_frame->getCurrentFrameNumber() + target.frame_number);
+                    }
+                }
+                if (target.isTimestampRelative()) {
+                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                    if (p_frame) {
+                        auto pNode = std::dynamic_pointer_cast<Node>(node);
+                        if (pNode) {
+                            std::shared_ptr<IStreamsInput> streams_in = pNode->sourceEdge()->findNodeUp<IStreamsInput>();
+                            if (streams_in) {
+                                size_t new_frame = streams_in->getFrameNumber(p_frame->getCurrentFrameNumber(), target.ts);
+                                target = StreamTarget::from_frames_absolute(new_frame);
+                            }
+                        }
+                    }
+                }
+                node->flushAndSeek(target);
+            }
+        }
+    }
+    void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
+        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        seek_targets_.push_back(target);
     }
 };

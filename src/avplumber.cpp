@@ -10,6 +10,7 @@
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/write.hpp>
 #include <json.hpp>
+#include <memory>
 
 #include "avutils.hpp"
 #include "graph_mgmt.hpp"
@@ -20,10 +21,18 @@
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
 #include "RealTimeTeam.hpp"
+#include "SpeedControlTeam.hpp"
+#include "PauseControlTeam.hpp"
+#include "InputSeekTeam.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
     #include "EventLoop.hpp"
+
+    #define INPUT_NODE "input"
+    #define PAUSE_NODE "pause"
+    #define REALTIME_NODE "realtime"
+    #define SINK_NODE "sink"
 #endif
 
 #include <avcpp/av.h>
@@ -257,6 +266,9 @@ public:
         manager_->edges()->printEdgesStats(ost, true);
         logstream << ost.str();
     }
+    void clearAllQueues() {
+        manager_->edges()->clearEdges();
+    }
     void shutdown() {
         logstream << "Closing server sockets";
         servers_.clear();
@@ -361,6 +373,17 @@ public:
             object_name = strutils::trim(object_name);
             cs << manager_->node(node_name)->getObject(object_name) << "\n";
         };
+        commands_["node.object.set"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string node_name, object_name, content;
+            ss >> node_name >> object_name;
+            std::getline(ss, content);
+
+            content = strutils::trim(content);
+
+            auto node = manager_->node(node_name);
+            node->setObject(object_name, json::parse(content));
+        };
         commands_["queue.plan_capacity"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string name;
@@ -398,6 +421,85 @@ public:
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
         };
+        auto seek = [this](std::string team_node_name, StreamTarget target) {
+            std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_node_name);
+            if (!team) {
+                throw Error("unknown team");
+            }
+            std::shared_ptr<IFlushAndSeek> seekable = std::dynamic_pointer_cast<IFlushAndSeek>(team);
+            if (!seekable) {
+                throw Error("team can't initiate seeking");
+            }
+            seekable->flushAndSeek(target);
+        };
+        auto seek_at = [this](std::string team_node_name, StreamTarget when, StreamTarget target) {
+            std::shared_ptr<InputSeekTeam> team = InstanceSharedObjects<InputSeekTeam>::get(manager_->instanceData(), team_node_name);
+            if (!team) {
+                throw Error("unknown team");
+            }
+            std::shared_ptr<ISeekAt> seekable = std::dynamic_pointer_cast<ISeekAt>(team);
+            if (!seekable) {
+                throw Error("team doesn't support seek at commands");
+            }
+            if (!target.ts.isValid()) {
+                seekable->seekAtClear();
+            } else {
+                seekable->seekAtAdd(when, target);
+            }
+        };
+        commands_["seek"] = [this, seek, seek_at](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string t1, t2;
+            std::string sink_name;
+            std::string command;
+            ss >> sink_name;
+            ss >> command;
+            if (command == "now") {
+                ss >> t1;
+                seek(sink_name, StreamTarget::from_string(t1));
+            } else if (command == "at") {
+                ss >> t1 >> t2;
+                seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
+            } else if (command == "frame") {
+                ss >> t1;
+                if (!t1.empty()) {
+                    int64_t frame_number = std::stoll(t1);
+                    if ((t1[0] == '+') || (t1[0] == '-')) {
+                        // relative seek
+                        seek(sink_name, StreamTarget::from_frames_relative(frame_number));
+                    } else {
+                        // absolute seek
+                        seek(sink_name, StreamTarget::from_frames_absolute(frame_number));
+                    }
+                }
+                seek_at(sink_name, StreamTarget::from_string(t1), StreamTarget::from_string(t2));
+            } else if (command == "clear") {
+                seek_at(sink_name, {}, {});
+            } else if (command == "live") {
+                seek(sink_name, StreamTarget::live());
+            } else {
+                throw Error("invalid command parameters");
+            }
+        };
+        commands_["pause"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string t, command;
+            ss >> t >> command;
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), t);
+            if (command == "now") {
+                team->pause();
+            } else if (command == "at") {
+                std::string at;
+                ss >> at;
+                team->pause(StreamTarget::from_string(at));
+            } else {
+                throw Error("invalid command parameters");
+            }
+        };
+        commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
+            team->resume();
+        };
         commands_["output.start"] = [this](ClientStream &cs, std::string &args) {
             OutputControl::get(args, false)->start();
         };
@@ -430,39 +532,17 @@ public:
                 ev->event().signal();
             });
         };
-        commands_["cc.pause"] = [this](ClientStream &cs, std::string arg) {
-            auto nodes = manager_->nodes("extract_cc_data");
-
-            if (nodes.empty()) {
-                throw Error("no extract_cc_data node found");
-            }
-            if (nodes.size() > 1) {
-                throw Error("multiple extract_cc_data nodes found");
-            }
-            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
-            if (!node_pauseable) {
-                throw Error("node extract_cc_data is not pauseable");
-            }
-            node_pauseable->pause();
-        };
-        commands_["cc.resume"] = [this](ClientStream &cs, std::string arg) {
-            auto nodes = manager_->nodes("extract_cc_data");
-
-            if (nodes.empty()) {
-                throw Error("no extract_cc_data node found");
-            }
-            if (nodes.size() > 1) {
-                throw Error("multiple extract_cc_data nodes found");
-            }
-            auto node_pauseable = std::dynamic_pointer_cast<IPauseable>(nodes.begin()->second->node());
-            if (!node_pauseable) {
-                throw Error("node extract_cc_data is not resumeable");
-            }
-            node_pauseable->resume();
-        };
         commands_["realtime.team.reset"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
             team->reset();
+        };
+        commands_["speed.set"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            float speed;
+            ss >> team_name >> speed;
+            std::shared_ptr<SpeedControlTeam> team = InstanceSharedObjects<SpeedControlTeam>::get(manager_->instanceData(), team_name);
+            team->setSpeed(speed);
         };
 
         #ifdef EMBED_IN_OBS
@@ -641,6 +721,106 @@ void AVPlumber::unsetObsSourceAndWait() {
 
 void AVPlumber::obsTick() {
     impl_->tick();
+}
+
+void AVPlumber::get_pause_team_name() {
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("team")) {
+            PAUSE_TEAM_ = p["team"];
+        }
+    }
+}
+
+void AVPlumber::get_realtime_team_name() {
+    auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("team")) {
+            REALTIME_TEAM_ = p["team"];
+        }
+    }
+}
+
+void AVPlumber::obs_pause() {
+    if (PAUSE_TEAM_.empty()) {
+        get_pause_team_name();
+    }
+    if (!PAUSE_TEAM_.empty()) {
+        char cmd[128];
+        sprintf(cmd, "pause %s now", PAUSE_TEAM_.c_str());
+        executeCommandsFromString(cmd);
+    }
+}
+
+bool AVPlumber::obs_is_paused() {
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto p = node->parameters();
+        if (p.contains("paused")) {
+            bool paused = p["paused"];
+            return paused;
+        }
+    }
+
+    return false;
+}
+
+void AVPlumber::obs_play() {
+    if (PAUSE_TEAM_.empty()) {
+        get_pause_team_name();
+    }
+    if (!PAUSE_TEAM_.empty()) {
+        char cmd[128];
+        sprintf(cmd, "resume %s", PAUSE_TEAM_.c_str());
+        executeCommandsFromString(cmd);
+    }
+}
+
+int64_t AVPlumber::obs_get_time() {
+    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    if (node) {
+        auto n = node->node();
+        if (n) {
+            auto edge = n->sourceEdge();
+            return rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
+        }
+    }
+    return 0;
+}
+
+void AVPlumber::obs_set_time(int64_t ms) {
+    if (REALTIME_TEAM_.empty()) {
+        get_realtime_team_name();
+    }
+    if (!REALTIME_TEAM_.empty()) {
+        char command[128];
+        sprintf(command, "seek %s now %ld", REALTIME_TEAM_.c_str(), ms);
+        executeCommandsFromString(command);
+    }
+}
+
+void AVPlumber::obs_stop() {
+    executeCommandsFromString("group.stop g1");
+}
+
+void AVPlumber::obs_restart() {
+    impl_->clearAllQueues();
+    executeCommandsFromString("group.restart g1");
+}
+
+int64_t AVPlumber::obs_get_duration() {
+    auto node = impl_->manager()->node_if_exists(INPUT_NODE);
+    if (node) {
+        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
+        if (n) {
+            auto duration = n->getObject("duration");
+            return duration["duration"];
+        }
+    }
+
+    return 0;
 }
 #endif
 

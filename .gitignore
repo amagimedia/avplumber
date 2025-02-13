@@ -1,4 +1,7 @@
 /.clangd
 /.cache
 compile_commands.json
-/objs
+graph_factory.generated.cpp
+builddate.h
+compile_flags.txt
+
