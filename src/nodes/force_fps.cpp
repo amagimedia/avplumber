@@ -8,19 +8,19 @@ private:
     av::Timestamp next_ts_ = NOTS;
     T last_frame_;
     av::Rational timebase_;
-    bool frame_wasted_ = false;
+    bool last_unused_ = false;
     int dropped_ = 0;
     int duplicated_ = 0;
     int total_out_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
-    void setLast(T &frm, bool wasted) {
-        if (frame_wasted_) {
+    void setLast(T &frm, bool unused) {
+        if (last_unused_) {
             // if previous frame wasn't used and we have to overwrite it, increase dropped frames count
             dropped_++;
         }
         last_frame_ = frm;
-        frame_wasted_ = wasted;
+        last_unused_ = unused;
     }
 public:
     ForceFPS(std::unique_ptr<Source<T>> &&source, std::unique_ptr<Sink<T>> &&sink, const av::Rational fps, const av::Rational timebase): NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), timebase_(timebase) {
@@ -45,112 +45,41 @@ public:
                 }
                 return;
             }
-            
-            T &pkt = *ptr;
-            if (!pkt.isValid()) {
-                process_next = true;
-                continue;
-            }
-            
-            if (last_printed_stats_.isNoPts()) {
-                last_printed_stats_ = wallclock.ts();
-            }
-            
-            av::Timestamp in_ts = pkt.pts();
-            if ((in_ts.timebase() != timebase_) || (pkt.timeBase() != timebase_)) {
-                pkt.setTimeBase(timebase_);
-                in_ts = rescaleTS(in_ts, timebase_);
-            }
-            if (last_ts_.isValid()) {
-                av::Timestamp delta_from_last = in_ts - last_ts_;
-                bool discontinuity = (delta_from_last.seconds() > 0.03) || (delta_from_last.timestamp() < 0);
-                if (discontinuity) {
-                    logstream << "Discontinuity " << last_ts_ << " -> " << in_ts;
-                }
-                /*if (delta_from_last == frame_delta_) {
-                    logstream << "Frame PTS = " << in_ts << " perfectly aligned";
-                }*/
-                if (! ( (delta_from_last == frame_delta_) || discontinuity ) ) {
-                    // this scope is NOT executed if frame PTS is perfectly aligned
-                    // or discontinuity occured
-                    // because we don't want to duplicate or drop frames then
-                    if (in_ts > next_ts_) {
-                        // PTS too big
-                        // input frame rate too low
-                        // duplicate previous frame
-                        while (in_ts > next_ts_) {
-                            if (!frame_wasted_) {
-                                // increase number of duplicated frames only if last_frame_ was already used
-                                duplicated_++;
-                            }
-                            frame_wasted_ = false;
-                            last_frame_.setPts(next_ts_);
-                            total_out_++;
-
-                            if (!this->sink_->put(last_frame_, true)) {
-                                if (!ticks) {
-                                    // retry when we have space in sink
-                                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-                                }
-                                return;
-                            }
-                            next_ts_ = addTS(next_ts_, frame_delta_);
+            /*if (delta_from_last == frame_delta_) {
+                logstream << "Frame PTS = " << in_ts << " perfectly aligned";
+            }*/
+            if (! ( (delta_from_last == frame_delta_) || discontinuity ) ) {
+                // this scope is NOT executed if frame PTS is perfectly aligned
+                // or discontinuity occured
+                // because we don't want to duplicate or drop frames then
+                if (in_ts > next_ts_) {
+                    // PTS too big
+                    // input frame rate too low
+                    // duplicate previous frame
+                    while (in_ts > next_ts_) {
+                        if (!last_unused_) {
+                            // increase number of duplicated frames only if last_frame_ was already used
+                            duplicated_++;
+                            // if used more than once, remove side data to prevent CC duplication
+                            av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
                         }
-                        // now in_ts <= next_ts_
-                        //  if in_ts == next_ts, all OK
-                        //  if in_ts < next_ts_, it means that in_ts is too small and unaligned
-                        //   aligning it is dangerous, so...
-                        //   so continue to  the "PTS too small" logic!
-                        //in_ts = next_ts_; // align
-                        /*if (in_ts != next_ts_) {
-                            logstream << " :/ unaligned";
-                        } else {
-                            logstream << " :) aligned";
-                        }*/
-                    }
-                    if (in_ts < next_ts_) {
-                        // PTS too small
-                        // input frame rate too high
-                        // save received frame as last_frame_
-                        // and drop it!
-                        setLast(pkt, true);
-                        total_in_++;
-                        this->source_->pop();
-                        //logstream << "Dropping frame PTS = " << in_ts;
-                        if (ticks) {
-                            process_next = true;
-                            continue;
-                        } else {
-                            this->yieldAndProcess();
-                            break;
-                        }
+                        last_unused_ = false;
+                        last_frame_.setPts(next_ts_);
+                        total_out_++;
+                        this->sink_->put(last_frame_);
+                        next_ts_ = addTS(next_ts_, frame_delta_);
                     }
                 }
             }
-
-            pkt.setPts(in_ts);
-            
-            if (!this->sink_->put(pkt, true)) {
-                if (!ticks) {
-                    // retry when we have space in sink
-                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-                }
-                return;
-            } else {
-                last_ts_ = in_ts;
-                next_ts_ = addTS(in_ts, frame_delta_);
-                setLast(pkt, false);
-            }
-            total_out_++;
-            this->source_->pop();
-            total_in_++;
-
-            process_next = ticks;
-            if (!ticks) {
-                this->yieldAndProcess();
-            }
-        } while (process_next);
-
+        }
+        last_ts_ = in_ts;
+        next_ts_ = addTS(in_ts, frame_delta_);
+        pkt.setPts(in_ts);
+        this->sink_->put(pkt);
+        total_out_++;
+        setLast(pkt, false);
+        this->source_->pop();
+        total_in_++;
         av::Timestamp now = wallclock.ts();
         const float print_stats_every = 10;
         if ( (now-last_printed_stats_).seconds()>print_stats_every ) {
