@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+set(HAVE_CUDA ON CACHE BOOL "compile with CUDA support (built-in dynlink loader, no dependencies needed)")
+set(HAVE_JACK ON CACHE BOOL "compile with JACK support (system library needed)")
+
 # Set build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
@@ -53,35 +56,60 @@ set(CPPSRC
     ${CMAKE_BINARY_DIR}/graph_factory.generated.cpp
 )
 
+set(SYSTEM_LIBS
+    pthread
+    curl
+    ssl
+    crypto
+    boost_thread
+    boost_system
+    avcodec
+    avfilter
+    avutil
+    avformat
+    avdevice
+    swscale
+    swresample
+    dl
+)
+
 if(DEFINED EMBED_IN AND EMBED_IN STREQUAL obs)
     file(GLOB OBS_NODES_SRC src/nodes/obs/*.cpp)
     list(APPEND NODES_SRC ${OBS_NODES_SRC})
     include_directories(${LIBOBS_INCLUDE_DIR} ${LIBOBS_INCLUDE_DIR}/../deps/glad/include)
-    add_compile_definitions(EMBED_IN_OBS=1)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL Debug)
     file(GLOB DEBUG_NODES_SRC src/nodes/debug/*.cpp)
     list(APPEND NODES_SRC ${DEBUG_NODES_SRC})
-    add_compile_definitions(SYNCMETER=1)
+    set_property(SOURCE src/stats.cpp APPEND PROPERTY COMPILE_DEFINITIONS SYNCMETER=1)
 endif()
 
-if(DEFINED HAVE_JACK AND HAVE_JACK EQUAL 1)
+if(${HAVE_JACK})
     file(GLOB JACK_NODES_SRC src/nodes/jack/*.cpp)
     list(APPEND NODES_SRC ${JACK_NODES_SRC})
-    add_compile_definitions(HAVE_JACK=1)
-    list(APPEND SYSTEM_LIBS jack)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(jack REQUIRED IMPORTED_TARGET GLOBAL jack)
+    list(APPEND SYSTEM_LIBS PkgConfig::jack)
 endif()
 
-if(DEFINED HAVE_CUDA AND HAVE_CUDA EQUAL 1)
+if(${HAVE_CUDA})
     file(GLOB CUDA_NODES_SRC src/nodes/cuda/*.cpp)
     list(APPEND NODES_SRC ${CUDA_NODES_SRC})
     list(APPEND CPPSRC src/cuda.cpp deps/cuda_loader/cuda_drvapi_dynlink.c)
-    add_compile_definitions(HAVE_CUDA=1)
     list(APPEND DEPS_LIBS deps/cuda_loader/cuda_drvapi_dynlink.o)
 endif()
 
 set(CPPSRC_ALL ${CPPSRC} ${NODES_SRC})
+
+if(${HAVE_CUDA})
+    set_property(SOURCE ${CPPSRC_ALL} APPEND PROPERTY COMPILE_DEFINITIONS HAVE_CUDA=1)
+endif()
+
+if(DEFINED EMBED_IN AND EMBED_IN STREQUAL obs)
+    set_property(SOURCE ${CPPSRC_ALL} APPEND PROPERTY COMPILE_DEFINITIONS EMBED_IN_OBS=1)
+endif()
+
 
 execute_process(COMMAND /bin/date "+%Y-%m-%d %H:%M:%S %z" OUTPUT_VARIABLE COMPILE_DATE OUTPUT_STRIP_TRAILING_WHITESPACE)
 execute_process(COMMAND git describe --abbrev --dirty --always --tags OUTPUT_VARIABLE GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -115,23 +143,6 @@ set(DEPS_LIBS
     avcpp::avcpp
     ${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs/libklvanc.a
     ${CMAKE_BINARY_DIR}/deps/libklscte35/src/.libs/libklscte35.a
-)
-
-set(SYSTEM_LIBS
-    pthread
-    curl
-    ssl
-    crypto
-    boost_thread
-    boost_system
-    avcodec
-    avfilter
-    avutil
-    avformat
-    avdevice
-    swscale
-    swresample
-    dl
 )
 
 
