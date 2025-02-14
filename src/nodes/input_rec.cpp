@@ -29,7 +29,7 @@ enum class ETimestampSource {
     ts_Wallclock
 };
 
-class RecoringInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag,
+class RecoringInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt {
 protected:
     av::FormatContext ictx_;
@@ -51,7 +51,7 @@ protected:
     std::thread seek_read_thread_;
     Event seek_thread_terminate_;
     Event seek_thread_ready_;
-    IStreamsInput::EPlaybackDirection play_direction_ = IStreamsInput::EPlaybackDirection::pd_Forward;
+    IPlaybackControl::EPlaybackDirection play_direction_ = IPlaybackControl::EPlaybackDirection::pd_Forward;
     int64_t last_stream_position_ = -1;
     int64_t live_delay_ = 1'000;
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
@@ -567,7 +567,7 @@ public:
                 need_seek_ = false;
                 seeked = true;
             } else {
-                if (play_direction_ == IStreamsInput::EPlaybackDirection::pd_Backward) {
+                if (play_direction_ == IPlaybackControl::EPlaybackDirection::pd_Backward) {
                     auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
                     if (!seek_table_.empty()) {
                         auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
@@ -710,7 +710,7 @@ public:
         closeInput(true);
         #endif
     }
-    void setPlaybackDirection(IStreamsInput::EPlaybackDirection dir) override {
+    void setPlaybackDirection(IPlaybackControl::EPlaybackDirection dir) override {
         if (play_direction_ != dir) {
             play_direction_ = dir;
             last_stream_position_ = avio_tell(ictx_.raw()->pb);

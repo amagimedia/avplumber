@@ -65,7 +65,7 @@ public:
         }
     }
     virtual void flushAndSeek(StreamTarget target) override {
-        std::shared_ptr<IStreamsInput> input = findNodeUp<IStreamsInput>();
+        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
         if (input) {
             input->fixInputTimestamp(target);
         }
@@ -77,7 +77,7 @@ public:
             if (target.ts.isValid() && dec) {
                 dec->discardUntil(target.ts);
             }
-            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
             if (input) {
                 input->seekAndPause(target);
             }
@@ -104,7 +104,7 @@ public:
         // stop flushing and resume paused input:
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
-            std::shared_ptr<IStreamsInput> input = std::dynamic_pointer_cast<IStreamsInput>(node);
+            std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
             if (input) {
                 input->resumeAfterSeek();
             }
