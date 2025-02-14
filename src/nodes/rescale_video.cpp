@@ -32,6 +32,7 @@ public:
             //rescaler_->rescale(out_frame, in_frame);
             av::VideoFrame out_frame = rescaler_->rescale(in_frame, av::throws());
             if (out_frame) {
+                av_dict_copy(&out_frame.raw()->metadata, in_frame.raw()->metadata, 0);
                 for (int i=0; i<in_frame.raw()->nb_side_data; i++) {
                     AVFrameSideData* sd_src = in_frame.raw()->side_data[i];
                     if (sd_src==nullptr) continue;

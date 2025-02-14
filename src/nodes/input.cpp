@@ -199,15 +199,6 @@ public:
             throw Error("Unknown object to get");
         }
     }
-
-    // these functions are supported only byt the input_rec node
-    void seekAndPause(StreamTarget target) override {};
-    void resumeAfterSeek() override {};
-    void fixInputTimestamp(StreamTarget& ts) override {};
-    void setFrameMetadataTimestamps(av::VideoFrame& frame) override {};
-    void setPlaybackDirection(EPlaybackDirection dir) override {};
-    size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) override { return 0; };
-
 };
 
 DECLNODE(input, StreamInput);

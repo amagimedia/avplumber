@@ -38,9 +38,9 @@ public:
                     auto pNode = std::dynamic_pointer_cast<Node>(node);
                     // set input playback direction
                     if (pNode) {
-                        std::shared_ptr<IStreamsInput> streams_in = pNode->sourceEdge()->findNodeUp<IStreamsInput>();
+                        std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
                         if (streams_in) {
-                            streams_in->setPlaybackDirection(speed > 0 ? IStreamsInput::EPlaybackDirection::pd_Forward : IStreamsInput::EPlaybackDirection::pd_Backward);
+                            streams_in->setPlaybackDirection(speed > 0 ? IPlaybackControl::EPlaybackDirection::pd_Forward : IPlaybackControl::EPlaybackDirection::pd_Backward);
                         }
                     }
                 }

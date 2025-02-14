@@ -10,7 +10,7 @@ protected:
     std::optional<StreamTarget> pause_at_;
     std::vector<std::weak_ptr<IInputReset>> nodes_to_resume_;
     std::mutex mutex_;
-    std::weak_ptr<IStreamsInput> input_;
+    std::weak_ptr<IPlaybackControl> playback_;
     std::weak_ptr<IFlushAndSeek> sync_obj_;
 public:
     bool isPaused() {
@@ -26,10 +26,10 @@ public:
     }
     void pause(const StreamTarget& target) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
-        auto input = input_.lock();
-        if (input) {
+        auto playback = playback_.lock();
+        if (playback) {
             StreamTarget ts = target;
-            input->fixInputTimestamp(ts);
+            playback->fixInputTimestamp(ts);
             pause_at_ = ts;
         } else {
             pause_at_ = target;
@@ -64,9 +64,9 @@ public:
         nodes_to_resume_.erase(std::remove_if(nodes_to_resume_.begin(), nodes_to_resume_.end(), [](std::weak_ptr<IInputReset> &p) { return p.expired(); }), nodes_to_resume_.end());
         nodes_to_resume_.push_back(std::weak_ptr<IInputReset>(node));
     }
-    void setInputNode(std::weak_ptr<IStreamsInput>& node) {
+    void setPlaybackNode(std::weak_ptr<IPlaybackControl>& node) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
-        input_ = node;
+        playback_ = node;
     }
     void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
