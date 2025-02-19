@@ -164,13 +164,13 @@ add_dependencies(avplumber_static klvanc klscte35 cpr::cpr avcpp::avcpp)
 
 
 # Add dependencies as external projects
-set(CPR_USE_SYSTEM_CURL ON)
-set(BUILD_SHARED_LIBS OFF)
+set(CPR_USE_SYSTEM_CURL ON CACHE INTERNAL "")
+set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 add_subdirectory(deps/cpr)
 
-set(AV_BUILD_EXAMPLES OFF)
-set(AV_ENABLE_STATIC ON)
-set(AV_ENABLE_SHARED OFF)
+set(AV_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+set(AV_ENABLE_STATIC ON CACHE INTERNAL "")
+set(AV_ENABLE_SHARED OFF CACHE INTERNAL "")
 add_subdirectory(deps/avcpp)
 
 # Custom command for generating node list
