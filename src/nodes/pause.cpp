@@ -82,8 +82,8 @@ public:
 
         // find source of streams:
         auto in_edge = edges.find<av::VideoFrame>(params["src"]);
-        std::weak_ptr<IStreamsInput> streams_in = in_edge->findNodeUp<IStreamsInput>();
-        r->team_->setInputNode(streams_in);
+        std::weak_ptr<IPlaybackControl> streams_in = in_edge->findNodeUp<IPlaybackControl>();
+        r->team_->setPlaybackNode(streams_in);
         if (params.count("sync_team")) {
             std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
             if (sync_team) {
