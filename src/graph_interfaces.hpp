@@ -194,14 +194,18 @@ struct StreamTarget {
 
 class IStreamsInput {
 public:
-    enum class EPlaybackDirection {
-        pd_Forward, pd_Backward
-    };
     virtual size_t streamsCount() = 0;
     virtual av::Stream stream(size_t) = 0;
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
+};
+
+class IPlaybackControl {
+public:
+    enum class EPlaybackDirection {
+        pd_Forward, pd_Backward
+    };
     virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
     virtual void fixInputTimestamp(StreamTarget& ts) = 0;

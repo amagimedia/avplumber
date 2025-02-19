@@ -88,7 +88,7 @@ public:
                     if (p_frame) {
                         auto pNode = std::dynamic_pointer_cast<Node>(node);
                         if (pNode) {
-                            std::shared_ptr<IStreamsInput> streams_in = pNode->sourceEdge()->findNodeUp<IStreamsInput>();
+                            std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
                             if (streams_in) {
                                 size_t new_frame = streams_in->getFrameNumber(p_frame->getCurrentFrameNumber(), target.ts);
                                 target = StreamTarget::from_frames_absolute(new_frame);

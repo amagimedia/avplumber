@@ -101,7 +101,7 @@ for example:
 
 Some nodes require that other node implementing specific features (an *interface*) is placed before (up) or after (down) it:
 
-* `input` before `demux`
+* `input`/`input_rec` before `demux`
 * `mux` before `output`
 * video format metadata source before `enc_video`. It can be `dec_video`, `assume_video_format`, `rescale_video` or `filter_video`
 * FPS metadata source before `enc_video`, `extract_timestamps` and `filter_video`. It can be `dec_video`, `force_fps`, `filter_video` or `sentinel_video`
@@ -299,12 +299,12 @@ Tell all `pause` nodes in a team `team_name` to resume playback
 
 ```seek team_name live```
 
-Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to live video.
+Flush all queues between the `input_res` nodes and the nodes in a `team_name` team and seek to live video.
 Live wideo is a video playback from recording which is still recorded. It is delayed 10 seconds after current time.
 
 ```seek team_name now timestamp```
 
-Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given timestamp.
+Flush all queues between the `input_rec` nodes and the nodes in a `team_name` team and seek to given timestamp.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
 When timestamp is preceeded with `+` sign, then it will seek to `<current time> + <timestamp>` (like `seek team +0:10` - seek 10s forward from now).
 When timestamp is preceeded with `-` sign, then it will seek to `<current time> + <timestamp>` (like `seek team frame -0:10` - seek 10s backward from now).
@@ -312,14 +312,14 @@ When there is no sign before the timestamp, it will seek go absolute timestamp.
 
 ```seek team_name frame <frame number>```
 
-Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given frame number.
+Flush all queues between the `input_rec` nodes and the nodes in a `team_name` team and seek to given frame number.
 When frame number is preceeded with `+` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame +10` - seek 10 frames forward from now).
 When frame number is preceeded with `-` sign, then it will seek to `<current frame> + <frame number>` (like `seek team frame -10` - seek 10 frames backward from now).
 When there is no sign before the frame number, it will seek go absolute frame number (starting from `0`).
 
 ```seek team_name at timestamp_when timestamp_to```
 
-Flush all queues between the `input` nodes and the nodes in a `team_name` team and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
+Flush all queues between the `input_rec` nodes and the nodes in a `team_name` team and seek to given `timestamp_to` when playback time reaches `timestamp_when`.
 Multiple `seek at` commands may be specified and it will executed in order of adding.
 Timestamp may be expressed in many forms like: `01:02:03` (hh:mm:ss), `01:00.150` (mm:ss.millis), `12000` (time expressed in ms), `2024-10-03T08:12:44.100` (wallclock time, ISO 9601 format with optional milliseconds).
 
@@ -443,6 +443,18 @@ The tick source has its own event loop (or may even bypass it and call the node 
 ### `input`
 
 1 output: `av::Packet`
+
+-   `url` (string of URL)
+-   `options` (dictionary) - options for libavformat
+-   `timeout` (float, seconds) - packet read timeout
+-   `initial_timeout` (float, seconds) - URL open timeout
+
+### `input_rec`
+
+1 output: `av::Packet`
+
+This node is a special case on the `input` node with some changes required to plae & seek recoding files.
+It has the same parameters as the `input` node and some additional
 
 -   `url` (string of URL)
 -   `options` (dictionary) - options for libavformat
@@ -986,7 +998,7 @@ system's process.
 
 Despite the architecture initially being designed solely for handling live streams, latest updates to avplumber bring playback control support.
 
-Seeking is complicated because queues need to be flushed to ensure that user doesn't have to wait for them to drain after requesting a seek. Also, we want to display frame after seek even when the player is paused. That's why seek commands (`seek`) need the name of the downmost node in the graph that limits output speed (in a video player it would be `realtime`). The graph is walked up, passing needed requests to decoder nodes and issuing the actual seek request to the `input` node.
+Seeking is complicated because queues need to be flushed to ensure that user doesn't have to wait for them to drain after requesting a seek. Also, we want to display frame after seek even when the player is paused. That's why seek commands (`seek`) need the name of the downmost node in the graph that limits output speed (in a video player it would be `realtime`). The graph is walked up, passing needed requests to decoder nodes and issuing the actual seek request to the `input_rec` node.
 
 See `examples/video_player.avplumber` for a typical graph with playback control including seeking. Example control commands compatible with it:
 
@@ -1007,7 +1019,7 @@ In your application controlling the player, parse the generated seek table and f
 
 `seek rtsync now <timestamp>`
 
-Make sure that `preseek` is set to 0 (or unspecified) in the player's `input` node.
+Make sure that `preseek` is set to 0 (or unspecified) in the player's `input_rec` node.
 
 
 ## Tips & tricks
