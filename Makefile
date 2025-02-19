@@ -130,6 +130,7 @@ compile_flags.txt:
 # anything that requires cpr headers must be compiled after cpr is configured
 objs/src/nodes/sentinel.o: deps/cpr/build/lib/libcpr.a
 objs/src/stats.o: deps/cpr/build/lib/libcpr.a
+objs/src/nodes/scte35_parse.o: deps/cpr/build/lib/libcpr.a
 
 .PRECIOUS: objs/%.d
 
