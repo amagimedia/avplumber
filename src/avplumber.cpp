@@ -779,7 +779,7 @@ void AVPlumber::obs_play() {
 }
 
 int64_t AVPlumber::obs_get_time() {
-    auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
+    auto node = impl_->manager()->node_if_exists(SINK_NODE);
     if (node) {
         auto n = node->node();
         if (n) {
