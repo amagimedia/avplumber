@@ -163,7 +163,9 @@ public:
         this->finished_ = true;
     }
     template<typename T=OutputFrame, typename=decltype(&T::pixelFormat)> void setFrameTimestamps(OutputFrame& frm) {
-        playback_hold_->setFrameMetadataTimestamps(frm);
+        if (playback_hold_) {
+            playback_hold_->setFrameMetadataTimestamps(frm);
+        }
     }
     template<typename T> void setFrameTimestamps(T) {
     }
