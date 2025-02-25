@@ -5,9 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+set(AVPLUMBER_BUILD_EXE ON CACHE BOOL "build standalone executable")
 set(HAVE_CUDA ON CACHE BOOL "compile with CUDA support (built-in dynlink loader, no dependencies needed)")
 set(HAVE_JACK ON CACHE BOOL "compile with JACK support (system library needed)")
 set(HAVE_VAAPI ON CACHE BOOL "compile with VA-API support (system libraries needed: va GL EGL GLESv2)")
+
 
 # Set build type
 if(NOT CMAKE_BUILD_TYPE)
@@ -157,8 +159,10 @@ set(DEPS_LIBS
 add_library(avplumber_static STATIC ${CPPSRC_ALL})
 target_link_libraries(avplumber_static ${DEPS_LIBS} ${SYSTEM_LIBS})
 
-add_executable(avplumber src/main.cpp)
-target_link_libraries(avplumber avplumber_static)
+if (${AVPLUMBER_BUILD_EXE})
+    add_executable(avplumber src/main.cpp)
+    target_link_libraries(avplumber avplumber_static)
+endif ()
 
 add_dependencies(avplumber_static klvanc klscte35 cpr::cpr avcpp::avcpp)
 
