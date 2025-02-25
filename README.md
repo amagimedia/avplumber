@@ -27,8 +27,9 @@ Make sure to clone this repo with `--recursive` option.
 or if you don't want to use Docker but have Ubuntu:
 
     apt install git gcc pkg-config make cmake libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libcurl4-openssl-dev libboost-thread-dev libboost-system-dev libssl-dev
-    make -j`nproc`
-    ./avplumber
+    cmake -B build
+    cmake --build build -j`nproc`
+    ./build/avplumber
 
 and in a different terminal:
 

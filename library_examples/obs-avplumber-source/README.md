@@ -1,4 +1,4 @@
-# OBS avplumber source with zero-copy CUDA rendering
+# OBS avplumber source with zero-copy CUDA & VA-API rendering
 
 This plugin allows embedding avplumber graph into OBS, as a source. You can use it as a replacement for ffmpeg_source (media source) for live video input (avplumber doesn't support seeking so it isn't that useful for media files).
 
