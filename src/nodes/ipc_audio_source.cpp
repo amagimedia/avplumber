@@ -45,7 +45,11 @@ public:
             logstream << "unsupported bytes per sample " << packet.bytes_per_sample;
             return;
         }
+#if API_NEW_CHANNEL_LAYOUT
         int64_t channel_layout = av::ChannelLayout(packet.channels).layout();
+#else
+        int64_t channel_layout = av_get_default_channel_layout(packet.channels);
+#endif
         av::AudioSamples outfrm(sample_format, packet.samples_per_channel, channel_layout,
             sample_rate_override_>0 ? sample_rate_override_ : packet.sample_rate, align_);
 
