@@ -477,7 +477,6 @@ public:
             default_params_.channel_layout = stringToChannelLayout(layout_s);
         } else if (params.count("dst_channels")==1) {
             int64_t cnt = params["dst_channels"].get<int>();
-            AVChannelLayout new_layout{};
 #if API_NEW_CHANNEL_LAYOUT
             default_params_.channel_layout = av::ChannelLayout(cnt).layout();
 #else
