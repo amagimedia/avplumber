@@ -186,7 +186,7 @@ public:
 template<typename OutputType> class NodeWithOutputs: virtual public Node, public IWaitsSinksEmpty {
 public:
     virtual void forEachOutput(std::function<void(Sink<OutputType>*)>) = 0;
-    virtual void waitSinksEmpty() {
+    virtual void waitSinksEmpty() override {
         forEachOutput([](Sink<OutputType>* sink_a) {
             EdgeSink<OutputType>* sink = dynamic_cast<EdgeSink<OutputType>*>(sink_a);
             if (sink) {
@@ -196,13 +196,23 @@ public:
             }
         });
     }
-    virtual void stopSinks() {
+    virtual void stopSinks() override {
         forEachOutput([](Sink<OutputType>* sink_a) {
             EdgeSink<OutputType>* sink = dynamic_cast<EdgeSink<OutputType>*>(sink_a);
             if (sink) {
                 sink->edge()->finishProducer();
             } else {
                 throw Error("stopSinks called for node without edge sink!");
+            }
+        });
+    }
+    virtual void start() override {
+        forEachOutput([](Sink<OutputType> *sink) {
+            auto edge_sink = dynamic_cast<EdgeSink<OutputType>*>(sink);
+            if (edge_sink==nullptr) return;
+            if (edge_sink->edge()->consumer().expired()) {
+                // the `expired` name is a bit misleading - it returns true also for not-yet-set weak_ptr
+                logstream << "WARNING: one of dst queues is not connected to any other node";
             }
         });
     }
