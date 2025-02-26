@@ -1,6 +1,6 @@
-#include "channellayout.h"
 #include "node_common.hpp"
 #include <avcpp/audioresampler.h>
+#include <avcpp/channellayout.h>
 #include <string>
 #include "../util.hpp"
 
@@ -118,6 +118,7 @@ public:
         }
     }
     virtual void start() {
+        NodeSISO::start();
         if (enc_frame_size_==0) {
             enc_frame_size_ = 1024;
             logstream << "Notice: Audio resampler must know output frame size! Assuming " << enc_frame_size_;
