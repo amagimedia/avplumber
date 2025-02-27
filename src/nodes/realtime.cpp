@@ -80,7 +80,12 @@ public:
         }
         
         bool process_next;
+        int iter = 0;
+
         do {
+            iter++;
+            AVTS iter_begin = wallclock.pts();
+
             process_next = false;
             bool emit = true;
             bool consume = true;
@@ -95,6 +100,8 @@ public:
                 }
                 return;
             }
+            AVTS peeked = wallclock.pts();
+
             T &data = *dataptr;
             
             AVTS now_ts = now_ts_;
@@ -183,6 +190,9 @@ public:
             } else {
                 emit = false;
             }
+
+            AVTS before_emit = wallclock.pts();
+
             if (emit) {
                 av::Timestamp orig_pts = data.pts();
                 if (set_pts_) {
@@ -210,6 +220,9 @@ public:
                     }
                 }
             }
+
+            AVTS emitted = wallclock.pts();
+
             if (consume) {
                 this->source_->pop();
 
@@ -220,7 +233,18 @@ public:
                     last_wait_ = wallclock.pts();
                 }
             }
+
+            AVTS iter_end = wallclock.pts();
+            AVTS wclk_diff = iter_end - iter_begin;
+            if (wclk_diff>3) {
+                logstream << "rt iter peek: " << (peeked-iter_begin) << ", calc: " << (before_emit-peeked) << ", emit: " << (emitted-before_emit) << ", consume: " << (iter_end-emitted);
+            }
+
         } while (process_next);
+
+        AVTS exit_wclk = wallclock.pts();
+        AVTS wclk_diff = exit_wclk - now_ts_wclk;
+        if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
     }
     template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
