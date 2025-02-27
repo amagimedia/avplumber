@@ -244,6 +244,9 @@ protected:
                     } else {
                         ti = &titer->second;
                     }
+                    CUstream stream;
+                    CHECK_CU(cu->cuStreamCreate(&stream, 0));
+
                     CUDA_MEMCPY2D cpy = {
                         .srcY = 0,
                         .srcMemoryType = CU_MEMORYTYPE_DEVICE,
@@ -257,7 +260,7 @@ protected:
                     if (self.debug_timing_) {
                         logstream << "buffer_to_texture before cuMemcpy";
                     }
-                    if (!CHECK_CU(cu->cuMemcpy2DAsync(&cpy, 0))) {
+                    if (!CHECK_CU(cu->cuMemcpy2DAsync(&cpy, stream))) {
                         //logstream << "buffer_to_texture cuMemcpy success!";
                     } else {
                         logstream << "buffer_to_texture cuMemcpy failure";
@@ -265,6 +268,9 @@ protected:
                     if (self.debug_timing_) {
                         logstream << "buffer_to_texture after cuMemcpy";
                     }
+                    CHECK_CU(cu->cuStreamSynchronize(stream));
+                    CHECK_CU(cu->cuStreamDestroy(stream));
+                    
                     CUcontext dummy;
                     CHECK_CU(cu->cuCtxPopCurrent(&dummy));
                     if (self.debug_timing_) {
