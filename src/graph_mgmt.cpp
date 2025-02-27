@@ -127,6 +127,18 @@ Parameters NodeWrapper::getObject(const std::string object_name) {
     return retobj->getObject(object_name);
 }
 
+void NodeWrapper::setObject(const std::string object_name, const Parameters& p) {
+    std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
+    if (node_==nullptr) {
+        throw Error("Node not created");
+    }
+    IInputsObjects* inpobj = dynamic_cast<IInputsObjects*>(node_.get());
+    if (inpobj==nullptr) {
+        throw Error("Node doesn't inputs objects");
+    }
+    inpobj->setObject(object_name, p);
+}
+
 bool NodeWrapper::stopAndWait() {
     std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     bool r = interrupt(true);
@@ -499,6 +511,10 @@ void NodeGroup::stopNodesInternal() {
     doWithNodes([](NodeWrapper &n) {
         n.stopAndWait();
     }, false, "Stopping");
+}
+
+void NodeGroup::stopNodesAndWait() {
+    stopNodesInternal();
 }
 
 decltype(NodeGroup::start_id_)::value_type NodeGroup::startNodesInternal() {

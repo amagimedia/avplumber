@@ -1,0 +1,18 @@
+queue.plan_capacity * 1
+queue.plan_capacity v_in 63
+queue.plan_capacity Video_Decode_out 7
+
+node.add { "type": "input", "url": "/data/fsx/rec.ts", "format": "mpegts", "dst": "in10", "group": "g1", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0, "options": {"probesize": 10000, "analyzeduration": 10000, "max_probe_packets": 10}, "seek_table": "/data/fsx/rec.ts.seek", "team": "@input-seek-team" }
+node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in" }, "group": "g1", "auto_restart": "group" }
+node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"g1","src":"v_in","dst":"Video_Decode_out"}
+
+node.add {"type": "pause", "team": "@pause-team", "group": "g1", "src": "Video_Decode_out", "dst": "pause_out" }
+node.add {"type": "speed_video", "team": "@speed-team", "group":"g1", "src": "pause_out", "dst":"speeded"}
+
+node.add {"type": "force_fps", "fps": "60", "group":"g1", "src": "speeded", "dst":"forcedfps"}
+
+node.add { "type": "realtime<av::VideoFrame>", "team": "rt", "discontinuity_threshold": 30, "negative_time_tolerance": 0.02, "negative_time_discard": 0.02, "jitter_margin": 0.1, "initial_jitter_margin": 0.1, "src": "forcedfps", "dst": "videosink", "group": "g1", "name": "RTSync_v", "auto_restart": "on", "tick_source": "obs" }
+
+node.add { "type": "obs_video_sink", "src": "videosink", "group": "g1", "unbuffered": true, "auto_restart": "on", "tick_source": "obs" }
+
+group.start g1

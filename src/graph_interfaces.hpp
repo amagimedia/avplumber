@@ -44,12 +44,27 @@ public:
 };
 
 struct StreamTarget {
+    enum class ETargetType {
+        tt_Timestamp,
+        tt_TimestampRelative,
+        tt_Wallclock,
+        tt_Bytes,
+        tt_Live,
+        tt_FrameRelative,
+        tt_FrameAbsolute,
+        tt_End,
+        tt_Stop
+    };
     av::Timestamp ts = NOTS;
     size_t bytes = 0;
-    bool wallclock = false;
+    int64_t frame_number = 0;
+    ETargetType type = ETargetType::tt_Timestamp;
 
     static StreamTarget from_timestamp(av::Timestamp ts) {
-        return { ts: ts, bytes: 0, wallclock: false };
+        return { ts: ts, bytes: 0, type: ETargetType::tt_Timestamp };
+    }
+    static StreamTarget from_timestamp_relative(av::Timestamp ts) {
+        return { ts: ts, bytes: 0, type: ETargetType::tt_TimestampRelative };
     }
     static StreamTarget from_wallclock(const std::string& s) {
         // format: ISO8601: YYYY-MM-DDTHH:MM:SS:mmm
@@ -75,7 +90,7 @@ struct StreamTarget {
             t += mmm;
         }
 
-        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, wallclock: true };
+        return { ts: av::Timestamp(t, {1, 1000}), bytes: 0, type: ETargetType::tt_Wallclock };
     }
     static StreamTarget from_string(std::string& s) {
         if (s.find('T') != std::string::npos) {
@@ -84,9 +99,11 @@ struct StreamTarget {
         size_t t_sep = s.find(':');
         if (t_sep != std::string::npos) {
             // HH:MM:SS.mmm value
-            int hh, mm, ss = -1, mmm = 0;
+            bool is_relative = (s[0] == '+') || (s[0] == '-');
+            int hh, mm, ss, mmm = 0;
             int res = sscanf(s.c_str(), "%d:%d:%d", &hh, &mm, &ss);
-            if (ss < 0) {
+            hh = std::abs(hh);
+            if (res == 2) {
                 // mm:ss format
                 ss = mm;
                 mm = hh;
@@ -109,16 +126,69 @@ struct StreamTarget {
                 }
             }
             int64_t ts = (((hh * 60) + mm) * 60 + ss) * 1000 + mmm;
-            return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+            if (is_relative) {
+                if (s[0] == '-')
+                    ts = -ts;
+                return StreamTarget::from_timestamp_relative(av::Timestamp(ts, {1, 1000}));
+            } else {
+                return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+            }
         }
         // just a number (timestamp expressed in ms)
-        return StreamTarget::from_timestamp(av::Timestamp(std::atoll(s.c_str()), {1, 1000}));
+        bool is_relative = (s[0] == '+') || (s[0] == '-');
+        int64_t ts = std::abs(std::atoll(s.c_str()));
+        if (is_relative) {
+            if (s[0] == '-')
+                ts = -ts;
+            return StreamTarget::from_timestamp_relative(av::Timestamp(ts, {1, 1000}));
+        } else {
+            return StreamTarget::from_timestamp(av::Timestamp(ts, {1, 1000}));
+        }
+    }
+    static StreamTarget from_frames_relative(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::tt_FrameRelative };
+    }
+    static StreamTarget from_frames_absolute(int64_t frames) {
+        return { frame_number: frames, type: ETargetType::tt_FrameAbsolute };
     }
     static StreamTarget live() {
-        return {};
+        return { type: ETargetType::tt_Live };
+    }
+    static StreamTarget end() {
+        return { type: ETargetType::tt_End };
+    }
+    static StreamTarget stop() {
+        return { type: ETargetType::tt_Stop };
     }
     bool isLive() {
-        return ts.isNoPts() && (bytes == 0) && !wallclock;
+        return type == ETargetType::tt_Live;
+    }
+    bool isEnd() {
+        return type == ETargetType::tt_End;
+    }
+    bool isBytes() {
+        return type == ETargetType::tt_Bytes;
+    }
+    bool isStop() {
+        return type == ETargetType::tt_Stop;
+    }
+    bool isWallclock() {
+        return type == ETargetType::tt_Wallclock;
+    }
+    bool isTimestamp() {
+        return type == ETargetType::tt_Timestamp;
+    }
+    bool isTimestampRelative() {
+        return type == ETargetType::tt_TimestampRelative;
+    }
+    bool isFrameAbsolute() {
+        return type == ETargetType::tt_FrameAbsolute;
+    }
+    bool isFrameRelative() {
+        return type == ETargetType::tt_FrameRelative;
+    }
+    bool isFrame() {
+        return isFrameAbsolute() || isFrameRelative();
     }
 };
 
@@ -129,15 +199,29 @@ public:
     virtual void discardAllStreams() = 0;
     virtual void enableStream(size_t) = 0;
     virtual av::FormatContext& formatContext() = 0;
+};
+
+class IPlaybackControl {
+public:
+    enum class EPlaybackDirection {
+        pd_Forward, pd_Backward
+    };
     virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
     virtual void fixInputTimestamp(StreamTarget& ts) = 0;
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
+    virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
+    virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
 };
 
 class IFlushAndSeek {
 public:
     virtual void flushAndSeek(StreamTarget target) = 0;
+};
+
+class IFrameNumber {
+public:
+    virtual int64_t getCurrentFrameNumber() = 0;
 };
 
 class ISeekAt {
@@ -240,6 +324,11 @@ public:
 class IReturnsObjects {
 public:
     virtual Parameters getObject(const std::string) = 0;
+};
+
+class IInputsObjects {
+public:
+    virtual void setObject(const std::string, const Parameters&) = 0;
 };
 
 class IPreferredFormatReceiver {

@@ -85,6 +85,7 @@ public:
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);
+    void setObject(const std::string, const Parameters&);
 
     bool stopAndWait();
     void join();
@@ -136,6 +137,7 @@ private:
 public:
     void collectGarbage();
     void add(SolidItem node);
+    void stopNodesAndWait();
     void stopNodes() {
         goToState(State::STOPPED);
     }
@@ -185,6 +187,10 @@ public:
         if (p==nullptr) {
             throw Error("Node " + name + " doesn't exist.");
         }
+        return p;
+    }
+    std::shared_ptr<NodeWrapper> node_if_exists(const std::string &name) {
+        std::shared_ptr<NodeWrapper> p = getNodeByName(name);
         return p;
     }
     std::shared_ptr<NodeGroup> group(const std::string name) {

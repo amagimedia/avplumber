@@ -477,7 +477,6 @@ public:
             default_params_.channel_layout = stringToChannelLayout(layout_s);
         } else if (params.count("dst_channels")==1) {
             int64_t cnt = params["dst_channels"].get<int>();
-            AVChannelLayout new_layout{};
 #if API_NEW_CHANNEL_LAYOUT
             default_params_.channel_layout = av::ChannelLayout(cnt).layout();
 #else
@@ -492,7 +491,7 @@ public:
         if (outlink_) {
             return outlink_->sample_rate;
         } else if (default_params_.sample_rate>0) {
-            return default_params_.sample_rate>0;
+            return default_params_.sample_rate;
         } else {
             throw Error("unknown filter output sample rate");
         }

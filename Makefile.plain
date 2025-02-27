@@ -1,7 +1,7 @@
 
 BUILD_TYPE = Debug
-HAVE_CUDA = 0
-HAVE_VAAPI = 1
+HAVE_CUDA = 1
+HAVE_VAAPI = 0
 
 ifeq ($(BUILD_TYPE),Debug)
 OPTIMIZATION_FLAGS = -O0 -ftrapv
@@ -136,6 +136,7 @@ compile_flags.txt:
 # anything that requires cpr headers must be compiled after cpr is configured
 objs/src/nodes/sentinel.o: deps/cpr/build/lib/libcpr.a
 objs/src/stats.o: deps/cpr/build/lib/libcpr.a
+objs/src/nodes/scte35_parse.o: deps/cpr/build/lib/libcpr.a
 
 .PRECIOUS: objs/%.d
 

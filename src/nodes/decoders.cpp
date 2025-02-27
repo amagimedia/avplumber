@@ -11,6 +11,7 @@ protected:
     DecoderContext dec_;
     std::recursive_mutex mutex_;
     std::shared_ptr<IStreamsInput> input_hold_;
+    std::shared_ptr<IPlaybackControl> playback_hold_;
     size_t dec_errors_ = 0;
     av::Timestamp last_pts_ = NOTS;
     av::PixelFormat pixel_format_ = AV_PIX_FMT_NONE;
@@ -51,6 +52,7 @@ public:
         }
 
         input_hold_ = this->template findNodeUp<IStreamsInput>();
+        playback_hold_ = this->template findNodeUp<IPlaybackControl>();
         dec_.setRefCountedFrames(true);
 
         bool good_tb = dec_.timeBase().getNumerator() && dec_.timeBase().getDenominator();
@@ -161,7 +163,9 @@ public:
         this->finished_ = true;
     }
     template<typename T=OutputFrame, typename=decltype(&T::pixelFormat)> void setFrameTimestamps(OutputFrame& frm) {
-        input_hold_->setFrameMetadataTimestamps(frm);
+        if (playback_hold_) {
+            playback_hold_->setFrameMetadataTimestamps(frm);
+        }
     }
     template<typename T> void setFrameTimestamps(T) {
     }
@@ -182,7 +186,7 @@ public:
                 try {
                     OutputFrame frm = dec_.decode(pkt);
                     if (frm) {
-                        if ( last_pts_.isValid() && (last_pts_ > frm.pts()) ) {
+                        if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
                             logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
                         }
                         last_pts_ = frm.pts();

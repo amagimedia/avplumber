@@ -3,7 +3,7 @@
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber {
 protected:
     bool ready_ = false;
     bool first_ = true;
@@ -29,6 +29,7 @@ protected:
     bool is_master_ = true; // by default everyone is master and can resync
     // TODO: master election in case of failure of master specified by user
     bool set_pts_ = false;
+    std::atomic_int64_t last_frame_number_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -210,6 +211,7 @@ public:
                     }
                     consume = false;
                 } else {
+                    setLastFrame(dataptr);
                     if (!ticks) {
                         // process next packet
                         this->yieldAndProcess();
@@ -243,6 +245,18 @@ public:
         AVTS exit_wclk = wallclock.pts();
         AVTS wclk_diff = exit_wclk - now_ts_wclk;
         if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
+    }
+    template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
+        auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
+        if (frame_no) {
+            last_frame_number_ = std::atoll(frame_no->value);
+        }
+
+    }
+    template<typename T2> void setLastFrame(T2) {
+    }
+    virtual int64_t getCurrentFrameNumber() override {
+        return last_frame_number_;
     }
     virtual void resetInput() override {
         if (team_) {

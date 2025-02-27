@@ -77,6 +77,25 @@ public:
         for (auto t: seek_targets_) {
             auto node = t.lock();
             if (node) {
+                if (target.isFrameRelative()) {
+                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                    if (p_frame) {
+                        target = StreamTarget::from_frames_absolute(p_frame->getCurrentFrameNumber() + target.frame_number);
+                    }
+                }
+                if (target.isTimestampRelative()) {
+                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                    if (p_frame) {
+                        auto pNode = std::dynamic_pointer_cast<Node>(node);
+                        if (pNode) {
+                            std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
+                            if (streams_in) {
+                                size_t new_frame = streams_in->getFrameNumber(p_frame->getCurrentFrameNumber(), target.ts);
+                                target = StreamTarget::from_frames_absolute(new_frame);
+                            }
+                        }
+                    }
+                }
                 node->flushAndSeek(target);
             }
         }
