@@ -21,6 +21,8 @@ protected:
     AVRational timebase_;
     AVRational tb_to_rescale_ts_;
     uint64_t tick_drifted_for_ = 0;
+    bool woken_too_late_ = false;
+
     std::shared_ptr<RealTimeTeam> team_;
     std::shared_ptr<EdgeBase> input_ts_queue_;
     std::list<std::shared_ptr<EdgeBase>> intermediate_queues_;
@@ -71,6 +73,7 @@ public:
                     logstream << "tick clock drifted from wallclock by " << printDuration(drift) << ", resyncing tick clock";
                     now_ts_ = now_ts_wclk_scaled;
                     tick_drifted_for_ = 0;
+                    woken_too_late_ = true;
                 }
             } else {
                 tick_drifted_for_ = 0;
@@ -91,6 +94,7 @@ public:
             bool consume = true;
             T* dataptr = this->source_->peek(0);
             if (dataptr==nullptr) {
+                woken_too_late_ = false;
                 if (!ticks) {
                     // retry when we have packet in source queue
                     this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
@@ -138,10 +142,10 @@ public:
                 }
                 if (ready_) {
                     AVTS diff = (pkt_ts - offset_) - now_ts;
-                    if (diff < negative_time_tolerance_) {
+                    if ((!woken_too_late_) && (diff < negative_time_tolerance_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", resyncing.";
                         ready_ = false;
-                    } else if (diff < negative_time_discard_) {
+                    } else if ((!woken_too_late_) && (diff < negative_time_discard_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", discarding frame.";
                         emit = false;
                     } else if (diff < discontinuity_threshold_) {
@@ -153,6 +157,7 @@ public:
                             if (diff > 0) {
                                 emit = false;
                                 consume = false;
+                                woken_too_late_ = false;
                                 if (!ticks) {
                                     // retry after waiting
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
@@ -241,6 +246,10 @@ public:
             }
 
         } while (process_next);
+
+        if (iter < 2) {
+            woken_too_late_ = false;
+        }
 
         AVTS exit_wclk = wallclock.pts();
         AVTS wclk_diff = exit_wclk - now_ts_wclk;
