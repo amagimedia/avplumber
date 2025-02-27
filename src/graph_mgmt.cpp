@@ -513,6 +513,10 @@ void NodeGroup::stopNodesInternal() {
     }, false, "Stopping");
 }
 
+void NodeGroup::stopNodesAndWait() {
+    stopNodesInternal();
+}
+
 decltype(NodeGroup::start_id_)::value_type NodeGroup::startNodesInternal() {
     try {
         auto lock = getLock();

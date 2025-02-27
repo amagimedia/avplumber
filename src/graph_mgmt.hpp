@@ -137,6 +137,7 @@ private:
 public:
     void collectGarbage();
     void add(SolidItem node);
+    void stopNodesAndWait();
     void stopNodes() {
         goToState(State::STOPPED);
     }

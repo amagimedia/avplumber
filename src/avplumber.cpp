@@ -266,6 +266,9 @@ public:
         manager_->edges()->printEdgesStats(ost, true);
         logstream << ost.str();
     }
+    void stopGroupAndWait(const std::string& grp) {
+        manager_->group(grp)->stopNodesAndWait();
+    }
     void clearAllQueues() {
         manager_->edges()->clearEdges();
     }
@@ -806,15 +809,17 @@ void AVPlumber::obs_stop() {
 }
 
 void AVPlumber::obs_restart() {
+    impl_->stopGroupAndWait("g1");
     impl_->clearAllQueues();
-    executeCommandsFromString("group.restart g1");
+    executeCommandsFromString("group.start g1");
 }
 
 int64_t AVPlumber::obs_get_duration() {
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
+        auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
         auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
-        if (n) {
+        if (n_rec && n) {
             auto duration = n->getObject("duration");
             return duration["duration"];
         }
