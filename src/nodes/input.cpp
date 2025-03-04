@@ -180,6 +180,10 @@ public:
 #endif
                 obj["channel_layout"] = chlayout;
                 obj["sample_format"] = av::SampleFormat((AVSampleFormat)cpar.format).name();
+                AVDictionaryEntry *lang = av_dict_get(stream.raw()->metadata, "language", NULL, 0);
+                if (lang) {
+                    obj["language"] = lang->value;
+                }
             }
             streams_object_.push_back(obj);
         }
