@@ -910,7 +910,7 @@ public:
                 rec_length -= st
             }
             res["duration"] = rec_length;
-            res["loop"] = loop_
+            res["loop"] = loop_;
             return res;
         } else {
             throw Error("Unknown object to get");
