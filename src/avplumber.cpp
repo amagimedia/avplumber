@@ -787,7 +787,8 @@ int64_t AVPlumber::obs_get_time() {
         auto n = node->node();
         if (n) {
             auto edge = n->sourceEdge();
-            return rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
+            int64_t ts = rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
+            return ts;
         }
     }
     return 0;
@@ -820,7 +821,7 @@ int64_t AVPlumber::obs_get_duration() {
         auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
         auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
         if (n_rec && n) {
-            auto duration = n->getObject("duration");
+            auto duration = n->getObject("stream-limits");
             return duration["duration"];
         }
     }
