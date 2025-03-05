@@ -182,9 +182,9 @@ public:
                 obj["sample_format"] = av::SampleFormat((AVSampleFormat)cpar.format).name();
 
                 Parameters metadata_obj;
-                AVDictionaryEntry *entry = NULL;
-                while ((entry = av_dict_iterate(stream.raw()->metadata, entry))) {
-                    metadata_obj[entry->key] = entry->value;
+                av::Dictionary dict = av::Dictionary(stream.raw()->metadata, false);
+                for (auto &item : dict) {
+                    metadata_obj[item.key()] = item.value();
                 }
                 
                 if (!metadata_obj.empty()) {
