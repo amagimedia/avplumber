@@ -728,7 +728,7 @@ public:
         });
 
         if (it == seek_table_.end()) {
-            throw Error("timetamp outside input duration");
+            throw Error("timestamp outside input duration");
         }
 
         return it - seek_table_.begin();
@@ -887,16 +887,30 @@ public:
             return streams_object_;
         } else if (name=="programs") {
             return programs_object_;
-        } else if (name == "duration" ) {
+        } else if (name == "stream-limits" ) {
             Parameters res;
             auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
-            if (seek_table_.empty()) {
-                auto duration = rescaleTS(ictx_.duration(), {1, 1000});
-                res["duration"] = duration.timestamp();
+            int64_t rec_length;
+
+            if (stop_ts_.isTimestamp()) {
+                rec_length = stop_ts_.ts.timestamp();
+                res["stop"] = rec_length;
             } else {
-                res["duration"] = seek_table_.crbegin()->timestamp_ms;
+                if (seek_table_.empty()) {
+                    auto duration = rescaleTS(ictx_.duration(), {1, 1000});
+                    rec_length = duration.timestamp();
+                } else {
+                    rec_length = seek_table_.crbegin()->timestamp_ms;
+                }
             }
+            if (start_ts_.isTimestamp()) {
+                int64_t st = start_ts_.ts.timestamp();
+                res["start"] = st;
+                rec_length -= st
+            }
+            res["duration"] = rec_length;
+            res["loop"] = loop_
             return res;
         } else {
             throw Error("Unknown object to get");
