@@ -180,6 +180,16 @@ public:
 #endif
                 obj["channel_layout"] = chlayout;
                 obj["sample_format"] = av::SampleFormat((AVSampleFormat)cpar.format).name();
+
+                Parameters metadata_obj;
+                av::Dictionary dict = av::Dictionary(stream.raw()->metadata, false);
+                for (auto &item : dict) {
+                    metadata_obj[item.key()] = item.value();
+                }
+                
+                if (!metadata_obj.empty()) {
+                    obj["metadata"] = metadata_obj;
+                }
             }
             streams_object_.push_back(obj);
         }
