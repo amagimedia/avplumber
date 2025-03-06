@@ -893,21 +893,11 @@ public:
 
             int64_t rec_length;
 
-            if (stop_ts_.isTimestamp()) {
-                rec_length = stop_ts_.ts.timestamp();
-                res["stop"] = rec_length;
+            if (seek_table_.empty()) {
+                auto duration = rescaleTS(ictx_.duration(), {1, 1000});
+                rec_length = duration.timestamp();
             } else {
-                if (seek_table_.empty()) {
-                    auto duration = rescaleTS(ictx_.duration(), {1, 1000});
-                    rec_length = duration.timestamp();
-                } else {
-                    rec_length = seek_table_.crbegin()->timestamp_ms;
-                }
-            }
-            if (start_ts_.isTimestamp()) {
-                int64_t st = start_ts_.ts.timestamp();
-                res["start"] = st;
-                rec_length -= st
+                rec_length = seek_table_.crbegin()->timestamp_ms;
             }
             res["duration"] = rec_length;
             res["loop"] = loop_;
