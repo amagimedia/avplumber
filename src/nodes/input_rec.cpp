@@ -348,7 +348,7 @@ public:
                         if (it == ts_offsets_.cend()) {
                             it = std::prev(it);
                         }
-                        if ((it->changed_at - it->input_ts_diff) > v) {
+                        if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->input_ts_diff) > v)) {
                             it = std::prev(it);
                         }
                         video_ts = addTS(input_ts, av::Timestamp(it->input_ts_diff, {1, 1000}));
@@ -366,7 +366,7 @@ public:
                         if (it == ts_offsets_.cend()) {
                             it = std::prev(it);
                         }
-                        if ((it->changed_at - it->wallclock_diff) > v) {
+                        if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->wallclock_diff) > v)) {
                             it = std::prev(it);
                         }
                         video_ts = addTS(wallclock_ts, av::Timestamp(it->wallclock_diff, {1, 1000}));
@@ -384,7 +384,7 @@ public:
                         if (it == ts_offsets_.cend()) {
                             it = std::prev(it);
                         }
-                        if (it->changed_at > v) {
+                        if ((it != ts_offsets_.cbegin()) && (it->changed_at > v)) {
                             it = std::prev(it);
                         }
                         output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
@@ -406,7 +406,7 @@ public:
                 if (it == seek_table_.cend()) {
                     it = std::prev(it);
                 }
-                if (it->timestamp_ms > req_ts) {
+                if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
                     it = std::prev(it);
                 }
 
@@ -897,7 +897,20 @@ public:
                 auto duration = rescaleTS(ictx_.duration(), {1, 1000});
                 rec_length = duration.timestamp();
             } else {
-                rec_length = seek_table_.crbegin()->timestamp_ms;
+                if (seek_table_.empty()) {
+                    auto duration = rescaleTS(ictx_.duration(), {1, 1000});
+                    rec_length = duration.timestamp();
+                } else {
+                    rec_length = seek_table_.crbegin()->timestamp_ms;
+                }
+            }
+            if (start_ts_.isTimestamp()) {
+                int64_t st = start_ts_.ts.timestamp();
+                res["start"] = st;
+            }
+            if (stop_ts_.isTimestamp()) {
+                int64_t st = stop_ts_.ts.timestamp();
+                res["stop"] = st;
             }
             res["duration"] = rec_length;
             res["loop"] = loop_;
