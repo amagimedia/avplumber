@@ -37,6 +37,7 @@ protected:
     std::ofstream timeshift_history_file_;
     ThreadedRESTEndpoint rest_;
     bool reporting_ = false;
+    bool first_entry_ = true;
 public:
     av::Timestamp start_ts_ = {10, {1,1}};
     void wallclockOffsetChanged(av::Timestamp offset) {
@@ -56,14 +57,23 @@ public:
         }
         long output_pts_offset = rescaleTS(start_ts_, {1, 1000}).timestamp();
         
-        if (timeshift_history_file_text_.is_open()) {
-            timeshift_history_file_text_ << changed_at << " " << input_pts_offset << " " << wallclock_offset << " " << output_pts_offset << "\n";
-            timeshift_history_file_text_.flush();
-        }
         if (timeshift_history_file_.is_open()) {
+            if (first_entry_) {
+                if ((input_pts_offset == 0) && (wallclock_offset == 0) && (output_pts_offset == 0)) {
+                    // do not write, no valid information in this entry
+                    return;
+                }
+                // changed_at of first entry forced to 0
+                changed_at = 0;
+                first_entry_ = false;
+            }
             HistoryTableEntry entry { changed_at, input_pts_offset, wallclock_offset, output_pts_offset };
             timeshift_history_file_.write(reinterpret_cast<char*>(&entry), sizeof(entry));
             timeshift_history_file_.flush();
+        }
+        if (timeshift_history_file_text_.is_open()) {
+            timeshift_history_file_text_ << changed_at << " " << input_pts_offset << " " << wallclock_offset << " " << output_pts_offset << "\n";
+            timeshift_history_file_text_.flush();
         }
         if (reporting_) {
             Parameters jobj;
