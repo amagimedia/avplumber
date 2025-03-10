@@ -48,7 +48,7 @@ public:
             // seek to current frame
             auto obj = sync_obj_.lock();
             if (obj) {
-                obj->flushAndSeek(StreamTarget::from_timestamp(last_pts_));
+                //obj->flushAndSeek(StreamTarget::from_timestamp(last_pts_));
             }
         }
     }
