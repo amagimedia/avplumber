@@ -80,15 +80,19 @@ public:
             }
         }
 
-        // find source of streams:
-        auto in_edge = edges.find<av::VideoFrame>(params["src"]);
-        std::weak_ptr<IPlaybackControl> streams_in = in_edge->findNodeUp<IPlaybackControl>();
-        r->team_->setPlaybackNode(streams_in);
-        if (params.count("sync_team")) {
-            std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
-            if (sync_team) {
-                r->team_->setSyncObj(sync_team);
+        try {
+            auto in_edge = edges.find<av::VideoFrame>(params["src"]);
+            std::weak_ptr<IPlaybackControl> streams_in = in_edge->findNodeUp<IPlaybackControl>();
+            r->team_->setPlaybackNode(streams_in);
+            if (params.count("sync_team")) {
+                std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
+                if (sync_team) {
+                    r->team_->setSyncObj(sync_team);
+                }
             }
+        }
+        catch(...) {
+            // it is enough to set these parameters in video path, not required in audio path
         }
         return r;
     }
