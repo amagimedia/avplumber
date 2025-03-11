@@ -31,7 +31,7 @@
 
     #define INPUT_NODE "input"
     #define PAUSE_NODE "pause"
-    #define REALTIME_NODE "realtime"
+    #define REALTIME_NODE "rtsync"
     #define SINK_NODE "sink"
 #endif
 
@@ -782,13 +782,14 @@ void AVPlumber::obs_play() {
 }
 
 int64_t AVPlumber::obs_get_time() {
-    auto node = impl_->manager()->node_if_exists(SINK_NODE);
+    auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         auto n = node->node();
         if (n) {
-            auto edge = n->sourceEdge();
-            int64_t ts = rescaleTS(edge->lastTS(), {1, 1000}).timestamp();
-            return ts;
+            auto node_ts = dynamic_cast_pointer<IFrameTimestamp>(n);
+            if (node_ts) {
+                return node_ts->lastFrameTimestamp();
+            }
         }
     }
     return 0;

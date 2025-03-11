@@ -306,6 +306,10 @@ private:
         set_ts("wallclock_ts", ts_wallclock);
         if (frame_index >= 0) {
             av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
+            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+            if (frame_index < seek_table_.size()) {
+                av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
+            }
         }
     }
 public:
