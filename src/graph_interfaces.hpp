@@ -216,6 +216,8 @@ public:
 
 class IFlushAndSeek {
 public:
+    virtual void flushAndSeek_start(StreamTarget target) {};
+    virtual void flushAndSeek_finish(StreamTarget target) {};
     virtual void flushAndSeek(StreamTarget target) = 0;
 };
 

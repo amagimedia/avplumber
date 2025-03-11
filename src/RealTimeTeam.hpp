@@ -15,7 +15,7 @@ protected:
     std::atomic_bool flushing_ = false;
 
     std::mutex seek_mutex_;
-    std::list<std::weak_ptr<IFlushAndSeek>> seek_targets_;
+    std::vector<std::weak_ptr<IFlushAndSeek>> seek_targets_;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -72,9 +72,11 @@ public:
     bool isFlushing() {
         return flushing_;
     }
-    virtual void flushAndSeek(StreamTarget target) override {
+    virtual void flushAndSeek(StreamTarget seek_target) override {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        std::vector<StreamTarget> stream_targets;
         for (auto t: seek_targets_) {
+            StreamTarget target = seek_target;
             auto node = t.lock();
             if (node) {
                 if (target.isFrameRelative()) {
@@ -96,7 +98,26 @@ public:
                         }
                     }
                 }
-                node->flushAndSeek(target);
+                stream_targets.push_back(target);
+            }
+        }
+
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek_start(stream_targets[i]);
+            }
+        }
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek(stream_targets[i]);
+            }
+        }
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek_finish(stream_targets[i]);
             }
         }
     }
