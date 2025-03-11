@@ -786,9 +786,9 @@ int64_t AVPlumber::obs_get_time() {
     if (node) {
         auto n = node->node();
         if (n) {
-            auto node_ts = dynamic_cast_pointer<IFrameTimestamp>(n);
+            auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
-                return node_ts->lastFrameTimestamp();
+                return node_ts->getCurrentFrameTimestamp();
             }
         }
     }
