@@ -45,6 +45,7 @@ public:
 
 struct StreamTarget {
     enum class ETargetType {
+        tt_Empty,
         tt_Timestamp,
         tt_TimestampRelative,
         tt_Wallclock,
@@ -160,34 +161,40 @@ struct StreamTarget {
     static StreamTarget stop() {
         return { type: ETargetType::tt_Stop };
     }
-    bool isLive() {
+    static StreamTarget empty() {
+        return { type: ETargetType::tt_Empty };
+    }
+    bool isEmpty() const {
+        return type == ETargetType::tt_Empty;
+    }
+    bool isLive() const {
         return type == ETargetType::tt_Live;
     }
-    bool isEnd() {
+    bool isEnd() const {
         return type == ETargetType::tt_End;
     }
-    bool isBytes() {
+    bool isBytes() const {
         return type == ETargetType::tt_Bytes;
     }
-    bool isStop() {
+    bool isStop() const {
         return type == ETargetType::tt_Stop;
     }
-    bool isWallclock() {
+    bool isWallclock() const {
         return type == ETargetType::tt_Wallclock;
     }
-    bool isTimestamp() {
+    bool isTimestamp() const {
         return type == ETargetType::tt_Timestamp;
     }
-    bool isTimestampRelative() {
+    bool isTimestampRelative() const {
         return type == ETargetType::tt_TimestampRelative;
     }
-    bool isFrameAbsolute() {
+    bool isFrameAbsolute() const {
         return type == ETargetType::tt_FrameAbsolute;
     }
-    bool isFrameRelative() {
+    bool isFrameRelative() const {
         return type == ETargetType::tt_FrameRelative;
     }
-    bool isFrame() {
+    bool isFrame() const {
         return isFrameAbsolute() || isFrameRelative();
     }
 };

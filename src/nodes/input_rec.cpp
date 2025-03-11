@@ -737,6 +737,37 @@ public:
             throw Error("timestamp outside input duration");
         }
 
+        // find closest frame
+        if (it->timestamp_ms > ms) {
+            int64_t diff = it->timestamp_ms - ms;
+            for (int i = 0; i < 5; ++i) {
+                if (it != seek_table_.begin()) {
+                    int64_t diff2 = abs(std::prev(it)->timestamp_ms - ms);
+                    if (diff2 < diff) {
+                        diff = diff2;
+                        --it;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (it->timestamp_ms < ms) {
+                int64_t diff = ms - it->timestamp_ms;
+                for (int i = 0; i < 5; ++i) {
+                    if (it != seek_table_.begin()) {
+                        int64_t diff2 = abs(std::next(it)->timestamp_ms - ms);
+                        if (diff2 < diff) {
+                            diff = diff2;
+                            ++it;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         return it - seek_table_.begin();
     }
     static std::shared_ptr<RecoringInput> create(NodeCreationInfo &nci) {

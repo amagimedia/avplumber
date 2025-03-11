@@ -79,33 +79,37 @@ public:
             StreamTarget target = seek_target;
             auto node = t.lock();
             if (node) {
+                int64_t current_frame = -1;;
+                auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
+                if (p_frame) {
+                    current_frame = p_frame->getCurrentFrameNumber();
+                }
+
                 if (target.isFrameRelative()) {
-                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
-                    if (p_frame) {
-                        int64_t current_frame = p_frame->getCurrentFrameNumber();
-                        if (current_frame >= 0) {
-                            current_frame += target.frame_number;
-                            if (current_frame < 0) {
-                                current_frame = 0;
-                            }
-                            target = StreamTarget::from_frames_absolute(current_frame);
-                        } else {
-                            // frame number not supported (audio stream)
-                            target = StreamTarget();
+                    if (current_frame >= 0) {
+                        current_frame += target.frame_number;
+                        if (current_frame < 0) {
+                            current_frame = 0;
                         }
+                        target = StreamTarget::from_frames_absolute(current_frame);
+                    } else {
+                        // frame number not supported (audio stream)
+                        target = StreamTarget::empty();
                     }
                 }
                 if (target.isTimestampRelative()) {
-                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
-                    if (p_frame) {
+                    if (current_frame >= 0) {
                         auto pNode = std::dynamic_pointer_cast<Node>(node);
                         if (pNode) {
                             std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
                             if (streams_in) {
-                                size_t new_frame = streams_in->getFrameNumber(p_frame->getCurrentFrameNumber(), target.ts);
+                                size_t new_frame = streams_in->getFrameNumber(current_frame, target.ts);
                                 target = StreamTarget::from_frames_absolute(new_frame);
                             }
                         }
+                    } else {
+                        // frame number not supported (audio stream)
+                        target = StreamTarget::empty();
                     }
                 }
                 stream_targets.push_back(target);
