@@ -3,7 +3,7 @@
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp {
 protected:
     bool ready_ = false;
     bool first_ = true;
@@ -32,6 +32,7 @@ protected:
     // TODO: master election in case of failure of master specified by user
     bool set_pts_ = false;
     std::atomic_int64_t last_frame_number_ = -1;
+    std::atomic_int64_t last_frame_timestamp_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -260,12 +261,18 @@ public:
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
         }
-
+        auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
+        if (frame_ts) {
+            last_frame_timestamp_ = std::atoll(frame_ts->value);
+        }
     }
     template<typename T2> void setLastFrame(T2) {
     }
     virtual int64_t getCurrentFrameNumber() override {
         return last_frame_number_;
+    }
+    virtual int64_t getCurrentFrameTimestamp() override {
+        return last_frame_timestamp_;
     }
     virtual void resetInput() override {
         if (team_) {

@@ -233,6 +233,11 @@ public:
     virtual int64_t getCurrentFrameNumber() = 0;
 };
 
+class IFrameTimestamp {
+public:
+    virtual int64_t getCurrentFrameTimestamp() = 0;
+};
+
 class ISeekAt {
 public:
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) = 0;
