@@ -80,7 +80,7 @@ public:
             }
         }
 
-        try {
+        if (edges.exists<av::VideoFrame>(params["src"])) {
             auto in_edge = edges.find<av::VideoFrame>(params["src"]);
             std::weak_ptr<IPlaybackControl> streams_in = in_edge->findNodeUp<IPlaybackControl>();
             r->team_->setPlaybackNode(streams_in);
@@ -90,9 +90,6 @@ public:
                     r->team_->addSyncObj(sync_team);
                 }
             }
-        }
-        catch(...) {
-            // it is enough to set these parameters in video path, not required in audio path
         }
         return r;
     }
