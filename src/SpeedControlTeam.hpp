@@ -12,7 +12,7 @@ protected:
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
     std::vector<std::weak_ptr<IFlushAndSeek>> nodes_;
-    std::weak_ptr<IFlushAndSeek> sync_obj_;
+    std::vector<std::weak_ptr<IFlushAndSeek>> sync_objs_;
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
     }
@@ -46,9 +46,11 @@ public:
                 }
             }
             // seek to current frame
-            auto obj = sync_obj_.lock();
-            if (obj) {
-                //obj->flushAndSeek(StreamTarget::from_timestamp(last_pts_));
+            for (auto& p: sync_objs_) {
+                auto obj = p.lock();
+                if (obj) {
+                    obj->flushAndSeek(StreamTarget::from_timestamp(last_pts_));
+                }
             }
         }
     }
@@ -79,8 +81,8 @@ public:
         auto lock = getLock();
         nodes_.push_back(node);
     }
-    void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
+    void addSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
         auto lock = getLock();
-        sync_obj_ = obj;
+        sync_objs_.push_back(obj);
     }
 };

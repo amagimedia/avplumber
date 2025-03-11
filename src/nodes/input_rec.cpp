@@ -39,6 +39,7 @@ protected:
     AVTS wait_max_ = AV_NOPTS_VALUE;
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
+    av::Timestamp first_video_ts_;
     StreamTarget start_ts_;
     StreamTarget stop_ts_ = StreamTarget::end();
 
@@ -620,6 +621,11 @@ public:
         #endif
 
         if (!pkt.isNull()) {
+            if (first_video_ts_.timestamp() != 0) {
+                pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
+                pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
+            }
+
             // adjust ts
             auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
             if (!ts_offsets_.empty() && (timestamp_source_ != ETimestampSource::ts_None)) {
@@ -797,6 +803,7 @@ public:
             if (stream.isVideo()) {
                 if (video_stream_<0) {
                     video_stream_ = i;
+                    first_video_ts_ = stream.startTime();
                 }
                 obj["fps"] = std::to_string(stream.frameRate().getNumerator()) + '/' + std::to_string(stream.frameRate().getDenominator());
                 obj["width"] = cpar.width;

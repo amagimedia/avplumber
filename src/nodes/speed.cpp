@@ -82,7 +82,7 @@ public:
         if (params.count("sync_team")) {
             std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
             if (sync_team) {
-                r->team_->setSyncObj(sync_team);
+                r->team_->addSyncObj(sync_team);
             }
         }
         return r;

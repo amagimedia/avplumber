@@ -64,7 +64,7 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
-    virtual void flushAndSeek(StreamTarget target) override {
+    virtual void flushAndSeek_start(StreamTarget target) override {
         std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
         if (input) {
             input->fixInputTimestamp(target);
@@ -90,6 +90,8 @@ public:
         if (this_reset) {
             this_reset->resetInput();
         }
+    }
+    virtual void flushAndSeek(StreamTarget target) override {
         // wait for flushed state:
         while(true) {
             bool flushed = true;
@@ -101,6 +103,8 @@ public:
             }
             wallclock.sleepms(5);
         }
+    }
+    virtual void flushAndSeek_finish(StreamTarget target) override {
         // stop flushing and resume paused input:
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
