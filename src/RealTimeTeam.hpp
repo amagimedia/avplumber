@@ -82,7 +82,17 @@ public:
                 if (target.isFrameRelative()) {
                     auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
                     if (p_frame) {
-                        target = StreamTarget::from_frames_absolute(p_frame->getCurrentFrameNumber() + target.frame_number);
+                        int64_t current_frame = p_frame->getCurrentFrameNumber();
+                        if (current_frame >= 0) {
+                            current_frame += target.frame_number;
+                            if (current_frame < 0) {
+                                current_frame = 0;
+                            }
+                            target = StreamTarget::from_frames_absolute(current_frame);
+                        } else {
+                            // frame number not supported (audio stream)
+                            target = StreamTarget();
+                        }
                     }
                 }
                 if (target.isTimestampRelative()) {
