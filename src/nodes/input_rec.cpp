@@ -401,21 +401,23 @@ public:
 
             // get frame index
             int64_t frame_index = -1;
-            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+            {
+                auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
-            if (!seek_table_.empty()) {
-                int64_t req_ts = rescaleTS(video_ts, {1, 1000}).timestamp();
-                auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
-                    return e.timestamp_ms < value;
-                });
-                if (it == seek_table_.cend()) {
-                    it = std::prev(it);
-                }
-                if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
-                    it = std::prev(it);
-                }
+                if (!seek_table_.empty()) {
+                    int64_t req_ts = rescaleTS(video_ts, {1, 1000}).timestamp();
+                    auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
+                        return e.timestamp_ms < value;
+                    });
+                    if (it == seek_table_.cend()) {
+                        it = std::prev(it);
+                    }
+                    if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
+                        it = std::prev(it);
+                    }
 
-                frame_index = static_cast<int64_t>(std::distance(seek_table_.cbegin(), it));
+                    frame_index = static_cast<int64_t>(std::distance(seek_table_.cbegin(), it));
+                }
             }
 
             setFrameTimestamps(frame, frame_index, video_ts, input_ts, output_ts, wallclock_ts);
