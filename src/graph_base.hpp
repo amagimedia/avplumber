@@ -7,6 +7,8 @@
 #include <memory>
 #include "graph_interfaces.hpp"
 
+using namespace std::chrono_literals;
+
 template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate, public IFlushAndSeek {
 public:
     using SourceType = Source<InputType>;
@@ -103,7 +105,7 @@ public:
             if (flushed) {
                 break;
             }
-            wallclock.sleepms(5);
+            std::this_thread::sleep_for(100us);
         }
     }
     virtual void flushAndSeek_finish(StreamTarget target) override {

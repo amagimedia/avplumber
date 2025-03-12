@@ -599,11 +599,10 @@ public:
             return;
         }
         if (pkt.isNull()) {
-            this->finished_ = true;
-            logstream << "Got null packet";
-            //closeInput(true);
-            // do not close input right now, otherwise segfaults happen because decoder tries to use demuxer data which is freed
-            // TODO: check whether creating stream-independent decoder will help
+            // we are at the end os recording
+            //logstream << "end of video reached";
+            std::this_thread::sleep_for(5ms);
+            return;
         } else {
             if (!pkt.isComplete()) {
                 logstream << "Got incomplete packet, dropping";
