@@ -12,7 +12,13 @@ public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
         if (team_->isPaused() && !pass_single_) {
-            this->source_->peek(0); // need to call this to consume packets when in flushing state
+            logstream << "PAUSE peek & dropping!";
+            auto p = this->source_->peek(0); // need to call this to consume packets when in flushing state
+            if (p) {
+                //if (p->streamIndex() == 0) {
+                    logstream << "PAUSE peek & dropping!: " << p->streamIndex() << "   " << rescaleTS(p->pts(), {1, 1000});
+                //}
+            }
             if (!ticks) {
                 this->processWhenSignalled(wake_paused_);
             }
@@ -25,6 +31,7 @@ public:
             process_next = false;
             T* dataptr = this->source_->peek(0);
             if (dataptr==nullptr) {
+                logstream << "PAUSE data not available!";
                 // no data available in queue
                 if (!ticks) {
                     // retry when we have packet in source queue
@@ -37,7 +44,15 @@ public:
             
             T &pkt = *dataptr;
 
+            if (pkt.streamIndex() == 0) {
+                logstream << "Video pause frame RECV: " << rescaleTS(pkt.pts(), {1,1000});
+            }
+
+
             // put it in the sink queue:
+            if (pkt.streamIndex() == 0) {
+                logstream << "Video pause frame PUT: " << rescaleTS(pkt.pts(), {1,1000});
+            }
             if (this->sink_->put(pkt, true)) {
                 // put returned true, success, remove this packet from the source queue
                 av::Timestamp pkt_ts = pkt.pts();
@@ -60,6 +75,7 @@ public:
         } while (process_next);
     }
     virtual void resetInput() override {
+        logstream << "PAUSE " << this->name_ << " reset INPUT";
         pass_single_ = true;
         wake_paused_.signal();
     }

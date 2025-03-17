@@ -29,7 +29,7 @@ enum class ETimestampSource {
     ts_Wallclock
 };
 
-class RecoringInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
+class RecordingInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt {
 protected:
     av::FormatContext ictx_;
@@ -153,7 +153,7 @@ private:
                             if (it == ts_offsets_.cend()) {
                                 it = std::prev(it);
                             }
-                            if (it->changed_at - it->wallclock_diff > new_ts) {
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at - it->wallclock_diff > new_ts)) {
                                 it = std::prev(it);
                             }
 
@@ -173,7 +173,7 @@ private:
                             if (it == ts_offsets_.cend()) {
                                 it = std::prev(it);
                             }
-                            if (it->changed_at - it->input_ts_diff > new_ts) {
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at - it->input_ts_diff > new_ts)) {
                                 it = std::prev(it);
                             }
 
@@ -200,10 +200,20 @@ private:
         if (it == seek_table_.cend()) {
             it = std::prev(it);
         }
-        if (it->timestamp_ms > frame_ms) {
-            it = std::prev(it);
+        int64_t diff = abs(it->timestamp_ms - frame_ms);
+        for (int i = 0; i < 5; ++i) {
+            if (it != seek_table_.begin()) {
+                int64_t diff2 = abs(std::prev(it)->timestamp_ms - frame_ms);
+                if (diff2 < diff) {
+                    diff = diff2;
+                    --it;
+                } else {
+                    break;
+                }
+            }
         }
 
+        logstream << "RESOLVE " << st.ts << " --> " << frame_ms << "  ->  frame: " << static_cast<int64_t>(std::distance(seek_table_.cbegin(), it)) << ", new ts: " << (it->timestamp_ms - ts_offsets_.cbegin()->wallclock_diff);
         st.ts = NOTS;
         st.bytes = it->bytes;
         st.type = StreamTarget::ETargetType::tt_Bytes;
@@ -304,6 +314,7 @@ private:
         set_ts("input_ts", ts_in);
         set_ts("output_ts", ts_out);
         set_ts("wallclock_ts", ts_wallclock);
+        av_dict_set(&frame->metadata, "wallclock", std::to_string(ts_wallclock.timestamp({1, 1000})).c_str(), 0);
         if (frame_index >= 0) {
             av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
             auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
@@ -313,7 +324,7 @@ private:
         }
     }
 public:
-    RecoringInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
+    RecordingInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
         ictx_.setInterruptCallback([this]() -> int {
             if ( (wait_max_!=AV_NOPTS_VALUE) && ((wallclock.pts() - wait_start_) > wait_max_) ) {
                 logstream << "Timeout " << wait_max_ << " exceeded";
@@ -455,6 +466,7 @@ public:
         need_seek_ = true;
     }
     virtual void resumeAfterSeek() {
+        //logstream << "<<<< resumeAfterSeek";
         seek_resume_.signal();
     }
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
@@ -548,6 +560,7 @@ public:
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
+                //logstream << "<<<< need seek !! " << rescaleTS(seek_target_.ts, {1, 1000});
                 //ictx_.flush();
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.isTimestamp()) {
@@ -590,7 +603,9 @@ public:
             }
         }
         if (seeked && !auto_resume_after_seek_) {
+            logstream << "<<<< seek done, waiting for resume!!";
             seek_resume_.wait();
+            logstream << "<<<< input resumed!!";
         }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
@@ -658,7 +673,20 @@ public:
                 }
             }
         }
+        if (pkt.streamIndex() == 0) {
+            logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000});
+        }
+        {
+            auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
+            if (need_seek_) {
+                logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000}) << " should be dropped !!!";
+                //return;
+            }
+        }
         this->sink_->put(pkt);
+        if (pkt.streamIndex() == 0) {
+            logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000}) << " sent";
+        }
 
         // check if we have to stop/loop video
         if (play_direction_ == EPlaybackDirection::pd_Forward) {
@@ -707,7 +735,7 @@ public:
         logstream << "Set wait_max_ to " << wait_max_ << "s";
         //ictx_.setSocketTimeout(timeout);
     }
-    virtual ~RecoringInput() {
+    virtual ~RecordingInput() {
         if (seek_read_thread_.joinable()) {
             seek_thread_terminate_.signal();
             seek_read_thread_.join();
@@ -775,11 +803,30 @@ public:
 
         return it - seek_table_.begin();
     }
-    static std::shared_ptr<RecoringInput> create(NodeCreationInfo &nci) {
+
+    void offsetStreamTargetByFrames(StreamTarget& ts, const int64_t frames) override {
+        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+
+        if (seek_table_.size() < abs(frames)) {
+            throw Error("no seek table available");
+        }
+
+        int64_t duration = std::copysign(seek_table_.at(abs(frames)).timestamp_ms - seek_table_.cbegin()->timestamp_ms, frames);
+
+        switch (ts.type) {
+            case StreamTarget::ETargetType::tt_Wallclock:
+                ts.ts = addTS(ts.ts, av::Timestamp(duration, {1, 1000}));
+                break;
+            default:
+                throw Error("not implemented StreamTarget type");
+        }
+    }
+
+    static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
-        auto r = std::make_shared<RecoringInput>(make_unique<EdgeSink<av::Packet>>(edge));
+        auto r = std::make_shared<RecordingInput>(make_unique<EdgeSink<av::Packet>>(edge));
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<InputSeekTeam>::get(nci.instance, params["team"]);
             r->team_->addSeekTarget(r);
@@ -991,4 +1038,4 @@ public:
     }
 };
 
-DECLNODE(input_rec, RecoringInput);
+DECLNODE(input_rec, RecordingInput);
