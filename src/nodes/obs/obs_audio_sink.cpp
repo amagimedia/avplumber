@@ -2,6 +2,10 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
+#include <iostream>
+#include <queue>
+#include <chrono>
+
 // various parts of this code adapted from OBS source code: deps/media-playback/media-playback/media.c
 // Copyright (c) 2017 Hugh Bailey <obs.jim@gmail.com>
 
@@ -58,6 +62,8 @@ class ObsAudioSink: public NodeSingleInput<av::AudioSamples> {
 protected:
     InstanceData& app_instance_;
     struct obs_source_audio obs_frame_ = {0};
+		std::queue<std::pair<std::chrono::steady_clock::time_point, uint>> sample_queue_;
+		uint total_samples_ = 0;
 public:
     using NodeSingleInput::NodeSingleInput;
     virtual void process() {
@@ -74,6 +80,19 @@ public:
         obs_frame_.samples_per_sec = frm.sampleRate();
         obs_frame_.speakers = convert_speaker_layout(frm.channelsCount());
         obs_frame_.frames = frm.samplesCount();
+
+				auto now = std::chrono::steady_clock::now();
+        this->sample_queue_.push({now, frm.samplesCount()});
+        this->total_samples_ += frm.samplesCount();
+
+        while (!sample_queue_.empty() && std::chrono::duration_cast<std::chrono::seconds>(now - sample_queue_.front().first).count() >= 1) {
+            total_samples_ -= sample_queue_.front().second;
+            sample_queue_.pop();
+        }
+
+				if (total_samples_ > 49152) {
+					std::cout << "obs_sink samples per sec: " << static_cast<double>(total_samples_);
+				}
 
         for (size_t i = 0; i < MAX_AV_PLANES; i++) {
             obs_frame_.data[i] = frm.raw()->data[i];
