@@ -5,10 +5,11 @@
 #include "../hwaccel.hpp"
 
 template<typename Child, typename DecoderContext, typename OutputFrame> class Decoder:
-    public NodeSISO<av::Packet, OutputFrame>, public ReportsFinishByFlag, public IFlushable, public IDecoder, public ITimeBaseSource {
+    public NodeSISO<av::Packet, OutputFrame>, public ReportsFinishByFlag, public IFlushable, public IDecoder, public ITimeBaseSource, public IInputReset {
 protected:
     av::Codec codec_;
     DecoderContext dec_;
+    //std::recursive_mutex mutex_;
     std::recursive_mutex mutex_;
     std::shared_ptr<IStreamsInput> input_hold_;
     std::shared_ptr<IPlaybackControl> playback_hold_;
@@ -147,7 +148,8 @@ public:
         return av::Rational(this->dec_.raw()->time_base);
     }
     virtual void flush() {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        logstream << "FLUSH";
+        std::lock_guard<decltype(mutex_)> lock(mutex_);
         OutputFrame frm;
         do {
             try {
@@ -172,18 +174,26 @@ public:
     virtual void process() {
         // wait for packet
         //av::Packet pkt = this->source_->get();
+        //logstream << "DECODER trying to read packet ";
         av::Packet *pktp = this->source_->peek();
         if (pktp==nullptr) {
+            //logstream << " --> read packet FAILED";
             //flush();
             return;
         }
         av::Packet &pkt = *pktp;
+        if (pkt.streamIndex() == 0) {
+            logstream << "DECODER packet recived " << rescaleTS(pkt.pts(), {1, 1000}) << " MTX: " << mutex_.native_handle();
+        }
         // lock us, to prevent race condition with flushing!
         {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            std::lock_guard<decltype(mutex_)> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() ) {
                 // not a flush packet
                 try {
+                    if (pkt.streamIndex() == 0) {
+                        logstream << "DECODER start decode " << rescaleTS(pkt.pts(), {1, 1000}) << " MTX: " << mutex_.native_handle();
+                    }
                     OutputFrame frm = dec_.decode(pkt);
                     if (frm) {
                         if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
@@ -195,16 +205,24 @@ public:
                             auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
                             if (discard_until_.isValid()) {
                                 if (frm.pts() >= discard_until_) {
-                                    logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
+                                    logstream << "pts " << rescaleTS(frm.pts(), {1, 1000}) << " reached discard_until " << discard_until_;
                                     discard_until_ = NOTS;
                                 } else {
+                                    logstream << "pts discarged " << frm.pts() << ", " << rescaleTS(frm.pts(), {1, 1000}) << " limit: " <<  discard_until_;
                                     put = false;
                                 }
                             }
                         }
                         if (put) {
                             setFrameTimestamps(frm);
+                            if (pkt.streamIndex() == 0) {
+                                logstream << "DECODER put " << rescaleTS(frm.pts(), {1, 1000});
+                            }
                             this->sink_->put(frm);
+                            if (pkt.streamIndex() == 0) {
+                                auto frame_no = av_dict_get(frm.raw()->metadata, "frame_no", nullptr, 0);
+                                logstream << "--- DECODER put done " << rescaleTS(frm.pts(), {1, 1000}) << " frame " << (frame_no ? frame_no->value : "???");
+                            }
                         }
                     }
                     dec_errors_ = 0;
@@ -226,9 +244,17 @@ public:
             }
         }
     }
-    virtual void discardUntil(av::Timestamp pts) {
-        logstream << "will discard until " << pts;
+    virtual void resetInput() override {
+        //logstream << "resetINPUT";
+        // wait till peding packet 
         auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+    }
+    virtual void discardUntil(av::Timestamp pts) {
+        //logstream << "will discard until wait " << pts << " MTX: " << mutex_.native_handle();
+        auto lock_decoder = std::lock_guard<decltype(mutex_)>(mutex_);
+        //logstream << "will discard until wait [2] " << pts << " MTX: " << mutex_.native_handle();
+        auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+        //logstream << "will discard until " << pts << " MTX: " << mutex_.native_handle();
         discard_until_ = pts;
     }
     virtual ~Decoder() {

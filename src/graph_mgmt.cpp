@@ -9,6 +9,8 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 ///////////////////////////////////////////////////////////
 ////// NodeFactory
@@ -92,6 +94,7 @@ void NodeWrapper::createNode() {
             if (node_==nullptr) {
                 throw Error("Node factory returned nullptr");
             }
+            node_->name_ = name_;
             std::shared_ptr<IInitAfterCreate> node_init = std::dynamic_pointer_cast<IInitAfterCreate>(node_);
             if (node_init) {
                 try {
@@ -231,7 +234,12 @@ void NodeWrapper::threadFunction() {
                     return;
                 }
                 if (dowork_) {
-                    node->process();
+                    if (node->isPausedProcessing()) {
+                        std::this_thread::sleep_for(0us);
+                    } else {
+                        NodeLocker lock(node);
+                        node->process();
+                    }
                 } else if (node_flushable) {
                     // told to finish work
                     // and Node is IFlushable
@@ -242,7 +250,12 @@ void NodeWrapper::threadFunction() {
                     // but doesn't have flushing interface
                     // so to give it a chance to finish,
                     // call process()...
-                    node_->process();
+                    if (node->isPausedProcessing()) {
+                        std::this_thread::sleep_for(0us);
+                    } else {
+                        NodeLocker lock(node);
+                        node->process();
+                    }
                 }
             }
             logstream << "Node " << name_ << " reported that it finished processing.";
@@ -253,7 +266,13 @@ void NodeWrapper::threadFunction() {
                     logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
                     return;
                 }
-                node->process();
+                if (node->isPausedProcessing()) {
+                    std::this_thread::sleep_for(0us);
+                } else {
+                    NodeLocker lock(node);
+                    node->process();
+                }
+                //node->process();
             }
             if (node_flushable) {
                 node_flushable->flush();
