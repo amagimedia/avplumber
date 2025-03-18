@@ -185,6 +185,9 @@ struct StreamTarget {
     bool isTimestamp() const {
         return type == ETargetType::tt_Timestamp;
     }
+    bool isValidTimestamp() const {
+        return isTimestamp() && ts.isValid();
+    }
     bool isTimestampRelative() const {
         return type == ETargetType::tt_TimestampRelative;
     }
