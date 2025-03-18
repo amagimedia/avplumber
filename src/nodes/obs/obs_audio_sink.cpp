@@ -64,6 +64,7 @@ protected:
     struct obs_source_audio obs_frame_ = {0};
 		std::queue<std::pair<std::chrono::steady_clock::time_point, uint>> sample_queue_;
 		uint total_samples_ = 0;
+		std::chrono::steady_clock::time_point started_at_;
 public:
     using NodeSingleInput::NodeSingleInput;
     virtual void process() {
@@ -82,25 +83,31 @@ public:
         obs_frame_.frames = frm.samplesCount();
 
 				auto now = std::chrono::steady_clock::now();
-        this->sample_queue_.push({now, frm.samplesCount()});
+				this->sample_queue_.push({now, frm.samplesCount()});
         this->total_samples_ += frm.samplesCount();
 
-        while (!sample_queue_.empty() && std::chrono::duration_cast<std::chrono::seconds>(now - sample_queue_.front().first).count() >= 1) {
+				 while (!sample_queue_.empty() && std::chrono::duration_cast<std::chrono::seconds>(now - sample_queue_.front().first).count() >= 1) {
             total_samples_ -= sample_queue_.front().second;
             sample_queue_.pop();
         }
 
-				if (total_samples_ > 49152) {
-					std::cout << "obs_sink samples per sec: " << static_cast<double>(total_samples_);
+     		if (std::chrono::duration_cast<std::chrono::seconds>(now - started_at_).count() > 1 
+					&& (total_samples_ > 49152 || total_samples_ < 48000)) {
+					if (total_samples_ > 0 && started_at_ == std::chrono::steady_clock::time_point{}) {
+						std::cout << "obs_sink init started at\n";
+						started_at_ = now;
+					} else {
+						std::cout << "obs_sink samples per sec: " << static_cast<double>(total_samples_) << "\n";
+					}
 				}
 
-        for (size_t i = 0; i < MAX_AV_PLANES; i++) {
+			  for (size_t i = 0; i < MAX_AV_PLANES; i++) {
             obs_frame_.data[i] = frm.raw()->data[i];
         }
 
         obs_frame_.timestamp = rescaleTS(frm.pts(), av::Rational(1, 1000000000)).timestamp();
-		app_instance_.doWithObsSource([this](obs_source_t *s) {
-			obs_source_output_audio(s, &obs_frame_);
+				app_instance_.doWithObsSource([this](obs_source_t *s) {
+				obs_source_output_audio(s, &obs_frame_);
 		});
     }
 	ObsAudioSink(std::unique_ptr<SourceType> &&source, InstanceData& app_instance): NodeSingleInput(std::move(source)), app_instance_(app_instance) {
