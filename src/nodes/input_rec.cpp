@@ -994,14 +994,17 @@ public:
                     rec_length = seek_table_.crbegin()->timestamp_ms;
                 }
             }
-            if (start_ts_.isTimestamp()) {
+            if (start_ts_.isValidTimestamp()) {
                 int64_t st = start_ts_.ts.timestamp();
                 res["start"] = st;
             }
-            if (stop_ts_.isTimestamp()) {
+            if (stop_ts_.isValidTimestamp()) {
                 int64_t st = stop_ts_.ts.timestamp();
                 res["stop"] = st;
             }
+            StreamTarget t = StreamTarget::from_timestamp({0, {1, 1}});
+            fixInputTimestamp(t);
+            res["video_start"] = t.ts.timestamp();
             res["duration"] = rec_length;
             res["loop"] = loop_;
             return res;
