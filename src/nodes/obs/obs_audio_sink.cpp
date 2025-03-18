@@ -84,20 +84,23 @@ public:
 
 				auto now = std::chrono::steady_clock::now();
 				this->sample_queue_.push({now, frm.samplesCount()});
-        this->total_samples_ += frm.samplesCount();
+				if (frm.samplesCount() > 1024) {
+					logstream << "bump samples count: " << frm.samplesCount();
+				}
+				this->total_samples_ += frm.samplesCount();
 
-				 while (!sample_queue_.empty() && std::chrono::duration_cast<std::chrono::seconds>(now - sample_queue_.front().first).count() >= 1) {
+				while (!sample_queue_.empty() && std::chrono::duration_cast<std::chrono::seconds>(now - sample_queue_.front().first).count() >= 1) {
             total_samples_ -= sample_queue_.front().second;
             sample_queue_.pop();
-        }
+				}
 
-     		if (std::chrono::duration_cast<std::chrono::seconds>(now - started_at_).count() > 1 
+				if (std::chrono::duration_cast<std::chrono::seconds>(now - started_at_).count() > 1 
 					&& (total_samples_ > 49152 || total_samples_ < 48000)) {
 					if (total_samples_ > 0 && started_at_ == std::chrono::steady_clock::time_point{}) {
-						std::cout << "obs_sink init started at\n";
+						logstream << "obs_sink init started at\n";
 						started_at_ = now;
 					} else {
-						std::cout << "obs_sink samples per sec: " << static_cast<double>(total_samples_) << "\n";
+						logstream << "obs_sink samples per sec: " << static_cast<double>(total_samples_) << "\n";
 					}
 				}
 
