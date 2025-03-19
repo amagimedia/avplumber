@@ -1,6 +1,6 @@
 #include "node_common.hpp"
 
-template<typename T> class ForceFPS: public NonBlockingNode<ForceFPS<T>>, public NodeSISO<T, T>, public IFrameRateSource, public ITimeBaseSource {
+template<typename T> class ForceFPS: public NonBlockingNode<ForceFPS<T>>, public NodeSISO<T, T>, public IFrameRateSource, public ITimeBaseSource, public IInputReset {
 private:
     av::Rational fps_;
     av::Timestamp frame_delta_;
@@ -169,6 +169,10 @@ public:
     }
     virtual av::Rational timeBase() {
         return timebase_;
+    }
+    void resetInput() override {
+        last_ts_ = NOTS;
+        next_ts_ = NOTS;
     }
     static std::shared_ptr<ForceFPS> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

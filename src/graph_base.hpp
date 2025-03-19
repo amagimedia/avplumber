@@ -97,7 +97,7 @@ public:
             //edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
             if (target.ts.isValid() && dec) {
-                dec->discardUntil(addTS(target.ts, av::Timestamp(-2, {1, 1000})));
+                dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
             }
             if (use_input && !target.isEmpty()) {
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
