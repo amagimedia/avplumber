@@ -50,14 +50,14 @@ public:
                     } else {
                         process_next = true;
                     }
-                }
-            } else {
-                // put returned false, no space in queue
-                frame.setTimeBase(av::Rational());
-                frame.setPts(orig_pts);
-                if (!ticks) {
-                    // retry when we have space in sink
-                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                } else {
+                    // put returned false, no space in queue
+                    frame.setTimeBase(av::Rational());
+                    frame.setPts(orig_pts);
+                    if (!ticks) {
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    }
                 }
             }
         } while (process_next);
