@@ -344,71 +344,75 @@ public:
         return ictx_;
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
-        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
-
         av::Timestamp video_ts;
         av::Timestamp input_ts;
         av::Timestamp output_ts;
         av::Timestamp wallclock_ts;
 
-        if (!ts_offsets_.empty()) {
-            switch (timestamp_source_) {
-                case ETimestampSource::ts_Input:
-                    {
-                        input_ts = frame.pts();
-                        uint64_t v = rescaleTS(input_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at - e.input_ts_diff < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
+        {
+            // get timestamps offset
+            auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+            if (!ts_offsets_.empty()) {
+                switch (timestamp_source_) {
+                    case ETimestampSource::ts_Input:
+                        {
+                            input_ts = frame.pts();
+                            uint64_t v = rescaleTS(input_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at - e.input_ts_diff < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->input_ts_diff) > v)) {
+                                it = std::prev(it);
+                            }
+                            video_ts = addTS(input_ts, av::Timestamp(it->input_ts_diff, {1, 1000}));
+                            wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
                         }
-                        if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->input_ts_diff) > v)) {
-                            it = std::prev(it);
+                        break;
+                    case ETimestampSource::ts_Wallclock:
+                        {
+                            wallclock_ts = frame.pts();
+                            uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at - e.wallclock_diff < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->wallclock_diff) > v)) {
+                                it = std::prev(it);
+                            }
+                            video_ts = addTS(wallclock_ts, av::Timestamp(it->wallclock_diff, {1, 1000}));
+                            input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
                         }
-                        video_ts = addTS(input_ts, av::Timestamp(it->input_ts_diff, {1, 1000}));
-                        wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                    }
-                    break;
-                case ETimestampSource::ts_Wallclock:
-                    {
-                        wallclock_ts = frame.pts();
-                        uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at - e.wallclock_diff < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
+                        break;
+                    default:
+                        {
+                            video_ts = frame.pts();
+                            uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at > v)) {
+                                it = std::prev(it);
+                            }
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
+                            input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
+                            wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
                         }
-                        if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->wallclock_diff) > v)) {
-                            it = std::prev(it);
-                        }
-                        video_ts = addTS(wallclock_ts, av::Timestamp(it->wallclock_diff, {1, 1000}));
-                        input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                    }
-                    break;
-                default:
-                    {
-                        video_ts = frame.pts();
-                        uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
-                        }
-                        if ((it != ts_offsets_.cbegin()) && (it->changed_at > v)) {
-                            it = std::prev(it);
-                        }
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                        input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
-                        wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
-                    }
-                    break;
+                        break;
+                }
             }
+        }
 
+        {
             // get frame index
             int64_t frame_index = -1;
             {
