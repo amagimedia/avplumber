@@ -150,6 +150,10 @@ public:
                     } else if ((!woken_too_late_) && (diff < negative_time_discard_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", discarding frame.";
                         emit = false;
+                        if (!ticks) {
+                            // process next packet
+                            this->yieldAndProcess();
+                        }
                     } else if (diff < discontinuity_threshold_) {
                         if (now_ts - last_wait_ < max_no_wait_period_) {
                             if (no_wait_notified_) {
@@ -196,6 +200,10 @@ public:
                 }
             } else {
                 emit = false;
+                if (!ticks) {
+                    // process next packet
+                    this->yieldAndProcess();
+                }
             }
 
             AVTS before_emit = wallclock.pts();
