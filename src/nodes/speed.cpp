@@ -15,7 +15,6 @@ public:
             process_next = false;
             T* dataptr = this->source_->peek(0);
             if (dataptr==nullptr) {
-                logstream << "Speed frame noe available! ";
                 // no data available in queue
                 if (!ticks) {
                     // retry when we have packet in source queue
@@ -28,11 +27,6 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
-
-            if (frame.streamIndex() == 0) {
-                logstream << "Video Speed frame RECV: " << rescaleTS(orig_pts, {1,1000});
-            }
-
             av::Timestamp in_pts = orig_pts;
             if (timebase_.getNumerator() && timebase_.getDenominator()) {
                 in_pts = rescaleTS(in_pts, timebase_);
@@ -45,9 +39,6 @@ public:
 
             // put it in the sink queue:
             if (out_pts.isNoPts() || this->sink_->put(frame, true)) {
-                if (frame.streamIndex() == 0) {
-                    logstream << "Video Speed frame PUT: " << rescaleTS(out_pts, {1,1000});
-                }
                 // put returned true, success, remove this packet from the source queue
                 this->source_->pop();
                 team_->setLastPTS(orig_pts);
@@ -58,9 +49,6 @@ public:
                     process_next = true;
                 }
             } else {
-                if (frame.streamIndex() == 0) {
-                    logstream << "Video Speed frame PUT failed: " << rescaleTS(out_pts, {1,1000});
-                }
                 // put returned false, no space in queue
                 frame.setTimeBase(av::Rational());
                 frame.setPts(orig_pts);

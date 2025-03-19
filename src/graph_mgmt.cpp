@@ -12,6 +12,8 @@
 #include <thread>
 #include <chrono>
 
+using namespace std::chrono_literals;
+
 ///////////////////////////////////////////////////////////
 ////// NodeFactory
 
@@ -94,7 +96,6 @@ void NodeWrapper::createNode() {
             if (node_==nullptr) {
                 throw Error("Node factory returned nullptr");
             }
-            node_->name_ = name_;
             std::shared_ptr<IInitAfterCreate> node_init = std::dynamic_pointer_cast<IInitAfterCreate>(node_);
             if (node_init) {
                 try {
@@ -272,7 +273,6 @@ void NodeWrapper::threadFunction() {
                     NodeLocker lock(node);
                     node->process();
                 }
-                //node->process();
             }
             if (node_flushable) {
                 node_flushable->flush();

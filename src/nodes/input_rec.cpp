@@ -213,7 +213,6 @@ private:
             }
         }
 
-        logstream << "RESOLVE " << st.ts << " --> " << frame_ms << "  ->  frame: " << static_cast<int64_t>(std::distance(seek_table_.cbegin(), it)) << ", new ts: " << (it->timestamp_ms - ts_offsets_.cbegin()->wallclock_diff);
         st.ts = NOTS;
         st.bytes = it->bytes;
         st.type = StreamTarget::ETargetType::tt_Bytes;
@@ -466,7 +465,6 @@ public:
         need_seek_ = true;
     }
     virtual void resumeAfterSeek() {
-        //logstream << "<<<< resumeAfterSeek";
         seek_resume_.signal();
     }
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
@@ -560,7 +558,6 @@ public:
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
-                //logstream << "<<<< need seek !! " << rescaleTS(seek_target_.ts, {1, 1000});
                 //ictx_.flush();
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.isTimestamp()) {
@@ -603,9 +600,7 @@ public:
             }
         }
         if (seeked && !auto_resume_after_seek_) {
-            logstream << "<<<< seek done, waiting for resume!!";
             seek_resume_.wait();
-            logstream << "<<<< input resumed!!";
         }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
@@ -673,20 +668,7 @@ public:
                 }
             }
         }
-        if (pkt.streamIndex() == 0) {
-            logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000});
-        }
-        {
-            auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
-            if (need_seek_) {
-                logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000}) << " should be dropped !!!";
-                //return;
-            }
-        }
         this->sink_->put(pkt);
-        if (pkt.streamIndex() == 0) {
-            logstream << "!!! IN " << rescaleTS(pkt.pts(), {1, 1000}) << " sent";
-        }
 
         // check if we have to stop/loop video
         if (play_direction_ == EPlaybackDirection::pd_Forward) {

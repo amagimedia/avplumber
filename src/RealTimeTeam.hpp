@@ -73,14 +73,10 @@ public:
         return flushing_;
     }
     virtual void flushAndSeek(StreamTarget seek_target) override {
-        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         StreamTarget target = seek_target;
         int64_t current_wallclock = -1;
-        int64_t current_frame = -1;
         int input_idx = -1;
-
-        
 
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
@@ -91,11 +87,7 @@ public:
                 }
                 if (current_wallclock < 0)
                     continue;
-                auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
-                if (p_frame) {
-                    current_frame = p_frame->getCurrentFrameNumber();
-                }
-    
+
                 input_idx = i;
 
                 if (target.isFrameRelative()) {
@@ -120,9 +112,6 @@ public:
             }
         }
 
-        logstream << "---------------------------------- will seek from : " << current_wallclock << ", frame: " << current_frame;
-        logstream << "---------------------------------- will seek to ts: " << target.ts << ", frame: " << target.frame_number << ", type: " << int(target.type);
-
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {
@@ -141,9 +130,6 @@ public:
                 node->flushAndSeek_finish(target, input_idx == i);
             }
         }
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        auto diff = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-        logstream << "---------------------------------- seek DONE, time: " <<  diff << " us";
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
