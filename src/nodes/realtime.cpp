@@ -33,6 +33,7 @@ protected:
     bool set_pts_ = false;
     std::atomic_int64_t last_frame_number_ = -1;
     std::atomic_int64_t last_frame_timestamp_ = -1;
+    std::atomic_int64_t last_frame_wallclock_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -108,7 +109,7 @@ public:
             AVTS peeked = wallclock.pts();
 
             T &data = *dataptr;
-            
+
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
@@ -265,6 +266,10 @@ public:
         if (frame_ts) {
             last_frame_timestamp_ = std::atoll(frame_ts->value);
         }
+        auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
+        if (frame_wc) {
+            last_frame_wallclock_ = std::atoll(frame_wc->value);
+        }
     }
     template<typename T2> void setLastFrame(T2) {
     }
@@ -273,6 +278,9 @@ public:
     }
     virtual int64_t getCurrentFrameTimestamp() override {
         return last_frame_timestamp_;
+    }
+    virtual int64_t getCurrentFrameWallclock() override {
+        return last_frame_wallclock_;
     }
     virtual void resetInput() override {
         if (team_) {

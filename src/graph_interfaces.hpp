@@ -222,12 +222,13 @@ public:
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
     virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
     virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
+    virtual void offsetStreamTargetByFrames(StreamTarget& ts, const int64_t frames) = 0;
 };
 
 class IFlushAndSeek {
 public:
-    virtual void flushAndSeek_start(StreamTarget target) {};
-    virtual void flushAndSeek_finish(StreamTarget target) {};
+    virtual void flushAndSeek_start(StreamTarget target, bool use_input) {};
+    virtual void flushAndSeek_finish(StreamTarget target, bool use_input) {};
     virtual void flushAndSeek(StreamTarget target) = 0;
 };
 
@@ -239,6 +240,7 @@ public:
 class IFrameTimestamp {
 public:
     virtual int64_t getCurrentFrameTimestamp() = 0;
+    virtual int64_t getCurrentFrameWallclock() = 0;
 };
 
 class ISeekAt {
