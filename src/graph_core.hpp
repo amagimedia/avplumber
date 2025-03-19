@@ -12,8 +12,6 @@
 #include "EventLoop.hpp"
 #include "edge_meta_utils.hpp"
 
-using namespace std::chrono_literals;
-
 class EdgeBase;
 
 class Node: public std::enable_shared_from_this<Node> {
@@ -21,8 +19,6 @@ private:
     std::mutex mutex_;
     std::atomic_bool paused_ = false;
 public:
-    std::string name_;
-
     void pauseProcessing() {
         paused_ = true;
     }
@@ -69,11 +65,9 @@ public:
     NodeLocker(std::shared_ptr<Node> n) {
         n_ = n;
         n_->lockProcessing();
-        //logstream << "!!! " << n_->name_ << " locked";
     }
     ~NodeLocker() {
         n_->unlockProcessing();
-        //logstream << "!!! " << n_->name_ << " unlocked";
     }
 };
 
@@ -240,7 +234,7 @@ public:
 
 class EdgeBase: public std::enable_shared_from_this<EdgeBase> {
 protected:
-    std::mutex mutex_;
+    //std::mutex mutex_;
     std::list<std::shared_ptr<EdgeMetadata>> metadata_;
     std::weak_ptr<Node> producer_;
     std::weak_ptr<Node> consumer_;
@@ -302,11 +296,11 @@ public:
 
     void finishProducer() {
         signalAltFinish(finish_producer_, consumed_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        //std::lock_guard<std::mutex> lock(mutex_);
     }
     void finishConsumer() {
         signalAltFinish(finish_consumer_, produced_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        //std::lock_guard<std::mutex> lock(mutex_);
     }
 
     template<typename MD> std::shared_ptr<MD> metadata(bool create_if_empty = false) {
@@ -390,15 +384,6 @@ protected:
             alt_finish = false; // reset flag
             return false;
         }
-
-        /*
-        void finishProducer() {
-            signalAltFinish(finish_producer_, consumed_);
-        }
-    
-        return waitDo([this, &elem](){ return try_enqueue(elem); }, 
-            [this]() { consumed_.wait(); return true; }, finish_producer_, produced_);
-            */
     }
 
     bool popInternal() {
@@ -499,7 +484,7 @@ public:
     // lambdas don't support move semantics so generally the above is useless
     bool enqueue(const T &elem) {
         last_ts_ = elem.pts();
-        return waitDo([this, &elem](){ std::lock_guard<std::mutex> lock(mutex_); return try_enqueue(elem); }, [this]() { consumed_.wait(); return true; }, finish_producer_, produced_);
+        return waitDo([this, &elem](){ /*std::lock_guard<std::mutex> lock(mutex_);*/ return try_enqueue(elem); }, [this]() { consumed_.wait(); return true; }, finish_producer_, produced_);
     }
     T* peek() {
         return queue_.peek();
@@ -527,11 +512,11 @@ public:
     }
     void wait_dequeue(T &elem) {
         maybeFlush();
-        waitDo([this, &elem]() { std::lock_guard<std::mutex> lock(mutex_); return try_dequeue(elem); }, [this]() { produced_.wait(); return true; }, finish_consumer_, consumed_);
+        waitDo([this, &elem]() { /*std::lock_guard<std::mutex> lock(mutex_);*/ return try_dequeue(elem); }, [this]() { produced_.wait(); return true; }, finish_consumer_, consumed_);
     }
     bool wait_dequeue_timed_ms(T &elem, const unsigned int msec) {
         maybeFlush();
-        return waitDo([this, &elem]() { std::lock_guard<std::mutex> lock(mutex_); return try_dequeue(elem); }, [this, msec]() { return produced_.wait(msec) > 0; }, finish_consumer_, consumed_);
+        return waitDo([this, &elem]() { /*std::lock_guard<std::mutex> lock(mutex_);*/ return try_dequeue(elem); }, [this, msec]() { return produced_.wait(msec) > 0; }, finish_consumer_, consumed_);
     }
     virtual void waitEmpty() override {
         while (occupied_.load() > 0) {

@@ -110,10 +110,6 @@ public:
 
             T &data = *dataptr;
 
-            if (data.streamIndex() == 0) {
-                logstream << "??? RT peeked PTS: " << rescaleTS(data.pts(), {1, 1000});
-            }
-            
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
@@ -210,13 +206,7 @@ public:
                     data.setTimeBase(av::Rational());
                     data.setPts({new_pts, timebase_});
                 }
-                if (data.streamIndex() == 0) {
-                    logstream << "??? RT trying frame PTS: " << rescaleTS(orig_pts, {1, 1000});
-                }
                 if (!this->sink_->put(data, true)) {
-                    if (data.streamIndex() == 0) {
-                        logstream << "??? RT put failed: ";
-                    }
                     if (set_pts_) {
                         // putting failed, restore original PTS because we will process this frame next time
                         data.setTimeBase(av::Rational());
@@ -280,7 +270,6 @@ public:
         if (frame_wc) {
             last_frame_wallclock_ = std::atoll(frame_wc->value);
         }
-        logstream << "??? RT last frame PTS: " << last_frame_wallclock_ << ", no: " << last_frame_number_;
     }
     template<typename T2> void setLastFrame(T2) {
     }
