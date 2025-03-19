@@ -11,6 +11,7 @@ protected:
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
+        logstream << "PAUSE " << this->name_ << " processNonBlocking paused: " << team_->isPaused() << ", pass_single_: " << pass_single_;
         if (team_->isPaused() && !pass_single_) {
             logstream << "PAUSE peek & dropping!";
             auto p = this->source_->peek(0); // need to call this to consume packets when in flushing state
