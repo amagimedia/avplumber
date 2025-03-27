@@ -19,6 +19,8 @@ protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     av::Timestamp discard_until_ = NOTS;
     std::mutex discard_until_mutex_;
+    bool flush_magic_ = false;
+    int waiting_for_frame_ = 0;
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -182,41 +184,60 @@ public:
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() ) {
-                // not a flush packet
-                try {
-                    OutputFrame frm = dec_.decode(pkt);
-                    if (frm) {
-                        if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
-                            logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
-                        }
-                        last_pts_ = frm.pts();
-                        bool put = true;
-                        {
-                            auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
-                            if (discard_until_.isValid()) {
-                                if (frm.pts() >= discard_until_) {
-                                    logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
-                                    discard_until_ = NOTS;
-                                } else {
-                                    put = false;
+                int iter = 0;
+                do {
+                    iter++;
+                    // not a flush packet
+                    try {
+                        OutputFrame frm = dec_.decode(pkt);
+                        dec_errors_ = 0;
+
+                        if (frm) {
+                            if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
+                                logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
+                            }
+                            last_pts_ = frm.pts();
+                            bool put = true;
+                            {
+                                auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+                                if (discard_until_.isValid()) {
+                                    if (frm.pts() >= discard_until_) {
+                                        logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
+                                        discard_until_ = NOTS;
+                                    } else {
+                                        put = false;
+                                    }
                                 }
                             }
+                            if (flush_magic_ && waiting_for_frame_ > 0) {
+                                if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
+                                    logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
+                                    waiting_for_frame_ = 0;
+                                    put &= true;
+                                } else {
+                                    waiting_for_frame_++;
+                                    put = false;
+                                }
+                                if (waiting_for_frame_ > 5) {
+                                    logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
+                                    waiting_for_frame_ = 0;
+                                    put &= true;
+                                }
+                            }
+                            if (put) {
+                                setFrameTimestamps(frm);
+                                this->sink_->put(frm);
+                            }
                         }
-                        if (put) {
-                            setFrameTimestamps(frm);
-                            this->sink_->put(frm);
+                    } catch (std::exception &e) {
+                        dec_errors_++;
+                        if (dec_errors_>200) {
+                            throw;
                         }
+                        logstream << "Decode error: " << e.what();
                     }
-                    dec_errors_ = 0;
-                } catch (std::exception &e) {
-                    dec_errors_++;
-                    if (dec_errors_>200) {
-                        throw;
-                    }
-                    logstream << "Decode error: " << e.what();
-                }
-                //if (!frm) this->finished_ = true;
-
+                    //if (!frm) this->finished_ = true;
+                } while (flush_magic_ && waiting_for_frame_ > 0);
                 this->source_->pop();
             } else {
                 // this is flush packet
@@ -227,8 +248,9 @@ public:
         }
     }
     virtual void discardUntil(av::Timestamp pts) {
-        logstream << "will discard until " << pts;
+        logstream << "will wait for frame and discard until " << pts;
         auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+        waiting_for_frame_ = 1;
         discard_until_ = pts;
     }
     virtual ~Decoder() {
@@ -282,6 +304,9 @@ public:
             options = parametersToDict(params["options"]);
         }
         std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel);
+        if (params.count("flush_magic")) {
+            r->flush_magic_ = params["flush_magic"];
+        }
         return r;
     }
 };
