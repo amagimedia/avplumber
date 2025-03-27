@@ -81,6 +81,10 @@ public:
             edge.finishProducer();
         });
         executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
+            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+            if (target.ts.isValid() && dec) {
+                dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
+            }
             if (use_input && !target.isEmpty()) {
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
                 if (input) {
