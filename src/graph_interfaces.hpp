@@ -279,6 +279,7 @@ public:
     virtual std::string codecName() const = 0;
     virtual std::string codecMediaTypeString() const = 0;
     virtual std::string fieldOrderString() const = 0;
+    virtual void discardUntil(av::Timestamp pts) = 0;
 };
 
 class IMuxer {
