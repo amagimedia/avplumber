@@ -102,18 +102,28 @@ public:
         }
     }
     virtual void flushAndSeek(StreamTarget target) override {
-        // lock all nodes
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->lockProcessing();
-        });
-        // clear all edges
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            edge.clear();
-        });
-        // unlock all nodes
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->unlockProcessing();
-        });
+        // wait for flushed state:
+        while(true) {
+            bool flushed = true;
+            executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
+                if (!edge.isFlushed()) {
+                    auto consumer = edge.consumer().lock();
+                    if (consumer) {
+                        if (consumer->try_lockProcessing()) {
+                            edge.clear();
+                            consumer->unlockProcessing();
+                            return;
+                        }
+                    }
+                    std::this_thread::sleep_for(0ms);
+                }
+                flushed &= edge.isFlushed();
+            });
+            if (flushed) {
+                break;
+            }
+            std::this_thread::sleep_for(100us);
+        }			
     }
     virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
         // stop flushing and resume paused input:
