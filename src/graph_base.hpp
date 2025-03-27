@@ -81,10 +81,6 @@ public:
             edge.finishProducer();
         });
         executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
-            if (target.ts.isValid() && dec) {
-                dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
-            }
             if (use_input && !target.isEmpty()) {
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
                 if (input) {
@@ -102,28 +98,18 @@ public:
         }
     }
     virtual void flushAndSeek(StreamTarget target) override {
-        // wait for flushed state:
-        while(true) {
-            bool flushed = true;
-            executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
-                if (!edge.isFlushed()) {
-                    auto consumer = edge.consumer().lock();
-                    if (consumer) {
-                        if (consumer->try_lockProcessing()) {
-                            edge.clear();
-                            consumer->unlockProcessing();
-                            return;
-                        }
-                    }
-                    std::this_thread::sleep_for(0ms);
-                }
-                flushed &= edge.isFlushed();
-            });
-            if (flushed) {
-                break;
-            }
-            std::this_thread::sleep_for(100us);
-        }
+        // lock all nodes
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            node->lockProcessing();
+        });
+        // clear all edges
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.clear();
+        });
+        // unlock all nodes
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            node->unlockProcessing();
+        });
     }
     virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
         // stop flushing and resume paused input:
