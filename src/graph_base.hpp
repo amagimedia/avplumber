@@ -71,10 +71,12 @@ public:
         if (input) {
             input->fixInputTimestamp(target);
         }
-        // start flushing
+        // pause all nodes processing
+        pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             node->pauseProcessing();
         });
+        // start flushing
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.startFlushing();
             edge.finishConsumer(); // to wake up consumer that may be waiting for frame
@@ -102,45 +104,41 @@ public:
         }
     }
     virtual void flushAndSeek(StreamTarget target) override {
-        // lock all nodes
+        // wait current node to end processing
+        lockProcessing();
+        unlockProcessing();
+        // wait all nodes to complete its work
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             node->lockProcessing();
+            node->unlockProcessing();
         });
         // clear all edges
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.clear();
         });
-        // unlock all nodes
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->unlockProcessing();
-        });
     }
     virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
-        // stop flushing and resume paused input:
-        executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
+        // stop flushing
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
         });
-        executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!node->isPausedProcessing()) {
-                return;
-            }
+        // resume all nodes
+        executeUpstream([use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
             if (!use_input) {
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
                 if (input) {
                     return;
                 }
             }
-            node->lockProcessing();
             node->resumeProcessing();
-            node->unlockProcessing();
         });
-        if (use_input) {
+        resumeProcessing();
+        // resume input
+        if (use_input && !target.isEmpty()) {
             executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-                if (!target.isEmpty()) {
-                    std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                    if (input) {
-                        input->resumeAfterSeek();
-                    }
+                std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
+                if (input) {
+                    input->resumeAfterSeek();
                 }
             });
         }
