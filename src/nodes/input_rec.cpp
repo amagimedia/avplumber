@@ -29,7 +29,7 @@ enum class ETimestampSource {
     ts_Wallclock
 };
 
-class RecoringInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
+class RecordingInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
                    public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt {
 protected:
     av::FormatContext ictx_;
@@ -39,6 +39,7 @@ protected:
     AVTS wait_max_ = AV_NOPTS_VALUE;
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
+    av::Timestamp first_video_ts_;
     StreamTarget start_ts_;
     StreamTarget stop_ts_ = StreamTarget::end();
 
@@ -152,7 +153,7 @@ private:
                             if (it == ts_offsets_.cend()) {
                                 it = std::prev(it);
                             }
-                            if (it->changed_at - it->wallclock_diff > new_ts) {
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at - it->wallclock_diff > new_ts)) {
                                 it = std::prev(it);
                             }
 
@@ -172,7 +173,7 @@ private:
                             if (it == ts_offsets_.cend()) {
                                 it = std::prev(it);
                             }
-                            if (it->changed_at - it->input_ts_diff > new_ts) {
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at - it->input_ts_diff > new_ts)) {
                                 it = std::prev(it);
                             }
 
@@ -199,8 +200,17 @@ private:
         if (it == seek_table_.cend()) {
             it = std::prev(it);
         }
-        if (it->timestamp_ms > frame_ms) {
-            it = std::prev(it);
+        int64_t diff = abs(it->timestamp_ms - frame_ms);
+        for (int i = 0; i < 5; ++i) {
+            if (it != seek_table_.begin()) {
+                int64_t diff2 = abs(std::prev(it)->timestamp_ms - frame_ms);
+                if (diff2 < diff) {
+                    diff = diff2;
+                    --it;
+                } else {
+                    break;
+                }
+            }
         }
 
         st.ts = NOTS;
@@ -303,12 +313,17 @@ private:
         set_ts("input_ts", ts_in);
         set_ts("output_ts", ts_out);
         set_ts("wallclock_ts", ts_wallclock);
+        av_dict_set(&frame->metadata, "wallclock", std::to_string(ts_wallclock.timestamp({1, 1000})).c_str(), 0);
         if (frame_index >= 0) {
             av_dict_set(&frame->metadata, "frame_no", std::to_string(frame_index).c_str(), 0);
+            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+            if (frame_index < seek_table_.size()) {
+                av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
+            }
         }
     }
 public:
-    RecoringInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
+    RecordingInput(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
         ictx_.setInterruptCallback([this]() -> int {
             if ( (wait_max_!=AV_NOPTS_VALUE) && ((wallclock.pts() - wait_start_) > wait_max_) ) {
                 logstream << "Timeout " << wait_max_ << " exceeded";
@@ -329,88 +344,94 @@ public:
         return ictx_;
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
-        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
-
         av::Timestamp video_ts;
         av::Timestamp input_ts;
         av::Timestamp output_ts;
         av::Timestamp wallclock_ts;
 
-        if (!ts_offsets_.empty()) {
-            switch (timestamp_source_) {
-                case ETimestampSource::ts_Input:
-                    {
-                        input_ts = frame.pts();
-                        uint64_t v = rescaleTS(input_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at - e.input_ts_diff < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
+        {
+            // get timestamps offset
+            auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+            if (!ts_offsets_.empty()) {
+                switch (timestamp_source_) {
+                    case ETimestampSource::ts_Input:
+                        {
+                            input_ts = frame.pts();
+                            uint64_t v = rescaleTS(input_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at - e.input_ts_diff < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->input_ts_diff) > v)) {
+                                it = std::prev(it);
+                            }
+                            video_ts = addTS(input_ts, av::Timestamp(it->input_ts_diff, {1, 1000}));
+                            wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
                         }
-                        if ((it->changed_at - it->input_ts_diff) > v) {
-                            it = std::prev(it);
+                        break;
+                    case ETimestampSource::ts_Wallclock:
+                        {
+                            wallclock_ts = frame.pts();
+                            uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at - e.wallclock_diff < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && ((it->changed_at - it->wallclock_diff) > v)) {
+                                it = std::prev(it);
+                            }
+                            video_ts = addTS(wallclock_ts, av::Timestamp(it->wallclock_diff, {1, 1000}));
+                            input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
                         }
-                        video_ts = addTS(input_ts, av::Timestamp(it->input_ts_diff, {1, 1000}));
-                        wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                    }
-                    break;
-                case ETimestampSource::ts_Wallclock:
-                    {
-                        wallclock_ts = frame.pts();
-                        uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at - e.wallclock_diff < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
+                        break;
+                    default:
+                        {
+                            video_ts = frame.pts();
+                            uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
+                            auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at < value;
+                            });
+                            if (it == ts_offsets_.cend()) {
+                                it = std::prev(it);
+                            }
+                            if ((it != ts_offsets_.cbegin()) && (it->changed_at > v)) {
+                                it = std::prev(it);
+                            }
+                            output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
+                            input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
+                            wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
                         }
-                        if ((it->changed_at - it->wallclock_diff) > v) {
-                            it = std::prev(it);
-                        }
-                        video_ts = addTS(wallclock_ts, av::Timestamp(it->wallclock_diff, {1, 1000}));
-                        input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                    }
-                    break;
-                default:
-                    {
-                        video_ts = frame.pts();
-                        uint64_t v = rescaleTS(wallclock_ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), v, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
-                        }
-                        if (it->changed_at > v) {
-                            it = std::prev(it);
-                        }
-                        output_ts = addTS(video_ts, av::Timestamp(-it->output_ts_diff, {1, 1000}));
-                        input_ts = addTS(video_ts, av::Timestamp(-it->input_ts_diff, {1, 1000}));
-                        wallclock_ts = addTS(video_ts, av::Timestamp(-it->wallclock_diff, {1, 1000}));
-                    }
-                    break;
+                        break;
+                }
             }
+        }
 
+        {
             // get frame index
             int64_t frame_index = -1;
-            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+            {
+                auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
-            if (!seek_table_.empty()) {
-                int64_t req_ts = rescaleTS(video_ts, {1, 1000}).timestamp();
-                auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
-                    return e.timestamp_ms < value;
-                });
-                if (it == seek_table_.cend()) {
-                    it = std::prev(it);
-                }
-                if (it->timestamp_ms > req_ts) {
-                    it = std::prev(it);
-                }
+                if (!seek_table_.empty()) {
+                    int64_t req_ts = rescaleTS(video_ts, {1, 1000}).timestamp();
+                    auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), req_ts, [](const SeekTableEntry& e, int64_t value) {
+                        return e.timestamp_ms < value;
+                    });
+                    if (it == seek_table_.cend()) {
+                        it = std::prev(it);
+                    }
+                    if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
+                        it = std::prev(it);
+                    }
 
-                frame_index = static_cast<int64_t>(std::distance(seek_table_.cbegin(), it));
+                    frame_index = static_cast<int64_t>(std::distance(seek_table_.cbegin(), it));
+                }
             }
 
             setFrameTimestamps(frame, frame_index, video_ts, input_ts, output_ts, wallclock_ts);
@@ -592,11 +613,10 @@ public:
             return;
         }
         if (pkt.isNull()) {
-            this->finished_ = true;
-            logstream << "Got null packet";
-            //closeInput(true);
-            // do not close input right now, otherwise segfaults happen because decoder tries to use demuxer data which is freed
-            // TODO: check whether creating stream-independent decoder will help
+            // we are at the end os recording
+            //logstream << "end of video reached";
+            std::this_thread::sleep_for(5ms);
+            return;
         } else {
             if (!pkt.isComplete()) {
                 logstream << "Got incomplete packet, dropping";
@@ -620,6 +640,11 @@ public:
         #endif
 
         if (!pkt.isNull()) {
+            if (first_video_ts_.timestamp() != 0) {
+                pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
+                pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
+            }
+
             // adjust ts
             auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
             if (!ts_offsets_.empty() && (timestamp_source_ != ETimestampSource::ts_None)) {
@@ -696,7 +721,7 @@ public:
         logstream << "Set wait_max_ to " << wait_max_ << "s";
         //ictx_.setSocketTimeout(timeout);
     }
-    virtual ~RecoringInput() {
+    virtual ~RecordingInput() {
         if (seek_read_thread_.joinable()) {
             seek_thread_terminate_.signal();
             seek_read_thread_.join();
@@ -731,13 +756,63 @@ public:
             throw Error("timestamp outside input duration");
         }
 
+        // find closest frame
+        if (it->timestamp_ms > ms) {
+            int64_t diff = it->timestamp_ms - ms;
+            for (int i = 0; i < 5; ++i) {
+                if (it != seek_table_.begin()) {
+                    int64_t diff2 = abs(std::prev(it)->timestamp_ms - ms);
+                    if (diff2 < diff) {
+                        diff = diff2;
+                        --it;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (it->timestamp_ms < ms) {
+                int64_t diff = ms - it->timestamp_ms;
+                for (int i = 0; i < 5; ++i) {
+                    if (it != seek_table_.begin()) {
+                        int64_t diff2 = abs(std::next(it)->timestamp_ms - ms);
+                        if (diff2 < diff) {
+                            diff = diff2;
+                            ++it;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         return it - seek_table_.begin();
     }
-    static std::shared_ptr<RecoringInput> create(NodeCreationInfo &nci) {
+
+    void offsetStreamTargetByFrames(StreamTarget& ts, const int64_t frames) override {
+        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+
+        if (seek_table_.size() < abs(frames)) {
+            throw Error("no seek table available");
+        }
+
+        int64_t duration = std::copysign(seek_table_.at(abs(frames)).timestamp_ms - seek_table_.cbegin()->timestamp_ms, frames);
+
+        switch (ts.type) {
+            case StreamTarget::ETargetType::tt_Wallclock:
+                ts.ts = addTS(ts.ts, av::Timestamp(duration, {1, 1000}));
+                break;
+            default:
+                throw Error("not implemented StreamTarget type");
+        }
+    }
+
+    static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
-        auto r = std::make_shared<RecoringInput>(make_unique<EdgeSink<av::Packet>>(edge));
+        auto r = std::make_shared<RecordingInput>(make_unique<EdgeSink<av::Packet>>(edge));
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<InputSeekTeam>::get(nci.instance, params["team"]);
             r->team_->addSeekTarget(r);
@@ -797,6 +872,7 @@ public:
             if (stream.isVideo()) {
                 if (video_stream_<0) {
                     video_stream_ = i;
+                    first_video_ts_ = stream.startTime();
                 }
                 obj["fps"] = std::to_string(stream.frameRate().getNumerator()) + '/' + std::to_string(stream.frameRate().getDenominator());
                 obj["width"] = cpar.width;
@@ -897,8 +973,24 @@ public:
                 auto duration = rescaleTS(ictx_.duration(), {1, 1000});
                 rec_length = duration.timestamp();
             } else {
-                rec_length = seek_table_.crbegin()->timestamp_ms;
+                if (seek_table_.empty()) {
+                    auto duration = rescaleTS(ictx_.duration(), {1, 1000});
+                    rec_length = duration.timestamp();
+                } else {
+                    rec_length = seek_table_.crbegin()->timestamp_ms;
+                }
             }
+            if (start_ts_.isValidTimestamp()) {
+                int64_t st = start_ts_.ts.timestamp();
+                res["start"] = st;
+            }
+            if (stop_ts_.isValidTimestamp()) {
+                int64_t st = stop_ts_.ts.timestamp();
+                res["stop"] = st;
+            }
+            StreamTarget t = StreamTarget::from_timestamp({0, {1, 1}});
+            fixInputTimestamp(t);
+            res["video_start"] = t.ts.timestamp();
             res["duration"] = rec_length;
             res["loop"] = loop_;
             return res;
@@ -935,4 +1027,4 @@ public:
     }
 };
 
-DECLNODE(input_rec, RecoringInput);
+DECLNODE(input_rec, RecordingInput);

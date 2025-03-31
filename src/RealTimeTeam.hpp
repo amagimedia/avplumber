@@ -15,7 +15,7 @@ protected:
     std::atomic_bool flushing_ = false;
 
     std::mutex seek_mutex_;
-    std::list<std::weak_ptr<IFlushAndSeek>> seek_targets_;
+    std::vector<std::weak_ptr<IFlushAndSeek>> seek_targets_;
 public:
     void checkTimeBase(AVRational tb) {
         auto lock = getLock();
@@ -72,31 +72,62 @@ public:
     bool isFlushing() {
         return flushing_;
     }
-    virtual void flushAndSeek(StreamTarget target) override {
+    virtual void flushAndSeek(StreamTarget seek_target) override {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
-        for (auto t: seek_targets_) {
-            auto node = t.lock();
+        StreamTarget target = seek_target;
+        int64_t current_wallclock = -1;
+        int input_idx = -1;
+
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
             if (node) {
-                if (target.isFrameRelative()) {
-                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
-                    if (p_frame) {
-                        target = StreamTarget::from_frames_absolute(p_frame->getCurrentFrameNumber() + target.frame_number);
-                    }
+                auto p_time = std::dynamic_pointer_cast<IFrameTimestamp>(node);
+                if (p_time) {
+                    current_wallclock = p_time->getCurrentFrameWallclock();
                 }
-                if (target.isTimestampRelative()) {
-                    auto p_frame = std::dynamic_pointer_cast<IFrameNumber>(node);
-                    if (p_frame) {
+                if (current_wallclock < 0)
+                    continue;
+
+                input_idx = i;
+
+                if (target.isFrameRelative()) {
+                    target.type = StreamTarget::ETargetType::tt_Wallclock;
+                    target.ts = av::Timestamp(current_wallclock, {1, 1000});
+
+                    if (target.frame_number != 0) {
                         auto pNode = std::dynamic_pointer_cast<Node>(node);
                         if (pNode) {
                             std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
                             if (streams_in) {
-                                size_t new_frame = streams_in->getFrameNumber(p_frame->getCurrentFrameNumber(), target.ts);
-                                target = StreamTarget::from_frames_absolute(new_frame);
+                                streams_in->offsetStreamTargetByFrames(target, target.frame_number);
                             }
                         }
                     }
                 }
+                if (target.isTimestampRelative()) {
+                    target.type = StreamTarget::ETargetType::tt_Wallclock;
+                    target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
+                }
+                break;
+            }
+        }
+
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek_start(target, true);//input_idx == i);
+            }
+        }
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
                 node->flushAndSeek(target);
+            }
+        }
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek_finish(target, true);// input_idx == i);
             }
         }
     }

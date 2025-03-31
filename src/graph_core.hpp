@@ -15,7 +15,34 @@
 class EdgeBase;
 
 class Node: public std::enable_shared_from_this<Node> {
+private:
+    std::mutex mutex_;
+    std::atomic_bool paused_ = false;
 public:
+    void pauseProcessing() {
+        paused_ = true;
+    }
+
+    void resumeProcessing() {
+        paused_ = false;
+    }
+
+    bool isPausedProcessing() {
+        return paused_;
+    }
+
+    void lockProcessing() {
+        mutex_.lock();
+    }
+
+    bool try_lockProcessing() {
+        return mutex_.try_lock();
+    }
+
+    void unlockProcessing() {
+        mutex_.unlock();
+    }
+
     virtual void process() = 0;
     virtual void start() {};
     virtual std::weak_ptr<Node> sourceNode() {
@@ -28,6 +55,19 @@ public:
         return {};
     }*/
     virtual ~Node() {
+    }
+};
+
+class NodeLocker {
+private:
+    std::shared_ptr<Node> n_;
+public:
+    NodeLocker(std::shared_ptr<Node> n) {
+        n_ = n;
+        n_->lockProcessing();
+    }
+    ~NodeLocker() {
+        n_->unlockProcessing();
     }
 };
 
@@ -80,7 +120,12 @@ public:
     void wrappedProcessNonBlocking(EventLoop& evl, bool ticks) {
         std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
         if (!this->nonblk_should_work_) return;
-        processNonBlocking(evl, ticks);
+        if (isPausedProcessing()) {
+            yieldAndProcess();
+        } else {
+            NodeLocker lock_(shared_from_this());
+            processNonBlocking(evl, ticks);
+        }
     }
     void prohibitProcessNonBlocking() {
         std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
@@ -302,6 +347,7 @@ public:
     }
     virtual void waitEmpty() = 0;
     virtual int occupied() = 0;
+    virtual void clear() = 0;
     virtual ~EdgeBase() {
     }
 };
@@ -402,7 +448,7 @@ public:
     size_t capacity() {
         return queue_limit_;
     }
-    void clear() {
+    void clear() override {
         while (pop()) ;
     }
     virtual int occupied() final {

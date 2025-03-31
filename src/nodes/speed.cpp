@@ -37,24 +37,27 @@ public:
                 frame.setPts(out_pts);
             }
 
-            // put it in the sink queue:
-            if (out_pts.isNoPts() || this->sink_->put(frame, true)) {
-                // put returned true, success, remove this packet from the source queue
-                this->source_->pop();
-                team_->setLastPTS(orig_pts);
-                if (!ticks) {
-                    // process next packet
-                    this->yieldAndProcess();
+            
+            if (!out_pts.isNoPts()) {
+                // put it in the sink queue:
+                if (this->sink_->put(frame, true)) {
+                    // put returned true, success, remove this packet from the source queue
+                    this->source_->pop();
+                    team_->setLastPTS(orig_pts);
+                    if (!ticks) {
+                        // process next packet
+                        this->yieldAndProcess();
+                    } else {
+                        process_next = true;
+                    }
                 } else {
-                    process_next = true;
-                }
-            } else {
-                // put returned false, no space in queue
-                frame.setTimeBase(av::Rational());
-                frame.setPts(orig_pts);
-                if (!ticks) {
-                    // retry when we have space in sink
-                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    // put returned false, no space in queue
+                    frame.setTimeBase(av::Rational());
+                    frame.setPts(orig_pts);
+                    if (!ticks) {
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    }
                 }
             }
         } while (process_next);
@@ -82,7 +85,7 @@ public:
         if (params.count("sync_team")) {
             std::shared_ptr<RealTimeTeam> sync_team = InstanceSharedObjects<RealTimeTeam>::get(nci.instance, params["sync_team"]);
             if (sync_team) {
-                r->team_->setSyncObj(sync_team);
+                r->team_->addSyncObj(sync_team);
             }
         }
         return r;
