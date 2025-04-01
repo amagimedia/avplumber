@@ -112,6 +112,10 @@ public:
             }
         }
 
+        if ((input_idx < 0) || target.isRelative()) {
+            throw Error("Relative seek not possible. Can not determine current time.");
+        }
+
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {

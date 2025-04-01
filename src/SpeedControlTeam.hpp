@@ -12,45 +12,50 @@ protected:
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
     std::vector<std::weak_ptr<IFlushAndSeek>> nodes_;
-    std::vector<std::weak_ptr<IFlushAndSeek>> sync_objs_;
+    std::weak_ptr<IFlushAndSeek> sync_obj_;
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
     }
 public:
     void setSpeed(float speed) {
-        auto lock = getLock();
+        bool direction_changed = false;
+        {
+            auto lock = getLock();
 
-        if (!last_sync_.isNoPts()) {
-            av::Timestamp elapsed = addTS(last_pts_, negateTS(last_sync_));
-            av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
-            shift_ = addTS(shift_, last_sync_, scaled, negateTS(last_pts_));
-        }
+            if (!last_sync_.isNoPts()) {
+                av::Timestamp elapsed = addTS(last_pts_, negateTS(last_sync_));
+                av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
+                shift_ = addTS(shift_, last_sync_, scaled, negateTS(last_pts_));
+            }
 
-        bool direction_changed = std::signbit(speed_) != std::signbit(speed);
-        speed_ = speed;
-        inv_speed_ = 1.0f/speed;
-        last_sync_ = last_pts_;
+            direction_changed = std::signbit(speed_) != std::signbit(speed);
+            speed_ = speed;
+            inv_speed_ = 1.0f/speed;
+            last_sync_ = last_pts_;
 
-        if (direction_changed) {
-            for (auto n: nodes_) {
-                auto node = n.lock();
-                if (node) {
-                    auto pNode = std::dynamic_pointer_cast<Node>(node);
-                    // set input playback direction
-                    if (pNode) {
-                        std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
-                        if (streams_in) {
-                            streams_in->setPlaybackDirection(speed > 0 ? IPlaybackControl::EPlaybackDirection::pd_Forward : IPlaybackControl::EPlaybackDirection::pd_Backward);
+            if (direction_changed) {
+                logstream << "playback direction changed to " << ((speed < 0) ? "backward" : "forward");
+                for (auto n: nodes_) {
+                    auto node = n.lock();
+                    if (node) {
+                        auto pNode = std::dynamic_pointer_cast<Node>(node);
+                        // set input playback direction
+                        if (pNode) {
+                            std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
+                            if (streams_in) {
+                                streams_in->setPlaybackDirection(speed > 0 ? IPlaybackControl::EPlaybackDirection::pd_Forward : IPlaybackControl::EPlaybackDirection::pd_Backward);
+                            }
                         }
                     }
                 }
             }
-            // seek to current frame
-            for (auto& p: sync_objs_) {
-                auto obj = p.lock();
-                if (obj) {
-                    obj->flushAndSeek(StreamTarget::from_timestamp(last_pts_));
-                }
+        }
+
+        if (direction_changed) {
+            // flush queues
+            auto obj = sync_obj_.lock();
+            if (obj) {
+                obj->flushAndSeek(StreamTarget::now());
             }
         }
     }
@@ -81,8 +86,8 @@ public:
         auto lock = getLock();
         nodes_.push_back(node);
     }
-    void addSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
+    void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
         auto lock = getLock();
-        sync_objs_.push_back(obj);
+        sync_obj_ = obj;
     }
 };

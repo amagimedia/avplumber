@@ -68,8 +68,11 @@ public:
     }
     virtual void flushAndSeek_start(StreamTarget target, bool use_input) override {
         std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
+        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
+
         if (input) {
             input->fixInputTimestamp(target);
+            direction = input->getPlaybackDirection();
         }
         // pause all nodes processing
         pauseProcessing();
@@ -82,15 +85,19 @@ public:
             edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             edge.finishProducer();
         });
-        executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
-            if (target.ts.isValid() && dec) {
-                dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
-            }
-            if (use_input && !target.isEmpty()) {
-                std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                if (input) {
-                    input->seekAndPause(target);
+        executeUpstream([target, use_input, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
+            if (!target.isEmpty()) {
+                if ((direction == IPlaybackControl::EPlaybackDirection::pd_Forward) && target.ts.isValid()) {
+                    std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+                    if (dec) {
+                        dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
+                    }
+                }
+                if (use_input) {
+                    std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
+                    if (input) {
+                        input->seekAndPause(target);
+                    }
                 }
             }
             std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
