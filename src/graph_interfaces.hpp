@@ -155,6 +155,9 @@ struct StreamTarget {
     static StreamTarget live() {
         return { type: ETargetType::tt_Live };
     }
+    static StreamTarget now() {
+        return StreamTarget::from_timestamp_relative(av::Timestamp(0, {1, 1000}));
+    }
     static StreamTarget end() {
         return { type: ETargetType::tt_End };
     }
@@ -200,6 +203,9 @@ struct StreamTarget {
     bool isFrame() const {
         return isFrameAbsolute() || isFrameRelative();
     }
+    bool isRelative() const {
+        return isTimestampRelative() || isFrameRelative();
+    }
 };
 
 class IStreamsInput {
@@ -221,6 +227,7 @@ public:
     virtual void fixInputTimestamp(StreamTarget& ts) = 0;
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
     virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
+    virtual EPlaybackDirection getPlaybackDirection() = 0;
     virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
     virtual void offsetStreamTargetByFrames(StreamTarget& ts, const int64_t frames) = 0;
 };

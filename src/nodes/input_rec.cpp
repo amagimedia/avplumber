@@ -100,6 +100,11 @@ private:
             return;
         }
 
+        if (st.isEmpty()) {
+            // flush only
+            return;
+        }
+
         auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
 
         if (seek_table_.empty()) {
@@ -740,6 +745,9 @@ public:
             play_direction_ = dir;
             last_stream_position_ = avio_tell(ictx_.raw()->pb);
         }
+    }
+    IPlaybackControl::EPlaybackDirection getPlaybackDirection() override {
+        return play_direction_;
     }
     size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) override {
         auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
