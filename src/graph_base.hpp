@@ -67,13 +67,6 @@ public:
         }
     }
     virtual void flushAndSeek_start(StreamTarget target, bool use_input) override {
-        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
-        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
-
-        if (input) {
-            input->fixInputTimestamp(target);
-            direction = input->getPlaybackDirection();
-        }
         // pause all nodes processing
         pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
@@ -85,6 +78,30 @@ public:
             edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             edge.finishProducer();
         });
+    }
+    virtual void flushAndSeek(StreamTarget target) override {
+        // wait current node to end processing
+        lockProcessing();
+        unlockProcessing();
+        // wait all nodes to complete its work
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            node->lockProcessing();
+            node->unlockProcessing();
+        });
+        // clear all edges
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.clear();
+        });
+    }
+    virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
+        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
+        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
+
+        if (input) {
+            input->fixInputTimestamp(target);
+            direction = input->getPlaybackDirection();
+        }
+        // set-up discard until & execute seek
         executeUpstream([target, use_input, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
             if (!target.isEmpty()) {
                 if ((direction == IPlaybackControl::EPlaybackDirection::pd_Forward) && target.ts.isValid()) {
@@ -105,26 +122,11 @@ public:
                 input_reset->resetInput();
             }
         });
+        // reset current node
         IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
         if (this_reset) {
             this_reset->resetInput();
         }
-    }
-    virtual void flushAndSeek(StreamTarget target) override {
-        // wait current node to end processing
-        lockProcessing();
-        unlockProcessing();
-        // wait all nodes to complete its work
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->lockProcessing();
-            node->unlockProcessing();
-        });
-        // clear all edges
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            edge.clear();
-        });
-    }
-    virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
         // stop flushing
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
