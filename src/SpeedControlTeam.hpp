@@ -11,7 +11,7 @@ protected:
     av::Timestamp last_pts_ = NOTS;
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
-    std::vector<std::weak_ptr<IFlushAndSeek>> nodes_;
+    std::vector<std::weak_ptr<ISpeed>> nodes_;
     std::weak_ptr<IFlushAndSeek> sync_obj_;
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
@@ -58,6 +58,14 @@ public:
                 obj->flushAndSeek(StreamTarget::now());
             }
         }
+
+        // notify about speed change
+        for (auto n: nodes_) {
+            auto node = n.lock();
+            if (node) {
+                node->speedChanged();
+            }
+        }
     }
     float getSpeed() {
         auto lock = getLock();
@@ -82,7 +90,7 @@ public:
         av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
         return rescaleTS(addTS(last_sync_, scaled, shift_), pts.timebase());
     }
-    void addNode(std::weak_ptr<IFlushAndSeek> node) {
+    void addNode(std::weak_ptr<ISpeed> node) {
         auto lock = getLock();
         nodes_.push_back(node);
     }
