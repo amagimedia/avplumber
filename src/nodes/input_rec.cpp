@@ -612,7 +612,14 @@ public:
             }
         }
         if (seeked && !auto_resume_after_seek_) {
-            seek_resume_.wait();
+            while (!isPausedProcessing()) {
+                if (seek_resume_.wait(1)) {
+                    break;
+                };
+            }
+            if (isPausedProcessing()) {
+                logstream << "BUG: potential error (deadlock). this should never happen!";
+            }
         }
         if (!paused_read_) {
             if (pause_team_ && pause_team_->isPaused()) {
