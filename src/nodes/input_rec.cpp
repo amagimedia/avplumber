@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "../InputSeekTeam.hpp"
+#include "../PauseControlTeam.hpp"
 
 using namespace std::chrono_literals;
 
@@ -42,6 +43,8 @@ protected:
     av::Timestamp first_video_ts_;
     StreamTarget start_ts_;
     StreamTarget stop_ts_ = StreamTarget::end();
+    std::shared_ptr<PauseControlTeam> pause_team_;
+    bool paused_read_ = false;
 
     std::string seek_table_url_;
     std::mutex seek_table_mutex_;
@@ -611,6 +614,16 @@ public:
         if (seeked && !auto_resume_after_seek_) {
             seek_resume_.wait();
         }
+        if (!paused_read_) {
+            if (pause_team_ && pause_team_->isPaused()) {
+                paused_read_ = seeked;
+                if (!paused_read_) {
+                    // graph is paused, wait for another seek
+                    std::this_thread::sleep_for(0us);
+                    return;
+                }
+            }
+        }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
         if (pkt.isNull() && loop_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
@@ -645,6 +658,11 @@ public:
         #endif
 
         if (!pkt.isNull()) {
+            if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
+                // video frame read, do not read more packets
+                paused_read_ = false;
+            }
+
             if (first_video_ts_.timestamp() != 0) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
@@ -824,6 +842,9 @@ public:
         if (params.count("team")) {
             r->team_ = InstanceSharedObjects<InputSeekTeam>::get(nci.instance, params["team"]);
             r->team_->addSeekTarget(r);
+        }
+        if (params.count("pause_team")) {
+            r->pause_team_ = InstanceSharedObjects<PauseControlTeam>::get(nci.instance, params["pause_team"]);
         }
         return r;
     }
