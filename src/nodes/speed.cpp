@@ -1,11 +1,13 @@
 #include "node_common.hpp"
 #include "../SpeedControlTeam.hpp"
 #include "../RealTimeTeam.hpp"
+#include "../graph_base.hpp"
 
-template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>> {
+template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed {
 protected:
     std::shared_ptr<SpeedControlTeam> team_;
     av::Rational timebase_ {0, 0};
+    std::weak_ptr<NodeWrapper> sync_node_;
     bool discard_when_speed_changed_ = false;
 public:
     using NodeSISO<T, T>::NodeSISO;
@@ -36,7 +38,6 @@ public:
                 frame.setTimeBase(av::Rational());
                 frame.setPts(out_pts);
             }
-
             
             if (!out_pts.isNoPts()) {
                 // put it in the sink queue:
@@ -61,6 +62,36 @@ public:
                 }
             }
         } while (process_next);
+    }
+    void speedChanged() override {
+        this->lockProcessing();
+        auto n = sync_node_.lock();
+        if (n) {
+            auto node = n->node();
+            if (node) {
+                auto nsi = std::dynamic_pointer_cast<NodeSingleInput<T>>(node);
+                if (nsi) {
+                    std::shared_ptr<EdgeBase> edge = nsi->sourceEdge();
+                    while (edge) {
+                        auto prod = edge->producer().lock();
+                        logstream << prod->name_ << " E " << edge << " T " << this;
+                        if (prod.get() == this) {
+                            logstream << "DONE!";
+                            break;
+                        }
+                        if (prod) {
+                            edge = prod->sourceEdge();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // pause & lock all nodes
+            
+        }
+        this->unlockProcessing();
     }
     static std::shared_ptr<Speed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -87,6 +118,9 @@ public:
             if (sync_team) {
                 r->team_->setSyncObj(sync_team);
             }
+        }
+        if (params.count("sync_node")) {
+             r->sync_node_ = nci.nodes.node(params["sync_node"]);
         }
         return r;
     }

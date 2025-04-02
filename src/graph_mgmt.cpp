@@ -96,6 +96,7 @@ void NodeWrapper::createNode() {
             if (node_==nullptr) {
                 throw Error("Node factory returned nullptr");
             }
+            node_->name_ = name_;
             std::shared_ptr<IInitAfterCreate> node_init = std::dynamic_pointer_cast<IInitAfterCreate>(node_);
             if (node_init) {
                 try {
