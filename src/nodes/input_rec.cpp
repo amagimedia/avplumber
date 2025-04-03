@@ -626,6 +626,18 @@ public:
         }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
+
+        if (play_direction_ == IPlaybackControl::EPlaybackDirection::pd_Backward) {
+            // read only video frames, discard all other frames
+            // read packet until video packet found
+            int rep = 50;
+            while (!pkt.isNull() && rep--) {
+                if (pkt.streamIndex() == video_stream_)
+                    break;
+                pkt = ictx_.readPacket();
+            }
+        }
+
         if (pkt.isNull() && loop_ && (play_direction_ == EPlaybackDirection::pd_Forward)) {
             seek(start_ts_);
             return;

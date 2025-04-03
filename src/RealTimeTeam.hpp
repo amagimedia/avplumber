@@ -112,14 +112,14 @@ public:
             }
         }
 
-        if ((input_idx < 0) || target.isRelative()) {
+        if ((input_idx < 0) && target.isRelative()) {
             throw Error("Relative seek not possible. Can not determine current time.");
         }
 
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {
-                node->flushAndSeek_start(target, true);//input_idx == i);
+                node->flushAndSeek_start(target);
             }
         }
         for (int i = 0; i < seek_targets_.size(); ++i) {
@@ -131,7 +131,7 @@ public:
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {
-                node->flushAndSeek_finish(target, true);// input_idx == i);
+                node->flushAndSeek_finish(target);
             }
         }
     }
