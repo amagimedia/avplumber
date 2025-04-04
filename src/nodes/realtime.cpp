@@ -294,9 +294,6 @@ public:
         if (team_) {
             team_->reset();
         }
-        AVTS exit_wclk = wallclock.pts();
-        AVTS wclk_diff = exit_wclk - now_ts_wclk;
-        if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
     }
     static std::shared_ptr<RealTimeSpeed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
