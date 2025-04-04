@@ -257,7 +257,6 @@ public:
 
         } while (process_next);
 
-<<<<<<< HEAD
         if (iter < 2) {
             woken_too_late_ = false;
         }
