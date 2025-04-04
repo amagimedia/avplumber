@@ -66,94 +66,85 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
-    virtual void flushAndSeek_start(StreamTarget target, bool use_input) override {
-        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
-        if (input) {
-            input->fixInputTimestamp(target);
-        }
-        // start flushing
+    virtual void flushAndSeek_start(StreamTarget target) override {
+        // pause all nodes processing
+        pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             node->pauseProcessing();
         });
+        // start flushing
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.startFlushing();
             edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             edge.finishProducer();
         });
-        executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
-            if (target.ts.isValid() && dec) {
-                dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
-            }
-            if (use_input && !target.isEmpty()) {
+    }
+    virtual void flushAndSeek(StreamTarget target) override {
+        // wait current node to end processing
+        lockProcessing();
+        unlockProcessing();
+        // wait all nodes to complete its work
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            node->lockProcessing();
+            node->unlockProcessing();
+        });
+    }
+    void flushAndSeek_finish(StreamTarget target) override {
+        // clear all edges & stop flushing
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            edge.clear();
+            edge.stopFlushing();
+        });
+
+        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
+        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
+
+        if (input) {
+            input->fixInputTimestamp(target);
+            direction = input->getPlaybackDirection();
+        }
+        // set-up discard until & execute seek
+        executeUpstream([target, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
+            if (!node->isPausedProcessing())
+                return;
+            if (!target.isEmpty()) {
+                if (target.ts.isValid()) {
+                    std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+                    if (dec) {
+                        if (direction == IPlaybackControl::EPlaybackDirection::pd_Forward) {
+                            dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
+                        } else {
+                            // make sure encoder will outout valid frame (not any frame inside nvdec queue)
+                            dec->discardUntil(av::Timestamp(0, {1, 1}));
+                        }
+                    }
+                }
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
                 if (input) {
                     input->seekAndPause(target);
                 }
             }
+            // reset nodes
             std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
             if (input_reset) {
                 input_reset->resetInput();
             }
         });
+        // reset current node
         IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
         if (this_reset) {
             this_reset->resetInput();
         }
-    }
-    virtual void flushAndSeek(StreamTarget target) override {
-        // wait for flushed state:
-        while(true) {
-            bool flushed = true;
-            executeUpstream([&flushed](EdgeBase& edge, std::shared_ptr<Node> node) {
-                if (!edge.isFlushed()) {
-                    auto consumer = edge.consumer().lock();
-                    if (consumer) {
-                        if (consumer->try_lockProcessing()) {
-                            edge.clear();
-                            consumer->unlockProcessing();
-                            return;
-                        }
-                    }
-                    std::this_thread::sleep_for(0ms);
-                }
-                flushed &= edge.isFlushed();
-            });
-            if (flushed) {
-                break;
+        // resume all nodes
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
+            // resume input after seek
+            if (input && node->isPausedProcessing()) {
+                input->resumeAfterSeek();
             }
-            std::this_thread::sleep_for(100us);
-        }			
-    }
-    virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
-        // stop flushing and resume paused input:
-        executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-            edge.stopFlushing();
-        });
-        executeUpstream([target, use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!node->isPausedProcessing()) {
-                return;
-            }
-            if (!use_input) {
-                std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                if (input) {
-                    return;
-                }
-            }
-            node->lockProcessing();
             node->resumeProcessing();
-            node->unlockProcessing();
         });
-        if (use_input) {
-            executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-                if (!target.isEmpty()) {
-                    std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                    if (input) {
-                        input->resumeAfterSeek();
-                    }
-                }
-            });
-        }
+        resumeProcessing();
     }
     virtual ~NodeSingleInput() {
     }
