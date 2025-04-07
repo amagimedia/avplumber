@@ -11,6 +11,7 @@ protected:
     av::Timestamp last_pts_ = NOTS;
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
+    av::Timestamp previous_shift_ = {0, {1, 1}};
     std::vector<std::weak_ptr<ISpeed>> nodes_;
     std::weak_ptr<IFlushAndSeek> sync_obj_;
     std::unique_lock<decltype(mutex_)> getLock() {
@@ -25,6 +26,7 @@ public:
             if (!last_sync_.isNoPts()) {
                 av::Timestamp elapsed = addTS(last_pts_, negateTS(last_sync_));
                 av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
+                previous_shift_ = shift_;
                 shift_ = addTS(shift_, last_sync_, scaled, negateTS(last_pts_));
             }
 
@@ -97,5 +99,14 @@ public:
     void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
         auto lock = getLock();
         sync_obj_ = obj;
+    }
+    void setLastSync(av::Timestamp s) {
+        shift_ = previous_shift_;
+        last_sync_ = s;
+    }
+    void reset() {
+        logstream << "speed team reset";
+        //last_pts_ = NOTS;
+        //last_sync_ = NOTS;
     }
 };
