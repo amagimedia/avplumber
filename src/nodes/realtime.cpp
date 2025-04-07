@@ -113,6 +113,7 @@ public:
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
             AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
+            logstream << "!!! RT get " << data.pts().timestamp({1, 1000});
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
@@ -166,6 +167,8 @@ public:
                                 woken_too_late_ = false;
                                 if (!ticks) {
                                     // retry after waiting
+                                    logstream << "!!! RT process after " << av::Timestamp(diff, timebase_).timestamp({1, 1000});
+                                    diff = 5;
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
                             } else {
@@ -209,6 +212,7 @@ public:
             AVTS before_emit = wallclock.pts();
 
             if (emit) {
+                //logstream << "   !!! RT need to emit";
                 av::Timestamp orig_pts = data.pts();
                 if (set_pts_) {
                     data.setTimeBase(av::Rational());
@@ -269,6 +273,7 @@ public:
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
+            //logstream << "   !!! RT PUT " << frm->pts().timestamp({1, 1000}) << " frame_no: " << last_frame_number_;
         }
         auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
         if (frame_ts) {
@@ -291,6 +296,7 @@ public:
         return last_frame_wallclock_;
     }
     virtual void resetInput() override {
+        last_wait_ = 0;
         if (team_) {
             team_->reset();
         }

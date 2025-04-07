@@ -57,15 +57,20 @@ public:
             }
             
             av::Timestamp in_ts = pkt.pts();
+            //logstream << "??? FORCE_FPS received: " << in_ts.timestamp({1, 1000}) << ", last: " << last_ts_;
+            auto frame_no = av_dict_get(pkt.raw()->metadata, "frame_no", nullptr, 0);
+            if (frame_no) {
+                logstream << "??? [IN] FORCE FPS frame no: " << frame_no->value;
+            }
             if ((in_ts.timebase() != timebase_) || (pkt.timeBase() != timebase_)) {
                 pkt.setTimeBase(timebase_);
                 in_ts = rescaleTS(in_ts, timebase_);
             }
             if (last_ts_.isValid()) {
                 av::Timestamp delta_from_last = in_ts - last_ts_;
-                bool discontinuity = (delta_from_last.seconds() > 0.5) || (delta_from_last.timestamp() < 0);
+                bool discontinuity = (delta_from_last.seconds() > 5) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
-                    logstream << "Discontinuity " << last_ts_ << " -> " << in_ts;
+                    //logstream << "Discontinuity " << last_ts_ << " -> " << in_ts;
                 }
                 /*if (delta_from_last == frame_delta_) {
                     logstream << "Frame PTS = " << in_ts << " perfectly aligned";
@@ -93,6 +98,13 @@ public:
                                     this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                                 }
                                 return;
+                            } else {
+                                auto frame_no = av_dict_get(pkt.raw()->metadata, "frame_no", nullptr, 0);
+                                if (frame_no) {
+                                    logstream << "   ??? FORCE_FPS duplicate " << last_frame_.pts().timestamp({1, 1000}) << " frame_no: " << frame_no->value;
+                                }
+                                //logstream << "   ??? FORCE_FPS duplicate " << last_frame_.pts().timestamp({1, 1000}) << " limit: " << in_ts.timestamp({1, 1000});
+
                             }
                             next_ts_ = addTS(next_ts_, frame_delta_);
                         }
@@ -130,13 +142,20 @@ public:
 
             pkt.setPts(in_ts);
             
+
             if (!this->sink_->put(pkt, true)) {
+                //logstream << "   ??? FORCE_FPS put FAILED" << pkt.pts().timestamp({1, 1000});
                 if (!ticks) {
                     // retry when we have space in sink
                     this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                 }
                 return;
             } else {
+                auto frame_no = av_dict_get(pkt.raw()->metadata, "frame_no", nullptr, 0);
+                if (frame_no) {
+                    logstream << "   ??? FORCE_FPS PUT " << pkt.pts().timestamp({1, 1000}) << " frame_no: " << frame_no->value;
+                }
+                //logstream << "   ??? FORCE_FPS put " << pkt.pts().timestamp({1, 1000});
                 last_ts_ = in_ts;
                 next_ts_ = addTS(in_ts, frame_delta_);
                 setLast(pkt, false);
@@ -171,6 +190,7 @@ public:
         return timebase_;
     }
     void resetInput() override {
+        logstream << "force_fps reset";
         last_ts_ = NOTS;
         next_ts_ = NOTS;
     }

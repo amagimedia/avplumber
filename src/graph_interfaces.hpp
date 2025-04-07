@@ -276,7 +276,7 @@ class ISpeed {
 public:
     virtual void speedChanged() = 0;
 };
-    
+
 class IEncoder {
 public:
     virtual av::Codec& encodingCodec() = 0;

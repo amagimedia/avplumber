@@ -132,6 +132,9 @@ public:
         std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
         this->nonblk_should_work_ = false;
     }
+    void doExecute() {
+        yieldAndProcess();
+    }
 };
 
 template<typename Child> class NonBlockingNode: public NonBlockingNodeBase {
