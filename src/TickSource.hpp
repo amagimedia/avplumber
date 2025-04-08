@@ -10,10 +10,10 @@ protected:
     std::vector<std::weak_ptr<NonBlockingNodeBase>> nodes_;
     std::mutex busy_;
     std::shared_ptr<EventLoop> event_loop_;
+    int fast_tick_ms_ = 4;
 public:
     void tick(EventLoop &evl);
     void fastTick();
     void add(std::shared_ptr<NonBlockingNodeBase> node);
-    TickSource(std::shared_ptr<EventLoop> evl): event_loop_(evl) {
-    }
+    TickSource(std::shared_ptr<EventLoop> evl);
 };
