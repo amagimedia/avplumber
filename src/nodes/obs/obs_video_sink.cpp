@@ -480,7 +480,8 @@ public:
         #ifdef HAVE_CUDA
         if (global_cu) {
             logstream << "have CUDA functions";
-            r->frames_.resize(60);
+	    // this should match maximum delay for live source
+            r->frames_.resize(300);
 
             if (!global_cu_ctx) {
                 std::lock_guard<decltype(global_cu_ctx_create_mutex)> lock(global_cu_ctx_create_mutex);
