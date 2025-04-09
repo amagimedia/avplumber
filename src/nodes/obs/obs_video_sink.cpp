@@ -347,9 +347,10 @@ public:
                 return;
             }
         }
+        av::VideoFrame frm;
         if (pfrm && *pfrm) {
             //logstream << "have frame";
-            av::VideoFrame frm = *pfrm;
+            frm = *pfrm;
             if (ticks) {
                 while (this->source_->pop()) {}; // remove outstanding buffered packets
             } else {
