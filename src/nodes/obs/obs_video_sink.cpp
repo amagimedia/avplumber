@@ -568,9 +568,15 @@ public:
                 return;
             }
         }
+        av::VideoFrame frm;
         if (pfrm && *pfrm) {
             //logstream << "have frame";
-            av::VideoFrame frm = *pfrm;
+            frm = *pfrm;
+            if (ticks) {
+                while (this->source_->pop()) {}; // remove outstanding buffered packets
+            } else {
+                this->source_->pop();
+            }
             AVPixelFormat hw_pixel_format;
             av::PixelFormat real_pixel_format = getHwSwPixelFormat(frm);
             if (real_pixel_format==AV_PIX_FMT_NONE) {
