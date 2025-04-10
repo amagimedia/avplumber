@@ -238,6 +238,7 @@ protected:
     #if HAVE_VAAPI
     void (EGLAPIENTRY *EGLImageTargetTexture2DOES)(GLenum, GLeglImageOES);
 	PFNEGLCREATEIMAGEKHRPROC EGLCreateImageKHR;
+    PFNEGLDESTROYIMAGEKHRPROC EGLDestroyImageKHR;
     #endif
     struct FrameInfo {
         std::atomic<ObsVideoSink*> owner;
@@ -286,6 +287,13 @@ protected:
     static std::unordered_map<gs_texture_t*, TextureInfo> global_textures;
     static std::mutex global_cu_ctx_create_mutex;
     #endif // HAVE_CUDA
+
+    #if HAVE_VAAPI
+    struct TextureInfoVAAPI {
+        av::VideoFrame frame;
+    };
+    static std::unordered_map<gs_texture_t*, TextureInfoVAAPI> global_textures_vaapi;
+    #endif // HAVE_VAAPI
 
     void prepareEmptyFrame() {
         logstream << "outputting empty frame";
@@ -508,6 +516,16 @@ protected:
                     logstream << "glEGLImageTargetTexture2DOES failed, VAAPI data not copied to texture";
                 }
                 gl_bind_texture(GL_TEXTURE_2D, 0);
+                self.EGLDestroyImageKHR(graphics->device->plat->edisplay, image);
+
+                global_textures_vaapi[tex] = { fi.frame };
+                tex->on_destroy_callback = [](gs_texture_t *tex) {
+                    auto titer = global_textures_vaapi.find(tex);
+                    if (titer != global_textures_vaapi.end()) {
+                        logstream << "freeing frame associated with our texture";
+                        global_textures_vaapi.erase(titer);
+                    }
+                };
             };
             obs_hw_.free_buffer = [](void* opaque, void* buf) {
                 CB_COMMON
@@ -759,6 +777,7 @@ public:
         #if HAVE_VAAPI
         r->EGLImageTargetTexture2DOES = (void (*)(GLenum, GLeglImageOES))eglGetProcAddress("glEGLImageTargetTexture2DOES");
         r->EGLCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+        r->EGLDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
         r->frames_.resize(60);
         #endif
         return r;
@@ -769,6 +788,10 @@ public:
 CUcontext ObsVideoSink::global_cu_ctx = nullptr;
 std::unordered_map<gs_texture_t*, ObsVideoSink::TextureInfo> ObsVideoSink::global_textures;
 std::mutex ObsVideoSink::global_cu_ctx_create_mutex;
+#endif
+
+#if HAVE_VAAPI
+std::unordered_map<gs_texture_t*, ObsVideoSink::TextureInfoVAAPI> ObsVideoSink::global_textures_vaapi;
 #endif
 
 DECLNODE(obs_video_sink, ObsVideoSink);

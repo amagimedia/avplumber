@@ -21,6 +21,8 @@ protected:
     std::mutex discard_until_mutex_;
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
+    int pool_size_add_ = 4;
+    int pool_size_set_ = -1;
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -94,7 +96,6 @@ public:
                 const enum AVPixelFormat *p;
                 for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                     if (*p == self.pixel_format_) {
-                        #if 0 // not really needed
                         if (self.hwaccel_) {
                             int r = avcodec_get_hw_frames_parameters(cc, self.hwaccel_->refDeviceContext(), *p, &cc->hw_frames_ctx);
                             if (r == AVERROR(ENOENT)) {
@@ -104,6 +105,19 @@ public:
                                     logstream << "Failed to setup hardware decoder: avcodec_get_hw_frames_parameters failed: " << av::error2string(r);
                                     return AV_PIX_FMT_NONE;
                                 }
+                                if (cc->hw_frames_ctx && cc->hw_frames_ctx->data) {
+                                    AVHWFramesContext *frmctx = (AVHWFramesContext *)(cc->hw_frames_ctx->data);
+                                    int prev = frmctx->initial_pool_size;
+                                    frmctx->initial_pool_size += self.pool_size_add_;
+                                    if (self.pool_size_set_ >= 0) {
+                                        frmctx->initial_pool_size = self.pool_size_set_;
+                                    }
+                                    if (prev != frmctx->initial_pool_size) {
+                                        logstream << "initial_pool_size set " << prev << " -> " << frmctx->initial_pool_size;
+                                    }
+                                } else {
+                                    logstream << "hw_frames_ctx null, can't set initial_pool_size";
+                                }
                                 r = av_hwframe_ctx_init(cc->hw_frames_ctx);
                                 if (r != 0) {
                                     logstream << "Failed to setup hardware decoder: av_hwframe_ctx_init failed: " << av::error2string(r);
@@ -111,7 +125,6 @@ public:
                                 }
                             }
                         }
-                        #endif
                         return *p;
                     }
                 }
@@ -231,10 +244,10 @@ public:
                         }
                     } catch (std::exception &e) {
                         dec_errors_++;
-                        if (dec_errors_>200) {
+                        /* if (dec_errors_>200) {
                             throw;
-                        }
-                        logstream << "Decode error: " << e.what();
+                        } */
+                        logstream << "Decode error " << dec_errors_ << ": " << e.what();
                     }
                     //if (!frm) this->finished_ = true;
                 } while (flush_magic_ && waiting_for_frame_ > 0);
@@ -306,6 +319,12 @@ public:
         std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel);
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
+        }
+        if (params.count("pool_size_add")) {
+            r->pool_size_add_ = params["pool_size_add"];
+        }
+        if (params.count("pool_size_set")) {
+            r->pool_size_set_ = params["pool_size_set"];
         }
         return r;
     }
