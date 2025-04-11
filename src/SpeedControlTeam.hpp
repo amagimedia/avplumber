@@ -104,9 +104,4 @@ public:
         shift_ = previous_shift_;
         last_sync_ = s;
     }
-    void reset() {
-        logstream << "speed team reset";
-        //last_pts_ = NOTS;
-        //last_sync_ = NOTS;
-    }
 };

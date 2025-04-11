@@ -19,7 +19,6 @@ private:
     std::mutex mutex_;
     std::atomic_bool paused_ = false;
 public:
-    std::string name_;
     void pauseProcessing() {
         paused_ = true;
     }
@@ -271,7 +270,6 @@ protected:
         event.signal();
     }
 public:
-    std::string name_;
     std::weak_ptr<Node> producer() {
         return producer_;
     }
