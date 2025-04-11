@@ -6,6 +6,7 @@
 #include <concurrentqueue/concurrentqueue.h>
 #include <atomic>
 #include <deque>
+#include <limits>
 #include <list>
 #include <map>
 #include <mutex>
@@ -159,19 +160,23 @@ public:
         todo_.enqueue(cb);
         wakeup_.signal();
     }
-    void fastExecute(av::Timestamp time_limit, Callable cb) {
+    int fastExecute(av::Timestamp time_limit, Callable cb) {
         av::Timestamp deadline = addTS(wallclock.ts(), time_limit);
         if (busy_.try_lock()) {
             std::lock_guard<decltype(busy_)> lock(busy_, std::adopt_lock);
             todo_.enqueue(cb);
+            int diff = std::numeric_limits<int>::min();
             while (executeSingleFromToDo()) {
-                if (wallclock.ts() > deadline) {
+                diff = addTSSameTB(rescaleTS(wallclock.ts(), {1, 1000}), rescaleTS(negateTS(deadline), {1, 1000}));
+                if (diff > 0) {
                     wakeup_.signal();
-                    break;
+                    return diff;
                 }
             }
+            return diff;
         } else {
             execute(cb);
+            return std::numeric_limits<int>::min();
         }
     }
     void asyncWaitAndExecute(Event &event, Callable cb) {
