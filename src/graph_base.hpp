@@ -66,14 +66,7 @@ public:
             esrc->edge()->setConsumer(this->shared_from_this());
         }
     }
-    virtual void flushAndSeek_start(StreamTarget target, bool use_input) override {
-        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
-        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
-
-        if (input) {
-            input->fixInputTimestamp(target);
-            direction = input->getPlaybackDirection();
-        }
+    virtual void flushAndSeek_start(StreamTarget target) override {
         // pause all nodes processing
         pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
@@ -85,30 +78,6 @@ public:
             edge.finishConsumer(); // to wake up consumer that may be waiting for frame
             edge.finishProducer();
         });
-        executeUpstream([target, use_input, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!target.isEmpty()) {
-                if ((direction == IPlaybackControl::EPlaybackDirection::pd_Forward) && target.ts.isValid()) {
-                    std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
-                    if (dec) {
-                        dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
-                    }
-                }
-                if (use_input) {
-                    std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                    if (input) {
-                        input->seekAndPause(target);
-                    }
-                }
-            }
-            std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
-            if (input_reset) {
-                input_reset->resetInput();
-            }
-        });
-        IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
-        if (this_reset) {
-            this_reset->resetInput();
-        }
     }
     virtual void flushAndSeek(StreamTarget target) override {
         // wait current node to end processing
@@ -119,36 +88,63 @@ public:
             node->lockProcessing();
             node->unlockProcessing();
         });
-        // clear all edges
+    }
+    void flushAndSeek_finish(StreamTarget target) override {
+        // clear all edges & stop flushing
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.clear();
-        });
-    }
-    virtual void flushAndSeek_finish(StreamTarget target, bool use_input) override {
-        // stop flushing
-        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
             edge.stopFlushing();
         });
-        // resume all nodes
-        executeUpstream([use_input](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!use_input) {
+
+        std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
+        IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
+
+        if (input) {
+            input->fixInputTimestamp(target);
+            direction = input->getPlaybackDirection();
+        }
+        // set-up discard until & execute seek
+        executeUpstream([target, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
+            if (!node->isPausedProcessing())
+                return;
+            if (!target.isEmpty()) {
+                if (target.ts.isValid()) {
+                    std::shared_ptr<IDecoder> dec = std::dynamic_pointer_cast<IDecoder>(node);
+                    if (dec) {
+                        if (direction == IPlaybackControl::EPlaybackDirection::pd_Forward) {
+                            dec->discardUntil(addTS(target.ts, av::Timestamp(-7, {1, 1000})));
+                        } else {
+                            // make sure encoder will outout valid frame (not any frame inside nvdec queue)
+                            dec->discardUntil(av::Timestamp(0, {1, 1}));
+                        }
+                    }
+                }
                 std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
                 if (input) {
-                    return;
+                    input->seekAndPause(target);
                 }
+            }
+            // reset nodes
+            std::shared_ptr<IInputReset> input_reset = std::dynamic_pointer_cast<IInputReset>(node);
+            if (input_reset) {
+                input_reset->resetInput();
+            }
+        });
+        // reset current node
+        IInputReset* this_reset = dynamic_cast<IInputReset*>(this);
+        if (this_reset) {
+            this_reset->resetInput();
+        }
+        // resume all nodes
+        executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
+            std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
+            // resume input after seek
+            if (input && node->isPausedProcessing()) {
+                input->resumeAfterSeek();
             }
             node->resumeProcessing();
         });
         resumeProcessing();
-        // resume input
-        if (use_input && !target.isEmpty()) {
-            executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-                std::shared_ptr<IPlaybackControl> input = std::dynamic_pointer_cast<IPlaybackControl>(node);
-                if (input) {
-                    input->resumeAfterSeek();
-                }
-            });
-        }
     }
     virtual ~NodeSingleInput() {
     }
