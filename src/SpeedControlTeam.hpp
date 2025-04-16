@@ -11,7 +11,8 @@ protected:
     av::Timestamp last_pts_ = NOTS;
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
-    std::vector<std::weak_ptr<IFlushAndSeek>> nodes_;
+    av::Timestamp previous_shift_ = {0, {1, 1}};
+    std::vector<std::weak_ptr<ISpeed>> nodes_;
     std::weak_ptr<IFlushAndSeek> sync_obj_;
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
@@ -25,6 +26,7 @@ public:
             if (!last_sync_.isNoPts()) {
                 av::Timestamp elapsed = addTS(last_pts_, negateTS(last_sync_));
                 av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
+                previous_shift_ = shift_;
                 shift_ = addTS(shift_, last_sync_, scaled, negateTS(last_pts_));
             }
 
@@ -41,9 +43,12 @@ public:
                         auto pNode = std::dynamic_pointer_cast<Node>(node);
                         // set input playback direction
                         if (pNode) {
-                            std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
-                            if (streams_in) {
-                                streams_in->setPlaybackDirection(speed > 0 ? IPlaybackControl::EPlaybackDirection::pd_Forward : IPlaybackControl::EPlaybackDirection::pd_Backward);
+                            auto e = pNode->sourceEdge();
+                            if (e) {
+                                std::shared_ptr<IPlaybackControl> streams_in = e->findNodeUp<IPlaybackControl>();
+                                if (streams_in) {
+                                    streams_in->setPlaybackDirection(speed > 0 ? IPlaybackControl::EPlaybackDirection::pd_Forward : IPlaybackControl::EPlaybackDirection::pd_Backward);
+                                }
                             }
                         }
                     }
@@ -56,6 +61,14 @@ public:
             auto obj = sync_obj_.lock();
             if (obj) {
                 obj->flushAndSeek(StreamTarget::now());
+            }
+        }
+
+        // notify about speed change
+        for (auto n: nodes_) {
+            auto node = n.lock();
+            if (node) {
+                node->speedChanged();
             }
         }
     }
@@ -82,12 +95,16 @@ public:
         av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
         return rescaleTS(addTS(last_sync_, scaled, shift_), pts.timebase());
     }
-    void addNode(std::weak_ptr<IFlushAndSeek> node) {
+    void addNode(std::weak_ptr<ISpeed> node) {
         auto lock = getLock();
         nodes_.push_back(node);
     }
     void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
         auto lock = getLock();
         sync_obj_ = obj;
+    }
+    void setLastSync(av::Timestamp s) {
+        shift_ = previous_shift_;
+        last_sync_ = s;
     }
 };

@@ -5,6 +5,7 @@
 
 #include "../InputSeekTeam.hpp"
 #include "../PauseControlTeam.hpp"
+#include "../SpeedControlTeam.hpp"
 
 using namespace std::chrono_literals;
 
@@ -31,7 +32,7 @@ enum class ETimestampSource {
 };
 
 class RecordingInput: public NodeSingleOutput<av::Packet>, public IStreamsInput, public ReportsFinishByFlag, public IPlaybackControl,
-                   public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt {
+                   public IStoppable, public IInterruptible, public IReturnsObjects, public IInputsObjects, public ISeekAt, public ISpeed {
 protected:
     av::FormatContext ictx_;
     std::atomic_bool should_end_ {false};
@@ -41,10 +42,13 @@ protected:
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
     av::Timestamp first_video_ts_;
-    StreamTarget start_ts_;
+    StreamTarget start_ts_ = StreamTarget::from_frames_absolute(0);
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
     bool paused_read_ = false;
+    std::shared_ptr<SpeedControlTeam> speed_team_;
+    std::atomic_int speed_skip_frames_ = 0;
+    std::atomic_int speed_skipped_frames_ = 0;
 
     std::string seek_table_url_;
     std::mutex seek_table_mutex_;
@@ -602,8 +606,10 @@ public:
                         auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
                             return e.bytes < value;
                         });
-                        if (it != seek_table_.cbegin()) {
-                            it = std::prev(it);
+                        for (int i = 0; i <= (paused_read_ ? 0 : speed_skip_frames_.load()); ++i) {
+                            if (it != seek_table_.cbegin()) {
+                                it = std::prev(it);
+                            }
                         }
                         last_stream_position_ = it->bytes;
                         ictx_.seek(it->bytes, -1, AVSEEK_FLAG_BYTE);
@@ -673,6 +679,19 @@ public:
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
                 paused_read_ = false;
+            }
+
+            if (!paused_read_ && (speed_skip_frames_ > 0) && (play_direction_ == EPlaybackDirection::pd_Forward) && (pkt.streamIndex() == video_stream_)) {
+                if (pkt.isKeyPacket()) {
+                    if (speed_skipped_frames_++ < speed_skip_frames_) {
+                        // skip this video frame
+                        return;
+                    }
+                    speed_skipped_frames_ = 0;
+                } else {
+                    // this doesn't work with non-intra-only frames stream, disable frame skipping
+                    speed_skip_frames_ = 0;
+                }
             }
 
             if (first_video_ts_.timestamp() != 0) {
@@ -755,6 +774,10 @@ public:
         wait_max_ = timeout * wallclock.timeBase().den / wallclock.timeBase().num;
         logstream << "Set wait_max_ to " << wait_max_ << "s";
         //ictx_.setSocketTimeout(timeout);
+    }
+    void speedChanged() override {
+        speed_skip_frames_ = std::max(int(fabs(speed_team_->getSpeed()) + 0.5) - 1, 0);
+        speed_skipped_frames_ = 0;
     }
     virtual ~RecordingInput() {
         if (seek_read_thread_.joinable()) {
@@ -857,6 +880,10 @@ public:
         }
         if (params.count("pause_team")) {
             r->pause_team_ = InstanceSharedObjects<PauseControlTeam>::get(nci.instance, params["pause_team"]);
+        }
+        if (params.count("speed_team")) {
+            r->speed_team_ = InstanceSharedObjects<SpeedControlTeam>::get(nci.instance, params["speed_team"]);
+            r->speed_team_->addNode(std::dynamic_pointer_cast<ISpeed>(r->shared_from_this()));
         }
         return r;
     }

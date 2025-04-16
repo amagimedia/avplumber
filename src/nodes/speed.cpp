@@ -1,14 +1,32 @@
 #include "node_common.hpp"
 #include "../SpeedControlTeam.hpp"
 #include "../RealTimeTeam.hpp"
+#include "../graph_base.hpp"
 
-template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>> {
+template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed {
 protected:
     std::shared_ptr<SpeedControlTeam> team_;
     av::Rational timebase_ {0, 0};
+    std::weak_ptr<NodeWrapper> sync_node_;
+    bool sync_node_tick_ = false;
     bool discard_when_speed_changed_ = false;
+    std::list<std::tuple<int64_t, av::Timestamp>> scaled_pts_;
 public:
     using NodeSISO<T, T>::NodeSISO;
+
+    void rescaleFrameTS(T* frame) {
+        av::Timestamp orig_pts = frame->pts();
+        av::Timestamp in_pts = orig_pts;
+        if (timebase_.getNumerator() && timebase_.getDenominator()) {
+            in_pts = rescaleTS(in_pts, timebase_);
+        }
+        av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
+        if (out_pts.isValid()) {
+            frame->setTimeBase(av::Rational());
+            frame->setPts(out_pts);
+        }
+    }
+
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
         bool process_next;
         do {
@@ -27,20 +45,20 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
-            av::Timestamp in_pts = orig_pts;
-            if (timebase_.getNumerator() && timebase_.getDenominator()) {
-                in_pts = rescaleTS(in_pts, timebase_);
-            }
-            av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
-            if (out_pts.isValid()) {
-                frame.setTimeBase(av::Rational());
-                frame.setPts(out_pts);
-            }
-
+            rescaleFrameTS(&frame);
             
-            if (!out_pts.isNoPts()) {
+            if (!frame.pts().isNoPts()) {
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
+                    // store orifinal frame PTS
+                    auto frame_ts = av_dict_get(frame.raw()->metadata, "frame_ts", nullptr, 0);
+                    if (frame_ts) {
+                        if (scaled_pts_.size() > 8)
+                            scaled_pts_.pop_front();
+                        int64_t f_ts = std::atoll(frame_ts->value);
+                        scaled_pts_.emplace_back(std::make_tuple(f_ts, orig_pts));
+                    }
+ 
                     // put returned true, success, remove this packet from the source queue
                     this->source_->pop();
                     team_->setLastPTS(orig_pts);
@@ -61,6 +79,107 @@ public:
                 }
             }
         } while (process_next);
+    }
+    void speedChanged() override {
+        auto n = sync_node_.lock();
+        if (!n)
+            return;
+        auto node = n->node();
+        if (!node)
+            return;
+        auto nsi = std::dynamic_pointer_cast<NodeSingleInput<T>>(node);
+        if (!nsi)
+            return;
+        auto ifs = std::dynamic_pointer_cast<IFrameTimestamp>(node);
+        if (!ifs)
+            return;
+        int64_t current_wc = ifs->getCurrentFrameTimestamp();
+        if (current_wc < 0)
+            return;
+
+        av::Timestamp current_ts;
+        this->lockProcessing();
+        for (auto& p: scaled_pts_) {
+            if (std::get<0>(p) == current_wc) {
+                current_ts = std::get<1>(p);
+                break;
+            }
+        }
+        if (!current_ts.isValid()) {
+            logstream << "unable to rescale frames";
+            this->unlockProcessing();
+            return;
+        }
+
+        nsi->lockProcessing();
+
+        team_->setLastSync(current_ts);
+        auto edge = std::dynamic_pointer_cast<Edge<T>>(nsi->sourceEdge());
+        // pause all nodes from sync-node to current node
+        while (edge) {
+            T* p = edge->peek();
+            if (p) {
+                auto frame_wc = av_dict_get(p->raw()->metadata, "frame_ts", nullptr, 0);
+                auto frame_no = av_dict_get(p->raw()->metadata, "frame_no", nullptr, 0);
+                if (frame_wc && frame_no) {
+                    int64_t f_wc = atoll(frame_wc->value);
+                    // rescale PTS again with current speed
+                    for (const auto& it: scaled_pts_) {
+                        if (f_wc == std::get<0>(it)) {
+                            // found original PTS
+                            p->setTimeBase(av::Rational());
+                            p->setPts(std::get<1>(it));
+                            rescaleFrameTS(p);
+                            team_->setLastPTS(std::get<1>(it));
+                            break;
+                        }
+                    }
+                }
+            }
+            auto prod = edge->producer().lock();
+            if (prod.get() == this) {
+                break;
+            }
+            if (prod) {
+                prod->lockProcessing();
+                edge = std::dynamic_pointer_cast<Edge<T>>(prod->sourceEdge());
+            } else {
+                break;
+            }
+        }
+        edge = std::dynamic_pointer_cast<Edge<T>>(nsi->sourceEdge());
+
+        auto p_reset = std::dynamic_pointer_cast<IInputReset>(node);
+        if (p_reset) {
+            p_reset->resetInput();
+        }
+
+        // resume everything
+        while (edge) {
+            auto prod = edge->producer().lock();
+            auto p_reset = std::dynamic_pointer_cast<IInputReset>(prod);
+            if (p_reset) {
+                p_reset->resetInput();
+            }
+            if (prod.get() == this) {
+                break;
+            }
+            if (prod) {
+                prod->unlockProcessing();
+                edge = std::dynamic_pointer_cast<Edge<T>>(prod->sourceEdge());
+            } else {
+                break;
+            }
+        }
+        nsi->unlockProcessing();
+        this->unlockProcessing();
+
+        if (!sync_node_tick_) {
+            auto nnbi = std::dynamic_pointer_cast<NonBlockingNodeBase>(node);
+            if (nnbi) {
+                nnbi->doExecute();
+            }
+        }
     }
     static std::shared_ptr<Speed> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -87,6 +206,12 @@ public:
             if (sync_team) {
                 r->team_->setSyncObj(sync_team);
             }
+        }
+        if (params.count("sync_node")) {
+            auto n = nci.nodes.node(params["sync_node"]);
+            auto p = n->parameters();
+            r->sync_node_ = n;
+            r->sync_node_tick_ = p.count("tick_source") && (p["tick_source"].get<std::string>() == "obs");
         }
         return r;
     }

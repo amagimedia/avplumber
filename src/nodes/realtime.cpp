@@ -291,6 +291,7 @@ public:
         return last_frame_wallclock_;
     }
     virtual void resetInput() override {
+        last_wait_ = 0;
         if (team_) {
             team_->reset();
         }
