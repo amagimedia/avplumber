@@ -1,4 +1,4 @@
-FROM alpine:3.19 AS builder
+FROM alpine:3.21 AS builder
 
 RUN apk add ffmpeg-dev git g++ cmake build-base curl-dev openssl-dev libssl3 boost-dev perl bash automake autoconf libtool
 
@@ -19,8 +19,8 @@ COPY .git /build/.git
 RUN make -C /build -j `nproc`
 
 
-FROM alpine:3.19
+FROM alpine:3.21
 
-RUN apk add ffmpeg libcurl libssl3 musl
+RUN apk add ffmpeg libcurl libssl3 musl boost-thread
 COPY --from=builder /build/avplumber /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/avplumber"]
