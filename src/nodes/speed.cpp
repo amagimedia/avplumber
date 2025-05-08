@@ -3,7 +3,7 @@
 #include "../RealTimeTeam.hpp"
 #include "../graph_base.hpp"
 
-template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed {
+template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed, public IReturnsObjects {
 protected:
     std::shared_ptr<SpeedControlTeam> team_;
     av::Rational timebase_ {0, 0};
@@ -79,6 +79,15 @@ public:
                 }
             }
         } while (process_next);
+    }
+    Parameters getObject(const std::string name) override {
+        if (name == "info") {
+            Parameters res;
+            res["speed"] = team_->getSpeed();
+            return res;
+        }
+
+        throw Error("Unknown object to get");
     }
     void speedChanged() override {
         auto n = sync_node_.lock();

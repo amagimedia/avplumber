@@ -31,6 +31,7 @@
 
     #define INPUT_NODE "input"
     #define PAUSE_NODE "pause"
+    #define SPEED_NODE "speed"
     #define REALTIME_NODE "rtsync"
     #define SINK_NODE "sink"
 #endif
@@ -828,6 +829,18 @@ int64_t AVPlumber::obs_get_duration() {
     }
 
     return 0;
+}
+double AVPlumber::obs_get_speed() {
+    auto node = impl_->manager()->node_if_exists(SPEED_NODE);
+    if (node) {
+        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
+        if (n) {
+            auto info = n->getObject("info");
+            return info["speed"];
+        }
+    }
+
+    return 1.00;
 }
 #endif
 
