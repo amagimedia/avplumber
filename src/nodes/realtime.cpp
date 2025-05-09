@@ -33,7 +33,9 @@ protected:
     bool set_pts_ = false;
     std::atomic_int64_t last_frame_number_ = -1;
     std::atomic_int64_t last_frame_timestamp_ = -1;
+    std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t last_frame_wallclock_ = -1;
+    std::weak_ptr<IPlaybackControl> playback_control_;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -273,6 +275,14 @@ public:
         auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
         if (frame_ts) {
             last_frame_timestamp_ = std::atoll(frame_ts->value);
+            auto pc = playback_control_.lock();
+            if (!pc) {
+                playback_control_ = this->template findNodeUp<IPlaybackControl>();
+                pc = playback_control_.lock();
+            }
+            if (pc) {
+                is_eof_ = pc->isEof(last_frame_number_);
+            }
         }
         auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
         if (frame_wc) {
@@ -289,6 +299,9 @@ public:
     }
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
+    }
+    bool isEof() override {
+        return is_eof_;
     }
     virtual void resetInput() override {
         last_wait_ = 0;

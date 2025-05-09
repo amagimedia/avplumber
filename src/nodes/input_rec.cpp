@@ -42,6 +42,7 @@ protected:
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
     av::Timestamp first_video_ts_;
+    int64_t stream_eof_pts_;
     StreamTarget start_ts_ = StreamTarget::from_frames_absolute(0);
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
@@ -675,6 +676,7 @@ public:
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
 
+        int64_t frame_pts = -1;
         if (!pkt.isNull()) {
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
@@ -702,13 +704,13 @@ public:
             // adjust ts
             auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
             if (!ts_offsets_.empty() && (timestamp_source_ != ETimestampSource::ts_None)) {
-                int64_t pts = rescaleTS(pkt.pts(), {1, 1000}).timestamp();
-                auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), pts, [](const TSOffsetEntry& e, int64_t value) {
+                frame_pts = rescaleTS(pkt.pts(), {1, 1000}).timestamp();
+                auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), frame_pts, [](const TSOffsetEntry& e, int64_t value) {
                     return e.changed_at < value;
                 });
                 if (it == ts_offsets_.cend())
                     it--;
-                if (it->changed_at > pts)
+                if (it->changed_at > frame_pts)
                     it--;
 
                 int64_t pts_diff = 0;
@@ -734,6 +736,7 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
+                    stream_eof_pts_ = frame_pts;
                     stop();
                 }
             }
@@ -742,6 +745,7 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
+                    stream_eof_pts_ = frame_pts;
                     stop();
                 }
             }
@@ -867,6 +871,10 @@ public:
             default:
                 throw Error("not implemented StreamTarget type");
         }
+    }
+
+    bool isEof(int64_t ts) override {
+        return should_end_ && (stream_eof_pts_ >= 0) && (abs(ts - stream_eof_pts_) < 5);
     }
 
     static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {
