@@ -8,7 +8,7 @@ RUN dnf -y install \
 
 FROM common AS builder
 
-RUN dnf -y --allowerasing install \
+RUN dnf -y install \
     alsa-lib-devel \
     asio-devel \
     cmake \
@@ -70,7 +70,7 @@ RUN make -C /build -j `nproc`
 
 FROM common
 
-RUN dnf -y --allowerasing install \
+RUN dnf -y install \
     alsa-lib \
     ffmpeg \
     fontconfig\
