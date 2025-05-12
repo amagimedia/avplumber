@@ -113,4 +113,4 @@ RUN dnf -y install \
 
 COPY --from=builder /build/avplumber /usr/local/bin/
 COPY examples/complicated_transcoder.avplumber /usr/local/etc/complicated_transcoder.avplumber
-ENTRYPOINT ["/usr/local/bin/avplumber"]
+ENTRYPOINT ["/usr/local/bin/avplumber", "-s", "/usr/local/etc/complicated_transcoder.avplumber"]
