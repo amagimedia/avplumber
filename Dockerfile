@@ -42,16 +42,10 @@ RUN dnf -y install \
     mbedtls-devel \
     nv-codec-headers \
     oneVPL-devel \
-    pciutils-devel \
     pipewire-devel \
-    pulseaudio-libs-devel \
-    rnnoise-devel \
-    speexdsp-devel \
     srt-devel \
     swig \
     systemd-devel \
-    uthash-devel \
-    websocketpp-devel \
     x264-devel \
     pipewire-jack-audio-connection-kit-devel \
     openssl-devel libxcrypt-compat \
@@ -98,13 +92,9 @@ RUN dnf -y install \
     pciutils \
     pipewire \
     pulseaudio-libs \
-    rnnoise \
-    speexdsp \
     srt \
     systemd \
     uthash \
-    vlc \
-    libwayland-client libwayland-cursor libwayland-egl libwayland-server libxml2 glibc expat \
     x264 \
     mesa-va-drivers-freeworld \
     pipewire-jack-audio-connection-kit \
@@ -113,4 +103,4 @@ RUN dnf -y install \
 
 COPY --from=builder /build/avplumber /usr/local/bin/
 COPY examples/complicated_transcoder.avplumber /usr/local/etc/complicated_transcoder.avplumber
-ENTRYPOINT ["/usr/local/bin/avplumber", "-s", "/usr/local/etc/complicated_transcoder.avplumber"]
+ENTRYPOINT ["/usr/local/bin/avplumber"]
