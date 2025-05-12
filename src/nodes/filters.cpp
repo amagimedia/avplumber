@@ -136,12 +136,12 @@ protected:
             }
             
             if (hwaccel) {
-                AVFilterLink* link = getSourceLink();
+                /*AVFilterLink* link = getSourceLink();
                 soft_assert(link != nullptr, "source link null");
                 link->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
                 AVHWFramesContext *frmctx = (AVHWFramesContext *)(link->hw_frames_ctx->data);
                 ms_.initHWAccel(*frmctx);
-                av_hwframe_ctx_init(link->hw_frames_ctx);
+                av_hwframe_ctx_init(link->hw_frames_ctx);*/
             }
         }
         void initSinkFilter(const int index, AVFilterGraph *filter_graph, AVFilterInOut *src) {
@@ -445,7 +445,7 @@ public:
         }
     }
     virtual av::PixelFormat realPixelFormat() {
-        if (outlink_ && outlink_->hw_frames_ctx && outlink_->hw_frames_ctx->data) {
+        /*if (outlink_ && outlink_->hw_frames_ctx && outlink_->hw_frames_ctx->data) {
             AVHWFramesContext *frmctx = (AVHWFramesContext *)(outlink_->hw_frames_ctx->data);
             logstream << "have hw frames context in filter outlink, sw_format " << av::PixelFormat(frmctx->sw_format);
             if (frmctx->sw_format != AV_PIX_FMT_NONE) {
@@ -453,12 +453,12 @@ public:
             } else {
                 logstream << "falling back to pixelFormat()";
             }
-        }
+        }*/
         return pixelFormat();
     }
     virtual av::Rational frameRate() {
         if (outlink_) {
-            return outlink_->frame_rate;
+            return av_inv_q(outlink_->time_base);
         } else if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
             return default_frame_rate_;
         } else {

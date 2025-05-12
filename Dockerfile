@@ -23,4 +23,5 @@ FROM alpine:3.21
 
 RUN apk add ffmpeg libcurl libssl3 musl boost-thread
 COPY --from=builder /build/avplumber /usr/local/bin/
+COPY examples/complicated_transcoder.avplumber /
 ENTRYPOINT ["/usr/local/bin/avplumber"]

@@ -83,6 +83,7 @@ public:
                                 // increase number of duplicated frames only if last_frame_ was already used
                                 duplicated_++;
                                 // if used more than once, remove side data to prevent CC duplication
+				logstream << "skip side data";
                                 av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
                             }
                             last_unused_ = false;
