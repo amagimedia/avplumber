@@ -842,6 +842,19 @@ double AVPlumber::obs_get_speed() {
 
     return 1.00;
 }
+bool AVPlumber::obs_is_eof() {
+    auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
+    if (node) {
+        auto n = node->node();
+        if (n) {
+            auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
+            if (node_ts) {
+                return node_ts->isEof();
+            }
+        }
+    }
+    return false;
+}
 #endif
 
 void AVPlumber::enableControlServer(const uint16_t tcp_port) {
