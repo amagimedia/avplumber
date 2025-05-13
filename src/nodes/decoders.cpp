@@ -20,6 +20,7 @@ protected:
     av::Timestamp discard_until_ = NOTS;
     std::mutex discard_until_mutex_;
     bool flush_magic_ = false;
+    av::Rational forced_input_fps_ = av::Rational{0, 1};
     int waiting_for_frame_ = 0;
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
@@ -307,6 +308,17 @@ public:
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
         }
+        if (params.count("force_input_fps")) {
+            std::string forced_fps = params["force_input_fps"];
+            size_t pos = forced_fps.find('/');
+            if (pos == std::string::npos) {
+                throw Error("invalid forced input decoder fps format");
+            }
+            int fps_num = std::stoi(forced_fps.substr(0, pos));
+            int fps_den = std::stoi(forced_fps.substr(pos + 1));
+            logstream << "forced input decoder fps: " << fps_num << "/" << fps_den;
+            r->forced_input_fps_ = av::Rational{fps_num, fps_den};
+        }
         return r;
     }
 };
@@ -350,7 +362,11 @@ public:
         return av::PixelFormat(static_cast<AVPixelFormat>(this->dec_.stream().raw()->codecpar->format));
     }
     virtual av::Rational frameRate() {
-        return this->dec_.stream().frameRate();
+        if (forced_input_fps_.getNumerator() > 0 && forced_input_fps_.getDenominator() > 0) {
+            return forced_input_fps_;
+        } else {
+            return this->dec_.stream().frameRate();
+        }
     }
 };
 class AudioDecoder: public Decoder<AudioDecoder, av::AudioDecoderContext, av::AudioSamples>, public IAudioMetadataSource {
