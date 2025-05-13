@@ -54,6 +54,7 @@ public:
     void obs_set_time(int64_t ms);
     int64_t obs_get_duration();
     double obs_get_speed();
+    bool obs_is_eof();
 #endif
 
     void executeCommandsFromFile(const std::string path);

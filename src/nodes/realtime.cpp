@@ -275,18 +275,18 @@ public:
         auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
         if (frame_ts) {
             last_frame_timestamp_ = std::atoll(frame_ts->value);
+        }
+        auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
+        if (frame_wc) {
+            last_frame_wallclock_ = std::atoll(frame_wc->value);
             auto pc = playback_control_.lock();
             if (!pc) {
                 playback_control_ = this->template findNodeUp<IPlaybackControl>();
                 pc = playback_control_.lock();
             }
             if (pc) {
-                is_eof_ = pc->isEof(last_frame_number_);
+                is_eof_ = pc->isEof(last_frame_wallclock_);
             }
-        }
-        auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
-        if (frame_wc) {
-            last_frame_wallclock_ = std::atoll(frame_wc->value);
         }
     }
     template<typename T2> void setLastFrame(T2) {

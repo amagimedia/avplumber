@@ -42,7 +42,8 @@ protected:
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
     av::Timestamp first_video_ts_;
-    int64_t stream_eof_pts_;
+    int64_t stream_eof_pts_ = -1;
+    int64_t last_video_packet_pts_ = -1;
     StreamTarget start_ts_ = StreamTarget::from_frames_absolute(0);
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
@@ -559,6 +560,10 @@ public:
             }
         }
     }
+    void doStop() {
+        logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
+        node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+    }
     virtual void process() {
         bool seeked = false;
 
@@ -575,6 +580,7 @@ public:
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
+                stream_eof_pts_ = -1;
                 //ictx_.flush();
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.isTimestamp()) {
@@ -595,8 +601,7 @@ public:
                     last_stream_position_ = seek_target_.bytes;
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
                 } else if (seek_target_.isStop()) {
-                    logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
-                    node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+                    doStop();
                 }
                 need_seek_ = false;
                 seeked = true;
@@ -652,6 +657,7 @@ public:
         if (pkt.isNull()) {
             // we are at the end os recording
             //logstream << "end of video reached";
+            stream_eof_pts_ = last_video_packet_pts_;
             std::this_thread::sleep_for(5ms);
             return;
         } else {
@@ -676,7 +682,6 @@ public:
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
 
-        int64_t frame_pts = -1;
         if (!pkt.isNull()) {
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
@@ -704,13 +709,13 @@ public:
             // adjust ts
             auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
             if (!ts_offsets_.empty() && (timestamp_source_ != ETimestampSource::ts_None)) {
-                frame_pts = rescaleTS(pkt.pts(), {1, 1000}).timestamp();
-                auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), frame_pts, [](const TSOffsetEntry& e, int64_t value) {
+                int64_t pts = rescaleTS(pkt.pts(), {1, 1000}).timestamp();
+                auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), pts, [](const TSOffsetEntry& e, int64_t value) {
                     return e.changed_at < value;
                 });
                 if (it == ts_offsets_.cend())
                     it--;
-                if (it->changed_at > frame_pts)
+                if (it->changed_at > pts)
                     it--;
 
                 int64_t pts_diff = 0;
@@ -728,6 +733,10 @@ public:
                 }
             }
         }
+        if (pkt.streamIndex() == video_stream_) {
+            stream_eof_pts_ = -1;
+            last_video_packet_pts_ = pkt.pts().timestamp({1, 1000});
+        }
         this->sink_->put(pkt);
 
         // check if we have to stop/loop video
@@ -736,8 +745,11 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
-                    stream_eof_pts_ = frame_pts;
-                    stop();
+                    stream_eof_pts_ = last_video_packet_pts_;
+                    av::Packet p;
+                    p.setStreamIndex(video_stream_);
+                    this->sink_->put(p);
+                    doStop();
                 }
             }
         } else {
@@ -745,8 +757,11 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
-                    stream_eof_pts_ = frame_pts;
-                    stop();
+                    stream_eof_pts_ = last_video_packet_pts_;
+                    av::Packet p;
+                    p.setStreamIndex(video_stream_);
+                    this->sink_->put(p);
+                    doStop();
                 }
             }
         }
@@ -874,7 +889,7 @@ public:
     }
 
     bool isEof(int64_t ts) override {
-        return should_end_ && (stream_eof_pts_ >= 0) && (abs(ts - stream_eof_pts_) < 5);
+        return (stream_eof_pts_ >= 0) && (abs(ts - stream_eof_pts_) < 5);
     }
 
     static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {
