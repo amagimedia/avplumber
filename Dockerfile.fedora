@@ -1,0 +1,46 @@
+FROM fedora:41 AS common
+
+RUN dnf -y install \
+		https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+
+RUN dnf -y install \
+		https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+
+FROM common AS builder
+
+RUN dnf -y install \
+    boost-devel perl bash git \
+    cmake \
+    ffmpeg-devel \
+    gcc \
+    gcc-c++ \
+    which \
+    libcurl-devel \
+    curl \
+    make \
+    openssl-devel \
+    automake libtool
+
+COPY deps /build/deps
+COPY Makefile /build/
+    
+RUN make -C /build -j `nproc` deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/cuda_loader/cuda_drvapi_dynlink.o
+    
+COPY src /build/src
+COPY generate_node_list /build/
+COPY .git /build/.git
+    
+RUN make -C /build -j `nproc`
+
+FROM common
+
+RUN dnf -y install \
+    ffmpeg \
+    libcurl \
+    mesa-va-drivers-freeworld \
+    openssl \
+    boost-thread boost-system boost-iostreams boost-stacktrace boost
+
+COPY --from=builder /build/avplumber /usr/local/bin/
+COPY examples/complicated_transcoder.avplumber /usr/local/etc/complicated_transcoder.avplumber
+ENTRYPOINT ["/usr/local/bin/avplumber"]
