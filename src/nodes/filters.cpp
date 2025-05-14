@@ -136,12 +136,19 @@ protected:
             }
             
             if (hwaccel) {
-                AVFilterLink* link = getSourceLink();
-                soft_assert(link != nullptr, "source link null");
-                link->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
-                AVHWFramesContext *frmctx = (AVHWFramesContext *)(link->hw_frames_ctx->data);
+                soft_assert(ctx_ != nullptr, "source context null");
+                AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
+                params->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
+                soft_assert(params->hw_frames_ctx && params->hw_frames_ctx->data, "hw_frames_ctx null");
+                
+                AVHWFramesContext *frmctx = (AVHWFramesContext *)(params->hw_frames_ctx->data);
                 ms_.initHWAccel(*frmctx);
-                av_hwframe_ctx_init(link->hw_frames_ctx);
+                av_hwframe_ctx_init(params->hw_frames_ctx);
+                av_buffersrc_parameters_set(ctx_, params);
+
+                // av_buffersrc_parameters_set has increased the refcount, we should unref
+                av_buffer_unref(&params->hw_frames_ctx);
+                av_freep(&params);
             }
         }
         void initSinkFilter(const int index, AVFilterGraph *filter_graph, AVFilterInOut *src) {
@@ -159,6 +166,9 @@ protected:
             if (ret != 0) {
                 throw Error("Couldn't link " + name);
             }
+        }
+        const AVFilterContext* getFilterContext() {
+            return ctx_;
         }
         const AVFilterLink* getSinkLink() {
             return ctx_->inputs[0];
@@ -181,7 +191,7 @@ protected:
     std::vector<Port> sinks_;
     std::vector<Port> sources_;
     AVFilterGraph *filter_graph_ = nullptr;
-    const AVFilterLink *outlink_ = nullptr;
+    const AVFilterContext* out_ctx_ = nullptr;
     TSEqualizer eq_;
     std::string graph_desc_;
     bool do_shift_ = true;
@@ -191,7 +201,7 @@ protected:
         if (filter_graph_ == nullptr) return;
         avfilter_graph_free(&filter_graph_);
         filter_graph_ = nullptr;
-        outlink_ = nullptr;
+        out_ctx_ = nullptr;
     }
     void initPorts() {
         sources_.resize(this->source_edges_.size());
@@ -257,8 +267,7 @@ protected:
             }
         }
         if (sinks_.size()==1) {
-            outlink_ = sinks_[0].getSinkLink();
-            logstream << outlink_->type;
+            out_ctx_ = sinks_[0].getFilterContext();
         } else {
             freeFilterGraph();
             throw Error("Exactly one destination is needed");
@@ -398,8 +407,8 @@ public:
         return result;
     }
     virtual av::Rational timeBase() {
-        ensureNotNull(outlink_, "timeBase(): outlink none");
-        return outlink_->time_base;
+        ensureNotNull(out_ctx_, "timeBase(): out ctx none");
+        return av_buffersink_get_time_base(out_ctx_);
     }
 };
 
@@ -418,8 +427,8 @@ public:
         if (params.count("dst_frame_rate")==1) default_frame_rate_ = parseRatio(params["dst_frame_rate"]);
     }
     virtual int width() {
-        if (outlink_) {
-            return outlink_->w;
+        if (out_ctx_) {
+            return av_buffersink_get_w(out_ctx_);
         } else if (default_params_.width>0) {
             return default_params_.width;
         } else {
@@ -427,8 +436,8 @@ public:
         }
     }
     virtual int height() {
-        if (outlink_) {
-            return outlink_->h;
+        if (out_ctx_) {
+            return av_buffersink_get_h(out_ctx_);
         } else if (default_params_.height>0) {
             return default_params_.height;
         } else {
@@ -436,8 +445,8 @@ public:
         }
     }
     virtual av::PixelFormat pixelFormat() {
-        if (outlink_) {
-            return av::PixelFormat(static_cast<AVPixelFormat>(outlink_->format));
+        if (out_ctx_) {
+            return av::PixelFormat(static_cast<AVPixelFormat>(av_buffersink_get_format(out_ctx_)));
         } else if (default_params_.pixel_format.get()!=AV_PIX_FMT_NONE) {
             return default_params_.pixel_format;
         } else {
@@ -445,20 +454,23 @@ public:
         }
     }
     virtual av::PixelFormat realPixelFormat() {
-        if (outlink_ && outlink_->hw_frames_ctx && outlink_->hw_frames_ctx->data) {
-            AVHWFramesContext *frmctx = (AVHWFramesContext *)(outlink_->hw_frames_ctx->data);
-            logstream << "have hw frames context in filter outlink, sw_format " << av::PixelFormat(frmctx->sw_format);
-            if (frmctx->sw_format != AV_PIX_FMT_NONE) {
-                return frmctx->sw_format;
-            } else {
-                logstream << "falling back to pixelFormat()";
+        if (out_ctx_) {
+            AVBufferRef* ref = av_buffersink_get_hw_frames_ctx(out_ctx_);
+            if (ref && ref->data) {
+                AVHWFramesContext *frmctx = (AVHWFramesContext *)(ref->data);
+                logstream << "have hw frames context in filter outlink, sw_format " << av::PixelFormat(frmctx->sw_format);
+                if (frmctx->sw_format != AV_PIX_FMT_NONE) {
+                    return frmctx->sw_format;
+                } else {
+                    logstream << "falling back to pixelFormat()";
+                }
             }
         }
         return pixelFormat();
     }
     virtual av::Rational frameRate() {
-        if (outlink_) {
-            return outlink_->frame_rate;
+        if (out_ctx_) {
+            return av_buffersink_get_frame_rate(out_ctx_);
         } else if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
             return default_frame_rate_;
         } else {
@@ -488,8 +500,8 @@ public:
         if (params.count("dst_sample_format")==1) default_params_.sample_format = av::SampleFormat(params["dst_sample_format"].get<std::string>());
     }
     virtual int sampleRate() {
-        if (outlink_) {
-            return outlink_->sample_rate;
+        if (out_ctx_) {
+            return av_buffersink_get_sample_rate(out_ctx_);
         } else if (default_params_.sample_rate>0) {
             return default_params_.sample_rate;
         } else {
@@ -497,8 +509,8 @@ public:
         }
     }
     virtual av::SampleFormat sampleFormat() {
-        if (outlink_) {
-            return av::SampleFormat(static_cast<AVSampleFormat>(outlink_->format));
+        if (out_ctx_) {
+            return av::SampleFormat(static_cast<AVSampleFormat>(av_buffersink_get_format(out_ctx_)));
         } else if (default_params_.sample_format.get()!=AV_SAMPLE_FMT_NONE) {
             return default_params_.sample_format;
         } else {
@@ -506,12 +518,17 @@ public:
         }
     }
     virtual uint64_t channelLayout() {
-        if (outlink_) {
+        if (out_ctx_) {
 #if API_NEW_CHANNEL_LAYOUT
             // TODO
-            return outlink_->ch_layout.order == AV_CHANNEL_ORDER_NATIVE ? outlink_->ch_layout.u.mask : 0;
+            AVChannelLayout chl;
+            if (av_buffersink_get_ch_layout(out_ctx_, &chl) < 0) {
+                logstream << "av_buffersink_get_ch_layout failed";
+                return 0;
+            }
+            return chl.order == AV_CHANNEL_ORDER_NATIVE ? chl.u.mask : 0;
 #else
-            return outlink_->channel_layout;
+            return av_buffersink_get_channel_layout(out_ctx_);
 #endif
         } else if (default_params_.channel_layout>0) {
             return default_params_.channel_layout;
