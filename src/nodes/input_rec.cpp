@@ -42,8 +42,6 @@ protected:
     av::Timestamp node_stop_ts_ = NOTS;
     av::Timestamp stop_delay_ = {0, {1, 1}};
     av::Timestamp first_video_ts_;
-    int64_t stream_eof_pts_ = -1;
-    int64_t last_video_packet_pts_ = -1;
     StreamTarget start_ts_ = StreamTarget::from_frames_absolute(0);
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
@@ -580,7 +578,6 @@ public:
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
-                stream_eof_pts_ = -1;
                 //ictx_.flush();
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.isTimestamp()) {
@@ -657,7 +654,6 @@ public:
         if (pkt.isNull()) {
             // we are at the end os recording
             //logstream << "end of video reached";
-            stream_eof_pts_ = last_video_packet_pts_;
             std::this_thread::sleep_for(5ms);
             return;
         } else {
@@ -733,10 +729,6 @@ public:
                 }
             }
         }
-        if (pkt.streamIndex() == video_stream_) {
-            stream_eof_pts_ = -1;
-            last_video_packet_pts_ = pkt.pts().timestamp({1, 1000});
-        }
         this->sink_->put(pkt);
 
         // check if we have to stop/loop video
@@ -745,10 +737,7 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
-                    stream_eof_pts_ = last_video_packet_pts_;
-                    av::Packet p;
-                    p.setStreamIndex(video_stream_);
-                    this->sink_->put(p);
+                    this->sink_->put(av::Packet());
                     doStop();
                 }
             }
@@ -757,10 +746,7 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
-                    stream_eof_pts_ = last_video_packet_pts_;
-                    av::Packet p;
-                    p.setStreamIndex(video_stream_);
-                    this->sink_->put(p);
+                    this->sink_->put(av::Packet());
                     doStop();
                 }
             }
@@ -886,10 +872,6 @@ public:
             default:
                 throw Error("not implemented StreamTarget type");
         }
-    }
-
-    bool isEof(int64_t ts) override {
-        return (stream_eof_pts_ >= 0) && (abs(ts - stream_eof_pts_) < 5);
     }
 
     static std::shared_ptr<RecordingInput> create(NodeCreationInfo &nci) {

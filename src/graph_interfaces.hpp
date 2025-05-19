@@ -230,7 +230,6 @@ public:
     virtual EPlaybackDirection getPlaybackDirection() = 0;
     virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
     virtual void offsetStreamTargetByFrames(StreamTarget& ts, const int64_t frames) = 0;
-    virtual bool isEof(int64_t ts) = 0;
 };
 
 class IFlushAndSeek {
