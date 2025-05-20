@@ -11,6 +11,8 @@
 #include <string>
 #include <json.hpp>
 #include "app_version.hpp"
+#include <avcpp/packet.h>
+#include <avcpp/frame.h>
 
 #ifdef __GNUC__
 #define DEPRECATED __attribute__((deprecated))
@@ -112,4 +114,8 @@ public:
 };
 
 #define logstream (LogLine(current_thread.logger.get()).stream())
+
+bool is_eof_marker(const av::Packet& p);
+bool is_eof_marker(const av::VideoFrame& f);
+bool is_eof_marker(const av::AudioSamples& f);
 
