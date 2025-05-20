@@ -45,8 +45,25 @@ public:
                 }
                 return;
             }
-            
+
             T &pkt = *ptr;
+
+            if (is_eof_marker(pkt)) {
+                // EOF
+                if (!this->sink_->put(pkt, true)) {
+                    if (!ticks) {
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    }
+                } else {
+                    this->source_->pop();
+                    if (!ticks) {
+                        this->yieldAndProcess();
+                    }
+                }
+                break;
+            }
+
             if (!pkt.isValid()) {
                 process_next = true;
                 continue;

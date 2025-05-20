@@ -149,16 +149,20 @@ public:
     }
     virtual void flush() {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        OutputFrame frm;
-        do {
+        while (true) {
+            OutputFrame frm;
             try {
                 frm = dec_.decode(av::Packet());
-                //this->sink_->put(frm); // don't do anything with the frame! otherwise, blinking happens when decoder is flushed after generating "no signal" card
+                if (frm) {
+                    this->sink_->put(frm);
+                }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing decoder." << std::endl;
                 break; // flush error is not considered error
             }
-        } while (frm);
+            if (!frm)
+                break;
+        }
         //dec_.close();
         //input_hold_ = nullptr;
         this->finished_ = true;
@@ -247,6 +251,10 @@ public:
                 // this is flush packet
                 // so flush decoder
                 flush();
+                // pass eof packet to next node
+                if (is_eof_marker(pkt)) {
+                    this->sink_->put(OutputFrame());
+                }
                 this->source_->pop();
             }
         }

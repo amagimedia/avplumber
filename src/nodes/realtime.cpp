@@ -34,6 +34,7 @@ protected:
     std::atomic_int64_t last_frame_number_ = -1;
     std::atomic_int64_t last_frame_timestamp_ = -1;
     std::atomic_int64_t is_eof_ = false;
+    std::atomic_int64_t eof_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
     std::weak_ptr<IPlaybackControl> playback_control_;
 
@@ -201,6 +202,11 @@ public:
                     ready_ = true;
                 }
             } else {
+                if (is_eof_marker(data)) {
+                    eof_frame_wallclock_.store(last_frame_wallclock_.load());
+                    is_eof_ = true;
+                    logstream << "EOF detected";
+                }
                 emit = false;
                 if (!ticks) {
                     // process next packet
@@ -275,6 +281,11 @@ public:
         auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
         if (frame_ts) {
             last_frame_timestamp_ = std::atoll(frame_ts->value);
+            if (is_eof_ && (eof_frame_wallclock_ != last_frame_wallclock_)) {
+                eof_frame_wallclock_ = -1;
+                is_eof_ = false;
+                logstream << "no EOF anymore";
+            }
         }
         auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
         if (frame_wc) {
