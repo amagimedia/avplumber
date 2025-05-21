@@ -252,7 +252,7 @@ public:
                 // so flush decoder
                 flush();
                 // pass eof packet to next node
-                if (is_eof_marker(pkt)) {
+                if (isEofMarker(pkt)) {
                     this->sink_->put(OutputFrame());
                 }
                 this->source_->pop();

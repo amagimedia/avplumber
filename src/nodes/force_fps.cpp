@@ -48,7 +48,7 @@ public:
 
             T &pkt = *ptr;
 
-            if (is_eof_marker(pkt)) {
+            if (isEofMarker(pkt)) {
                 // EOF
                 if (!this->sink_->put(pkt, true)) {
                     if (!ticks) {

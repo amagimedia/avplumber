@@ -114,8 +114,3 @@ public:
 };
 
 #define logstream (LogLine(current_thread.logger.get()).stream())
-
-bool is_eof_marker(const av::Packet& p);
-bool is_eof_marker(const av::VideoFrame& f);
-bool is_eof_marker(const av::AudioSamples& f);
-

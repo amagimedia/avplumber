@@ -202,7 +202,7 @@ public:
                     ready_ = true;
                 }
             } else {
-                if (is_eof_marker(data)) {
+                if (isEofMarker(data)) {
                     eof_frame_wallclock_.store(last_frame_wallclock_.load());
                     is_eof_ = true;
                     logstream << "EOF detected";
