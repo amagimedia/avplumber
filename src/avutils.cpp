@@ -76,3 +76,18 @@ uint64_t stringToChannelLayout(const std::string s) {
     return av_get_channel_layout(s.c_str());
 #endif
 }
+
+bool isEofMarker(const av::Packet& p)
+{
+    return p.streamIndex() == -1;
+}
+
+bool isEofMarker(const av::VideoFrame& f)
+{
+    return f.pts().isNoPts();
+}
+
+bool isEofMarker(const av::AudioSamples& f)
+{
+    return f.pts().isNoPts();
+}

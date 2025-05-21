@@ -45,9 +45,9 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
-            rescaleFrameTS(&frame);
-            
-            if (!frame.pts().isNoPts()) {
+
+            if (!orig_pts.isNoPts()) {
+                rescaleFrameTS(&frame);
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
                     // store orifinal frame PTS
@@ -72,6 +72,23 @@ public:
                     // put returned false, no space in queue
                     frame.setTimeBase(av::Rational());
                     frame.setPts(orig_pts);
+                    if (!ticks) {
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    }
+                }
+            } else if (isEofMarker(frame)) {
+                // EOF frame
+                if (this->sink_->put(frame, true)) {
+                    this->source_->pop();
+                    if (!ticks) {
+                        // process next packet
+                        this->yieldAndProcess();
+                    } else {
+                        process_next = true;
+                    }
+                } else {
+                    // put returned false, no space in queue
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());

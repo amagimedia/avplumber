@@ -558,6 +558,10 @@ public:
             }
         }
     }
+    void doStop() {
+        logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
+        node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+    }
     virtual void process() {
         bool seeked = false;
 
@@ -594,8 +598,7 @@ public:
                     last_stream_position_ = seek_target_.bytes;
                     ictx_.seek(seek_target_.bytes, -1, AVSEEK_FLAG_BYTE);
                 } else if (seek_target_.isStop()) {
-                    logstream << "video_stream_ " << video_stream_ << " stopping in " << stop_delay_;
-                    node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+                    doStop();
                 }
                 need_seek_ = false;
                 seeked = true;
@@ -734,7 +737,8 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
-                    stop();
+                    this->sink_->put(av::Packet());
+                    doStop();
                 }
             }
         } else {
@@ -742,7 +746,8 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
-                    stop();
+                    this->sink_->put(av::Packet());
+                    doStop();
                 }
             }
         }
