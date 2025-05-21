@@ -11,7 +11,7 @@ protected:
     DecoderContext dec_;
     std::recursive_mutex mutex_;
     std::shared_ptr<IStreamsInput> input_hold_;
-    std::shared_ptr<IPlaybackControl> playback_hold_;
+    std::weak_ptr<IPlaybackControl> playback_hold_;
     size_t dec_errors_ = 0;
     av::Timestamp last_pts_ = NOTS;
     av::PixelFormat pixel_format_ = AV_PIX_FMT_NONE;
@@ -54,7 +54,6 @@ public:
         }
 
         input_hold_ = this->template findNodeUp<IStreamsInput>();
-        playback_hold_ = this->template findNodeUp<IPlaybackControl>();
         dec_.setRefCountedFrames(true);
 
         bool good_tb = dec_.timeBase().getNumerator() && dec_.timeBase().getDenominator();
@@ -150,23 +149,32 @@ public:
     }
     virtual void flush() {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        OutputFrame frm;
-        do {
+        while (true) {
+            OutputFrame frm;
             try {
                 frm = dec_.decode(av::Packet());
-                //this->sink_->put(frm); // don't do anything with the frame! otherwise, blinking happens when decoder is flushed after generating "no signal" card
+                if (frm) {
+                    this->sink_->put(frm);
+                }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing decoder." << std::endl;
                 break; // flush error is not considered error
             }
-        } while (frm);
+            if (!frm)
+                break;
+        }
         //dec_.close();
         //input_hold_ = nullptr;
         this->finished_ = true;
     }
     template<typename T=OutputFrame, typename=decltype(&T::pixelFormat)> void setFrameTimestamps(OutputFrame& frm) {
-        if (playback_hold_) {
-            playback_hold_->setFrameMetadataTimestamps(frm);
+        auto pb = playback_hold_.lock();
+        if (!pb) {
+            playback_hold_ = this->template findNodeUp<IPlaybackControl>();
+            pb = playback_hold_.lock();
+        }
+        if (pb) {
+            pb->setFrameMetadataTimestamps(frm);
         }
     }
     template<typename T> void setFrameTimestamps(T) {
@@ -243,6 +251,10 @@ public:
                 // this is flush packet
                 // so flush decoder
                 flush();
+                // pass eof packet to next node
+                if (isEofMarker(pkt)) {
+                    this->sink_->put(OutputFrame());
+                }
                 this->source_->pop();
             }
         }

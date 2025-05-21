@@ -12,6 +12,10 @@ public:
             if (prev_pts_.isNoPts()) {
                 break;
             }
+            if (isEofMarker(frame)) {
+                this->sink_->put(frame);
+                return;
+            }
             if (frame.pts().isNoPts()) {
                 logstream << "got NOPTS, dropping";
                 return;
