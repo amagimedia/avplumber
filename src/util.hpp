@@ -11,8 +11,6 @@
 #include <string>
 #include <json.hpp>
 #include "app_version.hpp"
-#include <avcpp/packet.h>
-#include <avcpp/frame.h>
 
 #ifdef __GNUC__
 #define DEPRECATED __attribute__((deprecated))
