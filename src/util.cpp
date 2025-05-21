@@ -68,18 +68,3 @@ std::thread start_thread(const std::string name, std::function<void()> whattodo)
         whattodo();
     });
 }
-
-bool is_eof_marker(const av::Packet& p)
-{
-    return p.streamIndex() == -1;
-}
-
-bool is_eof_marker(const av::VideoFrame& f)
-{
-    return f.pts().isNoPts();
-}
-
-bool is_eof_marker(const av::AudioSamples& f)
-{
-    return f.pts().isNoPts();
-}

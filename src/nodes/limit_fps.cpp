@@ -12,7 +12,7 @@ public:
             if (prev_pts_.isNoPts()) {
                 break;
             }
-            if (is_eof_marker(frame)) {
+            if (isEofMarker(frame)) {
                 this->sink_->put(frame);
                 return;
             }

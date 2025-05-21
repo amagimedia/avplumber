@@ -23,7 +23,7 @@ public:
     }
     virtual void process() {
         av::Packet pkt = this->source_->get();
-        if (is_eof_marker(pkt)) {
+        if (isEofMarker(pkt)) {
             // eof marker
             // put on each queue
             forEachOutput([](auto out) {

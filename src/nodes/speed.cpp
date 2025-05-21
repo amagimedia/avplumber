@@ -77,7 +77,7 @@ public:
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                     }
                 }
-            } else if (is_eof_marker(frame)) {
+            } else if (isEofMarker(frame)) {
                 // EOF frame
                 if (this->sink_->put(frame, true)) {
                     this->source_->pop();
