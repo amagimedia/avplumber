@@ -860,6 +860,7 @@ multiple inputs, 1 output: `av::Packet`
 -   `ts_sort_wait` (float, seconds) - default `2.5`, maximum time to wait
     for all streams to select the packet with least DTS. Set to `0` to
     emit packets as soon as they arrive.
+-   `stream_ids` (list of positive integers) - if specified, will set custom stream ids in output container. Useful for `mpegts` format output.
 
 ### `output`
 
