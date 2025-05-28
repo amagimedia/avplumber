@@ -861,6 +861,7 @@ multiple inputs, 1 output: `av::Packet`
     for all streams to select the packet with least DTS. Set to `0` to
     emit packets as soon as they arrive.
 -   `stream_ids` (list of positive integers) - if specified, will set custom stream ids in output container. Useful for `mpegts` format output.
+-   `metadata` (list of dictionaries) - if specified, will set metadata in output container's streams.
 
 ### `output`
 
