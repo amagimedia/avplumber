@@ -79,7 +79,7 @@ uint64_t stringToChannelLayout(const std::string s) {
 
 bool isEofMarker(const av::Packet& p)
 {
-    return p.streamIndex() == -1;
+    return p.pts().isNoPts();
 }
 
 bool isEofMarker(const av::VideoFrame& f)
@@ -90,4 +90,11 @@ bool isEofMarker(const av::VideoFrame& f)
 bool isEofMarker(const av::AudioSamples& f)
 {
     return f.pts().isNoPts();
+}
+
+av::Packet createEofPacket(int streamIndex)
+{
+    auto p = av::Packet({ 0xFF });
+    p.setStreamIndex(streamIndex);
+    return p;
 }

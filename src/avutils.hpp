@@ -166,3 +166,5 @@ namespace {
 bool isEofMarker(const av::Packet& p);
 bool isEofMarker(const av::VideoFrame& f);
 bool isEofMarker(const av::AudioSamples& f);
+
+av::Packet createEofPacket(int streamIndex = -1);
