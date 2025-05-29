@@ -737,7 +737,7 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
-                    this->sink_->put(av::Packet());
+                    this->sink_->put(createEofPacket(video_stream_));
                     doStop();
                 }
             }
@@ -746,7 +746,7 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
-                    this->sink_->put(av::Packet());
+                    this->sink_->put(createEofPacket(video_stream_));
                     doStop();
                 }
             }

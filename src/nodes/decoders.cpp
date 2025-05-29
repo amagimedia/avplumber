@@ -191,7 +191,7 @@ public:
         // lock us, to prevent race condition with flushing!
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
-            if ( (!pkt.isNull()) && pkt.isComplete() ) {
+            if ( (!pkt.isNull()) && pkt.isComplete() && !isEofMarker(pkt)) {
                 int iter = 0;
                 do {
                     iter++;
