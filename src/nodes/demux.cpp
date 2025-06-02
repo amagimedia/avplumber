@@ -23,11 +23,10 @@ public:
     }
     virtual void process() {
         av::Packet pkt = this->source_->get();
-        logstream << "GET " << pkt.raw() << " " << pkt.pts() << " idx " << pkt.streamIndex();
         if (isEofMarker(pkt)) {
             // eof marker
             // put on each queue
-            for (auto& m:  map_) {
+            for (auto& m: map_) {
                 m.second->enqueue(createEofPacket(m.first));
             }
         } else {
