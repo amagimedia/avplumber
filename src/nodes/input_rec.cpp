@@ -64,6 +64,7 @@ protected:
     int64_t live_delay_ = 1'000;
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
     bool loop_ = false;
+    std::atomic_bool notify_eof_ = false;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -563,6 +564,13 @@ public:
         node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
     }
     virtual void process() {
+        if (notify_eof_) {
+            this->sink_->put(createEofPacket(video_stream_));
+            doStop();
+            notify_eof_ = false;
+            return;
+        }
+
         bool seeked = false;
 
         if (!input_url_set_)
@@ -737,8 +745,8 @@ public:
                 if (loop_) {
                     seek(start_ts_);
                 } else {
-                    this->sink_->put(createEofPacket(video_stream_));
-                    doStop();
+                    logstream << "input_rec reached stop timestamp, EOF";
+                    notify_eof_ = true;
                 }
             }
         } else {
@@ -746,8 +754,8 @@ public:
                 if (loop_) {
                     seek(stop_ts_);
                 } else {
-                    this->sink_->put(createEofPacket(video_stream_));
-                    doStop();
+                    logstream << "input_rec reached stop timestamp, EOF";
+                    notify_eof_ = true;
                 }
             }
         }
