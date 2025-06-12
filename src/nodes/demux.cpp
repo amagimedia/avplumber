@@ -23,18 +23,26 @@ public:
     }
     virtual void process() {
         av::Packet pkt = this->source_->get();
-        auto iter = map_.find(pkt.streamIndex());
-        if (iter != map_.end()) {
-            if (iter->second != nullptr) { // null pointer means that we should ignore that packet
-                if (waiting_for_keyframe_ && video_streams_.count(pkt.streamIndex()) && pkt.isKeyPacket()) {
-                    waiting_for_keyframe_ = false;
-                }
-                if (!waiting_for_keyframe_) {
-                    iter->second->enqueue(pkt);
-                } // else drop
+        if (isEofMarker(pkt)) {
+            // eof marker
+            // put on each queue
+            for (auto& m: map_) {
+                m.second->enqueue(createEofPacket(m.first));
             }
-        } else if (report_unknown_stream_) {
-            logstream << "Unknown stream " << pkt.streamIndex() << std::endl;
+        } else {
+            auto iter = map_.find(pkt.streamIndex());
+            if (iter != map_.end()) {
+                if (iter->second != nullptr) { // null pointer means that we should ignore that packet
+                    if (waiting_for_keyframe_ && video_streams_.count(pkt.streamIndex()) && pkt.isKeyPacket()) {
+                        waiting_for_keyframe_ = false;
+                    }
+                    if (!waiting_for_keyframe_) {
+                        iter->second->enqueue(pkt);
+                    } // else drop
+                }
+            } else if (report_unknown_stream_) {
+                logstream << "Unknown stream " << pkt.streamIndex() << std::endl;
+            }
         }
     }
     virtual void forEachOutput(std::function<void(Sink<av::Packet>*)> cb) {

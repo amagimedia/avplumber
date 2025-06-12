@@ -5,6 +5,8 @@ class StreamMuxer: public NodeSingleOutput<av::Packet>, public IStoppable, publi
 private:
     struct StreamInfo {
         int stream_index = -1;
+        int out_stream_id = -1;
+        av::Dictionary out_metadata;
         //av::Stream stream;
         std::shared_ptr<Edge<av::Packet>> edge;
         AVTS idle_since = AV_NOPTS_VALUE; // timebase: milliseconds
@@ -63,10 +65,11 @@ private:
 public:
     StreamMuxer(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
     }
-    void addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge) {
+    StreamInfo& addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge) {
         streams_.emplace_back();
         streams_.back().stream_index = stream_index;
         streams_.back().edge = edge;
+        return streams_.back();
     }
     void prepare() {
         std::vector<Event*> events(streams_.size()+1);
@@ -240,6 +243,12 @@ public:
                 codec = enc->encodingCodec();
             }
             av::Stream deststream = octx.addStream(codec);
+            if (s.out_stream_id!=-1) {
+                deststream.raw()->id = s.out_stream_id;
+            }
+            if (!s.out_metadata.isNull()) {
+                av_dict_copy(&deststream.raw()->metadata, s.out_metadata.raw(), 0);
+            }
             s.stream_index = deststream.index();
             if (enc!=nullptr) {
                 enc->setOutput(deststream, octx);
@@ -286,6 +295,26 @@ public:
         for (std::string sname: params["src"]) {
             std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(sname);
             r->addStream(-1, edge);
+        }
+        if (params.count("stream_ids")) {
+            int index = 0;
+            for (int id: params["stream_ids"]) {
+                if (index >= r->streams_.size()) {
+                    throw Error("too many stream_ids");
+                }
+                r->streams_[index].out_stream_id = id;
+                index++;
+            }
+        }
+        if (params.count("metadata")) {
+            int index = 0;
+            for (Parameters in_dict: params["metadata"]) {
+                if (index >= r->streams_.size()) {
+                    throw Error("too many metadata dictionaries in list");
+                }
+                r->streams_[index].out_metadata = parametersToDict(in_dict);
+                index++;
+            }
         }
         r->prepare();
         out_edge->setProducer(r);

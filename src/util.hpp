@@ -112,4 +112,3 @@ public:
 };
 
 #define logstream (LogLine(current_thread.logger.get()).stream())
-

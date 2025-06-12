@@ -22,6 +22,12 @@ protected:
 public:
     virtual void process() {
         av::VideoFrame in_frame = this->source_->get();
+
+        if (isEofMarker(in_frame)) {
+            this->sink_->put(in_frame);
+            return;
+        }
+
         if (in_frame) {
             //logstream << "scale in: PTS = " << in_frame.pts() << std::endl;
             if (sourceChanged(in_frame)) {

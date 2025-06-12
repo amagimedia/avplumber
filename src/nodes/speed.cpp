@@ -3,7 +3,7 @@
 #include "../RealTimeTeam.hpp"
 #include "../graph_base.hpp"
 
-template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed {
+template<typename T> class Speed: public NodeSISO<T, T>, public NonBlockingNode<Speed<T>>, public ISpeed, public IReturnsObjects {
 protected:
     std::shared_ptr<SpeedControlTeam> team_;
     av::Rational timebase_ {0, 0};
@@ -45,9 +45,9 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
-            rescaleFrameTS(&frame);
-            
-            if (!frame.pts().isNoPts()) {
+
+            if (!orig_pts.isNoPts()) {
+                rescaleFrameTS(&frame);
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
                     // store orifinal frame PTS
@@ -77,8 +77,34 @@ public:
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                     }
                 }
+            } else if (isEofMarker(frame)) {
+                // EOF frame
+                if (this->sink_->put(frame, true)) {
+                    this->source_->pop();
+                    if (!ticks) {
+                        // process next packet
+                        this->yieldAndProcess();
+                    } else {
+                        process_next = true;
+                    }
+                } else {
+                    // put returned false, no space in queue
+                    if (!ticks) {
+                        // retry when we have space in sink
+                        this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
+                    }
+                }
             }
         } while (process_next);
+    }
+    Parameters getObject(const std::string name) override {
+        if (name == "info") {
+            Parameters res;
+            res["speed"] = team_->getSpeed();
+            return res;
+        }
+
+        throw Error("Unknown object to get");
     }
     void speedChanged() override {
         auto n = sync_node_.lock();

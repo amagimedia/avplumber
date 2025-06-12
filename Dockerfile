@@ -9,6 +9,6 @@ RUN --mount=type=cache,target=/build/build  cd /build && cmake -B build -DHAVE_J
 
 FROM alpine:3.21
 
-RUN apk add ffmpeg libcurl libssl3 musl
+RUN apk add ffmpeg libcurl libssl3 musl boost-thread
 COPY --from=builder /build/avplumber /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/avplumber"]

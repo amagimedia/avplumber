@@ -68,4 +68,3 @@ std::thread start_thread(const std::string name, std::function<void()> whattodo)
         whattodo();
     });
 }
-
