@@ -376,40 +376,6 @@ protected:
                     };
                     if (self.debug_timing_) {
                         logstream << "done getting new resource";
-                    } else {
-                        ti = &titer->second;
-                    }
-                    CUstream stream;
-                    CHECK_CU(cu->cuStreamCreate(&stream, 0));
-
-                    CUDA_MEMCPY2D cpy = {
-                        .srcY = 0,
-                        .srcMemoryType = CU_MEMORYTYPE_DEVICE,
-                        .srcDevice = (CUdeviceptr)buf,
-                        .srcPitch = linesize,
-                        .dstMemoryType = CU_MEMORYTYPE_ARRAY,
-                        .dstArray = ti->cu_arr,
-                        .WidthInBytes = tex2d->width * gs_get_format_bpp(tex->format) / 8,
-                        .Height = tex2d->height
-                    };
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture before cuMemcpy";
-                    }
-                    if (!CHECK_CU(cu->cuMemcpy2DAsync(&cpy, stream))) {
-                        //logstream << "buffer_to_texture cuMemcpy success!";
-                    } else {
-                        logstream << "buffer_to_texture cuMemcpy failure";
-                    }
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture after cuMemcpy";
-                    }
-                    CHECK_CU(cu->cuStreamSynchronize(stream));
-                    CHECK_CU(cu->cuStreamDestroy(stream));
-                    
-                    CUcontext dummy;
-                    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
-                    if (self.debug_timing_) {
-                        logstream << "buffer_to_texture end";
                     }
                 } else {
                     ti = &titer->second;
