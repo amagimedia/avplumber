@@ -346,13 +346,13 @@ public:
 
 class DynamicAudioResamplerProcessChannels: public DynamicAudioResampler, public IAudioMetadataSource {
 public:
-    virtual int sampleRate() {
+    virtual int sampleRate() override {
         return dst_params_.sample_rate;
     }
-    virtual av::SampleFormat sampleFormat() {
+    virtual av::SampleFormat sampleFormat() override {
         return dst_params_.sample_format;
     }
-    virtual uint64_t channelLayout() {
+    virtual uint64_t channelLayout() override {
         return dst_params_.channel_layout;
     }
     static std::shared_ptr<DynamicAudioResamplerProcessChannels> create(NodeCreationInfo &nci) {
@@ -363,8 +363,23 @@ public:
     using DynamicAudioResampler::DynamicAudioResampler;
 };
 
-class DynamicAudioResamplerForwardChannels: public DynamicAudioResampler {
+class DynamicAudioResamplerForwardChannels: public DynamicAudioResampler, public IAudioMetadataSource {
 public:
+    virtual int sampleRate() override {
+        return dst_params_.sample_rate;
+    }
+    virtual av::SampleFormat sampleFormat() override {
+        return dst_params_.sample_format;
+    }
+    virtual uint64_t channelLayout() override {
+        auto upstream = this->findNodeUp<IAudioMetadataSource>();
+        if (upstream) {
+            return upstream->channelLayout();
+        } else {
+            logstream << "no channel_layout upstream, returning previous or default (unspecified)";
+            return dst_params_.channel_layout;
+        }
+    }
     static std::shared_ptr<DynamicAudioResamplerForwardChannels> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
