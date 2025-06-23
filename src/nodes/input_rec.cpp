@@ -46,6 +46,7 @@ protected:
     StreamTarget stop_ts_ = StreamTarget::end();
     std::shared_ptr<PauseControlTeam> pause_team_;
     bool paused_read_ = false;
+    bool just_started_ = true;
     std::shared_ptr<SpeedControlTeam> speed_team_;
     std::atomic_int speed_skip_frames_ = 0;
     std::atomic_int speed_skipped_frames_ = 0;
@@ -625,7 +626,8 @@ public:
         }
         if (!paused_read_) {
             if (pause_team_ && pause_team_->isPaused()) {
-                paused_read_ = seeked;
+                paused_read_ = seeked || just_started_;
+                just_started_ = false;
                 if (!paused_read_) {
                     // graph is paused, wait for another seek
                     std::this_thread::sleep_for(0us);
