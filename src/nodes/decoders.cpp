@@ -330,6 +330,9 @@ public:
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
         }
+        if (params.count("waiting_for_frame")) {
+            r->waiting_for_frame_ = params["waiting_for_frame"];
+        }
         return r;
     }
 };
