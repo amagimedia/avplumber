@@ -19,6 +19,7 @@ protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     av::Timestamp discard_until_ = NOTS;
     std::mutex discard_until_mutex_;
+    std::list<OutputFrame> flush_frames_;
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
     //AVBufferRef *out_frames_ref_ = nullptr;
@@ -154,7 +155,7 @@ public:
             try {
                 frm = dec_.decode(av::Packet());
                 if (frm) {
-                    this->sink_->put(frm);
+                    flush_frames_.push_back(frm);
                 }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing decoder." << std::endl;
@@ -180,6 +181,16 @@ public:
     template<typename T> void setFrameTimestamps(T) {
     }
     virtual void process() {
+        // check if there is something in flush queue
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (!flush_frames_.empty()) {
+                OutputFrame frame = *flush_frames_.begin();
+                flush_frames_.pop_front();
+                this->sink_->put(frame);
+                return;
+            }
+        }
         // wait for packet
         //av::Packet pkt = this->source_->get();
         av::Packet *pktp = this->source_->peek();
