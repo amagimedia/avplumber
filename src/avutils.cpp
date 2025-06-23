@@ -79,7 +79,7 @@ uint64_t stringToChannelLayout(const std::string s) {
 
 bool isEofMarker(const av::Packet& p)
 {
-    return p.pts().isNoPts();
+    return p.pts().isNoPts() && (p.size() == 1);
 }
 
 bool isEofMarker(const av::VideoFrame& f)
