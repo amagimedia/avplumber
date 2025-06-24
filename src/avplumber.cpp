@@ -792,7 +792,7 @@ void AVPlumber::obs_play() {
 
 int64_t AVPlumber::obs_get_time() {
     if (!impl_ || !impl_->manager())
-        return 0;
+        return -1;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         auto n = node->node();
@@ -803,7 +803,7 @@ int64_t AVPlumber::obs_get_time() {
             }
         }
     }
-    return 0;
+    return -1;
 }
 
 void AVPlumber::obs_set_time(int64_t ms) {
@@ -831,7 +831,7 @@ void AVPlumber::obs_restart() {
 
 int64_t AVPlumber::obs_get_duration() {
     if (!impl_ || !impl_->manager())
-        return 0;
+        return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
         auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
@@ -842,7 +842,7 @@ int64_t AVPlumber::obs_get_duration() {
         }
     }
 
-    return 0;
+    return -1;
 }
 double AVPlumber::obs_get_speed() {
     if (!impl_ || !impl_->manager())
