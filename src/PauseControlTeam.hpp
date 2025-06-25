@@ -16,13 +16,15 @@ public:
     bool isPaused() {
         return paused_;
     }
-    void pause() {
+    void pause(bool synchonize_nodes = true) {
         paused_ = true;
 
-        for (auto& p: sync_objs_) {
-            auto obj = p.lock();
-            if (obj) {
-                obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+        if (synchonize_nodes) {
+            for (auto& p: sync_objs_) {
+                auto obj = p.lock();
+                if (obj) {
+                    obj->flushAndSeek(StreamTarget::from_frames_relative(0));
+                }
             }
         }
     }
