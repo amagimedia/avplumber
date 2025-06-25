@@ -75,7 +75,7 @@ public:
         r->team_->addNode(std::weak_ptr<IInputReset>(r));
         if (params.count("paused")) {
             if (params["paused"].get<bool>()) {
-                r->team_->pause();
+                r->team_->pause(false);
                 r->pass_single_ = true;
             }
         }
