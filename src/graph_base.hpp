@@ -70,7 +70,9 @@ public:
         // pause all nodes processing
         pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->pauseProcessing();
+            if (node) {
+                node->pauseProcessing();
+            }
         });
         // start flushing
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
@@ -85,8 +87,10 @@ public:
         unlockProcessing();
         // wait all nodes to complete its work
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->lockProcessing();
-            node->unlockProcessing();
+            if (node) {
+                node->lockProcessing();
+                node->unlockProcessing();
+            }
         });
     }
     void flushAndSeek_finish(StreamTarget target) override {
@@ -105,7 +109,7 @@ public:
         }
         // set-up discard until & execute seek
         executeUpstream([target, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!node->isPausedProcessing())
+            if (!node || !node->isPausedProcessing())
                 return;
             if (!target.isEmpty()) {
                 if (target.ts.isValid()) {
