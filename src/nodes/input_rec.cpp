@@ -613,18 +613,20 @@ public:
                 seeked = true;
             } else {
                 if (play_direction_ == IPlaybackControl::EPlaybackDirection::pd_Backward) {
-                    auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
-                    if (!seek_table_.empty()) {
-                        auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
-                            return e.bytes < value;
-                        });
-                        for (int i = 0; i <= (paused_read_ ? 0 : speed_skip_frames_.load()); ++i) {
-                            if (it != seek_table_.cbegin()) {
-                                it = std::prev(it);
+                    if (!pause_team_ || !pause_team_->isPaused()) {
+                        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                        if (!seek_table_.empty()) {
+                            auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
+                                return e.bytes < value;
+                            });
+                            for (int i = 0; i <= (paused_read_ ? 0 : speed_skip_frames_.load()); ++i) {
+                                if (it != seek_table_.cbegin()) {
+                                    it = std::prev(it);
+                                }
                             }
+                            last_stream_position_ = it->bytes;
+                            ictx_.seek(it->bytes, -1, AVSEEK_FLAG_BYTE);
                         }
-                        last_stream_position_ = it->bytes;
-                        ictx_.seek(it->bytes, -1, AVSEEK_FLAG_BYTE);
                     }
                 }
             }
