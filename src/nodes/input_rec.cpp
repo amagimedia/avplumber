@@ -637,8 +637,8 @@ public:
                 paused_read_ = seeked || just_started_;
                 just_started_ = false;
                 if (!paused_read_) {
-                    // graph is paused, wait for another seek
-                    std::this_thread::sleep_for(0us);
+                    // graph is paused, wait for resume
+                    pause_team_->waitForResume(3);
                     return;
                 }
             }
@@ -781,7 +781,7 @@ public:
         stop();
     }
     void setTimeout(int64_t timeout) {
-        if (timeout<0) {
+        if (timeout < 0) {
             wait_max_ = AV_NOPTS_VALUE;
             return;
         }
