@@ -62,6 +62,7 @@ protected:
     Event seek_thread_ready_;
     IPlaybackControl::EPlaybackDirection play_direction_ = IPlaybackControl::EPlaybackDirection::pd_Forward;
     int64_t last_stream_position_ = -1;
+    int same_stream_position_repeat_ = 0;
     int64_t live_delay_ = 1'000;
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
     bool loop_ = false;
@@ -614,19 +615,35 @@ public:
             } else {
                 if (play_direction_ == IPlaybackControl::EPlaybackDirection::pd_Backward) {
                     if (!pause_team_ || !pause_team_->isPaused()) {
-                        auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
-                        if (!seek_table_.empty()) {
-                            auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
-                                return e.bytes < value;
-                            });
-                            for (int i = 0; i <= (paused_read_ ? 0 : speed_skip_frames_.load()); ++i) {
-                                if (it != seek_table_.cbegin()) {
-                                    it = std::prev(it);
+                        uint64_t new_stream_position = last_stream_position_;
+                        {
+                            auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
+                            if (!seek_table_.empty()) {
+                                auto it = std::lower_bound(seek_table_.cbegin(), seek_table_.cend(), last_stream_position_, [](const SeekTableEntry& e, int64_t value) {
+                                    return e.bytes < value;
+                                });
+                                for (int i = 0; i <= (paused_read_ ? 0 : speed_skip_frames_.load()); ++i) {
+                                    if (it != seek_table_.cbegin()) {
+                                        it = std::prev(it);
+                                    }
                                 }
+                                new_stream_position = it->bytes;
                             }
-                            last_stream_position_ = it->bytes;
-                            ictx_.seek(it->bytes, -1, AVSEEK_FLAG_BYTE);
                         }
+                        if (new_stream_position == last_stream_position_) {
+                            // repeat frame to flush decoder
+                            if (same_stream_position_repeat_ < 5) {
+                                same_stream_position_repeat_++;
+                            } else {
+                                // reached start of stream, need to wait for seek or change direction
+                                seek_resume_.wait(1);
+                                return;
+                            }
+                        } else {
+                            same_stream_position_repeat_ = 0;
+                        }
+                        last_stream_position_ = new_stream_position;
+                        ictx_.seek(last_stream_position_, -1, AVSEEK_FLAG_BYTE);
                     }
                 }
             }
