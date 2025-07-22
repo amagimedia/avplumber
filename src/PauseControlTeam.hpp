@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <optional>
+#include <condition_variable>
 #include "instance_shared.hpp"
 #include "graph_interfaces.hpp"
 
@@ -12,6 +13,7 @@ protected:
     std::mutex mutex_;
     std::weak_ptr<IPlaybackControl> playback_;
     std::vector<std::weak_ptr<IFlushAndSeek>> sync_objs_;
+    std::condition_variable cv_;
 public:
     bool isPaused() {
         return paused_;
@@ -60,7 +62,16 @@ public:
                     node->resetInput();
                 }
             }
+            cv_.notify_all();
         }
+    }
+    bool waitForResume(int timeout_ms) {
+        std::unique_lock<decltype(mutex_)> lock(mutex_);
+        if (!paused_) {
+            return true;
+        }
+        cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]{ return !paused_; });
+        return !paused_;
     }
     void addNode(std::weak_ptr<IInputReset> node) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);

@@ -36,7 +36,6 @@ protected:
     std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t eof_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
-    std::weak_ptr<IPlaybackControl> playback_control_;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
