@@ -202,6 +202,14 @@ public:
             // get argument:
             std::getline(in, arg);
 
+            auto mngr = manager_;
+            if (!mngr) {
+                out << "400 manager not ready: " << cmd << "\n";
+                logstream << "Command " << cmd << " " << arg << " failed: manager not ready";
+                all_good = false;
+                continue;
+            }
+
             // handle special commands:
             if (cmd == "retry") {
                 do {
