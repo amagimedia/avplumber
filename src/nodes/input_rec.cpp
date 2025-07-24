@@ -594,8 +594,27 @@ public:
                     // seek by timestamp, no seek table used
                     av::Rational tb = (video_stream_>=0) ? ictx_.stream(video_stream_).timeBase() : av::Rational(AV_TIME_BASE_Q);
                     AVTS preseek = std::round(preseek_ * float(tb.getDenominator()) / float(tb.getNumerator()));
-                    // TODO: preseek may seek too far before needed timestamp, discard non-key frames before first keyframe in such case
-                    AVTS ts = seek_target_.ts.timestamp(tb) - preseek;
+                    
+                    // Get the seek timestamp and apply input_ts_diff if needed
+                    AVTS ts = seek_target_.ts.timestamp(tb);
+                    if (timestamp_source_ == ETimestampSource::ts_Input && !ts_offsets_.empty()) {
+                        // Convert seek time from input time to video time by adding input_ts_diff
+                        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+                        int64_t pts = rescaleTS(seek_target_.ts, {1, 1000}).timestamp();
+                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), pts,
+                            [](const TSOffsetEntry& e, int64_t value) {
+                                return e.changed_at < value;
+                            });
+                        if (it == ts_offsets_.cend())
+                            it = std::prev(it);
+                        if (it->changed_at > pts)
+                            it = std::prev(it);
+                        
+                        // Add the offset to convert from input time to video time
+                        ts += av::Timestamp(it->input_ts_diff, {1, 1000}).timestamp(tb);
+                    }
+                    
+                    ts -= preseek;
                     /*ictx_.seek(ts, video_stream_, AVSEEK_FLAG_BACKWARD);*/
                     int ret = avformat_seek_file(ictx_.raw(), video_stream_, INT64_MIN, ts, ts + int(0.04f/tb.getDouble()+0.5f), 0);
                     //logstream << "video_stream_ " << video_stream_ << " timestamp " << ts;
