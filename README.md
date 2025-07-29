@@ -13,6 +13,7 @@ Furthermore, it was designed to allow easy prototyping of new video & audio proc
 
 So does it replace FFmpeg in all use cases? Not at all. It is targetted at live use - currently it can't seek the input at all. Also, subtitles aren't supported due to limitations of the underlying library - avcpp.
 
+Curious about history and applications of this project? **Read [Story of avplumber — open source multimedia streaming engine from Amagi](https://medium.com/amagi-engineering/story-of-avplumber-open-source-multimedia-streaming-engine-from-amagi-fc649cce2637)** at [Amagi Engineering](https://medium.com/amagi-engineering) blog.
 
 ## Quick start
 
