@@ -35,7 +35,7 @@ public:
         auto playback = playback_.lock();
         if (playback) {
             StreamTarget ts = target;
-            playback->fixInputTimestamp(ts);
+            playback->convertStreamTarget(ts, StreamTarget::ETargetType::tt_Timestamp);
             pause_at_ = ts;
         } else {
             pause_at_ = target;

@@ -53,6 +53,7 @@ struct StreamTarget {
         tt_Live,
         tt_FrameRelative,
         tt_FrameAbsolute,
+        tt_SyncTime,
         tt_End,
         tt_Stop
     };
@@ -188,6 +189,9 @@ struct StreamTarget {
     bool isTimestamp() const {
         return type == ETargetType::tt_Timestamp;
     }
+    bool isSyncclock() const {
+        return type == ETargetType::tt_SyncTime;
+    }
     bool isValidTimestamp() const {
         return isTimestamp() && ts.isValid();
     }
@@ -224,7 +228,7 @@ public:
     };
     virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
-    virtual void fixInputTimestamp(StreamTarget& ts) = 0;
+    virtual bool convertStreamTarget(StreamTarget& st, StreamTarget::ETargetType target_type) = 0;
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
     virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
     virtual EPlaybackDirection getPlaybackDirection() = 0;
@@ -248,6 +252,7 @@ class IFrameTimestamp {
 public:
     virtual int64_t getCurrentFrameTimestamp() = 0;
     virtual int64_t getCurrentFrameWallclock() = 0;
+    virtual int64_t getCurrentFrameSyncclock() = 0;
     virtual bool isEof() = 0;
 };
 

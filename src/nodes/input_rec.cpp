@@ -154,8 +154,19 @@ private:
 
         int64_t frame_ms = -1;
 
-        if (st.isTimestamp() || st.isWallclock()) {
-            switch (timestamp_source_) {
+        if (st.isTimestamp()) {
+            frame_ms = rescaleTS(st.ts, {1, 1000}).timestamp();
+        }
+
+        if (st.isSyncclock() || st.isWallclock()) {
+            ETimestampSource ts_required = ETimestampSource::ts_None;
+            if (st.isWallclock()) {
+                ts_required = ETimestampSource::ts_Wallclock;
+            } else {
+                ts_required = timestamp_source_;
+            }
+
+            switch (ts_required) {
                 case ETimestampSource::ts_Wallclock:
                     {
                         auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
@@ -197,12 +208,8 @@ private:
                     }
                     break;
                 default:
-                    if (st.isTimestamp()) {
-                        frame_ms = rescaleTS(st.ts, {1, 1000}).timestamp();
-                    } else if (st.isWallclock()) {
-                        // invalid request, jump to the beginning of file
-                        frame_ms = 0;
-                    }
+                    // invalid request, jump to the beginning of file
+                    frame_ms = 0;
                     break;
             }
         }
@@ -233,64 +240,95 @@ private:
         st.type = StreamTarget::ETargetType::tt_Bytes;
     }
 
-    virtual void fixInputTimestamp(StreamTarget& st) override
+    virtual bool convertStreamTarget(StreamTarget& st, StreamTarget::ETargetType target_type) override
     {
+        if (st.type == target_type) {
+            return true; // no conversion needed
+        }
+
+        auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+        if (ts_offsets_.empty()) {
+            // no timestamp offsets available, can not convert timestamp
+            return false;
+        }
+
+        // first step - calculate to the offset of the beginning of the file
+        int64_t new_ts = 0;
+
         switch (st.type) {
+            // special cases, do nothing
+            case StreamTarget::ETargetType::tt_Live:
+            case StreamTarget::ETargetType::tt_End:
+            case StreamTarget::ETargetType::tt_Stop:
+            case StreamTarget::ETargetType::tt_Bytes:
+                // do nothing, do not convert, will be used directly by seek command
+                return true;
+
+            case StreamTarget::ETargetType::tt_Timestamp:
+                new_ts = rescaleTS(st.ts, {1, 1000}).timestamp();
+                break;
+
             case StreamTarget::ETargetType::tt_Wallclock:
                 {
-                    switch (timestamp_source_) {
-                        case ETimestampSource::ts_Input:
-                        case ETimestampSource::ts_Wallclock:
-                            // just do nothing, timestamp is ok
-                            break;
-                        default:
-                            // no timestamp source set
-                            // fix target to the very beginning of file
-                            st.ts = av::Timestamp(0, {1, 1});
-                            break;
+                    new_ts = rescaleTS(st.ts, {1, 1000}).timestamp();
+                    auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](const TSOffsetEntry& e, int64_t value) {
+                        return e.changed_at < value;
+                    });
+                    if (it == ts_offsets_.cend()) {
+                        it = std::prev(it);
                     }
+                    if (it->changed_at > new_ts) {
+                        it = std::prev(it);
+                    }
+                    new_ts += it->wallclock_diff;
                 }
                 break;
-            case StreamTarget::ETargetType::tt_Timestamp:
-                {
-                    auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
+            default:
+                // unknown type, do nothing
+                return false;
+        }
 
-                    if (!ts_offsets_.empty()) {
-                        int64_t new_ts = rescaleTS(st.ts, {1, 1000}).timestamp();
-                        auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](const TSOffsetEntry& e, int64_t value) {
-                            return e.changed_at < value;
-                        });
-                        if (it == ts_offsets_.cend()) {
-                            it = std::prev(it);
-                        }
-                        if (it->changed_at > new_ts) {
-                            it = std::prev(it);
-                        }
+        // now convert to desired target type
+        switch (target_type) {
+            case StreamTarget::ETargetType::tt_Timestamp:
+                st.ts = av::Timestamp(new_ts, {1, 1000});
+                st.type = target_type;
+                return true;
+            case StreamTarget::ETargetType::tt_Wallclock:
+            case StreamTarget::ETargetType::tt_SyncTime:
+                {
+                    auto it = std::lower_bound(ts_offsets_.cbegin(), ts_offsets_.cend(), new_ts, [](const TSOffsetEntry& e, int64_t value) {
+                        return e.changed_at < value;
+                    });
+                    if (it == ts_offsets_.cend()) {
+                        it = std::prev(it);
+                    }
+                    if (it->changed_at > new_ts) {
+                        it = std::prev(it);
+                    }
+
+                    if (target_type == StreamTarget::ETargetType::tt_Wallclock) {
+                        st.type = StreamTarget::ETargetType::tt_Wallclock;
+                        new_ts -= it->wallclock_diff;
+                    } else {
+                        // convert to sync time
                         switch (timestamp_source_) {
                             case ETimestampSource::ts_Input:
                                 new_ts -= it->input_ts_diff;
+                                st.type = StreamTarget::ETargetType::tt_SyncTime;
                                 break;
                             case ETimestampSource::ts_Wallclock:
                                 new_ts -= it->wallclock_diff;
+                                st.type = StreamTarget::ETargetType::tt_SyncTime;
                                 break;
                         }
-
-                        st.ts = av::Timestamp(new_ts, {1, 1000});
                     }
+                    st.ts = av::Timestamp(new_ts, {1, 1000});
+                    st.type = target_type;
+                    return true;
                 }
-                break;
-            case StreamTarget::ETargetType::tt_Live:
-                // do nothing;
-                return;
-            case StreamTarget::ETargetType::tt_End:
-                // do nothing;
-                return;
-            case StreamTarget::ETargetType::tt_Stop:
-                // do nothing;
-                return;
-            case StreamTarget::ETargetType::tt_Bytes:
-                // do nothing;
-                return;
+            default:
+                return false; // conversion not supported
         }
     }
 
@@ -489,8 +527,8 @@ public:
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
         StreamTarget when_fixed = when;
         StreamTarget target_fixed = target;
-        fixInputTimestamp(when_fixed);
-        fixInputTimestamp(target_fixed);
+        convertStreamTarget(when_fixed, StreamTarget::ETargetType::tt_Timestamp);
+        convertStreamTarget(target_fixed, StreamTarget::ETargetType::tt_Timestamp);
         auto lock = std::lock_guard<decltype(seek_at_mutex_)>(seek_at_mutex_);
         seek_at_table_.push_back(std::make_pair(when_fixed.ts, target_fixed));
     }
@@ -1048,13 +1086,13 @@ public:
         if (params.count("start_ts") > 0) {
             std::string s = params["start_ts"];
             start_ts_ = StreamTarget::from_string(s);
-            fixInputTimestamp(start_ts_);
+            convertStreamTarget(start_ts_, StreamTarget::ETargetType::tt_Timestamp);
             seek(start_ts_);
         }
         if (params.count("stop_ts") > 0) {
             std::string stop = params["stop_ts"];
             stop_ts_ = StreamTarget::from_string(stop);
-            fixInputTimestamp(stop_ts_);
+            convertStreamTarget(stop_ts_, StreamTarget::ETargetType::tt_Timestamp);
         }
         if (params.count("stop_delay") > 0) {
             stop_delay_ = av::Timestamp(params["stop_delay"].get<int64_t>(), {1, 1000});
@@ -1091,7 +1129,7 @@ public:
                 res["stop"] = st;
             }
             StreamTarget t = StreamTarget::from_timestamp({0, {1, 1}});
-            fixInputTimestamp(t);
+            convertStreamTarget(t, StreamTarget::ETargetType::tt_Wallclock);
             res["video_start"] = t.ts.timestamp();
             res["duration"] = rec_length;
             res["loop"] = loop_;
@@ -1108,7 +1146,7 @@ public:
                 } else {
                     std::string s = p["start"];
                     StreamTarget ts = StreamTarget::from_string(s);
-                    fixInputTimestamp(ts);
+                    convertStreamTarget(ts, StreamTarget::ETargetType::tt_Timestamp);
                     start_ts_ = ts;
                 }
             }
@@ -1118,7 +1156,7 @@ public:
                 } else {
                     std::string s = p["stop"];
                     StreamTarget ts = StreamTarget::from_string(s);
-                    fixInputTimestamp(ts);
+                    convertStreamTarget(ts, StreamTarget::ETargetType::tt_Timestamp);
                     stop_ts_ = ts;
                 }
             }
