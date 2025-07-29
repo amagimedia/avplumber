@@ -90,23 +90,27 @@ public:
 
                 input_idx = i;
 
-                if (target.isFrameRelative()) {
-                    target.type = StreamTarget::ETargetType::tt_Wallclock;
-                    target.ts = av::Timestamp(current_wallclock, {1, 1000});
-
-                    if (target.frame_number != 0) {
-                        auto pNode = std::dynamic_pointer_cast<Node>(node);
-                        if (pNode) {
-                            std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
-                            if (streams_in) {
-                                streams_in->offsetStreamTargetByFrames(target, target.frame_number);
+                auto pNode = std::dynamic_pointer_cast<Node>(node);
+                if (pNode) {
+                    std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
+                    if (streams_in) {
+                        if (target.isRelative()) {
+                            target.type = StreamTarget::ETargetType::tt_Wallclock;
+                            target.ts = av::Timestamp(current_wallclock, {1, 1000});
+                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+                            if (target.isFrameRelative()) {
+                                if (target.frame_number != 0) {
+                                    streams_in->offsetStreamTargetByFrames(target, target.frame_number);
+                                }
+                            }
+                            if (target.isTimestampRelative()) {
+                                target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
                             }
                         }
+                        if (target.isTimestamp()) {
+                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+                        }
                     }
-                }
-                if (target.isTimestampRelative()) {
-                    target.type = StreamTarget::ETargetType::tt_Wallclock;
-                    target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
                 }
                 break;
             }

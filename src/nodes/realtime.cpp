@@ -36,6 +36,7 @@ protected:
     std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t eof_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
+    std::atomic_int64_t last_frame_synclock_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -301,6 +302,9 @@ public:
     }
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
+    }
+    virtual int64_t getCurrentFrameSyncclock() override {
+        return last_frame_synclock_;
     }
     bool isEof() override {
         return is_eof_;

@@ -104,7 +104,7 @@ public:
         IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
 
         if (input) {
-            input->fixInputTimestamp(target);
+            input->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
             direction = input->getPlaybackDirection();
         }
         // set-up discard until & execute seek
