@@ -13,6 +13,7 @@ protected:
     }
     AVRational timebase_ = {0, 0};
     std::atomic_bool flushing_ = false;
+    std::weak_ptr<IPlaybackControl> earliest_stream_;
 
     std::mutex seek_mutex_;
     std::vector<std::weak_ptr<IFlushAndSeek>> seek_targets_;
@@ -72,11 +73,44 @@ public:
     bool isFlushing() {
         return flushing_;
     }
+
+    std::shared_ptr<IPlaybackControl> getEarliestStream() {
+        auto earliest_stream = earliest_stream_.lock();
+        if (earliest_stream) {
+           return earliest_stream;
+        }
+
+        av::Timestamp earliest_ts;
+
+        for (const auto& weak_target : seek_targets_) {
+            auto target = weak_target.lock();
+            if (target) {
+                auto pNode = std::dynamic_pointer_cast<Node>(target);
+                if (pNode) {
+                    std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
+                    if (streams_in) {
+                        StreamTarget start_target = StreamTarget::from_timestamp({2000, {1, 1000}});
+                        if (streams_in->convertStreamTarget(start_target, StreamTarget::ETargetType::tt_SyncTime)) {
+                            if (earliest_ts.isNoPts() || start_target.ts < earliest_ts) {
+                                earliest_ts = start_target.ts;
+                                earliest_stream_ = streams_in;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return earliest_stream_.lock();
+    }
+
     virtual void flushAndSeek(StreamTarget seek_target) override {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         StreamTarget target = seek_target;
         int64_t current_wallclock = -1;
         int input_idx = -1;
+
+        auto streams_in = getEarliestStream();
 
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
@@ -90,26 +124,22 @@ public:
 
                 input_idx = i;
 
-                auto pNode = std::dynamic_pointer_cast<Node>(node);
-                if (pNode) {
-                    std::shared_ptr<IPlaybackControl> streams_in = pNode->sourceEdge()->findNodeUp<IPlaybackControl>();
-                    if (streams_in) {
-                        if (target.isRelative()) {
-                            target.type = StreamTarget::ETargetType::tt_Wallclock;
-                            target.ts = av::Timestamp(current_wallclock, {1, 1000});
-                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
-                            if (target.isFrameRelative()) {
-                                if (target.frame_number != 0) {
-                                    streams_in->offsetStreamTargetByFrames(target, target.frame_number);
-                                }
-                            }
-                            if (target.isTimestampRelative()) {
-                                target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
+                if (streams_in) {
+                    if (target.isRelative()) {
+                        target.type = StreamTarget::ETargetType::tt_Wallclock;
+                        target.ts = av::Timestamp(current_wallclock, {1, 1000});
+                        streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+                        if (target.isFrameRelative()) {
+                            if (target.frame_number != 0) {
+                                streams_in->offsetStreamTargetByFrames(target, target.frame_number);
                             }
                         }
-                        if (target.isTimestamp()) {
-                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+                        if (target.isTimestampRelative()) {
+                            target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
                         }
+                    }
+                    if (target.isTimestamp()) {
+                        streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
                     }
                 }
                 break;
@@ -142,5 +172,6 @@ public:
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         seek_targets_.push_back(target);
+        earliest_stream_.reset();
     }
 };
