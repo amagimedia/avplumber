@@ -27,6 +27,8 @@ class NodeGroup;
 class TickSource;
 
 class NodeWrapper: public std::enable_shared_from_this<NodeWrapper> {
+private:
+    void processNode(std::shared_ptr<Node> node);
 public:
     // cb(this->shared_from_this(), exit_requested)
     using OnFinishedHandler = std::function<void(std::shared_ptr<NodeWrapper>, bool)>;

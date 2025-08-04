@@ -99,7 +99,8 @@ public:
             edge.clear();
             edge.stopFlushing();
         });
-
+    }
+    void flushAndSeek_complete(StreamTarget target) override {
         std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
         IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
 
