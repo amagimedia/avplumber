@@ -168,6 +168,12 @@ public:
                 node->flushAndSeek_finish(target);
             }
         }
+        for (int i = 0; i < seek_targets_.size(); ++i) {
+            auto node = seek_targets_[i].lock();
+            if (node) {
+                node->flushAndSeek_complete(target);
+            }
+        }
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
