@@ -1,0 +1,20 @@
+
+# Video input
+node.add_start {"name":"video_input","type":"input","format":"lavfi","url":"testsrc=size=1280x720:rate=60", "dst": "video_input0"}
+node.add_start {"type": "realtime", "src": "video_input0", "dst": "video_input1", "team": "rt"}
+node.add_start {"type": "demux", "src": "video_input1", "routing": { "v:0": "video_input2" } }
+node.add_start {"name":"video_dec","type":"dec_video","src":"video_input2","dst":"video_decoded"}
+
+# Audio input: dirac pulse every second
+node.add_start {"name":"audio_input","type":"input","format":"lavfi","url":"aevalsrc='eq(mod(n,32100),0)':sample_rate=32000,asetpts=PTS*32000/32100", "dst": "audio_input0"}
+node.add_start {"type": "realtime", "src": "audio_input0", "dst": "audio_input1", "team": "rt"}
+node.add_start {"type": "demux", "src": "audio_input1", "routing": { "a:0": "audio_input2" } }
+node.add_start {"name":"audio_dec","type":"dec_audio","src":"audio_input2","dst":"audio_decoded"}
+
+
+node.add_start {"name":"audio_resample","type":"resample_audio","src":"audio_decoded","dst":"audio_resampled","dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"s16", "compensation": 0.1}
+
+node.add_start {"name":"video_sink","type":"null_sink","src":"video_decoded"}
+node.add_start {"name":"audio_sink","type":"null_sink","src":"audio_resampled"}
+
+stats.subscribe {"type":"stats.subscribe","interval":1,"name":"syncmeter_test","streams":{"video":[{"q_pre_dec":"video_input","q_post_dec":"video_decoded","decoder":"video_dec"}],"audio":[{"q_pre_dec":"audio_input","q_post_dec":"audio_resampled","decoder":"audio_dec"}]},"syncmeters":[["audio_resampled","video_decoded"]]}

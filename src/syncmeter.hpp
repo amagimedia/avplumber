@@ -112,7 +112,9 @@ namespace SyncMeter {
                 float diff_per_pixel = float(diffsum) / ( (iy2-iy1)*(ix2-ix1) );
                 if (diff_per_pixel > 255.0*0.04) { // 4% of pixels changed black->white or white->black
                     result = true;
-                    this->last_triggered_ = frame.pts();
+                    av::Timestamp ts = frame.pts();
+                    //logstream << "change detected at " << ts << " = " << ts.seconds();
+                    this->last_triggered_ = ts;
                 }
             }
             prev_frame_ = gray;
@@ -162,7 +164,8 @@ namespace SyncMeter {
             for (int i=0; i<amono.samplesCount(); i++) {
                 int sample = abs(int(samples[i])); // since -32768 overflows int16 when abs()ed, we must use at least int32
                 if ( (sample > prev_sample_) && (sample > 32768/4) ) { // at least -12dBFS & must be peak
-                    av::Timestamp ts = { asamp.pts().timestamp(timebase_) + i, timebase_ };
+                    av::Timestamp ts = { asamp.pts().timestamp(timebase_) - asamp.samplesCount() + i, timebase_ };
+                    //logstream << "peak detected at " << ts << " = " << ts.seconds() << " (pts=" << asamp.pts() << ", sample=" << i << ")";
                     if (this->last_triggered_.isNoPts() || (ts - this->last_triggered_).seconds() > 0.2) { // at least 200ms pause between triggers
                         last_triggered_ = ts;
                         result = true;
@@ -187,11 +190,13 @@ namespace SyncMeter {
     public:
         Meter(std::shared_ptr<Edge<av::AudioSamples>> audio_edge, std::shared_ptr<Edge<av::VideoFrame>> video_edge, const std::string prefix): audio_edge_(audio_edge), video_edge_(video_edge), prefix_(prefix) {
             audio_edge_->addWiretapCallback([this](const av::AudioSamples samples) {
+                //logstream << "Audio samples: " << samples.pts();
                 if (audio_proc_.processSamples(samples)) {
                     triggered();
                 }
             });
             video_edge_->addWiretapCallback([this](const av::VideoFrame frame) {
+                //logstream << "Video frame: " << frame.pts();
                 if (video_proc_.processFrame(frame)) {
                     triggered();
                 }
