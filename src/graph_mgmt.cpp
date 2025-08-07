@@ -216,7 +216,7 @@ bool NodeWrapper::interrupt(bool optional) {
     }
 }
 
-void NodeWrapper::processNode(std::shared_ptr<Node> node)
+static void processNode(std::shared_ptr<Node> node)
 {
     bool paused;
     {
