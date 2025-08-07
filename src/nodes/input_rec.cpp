@@ -778,7 +778,7 @@ public:
                 });
                 if (it == ts_offsets_.cend())
                     it--;
-                if (it->changed_at > pts)
+                while ((it->changed_at > pts) && (it != ts_offsets_.cbegin()))
                     it--;
 
                 int64_t pts_diff = 0;
