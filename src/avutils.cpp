@@ -17,6 +17,13 @@ void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align)
     frm.setComplete(true);
 }
 
+av::AudioSamples generateSilence(AVTS samples_length, AudioParameters params) {
+    auto align = av::SampleFormat::Alignment::AlignDefault;
+    av::AudioSamples r(params.sample_format, samples_length, params.channel_layout, params.sample_rate, align);
+    silenceAudioFrame(r, align);
+    return r;
+}
+
 av::Rational parseRatio(const std::string ratio) {
     AVRational r;
     if (av_parse_ratio(&r, ratio.c_str(), 1<<24, AV_LOG_MAX_OFFSET, nullptr) < 0) {

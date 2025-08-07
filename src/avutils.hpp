@@ -8,6 +8,7 @@
 #include <json.hpp>
 #include <avcpp/dictionary.h>
 #include "util.hpp"
+#include "audio_parameters.hpp"
 
 typedef int64_t AVTS;
 const av::Timestamp NOTS = {AV_NOPTS_VALUE, {0, 1}};
@@ -43,6 +44,7 @@ template<> struct TSGetter<av::VideoFrame>: public FrameTSGetter<av::VideoFrame>
 };
 
 void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align = av::SampleFormat::Alignment::AlignDefault);
+av::AudioSamples generateSilence(AVTS samples_length, AudioParameters params);
 
 av::Rational parseRatio(const std::string ratio);
 
