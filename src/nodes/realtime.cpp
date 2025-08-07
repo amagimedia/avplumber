@@ -114,13 +114,14 @@ public:
 
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
-            AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
+            av::Timestamp pkt_ts_with_tb = TSGetter<T>::getWithTB(data);
+            AVTS pkt_ts = rescaleTS(pkt_ts_with_tb, tb_to_rescale_ts_).timestamp();
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
 
                     if (input_ts.isValid() && team_) {
-                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
+                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
                         if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
                             if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
@@ -200,7 +201,7 @@ public:
                     }
                     ready_ = true;
                 }
-            } else {
+            } else { // NO PTS
                 if (isEofMarker(data)) {
                     eof_frame_wallclock_.store(last_frame_wallclock_.load());
                     is_eof_ = true;
