@@ -73,7 +73,7 @@ public:
         return flushing_;
     }
     virtual void flushAndSeek(StreamTarget seek_target) override {
-        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        std::unique_lock<decltype(seek_mutex_)> lock(seek_mutex_);
         StreamTarget target = seek_target;
         int64_t current_wallclock = -1;
         int input_idx = -1;
@@ -136,7 +136,7 @@ public:
         }
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
-        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        std::unique_lock<decltype(seek_mutex_)> lock(seek_mutex_);
         seek_targets_.push_back(target);
     }
 };
