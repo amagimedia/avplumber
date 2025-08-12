@@ -1,5 +1,5 @@
 
-node.add_start {"type":"input","url":"udp://224.0.0.1:20000", "dst": "input0", "group":"in", "auto_restart":"group"}
+node.add_start {"type":"input","url":"udp://224.0.0.1:20000", "dst": "input0", "group":"in", "auto_restart":"group", "options":{"fflags":"nofillin"}}
 node.add_start {"type": "demux", "src": "input0", "routing": { "v:0": "video_input2", "a:0": "audio_input2" } , "group":"in", "auto_restart":"group"}
 node.add_start {"name":"video_dec","type":"dec_video","src":"video_input2","dst":"video_decoded", "group":"in", "auto_restart":"group"}
 node.add_start {"name":"audio_dec","type":"dec_audio","src":"audio_input2","dst":"audio_decoded", "group":"in", "auto_restart":"group"}

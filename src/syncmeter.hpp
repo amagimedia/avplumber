@@ -164,7 +164,8 @@ namespace SyncMeter {
             for (int i=0; i<amono.samplesCount(); i++) {
                 int sample = abs(int(samples[i])); // since -32768 overflows int16 when abs()ed, we must use at least int32
                 if ( (sample > prev_sample_) && (sample > 32768/4) ) { // at least -12dBFS & must be peak
-                    av::Timestamp ts = { asamp.pts().timestamp(timebase_) - asamp.samplesCount() + i, timebase_ };
+                    //av::Timestamp ts = { asamp.pts().timestamp(timebase_) - asamp.samplesCount() + i, timebase_ };
+                    av::Timestamp ts = { asamp.pts().timestamp(timebase_) + i, timebase_ };
                     //logstream << "peak detected at " << ts << " = " << ts.seconds() << " (pts=" << asamp.pts() << ", sample=" << i << ")";
                     if (this->last_triggered_.isNoPts() || (ts - this->last_triggered_).seconds() > 0.2) { // at least 200ms pause between triggers
                         last_triggered_ = ts;

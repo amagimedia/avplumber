@@ -61,6 +61,8 @@ protected:
         if (forward_channels_) {
             dst_params_.channel_layout = src_params_.channel_layout;
         }
+        logstream << "  " << opts.toString('=', ',');
+
         resampler_ = make_unique<av::AudioResampler>(dst_params_.channel_layout, dst_params_.sample_rate, dst_params_.sample_format, src_params_.channel_layout, src_params_.sample_rate, src_params_.sample_format, opts);
     }
     void out(av::AudioSamples &out_samples) {
@@ -87,8 +89,8 @@ protected:
         drainResampler(true);
         resampler_ = nullptr;
     }
-    void drainResampler(bool output_incomplete = false, av::Timestamp compensation = av::Timestamp(0, {1,1})) {
-        AVTS delta_samp = rescaleTS(compensation, dst_params_.timebase()).timestamp();
+    void drainResampler(bool output_incomplete = false/* , av::Timestamp compensation = av::Timestamp(0, {1,1}) */) {
+        /* AVTS delta_samp = rescaleTS(compensation, dst_params_.timebase()).timestamp();
         if (delta_samp < 0) {
             size_t req_samples = -delta_samp;
             av::AudioSamples to_throw(dst_params_.sample_format, req_samples, dst_params_.channel_layout, dst_params_.sample_rate);
@@ -111,7 +113,7 @@ protected:
                 out(to_out_);
                 to_out_ = av::AudioSamples(nullptr);
             }
-        }
+        } */
         
         while(true) {
             // it seems that we need to drain all samples
@@ -168,7 +170,7 @@ public:
             bool discontinuity = discodet_.check(in_samples.pts());
             if (discontinuity) {
                 logstream << "Detected discontinuity: " << next_out_ts_ << " -> " << in_samples.pts();
-                //next_out_ts_ = NOTS;
+                next_out_ts_ = NOTS;
             }
             if (sourceChanged(in_samples) || discontinuity) {
                 flushInternal();
@@ -178,7 +180,6 @@ public:
                 // Drain the internal audio buffer to prevent negative number of samples inside resampler
                 to_out_ = av::AudioSamples(nullptr);
 
-                createResampler();
                 drifts_ = std::vector<double>(drifts_size_, 0);
                 drift_index_ = 0;
                 drifted_frames_ = 0;
@@ -189,6 +190,7 @@ public:
                 av::Timestamp outts = rescaleTS(in_samples.pts(), dst_params_.timebase());
                 if (!next_out_ts_.isValid()) {
                     next_out_ts_ = outts;
+                    //next_out_ts_ = addTS(outts, {-swr_get_delay(resampler_->raw(), dst_params_.sample_rate), dst_params_.timebase()});
                 } else {
                     av::Timestamp drift = addTSSameTB(rescaleTS(next_out_ts_, timebase_), rescaleTS(negateTS(outts), timebase_));
                     double drift_s = drift.seconds();
@@ -196,6 +198,7 @@ public:
                     really_drift = true; // assume that drift occurs when source changes
                     logstream << "Recreated resampler. Input: " << prev_params << " -> " << src_params_ << " Output: " << dst_params_ << ", Drift: " << drift_s << " s";
                 }
+                createResampler();
             }
             
             // add current drift to averaging table:
@@ -208,7 +211,7 @@ public:
                 av::Timestamp in_ts = in_samples.pts();
                 //cur_drift_r = addTS(in_samples.pts(), negateTS(next_out_ts_), av::Timestamp(-swr_get_delay(resampler_->raw(), dst_params_.sample_rate), dst_params_.timebase()));
 
-                int64_t ts = int64_t(in_ts.timestamp()) * uint64_t(dst_params_.sample_rate);
+                int64_t ts = int64_t(in_ts.timestamp(src_params_.timebase())) * uint64_t(dst_params_.sample_rate);
                 int64_t next_pts_raw = swr_next_pts(resampler_->raw(), ts);
                 av::Timestamp next_pts(next_pts_raw / uint64_t(dst_params_.sample_rate), src_params_.timebase());
                 //cur_drift_r = addTS(in_ts, negateTS(next_pts));
@@ -263,22 +266,22 @@ public:
             // apparently swr_inject_silence uses input sample rate,
             // and swr_drop_output uses output sample rate
             
-            av::Timestamp compensation = av::Timestamp(0, {1,1});
+            //av::Timestamp compensation = av::Timestamp(0, {1,1});
             
-            if (/*(comp_samp_==0) &&*/ really_drift && (cur_drift > 0)) {
+            if ((comp_samp_==0) && really_drift && (cur_drift > 0)) {
                 // input PTS too big / output PTS too small
                 // inject silence to bump output PTS
                 //compensation = av::Timestamp(cur_drift * dst_params_.sample_rate, {1, dst_params_.sample_rate});
-                /*int samp_count = cur_drift * src_params_.sample_rate;
+                int samp_count = cur_drift * src_params_.sample_rate;
                 if (samp_count > enc_frame_size_) {
                     samp_count = enc_frame_size_;
                     now_compensating_ = true;
-                }*/
-                //logstream << "output PTSes too small, injecting silence, " << samp_count << " samples";
-                /*swr_inject_silence(resampler_->raw(), samp_count);
+                }
+                logstream << "output PTSes too small, injecting silence, " << samp_count << " samples";
+                swr_inject_silence(resampler_->raw(), samp_count);
                 if (inside_resampler_.isValid()) {
                     inside_resampler_ = addTS(inside_resampler_, {samp_count, {1, src_params_.sample_rate} });
-                }*/
+                }
             }
             
             //in_ts_ = in_samples.pts();
@@ -290,22 +293,22 @@ public:
             }
             
             
-            if (/*(comp_samp_==0) &&*/ really_drift && (cur_drift < 0)) {
+            if ((comp_samp_==0) && really_drift && (cur_drift < 0)) {
                 // input PTS too small / output PTS too big
                 //compensation = av::Timestamp(cur_drift * dst_params_.sample_rate, {1, dst_params_.sample_rate});
-                /*int samp_count = -cur_drift * dst_params_.sample_rate;
+                int samp_count = -cur_drift * dst_params_.sample_rate;
                 if (samp_count > enc_frame_size_) {
                     samp_count = enc_frame_size_;
                     now_compensating_ = true;
-                }*/
-                //logstream << "output PTSes too large, dropping output, " << samp_count << " samples";
-                /*swr_drop_output(resampler_->raw(), samp_count);
+                }
+                logstream << "output PTSes too large, dropping output, " << samp_count << " samples";
+                swr_drop_output(resampler_->raw(), samp_count);
                 if (inside_resampler_.isValid()) {
                     inside_resampler_ = addTS(inside_resampler_, {-samp_count, {1, dst_params_.sample_rate} });
-                }*/
+                }
             }
             //logstream << "Resampler delay in->out: " << resampler_->delay() << " samp";
-            drainResampler(false, compensation);
+            drainResampler(false);
         } else {
             logstream << "no input samples, flushing";
             flush();

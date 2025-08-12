@@ -513,10 +513,10 @@ protected:
         }
         if (ts.timestamp() != next_ts_.timestamp()) {
             double diff = fabs((ts.timestamp() - next_ts_.timestamp()) * timebase_.getDouble());
-            if (diff < max_streams_diff_) {
+            /* if (diff < max_streams_diff_) {
                 // ignore minor clock fluctuations
                 return false;
-            }
+            } */ // XXX
             logstream << "Discontinuity: " << next_ts_ << " -> " << ts << " diff = " << diff << "s" << std::endl;
             return true;
         } else {
@@ -768,6 +768,9 @@ public:
                     setCard(false);
                     handleWallclockOffset(ts, frame_wallclock);
                     setFrameTimestamps(frm, frm.pts(), ts, frame_wallclock);
+                    if (next_ts_.isValid() && abs(addTS(ts, negateTS(next_ts_)).seconds()) > 0.001) {
+                        logstream << "BUG: outputFrame not continuous, detected drift " << next_ts_ << " -> " << ts << ", diff = " << addTS(ts, negateTS(next_ts_)).seconds() << "s";
+                    }
                     outputFrame(frm, ts); // we don't need overflow prevention logic here because we're outside the lock - we can block without causing Bad Things(TM)
                     last_no_card_pts_ = ts;
                     if (freezable()) last_frame_ = frm;
