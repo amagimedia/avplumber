@@ -14,6 +14,7 @@ private:
     int total_out_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
+
     void setLast(T &frm, bool unused) {
         if (last_unused_) {
             // if previous frame wasn't used and we have to overwrite it, increase dropped frames count
@@ -97,14 +98,10 @@ public:
                         // duplicate previous frame
                         while (in_ts > next_ts_) {
                             if (!last_unused_) {
-                                // increase number of duplicated frames only if last_frame_ was already used
-                                duplicated_++;
                                 // if used more than once, remove side data to prevent CC duplication
                                 av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
                             }
-                            last_unused_ = false;
                             last_frame_.setPts(next_ts_);
-                            total_out_++;
 
                             if (!this->sink_->put(last_frame_, true)) {
                                 if (!ticks) {
@@ -112,6 +109,13 @@ public:
                                     this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
                                 }
                                 return;
+                            } else {
+                                if (!last_unused_) {
+                                    // increase number of duplicated frames only if last_frame_ was already used
+                                    duplicated_++;
+                                }
+                                last_unused_ = false;
+                                total_out_++;
                             }
                             next_ts_ = addTS(next_ts_, frame_delta_);
                         }
