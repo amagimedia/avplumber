@@ -689,10 +689,10 @@ public:
         if (seeked && !auto_resume_after_seek_) {
             seek_resume_.wait();
         }
+        bool was_just_started = just_started_;
         if (!paused_read_) {
             if (pause_team_ && pause_team_->isPaused()) {
                 paused_read_ = seeked || just_started_;
-                just_started_ = false;
                 if (!paused_read_) {
                     // graph is paused, wait for resume
                     pause_team_->waitForResume(3);
@@ -753,7 +753,7 @@ public:
 
             if (!paused_read_ && (speed_skip_frames_ > 0) && (play_direction_ == EPlaybackDirection::pd_Forward) && (pkt.streamIndex() == video_stream_)) {
                 if (pkt.isKeyPacket()) {
-                    if (speed_skipped_frames_++ < speed_skip_frames_) {
+                    if (!was_just_started && (speed_skipped_frames_++ < speed_skip_frames_)) {
                         // skip this video frame
                         return;
                     }
@@ -763,6 +763,8 @@ public:
                     speed_skip_frames_ = 0;
                 }
             }
+
+            just_started_ = false;
 
             if (first_video_ts_.timestamp() != 0) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
