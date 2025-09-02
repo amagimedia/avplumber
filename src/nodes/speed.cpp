@@ -14,7 +14,7 @@ protected:
 public:
     using NodeSISO<T, T>::NodeSISO;
 
-    void rescaleFrameTS(T* frame) {
+    bool rescaleFrameTS(T* frame) {
         av::Timestamp orig_pts = frame->pts();
         av::Timestamp in_pts = orig_pts;
         if (timebase_.getNumerator() && timebase_.getDenominator()) {
@@ -24,7 +24,9 @@ public:
         if (out_pts.isValid()) {
             frame->setTimeBase(av::Rational());
             frame->setPts(out_pts);
+            return true;
         }
+        return false;
     }
 
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
@@ -47,7 +49,17 @@ public:
             av::Timestamp orig_pts = frame.pts();
 
             if (!orig_pts.isNoPts()) {
-                rescaleFrameTS(&frame);
+                if (!rescaleFrameTS(&frame)) {
+                    // frame dropped
+                    this->source_->pop();
+                    if (!ticks) {
+                        // process next packet
+                        this->yieldAndProcess();
+                    } else {
+                        process_next = true;
+                    }
+                    return;
+                }
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
                     // store orifinal frame PTS
