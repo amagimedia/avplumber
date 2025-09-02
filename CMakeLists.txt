@@ -129,7 +129,7 @@ ExternalProject_Add(
     klvanc
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklvanc
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc
-    CONFIGURE_COMMAND cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklvanc && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc/configure --enable-shared=no --enable-static
+    CONFIGURE_COMMAND cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc && git clean -xdf && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklvanc && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklvanc/configure --enable-shared=no --enable-static
     BUILD_COMMAND cd ${CMAKE_BINARY_DIR}/deps/libklvanc && make
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs/libklvanc.a
@@ -139,7 +139,7 @@ ExternalProject_Add(
     klscte35
     PREFIX ${CMAKE_BINARY_DIR}/deps/libklscte35
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35
-    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35 && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35/configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc
+    CONFIGURE_COMMAND export CFLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklvanc/src/.libs && cd ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35 && git clean -xdf && ./autogen.sh --build && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && ${CMAKE_CURRENT_SOURCE_DIR}/deps/libklscte35/configure --enable-shared=no --libdir=${CMAKE_BINARY_DIR}/deps/libklvanc
     BUILD_COMMAND export CFLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/deps/include && export LDFLAGS=-L${CMAKE_BINARY_DIR}/deps/libklscte35 && cd ${CMAKE_BINARY_DIR}/deps/libklscte35 && make
     INSTALL_COMMAND ""
     DEPENDS klvanc
