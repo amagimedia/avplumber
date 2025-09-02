@@ -47,6 +47,11 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
+            int orig_sample_rate = 0;
+            if (frame.raw()) {
+                orig_sample_rate = frame.raw()->sample_rate;
+                frame.raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
+            }
 
             if (!orig_pts.isNoPts()) {
                 if (!rescaleFrameTS(&frame)) {
@@ -84,6 +89,9 @@ public:
                     // put returned false, no space in queue
                     frame.setTimeBase(av::Rational());
                     frame.setPts(orig_pts);
+                    if (frame.raw()) {
+                        frame.raw()->sample_rate = orig_sample_rate;
+                    }
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
