@@ -274,7 +274,7 @@ public:
         AVTS wclk_diff = exit_wclk - now_ts_wclk;
         if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
     }
-    template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
+    void setLastFrame(av::VideoFrame* frm) {
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
@@ -291,6 +291,13 @@ public:
         auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
         if (frame_wc) {
             last_frame_wallclock_ = std::atoll(frame_wc->value);
+        }
+    }
+    void setLastFrame(av::AudioSamples* frm) {
+        // read only frame_ts
+        auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
+        if (frame_ts) {
+            last_frame_timestamp_ = std::atoll(frame_ts->value);
         }
     }
     template<typename T2> void setLastFrame(T2) {
