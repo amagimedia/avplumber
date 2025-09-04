@@ -396,6 +396,9 @@ public:
     av::FormatContext& ctx() {
         return ictx_;
     }
+    virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) override {
+        av_dict_set(&frame.raw()->metadata, "frame_ts", std::to_string(frame.pts().timestamp({1, 1000})).c_str(), 0);
+    }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
         av::Timestamp video_ts;
         av::Timestamp input_ts;
@@ -764,7 +767,9 @@ public:
                 }
             }
 
-            just_started_ = false;
+            if (pkt.streamIndex() == video_stream_) {
+                just_started_ = false;
+            }
 
             if (first_video_ts_.timestamp() != 0) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));

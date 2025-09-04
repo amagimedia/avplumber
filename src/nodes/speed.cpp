@@ -21,6 +21,12 @@ public:
             in_pts = rescaleTS(in_pts, timebase_);
         }
         av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
+
+        if (frame->raw()->sample_rate != 0) {
+            int orig_sample_rate = 48000;
+            frame->raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
+        }
+
         if (out_pts.isValid()) {
             frame->setTimeBase(av::Rational());
             frame->setPts(out_pts);
@@ -47,11 +53,7 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
-            int orig_sample_rate = 0;
-            if (frame.raw()) {
-                orig_sample_rate = frame.raw()->sample_rate;
-                frame.raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
-            }
+            int orig_sample_rate = frame.raw()->sample_rate;
 
             if (!orig_pts.isNoPts()) {
                 if (!rescaleFrameTS(&frame)) {
@@ -166,8 +168,7 @@ public:
             T* p = edge->peek();
             if (p) {
                 auto frame_wc = av_dict_get(p->raw()->metadata, "frame_ts", nullptr, 0);
-                auto frame_no = av_dict_get(p->raw()->metadata, "frame_no", nullptr, 0);
-                if (frame_wc && frame_no) {
+                if (frame_wc) {
                     int64_t f_wc = atoll(frame_wc->value);
                     // rescale PTS again with current speed
                     for (const auto& it: scaled_pts_) {
@@ -175,7 +176,10 @@ public:
                             // found original PTS
                             p->setTimeBase(av::Rational());
                             p->setPts(std::get<1>(it));
-                            rescaleFrameTS(p);
+                            if (!rescaleFrameTS(p)) {
+                                // drop frame
+                                edge->pop();
+                            }
                             team_->setLastPTS(std::get<1>(it));
                             break;
                         }

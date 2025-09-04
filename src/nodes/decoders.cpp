@@ -168,7 +168,7 @@ public:
         //input_hold_ = nullptr;
         this->finished_ = true;
     }
-    template<typename T=OutputFrame, typename=decltype(&T::pixelFormat)> void setFrameTimestamps(OutputFrame& frm) {
+    void setFrameTimestamps(OutputFrame& frm) {
         auto pb = playback_hold_.lock();
         if (!pb) {
             playback_hold_ = this->template findNodeUp<IPlaybackControl>();
@@ -177,8 +177,6 @@ public:
         if (pb) {
             pb->setFrameMetadataTimestamps(frm);
         }
-    }
-    template<typename T> void setFrameTimestamps(T) {
     }
     virtual void process() {
         // check if there is something in flush queue
