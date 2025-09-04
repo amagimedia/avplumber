@@ -23,8 +23,12 @@ public:
         av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
 
         if (frame->raw()->sample_rate != 0) {
-            int orig_sample_rate = 48000;
-            frame->raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
+            // Try to read sample_rate from frame metadata, if present
+            auto sample_rate_entry = av_dict_get(frame->raw()->metadata, "sample_rate", nullptr, 0);
+            if (sample_rate_entry) {
+                int orig_sample_rate = std::atoi(sample_rate_entry->value);
+                frame->raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
+            }
         }
 
         if (out_pts.isValid()) {

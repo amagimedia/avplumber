@@ -398,6 +398,7 @@ public:
     }
     virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) override {
         av_dict_set(&frame.raw()->metadata, "frame_ts", std::to_string(frame.pts().timestamp({1, 1000})).c_str(), 0);
+        av_dict_set(&frame.raw()->metadata, "sample_rate", std::to_string(frame.raw()->sample_rate).c_str(), 0);
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
         av::Timestamp video_ts;
