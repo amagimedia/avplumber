@@ -36,7 +36,7 @@ protected:
     std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t eof_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
-    std::weak_ptr<IPlaybackControl> playback_control_;
+    std::atomic_int64_t last_frame_synclock_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -115,13 +115,14 @@ public:
 
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
-            AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
+            av::Timestamp pkt_ts_with_tb = TSGetter<T>::getWithTB(data);
+            AVTS pkt_ts = rescaleTS(pkt_ts_with_tb, tb_to_rescale_ts_).timestamp();
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
 
                     if (input_ts.isValid() && team_) {
-                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
+                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
                         if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
                             if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
@@ -201,7 +202,7 @@ public:
                     }
                     ready_ = true;
                 }
-            } else {
+            } else { // NO PTS
                 if (isEofMarker(data)) {
                     eof_frame_wallclock_.store(last_frame_wallclock_.load());
                     is_eof_ = true;
@@ -273,7 +274,7 @@ public:
         AVTS wclk_diff = exit_wclk - now_ts_wclk;
         if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
     }
-    template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
+    void setLastFrame(av::VideoFrame* frm) {
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
@@ -292,6 +293,13 @@ public:
             last_frame_wallclock_ = std::atoll(frame_wc->value);
         }
     }
+    void setLastFrame(av::AudioSamples* frm) {
+        // read only frame_ts
+        auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
+        if (frame_ts) {
+            last_frame_timestamp_ = std::atoll(frame_ts->value);
+        }
+    }
     template<typename T2> void setLastFrame(T2) {
     }
     virtual int64_t getCurrentFrameNumber() override {
@@ -302,6 +310,9 @@ public:
     }
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
+    }
+    virtual int64_t getCurrentFrameSyncclock() override {
+        return last_frame_synclock_;
     }
     bool isEof() override {
         return is_eof_;

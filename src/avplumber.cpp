@@ -202,6 +202,14 @@ public:
             // get argument:
             std::getline(in, arg);
 
+            auto mngr = manager_;
+            if (!mngr) {
+                out << "400 manager not ready: " << cmd << "\n";
+                logstream << "Command " << cmd << " " << arg << " failed: manager not ready";
+                all_good = false;
+                continue;
+            }
+
             // handle special commands:
             if (cmd == "retry") {
                 do {
@@ -728,6 +736,8 @@ void AVPlumber::obsTick() {
 }
 
 void AVPlumber::get_pause_team_name() {
+    if (!impl_ || !impl_->manager())
+        return;
     auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
     if (node) {
         auto p = node->parameters();
@@ -738,6 +748,8 @@ void AVPlumber::get_pause_team_name() {
 }
 
 void AVPlumber::get_realtime_team_name() {
+    if (!impl_ || !impl_->manager())
+        return;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         auto p = node->parameters();
@@ -759,6 +771,8 @@ void AVPlumber::obs_pause() {
 }
 
 bool AVPlumber::obs_is_paused() {
+    if (!impl_ || !impl_->manager())
+        return false;
     auto node = impl_->manager()->node_if_exists(PAUSE_NODE);
     if (node) {
         auto p = node->parameters();
@@ -772,6 +786,8 @@ bool AVPlumber::obs_is_paused() {
 }
 
 void AVPlumber::obs_play() {
+    if (!impl_ || !impl_->manager())
+        return;
     if (PAUSE_TEAM_.empty()) {
         get_pause_team_name();
     }
@@ -783,6 +799,8 @@ void AVPlumber::obs_play() {
 }
 
 int64_t AVPlumber::obs_get_time() {
+    if (!impl_ || !impl_->manager())
+        return -1;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         auto n = node->node();
@@ -793,7 +811,7 @@ int64_t AVPlumber::obs_get_time() {
             }
         }
     }
-    return 0;
+    return -1;
 }
 
 void AVPlumber::obs_set_time(int64_t ms) {
@@ -812,12 +830,16 @@ void AVPlumber::obs_stop() {
 }
 
 void AVPlumber::obs_restart() {
+    if (!impl_)
+        return;
     impl_->stopGroupAndWait("g1");
     impl_->clearAllQueues();
     executeCommandsFromString("group.start g1");
 }
 
 int64_t AVPlumber::obs_get_duration() {
+    if (!impl_ || !impl_->manager())
+        return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
         auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
@@ -828,9 +850,11 @@ int64_t AVPlumber::obs_get_duration() {
         }
     }
 
-    return 0;
+    return -1;
 }
 double AVPlumber::obs_get_speed() {
+    if (!impl_ || !impl_->manager())
+        return 1.00;
     auto node = impl_->manager()->node_if_exists(SPEED_NODE);
     if (node) {
         auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
@@ -843,6 +867,8 @@ double AVPlumber::obs_get_speed() {
     return 1.00;
 }
 bool AVPlumber::obs_is_eof() {
+    if (!impl_ || !impl_->manager())
+        return false;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         auto n = node->node();

@@ -59,7 +59,7 @@ public:
         
         if (timeshift_history_file_.is_open()) {
             if (first_entry_) {
-                if ((input_pts_offset == 0) && (wallclock_offset == 0) && (output_pts_offset == 0)) {
+                if (timeshift_.isNoPts() || wallclock_offset_.isNoPts()) {
                     // do not write, no valid information in this entry
                     return;
                 }
@@ -106,7 +106,7 @@ public:
             throw Error("NOPTS supplied as first PTS");
         }
         timeshift_ = {rtcTS(false).timestamp(timebase_) - ts.timestamp(timebase_), timebase_};
-        //reportTimeshiftChange();
+        reportTimeshiftChange();
     }
     void setTS(const av::Timestamp ts) {
         if ( (!clk_.isValid()) || (ts > clk_) ) {
