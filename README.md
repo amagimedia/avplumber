@@ -8,10 +8,12 @@ avplumber was created because we were experienced with FFmpeg and wanted to have
 * filter video (using FFmpeg's filter graph syntax) in multiple threads. It is possible since FFmpeg 6.0, but we needed this feature long before its release.
 * maintain output timestamps continuity **and** audio-video synchronization even when input timestamps jump.
 * insert fallback slate ("we'll be back shortly") when input stream breaks.
+* monitor input stream health, analyzing speed, actual FPS & sample rate, audio levels.
+* reconfigure processing graph on the fly.
 
 Furthermore, it was designed to allow easy prototyping of new video & audio processing blocks (nodes in graph) without writing so much boilerplate code that is needed in case of libavfilter or GStreamer.
 
-So does it replace FFmpeg in all use cases? Not at all. It is targetted at live use - currently it can't seek the input at all. Also, subtitles aren't supported due to limitations of the underlying library - avcpp.
+However, it does not replace FFmpeg in all use cases. For example, subtitles aren't supported due to limitations of the underlying library - avcpp.
 
 Curious about history and applications of this project? **Read [Story of avplumber — open source multimedia streaming engine from Amagi](https://medium.com/amagi-engineering/story-of-avplumber-open-source-multimedia-streaming-engine-from-amagi-fc649cce2637)** at [Amagi Engineering](https://medium.com/amagi-engineering) blog.
 
@@ -742,8 +744,7 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
     -   `true`: if input streams are present when starting the sentinels,
         forward relative shifts of their first packets (i.e. A-V offset)
         to output.
-    -   `false` (default): start all output streams at exact PTS = 10
-        seconds (hardcoded in `PTSCorrectorCommon` class)
+    -   `false` (default): start all output streams at exact PTS = `start_ts`
 -   `max_streams_diff` (float, seconds) - default `0.001`, tolerance in seconds
 -   `start_ts` (float, seconds) - default `10`, first output timestamp
 -   `lock_timeshift` (bool) - after receiving first PTS, maintain constant input-output PTS difference. Disabled by default. Enable only if you're sure that input timestamps are synchronized to real-time clock.
