@@ -125,20 +125,19 @@ public:
                 input_idx = i;
 
                 if (streams_in) {
-                    if (target.isRelative()) {
+                    if (seek_target.isRelative()) {
                         target.type = StreamTarget::ETargetType::tt_Wallclock;
                         target.ts = av::Timestamp(current_wallclock, {1, 1000});
-                        streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
-                        if (target.isFrameRelative()) {
-                            if (target.frame_number != 0) {
-                                streams_in->offsetStreamTargetByFrames(target, target.frame_number);
+                        if (seek_target.isFrameRelative()) {
+                            if (seek_target.frame_number != 0) {
+                                streams_in->offsetStreamTargetByFrames(target, seek_target.frame_number);
                             }
                         }
-                        if (target.isTimestampRelative()) {
-                            target.ts = addTS(target.ts, av::Timestamp(current_wallclock, {1, 1000}));
+                        if (seek_target.isTimestampRelative()) {
+                            target.ts = addTS(seek_target.ts, av::Timestamp(current_wallclock, {1, 1000}));
                         }
                     }
-                    if (target.isTimestamp()) {
+                    if (seek_target.isTimestamp()) {
                         streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
                     }
                 }
@@ -146,7 +145,7 @@ public:
             }
         }
 
-        if ((input_idx < 0) && target.isRelative()) {
+        if ((input_idx < 0) && seek_target.isRelative()) {
             throw Error("Relative seek not possible. Can not determine current time.");
         }
 
