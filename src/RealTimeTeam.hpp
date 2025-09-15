@@ -14,6 +14,7 @@ protected:
     AVRational timebase_ = {0, 0};
     std::atomic_bool flushing_ = false;
     std::weak_ptr<IPlaybackControl> earliest_stream_;
+    bool first_ = true;
 
     std::mutex seek_mutex_;
     std::vector<std::weak_ptr<IFlushAndSeek>> seek_targets_;
@@ -50,7 +51,16 @@ public:
     void reset() {
         auto lock = getLock();
         offset_.store(AV_NOPTS_VALUE, std::memory_order_relaxed);
+        first_ = true;
         logstream << "realtime team reset";
+    }
+    void setFirst(bool value) {
+        auto lock = getLock();
+        first_ = value;
+    }
+    bool isFirst() {
+        auto lock = getLock();
+        return first_;
     }
     AVTS getOffset(AVTS local_offset = AV_NOPTS_VALUE) {
         AVTS r = offset_.load(std::memory_order_acquire);
