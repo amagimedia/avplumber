@@ -6,7 +6,7 @@
 template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp {
 protected:
     bool ready_ = false;
-    bool first_ = true;
+    
     bool no_wait_notified_ = false;
     AVTS max_no_wait_period_ = INT64_MAX;
     AVTS last_wait_ = 0;
@@ -129,7 +129,7 @@ public:
                                 team_->startFlushing();
                             }
                             ready_ = false;
-                            first_ = true;
+                            if (team_) team_->setFirst(true);
                             this->source_->pop();
                             this->yieldAndProcess();
                             return;
@@ -181,7 +181,7 @@ public:
                                 no_wait_notified_ = true;
                             }
                             ready_ = false;
-                            first_ = true;
+                            if (team_) team_->setFirst(true);
                         }
                     } else {
                         // diff >= discontinuity_threshold_
@@ -190,13 +190,13 @@ public:
                             team_->reset();
                         }
                         ready_ = false;
-                        first_ = true;
+                        if (team_) team_->setFirst(true);
                     }
                 }
                 if ((!ready_) && consume) {
                     // offset_ must be set only when consuming, because it marks sync point
-                    offset_ = (pkt_ts - now_ts) - (first_ ? initial_jitter_margin_ : jitter_margin_);
-                    first_ = false;
+                    offset_ = (pkt_ts - now_ts) - ((team_ && team_->isFirst()) ? initial_jitter_margin_ : jitter_margin_);
+                    if (team_) team_->setFirst(false);
                     if (team_) {
                         offset_ = team_->updateOffset(offset_);
                     }
