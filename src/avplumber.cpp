@@ -724,6 +724,8 @@ void AVPlumber::setObsSource(obs_source_t* obssrc) {
 }
 
 void AVPlumber::unsetObsSourceAndWait() {
+    if (!impl_ || !impl_->manager())
+        return;
     InstanceData &inst = impl_->manager()->instanceData();
     inst.obs_source_.store(nullptr);
     while (inst.obs_source_used_by_.load()!=0) {
@@ -732,6 +734,8 @@ void AVPlumber::unsetObsSourceAndWait() {
 }
 
 void AVPlumber::obsTick() {
+    if (!impl_)
+        return;
     impl_->tick();
 }
 
