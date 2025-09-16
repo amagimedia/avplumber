@@ -352,11 +352,8 @@ protected:
                         auto cu = global_cu;
                         auto titer = global_textures.find(tex);
                         if (titer != global_textures.end()) {
-                            CHECK_CU(cu->cuCtxPushCurrent(global_cu_ctx));
                             logstream << "unregistering resource associated with our texture";
                             CHECK_CU(cu->cuGraphicsUnregisterResource(titer->second.cu_res));
-                            CUcontext dummy;
-                            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
                             global_textures.erase(titer);
                         }
                     };
@@ -392,8 +389,6 @@ protected:
                     CHECK_CU(cu->cuStreamSynchronize(stream));
                     CHECK_CU(cu->cuStreamDestroy(stream));
                     
-                    CUcontext dummy;
-                    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
                     if (self.debug_timing_) {
                         logstream << "buffer_to_texture end";
                     }
