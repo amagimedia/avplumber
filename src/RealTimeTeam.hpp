@@ -14,6 +14,7 @@ protected:
     AVRational timebase_ = {0, 0};
     std::atomic_bool flushing_ = false;
     std::weak_ptr<IPlaybackControl> earliest_stream_;
+    std::vector<std::shared_ptr<RealTimeTeam>> linked_teams_;
     bool first_ = true;
 
     std::mutex seek_mutex_;
@@ -29,7 +30,7 @@ public:
             }
         }
     }
-    AVTS updateOffset(AVTS local_offset) {
+    AVTS updateOffsetNonRecursive(AVTS local_offset) {
         auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
@@ -48,19 +49,49 @@ public:
             return offset;
         }
     }
-    void reset() {
+    AVTS updateOffset(AVTS local_offset) {
+        AVTS offset = updateOffsetNonRecursive(AVTS local_offset);
+        for (auto team: linked_teams_) {
+            offset = team->updateOffsetNonRecursive(offset);
+        }
+        return offset;
+    }
+    void resetNonRecursive() {
         auto lock = getLock();
         offset_.store(AV_NOPTS_VALUE, std::memory_order_relaxed);
         first_ = true;
         logstream << "realtime team reset";
     }
-    void setFirst(bool value) {
+    void reset() {
+        resetNonRecursive();
+        for (auto team: linked_teams_) {
+            team->resetNonRecursive();
+        }
+    }
+    void setFirstNonRecursive(bool value) {
         auto lock = getLock();
         first_ = value;
     }
-    bool isFirst() {
+    void setFirst(bool value) {
+        setFirstNonRecursive(value);
+        for (auto team: linked_teams_) {
+            team->setFirstNonRecursive(value);
+        }
+    }
+    bool isFirstNonRecursive() {
         auto lock = getLock();
         return first_;
+    }
+    bool isFirst() {
+        if (!isFirstNonRecursive()) {
+            return false;
+        }
+        for (auto team: linked_teams_) {
+            if (!team->isFirstNonRecursive()) {
+                return false;
+            }
+        }
+        return true;
     }
     AVTS getOffset(AVTS local_offset = AV_NOPTS_VALUE) {
         AVTS r = offset_.load(std::memory_order_acquire);
