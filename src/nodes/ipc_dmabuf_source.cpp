@@ -39,7 +39,7 @@ protected:
     static constexpr size_t EVENT_INDEX = 2;
 public:
     UnixFdpassReceiver(const std::string &path): path_(path) {
-        event_fd_ = eventfd(1, 0);
+        event_fd_ = eventfd(0, 0);
         pollfds_[LISTEN_INDEX].events = POLLIN;
         pollfds_[LISTEN_INDEX].revents = 0;
         pollfds_[CONN_INDEX].events = POLLIN;
@@ -106,12 +106,18 @@ public:
         while (true) {
             // Update conn pollfd each iteration
             pollfds_[CONN_INDEX].fd = conn_fd_;
+            pollfds_[LISTEN_INDEX].revents = 0;
+            pollfds_[CONN_INDEX].revents = 0;
+            pollfds_[EVENT_INDEX].revents = 0;
             int pret = poll(pollfds_, 3, -1);
             if (pret < 0) {
                 if (errno == EINTR) continue;
                 throw Error("poll() failed on unix socket");
             }
             if (pollfds_[EVENT_INDEX].revents & POLLIN) {
+                pollfds_[EVENT_INDEX].revents = 0;
+                int64_t blackhole;
+                ::read(event_fd_, &blackhole, sizeof blackhole);
                 return false;
             }
             // Accept new connection if pending
@@ -123,12 +129,14 @@ public:
                     if (cflags >= 0) fcntl(conn, F_SETFL, cflags | O_NONBLOCK);
                     if (conn_fd_ >= 0) close(conn_fd_);
                     conn_fd_ = conn;
+                    pollfds_[CONN_INDEX].fd = conn_fd_;
                 }
+                pollfds_[LISTEN_INDEX].revents = 0;
             }
             if (conn_fd_ < 0) {
                 continue;
             }
-            if (pollfds_[CONN_INDEX].revents & (POLLIN | POLLHUP | POLLERR)) {
+            if (pollfds_[CONN_INDEX].revents & (POLLIN)) {
                 memset(&msg, 0, sizeof(msg));
                 msg.msg_iov = &iov;
                 msg.msg_iovlen = 1;
@@ -139,6 +147,7 @@ public:
                     // connection reset or EOF: close and wait for next
                     close(conn_fd_);
                     conn_fd_ = -1;
+                    pollfds_[CONN_INDEX].fd = -1;
                     continue;
                 }
                 // Ancillary data
@@ -162,6 +171,11 @@ public:
                     return false;
                 }
                 return true;
+            }
+            if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR)) {
+                close(conn_fd_);
+                conn_fd_ = -1;
+                pollfds_[CONN_INDEX].fd = -1;
             }
         }
     }
@@ -194,7 +208,7 @@ public:
 
         AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)av_mallocz(sizeof(AVDRMFrameDescriptor));
         if (!desc) {
-            close(dmabuf_fd);
+            if (dmabuf_fd >= 0) close(dmabuf_fd);
             logstream << "av_mallocz failed for DRM descriptor";
             return;
         }
@@ -227,7 +241,7 @@ public:
                 av_free(d);
             }, desc, 0);
         if (!buf) {
-            close(dmabuf_fd);
+            if (dmabuf_fd >= 0) close(dmabuf_fd);
             av_free(desc);
             logstream << "av_buffer_create failed for DRM descriptor";
             return;
