@@ -12,6 +12,7 @@ extern "C" {
 #include <fcntl.h>
 #include <errno.h>
 #include <cstring>
+#include <sys/stat.h>
 
 #pragma pack(push, 1)
 struct TexInfo {
@@ -29,31 +30,37 @@ struct TexInfo {
 class UnixFdpassReceiver {
 protected:
     std::string path_;
-    int sock_fd_ = -2;
+    int listen_fd_ = -2;
+    int conn_fd_ = -2;
     int event_fd_ = -2;
-    struct pollfd pollfds_[2];
-    static constexpr size_t SOCK_INDEX = 0;
-    static constexpr size_t EVENT_INDEX = 1;
+    struct pollfd pollfds_[3];
+    static constexpr size_t LISTEN_INDEX = 0;
+    static constexpr size_t CONN_INDEX = 1;
+    static constexpr size_t EVENT_INDEX = 2;
 public:
     UnixFdpassReceiver(const std::string &path): path_(path) {
         event_fd_ = eventfd(1, 0);
-        pollfds_[SOCK_INDEX].events = POLLIN;
-        pollfds_[SOCK_INDEX].revents = 0;
+        pollfds_[LISTEN_INDEX].events = POLLIN;
+        pollfds_[LISTEN_INDEX].revents = 0;
+        pollfds_[CONN_INDEX].events = POLLIN;
+        pollfds_[CONN_INDEX].revents = 0;
         pollfds_[EVENT_INDEX].events = POLLIN;
         pollfds_[EVENT_INDEX].revents = 0;
         pollfds_[EVENT_INDEX].fd = event_fd_;
     }
     ~UnixFdpassReceiver() {
-        if (sock_fd_ >= 0) close(sock_fd_);
+        if (conn_fd_ >= 0) close(conn_fd_);
+        if (listen_fd_ >= 0) close(listen_fd_);
         if (event_fd_ >= 0) close(event_fd_);
+        if (!path_.empty()) unlink(path_.c_str());
     }
     void interrupt() {
         uint64_t v = 1;
         write(event_fd_, &v, sizeof(v));
     }
-    bool ensureConnected() {
-        if (sock_fd_ >= 0) return true;
-        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    bool ensureListening() {
+        if (listen_fd_ >= 0) return true;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) {
             throw Error("socket() failed for unix path " + path_);
         }
@@ -64,38 +71,42 @@ public:
             close(fd);
             throw Error("unix socket path too long: " + path_);
         }
+        // remove stale path
+        unlink(path_.c_str());
         strncpy(addr.sun_path, path_.c_str(), sizeof(addr.sun_path) - 1);
-        int ret = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-        if (ret < 0) {
-            if (errno==ENOENT || errno==ECONNREFUSED) {
-                close(fd);
-                logstream << "unix socket " << path_ << " not ready to connect";
-                wallclock.sleepms(200);
-                return false;
-            }
+        if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            int e = errno;
             close(fd);
-            throw Error("connect(" + path_ + ") failed");
+            throw Error(std::string("bind(") + path_ + ") failed: " + strerror(e));
         }
-        sock_fd_ = fd;
-        pollfds_[SOCK_INDEX].fd = sock_fd_;
+        chmod(path_.c_str(), 0777);
+        if (listen(fd, 512) < 0) {
+            int e = errno;
+            close(fd);
+            unlink(path_.c_str());
+            throw Error(std::string("listen(") + path_ + ") failed: " + strerror(e));
+        }
+        // make non-blocking
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        listen_fd_ = fd;
+        pollfds_[LISTEN_INDEX].fd = listen_fd_;
+        pollfds_[CONN_INDEX].fd = -1;
         return true;
     }
     bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
         received_fd = -1;
-        if (!ensureConnected()) return false;
+        if (!ensureListening()) return false;
         // Prepare to receive payload + a single FD via SCM_RIGHTS
         char control[CMSG_SPACE(sizeof(int))];
         struct iovec iov;
         iov.iov_base = &info;
         iov.iov_len = sizeof(info);
         struct msghdr msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = control;
-        msg.msg_controllen = sizeof(control);
         while (true) {
-            int pret = poll(pollfds_, 2, -1);
+            // Update conn pollfd each iteration
+            pollfds_[CONN_INDEX].fd = conn_fd_;
+            int pret = poll(pollfds_, 3, -1);
             if (pret < 0) {
                 if (errno == EINTR) continue;
                 throw Error("poll() failed on unix socket");
@@ -103,38 +114,56 @@ public:
             if (pollfds_[EVENT_INDEX].revents & POLLIN) {
                 return false;
             }
-            if (pollfds_[SOCK_INDEX].revents & (POLLIN | POLLHUP | POLLERR)) {
-                break;
+            // Accept new connection if pending
+            if (listen_fd_ >= 0 && (pollfds_[LISTEN_INDEX].revents & POLLIN)) {
+                int conn = accept(listen_fd_, nullptr, nullptr);
+                if (conn >= 0) {
+                    // set nonblocking
+                    int cflags = fcntl(conn, F_GETFL, 0);
+                    if (cflags >= 0) fcntl(conn, F_SETFL, cflags | O_NONBLOCK);
+                    if (conn_fd_ >= 0) close(conn_fd_);
+                    conn_fd_ = conn;
+                }
+            }
+            if (conn_fd_ < 0) {
+                continue;
+            }
+            if (pollfds_[CONN_INDEX].revents & (POLLIN | POLLHUP | POLLERR)) {
+                memset(&msg, 0, sizeof(msg));
+                msg.msg_iov = &iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = control;
+                msg.msg_controllen = sizeof(control);
+                ssize_t r = recvmsg(conn_fd_, &msg, 0);
+                if (r <= 0) {
+                    // connection reset or EOF: close and wait for next
+                    close(conn_fd_);
+                    conn_fd_ = -1;
+                    continue;
+                }
+                // Ancillary data
+                for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+                     cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+                    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+                        int *fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
+                        // Expect one fd
+                        received_fd = fds[0];
+                        break;
+                    }
+                }
+                if (received_fd < 0) {
+                    logstream << "fdpass: recvmsg without FD";
+                    return false;
+                }
+                if (static_cast<size_t>(r) < sizeof(TexInfo)) {
+                    logstream << "fdpass: metadata too small (" << r << ")";
+                    close(received_fd);
+                    received_fd = -1;
+                    return false;
+                }
+                return true;
             }
         }
-        ssize_t r = recvmsg(sock_fd_, &msg, 0);
-        if (r <= 0) {
-            // connection reset or EOF: close and retry later
-            close(sock_fd_);
-            sock_fd_ = -1;
-            return false;
-        }
-        // Ancillary data
-        for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-             cmsg != nullptr; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                int *fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
-                // Expect one fd
-                received_fd = fds[0];
-                break;
-            }
-        }
-        if (received_fd < 0) {
-            logstream << "fdpass: recvmsg without FD";
-            return false;
-        }
-        if (static_cast<size_t>(r) < sizeof(TexInfo)) {
-            logstream << "fdpass: metadata too small (" << r << ")";
-            close(received_fd);
-            received_fd = -1;
-            return false;
-        }
-        return true;
     }
 };
 
