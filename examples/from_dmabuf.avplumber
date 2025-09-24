@@ -1,0 +1,55 @@
+hwaccel.init { "name": "@drm", "type": "drm", "device": "/dev/dri/renderD128" }
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+# Slate loader:
+
+node.add {"url":"https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
+node.add {"routing":{"v:0":"slate_vpkt"},"type":"demux","auto_restart":"off","name":"slate_demux","group":"slate_loader","src":"slate_input"}
+node.add {"type":"dec_video","auto_restart":"off","name":"slate_decoder","group":"slate_loader","src":"slate_vpkt","dst":"slate_vfrm"}
+node.add {"dst_width":1920,"dst_height":1080,"dst_pixel_format":"yuv420p","flags":["SWS_LANCZOS"],"type":"rescale_video","auto_restart":"off","name":"slate_scaler","group":"slate_loader","src":"slate_vfrm","dst":"slate_scaled","hwaccel":"@gpu"}
+node.add {"type":"filter_video","graph":"hwupload_cuda","src":"slate_scaled","dst":"slate_final","auto_restart":"off","group":"slate_loader"}
+node.add {"buffer":"slate","type":"picture_buffer_sink","auto_restart":"off","name":"slate_buffer_sink","group":"slate_loader","src":"slate_final"}
+event.on.node.finished slate_ready slate_buffer_sink
+group.start slate_loader
+event.wait slate_ready
+group.stop slate_loader
+
+queue.plan_capacity in_a 200
+queue.plan_capacity Audio_Encode_out 200
+
+# Input:
+#node.add {"type":"input","format":"lavfi","url":"anullsrc","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"auto_restart":"group","name":"input","group":"in","dst":"in_mux"}
+#node.add {"type":"demux","wait_for_keyframe":false,"routing":{"a:0":"in_a"},"auto_restart":"group","name":"demux","group":"in","src":"in_mux"}
+
+# Decode:
+#node.add {"type":"dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"in_a","dst":"a_decoded", "optional":true}
+#node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"in","src":"in_v","dst":"v_decoded"}
+node.add {"type":"ipc_dmabuf_source","auto_restart":"group","name":"Video_Receive","group":"in","dst":"v_ipc_in","socket":"/tmp/electron-hwaccel/1.sock", "hwaccel":"@drm"}
+
+# here the "in" group ends, "out" group follows:
+
+# audio path:
+#node.add {"type":"assume_audio_format","auto_restart":"panic","group":"out","src":"a_decoded","dst":"a_assumed"}
+#node.add {"type":"sentinel_audio", "timeout":2, "auto_restart":"panic","name":"Audio_Sentinel","group":"out","src":"a_assumed","dst":"a_guarded"}
+#node.add {"type":"resample_audio","dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"auto_restart":"panic","name":"Audio_Resample","group":"out","src":"a_guarded","dst":"a_resampled"}
+#node.add {"type":"enc_audio","codec":"aac","options":{"b":"320k"},"auto_restart":"panic","name":"Audio_Encode","group":"out","src":"a_resampled","dst":"a_encoded"}
+
+# video path:
+node.add {"type":"assume_video_format","pixel_format":"drm_prime","auto_restart":"panic","group":"out","src":"v_ipc_in","dst":"v_assumed"}
+node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_assumed","dst":"v_correct_fps"}
+node.add {"type":"filter_video","auto_restart":"group","name":"Video_In_Filter","group":"out","src":"v_correct_fps","dst":"v_mapped","graph":"hwmap=derive_device=cuda,scale_cuda=1920x1080", "hwaccel":"@drm"}
+node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_mapped","dst":"v_fps2"}
+
+node.add {"type":"sentinel_video", "timeout":2, "freeze":4, "backup_picture_buffer":"slate","reporting_url":"","auto_restart":"panic","name":"Video_Sentinel","group":"out","src":"v_fps2","dst":"v_guarded"}
+node.add {"type":"filter_video", "graph": "scale_cuda=1920x1080", "group":"out", "auto_restart":"panic", "name":"Filter_Text", "src":"v_guarded", "dst":"v_filtered"}
+node.add {"type":"force_keyframe","interval_sec":1,"auto_restart":"panic","group":"out","src":"v_filtered","dst":"v_keyframed"}
+node.add {"type":"enc_video","codec":"h264_nvenc","options":{"b":"8500k"},"auto_restart":"panic","name":"VEncode","group":"out","src":"v_keyframed","dst":"v_encoded"}
+
+# Output:
+node.add {"type":"mux","auto_restart":"panic","name":"Mux","group":"out","src":["v_encoded"],"dst":"muxed_av"}
+node.add {"format":"flv","url":"rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output","options":{},"type":"output","auto_restart":"panic","name":"Out","group":"out","src":"muxed_av"}
+
+
+#stats.subscribe {"url":"","name":"stream1","interval":3,"streams":{"video":[{"decoder":"Video_Decode","q_pre_dec":"in_v","q_post_dec":"v_decoded"}],"audio":[{"decoder":"Audio_Decode","q_pre_dec":"in_a","q_post_dec":"a_decoded"}]},"sentinel":"Video_Sentinel"}   
+group.start out
+detach retry group.start in

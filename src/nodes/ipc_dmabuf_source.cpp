@@ -13,6 +13,7 @@ extern "C" {
 #include <errno.h>
 #include <cstring>
 #include <sys/stat.h>
+#include "../hwaccel.hpp"
 
 #pragma pack(push, 1)
 struct TexInfo {
@@ -186,6 +187,8 @@ protected:
     UnixFdpassReceiver receiver_;
     int width_ = 0;
     int height_ = 0;
+    std::shared_ptr<HWAccelDevice> hwaccel_;
+    AVBufferRef* hw_frames_ctx_ = nullptr;
 public:
     using NodeSingleOutput::NodeSingleOutput;
     IPCDMABUFSource(std::unique_ptr<SinkType> &&sink, const std::string &sock_path):
@@ -204,6 +207,45 @@ public:
         if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
             wallclock.sleepms(5);
             return;
+        }
+
+        // Ensure/refresh HW frames context for filters
+        if (hwaccel_) {
+            bool need_recreate = false;
+            if (!hw_frames_ctx_) need_recreate = true;
+            if (!need_recreate && (width_ != (int)ti.width || height_ != (int)ti.height)) need_recreate = true;
+            if (need_recreate) {
+                if (hw_frames_ctx_) {
+                    av_buffer_unref(&hw_frames_ctx_);
+                }
+                hw_frames_ctx_ = av_hwframe_ctx_alloc(hwaccel_->deviceContext());
+                if (!hw_frames_ctx_) {
+                    logstream << "failed to alloc hw_frames_ctx";
+                } else {
+                    AVHWFramesContext *frmctx = (AVHWFramesContext *)(hw_frames_ctx_->data);
+                    // Map source sw pixel format
+                    static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
+                    static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
+                    frmctx->sw_format = (ti.pixel_format == PIX_FMT_RGBA) ? AV_PIX_FMT_RGBA :
+                                        (ti.pixel_format == PIX_FMT_BGRA) ? AV_PIX_FMT_BGRA : AV_PIX_FMT_NONE;
+                    frmctx->width = ti.width;
+                    frmctx->height = ti.height;
+
+                    AVHWDeviceContext* devctx = (AVHWDeviceContext *)(hwaccel_->deviceContext()->data);
+                    switch (devctx->type) {
+                        case AV_HWDEVICE_TYPE_DRM: frmctx->format = AV_PIX_FMT_DRM_PRIME; break;
+                        case AV_HWDEVICE_TYPE_VAAPI: frmctx->format = AV_PIX_FMT_VAAPI; break;
+                        case AV_HWDEVICE_TYPE_CUDA: frmctx->format = AV_PIX_FMT_CUDA; break;
+                        default: frmctx->format = AV_PIX_FMT_DRM_PRIME; break;
+                    }
+                    int r = av_hwframe_ctx_init(hw_frames_ctx_);
+                    if (r != 0) {
+                        logstream << "av_hwframe_ctx_init failed: " << av::error2string(r);
+                        av_buffer_unref(&hw_frames_ctx_);
+                        hw_frames_ctx_ = nullptr;
+                    }
+                }
+            }
         }
 
         AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)av_mallocz(sizeof(AVDRMFrameDescriptor));
@@ -231,6 +273,10 @@ public:
         vfrm.raw()->height = ti.height;
         vfrm.setTimeBase({1, 1000000});
         vfrm.raw()->pts = ti.timestamp / 1000; // ns -> us
+
+        if (hw_frames_ctx_) {
+            vfrm.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
+        }
 
         AVBufferRef *buf = av_buffer_create(reinterpret_cast<uint8_t*>(desc), sizeof(*desc),
             [](void *opaque, uint8_t *data){
@@ -260,7 +306,16 @@ public:
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::VideoFrame>> edge = edges.find<av::VideoFrame>(params["dst"]);
         auto r = std::make_shared<IPCDMABUFSource>(make_unique<EdgeSink<av::VideoFrame>>(edge), params["socket"]);
+        if (params.count("hwaccel")) {
+            r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        }
         return r;
+    }
+    ~IPCDMABUFSource() {
+        if (hw_frames_ctx_) {
+            av_buffer_unref(&hw_frames_ctx_);
+            hw_frames_ctx_ = nullptr;
+        }
     }
 };
 

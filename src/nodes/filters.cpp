@@ -41,11 +41,11 @@ template<> struct FilterMediaSpecific<av::VideoFrame> {
     static Parameters parametersFromNodeInterface(NodeInterface &ni) {
         return ni.videoParameters();
     }
-    void initHWAccel(AVHWFramesContext &frmctx) {
+    void initHWAccel(AVHWFramesContext &frmctx, AVPixelFormat hw_format) {
         frmctx.sw_format = par_.real_pixel_format;
         frmctx.width = par_.width;
         frmctx.height = par_.height;
-        frmctx.format = AV_PIX_FMT_CUDA; // TODO deduce from somewhere
+        frmctx.format = hw_format;
     }
 };
 template<> struct FilterMediaSpecific<av::AudioSamples> {
@@ -71,7 +71,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     static Parameters parametersFromNodeInterface(NodeInterface &ni) {
         return ni.audioParameters();
     }
-    void initHWAccel(AVHWFramesContext&) {
+    void initHWAccel(AVHWFramesContext&, AVPixelFormat) {
         throw Error("hwaccel specified for audio filter");
     }
 };
@@ -142,7 +142,7 @@ protected:
                 soft_assert(params->hw_frames_ctx && params->hw_frames_ctx->data, "hw_frames_ctx null");
                 
                 AVHWFramesContext *frmctx = (AVHWFramesContext *)(params->hw_frames_ctx->data);
-                ms_.initHWAccel(*frmctx);
+                ms_.initHWAccel(*frmctx, hwaccel->hardwarePixelFormat());
                 av_hwframe_ctx_init(params->hw_frames_ctx);
                 av_buffersrc_parameters_set(ctx_, params);
 
