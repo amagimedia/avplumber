@@ -3,6 +3,7 @@ extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext_drm.h>
 #include <libavutil/mem.h>
+#include <libdrm/drm_fourcc.h>
 }
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -209,6 +210,9 @@ public:
             return;
         }
 
+        static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
+        static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
+
         // Ensure/refresh HW frames context for filters
         if (hwaccel_) {
             bool need_recreate = false;
@@ -224,10 +228,8 @@ public:
                 } else {
                     AVHWFramesContext *frmctx = (AVHWFramesContext *)(hw_frames_ctx_->data);
                     // Map source sw pixel format
-                    static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
-                    static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
-                    frmctx->sw_format = (ti.pixel_format == PIX_FMT_RGBA) ? AV_PIX_FMT_RGBA :
-                                        (ti.pixel_format == PIX_FMT_BGRA) ? AV_PIX_FMT_BGRA : AV_PIX_FMT_NONE;
+                    frmctx->sw_format = (ti.pixel_format == PIX_FMT_RGBA) ? AV_PIX_FMT_RGBA64LE :
+                                        (ti.pixel_format == PIX_FMT_BGRA) ? AV_PIX_FMT_BGRA64LE : AV_PIX_FMT_NONE;
                     frmctx->width = ti.width;
                     frmctx->height = ti.height;
 
@@ -257,11 +259,12 @@ public:
 
         desc->nb_objects = 1;
         desc->objects[0].fd = dmabuf_fd;
-        desc->objects[0].size = 0; // unknown
+        desc->objects[0].size = ti.offset + ti.stride * ti.height;
         desc->objects[0].format_modifier = ti.modifier;
 
         desc->nb_layers = 1;
-        desc->layers[0].format = ti.pixel_format;
+        desc->layers[0].format = (ti.pixel_format == PIX_FMT_RGBA) ? DRM_FORMAT_ABGR8888 :
+            (ti.pixel_format == PIX_FMT_BGRA) ? DRM_FORMAT_ARGB8888 : 0;
         desc->layers[0].nb_planes = 1;
         desc->layers[0].planes[0].object_index = 0;
         desc->layers[0].planes[0].offset = ti.offset;
@@ -294,6 +297,7 @@ public:
         }
         vfrm.raw()->buf[0] = buf;
         vfrm.raw()->data[0] = reinterpret_cast<uint8_t*>(desc);
+        vfrm.raw()->linesize[0] = ti.stride; // needed for isValid()
 
         width_ = ti.width;
         height_ = ti.height;

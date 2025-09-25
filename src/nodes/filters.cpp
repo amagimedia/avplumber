@@ -32,9 +32,9 @@ template<> struct FilterMediaSpecific<av::VideoFrame> {
         ss << "video_size=" << par_.width << "x" << par_.height << ":pix_fmt=" << static_cast<int>(par_.pixel_format.get()) << ":pixel_aspect=1/1:frame_rate=" << vfr->frameRate();
         return ss.str();
     }
-    bool checkFrame(av::VideoFrame &frm) {
+    /* bool checkFrame(av::VideoFrame &frm) {
         return par_ == VideoParameters(frm);
-    }
+    } */
     bool checkParameters(VideoParameters &p) {
         return par_ == p;
     }
@@ -62,9 +62,9 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
         ss << "sample_rate=" << par_.sample_rate << ":sample_fmt=" << par_.sample_format.name() << ":channel_layout=0x" << std::hex << par_.channel_layout;
         return ss.str();
     }
-    bool checkFrame(av::AudioSamples &frm) {
+    /* bool checkFrame(av::AudioSamples &frm) {
         return par_ == AudioParameters(frm);
-    }
+    } */
     bool checkParameters(AudioParameters &p) {
         return par_ == p;
     }
@@ -94,10 +94,28 @@ protected:
         av::Rational prev_tb_{0, 0};
         AVFilterContext* ctx_ = nullptr;
         std::string in_args_;
+        AVBufferRef* initial_hw_frames_ctx_ = nullptr;
     public:
         Port() {};
-        bool checkParameters(typename MediaSpecific::Parameters params, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
-            bool result = (timebase==prev_tb_) && ms_.checkParameters(params);
+        ~Port() {
+            if (initial_hw_frames_ctx_) {
+                av_buffer_unref(&initial_hw_frames_ctx_);
+                initial_hw_frames_ctx_ = nullptr;
+            }
+        }
+        bool checkParameters(typename MediaSpecific::Parameters params, AVFrame *raw, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
+            bool hw_frames_ctx_changed = raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data &&
+                ((!initial_hw_frames_ctx_) || (raw->hw_frames_ctx->data != initial_hw_frames_ctx_->data));
+            if (hw_frames_ctx_changed) {
+                if (initial_hw_frames_ctx_) {
+                    av_buffer_unref(&initial_hw_frames_ctx_);
+                    initial_hw_frames_ctx_ = nullptr;
+                    logstream << "hw frames ctx changed";
+                } else {
+                    logstream << "hw frames ctx appeared, was null";
+                }
+            }
+            bool result = (timebase==prev_tb_) && (!hw_frames_ctx_changed) && ms_.checkParameters(params);
             if (!result) {
                 std::stringstream args_stream;
                 args_stream << "time_base=" << timebase.getNumerator() << "/" << timebase.getDenominator() << ":" << ms_.getSourceArgsString(params, edge);
@@ -108,7 +126,13 @@ protected:
             return result;
         }
         bool checkFrame(T &frm, std::shared_ptr<Edge<T>> edge) {
-            return checkParameters(typename MediaSpecific::Parameters(frm), frm.timeBase(), edge);
+            return checkParameters(typename MediaSpecific::Parameters(frm), frm.raw(), frm.timeBase(), edge);
+        }
+        void captureInitialHWFramesCtxFromFrame(T &frm) {
+            AVFrame *raw = frm.raw();
+            if (!initial_hw_frames_ctx_ && raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
+                initial_hw_frames_ctx_ = av_buffer_ref(raw->hw_frames_ctx);
+            }
         }
         bool isSourceReadyToInit() {
             return !in_args_.empty();
@@ -135,7 +159,21 @@ protected:
                 throw Error("Couldn't link " + name);
             }
             
-            if (hwaccel) {
+            // Prefer copying hw_frames_ctx from the first frame (if captured),
+            // otherwise fall back to allocating a new hwframes context from the device
+            if (initial_hw_frames_ctx_) {
+                soft_assert(ctx_ != nullptr, "source context null");
+                AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
+                params->hw_frames_ctx = av_buffer_ref(initial_hw_frames_ctx_);
+                soft_assert(params->hw_frames_ctx && params->hw_frames_ctx->data, "initial hw_frames_ctx null");
+                av_buffersrc_parameters_set(ctx_, params);
+                // av_buffersrc_parameters_set has increased the refcount, we should unref our temp ref
+                av_buffer_unref(&params->hw_frames_ctx);
+                av_freep(&params);
+                // Release our captured copy; the source has been configured
+                av_buffer_unref(&initial_hw_frames_ctx_);
+                initial_hw_frames_ctx_ = nullptr;
+            } else if (hwaccel) {
                 soft_assert(ctx_ != nullptr, "source context null");
                 AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
                 params->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
@@ -143,7 +181,10 @@ protected:
                 
                 AVHWFramesContext *frmctx = (AVHWFramesContext *)(params->hw_frames_ctx->data);
                 ms_.initHWAccel(*frmctx, hwaccel->hardwarePixelFormat());
-                av_hwframe_ctx_init(params->hw_frames_ctx);
+                int r = av_hwframe_ctx_init(params->hw_frames_ctx);
+                if (r < 0) {
+                    throw Error("av_hwframe_ctx_init failed: " + av::error2string(r));
+                }
                 av_buffersrc_parameters_set(ctx_, params);
 
                 // av_buffersrc_parameters_set has increased the refcount, we should unref
@@ -289,7 +330,7 @@ protected:
                 continue;
             }
             typename MediaSpecific::Parameters params = MediaSpecific::parametersFromNodeInterface(*mdsrc);
-            sources_[i].checkParameters(params, tbsrc->timeBase(), edge);
+            sources_[i].checkParameters(params, nullptr, tbsrc->timeBase(), edge);
         }
         maybeInitFilterGraph();
     }
@@ -308,13 +349,15 @@ public:
             std::shared_ptr<Edge<T>> edge = this->source_edges_[source_index];
             frmin = edge->peek();
             if (frmin && (!frmin->isNull()) && frmin->isComplete() && frmin->timeBase().getNumerator() && frmin->timeBase().getDenominator()) {
-                Port &source_port = sources_[source_index];
+                Port &source_port = sources_[source_index];;
                 if (!source_port.checkFrame(*frmin, edge)) {
                     if (filter_graph_!=nullptr) {
                         logstream << "Input parameters changed. Restarting filter.";
                     }
                     freeFilterGraph();
                 }
+                // Capture hw_frames_ctx from the very first received frame to reuse in buffersrc
+                source_port.captureInitialHWFramesCtxFromFrame(*frmin);
                 if (filter_graph_==nullptr) {
                     maybeInitFilterGraph();
                 }
@@ -403,6 +446,7 @@ public:
             result->preliminaryInit();
         } catch (std::exception &e) {
             logstream << "preliminary init failed, will retry when we get first frame: " << e.what();
+            result->freeFilterGraph();
         }
         return result;
     }
