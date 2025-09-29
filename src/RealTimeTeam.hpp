@@ -4,7 +4,7 @@
 #include "instance_shared.hpp"
 #include "avutils.hpp"
 
-class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek {
+class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek, public ILinkableTeam<RealTimeTeam> {
 protected:
     std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
     std::mutex busy_;
@@ -14,7 +14,6 @@ protected:
     AVRational timebase_ = {0, 0};
     std::atomic_bool flushing_ = false;
     std::weak_ptr<IPlaybackControl> earliest_stream_;
-    std::vector<std::shared_ptr<RealTimeTeam>> linked_teams_;
     bool first_ = true;
 
     std::mutex seek_mutex_;
@@ -50,7 +49,7 @@ public:
         }
     }
     AVTS updateOffset(AVTS local_offset) {
-        AVTS offset = updateOffsetNonRecursive(AVTS local_offset);
+        AVTS offset = updateOffsetNonRecursive(local_offset);
         for (auto team: linked_teams_) {
             offset = team->updateOffsetNonRecursive(offset);
         }
