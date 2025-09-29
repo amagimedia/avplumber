@@ -43,6 +43,24 @@ public:
     virtual void stopSinks() = 0;
 };
 
+template<typename Object>
+class ILinkableTeam {
+protected:
+   std::vector<std::shared_ptr<Object>> linked_teams_;
+public:
+    virtual void linkTeam(std::shared_ptr<Object> team) {
+        linked_teams_.push_back(team);
+    }
+    virtual void unlinkTeam(std::shared_ptr<Object> team) {
+        linked_teams_.erase(
+            std::remove_if(
+                linked_teams_.begin(),
+                linked_teams_.end(), [team](auto& t) {
+                    return t == team;
+                }), linked_teams_.end());
+    }
+};
+
 struct StreamTarget {
     enum class ETargetType {
         tt_Empty,

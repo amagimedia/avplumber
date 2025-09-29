@@ -305,6 +305,26 @@ public:
         }
         logstream << APP_VERSION << " says goodbye!";
     }
+    template<typename Team>
+    auto command_team_link(std::string& args) {
+        std::stringstream ss(args);
+        std::string team_name, linked_team_name;
+        ss >> team_name >> linked_team_name;
+        
+        std::shared_ptr<Team> team = InstanceSharedObjects<Team>::get(manager_->instanceData(), team_name);
+        std::shared_ptr<Team> linked_team = InstanceSharedObjects<Team>::get(manager_->instanceData(), linked_team_name);
+        team->linkTeam(linked_team);
+    };
+    template<typename Team>
+    auto command_team_unlink(std::string& args) {
+        std::stringstream ss(args);
+        std::string team_name, linked_team_name;
+        ss >> team_name >> linked_team_name;
+
+        std::shared_ptr<Team> team = InstanceSharedObjects<Team>::get(manager_->instanceData(), team_name);
+        std::shared_ptr<Team> linked_team = InstanceSharedObjects<Team>::get(manager_->instanceData(), linked_team_name);
+        team->unlinkTeam(linked_team);
+    };
     ControlImpl(std::shared_ptr<NodeManager> manager):
         manager_(manager) {
         server_ready_.lock();
@@ -507,6 +527,24 @@ public:
             } else {
                 throw Error("invalid command parameters");
             }
+        };
+        commands_["team.link<Pause>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<PauseControlTeam>(arg);
+        };
+        commands_["team.link<Speed>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<SpeedControlTeam>(arg);
+        };
+        commands_["team.link<RealTime>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<RealTimeTeam>(arg);
+        };
+        commands_["team.unlink<Pause>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<PauseControlTeam>(arg);
+        };
+        commands_["team.unlink<Speed>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<SpeedControlTeam>(arg);
+        };
+        commands_["team.unlink<RealTime>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<RealTimeTeam>(arg);
         };
         commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
