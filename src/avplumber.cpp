@@ -528,22 +528,22 @@ public:
                 throw Error("invalid command parameters");
             }
         };
-        commands_["team.link<Pause>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.link<pause>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_link<PauseControlTeam>(arg);
         };
-        commands_["team.link<Speed>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.link<speed>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_link<SpeedControlTeam>(arg);
         };
-        commands_["team.link<RealTime>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.link<realtime>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_link<RealTimeTeam>(arg);
         };
-        commands_["team.unlink<Pause>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.unlink<pause>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_unlink<PauseControlTeam>(arg);
         };
-        commands_["team.unlink<Speed>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.unlink<speed>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_unlink<SpeedControlTeam>(arg);
         };
-        commands_["team.unlink<RealTime>"] = [this](ClientStream &cs, std::string &arg) {
+        commands_["team.unlink<realtime>"] = [this](ClientStream &cs, std::string &arg) {
             command_team_unlink<RealTimeTeam>(arg);
         };
         commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
@@ -927,6 +927,7 @@ bool AVPlumber::obs_is_eof() {
 
 void AVPlumber::enableControlServer(const uint16_t tcp_port) {
     if (tcp_port) {
+        logstream << "Enabling control server on TCP port " << tcp_port;
         impl_->createServer<TcpControlServer>(*impl_, tcp_port);
     } // if port==0, then NOOP
 }

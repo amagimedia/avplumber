@@ -145,6 +145,13 @@ public:
     }
 
     virtual void flushAndSeek(StreamTarget seek_target) override {
+        flushAndSeekNonRecursive(seek_target);
+        for (auto team: linked_teams_) {
+            team->flushAndSeekNonRecursive(seek_target);
+        }
+    }
+
+    void flushAndSeekNonRecursive(StreamTarget seek_target) {
         std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         StreamTarget target = seek_target;
         int64_t current_wallclock = -1;
