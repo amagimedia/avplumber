@@ -145,57 +145,60 @@ public:
     }
 
     virtual void flushAndSeek(StreamTarget seek_target) override {
-        flushAndSeekNonRecursive(seek_target);
+        StreamTarget target = seek_target;
+        {
+            std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+            int64_t current_wallclock = -1;
+            int input_idx = -1;
+
+            auto streams_in = getEarliestStream();
+
+            for (int i = 0; i < seek_targets_.size(); ++i) {
+                auto node = seek_targets_[i].lock();
+                if (node) {
+                    auto p_time = std::dynamic_pointer_cast<IFrameTimestamp>(node);
+                    if (p_time) {
+                        current_wallclock = p_time->getCurrentFrameWallclock();
+                    }
+                    if (current_wallclock < 0)
+                        continue;
+
+                    input_idx = i;
+
+                    if (streams_in) {
+                        if (seek_target.isRelative()) {
+                            target.type = StreamTarget::ETargetType::tt_Wallclock;
+                            target.ts = av::Timestamp(current_wallclock, {1, 1000});
+                            if (seek_target.isFrameRelative()) {
+                                if (seek_target.frame_number != 0) {
+                                    streams_in->offsetStreamTargetByFrames(target, seek_target.frame_number);
+                                }
+                            }
+                            if (seek_target.isTimestampRelative()) {
+                                target.ts = addTS(seek_target.ts, av::Timestamp(current_wallclock, {1, 1000}));
+                            }
+                        }
+                        if (seek_target.isTimestamp()) {
+                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if ((input_idx < 0) && seek_target.isRelative()) {
+                throw Error("Relative seek not possible. Can not determine current time.");
+            }
+
+            flushAndSeekNonRecursive(target);
+        }
         for (auto team: linked_teams_) {
-            team->flushAndSeekNonRecursive(seek_target);
+            std::unique_lock<decltype(team->seek_mutex_)>(team_seek_mutex_);
+            team->flushAndSeekNonRecursive(target);
         }
     }
 
-    void flushAndSeekNonRecursive(StreamTarget seek_target) {
-        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
-        StreamTarget target = seek_target;
-        int64_t current_wallclock = -1;
-        int input_idx = -1;
-
-        auto streams_in = getEarliestStream();
-
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                auto p_time = std::dynamic_pointer_cast<IFrameTimestamp>(node);
-                if (p_time) {
-                    current_wallclock = p_time->getCurrentFrameWallclock();
-                }
-                if (current_wallclock < 0)
-                    continue;
-
-                input_idx = i;
-
-                if (streams_in) {
-                    if (seek_target.isRelative()) {
-                        target.type = StreamTarget::ETargetType::tt_Wallclock;
-                        target.ts = av::Timestamp(current_wallclock, {1, 1000});
-                        if (seek_target.isFrameRelative()) {
-                            if (seek_target.frame_number != 0) {
-                                streams_in->offsetStreamTargetByFrames(target, seek_target.frame_number);
-                            }
-                        }
-                        if (seek_target.isTimestampRelative()) {
-                            target.ts = addTS(seek_target.ts, av::Timestamp(current_wallclock, {1, 1000}));
-                        }
-                    }
-                    if (seek_target.isTimestamp()) {
-                        streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
-                    }
-                }
-                break;
-            }
-        }
-
-        if ((input_idx < 0) && seek_target.isRelative()) {
-            throw Error("Relative seek not possible. Can not determine current time.");
-        }
-
+    void flushAndSeekNonRecursive(StreamTarget target) {
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {
