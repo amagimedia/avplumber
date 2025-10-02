@@ -7,7 +7,7 @@ hwaccel.init { "name": "@gpu", "type": "cuda" }
 node.add {"url":"https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
 node.add {"routing":{"v:0":"slate_vpkt"},"type":"demux","auto_restart":"off","name":"slate_demux","group":"slate_loader","src":"slate_input"}
 node.add {"type":"dec_video","auto_restart":"off","name":"slate_decoder","group":"slate_loader","src":"slate_vpkt","dst":"slate_vfrm"}
-node.add {"dst_width":1920,"dst_height":1080,"dst_pixel_format":"yuv420p","flags":["SWS_LANCZOS"],"type":"rescale_video","auto_restart":"off","name":"slate_scaler","group":"slate_loader","src":"slate_vfrm","dst":"slate_scaled","hwaccel":"@gpu"}
+node.add {"dst_width":1920,"dst_height":1080,"dst_pixel_format":"rgb0","flags":["SWS_LANCZOS"],"type":"rescale_video","auto_restart":"off","name":"slate_scaler","group":"slate_loader","src":"slate_vfrm","dst":"slate_scaled","hwaccel":"@gpu"}
 node.add {"type":"filter_video","graph":"hwupload_cuda","src":"slate_scaled","dst":"slate_final","auto_restart":"off","group":"slate_loader"}
 node.add {"buffer":"slate","type":"picture_buffer_sink","auto_restart":"off","name":"slate_buffer_sink","group":"slate_loader","src":"slate_final"}
 event.on.node.finished slate_ready slate_buffer_sink

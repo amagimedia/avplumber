@@ -231,9 +231,9 @@ protected:
         //glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
         
         // Unbind (optional)
-        //glBindTexture(GL_TEXTURE_2D, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
 
-        //glFinish();
+        glFinish();
 
         CUgraphicsResource gres = nullptr;
         CUresult cr = cuGraphicsGLRegisterImage(&gres, tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
@@ -257,7 +257,6 @@ protected:
             }
         }
 
-        dst.setTimeBase({1, 1000000});
         dst.raw()->format = AV_PIX_FMT_CUDA;
         dst.raw()->width = width;
         dst.raw()->height = height;
@@ -320,6 +319,7 @@ public:
         }
 
         av::VideoFrame out;
+        out.setTimeBase(in.timeBase());
         out.raw()->pts = in.raw()->pts;
         out.raw()->color_range = in.raw()->color_range;
         out.raw()->colorspace = in.raw()->colorspace;
