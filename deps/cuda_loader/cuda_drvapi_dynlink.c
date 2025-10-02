@@ -631,6 +631,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuGLCtxCreate);
         GET_PROC(cuGraphicsGLRegisterBuffer);
         GET_PROC(cuGraphicsGLRegisterImage);
+        GET_PROC(cuGraphicsEGLRegisterImage);
+        GET_PROC(cuGraphicsResourceGetMappedEglFrame);
 #  ifdef WIN32
         GET_PROC(cuWGLGetDevice);
 #  endif

@@ -7,8 +7,8 @@ extern tcuIpcGetMemHandle *cuIpcGetMemHandle;
 extern tcuIpcOpenMemHandle *cuIpcOpenMemHandle;
 extern tcuIpcCloseMemHandle *cuIpcCloseMemHandle;
 extern tcuGraphicsGLRegisterImage *cuGraphicsGLRegisterImage;
-extern tcuGraphicsEGLRegisterImage *cuGraphicsEGLRegisterImage;
-extern tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
+//extern tcuGraphicsEGLRegisterImage *cuGraphicsEGLRegisterImage;
+//extern tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
 
 typedef CUresult CUDAAPI tcuStreamCreate(CUstream *phStream, unsigned int flags);
 typedef CUresult CUDAAPI tcuStreamSynchronize(CUstream hStream);
