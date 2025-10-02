@@ -29,6 +29,9 @@ protected:
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
     EGLContext egl_ctx_ = EGL_NO_CONTEXT;
 
+    GLuint src_tex_ = 0;
+    GLuint dst_tex_ = 0;
+
     bool have_dma_buf_import_ = false;
     bool have_mods_ = false;
     PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR_ = nullptr;
@@ -124,11 +127,41 @@ protected:
             return s ? std::string(s) : std::string("null");
         };
         logstream << "gl: " << get_string(GL_VENDOR) << " / " << get_string(GL_RENDERER) << " / " << get_string(GL_VERSION);
+
         return true;
     }
 
+    void createTextures() {
+        if (src_tex_ != 0) {
+            glDeleteTextures(1, &src_tex_);
+            src_tex_ = 0;
+        }
+        if (dst_tex_ != 0) {
+            glDeleteTextures(1, &dst_tex_);
+            dst_tex_ = 0;
+        }
+        if (width_ <= 0 || height_ <= 0) return;
+        
+        glGenTextures(1, &src_tex_);
+        glGenTextures(1, &dst_tex_);
+
+        glBindTexture(GL_TEXTURE_2D, src_tex_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        glBindTexture(GL_TEXTURE_2D, dst_tex_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+            width_, height_, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE,
+            NULL);
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
     static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc) {
-        return AV_PIX_FMT_0BGR32;
+        return AV_PIX_FMT_0BGR32; // workaround for hwdownload not supporting transparency
         switch (fourcc) {
             case DRM_FORMAT_ABGR8888: return AV_PIX_FMT_RGBA;
             case DRM_FORMAT_ARGB8888: return AV_PIX_FMT_BGRA;
@@ -136,7 +169,7 @@ protected:
         }
     }
 
-    bool ensureCudaFramesCtx(int w, int h, AVPixelFormat swfmt) {
+    bool ensureCudaFramesCtxAndTextures(int w, int h, AVPixelFormat swfmt) {
         if (!hwaccel_) return false;
         if (w <= 0 || h <= 0) return false;
         bool need = false;
@@ -167,6 +200,7 @@ protected:
         }
         width_ = w;
         height_ = h;
+        createTextures();
 
         // Cache CUDA device ctx pointer for stream & context switches
         AVHWDeviceContext* devctx = (AVHWDeviceContext *)(hwaccel_->deviceContext()->data);
@@ -191,6 +225,11 @@ protected:
         const AVDRMPlaneDescriptor &pl = layer.planes[plane_index];
         const AVDRMObjectDescriptor &obj = desc->objects[pl.object_index];
 
+        if (!ensureCudaFramesCtxAndTextures(width, height, swfmt)) {
+            CUcontext dummy; CHECK_CU(cuCtxPopCurrent(&dummy));
+            return false;
+        }
+
         EGLAttrib attrs[64];
         int a = 0;
         attrs[a++] = EGL_WIDTH;  attrs[a++] = (EGLint)width;
@@ -214,45 +253,19 @@ protected:
             return false;
         }
 
-        // Create texture object
-        GLuint tex = 0;
-        glGenTextures(1, &tex);
-        // Bind it as a 2D texture
-        glBindTexture(GL_TEXTURE_2D, tex);
-        // Set filtering (no mipmaps, simple nearest/linear)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-        /* glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-            width, height, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE,
-            NULL); // NULL = no initial data */
-        
+        glBindTexture(GL_TEXTURE_2D, src_tex_);
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
-
+        
         GLenum err = glGetError();
         if (err != GL_NO_ERROR) {
             logstream << "drm2cuda: glEGLImageTargetTexture2DOES failed: " << err;
             return false;
         }
-        
-        // Unbind (optional)
-        glBindTexture(GL_TEXTURE_2D, 0);
 
-        GLuint dst_tex = 0;
-        glGenTextures(1, &dst_tex);
-        glBindTexture(GL_TEXTURE_2D, dst_tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-            width, height, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE,
-            NULL); // NULL = no initial data
-        
         glBindTexture(GL_TEXTURE_2D, 0);
-
-        glCopyImageSubData(tex, GL_TEXTURE_2D, 0, 0, 0, 0,
-            dst_tex, GL_TEXTURE_2D, 0, 0, 0, 0,
+        
+        glCopyImageSubData(src_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
+            dst_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
             width, height, 1);
 
         err = glGetError();
@@ -264,8 +277,7 @@ protected:
         glFinish();
 
         CUgraphicsResource gres = nullptr;
-        CUresult cr = cuGraphicsGLRegisterImage(&gres, dst_tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-        //CUresult cr = cuGraphicsEGLRegisterImage(&gres, img, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+        CUresult cr = cuGraphicsGLRegisterImage(&gres, dst_tex_, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
         if (cr != CUDA_SUCCESS) {
             logstream << "drm2cuda: cuGraphicsGLRegisterImage failed";
             CUcontext dummy; CHECK_CU(cuCtxPopCurrent(&dummy));
@@ -275,15 +287,6 @@ protected:
         cuGraphicsMapResources(1, &gres, 0);
         CUarray garr = nullptr;
         cuGraphicsSubResourceGetMappedArray(&garr, gres, 0, 0);
-
-        if (!hw_frames_ctx_) {
-            if (!ensureCudaFramesCtx(width, height, swfmt)) {
-                cuGraphicsUnregisterResource(gres);
-                CUcontext dummy; CHECK_CU(cuCtxPopCurrent(&dummy));
-                p_eglDestroyImageKHR_(egl_dpy_, img);
-                return false;
-            }
-        }
 
         dst.raw()->format = AV_PIX_FMT_CUDA;
         dst.raw()->width = width;
@@ -375,6 +378,14 @@ public:
         if (egl_dpy_ != EGL_NO_DISPLAY) {
             eglTerminate(egl_dpy_);
             egl_dpy_ = EGL_NO_DISPLAY;
+        }
+        if (src_tex_ != 0) {
+            glDeleteTextures(1, &src_tex_);
+            src_tex_ = 0;
+        }
+        if (dst_tex_ != 0) {
+            glDeleteTextures(1, &dst_tex_);
+            dst_tex_ = 0;
         }
     }
 
