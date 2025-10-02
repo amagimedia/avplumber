@@ -223,20 +223,48 @@ protected:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
+        /* glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+            width, height, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE,
+            NULL); // NULL = no initial data */
+        
+        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
+
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            logstream << "drm2cuda: glEGLImageTargetTexture2DOES failed: " << err;
+            return false;
+        }
+        
+        // Unbind (optional)
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        GLuint dst_tex = 0;
+        glGenTextures(1, &dst_tex);
+        glBindTexture(GL_TEXTURE_2D, dst_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
             width, height, 0,
             GL_RGBA, GL_UNSIGNED_BYTE,
             NULL); // NULL = no initial data
         
-        //glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
-        
-        // Unbind (optional)
         glBindTexture(GL_TEXTURE_2D, 0);
+
+        glCopyImageSubData(tex, GL_TEXTURE_2D, 0, 0, 0, 0,
+            dst_tex, GL_TEXTURE_2D, 0, 0, 0, 0,
+            width, height, 1);
+
+        err = glGetError();
+        if (err != GL_NO_ERROR) {
+            logstream << "drm2cuda: glCopyImageSubData failed: " << err;
+            return false;
+        }
 
         glFinish();
 
         CUgraphicsResource gres = nullptr;
-        CUresult cr = cuGraphicsGLRegisterImage(&gres, tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+        CUresult cr = cuGraphicsGLRegisterImage(&gres, dst_tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
         //CUresult cr = cuGraphicsEGLRegisterImage(&gres, img, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
         if (cr != CUDA_SUCCESS) {
             logstream << "drm2cuda: cuGraphicsGLRegisterImage failed";
