@@ -153,6 +153,12 @@ tcuGraphicsResourceGetMappedPointer   *cuGraphicsResourceGetMappedPointer;
 tcuGraphicsResourceSetMapFlags        *cuGraphicsResourceSetMapFlags;
 tcuGraphicsMapResources               *cuGraphicsMapResources;
 tcuGraphicsUnmapResources             *cuGraphicsUnmapResources;
+
+tcuImportExternalMemory                 *cuImportExternalMemory;
+tcuDestroyExternalMemory                 *cuDestroyExternalMemory;
+tcuExternalMemoryGetMappedBuffer         *cuExternalMemoryGetMappedBuffer;
+tcuExternalMemoryGetMappedMipmappedArray *cuExternalMemoryGetMappedMipmappedArray;
+
 tcuGetExportTable                     *cuGetExportTable;
 tcuCtxSetLimit                        *cuCtxSetLimit;
 tcuCtxGetLimit                        *cuCtxGetLimit;
@@ -367,6 +373,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         CHECKED_CALL(cuDriverGetVersion(&driverVer));
     }
 
+    fprintf(stderr, "cuda driver version: %d\n", driverVer);
+
     // fetch all function pointers
     GET_PROC(cuDeviceGet);
     GET_PROC(cuDeviceGetCount);
@@ -561,6 +569,14 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuTexRefSetAddress);
         GET_PROC(cuTexRefSetAddress2D);
         GET_PROC(cuTexRefGetAddress);
+    }
+
+    if (driverVer >= 13000)
+    {
+        GET_PROC(cuImportExternalMemory);
+        GET_PROC(cuDestroyExternalMemory);
+        GET_PROC(cuExternalMemoryGetMappedBuffer);
+        GET_PROC(cuExternalMemoryGetMappedMipmappedArray);
     }
 
     // The following functions are specific to CUDA versions

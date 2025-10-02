@@ -74,6 +74,52 @@ typedef struct CUgraphicsResource_st *CUgraphicsResource; /**< CUDA graphics int
 typedef unsigned long long CUtexObject;                   /**< CUDA texture object */
 typedef unsigned long long CUsurfObject;                  /**< CUDA surface object */
 
+/* Forward declarations for CUDA external memory interop types */
+typedef struct CUextMemory_st *CUexternalMemory;          /**< CUDA external memory */
+typedef struct CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st CUDA_EXTERNAL_MEMORY_HANDLE_DESC;
+typedef struct CUDA_EXTERNAL_MEMORY_BUFFER_DESC_st CUDA_EXTERNAL_MEMORY_BUFFER_DESC;
+typedef struct CUDA_EXTERNAL_MEMORY_MIPMAP_LEVEL_DESC_st CUDA_EXTERNAL_MEMORY_MIPMAP_LEVEL_DESC;
+
+/* Minimal definitions to allow stack allocation and use in this project */
+typedef enum CUexternalMemoryHandleType_enum
+{
+    CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD        = 1,
+    CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32     = 2,
+    CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT = 3,
+    CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP       = 4,
+    CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE   = 5
+} CUexternalMemoryHandleType;
+
+#define CUDA_EXTERNAL_MEMORY_DEDICATED   0x1
+
+struct CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st
+{
+    CUexternalMemoryHandleType type;
+    union
+    {
+        int fd;
+        struct
+        {
+            void *handle;
+            const void *name;
+        } win32;
+    } handle;
+    unsigned long long size;
+    unsigned int flags;
+    unsigned int reserved[16];
+};
+
+struct CUDA_EXTERNAL_MEMORY_BUFFER_DESC_st
+{
+    unsigned long long offset;
+    unsigned long long size;
+    unsigned int flags;
+    unsigned int reserved[16];
+};
+
+/* Note: The official CUDA header names this MIPMAPPED_ARRAY_DESC; maintain
+ * the existing symbol used by this dynlink header for compatibility. */
+
 typedef struct CUuuid_st                                  /**< CUDA definition of UUID */
 {
     char bytes[16];
@@ -1788,6 +1834,11 @@ typedef CUresult CUDAAPI tcuGraphicsResourceSetMapFlags(CUgraphicsResource resou
 typedef CUresult CUDAAPI tcuGraphicsMapResources(unsigned int count, CUgraphicsResource *resources, CUstream hStream);
 typedef CUresult CUDAAPI tcuGraphicsUnmapResources(unsigned int count, CUgraphicsResource *resources, CUstream hStream);
 
+typedef CUresult CUDAAPI tcuImportExternalMemory(CUexternalMemory *pHandle, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC *pMemHandleDesc);
+typedef CUresult CUDAAPI tcuDestroyExternalMemory(CUexternalMemory hExternalMemory);
+typedef CUresult CUDAAPI tcuExternalMemoryGetMappedBuffer(CUdeviceptr *pDevPtr, CUexternalMemory hExternalMemory, const CUDA_EXTERNAL_MEMORY_BUFFER_DESC *pBufferDesc);
+typedef CUresult CUDAAPI tcuExternalMemoryGetMappedMipmappedArray(CUarray *pArray, CUexternalMemory hExternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAP_LEVEL_DESC *pMipmapLevelDesc);
+
 /************************************
  **
  **    Export tables
@@ -1914,6 +1965,10 @@ extern tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArra
 extern tcuGraphicsResourceSetMapFlags        *cuGraphicsResourceSetMapFlags;
 extern tcuGraphicsMapResources               *cuGraphicsMapResources;
 extern tcuGraphicsUnmapResources             *cuGraphicsUnmapResources;
+extern tcuImportExternalMemory                 *cuImportExternalMemory;
+extern tcuDestroyExternalMemory                 *cuDestroyExternalMemory;
+extern tcuExternalMemoryGetMappedBuffer         *cuExternalMemoryGetMappedBuffer;
+extern tcuExternalMemoryGetMappedMipmappedArray *cuExternalMemoryGetMappedMipmappedArray;
 extern tcuGetExportTable                     *cuGetExportTable;
 extern tcuCtxSetLimit                        *cuCtxSetLimit;
 extern tcuCtxGetLimit                        *cuCtxGetLimit;
