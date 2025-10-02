@@ -170,9 +170,7 @@ protected:
                 // av_buffersrc_parameters_set has increased the refcount, we should unref our temp ref
                 av_buffer_unref(&params->hw_frames_ctx);
                 av_freep(&params);
-                // Release our captured copy; the source has been configured
-                av_buffer_unref(&initial_hw_frames_ctx_);
-                initial_hw_frames_ctx_ = nullptr;
+                // Keep our captured copy to detect future hw_frames_ctx changes reliably
             } else if (hwaccel) {
                 soft_assert(ctx_ != nullptr, "source context null");
                 AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
