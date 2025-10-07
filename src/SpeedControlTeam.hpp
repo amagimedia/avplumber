@@ -3,7 +3,7 @@
 #include "avutils.hpp"
 #include "instance_shared.hpp"
 
-class SpeedControlTeam: public InstanceShared<SpeedControlTeam> {
+class SpeedControlTeam: public InstanceShared<SpeedControlTeam>, public ILinkableTeam<SpeedControlTeam> {
 protected:
     std::mutex mutex_;
     float speed_ = 1;
@@ -17,8 +17,8 @@ protected:
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
     }
-public:
-    void setSpeed(float speed) {
+
+    void setSpeedNonRecursive(float speed) {
         bool direction_changed = false;
         {
             auto lock = getLock();
@@ -72,15 +72,36 @@ public:
             }
         }
     }
+
+    void setLastPTSNonRecursive(av::Timestamp pts) {
+        auto lock = getLock();
+        last_pts_ = pts;
+        if (last_sync_.isNoPts()) {
+            last_sync_ = last_pts_;
+        }
+    }
+
+    void setLastSyncNonRecursive(av::Timestamp s) {
+        auto lock = getLock();
+        last_sync_ = s;
+    }
+
+public:
+    void setSpeed(float speed) {
+        setSpeedNonRecursive(speed);
+        for (auto team: linked_teams_) {
+            team->setSpeedNonRecursive(speed);
+        }
+    }
+
     float getSpeed() {
         auto lock = getLock();
         return speed_;
     }
     void setLastPTS(av::Timestamp pts) {
-        auto lock = getLock();
-        last_pts_ = pts;
-        if (last_sync_.isNoPts()) {
-            last_sync_ = last_pts_;
+        setLastPTSNonRecursive(pts);
+        for (auto team: linked_teams_) {
+            team->setLastPTSNonRecursive(pts);
         }
     }
     av::Timestamp scalePTS(av::Timestamp pts, bool forbid_changed_speed) {
@@ -104,7 +125,9 @@ public:
         sync_obj_ = obj;
     }
     void setLastSync(av::Timestamp s) {
-        shift_ = previous_shift_;
-        last_sync_ = s;
+        setLastSyncNonRecursive(s);
+        for (auto team: linked_teams_) {
+            team->setLastSyncNonRecursive(s);
+        }
     }
 };

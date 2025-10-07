@@ -4,7 +4,7 @@
 #include "instance_shared.hpp"
 #include "avutils.hpp"
 
-class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek {
+class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek, public ILinkableTeam<RealTimeTeam> {
 protected:
     std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
     std::mutex busy_;
@@ -29,7 +29,7 @@ public:
             }
         }
     }
-    AVTS updateOffset(AVTS local_offset) {
+    AVTS updateOffsetNonRecursive(AVTS local_offset) {
         auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
@@ -48,19 +48,49 @@ public:
             return offset;
         }
     }
-    void reset() {
+    AVTS updateOffset(AVTS local_offset) {
+        AVTS offset = updateOffsetNonRecursive(local_offset);
+        for (auto team: linked_teams_) {
+            offset = team->updateOffsetNonRecursive(offset);
+        }
+        return offset;
+    }
+    void resetNonRecursive() {
         auto lock = getLock();
         offset_.store(AV_NOPTS_VALUE, std::memory_order_relaxed);
         first_ = true;
         logstream << "realtime team reset";
     }
-    void setFirst(bool value) {
+    void reset() {
+        resetNonRecursive();
+        for (auto team: linked_teams_) {
+            team->resetNonRecursive();
+        }
+    }
+    void setFirstNonRecursive(bool value) {
         auto lock = getLock();
         first_ = value;
     }
-    bool isFirst() {
+    void setFirst(bool value) {
+        setFirstNonRecursive(value);
+        for (auto team: linked_teams_) {
+            team->setFirstNonRecursive(value);
+        }
+    }
+    bool isFirstNonRecursive() {
         auto lock = getLock();
         return first_;
+    }
+    bool isFirst() {
+        if (!isFirstNonRecursive()) {
+            return false;
+        }
+        for (auto team: linked_teams_) {
+            if (!team->isFirstNonRecursive()) {
+                return false;
+            }
+        }
+        return true;
     }
     AVTS getOffset(AVTS local_offset = AV_NOPTS_VALUE) {
         AVTS r = offset_.load(std::memory_order_acquire);
@@ -115,50 +145,60 @@ public:
     }
 
     virtual void flushAndSeek(StreamTarget seek_target) override {
-        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
         StreamTarget target = seek_target;
-        int64_t current_wallclock = -1;
-        int input_idx = -1;
+        {
+            std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+            int64_t current_wallclock = -1;
+            int input_idx = -1;
 
-        auto streams_in = getEarliestStream();
+            auto streams_in = getEarliestStream();
 
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                auto p_time = std::dynamic_pointer_cast<IFrameTimestamp>(node);
-                if (p_time) {
-                    current_wallclock = p_time->getCurrentFrameWallclock();
-                }
-                if (current_wallclock < 0)
-                    continue;
+            for (int i = 0; i < seek_targets_.size(); ++i) {
+                auto node = seek_targets_[i].lock();
+                if (node) {
+                    auto p_time = std::dynamic_pointer_cast<IFrameTimestamp>(node);
+                    if (p_time) {
+                        current_wallclock = p_time->getCurrentFrameWallclock();
+                    }
+                    if (current_wallclock < 0)
+                        continue;
 
-                input_idx = i;
+                    input_idx = i;
 
-                if (streams_in) {
-                    if (seek_target.isRelative()) {
-                        target.type = StreamTarget::ETargetType::tt_Wallclock;
-                        target.ts = av::Timestamp(current_wallclock, {1, 1000});
-                        if (seek_target.isFrameRelative()) {
-                            if (seek_target.frame_number != 0) {
-                                streams_in->offsetStreamTargetByFrames(target, seek_target.frame_number);
+                    if (streams_in) {
+                        if (seek_target.isRelative()) {
+                            target.type = StreamTarget::ETargetType::tt_Wallclock;
+                            target.ts = av::Timestamp(current_wallclock, {1, 1000});
+                            if (seek_target.isFrameRelative()) {
+                                if (seek_target.frame_number != 0) {
+                                    streams_in->offsetStreamTargetByFrames(target, seek_target.frame_number);
+                                }
+                            }
+                            if (seek_target.isTimestampRelative()) {
+                                target.ts = addTS(seek_target.ts, av::Timestamp(current_wallclock, {1, 1000}));
                             }
                         }
-                        if (seek_target.isTimestampRelative()) {
-                            target.ts = addTS(seek_target.ts, av::Timestamp(current_wallclock, {1, 1000}));
+                        if (seek_target.isTimestamp()) {
+                            streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
                         }
                     }
-                    if (seek_target.isTimestamp()) {
-                        streams_in->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
-                    }
+                    break;
                 }
-                break;
             }
-        }
 
-        if ((input_idx < 0) && seek_target.isRelative()) {
-            throw Error("Relative seek not possible. Can not determine current time.");
-        }
+            if ((input_idx < 0) && seek_target.isRelative()) {
+                throw Error("Relative seek not possible. Can not determine current time.");
+            }
 
+            flushAndSeekNonRecursive(target);
+        }
+        for (auto team: linked_teams_) {
+            std::unique_lock<decltype(team->seek_mutex_)>(team_seek_mutex_);
+            team->flushAndSeekNonRecursive(target);
+        }
+    }
+
+    void flushAndSeekNonRecursive(StreamTarget target) {
         for (int i = 0; i < seek_targets_.size(); ++i) {
             auto node = seek_targets_[i].lock();
             if (node) {
