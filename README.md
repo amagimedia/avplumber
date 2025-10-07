@@ -338,6 +338,18 @@ Set speed of the `speed` nodes belonging to the team `team_name` to `speed` (flo
 
 Get current playback speed of the team `team_name`.
 
+### Teams synchronization
+
+```team.link<Pause> pause-team-A pause-team-B```
+```team.link<Speed> speed-team-A speed-team-B```
+```team.link<RealTime> realtime-team-A realtime-team-B```
+```team.unlink<Pause> pause-team-A pause-team-B```
+```team.unlink<Speed> speed-team-A speed-team-B```
+```team.unlink<RealTime> realtime-team-A realtime-team-B```
+
+It is possible to dynamically link & unlink teams to act as a single "super-team".
+When teams are linked, commands like ```speed.set``` are automatically sent to all linked teams.
+
 ### Hardware acceleration
 
 ```hwaccel.init { "name": "name", "type": "type" }```
