@@ -1,4 +1,4 @@
-#include "node_common.hpp"
+#include "../node_common.hpp"
 extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext_drm.h>
@@ -14,7 +14,7 @@ extern "C" {
 #include <errno.h>
 #include <cstring>
 #include <sys/stat.h>
-#include "../hwaccel.hpp"
+#include "../../hwaccel.hpp"
 
 #pragma pack(push, 1)
 struct TexInfo {
