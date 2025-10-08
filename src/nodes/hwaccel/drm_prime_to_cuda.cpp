@@ -161,12 +161,12 @@ protected:
     }
 
     static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc) {
-        return AV_PIX_FMT_0BGR32; // workaround for hwdownload not supporting transparency
         switch (fourcc) {
             case DRM_FORMAT_ABGR8888: return AV_PIX_FMT_RGBA;
             case DRM_FORMAT_ARGB8888: return AV_PIX_FMT_BGRA;
             default: return AV_PIX_FMT_NONE;
         }
+        // use AV_PIX_FMT_0BGR32 for hwdownload not supporting transparency
     }
 
     bool ensureCudaFramesCtxAndTextures(int w, int h, AVPixelFormat swfmt) {
@@ -342,12 +342,14 @@ public:
         }
 
         // single-plane ABGR/ARGB only for now
-        uint32_t fourcc = desc->layers[0].format;
+        /* uint32_t fourcc = desc->layers[0].format;
         AVPixelFormat swfmt = swfmt_from_fourcc(fourcc);
         if (swfmt == AV_PIX_FMT_NONE) {
             logstream << "drm2cuda: unsupported DRM fourcc";
             return;
-        }
+        } */
+        // swfmt_from_fourcc not needed - texture is normalized to RGBA during texture copy
+        AVPixelFormat swfmt = AV_PIX_FMT_RGBA;
 
         av::VideoFrame out;
         out.setTimeBase(in.timeBase());
