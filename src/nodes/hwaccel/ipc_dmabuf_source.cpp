@@ -14,6 +14,7 @@ extern "C" {
 #include <errno.h>
 #include <cstring>
 #include <sys/stat.h>
+#include <time.h>
 #include "../../hwaccel.hpp"
 
 #pragma pack(push, 1)
@@ -29,76 +30,65 @@ struct TexInfo {
 };
 #pragma pack(pop)
 
-class UnixFdpassReceiver {
+class UnixFdpassClient {
 protected:
     std::string path_;
-    int listen_fd_ = -2;
     int conn_fd_ = -2;
     int event_fd_ = -2;
-    struct pollfd pollfds_[3];
-    static constexpr size_t LISTEN_INDEX = 0;
-    static constexpr size_t CONN_INDEX = 1;
-    static constexpr size_t EVENT_INDEX = 2;
+    struct pollfd pollfds_[2];
+    static constexpr size_t CONN_INDEX = 0;
+    static constexpr size_t EVENT_INDEX = 1;
+    bool connecting_ = false;
 public:
-    UnixFdpassReceiver(const std::string &path): path_(path) {
+    UnixFdpassClient(const std::string &path): path_(path) {
         event_fd_ = eventfd(0, 0);
-        pollfds_[LISTEN_INDEX].events = POLLIN;
-        pollfds_[LISTEN_INDEX].revents = 0;
         pollfds_[CONN_INDEX].events = POLLIN;
         pollfds_[CONN_INDEX].revents = 0;
         pollfds_[EVENT_INDEX].events = POLLIN;
         pollfds_[EVENT_INDEX].revents = 0;
         pollfds_[EVENT_INDEX].fd = event_fd_;
+        pollfds_[CONN_INDEX].fd = -1;
     }
-    ~UnixFdpassReceiver() {
+    ~UnixFdpassClient() {
         if (conn_fd_ >= 0) close(conn_fd_);
-        if (listen_fd_ >= 0) close(listen_fd_);
         if (event_fd_ >= 0) close(event_fd_);
-        if (!path_.empty()) unlink(path_.c_str());
     }
     void interrupt() {
         uint64_t v = 1;
         write(event_fd_, &v, sizeof(v));
     }
-    bool ensureListening() {
-        if (listen_fd_ >= 0) return true;
+    bool ensureConnected() {
+        if (conn_fd_ >= 0) return true;
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) {
-            throw Error("socket() failed for unix path " + path_);
+            return false;
         }
+        // make non-blocking
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         if (path_.size() >= sizeof(addr.sun_path)) {
             close(fd);
-            throw Error("unix socket path too long: " + path_);
+            return false;
         }
-        // remove stale path
-        unlink(path_.c_str());
         strncpy(addr.sun_path, path_.c_str(), sizeof(addr.sun_path) - 1);
-        if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        int rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+        if (rc < 0 && errno != EINPROGRESS) {
             int e = errno;
+            (void)e;
             close(fd);
-            throw Error(std::string("bind(") + path_ + ") failed: " + strerror(e));
+            return false;
         }
-        chmod(path_.c_str(), 0777);
-        if (listen(fd, 512) < 0) {
-            int e = errno;
-            close(fd);
-            unlink(path_.c_str());
-            throw Error(std::string("listen(") + path_ + ") failed: " + strerror(e));
-        }
-        // make non-blocking
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        listen_fd_ = fd;
-        pollfds_[LISTEN_INDEX].fd = listen_fd_;
-        pollfds_[CONN_INDEX].fd = -1;
+        conn_fd_ = fd;
+        pollfds_[CONN_INDEX].fd = conn_fd_;
+        connecting_ = (rc < 0); // EINPROGRESS
+        pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
     bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
         received_fd = -1;
-        if (!ensureListening()) return false;
         // Prepare to receive payload + a single FD via SCM_RIGHTS
         char control[CMSG_SPACE(sizeof(int))];
         struct iovec iov;
@@ -106,15 +96,28 @@ public:
         iov.iov_len = sizeof(info);
         struct msghdr msg;
         while (true) {
-            // Update conn pollfd each iteration
-            pollfds_[CONN_INDEX].fd = conn_fd_;
-            pollfds_[LISTEN_INDEX].revents = 0;
+            // Ensure we have a connection
+            if (conn_fd_ < 0) {
+                if (!ensureConnected()) {
+                    // back off a bit when connect fails
+                    struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 10 * 1000 * 1000; // 10ms
+                    nanosleep(&ts, nullptr);
+                    // also check for interrupt events
+                    // fall through to poll which includes EVENT fd even when conn is -1
+                }
+                pollfds_[CONN_INDEX].fd = conn_fd_;
+            }
+            // Update pollfds each iteration
             pollfds_[CONN_INDEX].revents = 0;
             pollfds_[EVENT_INDEX].revents = 0;
-            int pret = poll(pollfds_, 3, -1);
+            int pret = poll(pollfds_, 2, 50);
             if (pret < 0) {
                 if (errno == EINTR) continue;
                 throw Error("poll() failed on unix socket");
+            }
+            if (pret == 0) {
+                // timeout
+                continue;
             }
             if (pollfds_[EVENT_INDEX].revents & POLLIN) {
                 pollfds_[EVENT_INDEX].revents = 0;
@@ -122,21 +125,22 @@ public:
                 ::read(event_fd_, &blackhole, sizeof blackhole);
                 return false;
             }
-            // Accept new connection if pending
-            if (listen_fd_ >= 0 && (pollfds_[LISTEN_INDEX].revents & POLLIN)) {
-                int conn = accept(listen_fd_, nullptr, nullptr);
-                if (conn >= 0) {
-                    // set nonblocking
-                    int cflags = fcntl(conn, F_GETFL, 0);
-                    if (cflags >= 0) fcntl(conn, F_SETFL, cflags | O_NONBLOCK);
-                    if (conn_fd_ >= 0) close(conn_fd_);
-                    conn_fd_ = conn;
-                    pollfds_[CONN_INDEX].fd = conn_fd_;
-                }
-                pollfds_[LISTEN_INDEX].revents = 0;
-            }
             if (conn_fd_ < 0) {
                 continue;
+            }
+            // Finish connect if it was in progress
+            if (connecting_ && (pollfds_[CONN_INDEX].revents & (POLLOUT | POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
+                int soerr = 0; socklen_t slen = sizeof(soerr);
+                if (getsockopt(conn_fd_, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0) {
+                    close(conn_fd_);
+                    conn_fd_ = -1;
+                    pollfds_[CONN_INDEX].fd = -1;
+                    pollfds_[CONN_INDEX].events = POLLIN;
+                    connecting_ = false;
+                    continue;
+                }
+                connecting_ = false;
+                pollfds_[CONN_INDEX].events = POLLIN;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLIN)) {
                 memset(&msg, 0, sizeof(msg));
@@ -144,7 +148,7 @@ public:
                 msg.msg_iovlen = 1;
                 msg.msg_control = control;
                 msg.msg_controllen = sizeof(control);
-                ssize_t r = recvmsg(conn_fd_, &msg, 0);
+                ssize_t r = recvmsg(conn_fd_, &msg, MSG_DONTWAIT);
                 if (r <= 0) {
                     // connection reset or EOF: close and wait for next
                     close(conn_fd_);
@@ -174,10 +178,11 @@ public:
                 }
                 return true;
             }
-            if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR)) {
+            if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR | POLLNVAL)) {
                 close(conn_fd_);
                 conn_fd_ = -1;
                 pollfds_[CONN_INDEX].fd = -1;
+                connecting_ = false;
             }
         }
     }
@@ -185,7 +190,7 @@ public:
 
 class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>, public IStoppable, public ReportsFinishByFlag, public IVideoFormatSource {
 protected:
-    UnixFdpassReceiver receiver_;
+    UnixFdpassClient receiver_;
     int width_ = 0;
     int height_ = 0;
     std::shared_ptr<HWAccelDevice> hwaccel_;

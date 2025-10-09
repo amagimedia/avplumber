@@ -40,9 +40,10 @@ node.add {"type":"assume_video_format","pixel_format":"drm_prime","real_pixel_fo
 node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_assumed","dst":"v_correct_fps"}
 node.add {"type":"drm_prime_to_cuda","auto_restart":"group","name":"to_cuda","group":"out","src":"v_correct_fps","dst":"v_cuda", "hwaccel":"@gpu"}
 # note to potential users: convert_cuda is developed in-house, not public for now
-node.add {"type":"filter_video", "graph": "convert_cuda=format=yuva420p,scale_npp=format=yuv420p:w=iw:h=ih", "group":"out", "auto_restart":"panic", "name":"Filter_cuda", "src":"v_cuda", "dst":"v_cuda_converted", "dst_width":1920,"dst_height":1080,"dst_pixel_format":"cuda","hwaccel":"@gpu"}
+node.add {"type":"filter_video", "graph": "convert_cuda=format=yuva420p", "group":"out", "auto_restart":"panic", "name":"Filter_cuda", "src":"v_cuda", "dst":"v_cuda_converted", "dst_width":1920,"dst_height":1080,"dst_pixel_format":"cuda","hwaccel":"@gpu"}
+node.add {"type":"reinterpret_planes_video", "group":"out", "auto_restart":"panic", "name":"remove_alpha", "dst_pixel_format": "yuv420p", "hw_frames": true, "src": "v_cuda_converted", "dst": "v_no_alpha"}
 
-node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_cuda_converted","dst":"v_fps2"}
+node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_no_alpha","dst":"v_fps2"}
 node.add {"type":"sentinel_video", "timeout":2, "freeze":4, "backup_picture_buffer":"slate","reporting_url":"","auto_restart":"panic","name":"Video_Sentinel","group":"out","src":"v_fps2","dst":"v_guarded"}
 node.add {"type":"force_fps","fps":"60/1","auto_restart":"panic","group":"out","src":"v_guarded","dst":"v_fps3"}
 
