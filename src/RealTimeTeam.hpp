@@ -53,6 +53,7 @@ public:
         for (auto team: linked_teams_) {
             offset = team->updateOffsetNonRecursive(offset);
         }
+        offset_.store(offset, std::memory_order_relaxed);
         return offset;
     }
     void resetNonRecursive() {
@@ -193,7 +194,7 @@ public:
             flushAndSeekNonRecursive(target);
         }
         for (auto team: linked_teams_) {
-            std::unique_lock<decltype(team->seek_mutex_)>(team_seek_mutex_);
+            std::unique_lock<decltype(team->seek_mutex_)>team_seek_mutex_(team->seek_mutex_);
             team->flushAndSeekNonRecursive(target);
         }
     }
@@ -225,7 +226,7 @@ public:
         }
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {
-        std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+        std::unique_lock<decltype(seek_mutex_)> lock(seek_mutex_);
         seek_targets_.push_back(target);
         earliest_stream_.reset();
     }
