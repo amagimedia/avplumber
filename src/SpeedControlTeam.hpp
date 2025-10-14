@@ -73,19 +73,6 @@ protected:
         }
     }
 
-    void setLastPTSNonRecursive(av::Timestamp pts) {
-        auto lock = getLock();
-        last_pts_ = pts;
-        if (last_sync_.isNoPts()) {
-            last_sync_ = last_pts_;
-        }
-    }
-
-    void setLastSyncNonRecursive(av::Timestamp s) {
-        auto lock = getLock();
-        last_sync_ = s;
-    }
-
 public:
     void setSpeed(float speed) {
         setSpeedNonRecursive(speed);
@@ -99,9 +86,10 @@ public:
         return speed_;
     }
     void setLastPTS(av::Timestamp pts) {
-        setLastPTSNonRecursive(pts);
-        for (auto team: linked_teams_) {
-            team->setLastPTSNonRecursive(pts);
+        auto lock = getLock();
+        last_pts_ = pts;
+        if (last_sync_.isNoPts()) {
+            last_sync_ = last_pts_;
         }
     }
     av::Timestamp scalePTS(av::Timestamp pts, bool forbid_changed_speed) {
@@ -125,9 +113,7 @@ public:
         sync_obj_ = obj;
     }
     void setLastSync(av::Timestamp s) {
-        setLastSyncNonRecursive(s);
-        for (auto team: linked_teams_) {
-            team->setLastSyncNonRecursive(s);
-        }
+        auto lock = getLock();
+        last_sync_ = s;
     }
 };
