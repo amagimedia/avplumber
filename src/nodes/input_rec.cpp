@@ -749,7 +749,10 @@ public:
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
 
+        av::Timestamp pkt_pts = pkt.pts();
+
         if (!pkt.isNull()) {
+
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
                 paused_read_ = false;
@@ -768,13 +771,13 @@ public:
                 }
             }
 
-            if (pkt.streamIndex() == video_stream_) {
-                just_started_ = false;
-            }
-
             if (first_video_ts_.timestamp() != 0) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
+            }
+
+            if (pkt.streamIndex() == video_stream_) {
+                just_started_ = false;
             }
 
             // adjust ts
@@ -806,23 +809,27 @@ public:
         }
         this->sink_->put(pkt);
 
-        // check if we have to stop/loop video
-        if (play_direction_ == EPlaybackDirection::pd_Forward) {
-            if (stop_ts_.ts.isValid() && (pkt.pts() >= stop_ts_.ts)) {
-                if (loop_) {
-                    seek(start_ts_);
-                } else {
-                    logstream << "input_rec reached stop timestamp, EOF";
-                    notify_eof_ = true;
+        if (pkt_pts.isValid()) {
+            // check if we have to stop/loop video
+            if (play_direction_ == EPlaybackDirection::pd_Forward) {
+                if (stop_ts_.ts.isValid() && (pkt_pts >= stop_ts_.ts)) {
+                    if (loop_) {
+                        logstream << "input_rec reached stop timestamp, loop to start";
+                        seek(start_ts_);
+                    } else {
+                        logstream << "input_rec reached stop timestamp, EOF";
+                        notify_eof_ = true;
+                    }
                 }
-            }
-        } else {
-            if (start_ts_.ts.isValid() && (pkt.pts() <= start_ts_.ts)) {
-                if (loop_) {
-                    seek(stop_ts_);
-                } else {
-                    logstream << "input_rec reached stop timestamp, EOF";
-                    notify_eof_ = true;
+            } else {
+                if (start_ts_.ts.isValid() && (pkt_pts <= start_ts_.ts)) {
+                    if (loop_) {
+                        logstream << "input_rec reached start timestamp, loop to stop";
+                        seek(stop_ts_);
+                    } else {
+                        logstream << "input_rec reached start timestamp, EOF";
+                        notify_eof_ = true;
+                    }
                 }
             }
         }
