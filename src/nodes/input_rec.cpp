@@ -483,7 +483,7 @@ public:
                     if (it == seek_table_.cend()) {
                         it = std::prev(it);
                     }
-                    if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
+                    while ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
                         it = std::prev(it);
                     }
 
@@ -749,7 +749,7 @@ public:
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
 
-        av::Timestamp pkt_pts = pkt.pts();
+        av::Timestamp pkt_pts;
 
         if (!pkt.isNull()) {
 
@@ -778,6 +778,7 @@ public:
 
             if (pkt.streamIndex() == video_stream_) {
                 just_started_ = false;
+                pkt_pts = pkt.pts();
             }
 
             // adjust ts
