@@ -30,7 +30,6 @@ public:
         }
     }
     AVTS updateOffsetNonRecursive(AVTS local_offset) {
-        auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
         if (offset == AV_NOPTS_VALUE) {
@@ -49,8 +48,10 @@ public:
         }
     }
     AVTS updateOffset(AVTS local_offset) {
+        auto lock = getLock();
         AVTS offset = updateOffsetNonRecursive(local_offset);
         for (auto team: linked_teams_) {
+            auto team_lock = team->getLock();
             offset = team->updateOffsetNonRecursive(offset);
         }
         offset_.store(offset, std::memory_order_relaxed);
@@ -194,7 +195,7 @@ public:
             flushAndSeekNonRecursive(target);
         }
         for (auto team: linked_teams_) {
-            std::unique_lock<decltype(team->seek_mutex_)>team_seek_mutex_(team->seek_mutex_);
+            std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
             team->flushAndSeekNonRecursive(target);
         }
     }

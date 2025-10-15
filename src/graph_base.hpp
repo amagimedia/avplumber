@@ -147,7 +147,9 @@ public:
             if (input && node->isPausedProcessing()) {
                 input->resumeAfterSeek();
             }
-            node->resumeProcessing();
+            if (node) {
+                node->resumeProcessing();
+            }
         });
         resumeProcessing();
     }
