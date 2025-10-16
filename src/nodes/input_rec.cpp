@@ -545,15 +545,16 @@ public:
             return;
         std::ifstream f(seek_table_url_, std::ios::binary);
         if (f) {
-            size_t start;
+            int64_t start;
             {
                 auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
                 start = sizeof(SeekTableEntry) * seek_table_.size();
             }
             f.seekg(0, std::ios::end);
-            if (f.tellg() == std::streampos(-1))
+            int64_t tellg = f.tellg();
+            if (tellg < 0)
                 return;
-            size_t count = static_cast<size_t>(f.tellg()) - start;
+            int64_t count = tellg - start;
             if (count < sizeof(SeekTableEntry)) {
                 // no new data
                 return;
@@ -578,14 +579,17 @@ public:
             return;
         std::ifstream f(ts_offsets_url_, std::ios::binary);
         if (f) {
-            size_t start;
+            int64_t start;
             {
                 auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
                 start = sizeof(TSOffsetEntry) * ts_offsets_.size();
             }
             f.seekg(0, std::ios::end);
-            size_t count = static_cast<size_t>(f.tellg()) - start;
-            if (count < sizeof(SeekTableEntry)) {
+            int64_t tellg = f.tellg();
+            if (tellg < 0)
+                return;
+            int64_t count = tellg - start;
+            if (count < sizeof(TSOffsetEntry)) {
                 // no new data
                 return;
             }
