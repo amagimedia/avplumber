@@ -18,22 +18,18 @@ group.stop slate_loader
 queue.plan_capacity in_a 200
 queue.plan_capacity Audio_Encode_out 200
 
-# Input:
-#node.add {"type":"input","format":"lavfi","url":"anullsrc","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"auto_restart":"group","name":"input","group":"in","dst":"in_mux"}
-#node.add {"type":"demux","wait_for_keyframe":false,"routing":{"a:0":"in_a"},"auto_restart":"group","name":"demux","group":"in","src":"in_mux"}
+# Receive:
+node.add {"type":"ipc_dmabuf_source","auto_restart":"group","name":"Video_Receive","group":"in","dst":"v_ipc_in","socket":"/tmp/electron-hwaccel/guest.sock", "hwaccel":"@drm"}
+node.add {"type":"ipc_socket_audio_source","auto_restart":"group","name":"Audio_Receive","group":"in","dst":"a_ipc_in","socket":"/tmp/electron-hwaccel/guest-audio.sock"}
 
-# Decode:
-#node.add {"type":"dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"in_a","dst":"a_decoded", "optional":true}
-#node.add {"type":"dec_video","auto_restart":"group","name":"Video_Decode","group":"in","src":"in_v","dst":"v_decoded"}
-node.add {"type":"ipc_dmabuf_source","auto_restart":"group","name":"Video_Receive","group":"in","dst":"v_ipc_in","socket":"/tmp/electron-hwaccel/test.sock", "hwaccel":"@drm"}
 
 # here the "in" group ends, "out" group follows:
 
 # audio path:
-#node.add {"type":"assume_audio_format","auto_restart":"panic","group":"out","src":"a_decoded","dst":"a_assumed"}
-#node.add {"type":"sentinel_audio", "timeout":2, "auto_restart":"panic","name":"Audio_Sentinel","group":"out","src":"a_assumed","dst":"a_guarded"}
-#node.add {"type":"resample_audio","dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"auto_restart":"panic","name":"Audio_Resample","group":"out","src":"a_guarded","dst":"a_resampled"}
-#node.add {"type":"enc_audio","codec":"aac","options":{"b":"320k"},"auto_restart":"panic","name":"Audio_Encode","group":"out","src":"a_resampled","dst":"a_encoded"}
+node.add {"type":"assume_audio_format","auto_restart":"panic","group":"out","src":"a_ipc_in","dst":"a_assumed", "sample_format": "flt"}
+node.add {"type":"sentinel_audio", "timeout":2, "auto_restart":"panic","name":"Audio_Sentinel","group":"out","src":"a_assumed","dst":"a_guarded"}
+node.add {"type":"resample_audio","dst_sample_rate":48000,"dst_channel_layout":"stereo","dst_sample_format":"fltp","compensation":0,"auto_restart":"panic","name":"Audio_Resample","group":"out","src":"a_guarded","dst":"a_resampled"}
+node.add {"type":"enc_audio","codec":"aac","options":{"b":"320k"},"auto_restart":"panic","name":"Audio_Encode","group":"out","src":"a_resampled","dst":"a_encoded"}
 
 # video path:
 node.add {"type":"assume_video_format","pixel_format":"drm_prime","real_pixel_format":"cuda","auto_restart":"panic","group":"out","src":"v_ipc_in","dst":"v_assumed"}
@@ -54,7 +50,7 @@ node.add {"type":"assume_video_format","pixel_format":"cuda","real_pixel_format"
 node.add {"type":"enc_video","codec":"h264_nvenc","options":{"b":"8500k"},"auto_restart":"panic","name":"VEncode","group":"out","src":"v_preenc","dst":"v_encoded","hwaccel":"@gpu"}
 
 # Output:
-node.add {"type":"mux","auto_restart":"panic","name":"Mux","group":"out","src":["v_encoded"],"dst":"muxed_av"}
+node.add {"type":"mux","auto_restart":"panic","name":"Mux","group":"out","src":["v_encoded", "a_encoded"],"dst":"muxed_av"}
 node.add {"format":"flv","url":"rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output","options":{},"type":"output","auto_restart":"panic","name":"Out","group":"out","src":"muxed_av"}
 
 

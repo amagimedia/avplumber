@@ -349,7 +349,7 @@ public:
             return;
         } */
         // swfmt_from_fourcc not needed - texture is normalized to RGBA during texture copy
-        AVPixelFormat swfmt = AV_PIX_FMT_RGBA;
+        AVPixelFormat swfmt = AV_PIX_FMT_BGRA;
 
         av::VideoFrame out;
         out.setTimeBase(in.timeBase());
