@@ -149,7 +149,7 @@ public:
     virtual void flushAndSeek(StreamTarget seek_target) override {
         StreamTarget target = seek_target;
         {
-            std::unique_lock<decltype(seek_mutex_)>(seek_mutex_);
+            std::unique_lock<decltype(seek_mutex_)> lock(seek_mutex_);
             int64_t current_wallclock = -1;
             int input_idx = -1;
 

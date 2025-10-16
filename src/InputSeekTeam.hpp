@@ -10,7 +10,7 @@ protected:
     std::list<std::weak_ptr<ISeekAt>> seek_targets_;
 public:
     virtual void seekAtAdd(const StreamTarget& when, const StreamTarget& target) override {
-        std::unique_lock<decltype(mutex_)>(mutex_);
+        std::unique_lock<decltype(mutex_)> lock(mutex_);
         for (auto t: seek_targets_) {
             auto node = t.lock();
             if (node) {
@@ -20,7 +20,7 @@ public:
     }
 
     virtual void seekAtClear() override {
-        std::unique_lock<decltype(mutex_)>(mutex_);
+        std::unique_lock<decltype(mutex_)> lock(mutex_);
         for (auto t: seek_targets_) {
             auto node = t.lock();
             if (node) {
@@ -30,7 +30,7 @@ public:
     }
 
     void addSeekTarget(std::weak_ptr<ISeekAt> target) {
-        std::unique_lock<decltype(mutex_)>(mutex_);
+        std::unique_lock<decltype(mutex_)> lock(mutex_);
         seek_targets_.push_back(target);
     }
 };
