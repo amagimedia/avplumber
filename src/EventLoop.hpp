@@ -85,6 +85,7 @@ protected:
 
             //logstream << "poll returned " << ret;
             if (!should_work_) {
+                delete pfds;
                 return;
             }
             {
@@ -103,6 +104,7 @@ protected:
                 }
             }
             if (ret<0) {
+                delete pfds;
                 throw Error("poll error in event loop thread");
             } else if (ret>0) {
                 int64_t blackhole;
@@ -124,6 +126,7 @@ protected:
                     pfds[count-1].revents = 0;
                 }
             }
+            delete pfds;
             {
                 std::lock_guard<decltype(busy_)> lock(busy_);
                 while (executeSingleFromToDo() && should_work_) { };
