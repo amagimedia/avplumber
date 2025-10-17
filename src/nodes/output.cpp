@@ -48,12 +48,10 @@ public:
 
                         if (seek_table_text_[i].is_open()) {
                             seek_table_text_[i] << ts_ms << " " << cur_pos << "\n";
-                            seek_table_text_[i].flush();
                         }
                         if (seek_table_bin_[i].is_open()) {
                             SeekTableEntry entry { ts_ms, uint64_t(cur_pos) };
                             seek_table_bin_[i].write(reinterpret_cast<char*>(&entry), sizeof(entry));
-                            seek_table_bin_[i].flush();
                         }
                     }
 
@@ -62,18 +60,23 @@ public:
                         unlink(seek_table_url_.c_str());
                         unlink(seek_table_text_url_.c_str());
                         if (seek_table_text_[current_seek_table_index_].is_open()) {
-                            seek_table_text_[current_seek_table_index_] << seek_table_text_stream_.str();
-                            seek_table_text_[current_seek_table_index_].flush();
+                            seek_table_text_[current_seek_table_index_] << seek_table_text_stream_.rdbuf();
                         }
                         if (seek_table_bin_[current_seek_table_index_].is_open()) {
                             seek_table_bin_[current_seek_table_index_].write(reinterpret_cast<char*>(seek_table_entries_.data()), seek_table_entries_.size() * sizeof(SeekTableEntry));
-                            seek_table_bin_[current_seek_table_index_].flush();
                         }
                         seek_table_entries_.clear();
                         seek_table_text_stream_.clear();
                         current_seek_table_index_ = (current_seek_table_index_ + 1) % SEEK_TABLE_FILES_COUNT;
-                        link(seek_table_url_.c_str(), (seek_table_url_ + "." + std::to_string(current_seek_table_index_)).c_str());
-                        link(seek_table_text_url_.c_str(), (seek_table_text_url_ + "." + std::to_string(current_seek_table_index_)).c_str());
+
+                        if (seek_table_text_[current_seek_table_index_].is_open()) {
+                            seek_table_text_[current_seek_table_index_].flush();
+                        }
+                        if (seek_table_bin_[current_seek_table_index_].is_open()) {
+                            seek_table_bin_[current_seek_table_index_].flush();
+                        }
+                        symlink((seek_table_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_url_.c_str());
+                        symlink((seek_table_text_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_text_url_.c_str());
                     }
                 }
                 octx_.writePacket(pkt);
