@@ -552,13 +552,14 @@ public:
             }
             f.seekg(0, std::ios::end);
             int64_t tellg = f.tellg();
-            if (tellg < 0)
-                return;
-            int64_t count = tellg - start;
-            if (count < sizeof(SeekTableEntry)) {
+            if (tellg <= start + sizeof(SeekTableEntry)) {
                 // no new data
                 return;
             }
+            int64_t count = tellg - start;
+            // maximum 1000 elements to load
+            if (count > 1000 * sizeof(SeekTableEntry))
+                count = 1000 * sizeof(SeekTableEntry);
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -586,13 +587,14 @@ public:
             }
             f.seekg(0, std::ios::end);
             int64_t tellg = f.tellg();
-            if (tellg < 0)
-                return;
-            int64_t count = tellg - start;
-            if (count < sizeof(TSOffsetEntry)) {
+            if (tellg <= start + sizeof(TSOffsetEntry)) {
                 // no new data
                 return;
             }
+            int64_t count = tellg - start;
+            // maximum 1000 elements to load
+            if (count > 1000 * sizeof(TSOffsetEntry))
+                count = 1000 * sizeof(TSOffsetEntry);
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
