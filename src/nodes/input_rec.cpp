@@ -557,9 +557,6 @@ public:
                 return;
             }
             int64_t count = tellg - start;
-            // maximum 1000 elements to load
-            if (count > 1000 * sizeof(SeekTableEntry))
-                count = 1000 * sizeof(SeekTableEntry);
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -592,9 +589,6 @@ public:
                 return;
             }
             int64_t count = tellg - start;
-            // maximum 1000 elements to load
-            if (count > 1000 * sizeof(TSOffsetEntry))
-                count = 1000 * sizeof(TSOffsetEntry);
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
