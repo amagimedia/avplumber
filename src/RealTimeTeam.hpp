@@ -50,9 +50,12 @@ public:
     AVTS updateOffset(AVTS local_offset) {
         auto lock = getLock();
         AVTS offset = updateOffsetNonRecursive(local_offset);
-        for (auto team: linked_teams_) {
-            auto team_lock = team->getLock();
-            offset = team->updateOffsetNonRecursive(offset);
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                auto team_lock = team->getLock();
+                offset = team->updateOffsetNonRecursive(offset);
+            }
         }
         offset_.store(offset, std::memory_order_relaxed);
         return offset;
@@ -65,8 +68,11 @@ public:
     }
     void reset() {
         resetNonRecursive();
-        for (auto team: linked_teams_) {
-            team->resetNonRecursive();
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                team->resetNonRecursive();
+            }
         }
     }
     void setFirstNonRecursive(bool value) {
@@ -75,8 +81,11 @@ public:
     }
     void setFirst(bool value) {
         setFirstNonRecursive(value);
-        for (auto team: linked_teams_) {
-            team->setFirstNonRecursive(value);
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                team->setFirstNonRecursive(value);
+            }
         }
     }
     bool isFirstNonRecursive() {
@@ -87,9 +96,12 @@ public:
         if (!isFirstNonRecursive()) {
             return false;
         }
-        for (auto team: linked_teams_) {
-            if (!team->isFirstNonRecursive()) {
-                return false;
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                if (!team->isFirstNonRecursive()) {
+                    return false;
+                }
             }
         }
         return true;
@@ -194,9 +206,12 @@ public:
 
             flushAndSeekNonRecursive(target);
         }
-        for (auto team: linked_teams_) {
-            std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
-            team->flushAndSeekNonRecursive(target);
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
+                team->flushAndSeekNonRecursive(target);
+            }
         }
     }
 
