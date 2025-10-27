@@ -1126,15 +1126,14 @@ public:
             int64_t rec_length;
 
             if (seek_table_.empty()) {
-                auto duration = rescaleTS(ictx_.duration(), {1, 1000});
-                rec_length = duration.timestamp();
-            } else {
-                if (seek_table_.empty()) {
+                if (ictx_.isOpened()) {
                     auto duration = rescaleTS(ictx_.duration(), {1, 1000});
                     rec_length = duration.timestamp();
                 } else {
-                    rec_length = seek_table_.crbegin()->timestamp_ms;
+                    rec_length = 0;
                 }
+            } else {
+                rec_length = seek_table_.crbegin()->timestamp_ms;
             }
             if (start_ts_.isValidTimestamp()) {
                 int64_t st = start_ts_.ts.timestamp();
