@@ -552,7 +552,7 @@ public:
             }
             f.seekg(0, std::ios::end);
             int64_t tellg = f.tellg();
-            if (tellg <= start + sizeof(SeekTableEntry)) {
+            if (tellg < start + sizeof(SeekTableEntry)) {
                 // no new data
                 return;
             }
@@ -584,7 +584,7 @@ public:
             }
             f.seekg(0, std::ios::end);
             int64_t tellg = f.tellg();
-            if (tellg <= start + sizeof(TSOffsetEntry)) {
+            if (tellg < start + sizeof(TSOffsetEntry)) {
                 // no new data
                 return;
             }
