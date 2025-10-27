@@ -5,14 +5,11 @@
 // missing extern function signatures
 extern tcuIpcGetMemHandle *cuIpcGetMemHandle;
 extern tcuIpcOpenMemHandle *cuIpcOpenMemHandle;
+extern tcuIpcOpenMemHandle *cuIpcOpenMemHandle;
 extern tcuIpcCloseMemHandle *cuIpcCloseMemHandle;
+#ifdef CUDA_INIT_OPENGL
 extern tcuGraphicsGLRegisterImage *cuGraphicsGLRegisterImage;
-//extern tcuGraphicsEGLRegisterImage *cuGraphicsEGLRegisterImage;
-//extern tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
-
-typedef CUresult CUDAAPI tcuStreamCreate(CUstream *phStream, unsigned int flags);
-typedef CUresult CUDAAPI tcuStreamSynchronize(CUstream hStream);
-typedef CUresult CUDAAPI tcuStreamDestroy_v2(CUstream hStream);
+#endif
 
 // helpers
 #define checkCudaErrors(err, func_call)  __checkCudaErrors(err, __FILE__, __LINE__, func_call)
