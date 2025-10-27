@@ -2,12 +2,6 @@
 BUILD_TYPE = Debug
 HAVE_CUDA = 1
 HAVE_VAAPI = 0
-HAVE_DRM = 0
-ifeq ($(HAVE_VAAPI),1)
-HAVE_GL = 1
-else
-HAVE_GL = 0
-endif
 
 ifeq ($(BUILD_TYPE),Debug)
 OPTIMIZATION_FLAGS = -O0 -ftrapv
@@ -24,11 +18,6 @@ BUILD_DATE_FILE = builddate.h
 SRCDIR = src
 
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
-
-# hwaccel nodes moved from nodes/cuda to nodes/hwaccel
-DRM_PRIME_TO_CUDA_SRC = $(SRCDIR)/nodes/hwaccel/drm_prime_to_cuda.cpp
-IPC_CUDA_SOURCE_SRC = $(SRCDIR)/nodes/hwaccel/ipc_cuda_source.cpp
-IPC_DMABUF_SOURCE_SRC = $(SRCDIR)/nodes/hwaccel/ipc_dmabuf_source.cpp
 
 ifeq ($(EMBED_IN),obs)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/obs -maxdepth 1 -name '*.cpp')
@@ -52,28 +41,15 @@ override LIBS_FLAGS += -ljack
 endif
 
 ifeq ($(HAVE_CUDA),1)
-NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+NODES_SRC += $(shell find $(SRCDIR)/nodes/cuda -maxdepth 1 -name '*.cpp')
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 
-ifeq ($(HAVE_DRM),1)
-NODES_SRC += $(IPC_DMABUF_SOURCE_SRC)
-endif
-
-# drm_prime_to_cuda requires CUDA + GL + DRM
-ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_DRM),111)
-NODES_SRC += $(DRM_PRIME_TO_CUDA_SRC)
-endif
-
 ifeq ($(HAVE_VAAPI),1)
 override CXXFLAGS += -DHAVE_VAAPI=1
-override LIBS_FLAGS += -lva
-endif
-
-ifeq ($(HAVE_GL),1)
-override LIBS_FLAGS += -lGL -lEGL -lGLESv2
+override LIBS_FLAGS += -lva -lGL -lEGL -lGLESv2
 endif
 
 EXE = avplumber
