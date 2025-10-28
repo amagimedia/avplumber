@@ -205,13 +205,6 @@ public:
 
             flushAndSeekNonRecursive(target);
         }
-        {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
-                std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
-                team->flushAndSeekNonRecursive(target);
-            }
-        }
     }
 
     void flushAndSeekNonRecursive(StreamTarget target) {
@@ -221,6 +214,18 @@ public:
             auto target_shared = t.lock();
             if (target_shared) {
                 seek_targets_shared.push_back(target_shared);
+            }
+        }
+        {
+            auto lock = getLinkedTeamsLock();
+            for (auto team: linked_teams_) {
+                std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
+                for (auto t: team->seek_targets_) {
+                    auto target_shared = t.lock();
+                    if (target_shared) {
+                        seek_targets_shared.push_back(target_shared);
+                    }
+                }
             }
         }
 
