@@ -30,6 +30,7 @@ public:
         }
     }
     AVTS updateOffsetNonRecursive(AVTS local_offset) {
+        auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
         if (offset == AV_NOPTS_VALUE) {
@@ -48,12 +49,10 @@ public:
         }
     }
     AVTS updateOffset(AVTS local_offset) {
-        auto lock = getLock();
         AVTS offset = updateOffsetNonRecursive(local_offset);
         {
             auto lock = getLinkedTeamsLock();
             for (auto team: linked_teams_) {
-                auto team_lock = team->getLock();
                 offset = team->updateOffsetNonRecursive(offset);
             }
         }
@@ -216,29 +215,26 @@ public:
     }
 
     void flushAndSeekNonRecursive(StreamTarget target) {
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_start(target);
+        std::vector<std::shared_ptr<IFlushAndSeek>> seek_targets_shared;
+
+        for (auto t: seek_targets_) {
+            auto target_shared = t.lock();
+            if (target_shared) {
+                seek_targets_shared.push_back(target_shared);
             }
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek(target);
-            }
+
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_start(target);
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_finish(target);
-            }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek(target);
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_complete(target);
-            }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_finish(target);
+        }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_complete(target);
         }
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {

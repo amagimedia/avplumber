@@ -54,7 +54,11 @@ public:
     }
     virtual void linkTeam(std::shared_ptr<Object> team) {
         auto lock = getLinkedTeamsLock();
-        linked_teams_.push_back(team);
+        if (std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
+            return t == team;
+        }) == linked_teams_.end()) {
+            linked_teams_.push_back(team);
+        }
     }
     virtual void unlinkTeam(std::shared_ptr<Object> team) {
         auto lock = getLinkedTeamsLock();
