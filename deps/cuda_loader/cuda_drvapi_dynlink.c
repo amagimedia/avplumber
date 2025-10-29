@@ -213,14 +213,16 @@ tcuGraphicsD3D11RegisterResource      *cuGraphicsD3D11RegisterResource;
 #endif
 
 // GL/CUDA interop
-#ifdef CUDA_INIT_OPENGL
 tcuGLCtxCreate                        *cuGLCtxCreate;
 tcuGraphicsGLRegisterBuffer           *cuGraphicsGLRegisterBuffer;
 tcuGraphicsGLRegisterImage            *cuGraphicsGLRegisterImage;
 #if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64)
 tcuWGLGetDevice                       *cuWGLGetDevice;
 #endif
-#endif
+
+/// EGL
+tcuGraphicsEGLRegisterImage           *cuGraphicsEGLRegisterImage;
+tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
 
 #define STRINGIFY(X) #X
 
@@ -444,7 +446,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
     }
 
     // These are CUDA 4.1 new functions
-    if (cudaVersion >= 4010 && __CUDA_API_VERSION >= 4010)
+    if (cudaVersion >= 4010)
     {
         GET_PROC(cuDeviceGetByPCIBusId);
         GET_PROC(cuDeviceGetPCIBusId);
@@ -456,7 +458,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
     }
 
     // These could be _v2 interfaces
-    if (cudaVersion >= 4000 && __CUDA_API_VERSION >= 4000)
+    if (cudaVersion >= 4000)
     {
         GET_PROC_V2(cuCtxDestroy);
         GET_PROC_V2(cuCtxPopCurrent);
@@ -465,7 +467,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC_V2(cuEventDestroy);
     }
 
-    if (cudaVersion >= 3020 && __CUDA_API_VERSION >= 3020)
+    if (cudaVersion >= 3020)
     {
         GET_PROC_V2(cuDeviceTotalMem);
         GET_PROC_V2(cuCtxCreate);
@@ -507,7 +509,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC_V2(cuTexRefSetAddress);
         GET_PROC_V2(cuTexRefGetAddress);
 
-        if (cudaVersion >= 4010 && __CUDA_API_VERSION >= 4010)
+        if (cudaVersion >= 4010)
         {
             GET_PROC_V3(cuTexRefSetAddress2D);
         }
@@ -595,7 +597,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuGraphicsUnregisterResource);
         GET_PROC(cuGraphicsSubResourceGetMappedArray);
 
-        if (cudaVersion >= 3020 && __CUDA_API_VERSION >= 3020)
+        if (cudaVersion >= 3020)
         {
             GET_PROC_V2(cuGraphicsResourceGetMappedPointer);
         }
@@ -618,24 +620,22 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuD3D10CtxCreate);
         GET_PROC(cuGraphicsD3D10RegisterResource);
 #endif
-#ifdef CUDA_INIT_OPENGL
         GET_PROC(cuGraphicsGLRegisterBuffer);
         GET_PROC(cuGraphicsGLRegisterImage);
-#endif
     }
 
     if (driverVer >= 2010)
     {
         GET_PROC(cuModuleLoadDataEx);
         GET_PROC(cuModuleLoadFatBinary);
-#ifdef CUDA_INIT_OPENGL
         GET_PROC(cuGLCtxCreate);
         GET_PROC(cuGraphicsGLRegisterBuffer);
         GET_PROC(cuGraphicsGLRegisterImage);
+        GET_PROC(cuGraphicsEGLRegisterImage);
+        GET_PROC(cuGraphicsResourceGetMappedEglFrame);
 #  ifdef WIN32
         GET_PROC(cuWGLGetDevice);
 #  endif
-#endif
 #ifdef CUDA_INIT_D3D9
         GET_PROC(cuD3D9GetDevice);
         GET_PROC(cuD3D9CtxCreate);

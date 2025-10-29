@@ -22,7 +22,7 @@
 /**
  * CUDA API versioning support
  */
-#define __CUDA_API_VERSION 5000
+#define __CUDA_API_VERSION 7000
 
 /**
  * \defgroup CUDA_DRIVER CUDA Driver API
@@ -1511,7 +1511,7 @@ typedef CUresult CUDAAPI tcuIpcCloseMemHandle(CUdeviceptr dptr);
 #endif
 
 typedef CUresult CUDAAPI tcuMemHostRegister(void *p, size_t bytesize, unsigned int Flags);
-typedef CUresult CUDAAPI tcuMemHostUnregister(void *p);;
+typedef CUresult CUDAAPI tcuMemHostUnregister(void *p);
 typedef CUresult CUDAAPI tcuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
 typedef CUresult CUDAAPI tcuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount);
 
