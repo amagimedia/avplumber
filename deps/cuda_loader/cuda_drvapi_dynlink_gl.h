@@ -12,28 +12,18 @@
 #ifndef __cuda_drvapi_dynlink_cuda_gl_h__
 #define __cuda_drvapi_dynlink_cuda_gl_h__
 
-#ifdef CUDA_INIT_OPENGL
-
-#if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64)
-#  define WINDOWS_LEAN_AND_MEAN
-#  define NOMINMAX
-#  include <windows.h>
-#endif
-
 // includes, system
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
-// includes, GL
-#include <GL/glew.h>
+#include <GL/gl.h>
+#include <EGL/egl.h>
+#include "EGL/eglext.h"
 
-#if defined (__APPLE__) || defined(MACOSX)
-#include <GLUT/glut.h>
-#else
-#include <GL/freeglut.h>
-#endif
+struct CUeglFrame_st;
+typedef struct CUeglFrame_st CUeglFrame;
 
 /************************************
  **
@@ -46,12 +36,9 @@ typedef CUresult CUDAAPI tcuGLCtxCreate(CUcontext *pCtx, unsigned int Flags, CUd
 typedef CUresult CUDAAPI tcuGraphicsGLRegisterBuffer(CUgraphicsResource *pCudaResource, GLuint buffer, unsigned int Flags);
 typedef CUresult CUDAAPI tcuGraphicsGLRegisterImage(CUgraphicsResource *pCudaResource, GLuint image, GLenum target, unsigned int Flags);
 
-#if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64)
-#include <GL/wglext.h>
-// WIN32
-typedef CUresult CUDAAPI tcuWGLGetDevice(CUdevice *pDevice, HGPUNV hGpu);
-#endif
-
-#endif // CUDA_INIT_OPENGL
+typedef CUresult CUDAAPI tcuGraphicsEGLRegisterImage(
+		    CUgraphicsResource *pCudaResource, EGLImageKHR image, unsigned int flags);
+typedef CUresult CUDAAPI tcuGraphicsResourceGetMappedEglFrame(
+		    CUeglFrame *eglFrame, CUgraphicsResource resource, unsigned int index, unsigned int mipLevel);
 
 #endif // __cuda_drvapi_dynlink_cuda_gl_h__

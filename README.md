@@ -926,6 +926,63 @@ format.
     to synchronize audio with video by cutting first audio frame to make
     it start together with first video frame.
 
+### `reinterpret_planes_video` / `reinterpret_planes_audio`
+
+Reinterpret plane pointers (like [`reinterpret_cast`](https://en.cppreference.com/w/cpp/language/reinterpret_cast.html)) without copying data. Works like a controlled cast of frame layout:
+- For video, re-map data planes and change destination pixel format metadata.
+- For audio (not tested yet), re-map planar channels and change destination sample format metadata.
+
+No memory copies are performed. Plane pointers and buffer references are reused. Dimensions and linesizes are validated using `av_pix_fmt_` functions.
+
+Intended as a more versatile alternative to [`shuffleplanes`](https://ffmpeg.org/ffmpeg-filters.html#shuffleplanes) which does not support hardware frames.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples` respectively
+
+-   `plane_map` (object) - optional, `{ "dst_plane": src_plane }` mapping. If omitted, planes are mapped 1:1 up to the minimum plane count (e.g. `yuva420p` -> `yuv420p` drops alpha by default).
+
+For video only:
+
+-   `dst_pixel_format` (string, required) - destination software pixel format name (e.g. `gray`, `yuv420p`). When using hardware frames, this updates only `hw_frames_ctx->sw_format`; `AVFrame::format` (the hardware pixel format, e.g. `cuda`) stays unchanged.
+-   `hw_frames` (bool, video) - default `false`. If `true`, the node expects a hardware input frame and keeps the hardware `AVFrame::format` unchanged. It clones `hw_frames_ctx` and sets its `sw_format` to `dst_pixel_format`.
+
+For audio only:
+
+-   `dst_sample_format` (string, required) - destination sample format name (e.g. `fltp`). Interleaved audio is supported only when source and destination sample formats match exactly (no copying is performed).
+
+Constraints:
+-   No conversions are performed. The node does not copy, up/download, or resample; it only reinterprets pointers and metadata.
+-   For video, mapping between hardware and non-hardware must be consistent: `hw_frames=true` is required for hardware inputs; `hw_frames=false` rejects hardware inputs. Otherwise pointers would become invalid.
+-   For audio, planar-to-planar remaps are supported; interleaved requires identical formats and is effectively pass-through.
+
+Examples:
+
+Map V component of `yuv420p` to grayscale:
+
+```
+{"type":"reinterpret_planes_video","name":"v_to_gray","group":"proc",
+ "src":"v_in","dst":"v_out",
+ "dst_pixel_format":"gray",
+ "plane_map":{"0":2}}
+```
+
+Drop alpha from `yuva420p` to `yuv420p` (default plane map) in hardware frames:
+
+```
+{"type":"reinterpret_planes_video","name":"drop_alpha","group":"proc",
+ "src":"v_in","dst":"v_out",
+ "dst_pixel_format":"yuv420p",
+ "hw_frames":true}
+```
+
+Audio: select channel 1 (second plane) as mono FLT planar:
+
+```
+{"type":"reinterpret_planes_audio","name":"pick_ch1","group":"proc",
+ "src":"a_in","dst":"a_out",
+ "dst_sample_format":"fltp",
+ "plane_map":{"0":1}}
+```
+
 ### `picture_buffer_sink`
 
 Take a frame and write it to picture buffer that can be later used by `sentinel_video`.
