@@ -168,6 +168,14 @@ public:
         }
         //dec_.close();
         //input_hold_ = nullptr;
+        // try to put frames to sink
+        while (!flush_frames_.empty()) {
+            OutputFrame frame = flush_frames_.front();
+            if (!this->sink_->put(frame, true)) {
+                break;
+            }
+            flush_frames_.pop_front();
+        }
         if (flush_frames_.empty()) {
             this->finished_ = true;
         } else {
