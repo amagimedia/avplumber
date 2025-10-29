@@ -313,10 +313,15 @@ template<> struct MediaSpecific<av::AudioSamples> {
 		dst->nb_samples = src->nb_samples;
 		dst->sample_rate = src->sample_rate;
 		// Set channel layout to unspecified with correct channel count
+		#if API_NEW_CHANNEL_LAYOUT
 		av_channel_layout_uninit(&dst->ch_layout);
 		dst->ch_layout.order = AV_CHANNEL_ORDER_UNSPEC;
 		dst->ch_layout.nb_channels = dst_planes;
 		dst->ch_layout.u.mask = 0;
+		#else
+		dst->channels = dst_planes;
+		dst->channel_layout = 0;
+		#endif
 
 		// Default mapping: identity for first planes
 		std::map<int,int> mapping = p.plane_map;
