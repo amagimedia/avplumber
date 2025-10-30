@@ -51,8 +51,7 @@ public:
     AVTS updateOffset(AVTS local_offset) {
         AVTS offset = updateOffsetNonRecursive(local_offset);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 offset = team->updateOffsetNonRecursive(offset);
             }
         }
@@ -68,8 +67,7 @@ public:
     void reset() {
         resetNonRecursive();
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->resetNonRecursive();
             }
         }
@@ -81,8 +79,7 @@ public:
     void setFirst(bool value) {
         setFirstNonRecursive(value);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->setFirstNonRecursive(value);
             }
         }
@@ -96,8 +93,7 @@ public:
             return false;
         }
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 if (!team->isFirstNonRecursive()) {
                     return false;
                 }
@@ -217,8 +213,7 @@ public:
             }
         }
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
                 for (auto t: team->seek_targets_) {
                     auto target_shared = t.lock();
