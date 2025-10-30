@@ -45,12 +45,16 @@ public:
 
 template<typename Object>
 class ILinkableTeam {
-protected:
+private:
     std::mutex linked_teams_mutex_;
     std::vector<std::shared_ptr<Object>> linked_teams_;
-public:
     std::unique_lock<decltype(linked_teams_mutex_)> getLinkedTeamsLock() {
         return std::unique_lock<decltype(linked_teams_mutex_)>(linked_teams_mutex_);
+    }
+public:
+    std::vector<std::shared_ptr<Object>> getLinkedTeams() {
+        auto lock = getLinkedTeamsLock();
+        return linked_teams_;
     }
     virtual void linkTeam(std::shared_ptr<Object> team) {
         auto lock = getLinkedTeamsLock();

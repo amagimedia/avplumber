@@ -77,8 +77,7 @@ public:
     void setSpeed(float speed) {
         setSpeedNonRecursive(speed);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->setSpeedNonRecursive(speed);
             }
         }

@@ -68,8 +68,7 @@ public:
     void pause(bool synchonize_nodes = true) {
         pauseNonRecursive(synchonize_nodes);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->pauseNonRecursive(synchonize_nodes);
             }
         }
@@ -78,8 +77,7 @@ public:
     void pause(const StreamTarget& target) {
         pauseNonRecursive(target);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->pauseNonRecursive(target);
             }
         }
@@ -90,8 +88,7 @@ public:
             return true;
         }
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 if (team->checkPauseNonRecursive(ts)) {
                     return true;
                 }
@@ -102,8 +99,7 @@ public:
     void resume() {
         resumeNonRecursive();
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->resumeNonRecursive();
             }
         }
