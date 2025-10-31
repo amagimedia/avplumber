@@ -176,10 +176,15 @@ public:
             }
             flush_frames_.pop_front();
         }
-        if (flush_frames_.empty()) {
+        if (true) {
             this->finished_ = true;
         } else {
-            this->finish_after_flush_ = true;
+            // FIXME: doesn't work correctly when destroying graph (may hang decoder thread)
+            if (flush_frames_.empty()) {
+                this->finished_ = true;
+            } else {
+                this->finish_after_flush_ = true;
+            }
         }
     }
     void setFrameTimestamps(OutputFrame& frm) {
