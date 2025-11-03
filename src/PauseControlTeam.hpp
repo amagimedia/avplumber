@@ -60,6 +60,16 @@ protected:
         return false;
     }
 
+    virtual void teamLinked(std::shared_ptr<PauseControlTeam> team, bool synchronize) override {
+        if (synchronize && (isPaused() != team->isPaused())) {
+            if (isPaused()) {
+                team->pauseNonRecursive(false);
+            } else {
+                team->resumeNonRecursive();
+            }
+        }
+    }
+
 public:
     bool isPaused() {
         return paused_;
