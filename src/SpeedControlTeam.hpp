@@ -73,6 +73,12 @@ protected:
         }
     }
 
+    virtual void teamLinked(std::shared_ptr<SpeedControlTeam> team, bool synchronize) override {
+        if (synchronize && (getSpeed() != team->getSpeed())) {
+            team->setSpeedNonRecursive(getSpeed());
+        }
+    }
+
 public:
     void setSpeed(float speed) {
         setSpeedNonRecursive(speed);

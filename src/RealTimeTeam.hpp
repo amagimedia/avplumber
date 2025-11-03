@@ -153,6 +153,12 @@ public:
         return earliest_stream_.lock();
     }
 
+    void teamLinked(std::shared_ptr<RealTimeTeam> team, bool synchronize) override {
+        if (synchronize) {
+            flushAndSeek(StreamTarget::now());
+        }
+    }
+
     virtual void flushAndSeek(StreamTarget seek_target) override {
         StreamTarget target = seek_target;
         {
