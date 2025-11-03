@@ -73,14 +73,15 @@ public:
             if (std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
                 return t == team;
             }) == linked_teams_.end()) {
-                logstream << "Linking team " << team << " to " << this << std::endl;
                 linked_teams_.push_back(team);
-                teamLinked(team, link_back);
                 linked = true;
             }
         }
-        if (link_back && linked) {
-            team->linkTeam(shared_from_this(), false); // link back
+        if (linked) {
+            teamLinked(team, link_back);
+            if (link_back) {
+                team->linkTeam(shared_from_this(), false); // link back
+            }
         }
     }
     virtual void unlinkTeam(std::shared_ptr<Object> team, bool unlink_back = true) {
@@ -92,12 +93,14 @@ public:
             });
             if (linked_team != linked_teams_.end()) {
                 linked_teams_.erase(linked_team);
-                teamUnlinked(team, unlink_back);
                 unlinked = true;
             }
         }
-        if (unlink_back && unlinked) {
-            team->unlinkTeam(shared_from_this(), false); // unlink back
+        if (unlinked) {
+            teamUnlinked(team, unlink_back);
+            if (unlink_back) {
+                team->unlinkTeam(shared_from_this(), false); // unlink back
+            }
         }
     }
 };
