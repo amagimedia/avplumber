@@ -168,10 +168,23 @@ public:
         }
         //dec_.close();
         //input_hold_ = nullptr;
-        if (flush_frames_.empty()) {
+        // try to put frames to sink
+        while (!flush_frames_.empty()) {
+            OutputFrame frame = flush_frames_.front();
+            if (!this->sink_->put(frame, true)) {
+                break;
+            }
+            flush_frames_.pop_front();
+        }
+        if (true) {
             this->finished_ = true;
         } else {
-            this->finish_after_flush_ = true;
+            // FIXME: doesn't work correctly when destroying graph (may hang decoder thread)
+            if (flush_frames_.empty()) {
+                this->finished_ = true;
+            } else {
+                this->finish_after_flush_ = true;
+            }
         }
     }
     void setFrameTimestamps(OutputFrame& frm) {

@@ -349,6 +349,7 @@ Get current playback speed of the team `team_name`.
 
 It is possible to dynamically link & unlink teams to act as a single "super-team".
 When teams are linked, commands like ```speed.set``` are automatically sent to all linked teams.
+Linking teams will also copy team's current status (like pause status) to linked team (from ```team A``` to ```team B```).
 
 ### Hardware acceleration
 
