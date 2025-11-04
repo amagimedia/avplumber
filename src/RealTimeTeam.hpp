@@ -30,6 +30,7 @@ public:
         }
     }
     AVTS updateOffsetNonRecursive(AVTS local_offset) {
+        auto lock = getLock();
         AVTS offset = offset_.load(std::memory_order_relaxed);
         // std::memory_order_relaxed because mutexed anyway
         if (offset == AV_NOPTS_VALUE) {
@@ -48,12 +49,9 @@ public:
         }
     }
     AVTS updateOffset(AVTS local_offset) {
-        auto lock = getLock();
         AVTS offset = updateOffsetNonRecursive(local_offset);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
-                auto team_lock = team->getLock();
+            for (auto team: getLinkedTeams()) {
                 offset = team->updateOffsetNonRecursive(offset);
             }
         }
@@ -69,8 +67,7 @@ public:
     void reset() {
         resetNonRecursive();
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->resetNonRecursive();
             }
         }
@@ -82,8 +79,7 @@ public:
     void setFirst(bool value) {
         setFirstNonRecursive(value);
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 team->setFirstNonRecursive(value);
             }
         }
@@ -97,8 +93,7 @@ public:
             return false;
         }
         {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
+            for (auto team: getLinkedTeams()) {
                 if (!team->isFirstNonRecursive()) {
                     return false;
                 }
@@ -158,6 +153,12 @@ public:
         return earliest_stream_.lock();
     }
 
+    void teamLinked(std::shared_ptr<RealTimeTeam> team, bool synchronize) override {
+        if (synchronize) {
+            flushAndSeek(StreamTarget::now());
+        }
+    }
+
     virtual void flushAndSeek(StreamTarget seek_target) override {
         StreamTarget target = seek_target;
         {
@@ -206,39 +207,40 @@ public:
 
             flushAndSeekNonRecursive(target);
         }
-        {
-            auto lock = getLinkedTeamsLock();
-            for (auto team: linked_teams_) {
-                std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
-                team->flushAndSeekNonRecursive(target);
-            }
-        }
     }
 
     void flushAndSeekNonRecursive(StreamTarget target) {
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_start(target);
+        std::vector<std::shared_ptr<IFlushAndSeek>> seek_targets_shared;
+
+        for (auto t: seek_targets_) {
+            auto target_shared = t.lock();
+            if (target_shared) {
+                seek_targets_shared.push_back(target_shared);
             }
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek(target);
+        {
+            for (auto team: getLinkedTeams()) {
+                std::unique_lock<decltype(team->seek_mutex_)> team_seek_mutex(team->seek_mutex_);
+                for (auto t: team->seek_targets_) {
+                    auto target_shared = t.lock();
+                    if (target_shared) {
+                        seek_targets_shared.push_back(target_shared);
+                    }
+                }
             }
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_finish(target);
-            }
+
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_start(target);
         }
-        for (int i = 0; i < seek_targets_.size(); ++i) {
-            auto node = seek_targets_[i].lock();
-            if (node) {
-                node->flushAndSeek_complete(target);
-            }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek(target);
+        }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_finish(target);
+        }
+        for (auto t: seek_targets_shared) {
+            t->flushAndSeek_complete(target);
         }
     }
     void addSeekTarget(std::weak_ptr<IFlushAndSeek> target) {

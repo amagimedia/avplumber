@@ -44,26 +44,64 @@ public:
 };
 
 template<typename Object>
-class ILinkableTeam {
-protected:
-    std::mutex linked_teams_mutex_;
+class ILinkableTeam: public std::enable_shared_from_this<Object> {
+private:
+    std::recursive_mutex linked_teams_mutex_;
     std::vector<std::shared_ptr<Object>> linked_teams_;
-public:
     std::unique_lock<decltype(linked_teams_mutex_)> getLinkedTeamsLock() {
         return std::unique_lock<decltype(linked_teams_mutex_)>(linked_teams_mutex_);
     }
-    virtual void linkTeam(std::shared_ptr<Object> team) {
-        auto lock = getLinkedTeamsLock();
-        linked_teams_.push_back(team);
+    std::shared_ptr<Object> shared_from_this() {
+        return std::dynamic_pointer_cast<Object>(std::enable_shared_from_this<Object>::shared_from_this());
     }
-    virtual void unlinkTeam(std::shared_ptr<Object> team) {
+protected:
+    virtual void teamLinked(std::shared_ptr<Object> team, bool synchronize) {
+        // noop
+    }
+    virtual void teamUnlinked(std::shared_ptr<Object> team, bool synchronize) {
+        // noop
+    }
+public:
+    std::vector<std::shared_ptr<Object>> getLinkedTeams() {
         auto lock = getLinkedTeamsLock();
-        linked_teams_.erase(
-            std::remove_if(
-                linked_teams_.begin(),
-                linked_teams_.end(), [team](auto& t) {
-                    return t == team;
-                }), linked_teams_.end());
+        return linked_teams_;
+    }
+    virtual void linkTeam(std::shared_ptr<Object> team, bool link_back = true) {
+        bool linked = false;
+        {
+            auto lock = getLinkedTeamsLock();
+            if (std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
+                return t == team;
+            }) == linked_teams_.end()) {
+                linked_teams_.push_back(team);
+                linked = true;
+            }
+        }
+        if (linked) {
+            teamLinked(team, link_back);
+            if (link_back) {
+                team->linkTeam(shared_from_this(), false); // link back
+            }
+        }
+    }
+    virtual void unlinkTeam(std::shared_ptr<Object> team, bool unlink_back = true) {
+        bool unlinked = false;
+        {
+            auto lock = getLinkedTeamsLock();
+            auto linked_team = std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
+                return t == team;
+            });
+            if (linked_team != linked_teams_.end()) {
+                linked_teams_.erase(linked_team);
+                unlinked = true;
+            }
+        }
+        if (unlinked) {
+            teamUnlinked(team, unlink_back);
+            if (unlink_back) {
+                team->unlinkTeam(shared_from_this(), false); // unlink back
+            }
+        }
     }
 };
 
