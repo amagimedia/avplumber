@@ -58,9 +58,9 @@ override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 NVCC ?= /usr/local/cuda/bin/nvcc
 # Build PTX and embed as header for driver-side kernel launch (no cudart)
-CUDA_KERNEL = $(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.cu
-PTX = objs/$(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx
-PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx.h
+CUDA_KERNEL = $(SRCDIR)/nodes/hwaccel/yuv_to_rgba_709lim_surface.cu
+PTX = objs/$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_709lim_surface.ptx
+PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_709lim_surface.ptx.h
 endif
 
 ifeq ($(HAVE_DRM),1)
@@ -169,7 +169,7 @@ $(PTX): $(CUDA_KERNEL)
 $(PTX_H): $(PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yuv444_to_rgba_709lim_surface_ptx_len/const unsigned int avpl_yuv444_rgba709lim_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yuv444_to_rgba_709lim_surface_ptx/const char avpl_yuv444_rgba709lim_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yuv_to_rgba_709lim_surface_ptx_len/const unsigned int avpl_yuv_rgba709lim_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yuv_to_rgba_709lim_surface_ptx/const char avpl_yuv_rgba709lim_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
 # Ensure the sink object rebuilds if the generated header changes
