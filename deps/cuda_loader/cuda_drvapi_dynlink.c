@@ -33,6 +33,8 @@ tcuDeviceComputeCapability            *cuDeviceComputeCapability;
 tcuDeviceTotalMem                     *cuDeviceTotalMem;
 tcuDeviceGetProperties                *cuDeviceGetProperties;
 tcuDeviceGetAttribute                 *cuDeviceGetAttribute;
+tcuGetErrorName                        *cuGetErrorName;
+tcuGetErrorString                      *cuGetErrorString;
 tcuCtxCreate                          *cuCtxCreate;
 tcuCtxDestroy                         *cuCtxDestroy;
 tcuCtxAttach                          *cuCtxAttach;
@@ -223,6 +225,9 @@ tcuWGLGetDevice                       *cuWGLGetDevice;
 /// EGL
 tcuGraphicsEGLRegisterImage           *cuGraphicsEGLRegisterImage;
 tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
+/* Surface object API */
+tcuSurfObjectCreate              *cuSurfObjectCreate;
+tcuSurfObjectDestroy             *cuSurfObjectDestroy;
 
 #define STRINGIFY(X) #X
 
@@ -374,6 +379,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
     GET_PROC(cuDeviceComputeCapability);
     GET_PROC(cuDeviceGetProperties);
     GET_PROC(cuDeviceGetAttribute);
+    GET_PROC(cuGetErrorName);
+    GET_PROC(cuGetErrorString);
     GET_PROC(cuCtxDestroy);
     GET_PROC(cuCtxAttach);
     GET_PROC(cuCtxDetach);
@@ -573,6 +580,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuMemcpy);
         GET_PROC(cuMemcpyPeer);
         GET_PROC(cuLaunchKernel);
+        GET_PROC(cuSurfObjectCreate);
+        GET_PROC(cuSurfObjectDestroy);
         GET_PROC(cuProfilerStop);
     }
 

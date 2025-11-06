@@ -41,4 +41,11 @@ typedef CUresult CUDAAPI tcuGraphicsEGLRegisterImage(
 typedef CUresult CUDAAPI tcuGraphicsResourceGetMappedEglFrame(
 		    CUeglFrame *eglFrame, CUgraphicsResource resource, unsigned int index, unsigned int mipLevel);
 
+
+extern tcuGLCtxCreate *cuGLCtxCreate;
+extern tcuGraphicsGLRegisterBuffer *cuGraphicsGLRegisterBuffer;
+extern tcuGraphicsGLRegisterImage *cuGraphicsGLRegisterImage;
+extern tcuGraphicsEGLRegisterImage *cuGraphicsEGLRegisterImage;
+extern tcuGraphicsResourceGetMappedEglFrame *cuGraphicsResourceGetMappedEglFrame;
+
 #endif // __cuda_drvapi_dynlink_cuda_gl_h__

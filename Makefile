@@ -54,8 +54,13 @@ endif
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
 override CPPSRC += cuda.cpp
-override CXXFLAGS += -DHAVE_CUDA=1
+override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+NVCC ?= /usr/local/cuda/bin/nvcc
+# Build PTX and embed as header for driver-side kernel launch (no cudart)
+CUDA_KERNEL = $(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.cu
+PTX = objs/$(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx
+PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx.h
 endif
 
 ifeq ($(HAVE_DRM),1)
@@ -109,12 +114,13 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 $(nodes_list_file): ./generate_node_list $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
-$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS)
+$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)
 
 build: $(EXE) compile_flags.txt
 
-$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS)
+
+$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H)
 	ar -rcs $@ $^
 
 static_library: $(STATIC_LIBRARY)
@@ -153,6 +159,22 @@ deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+ifeq ($(HAVE_CUDA),1)
+# Build PTX once and turn it into a C header array
+$(PTX): $(CUDA_KERNEL)
+	@mkdir -p $(dir $@)
+	$(NVCC) -ptx -o $@ $<
+
+$(PTX_H): $(PTX)
+	@mkdir -p $(dir $@)
+	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yuv444_to_rgba_709lim_surface_ptx_len/const unsigned int avpl_yuv444_rgba709lim_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yuv444_to_rgba_709lim_surface_ptx/const char avpl_yuv444_rgba709lim_ptx/' > $@
+	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
+
+# Ensure the sink object rebuilds if the generated header changes
+objs/src/nodes/obs/cuda_egl_obs_sink.o: $(PTX_H)
+endif
 
 compile_flags.txt:
 	echo "$(CXXFLAGS)" | tr ' ' '\n' > $@

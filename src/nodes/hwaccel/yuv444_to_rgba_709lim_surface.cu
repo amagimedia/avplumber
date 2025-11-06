@@ -28,7 +28,7 @@ __device__ __forceinline__ void yuv709lim_to_rgb(
     b = clamp8(Bf);
 }
 // Kernel: read planar YUV444p (linear, pitched) and write RGBA8 (A=255) to a cudaArray via surface
-__global__ void kYUV444p_to_RGBA8_709lim_surface(
+extern "C" __global__ void kYUV444p_to_RGBA8_709lim_surface(
     const uint8_t* __restrict__ Y, size_t pitchY,
     const uint8_t* __restrict__ U, size_t pitchU,
     const uint8_t* __restrict__ V, size_t pitchV,

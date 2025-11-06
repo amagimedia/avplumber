@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <dlfcn.h>
 
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixfmt.h>
@@ -17,39 +18,27 @@
 #define HAVE_CUDA 0
 #endif
 
-#if HAVE_CUDA
-
 #include <GL/gl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <X11/Xlib.h>
 
-#include <ffnvcodec/dynlink_loader.h>
+//#include <ffnvcodec/dynlink_loader.h>
+#include "../../../deps/cuda_loader/cuda_drvapi_dynlink_cuda.h"
+#include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 #include <libavutil/hwcontext_cuda.h>
+#include "../../cuda.hpp"
 
-// CUDA runtime symbols (for the kernel launcher)
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cuda_surface_types.h>
+// CU_GL_DEVICE_LIST_ALL constant (not in dynlink header)
+#ifndef CU_GL_DEVICE_LIST_ALL
+#define CU_GL_DEVICE_LIST_ALL 0x03
+#endif
 
-extern "C" cudaError_t yuv444p_to_rgba8_709lim_surface(
-    const uint8_t* dY, const uint8_t* dU, const uint8_t* dV,
-    int pitchY, int pitchU, int pitchV,
-    cudaSurfaceObject_t surfOut,
-    int W, int H,
-    cudaStream_t stream);
+// PTX blob for the conversion kernel (generated at build time)
+#include "../../../objs/src/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx.h"
 
-// minimal subset from OBS internals used here
-struct gs_device { struct gl_platform *plat; };
-typedef struct gs_device gs_device_t;
-
-struct gl_platform {
-    Display *xdisplay;
-    EGLDisplay edisplay;
-    EGLConfig config;
-    EGLContext context;
-    EGLSurface pbuffer;
-    bool close_xdisplay;
-};
+// Note: we launch the kernel via CUDA Driver API (dynlink), not the runtime.
+// We create our own independent EGL/OpenGL context, separate from OBS.
 
 static inline bool gl_success(const char *funcname)
 {
@@ -82,16 +71,15 @@ static inline bool gl_bind_texture(GLenum target, GLuint texture)
     return gl_success("glBindTexture");
 }
 
-static CudaFunctions* egl_global_cu = nullptr;
 
 static int check_cu(CUresult err, const char *func)
 {
     if (err == CUDA_SUCCESS) return 0;
     const char *err_name = nullptr;
     const char *err_string = nullptr;
-    if (egl_global_cu) {
-        egl_global_cu->cuGetErrorName(err, &err_name);
-        egl_global_cu->cuGetErrorString(err, &err_string);
+    if (cuGetErrorName && cuGetErrorString) {
+        cuGetErrorName(err, &err_name);
+        cuGetErrorString(err, &err_string);
     }
     logstream << "cuda function: " << func << " failed: " << (err_name ? err_name : "?") << ": " << (err_string ? err_string : "?");
     return -1;
@@ -99,21 +87,8 @@ static int check_cu(CUresult err, const char *func)
 
 #define CHECK_CU(x) check_cu((x), #x)
 
-// Ensure CUDA driver API is loaded and initialized
 __attribute__((constructor)) static void init_cuda_cuda_egl_obs_sink(void)
 {
-    if (!cuda_load_functions(&egl_global_cu, nullptr)) {
-        auto cu = egl_global_cu;
-        if (!CHECK_CU(cu->cuInit(0))) {
-            logstream << "cuda_egl_obs_sink: CUDA initialized";
-        } else {
-            logstream << "cuda_egl_obs_sink: failed to initialize CUDA";
-            egl_global_cu = nullptr;
-        }
-    } else {
-        egl_global_cu = nullptr;
-        logstream << "cuda_egl_obs_sink: failed to load CUDA functions";
-    }
 }
 
 class CudaEglObsSink: public NodeSingleInput<av::VideoFrame>, public NonBlockingNode<CudaEglObsSink>, public IFlushable {
@@ -146,6 +121,8 @@ protected:
     // CUDA interop for the GL texture
     CUcontext cu_ctx_ = nullptr;
     CUgraphicsResource cu_tex_res_ = nullptr;
+    CUmodule cu_module_ = nullptr;
+    CUfunction cu_kernel_ = nullptr;
 
     // OBS HW buffer callbacks
     struct obs_hw_buffer obs_hw_;
@@ -162,57 +139,194 @@ protected:
     void destroy_cuda_gl_resources()
     {
         if (cu_tex_res_) {
-            auto cu = egl_global_cu;
-            CHECK_CU(cu->cuGraphicsUnregisterResource(cu_tex_res_));
+            CHECK_CU(cuGraphicsUnregisterResource(cu_tex_res_));
             cu_tex_res_ = nullptr;
         }
-        if (egl_image_ != EGL_NO_IMAGE_KHR) {
+        if (egl_image_ != EGL_NO_IMAGE_KHR && egl_display_ != EGL_NO_DISPLAY) {
             eglDestroyImageKHR(egl_display_, egl_image_);
             egl_image_ = EGL_NO_IMAGE_KHR;
         }
-        if (gl_tex_rgba_) {
+        if (gl_tex_rgba_ && egl_context_ != EGL_NO_CONTEXT) {
+            // Make context current to delete texture
+            eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_);
             glDeleteTextures(1, &gl_tex_rgba_);
             gl_tex_rgba_ = 0;
         }
         tex_w_ = tex_h_ = 0;
     }
 
+    void destroy_egl_context()
+    {
+        destroy_cuda_gl_resources();
+        
+        if (egl_context_ != EGL_NO_CONTEXT) {
+            eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(egl_display_, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+        }
+        if (egl_surface_ != EGL_NO_SURFACE) {
+            eglDestroySurface(egl_display_, egl_surface_);
+            egl_surface_ = EGL_NO_SURFACE;
+        }
+        if (egl_display_ != EGL_NO_DISPLAY) {
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
+        }
+    }
+
+    bool ensure_kernel_loaded()
+    {
+        if (cu_kernel_) return true;
+        if (!cu_ctx_) return false;
+        CHECK_CU(cuCtxPushCurrent(cu_ctx_));
+        if (CHECK_CU(cuModuleLoadData(&cu_module_, (const void*)avpl_yuv444_rgba709lim_ptx))) {
+            CUcontext dummy;
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            logstream << "cuda_egl_obs_sink: cuModuleLoadData failed";
+            return false;
+        }
+        logstream << "cuda_egl_obs_sink: CUDA module loaded from PTX";
+        if (CHECK_CU(cuModuleGetFunction(&cu_kernel_, cu_module_, "kYUV444p_to_RGBA8_709lim_surface"))) {
+            CUcontext dummy;
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            logstream << "cuda_egl_obs_sink: cuModuleGetFunction failed";
+            return false;
+        }
+        CUcontext dummy;
+        CHECK_CU(cuCtxPopCurrent(&dummy));
+        logstream << "cuda_egl_obs_sink: CUDA kernel function loaded (kYUV444p_to_RGBA8_709lim_surface)";
+        return true;
+    }
+
     bool ensure_egl_context()
     {
         if (egl_context_ != EGL_NO_CONTEXT) return true;
 
-        graphics_t* graphics = gs_get_context();
-        if (!graphics || !graphics->device || !graphics->device->plat) {
-            logstream << "cuda_egl_obs_sink: OBS graphics device not available";
+        // Create our own independent EGL display
+        egl_display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (egl_display_ == EGL_NO_DISPLAY) {
+            logstream << "cuda_egl_obs_sink: eglGetDisplay failed";
             return false;
         }
-        gl_platform* plat = graphics->device->plat;
-        egl_display_ = plat->edisplay;
-        egl_config_ = plat->config;
-        EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-        // create a shared context? we keep it unshared; not required to share with OBS
+        logstream << "cuda_egl_obs_sink: EGL display created";
+
+        EGLint major, minor;
+        if (!eglInitialize(egl_display_, &major, &minor)) {
+            logstream << "cuda_egl_obs_sink: eglInitialize failed";
+            egl_display_ = EGL_NO_DISPLAY;
+            return false;
+        }
+        logstream << "cuda_egl_obs_sink: EGL initialized (version " << major << "." << minor << ")";
+
+        // Bind desktop OpenGL API (avoid ES/OpenGL API mismatch on this thread)
+        if (!eglBindAPI(EGL_OPENGL_API)) {
+            logstream << "cuda_egl_obs_sink: eglBindAPI(EGL_OPENGL_API) failed";
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
+            return false;
+        }
+        logstream << "cuda_egl_obs_sink: EGL OpenGL API bound";
+
+        // Choose our own config (RGBA8, OpenGL core compatible)
+        EGLint config_attrs[] = {
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+            EGL_SURFACE_TYPE,   EGL_PBUFFER_BIT,
+            EGL_RED_SIZE,       8,
+            EGL_GREEN_SIZE,     8,
+            EGL_BLUE_SIZE,      8,
+            EGL_ALPHA_SIZE,     8,
+            EGL_NONE
+        };
+        EGLint num_configs;
+        if (!eglChooseConfig(egl_display_, config_attrs, &egl_config_, 1, &num_configs) || num_configs == 0) {
+            logstream << "cuda_egl_obs_sink: eglChooseConfig failed";
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
+            return false;
+        }
+        logstream << "cuda_egl_obs_sink: EGL config selected";
+
+        // Create our own independent OpenGL context (core 3.3 if supported)
+        EGLint ctx_attr[] = {
+            #ifdef EGL_CONTEXT_OPENGL_PROFILE_MASK
+            EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            #endif
+            #ifdef EGL_CONTEXT_MAJOR_VERSION
+            EGL_CONTEXT_MAJOR_VERSION, 3,
+            EGL_CONTEXT_MINOR_VERSION, 3,
+            #endif
+            EGL_NONE
+        };
         egl_context_ = eglCreateContext(egl_display_, egl_config_, EGL_NO_CONTEXT, ctx_attr);
         if (egl_context_ == EGL_NO_CONTEXT) {
-            logstream << "cuda_egl_obs_sink: eglCreateContext failed";
+            EGLint error = eglGetError();
+            logstream << "cuda_egl_obs_sink: eglCreateContext failed, error: 0x" << std::hex << error;
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
             return false;
         }
+        logstream << "cuda_egl_obs_sink: EGL context created";
+
+        // Create pbuffer surface for context
         EGLint pbuf_attr[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
         egl_surface_ = eglCreatePbufferSurface(egl_display_, egl_config_, pbuf_attr);
         if (egl_surface_ == EGL_NO_SURFACE) {
-            logstream << "cuda_egl_obs_sink: eglCreatePbufferSurface failed";
+            EGLint error = eglGetError();
+            logstream << "cuda_egl_obs_sink: eglCreatePbufferSurface failed, error: 0x" << std::hex << error;
+            eglDestroyContext(egl_display_, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
             return false;
         }
-        if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
-            logstream << "cuda_egl_obs_sink: eglMakeCurrent failed";
-            return false;
-        }
+        logstream << "cuda_egl_obs_sink: EGL pbuffer surface created";
 
+        // Make context current to initialize OpenGL
+        if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
+            EGLint error = eglGetError();
+            logstream << "cuda_egl_obs_sink: eglMakeCurrent failed, error: 0x" << std::hex << error;
+            eglDestroySurface(egl_display_, egl_surface_);
+            egl_surface_ = EGL_NO_SURFACE;
+            eglDestroyContext(egl_display_, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
+            return false;
+        }
+        logstream << "cuda_egl_obs_sink: EGL context made current";
+
+        // Load EGL/GL extension functions
         EGLCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
         EGLImageTargetTexture2DOES_ = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
         if (!EGLCreateImageKHR_ || !EGLImageTargetTexture2DOES_) {
             logstream << "cuda_egl_obs_sink: failed to load EGL/GL image functions";
+            eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroySurface(egl_display_, egl_surface_);
+            egl_surface_ = EGL_NO_SURFACE;
+            eglDestroyContext(egl_display_, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
             return false;
         }
+        logstream << "cuda_egl_obs_sink: EGL/GL extension functions loaded";
+
+        // Verify OpenGL is initialized by checking a simple call
+        GLuint test_tex;
+        glGenTextures(1, &test_tex);
+        if (glGetError() != GL_NO_ERROR) {
+            logstream << "cuda_egl_obs_sink: OpenGL initialization failed";
+            eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroySurface(egl_display_, egl_surface_);
+            egl_surface_ = EGL_NO_SURFACE;
+            eglDestroyContext(egl_display_, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+            eglTerminate(egl_display_);
+            egl_display_ = EGL_NO_DISPLAY;
+            return false;
+        }
+        glDeleteTextures(1, &test_tex);
+        logstream << "cuda_egl_obs_sink: OpenGL verified and ready";
 
         return true;
     }
@@ -220,26 +334,13 @@ protected:
     bool ensure_cuda_context()
     {
         if (cu_ctx_) return true;
-        if (!egl_global_cu) return false;
-        auto cu = egl_global_cu;
-
-        CUdevice display_dev;
-        unsigned int device_count = 0;
-        obs_enter_graphics();
-        int rc = CHECK_CU(cu->cuGLGetDevices(&device_count, &display_dev, 1, CU_GL_DEVICE_LIST_ALL));
-        obs_leave_graphics();
-        if (rc) {
-            logstream << "cuda_egl_obs_sink: cuGLGetDevices failed";
-            return false;
+        if (!ensure_egl_context()) return false;
+        if (global_cuda.has_errors) {
+            logstream << "cuda_egl_obs_sink: global CUDA not initialized";
+        } else {
+            logstream << "cuda_egl_obs_sink: global CUDA initialized";
         }
-        if (CHECK_CU(cu->cuCtxCreate(&cu_ctx_, CU_CTX_SCHED_BLOCKING_SYNC, display_dev))) {
-            logstream << "cuda_egl_obs_sink: cuCtxCreate failed";
-            cu_ctx_ = nullptr;
-            return false;
-        }
-        CUcontext dummy;
-        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
-        return true;
+        return !global_cuda.has_errors;
     }
 
     bool ensure_texture_and_registration(int W, int H)
@@ -252,9 +353,33 @@ protected:
         // recreate
         destroy_cuda_gl_resources();
 
-        if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
-            logstream << "cuda_egl_obs_sink: eglMakeCurrent before GL create failed";
-            return false;
+        // Re-bind API to avoid mismatch if other code changed it on this thread
+        eglBindAPI(EGL_OPENGL_API);
+        // If a different context is current on this thread, switch to ours
+        if (eglGetCurrentContext() != egl_context_ || eglGetCurrentDisplay() != egl_display_ || eglGetCurrentSurface(EGL_DRAW) != egl_surface_) {
+            eglBindAPI(EGL_OPENGL_API);
+            if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
+                EGLint error = eglGetError();
+                logstream << "cuda_egl_obs_sink: eglMakeCurrent before GL create failed, error: 0x" << std::hex << error;
+                // Attempt to recreate pbuffer surface and retry
+                if (egl_surface_ != EGL_NO_SURFACE) {
+                    eglDestroySurface(egl_display_, egl_surface_);
+                    egl_surface_ = EGL_NO_SURFACE;
+                }
+                EGLint pbuf_attr2[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
+                egl_surface_ = eglCreatePbufferSurface(egl_display_, egl_config_, pbuf_attr2);
+                if (egl_surface_ == EGL_NO_SURFACE) {
+                    EGLint e2 = eglGetError();
+                    logstream << "cuda_egl_obs_sink: recreate eglCreatePbufferSurface failed, error: 0x" << std::hex << e2;
+                    return false;
+                }
+                if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
+                    EGLint e3 = eglGetError();
+                    logstream << "cuda_egl_obs_sink: eglMakeCurrent retry failed, error: 0x" << std::hex << e3;
+                    return false;
+                }
+                logstream << "cuda_egl_obs_sink: eglMakeCurrent succeeded after pbuffer recreate";
+            }
         }
 
         glGenTextures(1, &gl_tex_rgba_);
@@ -263,6 +388,7 @@ protected:
         gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         gl_bind_texture(GL_TEXTURE_2D, 0);
+        logstream << "cuda_egl_obs_sink: OpenGL texture created (" << W << "x" << H << ")";
 
         EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, EGL_NONE };
         egl_image_ = EGLCreateImageKHR_(egl_display_, egl_context_, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)gl_tex_rgba_, img_attrs);
@@ -271,18 +397,19 @@ protected:
             destroy_cuda_gl_resources();
             return false;
         }
+        logstream << "cuda_egl_obs_sink: EGL image created from texture";
 
-        auto cu = egl_global_cu;
-        CHECK_CU(cu->cuCtxPushCurrent(cu_ctx_));
-        if (CHECK_CU(cu->cuGraphicsGLRegisterImage(&cu_tex_res_, gl_tex_rgba_, GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD | CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST))) {
+        CHECK_CU(cuCtxPushCurrent(cu_ctx_));
+        if (CHECK_CU(cuGraphicsGLRegisterImage(&cu_tex_res_, gl_tex_rgba_, GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD | CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST))) {
             logstream << "cuda_egl_obs_sink: cuGraphicsGLRegisterImage failed";
             CUcontext dummy;
-            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            CHECK_CU(cuCtxPopCurrent(&dummy));
             destroy_cuda_gl_resources();
             return false;
         }
         CUcontext dummy;
-        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+        CHECK_CU(cuCtxPopCurrent(&dummy));
+        logstream << "cuda_egl_obs_sink: CUDA-GL interop resource registered";
 
         tex_w_ = W;
         tex_h_ = H;
@@ -291,64 +418,105 @@ protected:
 
     bool run_conversion_to_texture(const av::VideoFrame &frm)
     {
-        if (!egl_global_cu || !cu_ctx_ || !cu_tex_res_) return false;
-        auto cu = egl_global_cu;
+        if (!cu_ctx_ || !cu_tex_res_) return false;
+        // Validate input plane pointers and linesizes before use
+        if (!frm.raw()->data[0] || !frm.raw()->data[1] || !frm.raw()->data[2] ||
+            frm.raw()->linesize[0] <= 0 || frm.raw()->linesize[1] <= 0 || frm.raw()->linesize[2] <= 0) {
+            logstream << "cuda_egl_obs_sink: invalid input planes or linesizes";
+            return false;
+        }
+        CHECK_CU(cuCtxPushCurrent(cu_ctx_));
 
-        CHECK_CU(cu->cuCtxPushCurrent(cu_ctx_));
-
-        if (CHECK_CU(cu->cuGraphicsMapResources(1, &cu_tex_res_, 0))) {
+        if (CHECK_CU(cuGraphicsMapResources(1, &cu_tex_res_, 0))) {
             CUcontext dummy;
-            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            CHECK_CU(cuCtxPopCurrent(&dummy));
             logstream << "cuda_egl_obs_sink: cuGraphicsMapResources failed";
             return false;
         }
 
         CUarray cu_arr = nullptr;
-        if (CHECK_CU(cu->cuGraphicsSubResourceGetMappedArray(&cu_arr, cu_tex_res_, 0, 0))) {
-            CHECK_CU(cu->cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+        if (CHECK_CU(cuGraphicsSubResourceGetMappedArray(&cu_arr, cu_tex_res_, 0, 0))) {
+            CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
             CUcontext dummy;
-            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            CHECK_CU(cuCtxPopCurrent(&dummy));
             logstream << "cuda_egl_obs_sink: cuGraphicsSubResourceGetMappedArray failed";
             return false;
         }
 
-        cudaResourceDesc rdesc; memset(&rdesc, 0, sizeof(rdesc));
-        rdesc.resType = cudaResourceTypeArray;
-        rdesc.res.array.array = (cudaArray_t)cu_arr;
-        cudaSurfaceObject_t surf = 0;
-        cudaError_t cerr = cudaCreateSurfaceObject(&surf, &rdesc);
-        if (cerr != cudaSuccess) {
-            logstream << "cuda_egl_obs_sink: cudaCreateSurfaceObject failed: " << (int)cerr;
-            CHECK_CU(cu->cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+        if (!cuSurfObjectCreate || !cuSurfObjectDestroy) {
+            CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
             CUcontext dummy;
-            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            logstream << "cuda_egl_obs_sink: surface object functions not available";
             return false;
         }
 
-        const uint8_t* dY = (const uint8_t*)frm.raw()->data[0];
-        const uint8_t* dU = (const uint8_t*)frm.raw()->data[1];
-        const uint8_t* dV = (const uint8_t*)frm.raw()->data[2];
-        int pitchY = frm.raw()->linesize[0];
-        int pitchU = frm.raw()->linesize[1];
-        int pitchV = frm.raw()->linesize[2];
-
-        cudaStream_t stream = 0;
-        cerr = yuv444p_to_rgba8_709lim_surface(dY, dU, dV, pitchY, pitchU, pitchV, surf, tex_w_, tex_h_, stream);
-        if (cerr != cudaSuccess) {
-            logstream << "cuda_egl_obs_sink: kernel launch failed: " << (int)cerr;
-            cudaDestroySurfaceObject(surf);
-            CHECK_CU(cu->cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+        CUDA_RESOURCE_DESC rdesc; memset(&rdesc, 0, sizeof(rdesc));
+        rdesc.resType = CU_RESOURCE_TYPE_ARRAY;
+        rdesc.res.array.hArray = cu_arr;
+        CUsurfObject surf = 0;
+        if (CHECK_CU(cuSurfObjectCreate(&surf, &rdesc))) {
+            CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
             CUcontext dummy;
-            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            logstream << "cuda_egl_obs_sink: cuSurfObjectCreate failed";
             return false;
         }
+
+        // Device pointers/pitches must match kernel signature types exactly
+        CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
+        CUdeviceptr dU = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
+        CUdeviceptr dV = (CUdeviceptr)(uintptr_t)frm.raw()->data[2];
+        size_t pitchY = (size_t)frm.raw()->linesize[0];
+        size_t pitchU = (size_t)frm.raw()->linesize[1];
+        size_t pitchV = (size_t)frm.raw()->linesize[2];
+
+        if (!ensure_kernel_loaded()) {
+            cuSurfObjectDestroy(surf);
+            CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+            CUcontext dummy;
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            return false;
+        }
+
+        // Setup launch parameters
+        void* args[] = {
+            // Must match kYUV444p_to_RGBA8_709lim_surface parameter order:
+            // (Y, pitchY, U, pitchU, V, pitchV, surfOut, W, H)
+            (void*)&dY,
+            (void*)&pitchY,
+            (void*)&dU,
+            (void*)&pitchU,
+            (void*)&dV,
+            (void*)&pitchV,
+            (void*)&surf,
+            (void*)&tex_w_,
+            (void*)&tex_h_
+        };
+
+        unsigned int blockX = 32, blockY = 8;
+        unsigned int gridX = (tex_w_ + blockX - 1) / blockX;
+        unsigned int gridY = (tex_h_ + blockY - 1) / blockY;
+
+        if (CHECK_CU(cuLaunchKernel(cu_kernel_,
+                                        gridX, gridY, 1,
+                                        blockX, blockY, 1,
+                                        0, 0, args, nullptr))) {
+            logstream << "cuda_egl_obs_sink: cuLaunchKernel failed";
+            cuSurfObjectDestroy(surf);
+            CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+            CUcontext dummy;
+            CHECK_CU(cuCtxPopCurrent(&dummy));
+            return false;
+        }
+
         // Ensure completion before unmap so OBS sees complete frame
-        //cudaDeviceSynchronize();
-        cudaDestroySurfaceObject(surf);
+        CHECK_CU(cuCtxSynchronize());
+        cuSurfObjectDestroy(surf);
 
-        CHECK_CU(cu->cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
+        CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));
         CUcontext dummy;
-        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+        CHECK_CU(cuCtxPopCurrent(&dummy));
         return true;
     }
 
@@ -390,6 +558,7 @@ public:
         obs_frame_.format = VIDEO_FORMAT_RGBA;
         obs_frame_.full_range = true;
         obs_frame_.hw = &obs_hw_;
+        obs_frame_.hw_opaque = this;
 
         if (pfrm && *pfrm) {
             av::VideoFrame frm = *pfrm;
@@ -410,6 +579,25 @@ public:
                 outputFrame();
                 if (!ticks) this->yieldAndProcess();
                 return;
+            }
+
+            // On first frame, adopt decoder's CUDA context to avoid cross-context device pointers
+            if (!cu_ctx_) {
+                if (frm.raw()->hw_frames_ctx && frm.raw()->hw_frames_ctx->data) {
+                    AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+                    if (fctx && fctx->device_ctx && fctx->device_ctx->hwctx) {
+                        AVCUDADeviceContext* dc = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+                        cu_ctx_ = dc->cuda_ctx;
+                        if (!cu_ctx_) {
+                            logstream << "cuda_egl_obs_sink: frame's CUDA context is null";
+                        } else {
+                            logstream << "cuda_egl_obs_sink: adopted decoder CUDA context";
+                        }
+                    }
+                }
+                if (!cu_ctx_) {
+                    logstream << "cuda_egl_obs_sink: cannot adopt CUDA context from frame";
+                }
             }
 
             int W = frm.width();
@@ -494,18 +682,10 @@ public:
         }
         const char* debug_timing = getenv("AVPLUMBER_DEBUG_TIMING");
         r->debug_timing_ = debug_timing && debug_timing[0];
-        // Initialize EGL function pointers early
-        r->ensure_egl_context();
-        // Ensure CUDA context ready
-        r->ensure_cuda_context();
-        // Pass 'this' as opaque to callbacks
-        r->obs_frame_.hw_opaque = r.get();
+        // Defer EGL/CUDA initialization to processNonBlocking thread
+
         return r;
     }
 };
 
 DECLNODE(cuda_egl_obs_sink, CudaEglObsSink);
-
-#endif // HAVE_CUDA
-
-
