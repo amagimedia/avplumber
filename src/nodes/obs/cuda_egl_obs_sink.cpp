@@ -34,8 +34,9 @@
 #define CU_GL_DEVICE_LIST_ALL 0x03
 #endif
 
-// PTX blob for the conversion kernel (generated at build time)
-#include "../../../objs/src/nodes/hwaccel/yuv444_to_rgba_709lim_surface.ptx.h"
+// PTX blob for the conversion kernels (generated at build time)
+// Supports YUV444p and YUV420p -> RGBA8 (BT.709 limited)
+#include "../../../objs/src/nodes/hwaccel/yuv_to_rgba_709lim_surface.ptx.h"
 
 // Note: we launch the kernel via CUDA Driver API (dynlink), not the runtime.
 // We create our own independent EGL/OpenGL context, separate from OBS.
@@ -122,7 +123,9 @@ protected:
     CUcontext cu_ctx_ = nullptr;
     CUgraphicsResource cu_tex_res_ = nullptr;
     CUmodule cu_module_ = nullptr;
-    CUfunction cu_kernel_ = nullptr;
+    CUfunction cu_kernel_444_ = nullptr;
+    CUfunction cu_kernel_420_ = nullptr;
+    CUfunction cu_kernel_nv12_ = nullptr;
 
     // OBS HW buffer callbacks
     struct obs_hw_buffer obs_hw_;
@@ -176,26 +179,46 @@ protected:
 
     bool ensure_kernel_loaded()
     {
-        if (cu_kernel_) return true;
+        if (cu_module_ && cu_kernel_444_ && cu_kernel_420_) return true;
         if (!cu_ctx_) return false;
         CHECK_CU(cuCtxPushCurrent(cu_ctx_));
-        if (CHECK_CU(cuModuleLoadData(&cu_module_, (const void*)avpl_yuv444_rgba709lim_ptx))) {
-            CUcontext dummy;
-            CHECK_CU(cuCtxPopCurrent(&dummy));
-            logstream << "cuda_egl_obs_sink: cuModuleLoadData failed";
-            return false;
+        if (!cu_module_) {
+            if (CHECK_CU(cuModuleLoadData(&cu_module_, (const void*)avpl_yuv_rgba709lim_ptx))) {
+                CUcontext dummy;
+                CHECK_CU(cuCtxPopCurrent(&dummy));
+                logstream << "cuda_egl_obs_sink: cuModuleLoadData failed";
+                return false;
+            }
+            logstream << "cuda_egl_obs_sink: CUDA module loaded from PTX";
         }
-        logstream << "cuda_egl_obs_sink: CUDA module loaded from PTX";
-        if (CHECK_CU(cuModuleGetFunction(&cu_kernel_, cu_module_, "kYUV444p_to_RGBA8_709lim_surface"))) {
-            CUcontext dummy;
-            CHECK_CU(cuCtxPopCurrent(&dummy));
-            logstream << "cuda_egl_obs_sink: cuModuleGetFunction failed";
-            return false;
+        bool ok = true;
+        if (!cu_kernel_444_) {
+            if (CHECK_CU(cuModuleGetFunction(&cu_kernel_444_, cu_module_, "kYUV444p_to_RGBA8_709lim_surface"))) {
+                ok = false;
+                logstream << "cuda_egl_obs_sink: cuModuleGetFunction failed for kYUV444p_to_RGBA8_709lim_surface";
+            } else {
+                logstream << "cuda_egl_obs_sink: CUDA kernel loaded (kYUV444p_to_RGBA8_709lim_surface)";
+            }
+        }
+        if (!cu_kernel_420_) {
+            if (CHECK_CU(cuModuleGetFunction(&cu_kernel_420_, cu_module_, "kYUV420p_to_RGBA8_709lim_surface"))) {
+                ok = false;
+                logstream << "cuda_egl_obs_sink: cuModuleGetFunction failed for kYUV420p_to_RGBA8_709lim_surface";
+            } else {
+                logstream << "cuda_egl_obs_sink: CUDA kernel loaded (kYUV420p_to_RGBA8_709lim_surface)";
+            }
+        }
+        if (!cu_kernel_nv12_) {
+            if (CHECK_CU(cuModuleGetFunction(&cu_kernel_nv12_, cu_module_, "kNV12_to_RGBA8_709lim_surface"))) {
+                ok = false;
+                logstream << "cuda_egl_obs_sink: cuModuleGetFunction failed for kNV12_to_RGBA8_709lim_surface";
+            } else {
+                logstream << "cuda_egl_obs_sink: CUDA kernel loaded (kNV12_to_RGBA8_709lim_surface)";
+            }
         }
         CUcontext dummy;
         CHECK_CU(cuCtxPopCurrent(&dummy));
-        logstream << "cuda_egl_obs_sink: CUDA kernel function loaded (kYUV444p_to_RGBA8_709lim_surface)";
-        return true;
+        return ok;
     }
 
     bool ensure_egl_context()
@@ -419,10 +442,24 @@ protected:
     bool run_conversion_to_texture(const av::VideoFrame &frm)
     {
         if (!cu_ctx_ || !cu_tex_res_) return false;
-        // Validate input plane pointers and linesizes before use
-        if (!frm.raw()->data[0] || !frm.raw()->data[1] || !frm.raw()->data[2] ||
-            frm.raw()->linesize[0] <= 0 || frm.raw()->linesize[1] <= 0 || frm.raw()->linesize[2] <= 0) {
-            logstream << "cuda_egl_obs_sink: invalid input planes or linesizes";
+        // Validate input planes depending on subsampling
+        if (!frm.raw()->data[0] || frm.raw()->linesize[0] <= 0) {
+            logstream << "cuda_egl_obs_sink: invalid Y plane";
+            return false;
+        }
+        if (cur_sw_pix_fmt_ == AV_PIX_FMT_YUV444P || cur_sw_pix_fmt_ == AV_PIX_FMT_YUV420P) {
+            if (!frm.raw()->data[1] || !frm.raw()->data[2] ||
+                frm.raw()->linesize[1] <= 0 || frm.raw()->linesize[2] <= 0) {
+                logstream << "cuda_egl_obs_sink: invalid U/V planes for YUV planar format";
+                return false;
+            }
+        } else if (cur_sw_pix_fmt_ == AV_PIX_FMT_NV12) {
+            if (!frm.raw()->data[1] || frm.raw()->linesize[1] <= 0) {
+                logstream << "cuda_egl_obs_sink: invalid UV plane for NV12";
+                return false;
+            }
+        } else {
+            logstream << "cuda_egl_obs_sink: unsupported SW pixel format in validation";
             return false;
         }
         CHECK_CU(cuCtxPushCurrent(cu_ctx_));
@@ -498,7 +535,10 @@ protected:
         unsigned int gridX = (tex_w_ + blockX - 1) / blockX;
         unsigned int gridY = (tex_h_ + blockY - 1) / blockY;
 
-        if (CHECK_CU(cuLaunchKernel(cu_kernel_,
+        CUfunction kfun = cu_kernel_444_;
+        if (cur_sw_pix_fmt_ == AV_PIX_FMT_YUV420P) kfun = cu_kernel_420_;
+        else if (cur_sw_pix_fmt_ == AV_PIX_FMT_NV12) kfun = cu_kernel_nv12_;
+        if (CHECK_CU(cuLaunchKernel(kfun,
                                         gridX, gridY, 1,
                                         blockX, blockY, 1,
                                         0, 0, args, nullptr))) {
@@ -569,8 +609,9 @@ public:
             }
 
             av::PixelFormat swpf = getHwSwPixelFormat(frm);
-            if (!(frm.pixelFormat().get()==AV_PIX_FMT_CUDA && swpf==AV_PIX_FMT_YUV444P)) {
-                logstream << "cuda_egl_obs_sink: unsupported frame format, expected CUDA/YUV444P";
+            bool supported = (frm.pixelFormat().get() == AV_PIX_FMT_CUDA) && (swpf == AV_PIX_FMT_YUV444P || swpf == AV_PIX_FMT_YUV420P || swpf == AV_PIX_FMT_NV12);
+            if (!supported) {
+                logstream << "cuda_egl_obs_sink: unsupported frame format, expected CUDA/YUV444P or CUDA/YUV420P";
                 // fall back to empty frame
                 obs_frame_.width = 0;
                 obs_frame_.height = 0;
@@ -580,6 +621,9 @@ public:
                 if (!ticks) this->yieldAndProcess();
                 return;
             }
+
+            // Remember current SW pixel format for kernel selection
+            cur_sw_pix_fmt_ = (AVPixelFormat)swpf;
 
             // On first frame, adopt decoder's CUDA context to avoid cross-context device pointers
             if (!cu_ctx_) {
