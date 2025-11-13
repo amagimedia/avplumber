@@ -91,6 +91,7 @@ Data types:
 * [`av::Packet`](https://h4tr3d.github.io/avcpp/classav_1_1Packet.html) - encoded media packet
 * [`av::VideoFrame`](https://h4tr3d.github.io/avcpp/classav_1_1VideoFrame.html) - raw video frame
 * [`av::AudioSamples`](https://h4tr3d.github.io/avcpp/classav_1_1AudioSamples.html) - raw audio frame (usually 1024 samples of all channels)
+* `EglImageFrame` - GPU RGBA image passed by `EGLImageKHR` handle with PTS/timebase
 
 Some nodes support multiple input/output types - they work like templates/generics in programming languages (and are implemented this way). If the data type can be deduced from source or sink edges, there is no need to provide it explicitly. But if it can't be, use template syntax in `type` field of the node JSON object:
 
@@ -99,6 +100,11 @@ Some nodes support multiple input/output types - they work like templates/generi
 for example:
 
 ```split<av::VideoFrame>```
+
+Type auto-detection:
+- `DECLNODE_ATD(nodetype, tpl)` registers a templated node over all queue types.
+- `DECLNODE_ATD_RAW(nodetype, tpl)` limits auto-detect to raw frame/samples.
+- `DECLNODE_ATD_TYPES(nodetype, tpl, T1, T2, ...)` limits to an explicit list (e.g. `av::VideoFrame, EglImageFrame`).
 
 ### Topology
 

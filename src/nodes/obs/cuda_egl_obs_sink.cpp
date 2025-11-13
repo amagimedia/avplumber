@@ -7,6 +7,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <dlfcn.h>
+#include <string>
 
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixfmt.h>
@@ -183,13 +184,32 @@ protected:
         if (!cu_ctx_) return false;
         CHECK_CU(cuCtxPushCurrent(cu_ctx_));
         if (!cu_module_) {
-            if (CHECK_CU(cuModuleLoadData(&cu_module_, (const void*)avpl_yuv_rgba709lim_ptx))) {
+            char error_log[8192] = {0};
+            char info_log[8192]  = {0};
+            CUjit_option opts[4];
+            void*        optvals[4];
+            opts[0] = CU_JIT_ERROR_LOG_BUFFER;
+            optvals[0] = error_log;
+            opts[1] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
+            size_t err_size = sizeof(error_log);
+            optvals[1] = (void*)err_size;
+            opts[2] = CU_JIT_INFO_LOG_BUFFER;
+            optvals[2] = info_log;
+            opts[3] = CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES;
+            size_t info_size = sizeof(info_log);
+            optvals[3] = (void*)info_size;
+            // Ensure PTX is null-terminated for JIT
+            const std::string ptx_str(avpl_yuv_rgba709lim_ptx, avpl_yuv_rgba709lim_ptx + avpl_yuv_rgba709lim_ptx_len);
+            if (CHECK_CU(cuModuleLoadDataEx(&cu_module_, (const void*)ptx_str.c_str(), 4, opts, optvals))) {
                 CUcontext dummy;
                 CHECK_CU(cuCtxPopCurrent(&dummy));
-                logstream << "cuda_egl_obs_sink: cuModuleLoadData failed";
+                logstream << "cuda_egl_obs_sink: cuModuleLoadDataEx failed";
+                if (error_log[0]) logstream << "CUDA JIT error log: " << error_log;
+                if (info_log[0])  logstream << "CUDA JIT info log: "  << info_log;
                 return false;
             }
             logstream << "cuda_egl_obs_sink: CUDA module loaded from PTX";
+            if (info_log[0]) logstream << "CUDA JIT info log: " << info_log;
         }
         bool ok = true;
         if (!cu_kernel_444_) {
@@ -551,7 +571,7 @@ protected:
         }
 
         // Ensure completion before unmap so OBS sees complete frame
-        CHECK_CU(cuCtxSynchronize());
+        //CHECK_CU(cuCtxSynchronize());
         cuSurfObjectDestroy(surf);
 
         CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res_, 0));

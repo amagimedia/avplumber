@@ -1,6 +1,7 @@
 #include "avutils.hpp"
 #include "util.hpp"
 #include <avcpp/channellayout.h>
+#include "hwaccel/EglImageFrame.hpp"
 
 void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align) {
     if (frm.sampleFormat().isPlanar()) {
@@ -88,6 +89,11 @@ bool isEofMarker(const av::VideoFrame& f)
 }
 
 bool isEofMarker(const av::AudioSamples& f)
+{
+    return f.pts().isNoPts();
+}
+
+bool isEofMarker(const EglImageFrame& f)
 {
     return f.pts().isNoPts();
 }
