@@ -35,6 +35,8 @@ Available macros:
 
 * `DECLNODE(nodetype, classname)` - declares a node which will be created when `type` parameter in node's JSON object equals `nodetype`. The node must be defined in `classname` class.
 * `DECLNODE_ATD(nodetype, tplname)` - declares a node which will be created when `type` parameter in node's JSON object equals `nodetype`. The node template must be defined in `tplname` class template. It will be specialized for single template argument being the type of data processed in this node. If the node has both input(s) and output(s), input and output types must be the same. `ATD` means automatic type detection.
+* `DECLNODE_ATD_RAW(nodetype, tplname)` - like above, but auto-detect only raw frame/samples types (`av::VideoFrame`, `av::AudioSamples`).
+* `DECLNODE_ATD_TYPES(nodetype, tplname, T1, T2, ...)` - auto-detect only from the explicit list of types (e.g. `av::VideoFrame, EglImageFrame`). Untyped creation (`type = "nodetype"`) will select the first matching type from the provided list based on connected edges; typed creation (`"nodetype<Ti>"`) is also registered for each `Ti`.
 * `DECLNODE_ALIAS(nodetype, classname)` - declares a different type name for a node already declared using `DECLNODE`
 * `DECLNODE_ATD_ALIAS(nodetype, tplname)` - declares a different type name for a node already declared using `DECLNODE_ATD`
 

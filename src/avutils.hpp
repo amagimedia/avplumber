@@ -8,6 +8,7 @@
 #include <json.hpp>
 #include <avcpp/dictionary.h>
 #include "util.hpp"
+#include "hwaccel/EglImageFrame.hpp"
 
 typedef int64_t AVTS;
 const av::Timestamp NOTS = {AV_NOPTS_VALUE, {0, 1}};
@@ -137,6 +138,8 @@ namespace {
 bool isEofMarker(const av::Packet& p);
 bool isEofMarker(const av::VideoFrame& f);
 bool isEofMarker(const av::AudioSamples& f);
+class EglImageFrame; // fwd
+bool isEofMarker(const EglImageFrame& f);
 
 av::Packet createEofPacket(int streamIndex = -1);
 
@@ -167,4 +170,15 @@ template<> struct TSGetter<av::Packet> {
 template<> struct TSGetter<av::AudioSamples>: public FrameTSGetter<av::AudioSamples> {
 };
 template<> struct TSGetter<av::VideoFrame>: public FrameTSGetter<av::VideoFrame> {
+};
+template<> struct TSGetter<EglImageFrame> {
+    static AVTS get(const EglImageFrame& data, const AVRational time_base) {
+        return rescaleTS(data.pts(), time_base).timestamp();
+    }
+    static av::Timestamp getWithTB(const EglImageFrame& data) {
+        return data.pts();
+    }
+    static bool isValid(const EglImageFrame& data) {
+        return data.isComplete() && data.pts().isValid();
+    }
 };

@@ -53,6 +53,7 @@ endif
 
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
@@ -174,6 +175,7 @@ $(PTX_H): $(PTX)
 
 # Ensure the sink object rebuilds if the generated header changes
 objs/src/nodes/obs/cuda_egl_obs_sink.o: $(PTX_H)
+objs/src/nodes/hwaccel/cuda_to_egl_image.o: $(PTX_H)
 endif
 
 compile_flags.txt:
