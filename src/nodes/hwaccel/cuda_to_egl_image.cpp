@@ -26,7 +26,7 @@
 #include <libavutil/hwcontext_cuda.h>
 
 // PTX blob for the conversion kernels (generated at build time)
-#include "../../../objs/src/nodes/hwaccel/yuv_to_rgba_709lim_surface.ptx.h"
+#include "../../../objs/src/nodes/hwaccel/yuv_to_rgba_surface.ptx.h"
 
 static inline bool gl_success(const char *funcname)
 {
@@ -72,7 +72,7 @@ static int check_cu(CUresult err, const char *func)
 }
 #define CHECK_CU(x) check_cu((x), #x)
 
-class CudaToEglImage: public NodeSISO<av::VideoFrame, EglImageFrame>, public NonBlockingNode<CudaToEglImage>, public IFlushable {
+class CudaToEglImage: public NodeSISO<av::VideoFrame, EglImageFrame> {
 protected:
 	// EGL/GL
 	EGLDisplay egl_display_ = EGL_NO_DISPLAY;
@@ -90,10 +90,34 @@ protected:
 
 	// CUDA
 	CUcontext cu_ctx_ = nullptr; // adopted from incoming frame
+	bool ctx_current_set_ = false;
 	CUmodule cu_module_ = nullptr;
 	CUfunction cu_kernel_444_ = nullptr;
 	CUfunction cu_kernel_420_ = nullptr;
 	CUfunction cu_kernel_nv12_ = nullptr;
+	CUfunction cu_kernel_422_ = nullptr;
+	CUfunction cu_kernel_nv16_ = nullptr;
+	CUfunction cu_kernel_rgba_ = nullptr;
+	CUfunction cu_kernel_bgra_ = nullptr;
+	CUfunction cu_kernel_argb_ = nullptr;
+	CUfunction cu_kernel_abgr_ = nullptr;
+	CUfunction cu_kernel_rgb0_ = nullptr;
+	CUfunction cu_kernel_bgr0_ = nullptr;
+	CUfunction cu_kernel_0rgb_ = nullptr;
+	CUfunction cu_kernel_0bgr_ = nullptr;
+	CUfunction cu_kernel_444_full_ = nullptr;
+	CUfunction cu_kernel_420_full_ = nullptr;
+	CUfunction cu_kernel_nv12_full_ = nullptr;
+	CUfunction cu_kernel_422_full_ = nullptr;
+	CUfunction cu_kernel_nv16_full_ = nullptr;
+	CUfunction cu_kernel_rgba_full_ = nullptr;
+	CUfunction cu_kernel_bgra_full_ = nullptr;
+	CUfunction cu_kernel_argb_full_ = nullptr;
+	CUfunction cu_kernel_abgr_full_ = nullptr;
+	CUfunction cu_kernel_rgb0_full_ = nullptr;
+	CUfunction cu_kernel_bgr0_full_ = nullptr;
+	CUfunction cu_kernel_0rgb_full_ = nullptr;
+	CUfunction cu_kernel_0bgr_full_ = nullptr;
 
 	// helpers
 	av::PixelFormat getHwSwPixelFormat(av::VideoFrame &frm)
@@ -213,7 +237,14 @@ protected:
 	{
 		if (cu_module_ && cu_kernel_444_ && cu_kernel_420_ && cu_kernel_nv12_) return true;
 		if (!cu_ctx_) return false;
-		CHECK_CU(cuCtxPushCurrent(cu_ctx_));
+		// Make CUDA context current once for this thread (no per-frame push/pop)
+		if (!ctx_current_set_) {
+			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in ensure_kernel_loaded";
+				return false;
+			}
+			ctx_current_set_ = true;
+		}
 		if (!cu_module_) {
 			char error_log[8192] = {0};
 			char info_log[8192]  = {0};
@@ -230,10 +261,8 @@ protected:
 			size_t info_size = sizeof(info_log);
 			optvals[3] = (void*)info_size;
 			// Ensure PTX is null-terminated for JIT
-			const std::string ptx_str(avpl_yuv_rgba709lim_ptx, avpl_yuv_rgba709lim_ptx + avpl_yuv_rgba709lim_ptx_len);
+			const std::string ptx_str(avpl_yuv_rgba_ptx, avpl_yuv_rgba_ptx + avpl_yuv_rgba_ptx_len);
 			if (CHECK_CU(cuModuleLoadDataEx(&cu_module_, (const void*)ptx_str.c_str(), 4, opts, optvals))) {
-				CUcontext dummy;
-				CHECK_CU(cuCtxPopCurrent(&dummy));
 				logstream << "cuda_to_egl_image: cuModuleLoadDataEx failed";
 				if (error_log[0]) logstream << "CUDA JIT error log: " << error_log;
 				if (info_log[0])  logstream << "CUDA JIT info log: "  << info_log;
@@ -242,11 +271,34 @@ protected:
 			if (info_log[0]) logstream << "CUDA JIT info log: " << info_log;
 		}
 		bool ok = true;
-		if (!cu_kernel_444_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_444_, cu_module_, "kYUV444p_to_RGBA8_709lim_surface"));
-		if (!cu_kernel_420_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_420_, cu_module_, "kYUV420p_to_RGBA8_709lim_surface"));
-		if (!cu_kernel_nv12_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_nv12_, cu_module_, "kNV12_to_RGBA8_709lim_surface"));
-		CUcontext dummy;
-		CHECK_CU(cuCtxPopCurrent(&dummy));
+		if (!cu_kernel_444_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_444_, cu_module_, "kYUV444p_709lim_to_RGBA8_surface"));
+		if (!cu_kernel_420_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_420_, cu_module_, "kYUV420p_709lim_to_RGBA8_surface"));
+		if (!cu_kernel_nv12_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_nv12_, cu_module_, "kNV12_709lim_to_RGBA8_surface"));
+		if (!cu_kernel_422_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_422_, cu_module_, "kYUV422p_709lim_to_RGBA8_surface"));
+		if (!cu_kernel_nv16_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_nv16_, cu_module_, "kNV16_709lim_to_RGBA8_surface"));
+		// Passthrough (use same symbol for both limited/full variants)
+		if (!cu_kernel_rgba_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_rgba_, cu_module_, "kRGBA_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_bgra_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_bgra_, cu_module_, "kBGRA_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_argb_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_argb_, cu_module_, "kARGB_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_abgr_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_abgr_, cu_module_, "kABGR_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_rgb0_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_rgb0_, cu_module_, "kRGB0_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_bgr0_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_bgr0_, cu_module_, "kBGR0_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_0rgb_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_0rgb_, cu_module_, "k0RGB_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_0bgr_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_0bgr_, cu_module_, "k0BGR_to_RGBA8_passthrough_surface"));
+		if (!cu_kernel_444_full_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_444_full_, cu_module_, "kYUV444p_709full_to_RGBA8_surface"));
+		if (!cu_kernel_420_full_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_420_full_, cu_module_, "kYUV420p_709full_to_RGBA8_surface"));
+		if (!cu_kernel_nv12_full_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_nv12_full_, cu_module_, "kNV12_709full_to_RGBA8_surface"));
+		if (!cu_kernel_422_full_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_422_full_, cu_module_, "kYUV422p_709full_to_RGBA8_surface"));
+		if (!cu_kernel_nv16_full_) ok &= !CHECK_CU(cuModuleGetFunction(&cu_kernel_nv16_full_, cu_module_, "kNV16_709full_to_RGBA8_surface"));
+		// For passthrough, reuse the same kernel symbol
+		if (!cu_kernel_rgba_full_) cu_kernel_rgba_full_ = cu_kernel_rgba_;
+		if (!cu_kernel_bgra_full_) cu_kernel_bgra_full_ = cu_kernel_bgra_;
+		if (!cu_kernel_argb_full_) cu_kernel_argb_full_ = cu_kernel_argb_;
+		if (!cu_kernel_abgr_full_) cu_kernel_abgr_full_ = cu_kernel_abgr_;
+		if (!cu_kernel_rgb0_full_) cu_kernel_rgb0_full_ = cu_kernel_rgb0_;
+		if (!cu_kernel_bgr0_full_) cu_kernel_bgr0_full_ = cu_kernel_bgr0_;
+		if (!cu_kernel_0rgb_full_) cu_kernel_0rgb_full_ = cu_kernel_0rgb_;
+		if (!cu_kernel_0bgr_full_) cu_kernel_0bgr_full_ = cu_kernel_0bgr_;
 		return ok;
 	}
 	bool ensure_pool(int W, int H)
@@ -282,25 +334,26 @@ protected:
 			logstream << "cuda_to_egl_image: run_conversion_to_texture failed - cu_ctx_=" << (void*)cu_ctx_ << " cu_tex_res=" << (void*)cu_tex_res;
 			return false;
 		}
-		CHECK_CU(cuCtxPushCurrent(cu_ctx_));
+		// Ensure context is current (only set once per node thread)
+		if (!ctx_current_set_) {
+			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in run_conversion_to_texture";
+				return false;
+			}
+			ctx_current_set_ = true;
+		}
 		if (CHECK_CU(cuGraphicsMapResources(1, &cu_tex_res, 0))) {
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			logstream << "cuda_to_egl_image: cuGraphicsMapResources failed";
 			return false;
 		}
 		CUarray cu_arr = nullptr;
 		if (CHECK_CU(cuGraphicsSubResourceGetMappedArray(&cu_arr, cu_tex_res, 0, 0))) {
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			logstream << "cuda_to_egl_image: cuGraphicsSubResourceGetMappedArray failed";
 			return false;
 		}
 		if (!cuSurfObjectCreate || !cuSurfObjectDestroy) {
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			logstream << "cuda_to_egl_image: surface object functions not available";
 			return false;
 		}
@@ -310,8 +363,6 @@ protected:
 		CUsurfObject surf = 0;
 		if (CHECK_CU(cuSurfObjectCreate(&surf, &rdesc))) {
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			logstream << "cuda_to_egl_image: cuSurfObjectCreate failed";
 			return false;
 		}
@@ -343,9 +394,21 @@ protected:
 		unsigned int blockX = 32, blockY = 8;
 		unsigned int gridX = (tex_w + blockX - 1) / blockX;
 		unsigned int gridY = (tex_h + blockY - 1) / blockY;
-		CUfunction kfun = cu_kernel_444_;
-		if (swfmt == AV_PIX_FMT_YUV420P) kfun = cu_kernel_420_;
-		else if (swfmt == AV_PIX_FMT_NV12) kfun = cu_kernel_nv12_;
+		// Choose full vs limited based on frame color range
+		const bool is_full_range = (frm.raw()->color_range == AVCOL_RANGE_JPEG);
+		CUfunction kfun = is_full_range ? cu_kernel_444_full_ : cu_kernel_444_;
+		if (swfmt == AV_PIX_FMT_YUV420P) kfun = is_full_range ? cu_kernel_420_full_ : cu_kernel_420_;
+		else if (swfmt == AV_PIX_FMT_NV12) kfun = is_full_range ? cu_kernel_nv12_full_ : cu_kernel_nv12_;
+		else if (swfmt == AV_PIX_FMT_YUV422P) kfun = is_full_range ? cu_kernel_422_full_ : cu_kernel_422_;
+		else if (swfmt == AV_PIX_FMT_NV16) kfun = is_full_range ? cu_kernel_nv16_full_ : cu_kernel_nv16_;
+		else if (swfmt == AV_PIX_FMT_RGBA) kfun = is_full_range ? cu_kernel_rgba_full_ : cu_kernel_rgba_;
+		else if (swfmt == AV_PIX_FMT_BGRA) kfun = is_full_range ? cu_kernel_bgra_full_ : cu_kernel_bgra_;
+		else if (swfmt == AV_PIX_FMT_ARGB) kfun = is_full_range ? cu_kernel_argb_full_ : cu_kernel_argb_;
+		else if (swfmt == AV_PIX_FMT_ABGR) kfun = is_full_range ? cu_kernel_abgr_full_ : cu_kernel_abgr_;
+		else if (swfmt == AV_PIX_FMT_RGB0) kfun = is_full_range ? cu_kernel_rgb0_full_ : cu_kernel_rgb0_;
+		else if (swfmt == AV_PIX_FMT_BGR0) kfun = is_full_range ? cu_kernel_bgr0_full_ : cu_kernel_bgr0_;
+		else if (swfmt == AV_PIX_FMT_0RGB) kfun = is_full_range ? cu_kernel_0rgb_full_ : cu_kernel_0rgb_;
+		else if (swfmt == AV_PIX_FMT_0BGR) kfun = is_full_range ? cu_kernel_0bgr_full_ : cu_kernel_0bgr_;
 		if (CHECK_CU(cuLaunchKernel(kfun,
 		                            gridX, gridY, 1,
 		                            blockX, blockY, 1,
@@ -353,47 +416,30 @@ protected:
 			logstream << "cuda_to_egl_image: cuLaunchKernel failed";
 			cuSurfObjectDestroy(surf);
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			return false;
 		}
 		//CHECK_CU(cuCtxSynchronize());
 		cuSurfObjectDestroy(surf);
 		CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-		CUcontext dummy;
-		CHECK_CU(cuCtxPopCurrent(&dummy));
 		return true;
 	}
-    std::optional<EglImageFrame> waiting_frame_;
 public:
 	using NodeSISO<av::VideoFrame, EglImageFrame>::NodeSISO;
-	virtual void processNonBlocking(EventLoop& evl, bool ticks)
+	virtual void process()
 	{
-        if (waiting_frame_) {
-            if (!this->sink_->put(*waiting_frame_, true)) {
-                //logstream << "cuda_to_egl_image: sink put failed, will retry on sink consumed event";
-                if (!ticks) {
-                    this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-                }
-                return;
-            } else {
-                waiting_frame_ = std::nullopt;
-            }
-        }
-		av::VideoFrame *pfrm = this->source_->peek(0);
-		if (pfrm==nullptr) {
-			if (!ticks) {
-				this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
-			}
+		// Block until an input frame is available, but keep it in the queue
+		// until we successfully publish the output (use peek/pop pattern).
+		av::VideoFrame *pfrm = this->source_->peek();
+		if (pfrm == nullptr) {
 			return;
 		}
-		av::VideoFrame frm = *pfrm;
+		av::VideoFrame &frm = *pfrm;
 		if (!frm) {
 			logstream << "cuda_to_egl_image: frame is invalid/null, discarding";
 			this->source_->pop(); // discard
 			return;
 		}
-		// adopt CUDA context from frame (once)
+		// Adopt CUDA context from frame (once)
 		if (!cu_ctx_) {
 			if (frm.raw()->hw_frames_ctx && frm.raw()->hw_frames_ctx->data) {
 				AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
@@ -411,11 +457,20 @@ public:
 				this->source_->pop();
 				return;
 			}
+			// Make the adopted context current for this node's thread
+			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed during context adoption";
+				this->source_->pop();
+				return;
+			}
+			ctx_current_set_ = true;
 		}
 		int W = frm.width();
 		int H = frm.height();
 		AVPixelFormat swfmt = getHwSwPixelFormat(frm);
-		if (!(swfmt == AV_PIX_FMT_YUV444P || swfmt == AV_PIX_FMT_YUV420P || swfmt == AV_PIX_FMT_NV12)) {
+		if (!(swfmt == AV_PIX_FMT_YUV444P || swfmt == AV_PIX_FMT_YUV420P || swfmt == AV_PIX_FMT_NV12 || swfmt == AV_PIX_FMT_YUV422P || swfmt == AV_PIX_FMT_NV16
+		      || swfmt == AV_PIX_FMT_RGBA || swfmt == AV_PIX_FMT_BGRA || swfmt == AV_PIX_FMT_ARGB || swfmt == AV_PIX_FMT_ABGR
+		      || swfmt == AV_PIX_FMT_RGB0 || swfmt == AV_PIX_FMT_BGR0 || swfmt == AV_PIX_FMT_0RGB || swfmt == AV_PIX_FMT_0BGR)) {
 			logstream << "cuda_to_egl_image: unsupported SW pixel format " << swfmt;
 			this->source_->pop();
 			return;
@@ -427,18 +482,19 @@ public:
 		}
 		auto opt_idx = pool_->acquire();
 		if (!opt_idx) {
-			logstream << "cuda_to_egl_image: pool acquire failed, no available entry; will retry when resources free";
-			// Don't drop the source frame; wait for resources to free up and retry soon
-			if (!ticks) {
-				// Retry when downstream frees space (likely correlates with pool entry release)
-				//this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-				// Also schedule a short delay to poll in case pool release happens outside edge consumption timing
-				this->sleepAndProcess(10);
-			}
+			// No available EGL image in the pool yet; keep the input frame and retry shortly
+			wallclock.sleepms(1);
 			return;
 		}
 		const size_t idx = *opt_idx;
 		auto &entry = pool_->entry(idx);
+		// Ensure kernels are ready before conversion
+		if (!ensure_kernel_loaded()) {
+			logstream << "cuda_to_egl_image: ensure_kernel_loaded failed";
+			pool_->release(idx);
+			this->source_->pop();
+			return;
+		}
 		if (!run_conversion_to_texture(frm, swfmt, entry.cu_tex_res, W, H)) {
 			logstream << "cuda_to_egl_image: run_conversion_to_texture failed, releasing pool entry";
 			pool_->release(idx);
@@ -454,25 +510,18 @@ public:
 		// Holder owns the token; token captures pool_, so pool stays alive
 		std::shared_ptr<void> holder = token_sp;
 		EglImageFrame out(entry.egl_image, W, H, frm.pts(), frm.timeBase(), holder);
-		if (!this->sink_->put(out, true)) {
-            waiting_frame_ = std::make_optional(out);
-			//logstream << "cuda_to_egl_image: sink put failed (no space), will retry on sink consumed event";
-			// no space, retry on sink consumed
-			this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
-		} else {
-			this->source_->pop();
-			if (!ticks) this->yieldAndProcess();
-		}
-	}
-	virtual void flush()
-	{
-		this->prohibitProcessNonBlocking();
+		// Blocking put: wait for space in sink, then remove input from source
+		this->sink_->put(out, false);
+		this->source_->pop();
 	}
 	CudaToEglImage(std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SourceType> &&source, std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SinkType> &&sink, std::shared_ptr<CudaEglImagePool> pool, std::string pool_id, int pool_size)
 		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size) {}
 	~CudaToEglImage()
 	{
-		destroy_egl_context();
+		// Intentionally do not destroy the EGL context/display here.
+		// Pool-managed EGLImages may still be referenced downstream (e.g. OBS)
+		// until their tokens are released. Tearing down EGL would invalidate
+		// those images and cause GL import failures during source teardown.
 	}
 	static std::shared_ptr<CudaToEglImage> create(NodeCreationInfo &nci)
 	{

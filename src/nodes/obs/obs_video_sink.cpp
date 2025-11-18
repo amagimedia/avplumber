@@ -709,9 +709,15 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
         EGLImage image = (EGLImage)buf;
         const GLuint gltex = *(GLuint *)gs_texture_get_obj(tex);
         gl_bind_texture(tex->gl_target, gltex);
+        // Ensure single LOD to avoid driver sampling stale mip levels
+        gl_tex_param_i(tex->gl_target, GL_TEXTURE_BASE_LEVEL, 0);
+        gl_tex_param_i(tex->gl_target, GL_TEXTURE_MAX_LEVEL, 0);
         gl_tex_param_i(tex->gl_target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         gl_tex_param_i(tex->gl_target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         g_EGLImageTargetTexture2DOES(tex->gl_target, image);
+        if (!gl_success("glEGLImageTargetTexture2DOES")) {
+            logstream << "EGLImage -> texture import failed; frame may repeat";
+        }
         gl_bind_texture(tex->gl_target, 0);
     };
     vsink.obs_hw_.free_buffer = [](void* opaque, void* buf) {
