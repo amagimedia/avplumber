@@ -2,7 +2,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
-#
+
 // Lightweight token passed along with EglImageFrame so that consumers
 // can return the underlying image back to its pool by calling release().
 struct EglImagePoolToken {
@@ -26,6 +26,7 @@ struct EglImagePoolToken {
 struct EglImageOpaque {
 	std::shared_ptr<void> holder;           // shared_ptr owning EglImagePoolToken
 	EglImagePoolToken* token = nullptr;     // raw view for convenience/assertion
+	std::function<void()> release_cb;       // invoked when OBS frees the buffer
 };
 
 

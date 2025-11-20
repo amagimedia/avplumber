@@ -14,8 +14,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
-#include <dlfcn.h>
-#include <mutex>
+#include <algorithm>
 #include <vector>
 #include <optional>
 #include <string>
@@ -27,36 +26,6 @@
 
 // PTX blob for the conversion kernels (generated at build time)
 #include "../../../objs/src/nodes/hwaccel/yuv_to_rgba_surface.ptx.h"
-
-static inline bool gl_success(const char *funcname)
-{
-	GLenum errorcode = glGetError();
-	if (errorcode != GL_NO_ERROR) {
-		int attempts = 8;
-		do {
-			logstream << funcname << " failed, glGetError returned 0x" << std::hex << errorcode;
-			errorcode = glGetError();
-			--attempts;
-			if (attempts == 0) {
-				logstream << "Too many GL errors, moving on";
-				break;
-			}
-		} while (errorcode != GL_NO_ERROR);
-		return false;
-	}
-	return true;
-}
-
-static inline bool gl_tex_param_i(GLenum target, GLenum param, GLint val)
-{
-	glTexParameteri(target, param, val);
-	return gl_success("glTexParameteri");
-}
-static inline bool gl_bind_texture(GLenum target, GLuint texture)
-{
-	glBindTexture(target, texture);
-	return gl_success("glBindTexture");
-}
 
 static int check_cu(CUresult err, const char *func)
 {
@@ -74,18 +43,9 @@ static int check_cu(CUresult err, const char *func)
 
 class CudaToEglImage: public NodeSISO<av::VideoFrame, EglImageFrame> {
 protected:
-	// EGL/GL
-	EGLDisplay egl_display_ = EGL_NO_DISPLAY;
-	EGLContext egl_context_ = EGL_NO_CONTEXT;
-	EGLSurface egl_surface_ = EGL_NO_SURFACE;
-	EGLConfig egl_config_ = nullptr;
-	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC EGLImageTargetTexture2DOES_ = nullptr;
-	PFNEGLCREATEIMAGEKHRPROC EGLCreateImageKHR_ = nullptr;
-
 	// External shared pool
 	std::shared_ptr<CudaEglImagePool> pool_;
 	std::string pool_id_;
-	size_t pool_index_ = 0;
 	int pool_size_ = 3; // default; can be overridden by params
 
 	// CUDA
@@ -127,108 +87,14 @@ protected:
 		if (ctx == nullptr) return AV_PIX_FMT_NONE;
 		return ctx->sw_format;
 	}
-	void destroy_cuda_gl_resources()
+	bool ensure_pool(int W, int H)
 	{
-		// Pool resources are managed externally by CudaEglImagePool
-	}
-	void destroy_egl_context()
-	{
-		destroy_cuda_gl_resources();
-		if (egl_context_ != EGL_NO_CONTEXT) {
-			eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-			eglDestroyContext(egl_display_, egl_context_);
-			egl_context_ = EGL_NO_CONTEXT;
-		}
-		if (egl_surface_ != EGL_NO_SURFACE) {
-			eglDestroySurface(egl_display_, egl_surface_);
-			egl_surface_ = EGL_NO_SURFACE;
-		}
-		if (egl_display_ != EGL_NO_DISPLAY) {
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-		}
-	}
-	bool ensure_egl_context()
-	{
-		if (egl_context_ != EGL_NO_CONTEXT) return true;
-		egl_display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-		if (egl_display_ == EGL_NO_DISPLAY) {
-			logstream << "cuda_to_egl_image: eglGetDisplay failed";
+		if (!pool_) {
+			logstream << "cuda_to_egl_image: pool_ is null";
 			return false;
 		}
-		EGLint major, minor;
-		if (!eglInitialize(egl_display_, &major, &minor)) {
-			logstream << "cuda_to_egl_image: eglInitialize failed";
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		if (!eglBindAPI(EGL_OPENGL_API)) {
-			logstream << "cuda_to_egl_image: eglBindAPI(EGL_OPENGL_API) failed";
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		EGLint config_attrs[] = {
-			EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-			EGL_SURFACE_TYPE,   EGL_PBUFFER_BIT,
-			EGL_RED_SIZE,       8,
-			EGL_GREEN_SIZE,     8,
-			EGL_BLUE_SIZE,      8,
-			EGL_ALPHA_SIZE,     8,
-			EGL_NONE
-		};
-		EGLint num_configs;
-		if (!eglChooseConfig(egl_display_, config_attrs, &egl_config_, 1, &num_configs) || num_configs == 0) {
-			logstream << "cuda_to_egl_image: eglChooseConfig failed";
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		EGLint ctx_attr[] = {
-			#ifdef EGL_CONTEXT_MAJOR_VERSION
-			EGL_CONTEXT_MAJOR_VERSION, 3,
-			EGL_CONTEXT_MINOR_VERSION, 3,
-			#endif
-			EGL_NONE
-		};
-		egl_context_ = eglCreateContext(egl_display_, egl_config_, EGL_NO_CONTEXT, ctx_attr);
-		if (egl_context_ == EGL_NO_CONTEXT) {
-			logstream << "cuda_to_egl_image: eglCreateContext failed";
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		EGLint pbuf_attr[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
-		egl_surface_ = eglCreatePbufferSurface(egl_display_, egl_config_, pbuf_attr);
-		if (egl_surface_ == EGL_NO_SURFACE) {
-			logstream << "cuda_to_egl_image: eglCreatePbufferSurface failed";
-			eglDestroyContext(egl_display_, egl_context_);
-			egl_context_ = EGL_NO_CONTEXT;
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
-			logstream << "cuda_to_egl_image: eglMakeCurrent failed";
-			eglDestroySurface(egl_display_, egl_surface_);
-			egl_surface_ = EGL_NO_SURFACE;
-			eglDestroyContext(egl_display_, egl_context_);
-			egl_context_ = EGL_NO_CONTEXT;
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
-			return false;
-		}
-		EGLCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-		EGLImageTargetTexture2DOES_ = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-		if (!EGLCreateImageKHR_ || !EGLImageTargetTexture2DOES_) {
-			logstream << "cuda_to_egl_image: failed to load EGL image funcs";
-			eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-			eglDestroySurface(egl_display_, egl_surface_);
-			egl_surface_ = EGL_NO_SURFACE;
-			eglDestroyContext(egl_display_, egl_context_);
-			egl_context_ = EGL_NO_CONTEXT;
-			eglTerminate(egl_display_);
-			egl_display_ = EGL_NO_DISPLAY;
+		if (!pool_->ensureInitialized(W, H, std::max(1, pool_size_), cu_ctx_)) {
+			logstream << "cuda_to_egl_image: pool ensureInitialized failed";
 			return false;
 		}
 		return true;
@@ -300,33 +166,6 @@ protected:
 		if (!cu_kernel_0rgb_full_) cu_kernel_0rgb_full_ = cu_kernel_0rgb_;
 		if (!cu_kernel_0bgr_full_) cu_kernel_0bgr_full_ = cu_kernel_0bgr_;
 		return ok;
-	}
-	bool ensure_pool(int W, int H)
-	{
-		if (!ensure_egl_context()) {
-			logstream << "cuda_to_egl_image: ensure_egl_context failed in ensure_pool";
-			return false;
-		}
-		if (!pool_) {
-			logstream << "cuda_to_egl_image: pool_ is null";
-			return false;
-		}
-		if (pool_->initializedFor(W, H)) {
-			return true;
-		}
-		eglBindAPI(EGL_OPENGL_API);
-		if (eglGetCurrentContext() != egl_context_) {
-			if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) {
-				logstream << "cuda_to_egl_image: eglMakeCurrent before pool reinit failed";
-				return false;
-			}
-		}
-		if (!pool_->reinit(W, H, std::max(1, pool_size_), egl_display_, egl_context_, EGLCreateImageKHR_, cu_ctx_)) {
-			logstream << "cuda_to_egl_image: pool reinit failed";
-			return false;
-		}
-		pool_index_ = 0;
-		return true;
 	}
 	bool run_conversion_to_texture(const av::VideoFrame &frm, AVPixelFormat swfmt, CUgraphicsResource cu_tex_res, int tex_w, int tex_h)
 	{
@@ -515,14 +354,10 @@ public:
 		this->source_->pop();
 	}
 	CudaToEglImage(std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SourceType> &&source, std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SinkType> &&sink, std::shared_ptr<CudaEglImagePool> pool, std::string pool_id, int pool_size)
-		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size) {}
-	~CudaToEglImage()
+		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size)
 	{
-		// Intentionally do not destroy the EGL context/display here.
-		// Pool-managed EGLImages may still be referenced downstream (e.g. OBS)
-		// until their tokens are released. Tearing down EGL would invalidate
-		// those images and cause GL import failures during source teardown.
 	}
+	~CudaToEglImage() override = default;
 	static std::shared_ptr<CudaToEglImage> create(NodeCreationInfo &nci)
 	{
 		EdgeManager &edges = nci.edges;

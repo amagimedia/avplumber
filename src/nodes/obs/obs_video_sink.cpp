@@ -180,7 +180,7 @@ struct graphics_subsystem {
 #endif // HAVE_VAAPI
 
 // various parts of this code adapted from OBS source code: deps/media-playback/media-playback/media.c
-// Copyright (c) 2017 Hugh Bailey <obs.jim@gmail.com>
+// Copyright (c) 2017 Lain Bailey <lain@obsproject.com>
 
 static inline enum video_colorspace convert_color_space(enum AVColorSpace s)
 {
@@ -297,10 +297,13 @@ template<> struct ObsSinkMediaSpecific<av::VideoFrame> {
 
 // EglImageFrame specialization
 template<> struct ObsSinkMediaSpecific<EglImageFrame> {
+    std::atomic<size_t> outstanding_frames_{0};
     void initOnCreate(ObsVideoSink<EglImageFrame> &vsink);
     void onStart(ObsVideoSink<EglImageFrame> &vsink) {
     }
     bool hasFormat() const { return true; }
+    bool framesEmpty() const { return outstanding_frames_.load(std::memory_order_acquire) == 0; }
+    size_t occupiedFramesCount() const { return outstanding_frames_.load(std::memory_order_acquire); }
     void composeObsFrame(ObsVideoSink<EglImageFrame> &vsink, EglImageFrame &frm, bool /*ticks*/);
 };
 
@@ -370,7 +373,7 @@ public:
         if (pfrm && isFrameValid(*pfrm)) {
             //logstream << "have frame";
             frm = *pfrm;
-            if (ticks) {
+            if (ticks && unbuffered_) {
                 while (this->source_->pop()) {}; // remove outstanding buffered packets
             } else {
                 this->source_->pop();
@@ -391,6 +394,18 @@ public:
         this->prohibitProcessNonBlocking();
         prepareEmptyFrame();
         outputFrame();
+
+        AVTS warn_at = wallclock.pts() + 2000;
+        while(true) {
+            if (mspec_.framesEmpty()) {
+                break;
+            }
+            wallclock.sleepms(50);
+            if (wallclock.pts() >= warn_at) {
+                logstream << "WARNING: still have " << mspec_.occupiedFramesCount() << " frames in hold buffer, waiting";
+                warn_at = wallclock.pts() + 2000;
+            }
+        }
     }
     ObsVideoSink(std::unique_ptr<typename NodeSingleInput<T>::SourceType> &&source, InstanceData& app_instance): NodeSingleInput<T>(std::move(source)), app_instance_(app_instance) {
     }
@@ -726,6 +741,7 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
         if (box) {
             // Ensure release; token's destructor is idempotent as well
             if (box->token) box->token->releaseOnce();
+            if (box->release_cb) box->release_cb();
             delete box; // drops holder shared_ptr; token will be deleted if this was the last ref
         }
     };
@@ -733,19 +749,34 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
 
 void ObsSinkMediaSpecific<EglImageFrame>::composeObsFrame(ObsVideoSink<EglImageFrame> &vsink, EglImageFrame &frm, bool)
 {
+    enum video_colorspace new_space = VIDEO_CS_SRGB;
+    enum video_range_type new_range = VIDEO_RANGE_FULL;
+    enum video_format new_format = VIDEO_FORMAT_RGBA;
     vsink.obs_frame_ = {0};
-    vsink.obs_frame_.format = VIDEO_FORMAT_RGBA;
-    vsink.obs_frame_.full_range = true;
+    bool success = video_format_get_parameters(new_space, new_range,
+                       vsink.obs_frame_.color_matrix,
+                       vsink.obs_frame_.color_range_min,
+                       vsink.obs_frame_.color_range_max);
+    if (!success) {
+        logstream << "video_format_get_parameters failed, colors may be wrong?!";
+    }
+    
+    vsink.obs_frame_.format = new_format;
+    vsink.obs_frame_.full_range = new_range == VIDEO_RANGE_FULL;
     vsink.obs_frame_.width = frm.width();
     vsink.obs_frame_.height = frm.height();
     vsink.obs_frame_.data[0] = (uint8_t*)frm.image();
     vsink.obs_frame_.linesize[0] = 0;
     vsink.obs_frame_.hw = &vsink.obs_hw_;
     // Pass an opaque box holding a strong ref to the token so it survives until free_buffer
-    vsink.obs_frame_.hw_opaque = new EglImageOpaque{
-        .holder = frm.holder(),
-        .token = reinterpret_cast<EglImagePoolToken*>(const_cast<void*>(frm.holder().get()))
+    outstanding_frames_.fetch_add(1, std::memory_order_acq_rel);
+    EglImageOpaque* box = new EglImageOpaque;
+    box->holder = frm.holder();
+    box->token = reinterpret_cast<EglImagePoolToken*>(const_cast<void*>(frm.holder().get()));
+    box->release_cb = [this]() {
+        outstanding_frames_.fetch_sub(1, std::memory_order_acq_rel);
     };
+    vsink.obs_frame_.hw_opaque = box;
     vsink.obs_frame_.timestamp = rescaleTS(frm.pts(), av::Rational(1, 1000000000)).timestamp();
     vsink.last_frame_emitted_at_ = wallclock.pts();
 }
