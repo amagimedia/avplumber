@@ -360,6 +360,9 @@ public:
 	~CudaToEglImage() override = default;
 	static std::shared_ptr<CudaToEglImage> create(NodeCreationInfo &nci)
 	{
+		if (global_cuda.has_errors) {
+			throw Error("cuda_to_egl_image: CUDA not initialized");
+		}
 		EdgeManager &edges = nci.edges;
 		const Parameters &params = nci.params;
 		std::shared_ptr<Edge<av::VideoFrame>> src = edges.find<av::VideoFrame>(params["src"]);
