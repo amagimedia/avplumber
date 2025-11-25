@@ -73,6 +73,7 @@ public:
                 }
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
+                    logstream << "SSS/put = " << frame.pts().timestamp({1, 1000});
                     // store orifinal frame PTS
                     auto frame_ts = av_dict_get(frame.raw()->metadata, "frame_ts", nullptr, 0);
                     if (frame_ts) {
@@ -106,6 +107,7 @@ public:
             } else if (isEofMarker(frame)) {
                 // EOF frame
                 if (this->sink_->put(frame, true)) {
+                    logstream << "SSS/eof = " << frame.pts().timestamp({1, 1000});
                     this->source_->pop();
                     if (!ticks) {
                         // process next packet
