@@ -11,64 +11,91 @@ __device__ __forceinline__ uint8_t clamp8(float x) {
 	return (uint8_t)(x + 0.5f);
 }
 
-// BT.709 inverse OETF: nonlinear to linear
-__device__ __forceinline__ float bt709_inverse_oetf(float x)
+// sRGB nonlinear -> linear channel conversion, ported from
+// libobs/data/default.effect::srgb_nonlinear_to_linear_channel
+__device__ __forceinline__ float srgb_nonlinear_to_linear_channel(float u)
 {
-	// x in [0,1] (nonlinear), return linear value in [0,1]
-	return (x < 0.081f) ? (x / 4.5f) : powf((x + 0.099f) / 1.099f, 1.0f / 0.45f);
+	// Shader equivalent:
+	// return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);
+	return (u <= 0.04045f) ? (u / 12.92f)
+	                       : powf((u + 0.055f) / 1.055f, 2.4f);
 }
 
-// YUV709 LIMITED (TV range) -> linear RGB8
+
 __device__ __forceinline__ void yuv709lim_to_linear_rgb8(
 	uint8_t Y, uint8_t U, uint8_t V,
 	uint8_t& r, uint8_t& g, uint8_t& b)
 {
-	const float y = (float)Y;
-	const float u = (float)U - 128.0f;
-	const float v = (float)V - 128.0f;
-	const float C  = 1.164383f * (y - 16.0f) / 255.0f;
-	float Rp = C + 1.792741f * (v / 255.0f);
-	float Gp = C - 0.213249f * (u / 255.0f) - 0.532909f * (v / 255.0f);
-	float Bp = C + 2.112402f * (u / 255.0f);
-	// Clamp to [0,1]
+	// Normalize to [0,1]
+	float y = (float)Y / 255.0f;
+	float u = (float)U / 255.0f;
+	float v = (float)V / 255.0f;
+
+	// Match OBS' limited-range clamp:
+	//   color_range_min = {16/255, 16/255, 16/255}
+	//   color_range_max = {235/255, 240/255, 240/255}
+	const float ymin = 16.0f / 255.0f;
+	const float umax = 240.0f / 255.0f;
+	const float vmin = 16.0f / 255.0f;
+	const float ymax = 235.0f / 255.0f;
+	const float umin = 16.0f / 255.0f;
+	const float vmax = 240.0f / 255.0f;
+
+	// Clamp YUV into the legal range
+	y = y < ymin ? ymin : (y > ymax ? ymax : y);
+	u = u < umin ? umin : (u > umax ? umax : u);
+	v = v < vmin ? vmin : (v > vmax ? vmax : v);
+
+	// Apply the same BT.709 limited-range matrix as OBS
+	// (see format_info[VIDEO_CS_709].matrix[0] in video-matrices.c)
+	float Rp = 1.164384f * y + 0.000000f * u + 1.792741f * v - 0.972945f;
+	float Gp = 1.164384f * y - 0.213249f * u - 0.532909f * v + 0.301483f;
+	float Bp = 1.164384f * y + 2.112402f * u + 0.000000f * v - 1.133402f;
+
+	// Clamp to [0,1] and store as 8‑bit nonlinear (display) RGB
 	Rp = Rp < 0.f ? 0.f : (Rp > 1.f ? 1.f : Rp);
 	Gp = Gp < 0.f ? 0.f : (Gp > 1.f ? 1.f : Gp);
 	Bp = Bp < 0.f ? 0.f : (Bp > 1.f ? 1.f : Bp);
-	// Decode to linear
-	const float Rlin = bt709_inverse_oetf(Rp);
-	const float Glin = bt709_inverse_oetf(Gp);
-	const float Blin = bt709_inverse_oetf(Bp);
-	// Convert to 8-bit full-range
-	r = clamp8(Rlin * 255.0f);
-	g = clamp8(Glin * 255.0f);
-	b = clamp8(Blin * 255.0f);
+
+	// ??? we are treating bt709 as sRGB here, why it works is a mystery
+	// probably OBS is doing some magic afterwards
+	r = clamp8(srgb_nonlinear_to_linear_channel(Rp) * 255.0f);
+	g = clamp8(srgb_nonlinear_to_linear_channel(Gp) * 255.0f);
+	b = clamp8(srgb_nonlinear_to_linear_channel(Bp) * 255.0f);
 }
 
-// YUV709 FULL (PC range) -> linear RGB8
 __device__ __forceinline__ void yuv709full_to_linear_rgb8(
 	uint8_t Y, uint8_t U, uint8_t V,
 	uint8_t& r, uint8_t& g, uint8_t& b)
 {
-	// Normalize to [0,1] and [-0.5,0.5]
-	const float Yp = ((float)Y) / 255.0f;
-	const float Cb = (((float)U) - 128.0f) / 255.0f;
-	const float Cr = (((float)V) - 128.0f) / 255.0f;
-	// BT.709 full-range matrix for R'G'B' (nonlinear)
-	float Rp = Yp + 1.5748f * Cr;
-	float Gp = Yp - 0.1873f * Cb - 0.4681f * Cr;
-	float Bp = Yp + 1.8556f * Cb;
-	// Clamp to [0,1]
+	// Normalize to [0,1]
+	const float y = ((float)Y) / 255.0f;
+	const float u = ((float)U) / 255.0f;
+	const float v = ((float)V) / 255.0f;
+
+	// Full range in OBS is just [0,1] for all components
+	const float ymin = 0.0f, ymax = 1.0f;
+	const float umin = 0.0f, umax = 1.0f;
+	const float vmin = 0.0f, vmax = 1.0f;
+
+	float yc = y < ymin ? ymin : (y > ymax ? ymax : y);
+	float uc = u < umin ? umin : (u > umax ? umax : u);
+	float vc = v < vmin ? vmin : (v > vmax ? vmax : v);
+
+	// Apply the same BT.709 full-range matrix as OBS
+	// (see format_info[VIDEO_CS_709].matrix[1] in video-matrices.c)
+	float Rp = 1.000000f * yc + 0.000000f * uc + 1.581000f * vc - 0.793600f;
+	float Gp = 1.000000f * yc - 0.188062f * uc - 0.469967f * vc + 0.330305f;
+	float Bp = 1.000000f * yc + 1.862906f * uc + 0.000000f * vc - 0.935106f;
+
+	// Clamp to [0,1] and store as 8‑bit nonlinear (display) RGB
 	Rp = Rp < 0.f ? 0.f : (Rp > 1.f ? 1.f : Rp);
 	Gp = Gp < 0.f ? 0.f : (Gp > 1.f ? 1.f : Gp);
 	Bp = Bp < 0.f ? 0.f : (Bp > 1.f ? 1.f : Bp);
-	// Decode to linear
-	const float Rlin = bt709_inverse_oetf(Rp);
-	const float Glin = bt709_inverse_oetf(Gp);
-	const float Blin = bt709_inverse_oetf(Bp);
-	// Convert to 8-bit full-range
-	r = clamp8(Rlin * 255.0f);
-	g = clamp8(Glin * 255.0f);
-	b = clamp8(Blin * 255.0f);
+
+	r = clamp8(srgb_nonlinear_to_linear_channel(Rp) * 255.0f);
+	g = clamp8(srgb_nonlinear_to_linear_channel(Gp) * 255.0f);
+	b = clamp8(srgb_nonlinear_to_linear_channel(Bp) * 255.0f);
 }
 
 __device__ __forceinline__ void surf_write_rgba8(cudaSurfaceObject_t surfOut, int x, int y, uint8_t r, uint8_t g, uint8_t b)
