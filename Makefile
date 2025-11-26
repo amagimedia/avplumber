@@ -3,6 +3,8 @@ BUILD_TYPE = Debug
 HAVE_CUDA = 1
 HAVE_VAAPI = 0
 HAVE_DRM = 0
+# HAVE_CUDA does not require any system dependencies, but nvcc does
+HAVE_NVCC = 0
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
 else
@@ -51,17 +53,23 @@ override CXXFLAGS += -DHAVE_JACK=1
 override LIBS_FLAGS += -ljack
 endif
 
-ifeq ($(HAVE_CUDA),1)
-NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_NVCC),111)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
-override CPPSRC += cuda.cpp
-override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
-override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 NVCC ?= /usr/local/cuda/bin/nvcc
 # Build PTX and embed as header for driver-side kernel launch (no cudart)
+BUILD_PTX = 1
 CUDA_KERNEL = $(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu
 PTX = objs/$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.ptx
 PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.ptx.h
+else
+BUILD_PTX = 0
+endif
+
+ifeq ($(HAVE_CUDA),1)
+NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
+override CPPSRC += cuda.cpp
+override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
+override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 
 ifeq ($(HAVE_DRM),1)
@@ -79,6 +87,7 @@ override LIBS_FLAGS += -lva
 endif
 
 ifeq ($(HAVE_GL),1)
+override CXXFLAGS += -DHAVE_GL=1
 override LIBS_FLAGS += -lGL -lEGL -lGLESv2
 endif
 
@@ -161,7 +170,7 @@ deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-ifeq ($(HAVE_CUDA),1)
+ifeq ($(BUILD_PTX),1)
 # Build PTX once and turn it into a C header array
 $(PTX): $(CUDA_KERNEL)
 	@mkdir -p $(dir $@)
@@ -174,7 +183,6 @@ $(PTX_H): $(PTX)
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
 # Ensure the sink object rebuilds if the generated header changes
-objs/src/nodes/obs/cuda_egl_obs_sink.o: $(PTX_H)
 objs/src/nodes/hwaccel/cuda_to_egl_image.o: $(PTX_H)
 endif
 
