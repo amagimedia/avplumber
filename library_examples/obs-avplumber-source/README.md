@@ -29,3 +29,29 @@ Add avplumber source to some scene.
 Paste content of `examples/rtmp_input.txt` to the script field in source properties, change input URL and confirm.
 
 After a few seconds, you should see and hear the input stream in OBS.
+
+## Available nodes
+
+### `obs_video_sink`
+
+Outputs video into the video mixer of OBS. Supports software frames and hardware frames (CUDA, VAAPI) with pixel data staying on the GPU, and also `EglImageFrame`.
+
+1 input: `av::VideoFrame` or `EglImageFrame`
+
+This node is non-blocking.
+
+Parameters:
+-   `max_freeze_duration` (float, seconds) - output an empty frame after this time without input
+-   `unbuffered` (bool, default `false`) - disables frame queue in OBS.
+
+To achieve frame-perfect output:
+* specify `tick_source: "obs"` and enable `unbuffered`
+* prepend this node with `force_fps` (set to video mixer's FPS) and `realtime` (also specify `tick_source: "obs"` in the latter)
+
+### `obs_audio_sink`
+
+Outputs audio into the audio mixer of OBS.
+
+1 input: `av::AudioSamples`
+
+no parameters
