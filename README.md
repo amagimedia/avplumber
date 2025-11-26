@@ -69,6 +69,29 @@ This demo uses [MediaMTX](https://github.com/bluenviron/mediamtx) as streaming s
     brew install docker docker-compose colima
     colima start
 
+## Build process details
+
+The build is driven by Makefile variables. Set them on the `make` command line, e.g.:
+
+    make -j`nproc` HAVE_CUDA=1 HAVE_DRM=1 HAVE_NVCC=1
+
+-   BUILD_TYPE: `Debug` (default) or `Release`
+    -   Debug enables debug-only nodes (`jittergen`, `delaygen`).
+    -   Release sets compiler flags to more optimization.
+-   HAVE_CUDA=1: enable CUDA support and CUDA-based nodes. Uses dynlink loader, so does not require anything during compilation and lack of CUDA libraries in runtime is non-fatal (nodes not using CUDA will work normally)
+-   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
+-   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
+-   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
+-   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
+-   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
+
+Feature gates:
+-   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
+-   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
+-   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
+
+
 ### Using as a library
 
 avplumber can be built as a static library: `make static_library` will make `libavplumber.a` which your app or library can link to. [`library_examples/obs-avplumber-source/CMakeLists.txt`](library_examples/obs-avplumber-source/CMakeLists.txt) is an example of CMake integration.
@@ -77,7 +100,7 @@ Public API is contained in [`src/avplumber.hpp`](src/avplumber.hpp).
 
 Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https://github.com/obsproject/obs-studio) supporting video decoder to texture direct VRAM copy.
 
-### Developing custom nodes
+## Developing custom nodes
 
 See [doc/developing_nodes.md](doc/developing_nodes.md)
 
@@ -101,10 +124,6 @@ for example:
 
 ```split<av::VideoFrame>```
 
-Type auto-detection:
-- `DECLNODE_ATD(nodetype, tpl)` registers a templated node over all queue types.
-- `DECLNODE_ATD_RAW(nodetype, tpl)` limits auto-detect to raw frame/samples.
-- `DECLNODE_ATD_TYPES(nodetype, tpl, T1, T2, ...)` limits to an explicit list (e.g. `av::VideoFrame, EglImageFrame`).
 
 ### Topology
 
@@ -1040,6 +1059,56 @@ Parse SCTE35 `SPLICE_INSERT` command.
 Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
 
 no parameters
+
+### `firewall`
+
+Drop data with invalid timestamps; pass through otherwise. Useful to prevent malformed inputs from propagating downstream.
+
+1 input, 1 output: anything
+
+no parameters
+
+### `ipc_dmabuf_source`
+
+Receive GPU frames via a UNIX domain socket with FD passing (DMA-BUF). Produces DRM PRIME frames with metadata taken from the sender.
+
+1 output: `av::VideoFrame` (hardware "pixel format" `DRM_PRIME`)
+
+Parameters:
+-   `socket` (string, required) - path to the UNIX domain socket
+-   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
+
+### `ipc_socket_audio_source`
+
+Receive audio frames over a UNIX domain socket. Expects a simple header followed by interleaved float32 PCM.
+
+1 output: `av::AudioSamples`
+
+Parameters:
+-   `socket` (string, required) - path to the UNIX domain socket
+-   `sample_rate` (int, default `48000`)
+-   `channels` (int, default `2`)
+<!-- -   `bytes_per_sample` (int, default `4` for float32) CHANGING NOT IMPLEMENTED -->
+-   `reconnect_delay_ms` (int, default `50`)
+
+### `cuda_to_egl_image`
+
+Convert CUDA `av::VideoFrame` to `EglImageFrame` (RGBA) using CUDA kernels and an EGL-backed texture pool. Intended for zero-copy rendering paths (e.g. OBS).
+
+1 input: `av::VideoFrame` (pixel format `cuda`), 1 output: `EglImageFrame`
+
+Parameters:
+-   `pool_id` (name of instance-shared object, default `"default"`) - shared EGL image pool id
+-   `pool_size` (int, default `8`) - pool capacity
+
+### `drm_prime_to_cuda`
+
+Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frames are passed through unchanged.
+
+1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format", pass-through otherwise), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
+
+Parameters:
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 
 ### `jittergen`
 
