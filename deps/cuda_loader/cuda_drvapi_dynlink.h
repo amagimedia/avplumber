@@ -15,6 +15,8 @@
 #define __cuda_drvapi_dynlink_h__
 
 #include "cuda_drvapi_dynlink_cuda.h"
+#if HAVE_GL
 #include "cuda_drvapi_dynlink_gl.h"
+#endif
 
 #endif //__cuda_drvapi_dynlink_h__

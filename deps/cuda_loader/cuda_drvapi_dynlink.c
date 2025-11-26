@@ -215,6 +215,7 @@ tcuGraphicsD3D11RegisterResource      *cuGraphicsD3D11RegisterResource;
 #endif
 
 // GL/CUDA interop
+#ifdef HAVE_GL
 tcuGLCtxCreate                        *cuGLCtxCreate;
 tcuGraphicsGLRegisterBuffer           *cuGraphicsGLRegisterBuffer;
 tcuGraphicsGLRegisterImage            *cuGraphicsGLRegisterImage;
@@ -225,6 +226,9 @@ tcuWGLGetDevice                       *cuWGLGetDevice;
 /// EGL
 tcuGraphicsEGLRegisterImage           *cuGraphicsEGLRegisterImage;
 tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
+#endif
+
+
 /* Surface object API */
 tcuSurfObjectCreate              *cuSurfObjectCreate;
 tcuSurfObjectDestroy             *cuSurfObjectDestroy;
@@ -629,14 +633,17 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuD3D10CtxCreate);
         GET_PROC(cuGraphicsD3D10RegisterResource);
 #endif
+#ifdef HAVE_GL
         GET_PROC(cuGraphicsGLRegisterBuffer);
         GET_PROC(cuGraphicsGLRegisterImage);
+#endif
     }
 
     if (driverVer >= 2010)
     {
         GET_PROC(cuModuleLoadDataEx);
         GET_PROC(cuModuleLoadFatBinary);
+#ifdef HAVE_GL
         GET_PROC(cuGLCtxCreate);
         GET_PROC(cuGraphicsGLRegisterBuffer);
         GET_PROC(cuGraphicsGLRegisterImage);
@@ -645,6 +652,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
 #  ifdef WIN32
         GET_PROC(cuWGLGetDevice);
 #  endif
+#endif
 #ifdef CUDA_INIT_D3D9
         GET_PROC(cuD3D9GetDevice);
         GET_PROC(cuD3D9CtxCreate);

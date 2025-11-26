@@ -6,7 +6,9 @@
 extern tcuIpcGetMemHandle *cuIpcGetMemHandle;
 extern tcuIpcOpenMemHandle *cuIpcOpenMemHandle;
 extern tcuIpcCloseMemHandle *cuIpcCloseMemHandle;
+#if HAVE_GL
 extern tcuGraphicsGLRegisterImage *cuGraphicsGLRegisterImage;
+#endif
 //extern tcuGraphicsEGLRegisterImage *cuGraphicsEGLRegisterImage;
 //extern tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
 
