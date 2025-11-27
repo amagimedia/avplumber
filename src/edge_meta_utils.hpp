@@ -1,20 +1,23 @@
 #pragma once
 #include <avcpp/packet.h>
 #include <avcpp/frame.h>
+#include "edge_types.hpp"
 
 namespace edge_meta_utils {
 
 template<template<typename> class SingleContainer> class MultiContainer:
-    protected SingleContainer<av::Packet>,
-    protected SingleContainer<av::VideoFrame>,
-    protected SingleContainer<av::AudioSamples>
+#define MC_BASE(T) protected SingleContainer<T>
+    EDGE_DATA_TYPES_AS_BASES(MC_BASE)
+#undef MC_BASE
 {
 public:
     template<typename Cb> bool some(Cb cb) {
-        if (cb(static_cast<SingleContainer<av::Packet>*>(this))) return true;
-        if (cb(static_cast<SingleContainer<av::VideoFrame>*>(this))) return true;
-        if (cb(static_cast<SingleContainer<av::AudioSamples>*>(this))) return true;
-        return false;
+        bool matched = false;
+        #define X(T) if (cb(static_cast<SingleContainer<T>*>(this))) { matched = true; } else
+        EDGE_DATA_TYPES(X)
+        /*fallthrough*/ matched = matched;
+        #undef X
+        return matched;
     }
     template<typename Cb> void forEach(Cb cb) {
         some([cb](auto arg) -> bool {

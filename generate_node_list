@@ -5,9 +5,26 @@ set -e
 echo '#include "src/graph_factory.hpp"'
 echo '#include "src/node_create_function.hpp"'
 
+# load type lists from central registry
+EDGE_TYPES=()
+RAW_TYPES=()
+if [ -f src/edge_types.hpp ]; then
+    # extract EDGE_DATA_TYPES
+    while IFS= read -r line; do
+        t="$(printf '%s\n' "$line" | sed -E 's/^.*X\(([^)]*)\).*/\1/')" ; t="${t//[[:space:]]/}"
+        if [ -n "$t" ]; then EDGE_TYPES+=("$t"); fi
+    done < <(awk '/^#define EDGE_DATA_TYPES\(X\)/{flag=1;next} flag&&/^#define/{exit} flag{gsub(/\\/, ""); print}' src/edge_types.hpp | grep -E 'X\(')
+    # extract EDGE_RAW_DATA_TYPES
+    while IFS= read -r line; do
+        t="$(printf '%s\n' "$line" | sed -E 's/^.*X\(([^)]*)\).*/\1/')" ; t="${t//[[:space:]]/}"
+        if [ -n "$t" ]; then RAW_TYPES+=("$t"); fi
+    done < <(awk '/^#define EDGE_RAW_DATA_TYPES\(X\)/{flag=1;next} flag&&/^#define/{exit} flag{gsub(/\\/, ""); print}' src/edge_types.hpp | grep -E 'X\(')
+fi
+
 for fn in $*; do
     sed -e 's/^DECLNODE(\([^, ]\+\), *\([^) ]\+\)).*/class \2;/; t; d' < $fn
-    sed -e 's/^DECLNODE_ATD(\([^, ]\+\), *\([^) ]\+\)).*/std::shared_ptr<Node> createNodeATD_\2(NodeCreationInfo\&);\ntemplate<typename> class \2;/; t; d' < $fn
+    sed -e 's/^DECLNODE_ATD\(_RAW\)\{0,1\}\(_ALIAS\)\{0,1\}(\([^, ]\+\), *\([^) ]\+\)).*/std::shared_ptr<Node> createNodeATD_\4(NodeCreationInfo\&);\ntemplate<typename> class \4;/; t; d' < $fn
+    sed -e 's/^DECLNODE_ATD_TYPES\(_ALIAS\)\{0,1\}(\([^, ]\+\), *\([^) ,]\+\)\(.*\)).*/std::shared_ptr<Node> createNodeATD_\3(NodeCreationInfo\&);\ntemplate<typename> class \3;/; t; d' < $fn
 done
 
 echo 'void initFactories(std::unordered_map<std::string, NodeFactoryFunction> &factories) {'
@@ -19,7 +36,67 @@ et() { # explicit type specification
 
 for fn in $*; do
     perl -ne 's/^DECLNODE(_ALIAS)?\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNode<$+{class}>;/ && print' < $fn
-    perl -ne 's/^DECLNODE_ATD(_ALIAS)?\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};'"$(et av::Packet) $(et av::VideoFrame) $(et av::AudioSamples)"'/ && print' < $fn
+    # DECLNODE_ATD over all EDGE_TYPES
+    if grep -qE '^DECLNODE_ATD\(' "$fn"; then
+        perl -ne 's/^DECLNODE_ATD\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};/ && print' < "$fn"
+        for t in "${EDGE_TYPES[@]}"; do
+            node="$(perl -ne "s/^DECLNODE_ATD\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{node}/ && print" < "$fn")"
+            class="$(perl -ne "s/^DECLNODE_ATD\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{class}/ && print" < "$fn")"
+            if [ -n "$node" ] && [ -n "$class" ]; then
+                echo "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;"
+            fi
+        done
+    fi
+    if grep -qE '^DECLNODE_ATD_ALIAS\(' "$fn"; then
+        perl -ne 's/^DECLNODE_ATD_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};/ && print' < "$fn"
+        for t in "${EDGE_TYPES[@]}"; do
+            node="$(perl -ne "s/^DECLNODE_ATD_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{node}/ && print" < "$fn")"
+            class="$(perl -ne "s/^DECLNODE_ATD_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{class}/ && print" < "$fn")"
+            if [ -n "$node" ] && [ -n "$class" ]; then
+                echo "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;"
+            fi
+        done
+    fi
+    # DECLNODE_ATD_RAW over RAW_TYPES
+    if grep -qE '^DECLNODE_ATD_RAW\(' "$fn"; then
+        perl -ne 's/^DECLNODE_ATD_RAW\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};/ && print' < "$fn"
+        for t in "${RAW_TYPES[@]}"; do
+            node="$(perl -ne "s/^DECLNODE_ATD_RAW\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{node}/ && print" < "$fn")"
+            class="$(perl -ne "s/^DECLNODE_ATD_RAW\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{class}/ && print" < "$fn")"
+            if [ -n "$node" ] && [ -n "$class" ]; then
+                echo "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;"
+            fi
+        done
+    fi
+    if grep -qE '^DECLNODE_ATD_RAW_ALIAS\(' "$fn"; then
+        perl -ne 's/^DECLNODE_ATD_RAW_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/    factories["$+{node}"] = \&createNodeATD_$+{class};/ && print' < "$fn"
+        for t in "${RAW_TYPES[@]}"; do
+            node="$(perl -ne "s/^DECLNODE_ATD_RAW_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{node}/ && print" < "$fn")"
+            class="$(perl -ne "s/^DECLNODE_ATD_RAW_ALIAS\((?<node>[^, ]+), *(?<class>[^) ]+)\).*/\$+{class}/ && print" < "$fn")"
+            if [ -n "$node" ] && [ -n "$class" ]; then
+                echo "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;"
+            fi
+        done
+    fi
+    # DECLNODE_ATD_TYPES explicit list
+    perl -ne '
+        if (s/^DECLNODE_ATD_TYPES\((?<node>[^, ]+), *(?<class>[^, )]+), *(?<types>[^)]+)\).*/\1/) {
+            $node=$+{node}; $class=$+{class}; $types=$+{types};
+            print "    factories[\"$node\"] = &createNodeATD_$class;\n";
+            for $t (split(/,/, $types)) {
+                $t =~ s/^\s+|\s+$//g;
+                print "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;\n";
+            }
+        }' < "$fn"
+    perl -ne '
+        if (s/^DECLNODE_ATD_TYPES_ALIAS\((?<node>[^, ]+), *(?<class>[^, )]+), *(?<types>[^)]+)\).*/\1/) {
+            $node=$+{node}; $class=$+{class}; $types=$+{types};
+            print "    factories[\"$node\"] = &createNodeATD_$class;\n";
+            for $t (split(/,/, $types)) {
+                $t =~ s/^\s+|\s+$//g;
+                print "    factories[\"$node<$t>\"] = &createNode<$class<$t>>;\n";
+            }
+        }' < "$fn"
 done
 
 echo '}'
