@@ -73,13 +73,13 @@ public:
                 }
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
-                    logstream << "SSS/put = " << frame.pts().timestamp({1, 1000});
                     // store orifinal frame PTS
                     auto frame_ts = av_dict_get(frame.raw()->metadata, "frame_ts", nullptr, 0);
                     if (frame_ts) {
                         if (scaled_pts_.size() > 8)
                             scaled_pts_.pop_front();
                         int64_t f_ts = std::atoll(frame_ts->value);
+                        //logstream << "SSS/put = " << frame.pts().timestamp({1, 1000}) << " original PTS = " << orig_pts.timestamp({1, 1000});
                         scaled_pts_.emplace_back(std::make_tuple(f_ts, orig_pts));
                     }
  
@@ -107,7 +107,7 @@ public:
             } else if (isEofMarker(frame)) {
                 // EOF frame
                 if (this->sink_->put(frame, true)) {
-                    logstream << "SSS/eof = " << frame.pts().timestamp({1, 1000});
+                    //logstream << "SSS/eof = " << frame.pts().timestamp({1, 1000});
                     this->source_->pop();
                     if (!ticks) {
                         // process next packet
