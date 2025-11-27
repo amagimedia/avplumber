@@ -157,6 +157,7 @@ public:
         if (synchronize) {
             flushAndSeek(StreamTarget::now());
         }
+        offset_ = AV_NOPTS_VALUE;
     }
 
     virtual void flushAndSeek(StreamTarget seek_target) override {
