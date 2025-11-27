@@ -110,7 +110,6 @@ public:
                                 }
                                 return;
                             } else {
-                                //logstream << "FFF/duplicate = " << last_frame_.pts().timestamp({1, 1000});
                                 if (!last_unused_) {
                                     // increase number of duplicated frames only if last_frame_ was already used
                                     duplicated_++;
@@ -162,7 +161,6 @@ public:
                 }
                 return;
             } else {
-                //logstream << "FFF/put = " << pkt.pts().timestamp({1, 1000});
                 last_ts_ = in_ts;
                 next_ts_ = addTS(in_ts, frame_delta_);
                 setLast(pkt, false);
