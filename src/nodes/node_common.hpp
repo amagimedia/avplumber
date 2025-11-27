@@ -5,6 +5,7 @@
 #include "../graph_base.hpp"
 #include "../graph_interfaces.hpp"
 #include "../node_create_function.hpp"
+#include "../edge_types.hpp"
 
 namespace {
     template<typename T> bool checkParamEdge(NodeCreationInfo &nci, const std::string &pname) {
@@ -34,15 +35,32 @@ namespace {
 };
 // ATD = Automatic (data) Type Detection
 template<template<typename> class Tpl> std::shared_ptr<Node> createNodeATD(NodeCreationInfo &nci) {
-    #define checkType(T) if (worksWithType<T>(nci)) { \
-        logstream << "Detected " << nci.params["type"].get<std::string>() << " as <" << #T << ">" ; \
-        return createNode<Tpl<T>>(nci); \
-    }
-    checkType(av::Packet);
-    checkType(av::VideoFrame);
-    checkType(av::AudioSamples);
-    return nullptr;
-    #undef checkType
+	#define X(T) if (worksWithType<T>(nci)) { \
+		logstream << "Detected " << nci.params["type"].get<std::string>() << " as <" << #T << ">"; \
+		return createNode<Tpl<T>>(nci); \
+	}
+	EDGE_DATA_TYPES(X)
+	#undef X
+	return nullptr;
+}
+
+template<template<typename> class Tpl> std::shared_ptr<Node> createNodeATD_RAW(NodeCreationInfo &nci) {
+	#define X(T) if (worksWithType<T>(nci)) { \
+		logstream << "Detected " << nci.params["type"].get<std::string>() << " as <" << #T << ">"; \
+		return createNode<Tpl<T>>(nci); \
+	}
+	EDGE_RAW_DATA_TYPES(X)
+	#undef X
+	return nullptr;
+}
+
+template<template<typename> class Tpl, typename... Ts>
+std::shared_ptr<Node> createNodeATD_Explicit(NodeCreationInfo &nci) {
+	std::shared_ptr<Node> r = nullptr;
+	(void)std::initializer_list<int>{
+		(r ? 0 : (worksWithType<Ts>(nci) ? (r = createNode<Tpl<Ts>>(nci), 0) : 0))...
+	};
+	return r;
 }
 template<typename T> std::shared_ptr<Node> createNode(NodeCreationInfo &nci) {
     return std::static_pointer_cast<Node>(T::create(nci));
@@ -57,9 +75,21 @@ template<typename T> std::shared_ptr<Node> createNode(NodeCreationInfo &nci) {
 //    template std::shared_ptr<Node>  createNodeATD<tplname>(EdgeManager &edges, const Parameters &params);
 
 #define DECLNODE_ATD(nodetype, tplname) \
-    std::shared_ptr<Node> createNodeATD_ ## tplname(NodeCreationInfo &nci) { \
-        return createNodeATD<tplname>(nci); \
-    }
+	std::shared_ptr<Node> createNodeATD_ ## tplname(NodeCreationInfo &nci) { \
+		return createNodeATD<tplname>(nci); \
+	}
+
+#define DECLNODE_ATD_RAW(nodetype, tplname) \
+	std::shared_ptr<Node> createNodeATD_ ## tplname(NodeCreationInfo &nci) { \
+		return createNodeATD_RAW<tplname>(nci); \
+	}
+
+#define DECLNODE_ATD_TYPES(nodetype, tplname, ...) \
+	std::shared_ptr<Node> createNodeATD_ ## tplname(NodeCreationInfo &nci) { \
+		return createNodeATD_Explicit<tplname, __VA_ARGS__>(nci); \
+	}
 
 #define DECLNODE_ALIAS(nodetype, classname)
 #define DECLNODE_ATD_ALIAS(nodetype, tplname)
+#define DECLNODE_ATD_RAW_ALIAS(nodetype, tplname)
+#define DECLNODE_ATD_TYPES_ALIAS(nodetype, tplname, ...)

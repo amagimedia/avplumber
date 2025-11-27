@@ -169,8 +169,8 @@ public:
                                 emit = false;
                                 consume = false;
                                 woken_too_late_ = false;
-                                if (!ticks) {
-                                    // retry after waiting
+                                // retry after waiting – schedule even if called from a tick when no internal tick clock is used
+                                if (!ticks || (tick_period_ == 0)) {
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
                             } else {
