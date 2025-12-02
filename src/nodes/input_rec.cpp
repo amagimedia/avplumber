@@ -373,6 +373,8 @@ private:
             if (frame_index < seek_table_.size()) {
                 av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
             }
+        } else {
+            av_dict_set(&frame->metadata, "frame_ts", std::to_string(frm.pts().timestamp({1, 1000})).c_str(), 0);
         }
     }
 public:
@@ -724,7 +726,8 @@ public:
         }
         if (pkt.isNull()) {
             // we are at the end os recording
-            //logstream << "end of video reached";
+            logstream << "end of video reached";
+            notify_eof_ = true;
             std::this_thread::sleep_for(5ms);
             return;
         } else {
