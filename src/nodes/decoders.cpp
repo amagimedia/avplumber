@@ -176,7 +176,7 @@ public:
             }
             flush_frames_.pop_front();
         }
-        if (true) {
+        if (false) {
             this->finished_ = true;
         } else {
             // FIXME: doesn't work correctly when destroying graph (may hang decoder thread)
