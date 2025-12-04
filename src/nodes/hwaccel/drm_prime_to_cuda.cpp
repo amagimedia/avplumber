@@ -6,7 +6,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "../../cuda.hpp"
-#include "../../../deps/cuda_loader/cudaEGL.h"
+#include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 
 extern "C" {
 #include <libavutil/buffer.h>
