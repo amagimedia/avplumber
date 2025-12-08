@@ -9,12 +9,20 @@ struct SeekTableEntry {
 };
 #pragma pack(pop)
 
+#define SEEK_TABLE_FILES_COUNT 4
+#define MAX_SEEK_TABLE_ENTRIES 60
+
 class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag {
 protected:
     av::FormatContext octx_;
     bool write_seek_table_ = false;
-    std::ofstream seek_table_text_;
-    std::ofstream seek_table_bin_;
+    std::ofstream seek_table_text_[SEEK_TABLE_FILES_COUNT];
+    std::ofstream seek_table_bin_[SEEK_TABLE_FILES_COUNT];
+    std::vector<SeekTableEntry> seek_table_entries_;
+    std::stringstream seek_table_text_stream_;
+    std::string seek_table_url_;
+    std::string seek_table_text_url_;
+    int current_seek_table_index_ = 0;
     bool should_close_ = false;
     int errors_ = 0;
 public:
@@ -29,14 +37,46 @@ public:
                 if (write_seek_table_ && octx_.raw() && octx_.raw()->pb && (pkt.streamIndex() == 0)) {
                     int64_t cur_pos = avio_tell(octx_.raw()->pb);
                     int64_t ts_ms = pkt.dts().timestamp({1, 1000});
-                    if (seek_table_text_.is_open()) {
-                        seek_table_text_ << ts_ms << " " << cur_pos << "\n";
-                        seek_table_text_.flush();
+
+                    seek_table_entries_.push_back({ ts_ms, uint64_t(cur_pos) });
+                    seek_table_text_stream_ << ts_ms << " " << cur_pos << "\n";
+
+                    for (int i = 0; i < SEEK_TABLE_FILES_COUNT; i++) {
+                        if (i == current_seek_table_index_) {
+                            continue;
+                        }
+
+                        if (seek_table_text_[i].is_open()) {
+                            seek_table_text_[i] << ts_ms << " " << cur_pos << "\n";
+                        }
+                        if (seek_table_bin_[i].is_open()) {
+                            SeekTableEntry entry { ts_ms, uint64_t(cur_pos) };
+                            seek_table_bin_[i].write(reinterpret_cast<char*>(&entry), sizeof(entry));
+                        }
                     }
-                    if (seek_table_bin_ .is_open()) {
-                        SeekTableEntry entry { ts_ms, uint64_t(cur_pos) };
-                        seek_table_bin_.write(reinterpret_cast<char*>(&entry), sizeof(entry));
-                        seek_table_bin_.flush();
+
+                    if (seek_table_entries_.size() >= MAX_SEEK_TABLE_ENTRIES) {
+                        // rotate seek table files
+                        unlink(seek_table_url_.c_str());
+                        unlink(seek_table_text_url_.c_str());
+                        if (seek_table_text_[current_seek_table_index_].is_open()) {
+                            seek_table_text_[current_seek_table_index_] << seek_table_text_stream_.rdbuf();
+                        }
+                        if (seek_table_bin_[current_seek_table_index_].is_open()) {
+                            seek_table_bin_[current_seek_table_index_].write(reinterpret_cast<char*>(seek_table_entries_.data()), seek_table_entries_.size() * sizeof(SeekTableEntry));
+                        }
+                        seek_table_entries_.clear();
+                        seek_table_text_stream_.clear();
+                        current_seek_table_index_ = (current_seek_table_index_ + 1) % SEEK_TABLE_FILES_COUNT;
+
+                        if (seek_table_text_[current_seek_table_index_].is_open()) {
+                            seek_table_text_[current_seek_table_index_].flush();
+                        }
+                        if (seek_table_bin_[current_seek_table_index_].is_open()) {
+                            seek_table_bin_[current_seek_table_index_].flush();
+                        }
+                        symlink((seek_table_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_url_.c_str());
+                        symlink((seek_table_text_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_text_url_.c_str());
                     }
                 }
                 octx_.writePacket(pkt);
@@ -95,11 +135,17 @@ public:
         muxer->initFromFormatContextPostOpen(octx);
 
         if (params.count("seek_table")) {
-            r->seek_table_bin_.open(params["seek_table"], std::ios::binary);
+            r->seek_table_url_ = params["seek_table"];
+            for (int i = 0; i < SEEK_TABLE_FILES_COUNT; i++) {
+                r->seek_table_bin_[i].open(r->seek_table_url_ + "." + std::to_string(i), std::ios::binary);
+            }
             r->write_seek_table_ = true;
         }
         if (params.count("seek_table_text")) {
-            r->seek_table_text_.open(params["seek_table_text"]);
+            r->seek_table_text_url_ = params["seek_table_text"];
+            for (int i = 0; i < SEEK_TABLE_FILES_COUNT; i++) {
+                r->seek_table_text_[i].open(r->seek_table_text_url_ + "." + std::to_string(i));
+            }
             r->write_seek_table_ = true;
         }
         

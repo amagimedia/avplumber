@@ -22,6 +22,7 @@ protected:
     std::list<OutputFrame> flush_frames_;
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
+    bool finish_after_flush_ = false;
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -155,6 +156,7 @@ public:
             try {
                 frm = dec_.decode(av::Packet());
                 if (frm) {
+                    setFrameTimestamps(frm);
                     flush_frames_.push_back(frm);
                 }
             } catch (std::exception &e) {
@@ -166,7 +168,24 @@ public:
         }
         //dec_.close();
         //input_hold_ = nullptr;
-        this->finished_ = true;
+        // try to put frames to sink
+        while (!flush_frames_.empty()) {
+            OutputFrame frame = flush_frames_.front();
+            if (!this->sink_->put(frame, true)) {
+                break;
+            }
+            flush_frames_.pop_front();
+        }
+        if (true) {
+            this->finished_ = true;
+        } else {
+            // FIXME: doesn't work correctly when destroying graph (may hang decoder thread)
+            if (flush_frames_.empty()) {
+                this->finished_ = true;
+            } else {
+                this->finish_after_flush_ = true;
+            }
+        }
     }
     void setFrameTimestamps(OutputFrame& frm) {
         auto pb = playback_hold_.lock();
@@ -186,6 +205,9 @@ public:
                 OutputFrame frame = *flush_frames_.begin();
                 flush_frames_.pop_front();
                 this->sink_->put(frame);
+                if (flush_frames_.empty() && finish_after_flush_) {
+                    this->finished_ = true;
+                }
                 return;
             }
         }
@@ -262,7 +284,8 @@ public:
                 flush();
                 // pass eof packet to next node
                 if (isEofMarker(pkt)) {
-                    this->sink_->put(OutputFrame());
+                    this->flush_frames_.push_back(OutputFrame());
+                    //this->sink_->put(OutputFrame());
                 }
                 this->source_->pop();
             }

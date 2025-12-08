@@ -19,11 +19,18 @@ private:
     static std::unordered_map<const InstanceData*, std::list<std::function<void()>>> destructors_;
     static std::mutex busy_;
     static void callDestructors(const InstanceData* instance) {
-        std::unique_lock<decltype(busy_)> lock(busy_);
-        for (auto &fn: destructors_[instance]) {
+        std::list<std::function<void()>> destructors;
+        {
+            std::unique_lock<decltype(busy_)> lock(busy_);
+            destructors = destructors_[instance];
+        }
+        for (auto &fn: destructors) {
             fn();
         }
-        destructors_.erase(instance);
+        {
+            std::unique_lock<decltype(busy_)> lock(busy_);
+            destructors_.erase(instance);
+        }
     }
 public:
     static void addDestructor(const InstanceData* instance, std::function<void()> destructor) {

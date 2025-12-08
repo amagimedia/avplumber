@@ -35,6 +35,7 @@ protected:
     std::atomic_int64_t last_frame_timestamp_ = -1;
     std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t eof_frame_wallclock_ = -1;
+    std::atomic_int64_t eof_frame_timestamp_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_synclock_ = -1;
 
@@ -168,8 +169,8 @@ public:
                                 emit = false;
                                 consume = false;
                                 woken_too_late_ = false;
-                                if (!ticks) {
-                                    // retry after waiting
+                                // retry after waiting – schedule even if called from a tick when no internal tick clock is used
+                                if (!ticks || (tick_period_ == 0)) {
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
                             } else {
@@ -205,8 +206,9 @@ public:
             } else { // NO PTS
                 if (isEofMarker(data)) {
                     eof_frame_wallclock_.store(last_frame_wallclock_.load());
+                    eof_frame_timestamp_.store(last_frame_timestamp_.load());
                     is_eof_ = true;
-                    logstream << "EOF detected";
+                    logstream << "EOF detected (wallclock: " << eof_frame_wallclock_.load() << ", timestamp: " << eof_frame_timestamp_.load() << ")";
                 }
                 emit = false;
                 if (!ticks) {
@@ -284,6 +286,7 @@ public:
             last_frame_timestamp_ = std::atoll(frame_ts->value);
             if (is_eof_ && (eof_frame_wallclock_ != last_frame_wallclock_)) {
                 eof_frame_wallclock_ = -1;
+                eof_frame_timestamp_ = -1;
                 is_eof_ = false;
                 logstream << "no EOF anymore";
             }

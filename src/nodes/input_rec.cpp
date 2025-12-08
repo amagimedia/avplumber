@@ -483,7 +483,7 @@ public:
                     if (it == seek_table_.cend()) {
                         it = std::prev(it);
                     }
-                    if ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
+                    while ((it != seek_table_.cbegin()) && (it->timestamp_ms > req_ts)) {
                         it = std::prev(it);
                     }
 
@@ -545,19 +545,18 @@ public:
             return;
         std::ifstream f(seek_table_url_, std::ios::binary);
         if (f) {
-            size_t start;
+            int64_t start;
             {
                 auto lock = std::lock_guard<decltype(seek_table_mutex_)>(seek_table_mutex_);
                 start = sizeof(SeekTableEntry) * seek_table_.size();
             }
             f.seekg(0, std::ios::end);
-            if (f.tellg() == std::streampos(-1))
-                return;
-            size_t count = static_cast<size_t>(f.tellg()) - start;
-            if (count < sizeof(SeekTableEntry)) {
+            int64_t tellg = f.tellg();
+            if (tellg < start + sizeof(SeekTableEntry)) {
                 // no new data
                 return;
             }
+            int64_t count = tellg - start;
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -578,17 +577,18 @@ public:
             return;
         std::ifstream f(ts_offsets_url_, std::ios::binary);
         if (f) {
-            size_t start;
+            int64_t start;
             {
                 auto lock = std::lock_guard<decltype(ts_offsets_mutex_)>(ts_offsets_mutex_);
                 start = sizeof(TSOffsetEntry) * ts_offsets_.size();
             }
             f.seekg(0, std::ios::end);
-            size_t count = static_cast<size_t>(f.tellg()) - start;
-            if (count < sizeof(SeekTableEntry)) {
+            int64_t tellg = f.tellg();
+            if (tellg < start + sizeof(TSOffsetEntry)) {
                 // no new data
                 return;
             }
+            int64_t count = tellg - start;
             f.seekg(start);
             std::vector<char> buffer(count);
             f.read(buffer.data(), count);
@@ -749,7 +749,10 @@ public:
         pkt.setPts(addTS(pkt.pts(), shift_));
         #endif
 
+        av::Timestamp pkt_pts;
+
         if (!pkt.isNull()) {
+
             if (paused_read_ && (pkt.streamIndex() == video_stream_) && pkt.isKeyPacket()) {
                 // video frame read, do not read more packets
                 paused_read_ = false;
@@ -768,13 +771,14 @@ public:
                 }
             }
 
-            if (pkt.streamIndex() == video_stream_) {
-                just_started_ = false;
-            }
-
             if (first_video_ts_.timestamp() != 0) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
+            }
+
+            if (pkt.streamIndex() == video_stream_) {
+                just_started_ = false;
+                pkt_pts = pkt.pts();
             }
 
             // adjust ts
@@ -806,23 +810,27 @@ public:
         }
         this->sink_->put(pkt);
 
-        // check if we have to stop/loop video
-        if (play_direction_ == EPlaybackDirection::pd_Forward) {
-            if (stop_ts_.ts.isValid() && (pkt.pts() >= stop_ts_.ts)) {
-                if (loop_) {
-                    seek(start_ts_);
-                } else {
-                    logstream << "input_rec reached stop timestamp, EOF";
-                    notify_eof_ = true;
+        if (pkt_pts.isValid()) {
+            // check if we have to stop/loop video
+            if (play_direction_ == EPlaybackDirection::pd_Forward) {
+                if (stop_ts_.ts.isValid() && (pkt_pts >= stop_ts_.ts)) {
+                    if (loop_) {
+                        logstream << "input_rec reached stop timestamp, loop to start";
+                        seek(start_ts_);
+                    } else {
+                        logstream << "input_rec reached stop timestamp, EOF";
+                        notify_eof_ = true;
+                    }
                 }
-            }
-        } else {
-            if (start_ts_.ts.isValid() && (pkt.pts() <= start_ts_.ts)) {
-                if (loop_) {
-                    seek(stop_ts_);
-                } else {
-                    logstream << "input_rec reached stop timestamp, EOF";
-                    notify_eof_ = true;
+            } else {
+                if (start_ts_.ts.isValid() && (pkt_pts <= start_ts_.ts)) {
+                    if (loop_) {
+                        logstream << "input_rec reached start timestamp, loop to stop";
+                        seek(stop_ts_);
+                    } else {
+                        logstream << "input_rec reached start timestamp, EOF";
+                        notify_eof_ = true;
+                    }
                 }
             }
         }
@@ -1118,15 +1126,14 @@ public:
             int64_t rec_length;
 
             if (seek_table_.empty()) {
-                auto duration = rescaleTS(ictx_.duration(), {1, 1000});
-                rec_length = duration.timestamp();
-            } else {
-                if (seek_table_.empty()) {
+                if (ictx_.isOpened()) {
                     auto duration = rescaleTS(ictx_.duration(), {1, 1000});
                     rec_length = duration.timestamp();
                 } else {
-                    rec_length = seek_table_.crbegin()->timestamp_ms;
+                    rec_length = 0;
                 }
+            } else {
+                rec_length = seek_table_.crbegin()->timestamp_ms;
             }
             if (start_ts_.isValidTimestamp()) {
                 int64_t st = start_ts_.ts.timestamp();

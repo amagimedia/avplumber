@@ -5,7 +5,7 @@
 #include "instance_shared.hpp"
 #include "graph_interfaces.hpp"
 
-class PauseControlTeam: public InstanceShared<PauseControlTeam> {
+class PauseControlTeam: public InstanceShared<PauseControlTeam>, public ILinkableTeam<PauseControlTeam> {
 protected:
     std::atomic_bool paused_ {false};
     std::optional<StreamTarget> pause_at_;
@@ -14,13 +14,9 @@ protected:
     std::weak_ptr<IPlaybackControl> playback_;
     std::vector<std::weak_ptr<IFlushAndSeek>> sync_objs_;
     std::condition_variable cv_;
-public:
-    bool isPaused() {
-        return paused_;
-    }
-    void pause(bool synchonize_nodes = true) {
-        paused_ = true;
 
+    void pauseNonRecursive(bool synchonize_nodes = true) {
+        paused_ = true;
         if (synchonize_nodes) {
             for (auto& p: sync_objs_) {
                 auto obj = p.lock();
@@ -30,29 +26,16 @@ public:
             }
         }
     }
-    void pause(const StreamTarget& target) {
+    void pauseNonRecursive(const StreamTarget& target) {
         std::lock_guard<decltype(mutex_)> lock(mutex_);
         auto playback = playback_.lock();
         if (playback) {
             StreamTarget ts = target;
             playback->convertStreamTarget(ts, StreamTarget::ETargetType::tt_Timestamp);
             pause_at_ = ts;
-        } else {
-            pause_at_ = target;
         }
     }
-    bool checkPause(const av::Timestamp& ts) {
-        std::lock_guard<decltype(mutex_)> lock(mutex_);
-        if (pause_at_.has_value()) {
-            if (ts >= pause_at_.value().ts) {
-                pause_at_.reset();
-                pause();
-                return true;
-            }
-        }
-        return false;
-    }
-    void resume() {
+    void resumeNonRecursive() {
         paused_ = false;
         {
             std::lock_guard<decltype(mutex_)> lock(mutex_);
@@ -63,6 +46,72 @@ public:
                 }
             }
             cv_.notify_all();
+        }
+    }
+    bool checkPauseNonRecursive(const av::Timestamp& ts) {
+        std::lock_guard<decltype(mutex_)> lock(mutex_);
+        if (pause_at_.has_value()) {
+            if (ts >= pause_at_.value().ts) {
+                pause_at_.reset();
+                pause();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    virtual void teamLinked(std::shared_ptr<PauseControlTeam> team, bool synchronize) override {
+        if (synchronize && (isPaused() != team->isPaused())) {
+            if (isPaused()) {
+                team->pauseNonRecursive(false);
+            } else {
+                team->resumeNonRecursive();
+            }
+        }
+    }
+
+public:
+    bool isPaused() {
+        return paused_;
+    }
+    
+    void pause(bool synchonize_nodes = true) {
+        pauseNonRecursive(synchonize_nodes);
+        {
+            for (auto team: getLinkedTeams()) {
+                team->pauseNonRecursive(synchonize_nodes);
+            }
+        }
+    }
+
+    void pause(const StreamTarget& target) {
+        pauseNonRecursive(target);
+        {
+            for (auto team: getLinkedTeams()) {
+                team->pauseNonRecursive(target);
+            }
+        }
+    }
+
+    bool checkPause(const av::Timestamp& ts) {
+        if (checkPauseNonRecursive(ts)) {
+            return true;
+        }
+        {
+            for (auto team: getLinkedTeams()) {
+                if (team->checkPauseNonRecursive(ts)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    void resume() {
+        resumeNonRecursive();
+        {
+            for (auto team: getLinkedTeams()) {
+                team->resumeNonRecursive();
+            }
         }
     }
     bool waitForResume(int timeout_ms) {
