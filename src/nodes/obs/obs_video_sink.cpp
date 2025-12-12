@@ -28,6 +28,7 @@
 #if (HAVE_CUDA || HAVE_VAAPI)
 
 #include <GL/gl.h>
+#include <GL/glext.h>
 
 struct gs_device {
   struct gl_platform *plat;
@@ -734,6 +735,124 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
             logstream << "EGLImage -> texture import failed; frame may repeat";
         }
         gl_bind_texture(tex->gl_target, 0);
+    };
+    vsink.obs_hw_.copy_frame_data_plane_from_hw = [](void* opaque, struct obs_source_frame *dst, const struct obs_source_frame *src, uint32_t plane, uint32_t lines) {
+        (void)opaque;
+        if (!src || !dst)
+            return;
+        if (plane != 0)
+            return;
+        if (!src->data[0] || !dst->data[0])
+            return;
+        if (!g_EGLImageTargetTexture2DOES)
+            return;
+
+        const uint32_t width = src->width;
+        const uint32_t height = src->height;
+        const uint32_t copy_lines = std::min(lines, height);
+        if (!width || !height || !copy_lines)
+            return;
+
+        // EglImageFrame path advertises RGBA only.
+        if (src->format != VIDEO_FORMAT_RGBA || dst->format != VIDEO_FORMAT_RGBA) {
+            logstream << "EGLImage hwdownload only supports RGBA; src=" << (int)src->format
+                      << " dst=" << (int)dst->format;
+            return;
+        }
+
+        const size_t packed_row_bytes = (size_t)width * 4;
+        const size_t dst_pitch = dst->linesize[0] ? (size_t)dst->linesize[0] : packed_row_bytes;
+
+        GLint prev_fbo = 0;
+        GLint prev_tex_2d = 0;
+        GLint prev_pack_align = 4;
+        GLint prev_pack_row_length = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex_2d);
+        glGetIntegerv(GL_PACK_ALIGNMENT, &prev_pack_align);
+#ifdef GL_PACK_ROW_LENGTH
+        glGetIntegerv(GL_PACK_ROW_LENGTH, &prev_pack_row_length);
+#endif
+
+        GLuint tmp_tex = 0;
+        GLuint tmp_fbo = 0;
+        glGenTextures(1, &tmp_tex);
+        glGenFramebuffers(1, &tmp_fbo);
+        if (!tmp_tex || !tmp_fbo) {
+            if (tmp_fbo)
+                glDeleteFramebuffers(1, &tmp_fbo);
+            if (tmp_tex)
+                glDeleteTextures(1, &tmp_tex);
+            return;
+        }
+
+        bool ok = true;
+
+        // Import EGLImage into a temporary GL texture.
+        ok = ok && gl_bind_texture(GL_TEXTURE_2D, tmp_tex);
+        ok = ok && gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        ok = ok && gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        ok = ok && gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        ok = ok && gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        g_EGLImageTargetTexture2DOES(GL_TEXTURE_2D, (void*)src->data[0]);
+        ok = ok && gl_success("glEGLImageTargetTexture2DOES(hwdownload)");
+
+        // Attach to FBO and read back.
+        glBindFramebuffer(GL_FRAMEBUFFER, tmp_fbo);
+        ok = ok && gl_success("glBindFramebuffer(hwdownload)");
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tmp_tex, 0);
+        ok = ok && gl_success("glFramebufferTexture2D(hwdownload)");
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            logstream << "EGLImage hwdownload FBO incomplete: 0x" << std::hex << status;
+            ok = false;
+        }
+
+        if (ok) {
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            ok = ok && gl_success("glPixelStorei(GL_PACK_ALIGNMENT)");
+#ifdef GL_PACK_ROW_LENGTH
+            if ((dst_pitch % 4) == 0) {
+                glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(dst_pitch / 4));
+                ok = ok && gl_success("glPixelStorei(GL_PACK_ROW_LENGTH)");
+                glReadPixels(0, 0, (GLsizei)width, (GLsizei)copy_lines, GL_RGBA, GL_UNSIGNED_BYTE, dst->data[0]);
+                ok = ok && gl_success("glReadPixels(EGLImage hwdownload)");
+            } else {
+                // Fallback: read line-by-line if stride is unusual (should not happen for RGBA)
+                for (uint32_t y = 0; y < copy_lines; y++) {
+                    glReadPixels(0, (GLint)y, (GLsizei)width, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 dst->data[0] + (size_t)y * dst_pitch);
+                    if (!gl_success("glReadPixels(EGLImage hwdownload row)")) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+#else
+            // Very old GL headers: no GL_PACK_ROW_LENGTH. Use a safe row-by-row read.
+            for (uint32_t y = 0; y < copy_lines; y++) {
+                glReadPixels(0, (GLint)y, (GLsizei)width, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             dst->data[0] + (size_t)y * dst_pitch);
+                if (!gl_success("glReadPixels(EGLImage hwdownload row)")) {
+                    ok = false;
+                    break;
+                }
+            }
+#endif
+        }
+
+        // Restore bindings/state and delete temp objects.
+        glPixelStorei(GL_PACK_ALIGNMENT, prev_pack_align);
+#ifdef GL_PACK_ROW_LENGTH
+        glPixelStorei(GL_PACK_ROW_LENGTH, prev_pack_row_length);
+#endif
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+        gl_bind_texture(GL_TEXTURE_2D, (GLuint)prev_tex_2d);
+        glDeleteFramebuffers(1, &tmp_fbo);
+        glDeleteTextures(1, &tmp_tex);
+
+        if (!ok)
+            return;
     };
     vsink.obs_hw_.free_buffer = [](void* opaque, void* buf) {
         (void)buf;
