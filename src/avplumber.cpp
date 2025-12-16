@@ -436,6 +436,16 @@ public:
         commands_["queues.stats"] = [this](ClientStream &cs, std::string&) {
             manager_->edges()->printEdgesStats(cs);
         };
+        // Machine-readable JSON statistics for all queues.
+        // Returns an array of objects:
+        // [
+        //   { "name": "videoin", "capacity": 256, "occupied": 12, "free": 244, "last_ts_seconds": 0.123 },
+        //   ...
+        // ]
+        commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
+            json j = manager_->edges()->edgesStatsJson();
+            cs << j << "\n";
+        };
         commands_["group.restart"] = [this](ClientStream &cs, std::string &arg) {
             manager_->group(arg)->restartNodes();
         };
@@ -452,6 +462,26 @@ public:
         commands_["stats.subscribe"] = [this](ClientStream &cs, std::string &arg) {
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
+        };
+        // Dump current graph (all nodes with their parameters) as JSON array.
+        // Each entry has: name, type, working (bool), params (full JSON object).
+        commands_["nodes.json"] = [this](ClientStream &cs, std::string &arg) {
+            (void)arg;
+            json jnodes = json::array();
+            for (auto &entry: manager_->allNodes()) {
+                const std::string &name = entry.first;
+                std::shared_ptr<NodeWrapper> node = entry.second;
+                if (!node) {
+                    continue;
+                }
+                json jn;
+                jn["name"] = name;
+                jn["type"] = node->type();
+                jn["working"] = node->isWorking();
+                jn["params"] = node->parameters();
+                jnodes.push_back(std::move(jn));
+            }
+            cs << jnodes << "\n";
         };
         auto seek = [this](std::string team_node_name, StreamTarget target) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_node_name);
