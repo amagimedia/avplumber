@@ -2,11 +2,14 @@
 #include "graph_interfaces.hpp"
 #include "util.hpp"
 #include "avutils.hpp"
+#include "edge_types.hpp"
 #include <json.hpp>
 #include <mutex>
 #include <shared_mutex>
 #include <readerwriterqueue/readerwriterqueue.h>
 #include <unordered_map>
+#include <cmath>
+#include <cstdint>
 #include "Event.hpp"
 #include "instance.hpp"
 #include "EventLoop.hpp"
@@ -229,6 +232,7 @@ public:
         if (drop_if_full) {
             if (!this->edge_->try_enqueue(data)) {
                 //logstream << "Enqueue failed, queue full, dropping!";
+                this->edge_->countDrop();
                 return false;
             } else {
                 return true;
@@ -369,6 +373,18 @@ protected:
     int queue_limit_;
     std::list<WiretapCallback> wiretap_callbacks_;
     std::atomic_int occupied_{0};
+    // queue item counters (monotonic since edge creation)
+    std::atomic<uint64_t> enqueued_total_{0};
+    std::atomic<uint64_t> dequeued_total_{0};
+    std::atomic<uint64_t> dropped_total_{0};
+
+    // cached rate calculation state (updated on stats serialization)
+    mutable std::mutex stats_mutex_;
+    mutable AVTS last_rate_ms_ = 0;
+    mutable uint64_t last_rate_enq_ = 0;
+    mutable uint64_t last_rate_deq_ = 0;
+    mutable double last_enq_pps_ = 0.0;
+    mutable double last_deq_pps_ = 0.0;
 
     // try_func returns whether item appeared in the queue
     // wait_func waits and returns false if timeout, true otherwise
@@ -394,6 +410,7 @@ protected:
     bool popInternal() {
         if (queue_.pop()) {
             occupied_--;
+            dequeued_total_++;
             consumed_.signal();
             return true;
         } else {
@@ -421,6 +438,7 @@ protected:
                 logstream << "BUG: decreasing occupied_ = " << occupied_;
             }*/ // warning disabled, gave false positives because of race conditions
             --occupied_;
+            dequeued_total_++;
             consumed_.signal();
         }
         return r;
@@ -429,6 +447,48 @@ protected:
         return std::static_pointer_cast<Edge<T>>(this->shared_from_this());
     }
 public:
+    void countDrop() {
+        dropped_total_++;
+    }
+    uint64_t enqueuedTotal() const { return enqueued_total_.load(); }
+    uint64_t dequeuedTotal() const { return dequeued_total_.load(); }
+    uint64_t droppedTotal() const { return dropped_total_.load(); }
+
+    // Compute enqueue/dequeue rates in items/sec based on wallclock and monotonic counters.
+    // Rate is updated when called (typically from queues.json).
+    std::pair<double, double> ratesPps() const {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        const AVTS now = wallclock.pts();
+        const uint64_t enq = enqueued_total_.load();
+        const uint64_t deq = dequeued_total_.load();
+
+        if (last_rate_ms_ <= 0) {
+            last_rate_ms_ = now;
+            last_rate_enq_ = enq;
+            last_rate_deq_ = deq;
+            last_enq_pps_ = 0.0;
+            last_deq_pps_ = 0.0;
+            return { last_enq_pps_, last_deq_pps_ };
+        }
+
+        const AVTS dt_ms = now - last_rate_ms_;
+        // Avoid unstable/meaningless rates when polling too fast.
+        if (dt_ms < 100) {
+            return { last_enq_pps_, last_deq_pps_ };
+        }
+
+        const double dt = static_cast<double>(dt_ms) / 1000.0;
+        const uint64_t denq = enq - last_rate_enq_;
+        const uint64_t ddeq = deq - last_rate_deq_;
+        last_enq_pps_ = denq / dt;
+        last_deq_pps_ = ddeq / dt;
+
+        last_rate_ms_ = now;
+        last_rate_enq_ = enq;
+        last_rate_deq_ = deq;
+        return { last_enq_pps_, last_deq_pps_ };
+    }
+
     void addWiretapCallback(WiretapCallback cb) {
         wiretap_callbacks_.push_back(cb);
     }
@@ -440,6 +500,7 @@ public:
         if (r) {
             last_ts_ = elem.pts();
             ++occupied_;
+            enqueued_total_++;
             if (occupied_ > queue_limit_) {
                 queue_limit_ = occupied_;
                 //logstream << "BUG: occupied_ = " << occupied_;
@@ -553,12 +614,12 @@ public:
             const std::string name = prefix + kv.first;
             std::shared_ptr<Edge<T>> edge = kv.second;
             if (edge==nullptr) continue;
-            std::stringstream ss;
             int capacity = edge->capacity();
             int occupied = edge->occupied();
             if (occupied > capacity) occupied = capacity;
             int free = capacity - occupied;
             //if (free < 0) free = 0;
+            std::stringstream ss;
             if (compact) {
                 ss << name << ':' << occupied << '/' << capacity << ", ";
                 ost << ss.str();
@@ -566,6 +627,42 @@ public:
                 ss << '[' << std::string(occupied, '#') << std::string(free, '.') << "]  " << edge->lastTS() << "=" << edge->lastTS().seconds() << "   " << name;
                 ost << ss.str() << std::endl;
             }
+        }
+    }
+    void toJson(nlohmann::json &arr, const std::string &prefix = "") {
+        for (auto &kv: edges_) {
+            const std::string name = prefix + kv.first;
+            std::shared_ptr<Edge<T>> edge = kv.second;
+            if (edge==nullptr) continue;
+            int capacity = edge->capacity();
+            int occupied = edge->occupied();
+            if (occupied > capacity) occupied = capacity;
+            int free = capacity - occupied;
+
+            nlohmann::json item;
+            item["name"] = name;
+            item["type"] = edgeTypeName<T>();
+            item["capacity"] = capacity;
+            item["occupied"] = occupied;
+            item["free"] = free;
+            item["enqueued_total"] = edge->enqueuedTotal();
+            item["dequeued_total"] = edge->dequeuedTotal();
+            item["dropped_total"] = edge->droppedTotal();
+            {
+                auto rates = edge->ratesPps();
+                // prefer dequeue rate for "flow across the edge"
+                item["enq_pps"] = rates.first;
+                item["deq_pps"] = rates.second;
+                item["pps"] = rates.second;
+            }
+            av::Timestamp ts = edge->lastTS();
+            double secs = ts.seconds();
+            // limit precision to milliseconds for readability
+            double rounded_secs = std::round(secs * 1000.0) / 1000.0;
+            item["last_ts_seconds"] = rounded_secs;
+            item["timebase_num"] = ts.timebase().getNumerator();
+            item["timebase_den"] = ts.timebase().getDenominator();
+            arr.push_back(std::move(item));
         }
     }
     void clear() {
@@ -658,6 +755,22 @@ public:
         storage_.forEach([&ost, compact, &prefix](auto edges) {
             edges->printStats(ost, compact, prefix);
         });
+    }
+    nlohmann::json edgesStatsJson() {
+        nlohmann::json arr = nlohmann::json::array();
+        bool we_are_global = this==&global_edge_manager_;
+        const std::string prefix = we_are_global ? "@" : "";
+        if (!we_are_global) {
+            nlohmann::json global_arr = global_edge_manager_.edgesStatsJson();
+            for (auto &item : global_arr) {
+                arr.push_back(item);
+            }
+        }
+        auto lock = getLock();
+        storage_.forEach([&arr, &prefix](auto edges) {
+            edges->toJson(arr, prefix);
+        });
+        return arr;
     }
     void clearEdges() {
         bool we_are_global = this==&global_edge_manager_;
