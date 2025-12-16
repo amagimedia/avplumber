@@ -1,0 +1,29 @@
+{
+  "name": "avplumber-web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal web UI for avplumber (control protocol over WebSocket + stats viewer) with Svelte frontend",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev:server": "NODE_ENV=development node backend/server.js",
+    "build": "cd frontend && vite build"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.0.0",
+    "elkjs": "^0.8.2",
+    "rete": "^2.0.6",
+    "rete-area-plugin": "^2.1.5",
+    "rete-auto-arrange-plugin": "^2.0.2",
+    "rete-connection-plugin": "^2.0.5",
+    "rete-svelte-plugin": "^2.1.1",
+    "svelte": "^4.0.0",
+    "svelte-preprocess": "^6.0.3",
+    "typescript": "^5.9.2",
+    "vite": "^5.0.0"
+  }
+}
+
+
