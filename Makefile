@@ -76,6 +76,10 @@ ifeq ($(HAVE_DRM),1)
 NODES_SRC += $(IPC_DMABUF_SOURCE_SRC)
 endif
 
+ifeq ($(HAVE_DRM)$(HAVE_GL),11)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/drm_prime_to_egl_image.cpp
+endif
+
 # drm_prime_to_cuda requires CUDA + GL + DRM
 ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_DRM),111)
 NODES_SRC += $(DRM_PRIME_TO_CUDA_SRC)
