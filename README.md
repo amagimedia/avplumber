@@ -1110,6 +1110,23 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 
+### `drm_prime_to_egl_image`
+
+Import DRM PRIME (DMA-BUF) frames into an `EGLImageKHR` via `EGL_EXT_image_dma_buf_import` and output them as `EglImageFrame` (no CUDA processing).
+
+1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format"; non-DRM PRIME frames are dropped), 1 output: `EglImageFrame`
+
+Supported DRM formats (layer0/plane0 only):
+- `DRM_FORMAT_ABGR8888`
+- `DRM_FORMAT_ARGB8888`
+
+Cache behavior:
+- Maintains an internal cache keyed by the incoming DMA-BUF FD number.
+- Cache entries are evicted when an FD is not seen for `ttl` seconds, and the whole cache is purged when resolution changes.
+
+Parameters:
+- `ttl` (float seconds, optional, default `5.0`) - cache entry time-to-live
+
 ### `jittergen`
 
 Enabled only if avplumber is compiled with `BUILD_TYPE=Debug`. Delay packets
