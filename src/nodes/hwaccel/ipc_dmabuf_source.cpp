@@ -279,7 +279,7 @@ public:
         vfrm.raw()->format = AV_PIX_FMT_DRM_PRIME;
         vfrm.raw()->width = ti.width;
         vfrm.raw()->height = ti.height;
-        vfrm.setTimeBase({1, 1000});
+        vfrm.setTimeBase({1, 1000000000});
         vfrm.raw()->pts = ti.timestamp;
 
         if (hw_frames_ctx_) {
