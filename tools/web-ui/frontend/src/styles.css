@@ -58,6 +58,23 @@ body {
   font-size: 16px;
 }
 
+.app-root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.dock-host {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+.gl-container {
+  background: #020617;
+}
+
 .layout {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -124,6 +141,11 @@ button:hover {
 
 pre {
   margin: 0;
+  white-space: pre;
+  word-break: normal;
+}
+
+.avp-prewrap {
   white-space: pre-wrap;
   word-break: break-word;
 }
