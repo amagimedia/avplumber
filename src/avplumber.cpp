@@ -446,6 +446,11 @@ public:
             json j = manager_->edges()->edgesStatsJson();
             cs << j << "\n";
         };
+        // Reset per-queue occupancy statistics used by queues.json (frames_in_queue.* fields).
+        commands_["queues.stats.reset"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            manager_->edges()->resetEdgesOccupancyStats();
+        };
         commands_["group.restart"] = [this](ClientStream &cs, std::string &arg) {
             manager_->group(arg)->restartNodes();
         };

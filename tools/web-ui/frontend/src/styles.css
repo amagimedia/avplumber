@@ -2,11 +2,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.4rem 0.8rem;
+  padding: 0.35rem 0.6rem;
   background: #111827;
   color: #e5e7eb;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 0.9rem;
+  font-size: 1rem;
 }
 
 .title {
@@ -15,8 +15,8 @@
 
 .badge {
   border-radius: 999px;
-  padding: 0.2rem 0.6rem;
-  font-size: 0.75rem;
+  padding: 0.22rem 0.65rem;
+  font-size: 0.85rem;
 }
 
 .badge-connected {
@@ -32,11 +32,11 @@
 .status {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .instance-select label {
-  font-size: 0.75rem;
+  font-size: 0.85rem;
   color: #d1d5db;
 }
 
@@ -46,8 +46,8 @@
   color: #e5e7eb;
   border-radius: 0.25rem;
   border: 1px solid #111827;
-  font-size: 0.75rem;
-  padding: 0.05rem 0.25rem;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.35rem;
 }
 
 body {
@@ -55,20 +55,21 @@ body {
   background: #020617;
   color: #e5e7eb;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
 }
 
 .layout {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 0.6rem;
-  padding: 0.6rem;
+  gap: 0.4rem;
+  padding: 0.4rem;
 }
 
 .panel {
   background: #020617;
   border-radius: 0.4rem;
   border: 1px solid #1f2937;
-  padding: 0.4rem 0.5rem 0.5rem;
+  padding: 0.3rem 0.4rem 0.4rem;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -79,16 +80,16 @@ body {
 }
 
 .panel h2 {
-  margin: 0 0 0.3rem;
-  font-size: 0.95rem;
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
   font-weight: 600;
   color: #f9fafb;
 }
 
 .toolbar {
   display: flex;
-  gap: 0.3rem;
-  margin-bottom: 0.3rem;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
 }
 
 button {
@@ -96,8 +97,8 @@ button {
   color: #e5e7eb;
   border: 1px solid #374151;
   border-radius: 0.25rem;
-  font-size: 0.8rem;
-  padding: 0.2rem 0.6rem;
+  font-size: 0.9rem;
+  padding: 0.22rem 0.6rem;
   cursor: pointer;
 }
 
@@ -112,13 +113,13 @@ button:hover {
   background: #020617;
   border-radius: 0.25rem;
   border: 1px solid #111827;
-  padding: 0.3rem 0.4rem;
+  padding: 0.25rem 0.35rem;
   overflow: auto;
 }
 
 .small-text {
-  font-size: 0.75rem;
-  line-height: 1.2;
+  font-size: 0.85rem;
+  line-height: 1.25;
 }
 
 pre {
@@ -128,25 +129,25 @@ pre {
 }
 
 .hint {
-  margin: 0 0 0.3rem;
-  font-size: 0.75rem;
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
   color: #9ca3af;
 }
 
 .console-input {
   display: flex;
-  gap: 0.3rem;
-  margin-bottom: 0.3rem;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
 }
 
 .console-input input {
   flex: 1;
-  padding: 0.2rem 0.4rem;
+  padding: 0.22rem 0.45rem;
   background: #020617;
   border-radius: 0.25rem;
   border: 1px solid #111827;
   color: #e5e7eb;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
 }
 
 .console-input input:focus {
@@ -161,9 +162,9 @@ pre {
 
 .node-table th,
 .node-table td {
-  padding: 0.15rem 0.25rem;
+  padding: 0.12rem 0.2rem;
   border-bottom: 1px solid #111827;
-  font-size: 0.75rem;
+  font-size: 0.85rem;
 }
 
 .node-table th {
@@ -172,10 +173,26 @@ pre {
   color: #9ca3af;
 }
 
+.node-table tr.click-row {
+  cursor: pointer;
+}
+
+.node-table tr.click-row:hover {
+  background: rgba(17, 24, 39, 0.65);
+}
+
+.node-table tr.selected {
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.node-table tr.selected td {
+  border-bottom-color: rgba(59, 130, 246, 0.35);
+}
+
 .node-badge {
   border-radius: 999px;
   padding: 0.05rem 0.35rem;
-  font-size: 0.7rem;
+  font-size: 0.82rem;
 }
 
 .node-badge-on {
@@ -192,10 +209,55 @@ pre {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
+.kv-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.kv-table th,
+.kv-table td {
+  padding: 0.12rem 0.2rem;
+  border-bottom: 1px solid #111827;
+  vertical-align: top;
+}
+
+.kv-table th {
+  text-align: left;
+  font-weight: 600;
+  color: #9ca3af;
+}
+
+.kv-key {
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.85rem;
+}
+
+.kv-val {
+  width: 100%;
+}
+
+.kv-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.82rem;
+}
+
+.kv-act {
+  white-space: nowrap;
+}
+
+.btn-small {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.82rem;
+}
+
 .queue-bar {
   position: relative;
   width: 100%;
-  height: 0.75rem;
+  height: 0.9rem;
   background: #111827;
   border-radius: 999px;
   overflow: hidden;
@@ -211,13 +273,51 @@ pre {
 
 .queue-bar-text {
   position: relative;
-  font-size: 0.7rem;
-  line-height: 0.75rem;
+  font-size: 0.82rem;
+  line-height: 0.9rem;
   text-align: center;
   width: 100%;
   color: #e5e7eb;
   white-space: nowrap;
   text-shadow: 0 0 2px #000;
+}
+
+/* --- Rete (Graph preview) density + legibility tweaks --- */
+/* The classic preset renders DOM nodes; we keep them compact so 30+ nodes can fit on screen. */
+.rete-wrap .rete-container {
+  /* Allow slightly larger base text without nodes ballooning */
+  font-size: 14px;
+}
+
+/* Most classic preset nodes use these common class names */
+.rete-wrap .node,
+.rete-wrap .rete-node,
+.rete-wrap .rete-node-classic {
+  border-radius: 8px;
+}
+
+.rete-wrap .node .title,
+.rete-wrap .rete-node .title {
+  padding: 4px 6px;
+  font-size: 0.95em;
+  line-height: 1.1;
+}
+
+.rete-wrap .node .content,
+.rete-wrap .rete-node .content {
+  padding: 4px 6px;
+}
+
+.rete-wrap .port,
+.rete-wrap .socket {
+  margin: 1px 0;
+}
+
+.rete-wrap .port .text,
+.rete-wrap .port label,
+.rete-wrap .port span {
+  font-size: 0.9em;
+  line-height: 1.1;
 }
 
 

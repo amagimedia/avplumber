@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
   import { NodeEditor, ClassicPreset } from 'rete';
   import { AreaPlugin, AreaExtensions } from 'rete-area-plugin';
@@ -10,6 +10,9 @@
 
   export let nodes = [];
   export let queues = [];
+  export let selectedNodeName = '';
+
+  const dispatch = createEventDispatcher();
 
   /** @type {HTMLElement | null} */
   let container = null;
@@ -27,10 +30,59 @@
 
   // Maps used for efficient queue-fill updates (no rebuild).
   const nodeByName = new Map(); // name -> ClassicPreset.Node
+  const nodeNameById = new Map(); // nodeId -> avplumber node name
   const outputsByQueue = new Map(); // queueName -> ClassicPreset.Output
   const nodeIdByQueue = new Map(); // queueName -> nodeId (owner node to refresh)
 
   const socket = new ClassicPreset.Socket('queue');
+
+  /** @type {Map<any, { el: HTMLElement, handler: any }>} */
+  const nodeDomHandlers = new Map();
+
+  function clearNodeDomHandlers() {
+    for (const { el, handler } of nodeDomHandlers.values()) {
+      try {
+        el.removeEventListener('click', handler);
+      } catch (_) {
+        // ignore
+      }
+    }
+    nodeDomHandlers.clear();
+  }
+
+  function syncSelectedNodeHighlight() {
+    if (!editor || !area) return;
+    for (const n of editor.getNodes()) {
+      const view = area.nodeViews && area.nodeViews.get ? area.nodeViews.get(n.id) : null;
+      const el = view && view.element ? view.element : null;
+      if (!el) continue;
+      const avName = nodeNameById.get(n.id) || '';
+      const selected = avName && selectedNodeName && avName === selectedNodeName;
+      if (selected) el.classList.add('avp-selected');
+      else el.classList.remove('avp-selected');
+    }
+  }
+
+  async function attachNodeClickHandlers() {
+    if (!editor || !area) return;
+    // Wait until DOM views exist
+    await nextFrame();
+    clearNodeDomHandlers();
+
+    for (const n of editor.getNodes()) {
+      const view = area.nodeViews && area.nodeViews.get ? area.nodeViews.get(n.id) : null;
+      const el = view && view.element ? view.element : null;
+      if (!el) continue;
+      const handler = (ev) => {
+        ev.stopPropagation();
+        const avName = nodeNameById.get(n.id);
+        if (avName) dispatch('selectNode', { name: avName });
+      };
+      el.addEventListener('click', handler);
+      nodeDomHandlers.set(n.id, { el, handler });
+    }
+    syncSelectedNodeHighlight();
+  }
 
   function nextFrame() {
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -64,18 +116,19 @@
 
   function guessNodeSize(node) {
     // fallback if DOM measurement isn't ready yet
-    const baseW = 260;
-    const baseH = 56;
+    const baseW = 200;
+    const baseH = 48;
     const inCount = node?.inputs ? Object.keys(node.inputs).length : 0;
     const outCount = node?.outputs ? Object.keys(node.outputs).length : 0;
     const ports = Math.max(inCount, outCount);
-    return { width: baseW, height: baseH + ports * 18 };
+    return { width: baseW, height: baseH + ports * 16 };
   }
 
   function queueFillLabel(queueName, q) {
     if (!q || !q.capacity || q.capacity <= 0) return queueName;
     const pct = Math.max(0, Math.min(100, (q.occupied / q.capacity) * 100));
-    return `${queueName} (${q.occupied}/${q.capacity} ${Math.round(pct)}%)`;
+    // Compact label to keep nodes narrow. Full details are available on connection hover tooltip.
+    return `${queueName} ${Math.round(pct)}%`;
   }
 
   function buildGraphKey(nodesArr) {
@@ -273,8 +326,9 @@
       }
     }
 
-    const xGap = 120;
-    const yGap = 70;
+    // Keep layout compact so wide graphs can fit ~10 nodes across on typical screens.
+    const xGap = 80;
+    const yGap = 48;
 
     // Compute max width per level to avoid overlaps horizontally
     const levelWidth = new Map();
@@ -316,8 +370,10 @@
     if (!editor || !area) return;
 
     nodeByName.clear();
+    nodeNameById.clear();
     outputsByQueue.clear();
     nodeIdByQueue.clear();
+    clearNodeDomHandlers();
 
     await editor.clear();
 
@@ -346,6 +402,7 @@
 
       await editor.addNode(node);
       nodeByName.set(n.name, node);
+      nodeNameById.set(node.id, n.name);
     }
 
     // 2) Create connections based on shared queue names: producer(dst) -> consumer(src)
@@ -387,6 +444,9 @@
     // 3) Measure and deterministic layout (dependency order)
     await measureAndApplyNodeSizes();
     await layoutDependencyOrder();
+
+    // 4) Enable node selection by clicking node DOM
+    await attachNodeClickHandlers();
   }
 
   async function updateQueueFills() {
@@ -477,6 +537,7 @@
     } catch (_) {
       // ignore
     }
+    clearNodeDomHandlers();
     editor = null;
     area = null;
     arrange = null;
@@ -497,6 +558,11 @@
     updateQueueFills();
   }
 
+  // Keep highlight in sync when selection changes from outside (nodes list)
+  $: {
+    syncSelectedNodeHighlight();
+  }
+
   // Always publish queue stats to the store (even before Rete `area` is ready),
   // so the custom connection component can render reactively.
   $: {
@@ -508,7 +574,9 @@
   {#if error}
     <div class="rete-error">Graph preview error: {error}</div>
   {/if}
-  <div class="rete-container" bind:this={container} />
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="rete-container" bind:this={container} on:click={() => dispatch('selectNode', { name: '' })} />
 </div>
 
 <style>
@@ -537,6 +605,13 @@
     color: #fee2e2;
     font-size: 0.75rem;
     border-radius: 0.25rem;
+  }
+
+  /* selected node highlight (set by GraphPreview via DOM class) */
+  .rete-wrap :global(.avp-selected) {
+    outline: 2px solid rgba(59, 130, 246, 0.95);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.75);
   }
 </style>
 
