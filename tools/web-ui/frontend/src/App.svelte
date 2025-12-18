@@ -1,6 +1,14 @@
 <script>
   import { onMount } from 'svelte';
-  import GraphPreview from './GraphPreview.svelte';
+  import DockHost from './DockHost.svelte';
+  import GraphPanel from './panels/GraphPanel.svelte';
+  import NodesPanel from './panels/NodesPanel.svelte';
+  import SelectedNodePanel from './panels/SelectedNodePanel.svelte';
+  import NodeObjectsPanel from './panels/NodeObjectsPanel.svelte';
+  import QueuesPanel from './panels/QueuesPanel.svelte';
+  import StatsPanel from './panels/StatsPanel.svelte';
+  import LogsPanel from './panels/LogsPanel.svelte';
+  import ConsolePanel from './panels/ConsolePanel.svelte';
 
   let ws;
   let wsConnected = false;
@@ -20,9 +28,19 @@
   let autoRefreshQueues = true;
   let autoRefreshMs = 1000;
 
+  /** @type {any} */
+  let dockHost;
+
   // Selected node state (from graph click or nodes list click)
   let selectedNodeName = '';
   $: selectedNode = selectedNodeName ? (nodes || []).find((n) => n && n.name === selectedNodeName) : null;
+
+  function setSelectedNodeName(name) {
+    selectedNodeName = name ? String(name) : '';
+  }
+  function setAutoRefreshQueues(v) {
+    autoRefreshQueues = !!v;
+  }
 
   // Clipboard helpers (for params table)
   let lastCopiedParamKey = '';
@@ -404,339 +422,165 @@
       }, 50);
     }
   }
+
+  function setAutoRefreshNodeObjects(v) {
+    autoRefreshNodeObjects = !!v;
+  }
+
+  function setConsoleInput(v) {
+    consoleInput = v == null ? '' : String(v);
+  }
+
+  const panelRegistry = {
+    graph: GraphPanel,
+    nodes: NodesPanel,
+    selected: SelectedNodePanel,
+    nodeObjects: NodeObjectsPanel,
+    queues: QueuesPanel,
+    stats: StatsPanel,
+    logs: LogsPanel,
+    console: ConsolePanel
+  };
+
+  const defaultDockLayoutConfig = {
+    settings: {
+      constrainDragToContainer: true,
+      reorderEnabled: true,
+      // popouts are useful, but can be confusing in debug UIs; keep disabled by default
+      showPopoutIcon: false
+    },
+    header: {
+      popout: false,
+      maximise: 'Maximise',
+      close: false,
+      minimise: 'Minimise',
+      tabDropdown: 'Tabs'
+    },
+    root: {
+      type: 'column',
+      content: [
+        {
+          type: 'row',
+          size: '72%',
+          content: [
+            {
+              type: 'stack',
+              size: '22%',
+              header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
+              content: [
+                { type: 'component', componentType: 'nodes', title: 'Graph / nodes', isClosable: false },
+                { type: 'component', componentType: 'queues', title: 'Queues', isClosable: false }
+              ]
+            },
+            { type: 'component', componentType: 'graph', title: 'Graph preview', isClosable: false, size: '56%' },
+            {
+              type: 'stack',
+              size: '22%',
+              header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
+              content: [
+                { type: 'component', componentType: 'selected', title: 'Selected node', isClosable: false },
+                { type: 'component', componentType: 'nodeObjects', title: 'Node objects', isClosable: false },
+                { type: 'component', componentType: 'stats', title: 'Statistics', isClosable: false }
+              ]
+            }
+          ]
+        },
+        {
+          type: 'stack',
+          size: '28%',
+          header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
+          content: [
+            { type: 'component', componentType: 'logs', title: 'Logs', isClosable: false },
+            { type: 'component', componentType: 'console', title: 'Raw console', isClosable: false }
+          ]
+        }
+      ]
+    }
+  };
+
+  $: dockCtx = {
+    nodes,
+    queues,
+    queuesText,
+
+    selectedNodeName,
+    selectedNode,
+    setSelectedNodeName,
+
+    refreshNodes,
+    refreshQueues,
+    resetQueueStats,
+
+    autoRefreshQueues,
+    autoRefreshMs,
+    setAutoRefreshQueues,
+
+    objectNamesByType,
+    nodeObjects,
+    nodesSupportingObjects,
+    nodeObjectsInFlight,
+    refreshNodeObjects,
+    autoRefreshNodeObjects,
+    nodeObjectsRefreshMs,
+    setAutoRefreshNodeObjects,
+
+    selectedNodeObjectNames,
+    refreshSelectedNodeObjects,
+    selectedNodeObjectsInFlight,
+
+    objectEntryText,
+    copyParam,
+    copyToClipboard,
+    lastCopiedParamKey,
+
+    hasReceivedStats,
+    currentStatsPrettyText,
+
+    hasReceivedLog,
+    logs,
+
+    consoleLines,
+    consoleInput,
+    setConsoleInput,
+    handleConsoleKeydown,
+    submitConsole
+  };
 </script>
 
-<header class="topbar">
-  <div class="title">avplumber web-ui</div>
-  <div class="status">
-    <span class="badge {wsConnected ? 'badge-connected' : 'badge-disconnected'}">
-      WS: {wsConnected ? 'connected' : 'disconnected'}
-    </span>
-    <div class="instance-select">
-      <label>
-        Instance:
-        <select bind:value={currentInstanceId}>
-          {#if instances.length === 0}
-            <option value="">no instances</option>
-          {:else}
-            {#each instances as inst}
-              <option value={inst.id}>
-                {inst.name || inst.id} ({inst.host}:{inst.port})
-              </option>
-            {/each}
-          {/if}
-        </select>
-      </label>
-    </div>
-  </div>
-</header>
-
-<main class="layout">
-  <section class="panel panel-wide">
-    <h2>Graph preview (Rete)</h2>
-    <div class="toolbar">
-      <button on:click={refreshNodes}>Refresh graph</button>
-      <button on:click={refreshQueues}>Refresh queues</button>
-      <button on:click={resetQueueStats}>Reset queue stats</button>
-      <label class="hint" style="margin-left: auto;">
-        <input type="checkbox" bind:checked={autoRefreshQueues} />
-        auto-refresh queue fill ({autoRefreshMs}ms)
-      </label>
-    </div>
-    <GraphPreview
-      {nodes}
-      {queues}
-      {selectedNodeName}
-      on:selectNode={(e) => {
-        selectedNodeName = (e && e.detail && typeof e.detail.name === 'string') ? e.detail.name : '';
-      }}
-    />
-  </section>
-
-  <section class="panel">
-    <h2>Graph / nodes</h2>
-    <div class="toolbar">
-      <button on:click={refreshNodes}>Refresh graph</button>
-    </div>
-    <div class="scrollable small-text">
-      {#if nodes.length === 0}
-        <div>No nodes yet.</div>
-      {:else}
-        <table class="node-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Type</th>
-              <th>Group</th>
-              <th>Status</th>
-              <th>Params</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each nodes as n}
-              <tr
-                class:selected={selectedNodeName && n.name === selectedNodeName}
-                class="click-row"
-                on:click={() => (selectedNodeName = n.name)}
-              >
-                <td>{n.name}</td>
-                <td>{n.type}</td>
-                <td>{n.params && n.params.group ? n.params.group : ''}</td>
-                <td>
-                  <span class="node-badge {n.working ? 'node-badge-on' : 'node-badge-off'}">
-                    {n.working ? 'ON' : 'OFF'}
-                  </span>
-                </td>
-                <td class="params-json">
-                  {JSON.stringify(n.params || {})}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>Selected node</h2>
-
-    {#if !selectedNode}
-      <div class="hint">Click a node in the graph or in the nodes list to inspect it.</div>
-    {:else}
-      <div class="hint">
-        <strong>{selectedNode.name}</strong>
-        <span class="hint">({selectedNode.type})</span>
-      </div>
-
-      <details open>
-        <summary><strong>Parameters</strong> <span class="hint">(creation-time)</span></summary>
-        <div class="scrollable small-text" style="margin-top: 8px;">
-          {#if selectedNode.params && typeof selectedNode.params === 'object'}
-            {@const keys = Object.keys(selectedNode.params || {}).sort()}
-            {#if keys.length === 0}
-              <div class="hint">No params.</div>
+<div class="app-root">
+  <header class="topbar">
+    <div class="title">avplumber web-ui</div>
+    <div class="status">
+      <span class="badge {wsConnected ? 'badge-connected' : 'badge-disconnected'}">
+        WS: {wsConnected ? 'connected' : 'disconnected'}
+      </span>
+      <button on:click={() => dockHost && dockHost.resetLayout && dockHost.resetLayout()}>Reset layout</button>
+      <div class="instance-select">
+        <label>
+          Instance:
+          <select bind:value={currentInstanceId}>
+            {#if instances.length === 0}
+              <option value="">no instances</option>
             {:else}
-              <table class="kv-table">
-                <thead>
-                  <tr>
-                    <th>Key</th>
-                    <th>Value</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each keys as k (k)}
-                    <tr>
-                      <td class="kv-key">{k}</td>
-                      <td class="kv-val">
-                        <pre class="kv-pre">{objectEntryText(selectedNode.params[k])}</pre>
-                      </td>
-                      <td class="kv-act">
-                        <button class="btn-small" on:click={() => copyParam(k, selectedNode.params[k])}>
-                          {lastCopiedParamKey === k ? 'Copied' : 'Copy'}
-                        </button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-          {:else}
-            <div class="hint">No params.</div>
-          {/if}
-        </div>
-      </details>
-
-      <details open style="margin-top: 8px;">
-        <summary><strong>Objects</strong> <span class="hint">(node.object.get)</span></summary>
-        <div class="toolbar" style="margin-top: 8px;">
-          <button on:click={refreshSelectedNodeObjects} disabled={selectedNodeObjectsInFlight}>
-            {selectedNodeObjectsInFlight ? 'Refreshing…' : 'Refresh objects'}
-          </button>
-        </div>
-
-        <div class="scrollable small-text">
-          {#if !selectedNodeObjectNames || selectedNodeObjectNames.length === 0}
-            <div class="hint">
-              This node type does not expose objects via <code>node.object.get</code> (known mapping).
-            </div>
-          {:else}
-            {#each selectedNodeObjectNames as objName (objName)}
-              <div style="margin: 8px 0;">
-                <div class="hint"><code>{`node.object.get ${selectedNode.name} ${objName}`}</code></div>
-                {#if nodeObjects[selectedNode.name] && nodeObjects[selectedNode.name][objName] && nodeObjects[selectedNode.name][objName].ok}
-                  <pre class="small-text">
-{JSON.stringify(nodeObjects[selectedNode.name][objName].data, null, 2)}</pre
-                  >
-                {:else if nodeObjects[selectedNode.name] && nodeObjects[selectedNode.name][objName] && nodeObjects[selectedNode.name][objName].error}
-                  <div class="hint">Error: {nodeObjects[selectedNode.name][objName].error}</div>
-                {:else}
-                  <div class="hint">No data yet.</div>
-                {/if}
-              </div>
-            {/each}
-          {/if}
-        </div>
-      </details>
-    {/if}
-  </section>
-
-  <section class="panel">
-    <h2>Node objects (node.object.get)</h2>
-    <div class="toolbar">
-      <button on:click={refreshNodeObjects} disabled={nodeObjectsInFlight}>
-        {nodeObjectsInFlight ? 'Refreshing…' : 'Refresh node objects'}
-      </button>
-      <label class="hint" style="margin-left: auto;">
-        <input type="checkbox" bind:checked={autoRefreshNodeObjects} />
-        auto-refresh ({nodeObjectsRefreshMs}ms)
-      </label>
-    </div>
-
-    <div class="scrollable small-text">
-      {#if !nodesSupportingObjects || nodesSupportingObjects.length === 0}
-        <div class="hint">
-          No nodes in this graph currently expose objects via <code>node.object.get</code>.
-        </div>
-      {:else}
-        {#each nodesSupportingObjects as n (n.name)}
-          <details open>
-            <summary>
-              <strong>{n.name}</strong>
-              <span class="hint">({n.type})</span>
-            </summary>
-            <div class="small-text" style="margin: 8px 0 12px 0;">
-              {#each objectNamesByType[n.type] as objName (objName)}
-                <div style="margin: 8px 0;">
-                  <div class="hint"><code>{`node.object.get ${n.name} ${objName}`}</code></div>
-                  {#if nodeObjects[n.name] && nodeObjects[n.name][objName] && nodeObjects[n.name][objName].ok}
-                    <pre class="small-text">{JSON.stringify(nodeObjects[n.name][objName].data, null, 2)}</pre>
-                  {:else if nodeObjects[n.name] && nodeObjects[n.name][objName] && nodeObjects[n.name][objName].error}
-                    <div class="hint">Error: {nodeObjects[n.name][objName].error}</div>
-                  {:else}
-                    <div class="hint">No data yet.</div>
-                  {/if}
-                </div>
+              {#each instances as inst}
+                <option value={inst.id}>
+                  {inst.name || inst.id} ({inst.host}:{inst.port})
+                </option>
               {/each}
-            </div>
-          </details>
-        {/each}
-      {/if}
+            {/if}
+          </select>
+        </label>
+      </div>
     </div>
-  </section>
+  </header>
 
-  <section class="panel">
-    <h2>Queues</h2>
-    <div class="toolbar">
-      <button on:click={refreshQueues}>Refresh queues</button>
-    </div>
-    <div class="scrollable small-text">
-      {#if queues.length > 0}
-        <table class="node-table">
-          <thead>
-            <tr>
-              <th>Queue</th>
-              <th>Type</th>
-              <th>Fill</th>
-              <th>Capacity</th>
-              <th>Fill</th>
-              <th>Frames in queue<br />(min/avg/max)</th>
-              <th>PTS (s)</th>
-              <th>Timebase</th>
-              <th>pps</th>
-              <th>enq/deq/drop</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each queues as q}
-              <tr>
-                <td>{q.name}</td>
-                <td>{q.type || ''}</td>
-                <td>{q.occupied}</td>
-                <td>{q.capacity}</td>
-                <td>
-                  <div class="queue-bar">
-                    <div
-                      class="queue-bar-fill"
-                      style={`width: ${
-                        q.capacity > 0 ? Math.min(100, Math.max(0, (q.occupied / q.capacity) * 100)) : 0
-                      }%;`}
-                    />
-                    <span class="queue-bar-text">
-                      {#if q.capacity > 0}
-                        {Math.round((q.occupied / q.capacity) * 100)}%
-                      {:else}
-                        -
-                      {/if}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  {#if q.frames_in_queue}
-                    {q.frames_in_queue.min}/
-                    {typeof q.frames_in_queue.avg === 'number' ? q.frames_in_queue.avg.toFixed(2) : q.frames_in_queue.avg}/{q.frames_in_queue.max}
-                  {:else}
-                    -
-                  {/if}
-                </td>
-                <td>{q.last_ts_seconds}</td>
-                <td>{q.timebase_num}/{q.timebase_den}</td>
-                <td>{typeof q.pps === 'number' ? q.pps.toFixed(1) : ''}</td>
-                <td>
-                  {q.enqueued_total ?? ''}/{q.dequeued_total ?? ''}/{q.dropped_total ?? ''}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {:else}
-        <pre class="small-text">{queuesText}</pre>
-      {/if}
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>Statistics (stats.subscribe)</h2>
-    {#if !hasReceivedStats}
-      <p class="hint">
-        Configure <code>stats.subscribe</code> in avplumber with
-        <code>"url":"http://WEBUI_HOST:WEBUI_PORT/api/stats?instance=INSTANCE_ID"</code>.
-      </p>
-    {/if}
-    <pre class="scrollable small-text">{currentStatsPrettyText}</pre>
-  </section>
-
-  <section class="panel">
-    <h2>Logs</h2>
-    {#if !hasReceivedLog}
-      <p class="hint">
-        If avplumber is started with <code>-l logfile</code> and web-ui has
-        <code>AVPLUMBER_LOGFILE</code> set, new lines will appear here.
-      </p>
-    {/if}
-    <pre class="scrollable small-text">
-{#each logs as line}
-{line}
-{/each}</pre>
-  </section>
-
-  <section class="panel panel-wide">
-    <h2>Raw console</h2>
-    <div class="console-input">
-      <input
-        type="text"
-        bind:value={consoleInput}
-        placeholder="Command, e.g. nodes.json"
-        on:keydown={handleConsoleKeydown}
-      />
-      <button on:click={submitConsole}>Send</button>
-    </div>
-    <pre class="scrollable small-text">
-{#each consoleLines as line}
-{line}
-{/each}</pre>
-  </section>
-</main>
+  <DockHost
+    bind:this={dockHost}
+    registry={panelRegistry}
+    ctx={dockCtx}
+    layoutConfig={defaultDockLayoutConfig}
+    storageKey="avplumber.webui.dock.layout.v1"
+  />
+</div>
 
 
