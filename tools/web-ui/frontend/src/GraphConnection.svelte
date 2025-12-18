@@ -26,11 +26,18 @@
       : null;
   $: pct = q && q.capacity > 0 ? Math.max(0, Math.min(1, q.occupied / q.capacity)) : null;
   $: pps = q && typeof q.pps === 'number' && Number.isFinite(q.pps) ? Math.max(0, q.pps) : 0;
+  $: fiq = q && q.frames_in_queue && typeof q.frames_in_queue === 'object' ? q.frames_in_queue : null;
+  $: fiqAvg =
+    fiq && typeof fiq.avg === 'number' && Number.isFinite(fiq.avg) ? fiq.avg.toFixed(2) : fiq && fiq.avg != null ? String(fiq.avg) : '';
+  $: fiqLine =
+    fiq && fiq.cur != null && fiq.min != null && fiq.max != null
+      ? `frames_in_queue: cur=${fiq.cur}, min=${fiq.min}, avg=${fiqAvg}, max=${fiq.max}`
+      : '';
   $: label =
     queueName && q && q.capacity > 0
       ? `${queueName}: ${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)${
           pps > 0 ? `, ${pps.toFixed(1)} pps` : ''
-        }`
+        }${fiqLine ? `\n${fiqLine}` : ''}`
       : queueName
         ? `${queueName} (no stats; queues[0]=${JSON.stringify(firstKey)})`
         : '';
@@ -39,6 +46,29 @@
   // Tuned so ~60 pps => ~1s period, clamped for usability.
   $: flowDuration = flowOn ? Math.max(0.25, Math.min(6, 60 / Math.max(pps, 0.1))) : 6;
   $: flowOpacity = flowOn ? Math.max(0.45, Math.min(0.95, 0.45 + pps / 200)) : 0;
+  $: hoverText =
+    pct !== null
+      ? `${fiq && fiq.min != null && fiq.max != null ? `min=${fiq.min} avg=${fiqAvg} max=${fiq.max}` : ''}${
+          pps > 0 ? ` · ${pps.toFixed(1)} pps` : ''
+        }`
+      : '';
+
+  // Hover badge layout (bar + one text line)
+  const hoverBadgeW = 240;
+  const hoverBadgeH = 40;
+  const barW = 200;
+  const barH = 8;
+  $: barX = -barW / 2;
+  $: barY = -14;
+  $: barFillW = pct !== null ? Math.round(barW * pct) : 0;
+  $: barFillColor = pct !== null ? colorFor(pct) : '#60a5fa';
+  $: barText =
+    q && q.capacity > 0
+      ? `${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)`
+      : q
+        ? `${q.occupied ?? ''}/?`
+        : '';
+  $: hoverBadgeY = -hoverBadgeH / 2;
 
   const HEX2 = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
   const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
@@ -93,6 +123,8 @@
 <svg data-testid="connection">
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-to-interactive-role -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <path
     d={path}
     stroke={stroke}
@@ -125,10 +157,15 @@
 
   {#if hovered && pct !== null}
     <g transform={`translate(${mid.x}, ${mid.y})`}>
-      <rect x="-54" y="-10" width="108" height="20" rx="6" ry="6" class="badge-bg" />
-      <text text-anchor="middle" dominant-baseline="middle" class="badge-text">
-        {Math.round(pct * 100)}% {#if pps > 0}· {pps.toFixed(1)} pps{/if}
-      </text>
+      <rect x={-hoverBadgeW / 2} y={hoverBadgeY} width={hoverBadgeW} height={hoverBadgeH} rx="7" ry="7" class="badge-bg" />
+
+      <!-- current fill as bar (first line) -->
+      <rect x={barX} y={barY} width={barW} height={barH} rx="4" ry="4" class="badge-bar-bg" />
+      <rect x={barX} y={barY} width={barFillW} height={barH} rx="4" ry="4" style={`fill: ${barFillColor};`} />
+      <text text-anchor="middle" y={barY + barH + 10} class="badge-bar-text">{barText}</text>
+
+      <!-- stats text (second line) -->
+      <text text-anchor="middle" y="14" class="badge-text">{hoverText}</text>
     </g>
   {/if}
 </svg>
@@ -167,7 +204,21 @@
   }
 
   .badge-text {
-    font-size: 11px;
+    font-size: 14px;
+    fill: #e5e7eb;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+      monospace;
+    text-shadow: 0 0 2px #000;
+  }
+
+  .badge-bar-bg {
+    fill: rgba(229, 231, 235, 0.14);
+    stroke: rgba(229, 231, 235, 0.18);
+    stroke-width: 1px;
+  }
+
+  .badge-bar-text {
+    font-size: 12px;
     fill: #e5e7eb;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
       monospace;
