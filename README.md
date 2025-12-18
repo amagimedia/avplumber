@@ -742,6 +742,24 @@ Duplicate and drop frames to achieve requested FPS
 
 -   `fps` (string of rational) - target FPS as a string, e.g. `25` or `30000/1001`
 
+### `smooth_timestamps`
+
+Overwrite timestamps with a smoothed monotonic timeline (previous + duration), while keeping A/V sync by resyncing to input timestamps when averaged drift grows too large.
+
+This node is non-blocking.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+For video:
+- `duration` (string of rational, seconds) - frame duration, typically `1/FPS` (e.g. `1/25`, `1001/30000`), **or**
+- `fps` (string of rational) - frames per second (alternative to `duration`)
+
+For both video and audio:
+- `resync_threshold` (float seconds, default `0.02`) - resync output timeline to input PTS when averaged drift exceeds this
+- `drift_window` (int, default `300`) - drift averaging window size (samples); larger = smoother, smaller = more reactive
+- `min_samples_before_resync` (int, default `150`) - ignore drift until this many frames/samples have been observed
+- `discontinuity_threshold` (float seconds, default `2.0`) - hard reset (resync) when input PTS jump exceeds this
+
 ### `assume_video_format` / `assume_audio_format`
 
 Set initial metadata to allow nodes that rely on them to start
