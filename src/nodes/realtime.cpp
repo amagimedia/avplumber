@@ -37,7 +37,6 @@ protected:
     std::atomic_int64_t eof_frame_wallclock_ = -1;
     std::atomic_int64_t eof_frame_timestamp_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
-    std::atomic_int64_t last_frame_synclock_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -303,6 +302,23 @@ public:
             last_frame_timestamp_ = std::atoll(frame_ts->value);
         }
     }
+    void setLastFrame(EglImageFrame* frm) {
+        if (frm->hasMetadata("frame_no")) {
+            last_frame_number_ = std::atoll(frm->getMetadata("frame_no").c_str());
+        }
+        if (frm->hasMetadata("frame_ts")) {
+            last_frame_timestamp_ = std::atoll(frm->getMetadata("frame_ts").c_str());
+            if (is_eof_ && (eof_frame_wallclock_ != last_frame_wallclock_)) {
+                eof_frame_wallclock_ = -1;
+                eof_frame_timestamp_ = -1;
+                is_eof_ = false;
+                logstream << "no EOF anymore";
+            }
+        }
+        if (frm->hasMetadata("wallclock")) {
+            last_frame_wallclock_ = std::atoll(frm->getMetadata("wallclock").c_str());
+        }
+    }
     template<typename T2> void setLastFrame(T2) {
     }
     virtual int64_t getCurrentFrameNumber() override {
@@ -313,9 +329,6 @@ public:
     }
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
-    }
-    virtual int64_t getCurrentFrameSyncclock() override {
-        return last_frame_synclock_;
     }
     bool isEof() override {
         return is_eof_;
