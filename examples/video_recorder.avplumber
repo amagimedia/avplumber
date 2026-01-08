@@ -6,7 +6,7 @@
 #queue.plan_capacity v_outenc 200
 #queue.plan_capacity a_outenc 200
 
-node.add { "type": "input", "url": "udp://localhost:5000", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0 }
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/testsrc2-tcr-12Mbps-1080p-5000", "dst": "in10", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1, "preseek": 0 }
 node.add { "type": "demux", "src": "in10", "routing": { "v:0": "v_in", "?a:0": "a_in" }, "group": "in", "auto_restart": "group" }
 node.add { "type": "dec_video","auto_restart":"group","name":"Video_Decode","group":"in","src":"v_in","dst":"Video_Decode_out"}
 node.add { "type": "dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"a_in","dst":"Audio_Decode_out", "optional": true}

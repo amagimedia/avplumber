@@ -205,6 +205,21 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && parsed.pathname === '/api/instance-shared-objects') {
+    const instanceId = parsed.query && parsed.query.instance ? String(parsed.query.instance) : 'default';
+    const inst = instances.get(instanceId);
+    if (!inst) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'Instance not found' }));
+      return;
+    }
+    // Query sync groups and correction groups via WebSocket command
+    // This will be handled by the WebSocket connection
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ message: 'Use WebSocket /ws endpoint with commands: sync_groups.json or correction_groups.json' }));
+    return;
+  }
+
   serveStatic(req, res);
 });
 

@@ -9,6 +9,7 @@
   import StatsPanel from './panels/StatsPanel.svelte';
   import LogsPanel from './panels/LogsPanel.svelte';
   import ConsolePanel from './panels/ConsolePanel.svelte';
+  import InstanceSharedObjectsPanel from './panels/InstanceSharedObjectsPanel.svelte';
 
   let ws;
   let wsConnected = false;
@@ -27,6 +28,9 @@
   let consoleLines = [];
   let autoRefreshQueues = true;
   let autoRefreshMs = 1000;
+  let autoRefreshISOs = true;
+  let syncGroups = [];
+  let correctionGroups = [];
 
   /** @type {any} */
   let dockHost;
@@ -202,6 +206,20 @@
             }
           } else if (id === 'queues.stats') {
             queuesText = body || '';
+          } else if (id === 'sync_groups.json') {
+            try {
+              const arr = JSON.parse(body || '[]');
+              syncGroups = Array.isArray(arr) ? arr : [];
+            } catch (e) {
+              appendConsole(`sync_groups.json parse error: ${e}`);
+            }
+          } else if (id === 'correction_groups.json') {
+            try {
+              const arr = JSON.parse(body || '[]');
+              correctionGroups = Array.isArray(arr) ? arr : [];
+            } catch (e) {
+              appendConsole(`correction_groups.json parse error: ${e}`);
+            }
           }
         }
       } else if (msg.type === 'stats') {
@@ -246,6 +264,12 @@
     sendCommand('queues.json', 'queues.json').catch(() => {
       sendCommand('queues.stats', 'queues.stats').catch(() => {});
     });
+  }
+  function refreshSyncGroups() {
+    sendCommand('sync_groups.json', 'sync_groups.json').catch(() => {});
+  }
+  function refreshCorrectionGroups() {
+    sendCommand('correction_groups.json', 'correction_groups.json').catch(() => {});
   }
   function resetQueueStats() {
     // Reset queue occupancy stats in avplumber so we don't miss peaks between UI polls.
@@ -382,6 +406,8 @@
     setTimeout(() => {
       refreshNodes();
       refreshQueues();
+      refreshSyncGroups();
+      refreshCorrectionGroups();
     }, 1000);
 
     const t = setInterval(() => {
@@ -403,10 +429,19 @@
       refreshNodes();
     }, 10000);
 
+    const tISOs = setInterval(() => {
+      if (!autoRefreshISOs) return;
+      if (!wsConnected) return;
+      if (!currentInstanceId) return;
+      refreshSyncGroups();
+      refreshCorrectionGroups();
+    }, autoRefreshMs);
+
     return () => {
       clearInterval(t);
       clearInterval(tObjects);
       clearInterval(tNodes);
+      clearInterval(tISOs);
     };
   });
 
@@ -419,6 +454,8 @@
         refreshQueues();
         clearNodeObjects();
         refreshNodeObjects();
+        refreshSyncGroups();
+        refreshCorrectionGroups();
       }, 50);
     }
   }
@@ -439,7 +476,8 @@
     queues: QueuesPanel,
     stats: StatsPanel,
     logs: LogsPanel,
-    console: ConsolePanel
+    console: ConsolePanel,
+    instanceSharedObjects: InstanceSharedObjectsPanel
   };
 
   const defaultDockLayoutConfig = {
@@ -480,7 +518,8 @@
               content: [
                 { type: 'component', componentType: 'selected', title: 'Selected node', isClosable: false },
                 { type: 'component', componentType: 'nodeObjects', title: 'Node objects', isClosable: false },
-                { type: 'component', componentType: 'stats', title: 'Statistics', isClosable: false }
+                { type: 'component', componentType: 'stats', title: 'Statistics', isClosable: false },
+                { type: 'component', componentType: 'instanceSharedObjects', title: 'Instance-Shared Objects', isClosable: false }
               ]
             }
           ]
@@ -543,7 +582,14 @@
     consoleInput,
     setConsoleInput,
     handleConsoleKeydown,
-    submitConsole
+    submitConsole,
+
+    syncGroups,
+    correctionGroups,
+    refreshSyncGroups,
+    refreshCorrectionGroups,
+    autoRefreshISOs,
+    setAutoRefreshISOs: (v) => { autoRefreshISOs = !!v; }
   };
 </script>
 
