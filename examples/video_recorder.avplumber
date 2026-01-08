@@ -12,8 +12,8 @@ node.add { "type": "dec_video","auto_restart":"group","name":"Video_Decode","gro
 node.add { "type": "dec_audio","auto_restart":"group","name":"Audio_Decode","group":"in","src":"a_in","dst":"Audio_Decode_out", "optional": true}
 
 node.add { "type": "force_fps", "fps": "60", "group":"g1", "src": "Video_Decode_out", "dst":"forcedfps"}
-node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "forcedfps", "dst": "v_rt", "group": "g1", "name": "rtsync_video", "set_pts": false }
-node.add { "type": "realtime", "team": "a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "Audio_Decode_out", "dst": "a_rt", "group": "g1", "name": "rtsync_audio", "set_pts": false }
+node.add { "type": "realtime", "team": "@a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "forcedfps", "dst": "v_rt", "group": "g1", "name": "rtsync_video", "set_pts": false }
+node.add { "type": "realtime", "team": "@a", "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "src": "Audio_Decode_out", "dst": "a_rt", "group": "g1", "name": "rtsync_audio", "set_pts": false }
 node.add { "type": "sentinel_video", "backup_image": "https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg", "src": "v_rt", "dst": "v_ts", "group": "g1", "history_file_text": "/home/video/output.ts.history.txt", "history_file": "/home/video/output.ts+history", "history_report_interval": 1, "track_wallclock": true, "start_ts": 0}
 node.add { "type": "assume_audio_format", "auto_restart": "panic", "group": "g1", "src": "a_rt", "dst": "a_sentinel_in"}
 node.add { "type": "sentinel_audio", "src": "a_sentinel_in", "dst": "a_rt_out", "group": "g1", "start_ts": 0}

@@ -71,6 +71,19 @@ body {
   min-height: 0;
 }
 
+/* --- Golden Layout safety: allow dragging, but prevent accidental closing --- */
+/* Hide close buttons (tab close + header close) */
+.lm_header .lm_controls .lm_close,
+.lm_header .lm_tab .lm_close_tab {
+  display: none !important;
+}
+
+/* Also ensure the close button can't be clicked if themes change markup */
+.lm_header .lm_controls .lm_close,
+.lm_header .lm_tab .lm_close_tab {
+  pointer-events: none !important;
+}
+
 .gl-container {
   background: #020617;
 }
