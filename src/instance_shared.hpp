@@ -4,6 +4,7 @@
 #include <memory>
 #include <unordered_map>
 #include <list>
+#include <vector>
 #include <string>
 #include <functional>
 
@@ -114,6 +115,28 @@ public:
         } else {
             pref = std::make_shared<Object>(std::forward<Args>(args)...);
         }
+    }
+    // Enumerate all instance-shared objects for a given instance
+    static std::vector<std::pair<std::string, std::shared_ptr<Object>>> enumerate(const InstanceData &instance) {
+        std::unique_lock<decltype(busy_)> lock(busy_);
+        std::vector<std::pair<std::string, std::shared_ptr<Object>>> result;
+        const InstanceData* instance_ptr = &instance;
+        if (objects_.count(instance_ptr)) {
+            for (const auto &entry : objects_[instance_ptr]) {
+                if (entry.second) {  // Only include non-null objects
+                    result.push_back({entry.first, entry.second});
+                }
+            }
+        }
+        // Also enumerate global objects (instance_ptr == nullptr)
+        if (objects_.count(nullptr)) {
+            for (const auto &entry : objects_[nullptr]) {
+                if (entry.second) {
+                    result.push_back({"@" + entry.first, entry.second});
+                }
+            }
+        }
+        return result;
     }
 };
 
