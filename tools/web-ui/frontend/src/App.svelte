@@ -481,59 +481,223 @@
   };
 
   const defaultDockLayoutConfig = {
+    root: {
+      type: "column",
+      content: [
+        {
+          type: "row",
+          content: [
+            {
+              type: "stack",
+              content: [
+                {
+                  type: "component",
+                  size: "56%",
+                  id: "",
+                  maximised: false,
+                  isClosable: true,
+                  reorderEnabled: true,
+                  title: "Graph preview",
+                  componentType: "graph",
+                  componentState: {}
+                }
+              ],
+              size: "71.71717171717171%",
+              id: "",
+              maximised: false,
+              isClosable: true,
+              activeItemIndex: 0
+            },
+            {
+              type: "column",
+              content: [
+                {
+                  type: "stack",
+                  content: [
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Selected node",
+                      componentType: "selected",
+                      componentState: {}
+                    },
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Node objects",
+                      componentType: "nodeObjects",
+                      componentState: {}
+                    },
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Statistics",
+                      componentType: "stats",
+                      componentState: {}
+                    },
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Instance-Shared Objects",
+                      componentType: "instanceSharedObjects",
+                      componentState: {}
+                    }
+                  ],
+                  size: "50%",
+                  id: "",
+                  maximised: false,
+                  isClosable: true,
+                  activeItemIndex: 0,
+                  header: {
+                    popout: false,
+                    close: "Close",
+                    maximise: "Maximise",
+                    minimise: false,
+                    tabDropdown: "Tabs"
+                  }
+                },
+                {
+                  type: "stack",
+                  content: [
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Graph / nodes",
+                      componentType: "nodes",
+                      componentState: {}
+                    },
+                    {
+                      type: "component",
+                      size: "1fr",
+                      id: "",
+                      maximised: false,
+                      isClosable: true,
+                      reorderEnabled: true,
+                      title: "Queues",
+                      componentType: "queues",
+                      componentState: {}
+                    }
+                  ],
+                  size: "50%",
+                  id: "",
+                  maximised: false,
+                  isClosable: true,
+                  activeItemIndex: 1,
+                  header: {
+                    popout: false,
+                    close: "Close",
+                    maximise: "Maximise",
+                    minimise: false,
+                    tabDropdown: "Tabs"
+                  }
+                }
+              ],
+              size: "28.28282828282828%",
+              id: "",
+              isClosable: true
+            }
+          ],
+          size: "72%",
+          id: "",
+          isClosable: true
+        },
+        {
+          type: "stack",
+          content: [
+            {
+              type: "component",
+              size: "1fr",
+              id: "",
+              maximised: false,
+              isClosable: true,
+              reorderEnabled: true,
+              title: "Logs",
+              componentType: "logs",
+              componentState: {
+                wrap: false,
+                autoScroll: true
+              }
+            },
+            {
+              type: "component",
+              size: "1fr",
+              id: "",
+              maximised: false,
+              isClosable: true,
+              reorderEnabled: true,
+              title: "Raw console",
+              componentType: "console",
+              componentState: {}
+            }
+          ],
+          size: "28%",
+          id: "",
+          maximised: false,
+          isClosable: true,
+          activeItemIndex: 0,
+          header: {
+            popout: false,
+            close: "Close",
+            maximise: "Maximise",
+            minimise: false,
+            tabDropdown: "Tabs"
+          }
+        }
+      ],
+      size: "1fr",
+      id: "",
+      isClosable: true
+    },
+    openPopouts: [],
     settings: {
       constrainDragToContainer: true,
       reorderEnabled: true,
-      // popouts are useful, but can be confusing in debug UIs; keep disabled by default
-      showPopoutIcon: false
+      popoutWholeStack: false,
+      blockedPopoutsThrowError: true,
+      closePopoutsOnUnload: true,
+      responsiveMode: "none",
+      tabOverlapAllowance: 0,
+      reorderOnTabMenuClick: true,
+      tabControlOffset: 10,
+      popInOnClose: false
+    },
+    dimensions: {
+      borderWidth: 5,
+      borderGrabWidth: 5,
+      defaultMinItemHeight: "0px",
+      defaultMinItemWidth: "10px",
+      headerHeight: 20,
+      dragProxyWidth: 300,
+      dragProxyHeight: 200
     },
     header: {
+      show: "top",
       popout: false,
-      maximise: 'Maximise',
-      close: false,
-      minimise: 'Minimise',
-      tabDropdown: 'Tabs'
-    },
-    root: {
-      type: 'column',
-      content: [
-        {
-          type: 'row',
-          size: '72%',
-          content: [
-            {
-              type: 'stack',
-              size: '22%',
-              header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
-              content: [
-                { type: 'component', componentType: 'nodes', title: 'Graph / nodes', isClosable: false },
-                { type: 'component', componentType: 'queues', title: 'Queues', isClosable: false }
-              ]
-            },
-            { type: 'component', componentType: 'graph', title: 'Graph preview', isClosable: false, size: '56%' },
-            {
-              type: 'stack',
-              size: '22%',
-              header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
-              content: [
-                { type: 'component', componentType: 'selected', title: 'Selected node', isClosable: false },
-                { type: 'component', componentType: 'nodeObjects', title: 'Node objects', isClosable: false },
-                { type: 'component', componentType: 'stats', title: 'Statistics', isClosable: false },
-                { type: 'component', componentType: 'instanceSharedObjects', title: 'Instance-Shared Objects', isClosable: false }
-              ]
-            }
-          ]
-        },
-        {
-          type: 'stack',
-          size: '28%',
-          header: { maximise: 'Maximise', popout: false, close: false, minimise: false, tabDropdown: 'Tabs' },
-          content: [
-            { type: 'component', componentType: 'logs', title: 'Logs', isClosable: false },
-            { type: 'component', componentType: 'console', title: 'Raw console', isClosable: false }
-          ]
-        }
-      ]
+      dock: "dock",
+      close: "Close",
+      maximise: "Maximise",
+      minimise: "Minimise",
+      tabDropdown: "Tabs"
     }
   };
 
