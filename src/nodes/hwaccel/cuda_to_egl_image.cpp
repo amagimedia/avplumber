@@ -46,7 +46,10 @@ protected:
 	// External shared pool
 	std::shared_ptr<CudaEglImagePool> pool_;
 	std::string pool_id_;
-	int pool_size_ = 3; // default; can be overridden by params
+	int pool_size_ = 60; // default; can be overridden by params
+	int pool_max_size_ = 0; // 0 => disabled; if >0, pool may grow up to this size on demand
+	int pool_grow_step_ = 8; // when growing, add this many entries (or less to reach max)
+	bool enable_sync_ = false; // whether to call cuCtxSynchronize after kernel launch
 
 	// CUDA
 	CUcontext cu_ctx_ = nullptr; // adopted from incoming frame
@@ -215,8 +218,6 @@ protected:
 			logstream << "cuda_to_egl_image: ensure_kernel_loaded failed";
 			cuSurfObjectDestroy(surf);
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-			CUcontext dummy;
-			CHECK_CU(cuCtxPopCurrent(&dummy));
 			return false;
 		}
 		void* args[] = {
@@ -257,7 +258,13 @@ protected:
 			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
 			return false;
 		}
-		//CHECK_CU(cuCtxSynchronize());
+		// Ensure all writes to the surface are visible before releasing the resource
+		if (enable_sync_ && CHECK_CU(cuCtxSynchronize())) {
+			logstream << "cuda_to_egl_image: cuCtxSynchronize failed after cuLaunchKernel";
+			cuSurfObjectDestroy(surf);
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			return false;
+		}
 		cuSurfObjectDestroy(surf);
 		CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
 		return true;
@@ -320,6 +327,9 @@ public:
 			return;
 		}
 		auto opt_idx = pool_->acquire();
+		if (!opt_idx && pool_max_size_ > 0) {
+			opt_idx = pool_->acquireOrGrow(W, H, pool_max_size_, pool_grow_step_, cu_ctx_);
+		}
 		if (!opt_idx) {
 			// No available EGL image in the pool yet; keep the input frame and retry shortly
 			wallclock.sleepms(1);
@@ -354,8 +364,8 @@ public:
 		this->sink_->put(out, false);
 		this->source_->pop();
 	}
-	CudaToEglImage(std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SourceType> &&source, std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SinkType> &&sink, std::shared_ptr<CudaEglImagePool> pool, std::string pool_id, int pool_size)
-		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size)
+	CudaToEglImage(std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SourceType> &&source, std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SinkType> &&sink, std::shared_ptr<CudaEglImagePool> pool, std::string pool_id, int pool_size, bool enable_sync)
+		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size), enable_sync_(enable_sync)
 	{
 	}
 	~CudaToEglImage() override = default;
@@ -370,8 +380,14 @@ public:
 		std::shared_ptr<Edge<EglImageFrame>> dst = edges.find<EglImageFrame>(params["dst"]);
 		std::string pool_id = params.count("pool_id") ? (std::string)params["pool_id"] : "default";
 		int pool_size = params.count("pool_size") ? (int)params["pool_size"] : 8;
+		int pool_max_size = params.count("pool_max_size") ? (int)params["pool_max_size"] : pool_size;
+		int pool_grow_step = params.count("pool_grow_step") ? (int)params["pool_grow_step"] : 8;
+		bool enable_sync = params.count("sync") ? (bool)params["sync"] : false;
 		auto pool = InstanceSharedObjects<CudaEglImagePool>::get(nci.instance, pool_id);
-		return std::make_shared<CudaToEglImage>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<EglImageFrame>>(dst), pool, pool_id, pool_size);
+		auto node = std::make_shared<CudaToEglImage>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<EglImageFrame>>(dst), pool, pool_id, pool_size, enable_sync);
+		node->pool_max_size_ = pool_max_size;
+		node->pool_grow_step_ = pool_grow_step;
+		return node;
 	}
 };
 
