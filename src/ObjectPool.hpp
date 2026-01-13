@@ -16,7 +16,7 @@ class ObjectPool {
 private:
 	std::vector<Entry> entries_;
 	std::queue<size_t> free_indices_;
-	std::mutex mtx_;
+	mutable std::mutex mtx_;
 public:
 	using CreateFn = std::function<bool(Entry&)>;
 	using DestroyFn = std::function<void(Entry&)>;
@@ -42,7 +42,29 @@ public:
 		}
 		return true;
 	}
+	// Grows pool by appending entries (does NOT destroy or recreate existing entries).
+	// New entries are created with create(); on failure, newly created entries are destroyed and the pool size is rolled back.
+	bool grow(size_t add, CreateFn create, DestroyFn destroy) {
+		if (add == 0) return true;
+		std::unique_lock<std::mutex> lock(mtx_);
+		const size_t old_size = entries_.size();
+		entries_.resize(old_size + add);
+		for (size_t i = 0; i < add; ++i) {
+			const size_t idx = old_size + i;
+			if (!create(entries_[idx])) {
+				// rollback newly created entries
+				for (size_t j = old_size; j < idx; ++j) {
+					destroy(entries_[j]);
+				}
+				entries_.resize(old_size);
+				return false;
+			}
+			free_indices_.push(idx);
+		}
+		return true;
+	}
 	size_t size() const {
+		std::unique_lock<std::mutex> lock(mtx_);
 		return entries_.size();
 	}
 	std::optional<size_t> acquire() {
