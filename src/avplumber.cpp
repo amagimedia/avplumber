@@ -586,6 +586,14 @@ public:
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
             team->reset();
         };
+        commands_["realtime.team.set_delay"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            float delay_sec;
+            ss >> team_name >> delay_sec;
+            std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
+            team->setUserDelay(delay_sec);
+        };
         commands_["speed.set"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
             std::string team_name;
