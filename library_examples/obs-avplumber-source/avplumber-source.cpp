@@ -26,6 +26,8 @@ class AVPlumberSource {
     std::string script_;
     uint16_t control_port_;
     std::string log_path_;
+    std::string webui_api_url_;
+    std::string instance_name_;
 
     State current_state_ {State::Stopped};
     std::atomic<State> desired_state_ {State::Stopped};
@@ -51,6 +53,9 @@ class AVPlumberSource {
         }
         avplumber_->executeCommandsFromString(script_);
         avplumber_->enableControlServer(control_port_);
+        if (!webui_api_url_.empty()) {
+            avplumber_->registerWithWebUI(webui_api_url_, instance_name_, log_path_);
+        }
         avplumber_->setReady();
     }
     void mgmtThreadFunction() {
@@ -92,6 +97,8 @@ public:
         script_ = obs_data_get_string(settings, "script");
         control_port_ = obs_data_get_int(settings, "control_port");
         log_path_ = obs_data_get_string(settings, "log_path");
+        webui_api_url_ = obs_data_get_string(settings, "webui_api_url");
+        instance_name_ = obs_data_get_string(settings, "instance_name");
         if (current_state_==State::Started || current_state_==State::Restart) {
             goToState(State::Restart);
         }
@@ -157,6 +164,8 @@ static obs_properties_t *avplumber_source_get_properties(void *data) {
     obs_properties_add_text(props, "script", "Script", OBS_TEXT_MULTILINE);
     obs_properties_add_int(props, "control_port", "Control interface TCP port (0 to disable)", 0, 65535, 1);
     obs_properties_add_text(props, "log_path", "Write log to file (empty = use stderr)", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(props, "webui_api_url", "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:8080)", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(props, "instance_name", "Instance name for web UI registration", OBS_TEXT_DEFAULT);
 
     UNUSED_PARAMETER(data);
     return props;
@@ -166,6 +175,8 @@ void avplumber_source_get_defaults(obs_data_t *settings) {
     obs_data_set_default_string(settings, "script", "");
     obs_data_set_default_int(settings, "control_port", 0);
     obs_data_set_default_string(settings, "log_path", "");
+    obs_data_set_default_string(settings, "webui_api_url", "");
+    obs_data_set_default_string(settings, "instance_name", "");
 }
 
 static const char *avplumber_source_getname (void *unused) {
