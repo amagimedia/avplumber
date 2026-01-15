@@ -24,6 +24,8 @@
 #include "SpeedControlTeam.hpp"
 #include "PauseControlTeam.hpp"
 #include "InputSeekTeam.hpp"
+#include "PTSCorrectorCommon.hpp"
+#include "rest_client.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -436,6 +438,65 @@ public:
         commands_["queues.stats"] = [this](ClientStream &cs, std::string&) {
             manager_->edges()->printEdgesStats(cs);
         };
+        // Machine-readable JSON statistics for all queues.
+        // Returns an array of objects:
+        // [
+        //   { "name": "videoin", "capacity": 256, "occupied": 12, "free": 244, "last_ts_seconds": 0.123 },
+        //   ...
+        // ]
+        commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
+            json j = manager_->edges()->edgesStatsJson();
+            cs << j << "\n";
+        };
+        // Reset per-queue occupancy statistics used by queues.json (frames_in_queue.* fields).
+        commands_["queues.stats.reset"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            manager_->edges()->resetEdgesOccupancyStats();
+        };
+        // Get statistics for all sync groups (RealTimeTeam instance-shared objects)
+        commands_["sync_groups.json"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            json jgroups = json::array();
+            auto teams = InstanceSharedObjects<RealTimeTeam>::enumerate(manager_->instanceData());
+            for (const auto &entry : teams) {
+                const std::string &name = entry.first;
+                std::shared_ptr<RealTimeTeam> team = entry.second;
+                if (!team) continue;
+                json jgroup;
+                jgroup["name"] = name;
+                AVTS offset = team->getOffset();
+                jgroup["offset"] = (offset == AV_NOPTS_VALUE) ? json(nullptr) : json(offset);
+                AVRational tb = team->getTimebase();
+                jgroup["timebase_num"] = tb.num;
+                jgroup["timebase_den"] = tb.den;
+                jgroup["flushing"] = team->isFlushing();
+                jgroup["first"] = team->isFirst();
+                jgroup["seek_targets_count"] = team->getSeekTargetsCount();
+                auto linked_teams = team->getLinkedTeams();
+                json jlinked = json::array();
+                for (const auto &linked : linked_teams) {
+                    // We can't easily get the name of linked teams, so we'll just count them
+                }
+                jgroup["linked_teams_count"] = linked_teams.size();
+                jgroups.push_back(std::move(jgroup));
+            }
+            cs << jgroups << "\n";
+        };
+        // Get statistics for all sentinel correction groups (PTSCorrectorCommon instance-shared objects)
+        commands_["correction_groups.json"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            json jgroups = json::array();
+            auto correctors = InstanceSharedObjects<PTSCorrectorCommon>::enumerate(manager_->instanceData());
+            for (const auto &entry : correctors) {
+                const std::string &name = entry.first;
+                std::shared_ptr<PTSCorrectorCommon> corr = entry.second;
+                if (!corr) continue;
+                json jgroup = corr->getStats();
+                jgroup["name"] = name;
+                jgroups.push_back(std::move(jgroup));
+            }
+            cs << jgroups << "\n";
+        };
         commands_["group.restart"] = [this](ClientStream &cs, std::string &arg) {
             manager_->group(arg)->restartNodes();
         };
@@ -452,6 +513,26 @@ public:
         commands_["stats.subscribe"] = [this](ClientStream &cs, std::string &arg) {
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
+        };
+        // Dump current graph (all nodes with their parameters) as JSON array.
+        // Each entry has: name, type, working (bool), params (full JSON object).
+        commands_["nodes.json"] = [this](ClientStream &cs, std::string &arg) {
+            (void)arg;
+            json jnodes = json::array();
+            for (auto &entry: manager_->allNodes()) {
+                const std::string &name = entry.first;
+                std::shared_ptr<NodeWrapper> node = entry.second;
+                if (!node) {
+                    continue;
+                }
+                json jn;
+                jn["name"] = name;
+                jn["type"] = node->type();
+                jn["working"] = node->isWorking();
+                jn["params"] = node->parameters();
+                jnodes.push_back(std::move(jn));
+            }
+            cs << jnodes << "\n";
         };
         auto seek = [this](std::string team_node_name, StreamTarget target) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_node_name);
@@ -757,6 +838,7 @@ AVPlumber::AVPlumber() {
     av::set_logging_level(AV_LOG_VERBOSE);
     std::shared_ptr<NodeManager> nm = std::make_shared<NodeManager>();
     impl_ = new ControlImpl(nm);
+    control_port_ = 0;
 }
 
 AVPlumber::~AVPlumber() {
@@ -934,10 +1016,39 @@ bool AVPlumber::obs_is_eof() {
 #endif
 
 void AVPlumber::enableControlServer(const uint16_t tcp_port) {
+    control_port_ = tcp_port;
     if (tcp_port) {
         logstream << "Enabling control server on TCP port " << tcp_port;
         impl_->createServer<TcpControlServer>(*impl_, tcp_port);
     } // if port==0, then NOOP
+}
+
+void AVPlumber::registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name, const std::string& log_file) {
+    if (webui_api_url.empty() || control_port_ == 0) {
+        return; // No web UI URL provided or control server not enabled
+    }
+    
+    try {
+        // Use RESTEndpoint for synchronous registration (non-blocking sendInternal handles rate limiting)
+        RESTEndpoint endpoint(webui_api_url);
+        
+        // Build the instance registration JSON
+        json instance_data;
+        instance_data["port"] = control_port_;
+        instance_data["host"] = "127.0.0.1"; // Default to localhost
+        if (!instance_name.empty()) {
+            instance_data["name"] = instance_name;
+        }
+        if (!log_file.empty()) {
+            instance_data["logFile"] = log_file;
+        }
+        
+        std::string json_str = instance_data.dump();
+        endpoint.send("/api/instances", json_str);
+        logstream << "Registered with web UI at " << webui_api_url << "/api/instances";
+    } catch (std::exception &e) {
+        logstream << "Failed to register with web UI: " << e.what();
+    }
 }
 
 void AVPlumber::executeCommandsFromFile(const std::string path) {

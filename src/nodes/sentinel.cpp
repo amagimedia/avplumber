@@ -21,29 +21,14 @@ struct HistoryTableEntry {
 };
 #pragma pack(pop)
 
-class PTSCorrectorCommon: public InstanceShared<PTSCorrectorCommon> {
-protected:
-    std::recursive_mutex busy_;
-    av::Timestamp timeshift_ = NOTS;
-    av::Rational timebase_ = {0, 1};
-    bool lock_timeshift_ = false;
-    av::Timestamp clk_ = NOTS;
-    AVTS clk_wallclock_ = AV_NOPTS_VALUE;
-    av::Timestamp next_history_report_ = NOTS;
-    av::Timestamp history_reporting_interval_ = NOTS;
-    av::Timestamp last_discontinuity_ = NOTS;
-    av::Timestamp wallclock_offset_ = NOTS;
-    std::ofstream timeshift_history_file_text_;
-    std::ofstream timeshift_history_file_;
-    ThreadedRESTEndpoint rest_;
-    bool reporting_ = false;
-    bool first_entry_ = true;
-public:
-    av::Timestamp start_ts_ = {10, {1,1}};
-    void wallclockOffsetChanged(av::Timestamp offset) {
-        wallclock_offset_ = offset;
-    }
-    void reportTimeshiftChange() {
+#include "../PTSCorrectorCommon.hpp"
+
+// Method implementations for PTSCorrectorCommon
+void PTSCorrectorCommon::wallclockOffsetChanged(av::Timestamp offset) {
+    wallclock_offset_ = offset;
+}
+
+void PTSCorrectorCommon::reportTimeshiftChange() {
         if (history_reporting_interval_.isValid()) {
             next_history_report_ = addTS(wallclock.absolute_ts(), history_reporting_interval_);
         }
@@ -84,40 +69,48 @@ public:
             std::string json_str = jobj.dump();
             rest_.send("", json_str);
         }
+}
+
+void PTSCorrectorCommon::openHistoryFileText(const std::string path) {
+    timeshift_history_file_text_.open(path, std::ios_base::app);
+}
+
+void PTSCorrectorCommon::openHistoryFile(const std::string path) {
+    timeshift_history_file_.open(path, std::ios_base::app);
+}
+
+void PTSCorrectorCommon::addTimebase(av::Rational tb) {
+    if ( (timebase_.getNumerator()==0) || (timebase_<tb) ) {
+        timebase_ = tb;
     }
-    void openHistoryFileText(const std::string path) {
-        timeshift_history_file_text_.open(path, std::ios_base::app);
-    }
-    void openHistoryFile(const std::string path) {
-        timeshift_history_file_.open(path, std::ios_base::app);
-    }
-    void addTimebase(av::Rational tb) {
-        if ( (timebase_.getNumerator()==0) || (timebase_<tb) ) {
-            timebase_ = tb;
-        }
-    }
-    bool hasTimeshift() {
-        return timeshift_.isValid();
-    }
-    void firstTS(const av::Timestamp ts) {
+}
+
+bool PTSCorrectorCommon::hasTimeshift() {
+    return timeshift_.isValid();
+}
+
+void PTSCorrectorCommon::firstTS(const av::Timestamp ts) {
         // argument = TS encountered by stream's PTS corrector
         logstream << "First TS: " << ts << "; global corrector's TB: " << timebase_ << std::endl;
         if (!ts.isValid()) {
             throw Error("NOPTS supplied as first PTS");
         }
-        timeshift_ = {rtcTS(false).timestamp(timebase_) - ts.timestamp(timebase_), timebase_};
-        reportTimeshiftChange();
-    }
-    void setTS(const av::Timestamp ts) {
+    timeshift_ = {rtcTS(false).timestamp(timebase_) - ts.timestamp(timebase_), timebase_};
+    reportTimeshiftChange();
+}
+
+void PTSCorrectorCommon::setTS(const av::Timestamp ts) {
         if ( (!clk_.isValid()) || (ts > clk_) ) {
             clk_ = rescaleTS(ts, timebase_);
-            clk_wallclock_ = wallclock.pts();
-        }
+        clk_wallclock_ = wallclock.pts();
     }
-    bool hasTS() {
-        return (clk_wallclock_ != AV_NOPTS_VALUE) && clk_.isValid();
-    }
-    av::Timestamp rtcTS(const bool warn_if_empty = true) {
+}
+
+bool PTSCorrectorCommon::hasTS() {
+    return (clk_wallclock_ != AV_NOPTS_VALUE) && clk_.isValid();
+}
+
+av::Timestamp PTSCorrectorCommon::rtcTS(const bool warn_if_empty) {
         if (!hasTS()) {
             if (warn_if_empty) {
                 logstream << "Warning: Global corrector doesn't have clock source. Bootstrapping with start_ts_.";
@@ -133,71 +126,146 @@ public:
         } else {
             //return clk_ + (wallclock.ts() - clk_wallclock_);
             //logstream << "Returning rtcTS: " << clk_.timestamp() << " + " << (int)(diff_sec / clk_.timebase().getDouble()) << " tb=" << clk_.timebase();
-            return { clk_.timestamp() + (AVTS)(diff_sec / clk_.timebase().getDouble()), clk_.timebase() };
-        }
+        return { clk_.timestamp() + (AVTS)(diff_sec / clk_.timebase().getDouble()), clk_.timebase() };
     }
-    av::Timestamp startTS() {
-        return start_ts_;
-    }
-    av::Timestamp startTS(const av::Rational tb) {
-        return rescaleTS(start_ts_, tb);
-        //return {start_ts_.timestamp(tb), tb};
-    }
-    av::Timestamp timeshift() {
-        if (!timeshift_.isValid()) {
-            throw Error("Refusing to return NOPTS in PTSCorrectorCommon::timeshift()");
-        }
-        return timeshift_;
-    }
+}
 
-    bool shouldReportNow() {
-        return history_reporting_interval_.isValid() && (next_history_report_ <= wallclock.absolute_ts());
-    }
+av::Timestamp PTSCorrectorCommon::startTS() {
+    return start_ts_;
+}
 
-    void setTimeshift(const av::Timestamp ts, bool report, bool periodical_report) {
+av::Timestamp PTSCorrectorCommon::startTS(const av::Rational tb) {
+    return rescaleTS(start_ts_, tb);
+}
+
+av::Timestamp PTSCorrectorCommon::timeshift() {
+    if (!timeshift_.isValid()) {
+        throw Error("Refusing to return NOPTS in PTSCorrectorCommon::timeshift()");
+    }
+    return timeshift_;
+}
+
+bool PTSCorrectorCommon::shouldReportNow() {
+    return history_reporting_interval_.isValid() && (next_history_report_ <= wallclock.absolute_ts());
+}
+
+void PTSCorrectorCommon::setTimeshift(const av::Timestamp ts, bool report, bool periodical_report) {
         if (lock_timeshift_ && timeshift_.isValid()) {
             logstream << "ignoring setTimeshift - correction group locked " << timeshift_ << " -> " << ts;
             return;
         }
         logstream << "setTimeshift " << timeshift_ << " -> " << ts;
         timeshift_ = rescaleTS(ts, timebase_);
-        if (report || (periodical_report && shouldReportNow())) {
-            reportTimeshiftChange();
-        }
+    if (report || (periodical_report && shouldReportNow())) {
+        reportTimeshiftChange();
     }
-    void lockTimeshift() {
-        lock_timeshift_ = true;
-    }
-    av::Timestamp timeshift(const av::Rational tb) {
-        return rescaleTS(timeshift_, tb);
-    }
-    double timeshiftDiff(const av::Timestamp cmpto) {
-        //return fabs( ((double)(timeshift_.timestamp(timebase_)-cmpto.timestamp(timebase_))) * timebase_.getDouble() );
-        return fabs(addTS(timeshift_, negateTS(cmpto)).seconds());
-    }
-    void nowDiscontinuity() {
-        last_discontinuity_ = rtcTS();
-    }
-    bool wasDiscontinuityRecently() {
-        return addTS(rtcTS(), negateTS(last_discontinuity_)).seconds() < 2.0;
-    }
-    std::unique_lock<decltype(busy_)> getLock() {
-        return std::unique_lock<decltype(busy_)>(busy_);
-    }
-    decltype(busy_)& mutex() {
-        return busy_;
-    }
-    void setReportingURL(const std::string url) {
+}
+
+void PTSCorrectorCommon::lockTimeshift() {
+    lock_timeshift_ = true;
+}
+
+av::Timestamp PTSCorrectorCommon::timeshift(const av::Rational tb) {
+    return rescaleTS(timeshift_, tb);
+}
+
+double PTSCorrectorCommon::timeshiftDiff(const av::Timestamp cmpto) {
+    return fabs(addTS(timeshift_, negateTS(cmpto)).seconds());
+}
+
+void PTSCorrectorCommon::nowDiscontinuity() {
+    last_discontinuity_ = rtcTS();
+}
+
+bool PTSCorrectorCommon::wasDiscontinuityRecently() {
+    return addTS(rtcTS(), negateTS(last_discontinuity_)).seconds() < 2.0;
+}
+
+std::unique_lock<std::recursive_mutex> PTSCorrectorCommon::getLock() {
+    return std::unique_lock<std::recursive_mutex>(busy_);
+}
+
+std::recursive_mutex& PTSCorrectorCommon::mutex() {
+    return busy_;
+}
+
+void PTSCorrectorCommon::setReportingURL(const std::string url) {
         rest_.setBaseURL(url);
         reporting_ = !url.empty();
-        if (reporting_) {
-            rest_.setMinimumInterval(1);
+    if (reporting_) {
+        rest_.setMinimumInterval(1);
+    }
+}
+
+void PTSCorrectorCommon::setReportingInterval(const av::Timestamp& interval) {
+    history_reporting_interval_ = interval;
+}
+
+av::Rational PTSCorrectorCommon::getTimebase() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return timebase_;
+}
+
+bool PTSCorrectorCommon::isTimeshiftLocked() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return lock_timeshift_;
+}
+
+av::Timestamp PTSCorrectorCommon::getClock() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return clk_;
+}
+
+AVTS PTSCorrectorCommon::getClockWallclock() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return clk_wallclock_;
+}
+
+av::Timestamp PTSCorrectorCommon::getWallclockOffset() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return wallclock_offset_;
+}
+
+av::Timestamp PTSCorrectorCommon::getLastDiscontinuity() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return last_discontinuity_;
+}
+
+bool PTSCorrectorCommon::isReporting() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+    return reporting_;
+}
+
+Parameters PTSCorrectorCommon::getStats() {
+    std::unique_lock<decltype(busy_)> lock(busy_);
+        Parameters stats;
+        stats["has_timeshift"] = timeshift_.isValid();
+        if (timeshift_.isValid()) {
+            stats["timeshift_seconds"] = timeshift_.seconds();
+            stats["timeshift_timestamp"] = timeshift_.timestamp();
         }
-    }
-    void setReportingInterval(const av::Timestamp& interval) {
-        history_reporting_interval_ = interval;
-    }
-};
+        stats["timebase_num"] = timebase_.getNumerator();
+        stats["timebase_den"] = timebase_.getDenominator();
+        stats["timeshift_locked"] = lock_timeshift_;
+        stats["has_clock"] = clk_.isValid();
+        if (clk_.isValid()) {
+            stats["clock_seconds"] = clk_.seconds();
+            stats["clock_timestamp"] = clk_.timestamp();
+        }
+        stats["clock_wallclock"] = clk_wallclock_;
+        stats["start_ts_seconds"] = start_ts_.isValid() ? start_ts_.seconds() : 0.0;
+        stats["start_ts_timestamp"] = start_ts_.isValid() ? start_ts_.timestamp() : 0;
+        stats["wallclock_offset_valid"] = wallclock_offset_.isValid();
+        if (wallclock_offset_.isValid()) {
+            stats["wallclock_offset_seconds"] = wallclock_offset_.seconds();
+        }
+        stats["last_discontinuity_valid"] = last_discontinuity_.isValid();
+        if (last_discontinuity_.isValid()) {
+            stats["last_discontinuity_seconds"] = last_discontinuity_.seconds();
+        }
+    stats["reporting"] = reporting_;
+    return stats;
+}
 
 template <typename T> struct CorrMediaSpecific {
 };
