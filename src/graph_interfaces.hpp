@@ -316,7 +316,6 @@ class IFrameTimestamp {
 public:
     virtual int64_t getCurrentFrameTimestamp() = 0;
     virtual int64_t getCurrentFrameWallclock() = 0;
-    virtual int64_t getCurrentFrameSyncclock() = 0;
     virtual bool isEof() = 0;
 };
 

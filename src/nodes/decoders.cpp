@@ -23,6 +23,8 @@ protected:
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
     bool finish_after_flush_ = false;
+    av::Timestamp flush_timeout_ts_ = NOTS;
+    av::Timestamp flush_timeout_ = {500, {1, 1000}}; // 500ms
     //AVBufferRef *out_frames_ref_ = nullptr;
     /* input_hold_ is a workaround to prevent StreamInput from being destroyed
      * when the shared_ptr is set to null in NodeWrapper
@@ -151,6 +153,7 @@ public:
     }
     virtual void flush() {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        bool decoded_something = false;
         while (true) {
             OutputFrame frm;
             try {
@@ -158,6 +161,7 @@ public:
                 if (frm) {
                     setFrameTimestamps(frm);
                     flush_frames_.push_back(frm);
+                    decoded_something = true;
                 }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing decoder." << std::endl;
@@ -165,6 +169,9 @@ public:
             }
             if (!frm)
                 break;
+        }
+        if (decoded_something) {
+            flush_timeout_ts_ = addTS(wallclock.absolute_ts(), flush_timeout_);
         }
         //dec_.close();
         //input_hold_ = nullptr;
@@ -176,15 +183,16 @@ public:
             }
             flush_frames_.pop_front();
         }
-        if (true) {
+        if (flush_frames_.empty()) {
             this->finished_ = true;
+            flush_timeout_ts_ = NOTS;
         } else {
-            // FIXME: doesn't work correctly when destroying graph (may hang decoder thread)
-            if (flush_frames_.empty()) {
-                this->finished_ = true;
-            } else {
-                this->finish_after_flush_ = true;
+            if (flush_timeout_ts_.isValid() && (wallclock.absolute_ts() > flush_timeout_ts_)) {
+                logstream << "Flush timeout " << flush_timeout_ts_ << " exceeded, finishing decoder";
+                flush_frames_.clear();
+                flush_timeout_ts_ = NOTS;
             }
+            this->finish_after_flush_ = true;
         }
     }
     void setFrameTimestamps(OutputFrame& frm) {

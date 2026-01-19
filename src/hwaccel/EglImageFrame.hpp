@@ -23,6 +23,7 @@ private:
 	av::Timestamp pts_;
 	av::Rational tb_;
 	std::shared_ptr<void> holder_; // keeps producer-owned resources alive until consumer releases
+	std::map<std::string, std::string> metadata_;
 public:
 	EglImageFrame() = default;
 	EglImageFrame(EGLImageKHR image,
@@ -53,6 +54,19 @@ public:
 	// Holder accessor (for advanced lifetime coordination if needed)
 	const std::shared_ptr<void>& holder() const { return holder_; }
 	void setHolder(std::shared_ptr<void> h) { holder_ = std::move(h); }
+
+	// Metadata accessor
+	void setMetadata(const std::string& key, const std::string& value) { metadata_[key] = value; }
+	std::string getMetadata(const std::string& key) const { return metadata_.at(key); }
+	bool hasMetadata(const std::string& key) const { return metadata_.find(key) != metadata_.end(); }
+	void clearMetadata() { metadata_.clear(); }
+	template<typename T>
+	void copyMetadata(const T& frm) {
+		av::Dictionary dict = av::Dictionary(frm.raw()->metadata, false);
+		for (auto it = dict.begin(); it != dict.end(); ++it) {
+			metadata_[it->key()] = it->value();
+		}
+	}
 };
 
 
