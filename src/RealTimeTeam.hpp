@@ -7,6 +7,7 @@
 class RealTimeTeam: public InstanceShared<RealTimeTeam>, public IFlushAndSeek, public ILinkableTeam<RealTimeTeam> {
 protected:
     std::atomic<AVTS> offset_{AV_NOPTS_VALUE};
+    std::atomic<AVTS> user_delay_{0};  // user-configurable delay in timebase units
     std::mutex busy_;
     std::unique_lock<decltype(busy_)> getLock() {
         return std::unique_lock<decltype(busy_)>(busy_);
@@ -121,6 +122,32 @@ public:
     }
     bool isFlushing() {
         return flushing_;
+    }
+    AVTS getUserDelayTS() const {
+        return user_delay_.load(std::memory_order_acquire);
+    }
+    float getUserDelay() const {
+        AVTS delay_ts = user_delay_.load(std::memory_order_acquire);
+        if (timebase_.num == 0 || timebase_.den == 0) {
+            // Timebase not set yet, return 0
+            return 0.0f;
+        }
+        return (float)delay_ts * (float)timebase_.num / (float)timebase_.den;
+    }
+    void setUserDelayNonRecursive(float delay_sec) {
+        if (timebase_.num == 0 || timebase_.den == 0) {
+            throw Error("Cannot set team delay: timebase not initialized yet");
+        }
+        AVTS delay_ts = AVTS(delay_sec * (float)timebase_.den / (float)timebase_.num + 0.5f);
+        user_delay_.store(delay_ts, std::memory_order_release);
+    }
+    void setUserDelay(float delay_sec) {
+        setUserDelayNonRecursive(delay_sec);
+        {
+            for (auto team: getLinkedTeams()) {
+                team->setUserDelayNonRecursive(delay_sec);
+            }
+        }
     }
 
     std::shared_ptr<IPlaybackControl> getEarliestStream() {
