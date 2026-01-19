@@ -148,19 +148,6 @@ public:
                 team->setUserDelayNonRecursive(delay_sec);
             }
         }
-    AVRational getTimebase() {
-        auto lock = getLock();
-        return timebase_;
-    }
-    size_t getSeekTargetsCount() {
-        std::unique_lock<decltype(seek_mutex_)> lock(seek_mutex_);
-        size_t count = 0;
-        for (const auto& weak_target : seek_targets_) {
-            if (!weak_target.expired()) {
-                count++;
-            }
-        }
-        return count;
     }
 
     std::shared_ptr<IPlaybackControl> getEarliestStream() {
