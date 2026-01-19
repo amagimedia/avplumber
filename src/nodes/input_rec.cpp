@@ -373,6 +373,8 @@ private:
             if (frame_index < seek_table_.size()) {
                 av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
             }
+        } else {
+            av_dict_set(&frame->metadata, "frame_ts", std::to_string(frm.pts().timestamp({1, 1000})).c_str(), 0);
         }
     }
 public:
@@ -401,10 +403,10 @@ public:
         av_dict_set(&frame.raw()->metadata, "sample_rate", std::to_string(frame.raw()->sample_rate).c_str(), 0);
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
-        av::Timestamp video_ts;
-        av::Timestamp input_ts;
-        av::Timestamp output_ts;
-        av::Timestamp wallclock_ts;
+        av::Timestamp video_ts = frame.pts();
+        av::Timestamp input_ts = video_ts;
+        av::Timestamp output_ts = video_ts;
+        av::Timestamp wallclock_ts = video_ts;
 
         {
             // get timestamps offset
@@ -724,7 +726,8 @@ public:
         }
         if (pkt.isNull()) {
             // we are at the end os recording
-            //logstream << "end of video reached";
+            logstream << "end of video reached";
+            notify_eof_ = true;
             std::this_thread::sleep_for(5ms);
             return;
         } else {
@@ -771,7 +774,7 @@ public:
                 }
             }
 
-            if (first_video_ts_.timestamp() != 0) {
+            if (first_video_ts_.isValid() && (first_video_ts_.timestamp() != 0)) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
             }
