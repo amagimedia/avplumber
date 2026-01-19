@@ -29,7 +29,6 @@ typedef struct obs_source obs_source_t;
 class AVPlumber {
 private:
     ControlImpl* impl_;
-    uint16_t control_port_;
 #ifdef EMBED_IN_OBS
     std::string PAUSE_TEAM_;
     std::string REALTIME_TEAM_;
@@ -41,7 +40,6 @@ public:
     AVPlumber();
     ~AVPlumber();
     void enableControlServer(const uint16_t tcp_port);
-    void registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name = "", const std::string& log_file = "");
 #ifdef EMBED_IN_OBS
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
