@@ -204,6 +204,11 @@ public:
     std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> nodes(const std::string &type) {
         return getNodesByType(type);
     }
+    // Return a snapshot of all nodes (name -> NodeWrapper)
+    std::unordered_map<std::string, std::shared_ptr<NodeWrapper>> allNodes() {
+        auto lock = getLock();
+        return nodes_index_;
+    }
     decltype(edges_)& edges() {
         return edges_;
     }
