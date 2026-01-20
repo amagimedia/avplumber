@@ -43,7 +43,7 @@ override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
-CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp
+CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
 
@@ -190,9 +190,7 @@ compile_flags.txt:
 	echo "$(CXXFLAGS)" | tr ' ' '\n' > $@
 
 # anything that requires cpr headers must be compiled after cpr is configured
-objs/src/nodes/sentinel.o: deps/cpr/build/lib/libcpr.a
-objs/src/stats.o: deps/cpr/build/lib/libcpr.a
-objs/src/nodes/scte35_parse.o: deps/cpr/build/lib/libcpr.a
+objs/src/rest_client.o: deps/cpr/build/lib/libcpr.a
 
 .PRECIOUS: objs/%.d
 
