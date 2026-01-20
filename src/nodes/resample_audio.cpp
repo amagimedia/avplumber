@@ -27,6 +27,7 @@ protected:
     size_t drift_index_;
     bool prev_drift_negative_ = false;
     bool now_compensating_ = false;
+    bool debug_ = false;
     av::AudioSamples to_out_;
     //bool outputted_ = false;
     //av::Timestamp out_ts_shift_ = { 0, {1,1} };
@@ -218,9 +219,11 @@ public:
                 inside_resampler_ = addTS(inside_resampler_, {samp_count, {1, src_params_.sample_rate} });
             }
             if (comp_samp_!=0) {
-                av::Rational tb = {1, src_params_.sample_rate * dst_params_.sample_rate};
-                av::Timestamp nextpts(swr_next_pts(resampler_->raw(), in_samples.pts().timestamp(tb)), tb);
-                logstream << "swr_next_pts returned " << nextpts.seconds() << "s, next_out_ts_ = " << next_out_ts_.seconds() << "s";
+                uint64_t tb = uint64_t(src_params_.sample_rate) * uint64_t(dst_params_.sample_rate);
+                int64_t nextpts = swr_next_pts(resampler_->raw(), int64_t(in_samples.pts().timestamp()) * int64_t(dst_params_.sample_rate));
+                if (debug_) {
+                    logstream << "swr_next_pts returned " << nextpts << " = " << double(nextpts) / double(tb) << "s, next_out_ts_ = " << next_out_ts_.seconds() << "s";
+                }
             }
             
             //in_ts_ = in_samples.pts();
@@ -335,6 +338,9 @@ public:
         auto r = NodeSISO<av::AudioSamples, av::AudioSamples>::template createCommon<Child>(edges, params, dst_params, comp_samp);
         if (params.count("max_drift")==1) {
             r->max_drift_ = params["max_drift"];
+        }
+        if (params.count("debug")==1) {
+            r->debug_ = params["debug"].get<bool>();
         }
         return r;
     }
