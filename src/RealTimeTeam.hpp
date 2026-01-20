@@ -148,6 +148,7 @@ public:
                 team->setUserDelayNonRecursive(delay_sec);
             }
         }
+    }
     AVRational getTimebase() {
         auto lock = getLock();
         return timebase_;
