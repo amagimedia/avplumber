@@ -3,6 +3,9 @@ BUILD_TYPE = Debug
 HAVE_CUDA = 1
 HAVE_VAAPI = 0
 HAVE_DRM = 0
+# Optional bundled deps/features
+# - HAVE_SCTE35 controls whether we build/link libklvanc + libklscte35 and enable the SCTE-35 parser node.
+HAVE_SCTE35 = 1
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
 ifeq ($(HAVE_VAAPI),1)
@@ -44,8 +47,17 @@ endif
 
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp
-DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
+DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
+
+ifeq ($(HAVE_SCTE35),1)
+DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
+override CXXFLAGS += -DHAVE_SCTE35=1
+else
+# The SCTE-35 node is the only thing that needs these libs; dropping it avoids building the autotools deps.
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/scte35_parse.cpp,$(NODES_SRC))
+override CXXFLAGS += -DHAVE_SCTE35=0
+endif
 
 ifeq ($(HAVE_JACK),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
