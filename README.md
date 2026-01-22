@@ -84,12 +84,14 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
+-   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
 
 ### Using as a library
