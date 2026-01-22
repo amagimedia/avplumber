@@ -63,6 +63,7 @@ protected:
         return anything_buffered;
     }
     void maybeStopFlushing() {
+        if (!team_) return;
         if (team_->isFlushing()) {
             logstream << "done flushing";
             if (is_master_) {
