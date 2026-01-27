@@ -9,6 +9,7 @@ extern "C" {
 #include "../audio_parameters.hpp"
 #include "../hwaccel.hpp"
 #include <avcpp/channellayout.h>
+#include <algorithm>
 
 template<typename T> struct FilterMediaSpecific {
 };
@@ -95,6 +96,7 @@ protected:
         AVFilterContext* ctx_ = nullptr;
         std::string in_args_;
         AVBufferRef* initial_hw_frames_ctx_ = nullptr;
+        bool seen_frame_ = false;
     public:
         Port() {};
         ~Port() {
@@ -130,9 +132,21 @@ protected:
         }
         void captureInitialHWFramesCtxFromFrame(T &frm) {
             AVFrame *raw = frm.raw();
+            if (raw) {
+                seen_frame_ = true;
+            }
             if (!initial_hw_frames_ctx_ && raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
                 initial_hw_frames_ctx_ = av_buffer_ref(raw->hw_frames_ctx);
             }
+        }
+        bool hasCapturedHWFramesCtx() const {
+            return initial_hw_frames_ctx_ && initial_hw_frames_ctx_->data;
+        }
+        bool hasSeenFrame() const {
+            return seen_frame_;
+        }
+        AVBufferRef* capturedHWFramesCtx() const {
+            return initial_hw_frames_ctx_;
         }
         bool isSourceReadyToInit() {
             return !in_args_.empty();
@@ -235,6 +249,24 @@ protected:
     std::string graph_desc_;
     bool do_shift_ = true;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+
+    AVBufferRef* deriveHWDeviceCtxFromAnySource() const {
+        for (const Port &p : sources_) {
+            if (!p.hasCapturedHWFramesCtx()) continue;
+            AVHWFramesContext *frmctx = (AVHWFramesContext *)(p.capturedHWFramesCtx()->data);
+            if (frmctx && frmctx->device_ref) {
+                return frmctx->device_ref;
+            }
+        }
+        return nullptr;
+    }
+
+    static bool filterNameRequiresHWFramesOnDirectInput(const char *filter_name) {
+        if (!filter_name) return false;
+        // Minimal (but safe) heuristic: scale_cuda is known to deref inlink->hw_frames_ctx during config.
+        // If it's connected directly to our buffersrc and we haven't provided hw_frames_ctx, ffmpeg may segfault.
+        return std::string(filter_name) == "scale_cuda";
+    }
     
     void freeFilterGraph() {
         if (filter_graph_ == nullptr) return;
@@ -259,6 +291,15 @@ protected:
         }
         
         filter_graph_ = avfilter_graph_alloc();
+        // Provide a hw_device_ctx if we can: this is needed by many hw filters (e.g. hwupload_cuda).
+        if (hwaccel_) {
+            filter_graph_->hw_device_ctx = av_buffer_ref(hwaccel_->deviceContext());
+        } else {
+            AVBufferRef *dev = deriveHWDeviceCtxFromAnySource();
+            if (dev) {
+                filter_graph_->hw_device_ctx = av_buffer_ref(dev);
+            }
+        }
         
         AVFilterInOut* inputs = nullptr;
         AVFilterInOut* outputs = nullptr;
@@ -276,14 +317,49 @@ protected:
         };
         
         int i = 0;
-        forEachInOut(inputs, [this, &i](AVFilterInOut* in) {
+        bool must_defer = false;
+        std::string must_defer_reason;
+        forEachInOut(inputs, [this, &i, &must_defer, &must_defer_reason](AVFilterInOut* in) {
             if (i >= sources_.size()) {
                 throw Error("Too many inputs in filtergraph");
             }
-            
-            sources_[i].initSourceFilter(i, filter_graph_, hwaccel_, in);
+
+            // If the first filter connected to this input is a CUDA scaler, it expects hw_frames_ctx on its input link.
+            // We can only provide that once we either:
+            // - saw a HW frame and captured its hw_frames_ctx, or
+            // - have an explicit hwaccel device to allocate a frames context from.
+            if (in && in->filter_ctx && in->filter_ctx->filter &&
+                filterNameRequiresHWFramesOnDirectInput(in->filter_ctx->filter->name)) {
+                const bool can_provide_hw_frames = hwaccel_ || sources_[i].hasCapturedHWFramesCtx();
+                if (!can_provide_hw_frames) {
+                    if (!sources_[i].hasSeenFrame()) {
+                        must_defer = true;
+                        must_defer_reason = std::string("Filter graph input ") + std::to_string(i) +
+                            " connects directly to '" + in->filter_ctx->filter->name +
+                            "' which requires hardware frames; waiting for first frame to determine hw_frames_ctx.";
+                    } else {
+                        throw Error(std::string("Filter graph input ") + std::to_string(i) +
+                            " connects directly to '" + in->filter_ctx->filter->name +
+                            "' which requires hardware frames, but input frames have no hw_frames_ctx. "
+                            "Either decode into CUDA frames, insert 'hwupload_cuda' before '" +
+                            in->filter_ctx->filter->name + "', or specify a 'hwaccel' device for the filter node.");
+                    }
+                }
+            }
+
+            // If we already know we need to defer, avoid creating/linking any buffersrc nodes yet.
+            if (!must_defer) {
+                sources_[i].initSourceFilter(i, filter_graph_, hwaccel_, in);
+            }
             i++;
         });
+        if (must_defer) {
+            logstream << must_defer_reason;
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+            freeFilterGraph();
+            return false;
+        }
         i = 0;
         forEachInOut(outputs, [this, &i](AVFilterInOut* out) {
             if (i >= sinks_.size()) {
@@ -297,7 +373,7 @@ protected:
         
         ret = avfilter_graph_config(filter_graph_, nullptr);
         if (ret < 0) {
-            throw Error("avfilter_graph_config error");
+            throw Error("avfilter_graph_config error: " + av::error2string(ret));
         }
         for (Port &port: sinks_) {
             if (!port.checkSinkFilterMediaType()) {
