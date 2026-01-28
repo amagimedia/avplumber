@@ -40,6 +40,11 @@ protected:
     std::atomic_int64_t last_frame_synclock_ = -1;
     // Local fallback delay for nodes without a team (shouldn't happen in practice, but for safety)
     std::atomic<AVTS> local_user_delay_{0};
+    // When user delay is decreased, we can't "consume faster than realtime". Instead, discard only
+    // as much already-buffered timeline as needed to catch up to the new delay.
+    AVTS last_user_delay_seen_ = 0;
+    AVTS catchup_remaining_ = 0;              // in timebase_ units
+    AVTS catchup_prev_pkt_ts_ = AV_NOPTS_VALUE; // last consumed pkt_ts (rescaled), used to estimate how much timeline we skipped
 
     AVTS secondsToTs(float seconds) const {
         return AVTS(seconds * (float)timebase_.den / (float)timebase_.num + 0.5f);
@@ -71,6 +76,12 @@ protected:
             }
             team_->stopFlushing();
         }
+    }
+    AVTS getUserDelay() {
+        // Get total user delay: team delay (shared, in timebase units) + local delay (per-source, in timebase units)
+        AVTS team_delay = team_ ? team_->getUserDelayTS() : 0;
+        AVTS local_delay = local_user_delay_.load(std::memory_order_relaxed);
+        return team_delay + local_delay;
     }
 public:
     using NodeSISO<T, T>::NodeSISO;
@@ -133,9 +144,12 @@ public:
 
                     if (input_ts.isValid() && team_) {
                         float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
-                        if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
+                        float user_delay_sec = tsToSeconds(getUserDelay());
+                        float sec_min = min_buffered_ + user_delay_sec;
+                        float sec_max = max_buffered_ + user_delay_sec;
+                        if ((buffered > sec_max) || (team_->isFlushing() && (buffered > sec_min))) {
                             if (!team_->isFlushing()) {
-                                logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
+                                logstream << "too many seconds buffered: " << buffered << " > " << sec_max << ", flushing";
                                 team_->startFlushing();
                             }
                             ready_ = false;
@@ -157,12 +171,30 @@ public:
                     ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                 }
                 if (ready_) {
-                    // Get total user delay: team delay (shared, in timebase units) + local delay (per-source, in timebase units)
-                    AVTS team_delay = team_ ? team_->getUserDelayTS() : 0;
-                    AVTS local_delay = local_user_delay_.load(std::memory_order_relaxed);
-                    AVTS user_delay = team_delay + local_delay;
+                    AVTS user_delay = getUserDelay();
+
+                    // If user_delay decreased since last time, enter bounded "catch-up" mode.
+                    // We will discard enough frames to remove only the delta delay from already buffered timeline.
+                    if (user_delay < last_user_delay_seen_) {
+                        catchup_remaining_ += (last_user_delay_seen_ - user_delay);
+                        catchup_prev_pkt_ts_ = AV_NOPTS_VALUE;
+                    }
+                    last_user_delay_seen_ = user_delay;
+
                     // Add user delay to shift output timeline (positive = more latency)
                     AVTS diff = (pkt_ts - offset_) - now_ts + user_delay;
+
+                    // Catch-up: when delay is reduced, previously buffered frames are now "late".
+                    // Don't resync/flush everything; just discard enough timeline to match the new delay.
+                    if (catchup_remaining_ > 0 && diff < 0) {
+                        emit = false;
+                        // keep consume=true so we pop the frame and advance
+                        if (!ticks) {
+                            this->yieldAndProcess();
+                        } else {
+                            process_next = true;
+                        }
+                    } else
                     if ((!woken_too_late_) && (diff < negative_time_tolerance_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", resyncing.";
                         ready_ = false;
@@ -264,6 +296,21 @@ public:
             AVTS emitted = wallclock.pts();
 
             if (consume) {
+                // If we are catching up after delay decrease, track how much timeline we have discarded so far.
+                // Use pkt_ts delta between consumed frames to estimate skipped duration (works for audio+video).
+                if (catchup_remaining_ > 0 && pkt_ts != AV_NOPTS_VALUE && pkt_ts != (AV_NOPTS_VALUE + 1)) {
+                    if (catchup_prev_pkt_ts_ != AV_NOPTS_VALUE && pkt_ts > catchup_prev_pkt_ts_) {
+                        AVTS advanced = pkt_ts - catchup_prev_pkt_ts_;
+                        if (advanced > 0) {
+                            catchup_remaining_ -= std::min(catchup_remaining_, advanced);
+                        }
+                    }
+                    catchup_prev_pkt_ts_ = pkt_ts;
+                    if (catchup_remaining_ <= 0) {
+                        catchup_remaining_ = 0;
+                        catchup_prev_pkt_ts_ = AV_NOPTS_VALUE;
+                    }
+                }
                 this->source_->pop();
 
                 // check whether there is next packet in the input queue 
