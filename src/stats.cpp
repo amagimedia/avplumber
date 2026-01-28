@@ -3,8 +3,11 @@
 #include <cstdint>
 #include <utility>
 #include <avcpp/audioresampler.h>
+extern "C" {
 #include "libavutil/dict.h"
+}
 #include "util.hpp"
+#include "avutils.hpp"
 #include "graph_mgmt.hpp"
 #include "rest_client.hpp"
 
@@ -786,9 +789,7 @@ public:
     }
     void mainloop() {
         auto gtod_ms = []() -> AVTS {
-            struct timeval tv;
-            gettimeofday(&tv, nullptr);
-            return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            return wallclock.pts();
         };
         AVTS next_send = gtod_ms() + interval_ms_;
         AVTS remainder = next_send % interval_ms_;
