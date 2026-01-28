@@ -14,18 +14,20 @@ const url = require('url');
 const net = require('net');
 const WebSocket = require('ws');
 
-const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '8080', 10);
+const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '22222', 10);
 const AVP_HOST = process.env.AVPLUMBER_HOST || '127.0.0.1';
-const AVP_PORT = parseInt(process.env.AVPLUMBER_PORT || '20200', 10);
+const AVP_PORT = parseInt(process.env.AVPLUMBER_PORT || '0', 10);
 const LOG_FILE = process.env.AVPLUMBER_LOGFILE || process.env.LOG_FILE || '';
 
 const DIST_DIR = path.join(__dirname, '..', 'frontend', 'dist');
 const PUBLIC_DIR = path.join(__dirname, '..', 'frontend', 'public');
 
-// In-memory instance registry: { id: { id, name, host, port } }
+// In-memory instance registry: { id: { id, name, host, port, logFile, lastHeartbeat, usesHeartbeat } }
 const instances = new Map();
+const HEARTBEAT_TIMEOUT_MS = 30000; // 30 seconds
+const HEARTBEAT_CLEANUP_INTERVAL_MS = 5000; // Check every 5 seconds
 
-function addInstance(def) {
+function addInstance(def, usesHeartbeat = false) {
   if (!def) throw new Error('instance definition required');
   const host = def.host || '127.0.0.1';
   const port = parseInt(def.port, 10);
@@ -38,14 +40,91 @@ function addInstance(def) {
     id = `${id}-${Date.now()}`;
   }
   const name = def.name || `${host}:${port}`;
-  const inst = { id, name, host, port };
+  const logFile = def.logFile || def.log_file || def.log || null;
+  const inst = { 
+    id, 
+    name, 
+    host, 
+    port, 
+    logFile, 
+    lastHeartbeat: usesHeartbeat ? Date.now() : null,
+    usesHeartbeat 
+  };
   instances.set(id, inst);
   return inst;
 }
 
+function updateInstanceHeartbeat(def) {
+  if (!def) throw new Error('instance definition required');
+  const host = def.host || '127.0.0.1';
+  const port = parseInt(def.port, 10);
+  if (!port || Number.isNaN(port)) {
+    throw new Error('valid port required');
+  }
+  // Try to find existing instance by host:port
+  let foundId = null;
+  for (const [id, inst] of instances.entries()) {
+    if (inst.host === host && inst.port === port) {
+      foundId = id;
+      break;
+    }
+  }
+  
+  if (foundId) {
+    // Update existing instance
+    const inst = instances.get(foundId);
+    inst.lastHeartbeat = Date.now();
+    inst.usesHeartbeat = true;
+    // Update name and logFile if provided
+    if (def.name) {
+      inst.name = def.name;
+    }
+    if (def.logFile || def.log_file || def.log) {
+      inst.logFile = def.logFile || def.log_file || def.log;
+    }
+    return { inst, wasNew: false };
+  } else {
+    // Create new instance with heartbeat tracking
+    const inst = addInstance(def, true);
+    return { inst, wasNew: true };
+  }
+}
+
+// Cleanup stale instances periodically
+setInterval(() => {
+  const now = Date.now();
+  const toRemove = [];
+  for (const [id, inst] of instances.entries()) {
+    // Only remove instances that use heartbeat and have timed out
+    if (inst.usesHeartbeat && inst.lastHeartbeat && (now - inst.lastHeartbeat) > HEARTBEAT_TIMEOUT_MS) {
+      toRemove.push(id);
+    }
+  }
+  for (const id of toRemove) {
+    instances.delete(id);
+    // Stop log tailing for removed instance
+    if (logTails.has(id)) {
+      fs.unwatchFile(logTails.get(id).logFile);
+      logTails.delete(id);
+    }
+    console.log(`Removed stale instance: ${id}`);
+  }
+  if (toRemove.length > 0) {
+    broadcastInstancesUpdate();
+  }
+}, HEARTBEAT_CLEANUP_INTERVAL_MS);
+
 // Initialize default instance from env for backwards compatibility
+// Note: This instance won't be automatically removed since it doesn't send heartbeats
+// It's kept for backwards compatibility with manual registration
 if (AVP_PORT) {
-  addInstance({ id: 'default', name: 'default', host: AVP_HOST, port: AVP_PORT });
+  addInstance({
+    id: 'default',
+    name: 'default',
+    host: AVP_HOST,
+    port: AVP_PORT,
+    logFile: LOG_FILE || null
+  });
 }
 
 // Stats history: { [instanceId: string]: { [streamName: string]: { ts: number, data: any }[] } }
@@ -135,9 +214,14 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && parsed.pathname === '/api/instances') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    // Return instances without internal fields for API compatibility
+    const instancesArray = Array.from(instances.values()).map(inst => {
+      const { lastHeartbeat, usesHeartbeat, ...rest } = inst;
+      return rest;
+    });
     res.end(
       JSON.stringify({
-        instances: Array.from(instances.values())
+        instances: instancesArray
       })
     );
     return;
@@ -155,7 +239,38 @@ const server = http.createServer((req, res) => {
       try {
         const obj = JSON.parse(body || '{}');
         const inst = addInstance(obj);
+        // start per-instance log tailing if logfile provided
+        startLogTailForInstance(inst);
+        broadcastInstancesUpdate();
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(inst));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: String(e && e.message ? e.message : e) }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && parsed.pathname === '/api/instances/heartbeat') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      try {
+        const obj = JSON.parse(body || '{}');
+        const { inst, wasNew } = updateInstanceHeartbeat(obj);
+        // start per-instance log tailing if logfile provided and not already started
+        startLogTailForInstance(inst);
+        // Only broadcast if this was a new instance (first heartbeat)
+        if (wasNew) {
+          broadcastInstancesUpdate();
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(inst));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -202,21 +317,6 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && parsed.pathname === '/api/stats/latest') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(latestStatsSnapshot()));
-    return;
-  }
-
-  if (req.method === 'GET' && parsed.pathname === '/api/instance-shared-objects') {
-    const instanceId = parsed.query && parsed.query.instance ? String(parsed.query.instance) : 'default';
-    const inst = instances.get(instanceId);
-    if (!inst) {
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'Instance not found' }));
-      return;
-    }
-    // Query sync groups and correction groups via WebSocket command
-    // This will be handled by the WebSocket connection
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ message: 'Use WebSocket /ws endpoint with commands: sync_groups.json or correction_groups.json' }));
     return;
   }
 
@@ -365,6 +465,73 @@ class AvpConnection {
 
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
+// Broadcast instance list updates to all WebSocket clients
+function broadcastInstancesUpdate() {
+  const instancesArray = Array.from(instances.values()).map(inst => {
+    const { lastHeartbeat, usesHeartbeat, ...rest } = inst;
+    return rest;
+  });
+  const msg = JSON.stringify({
+    type: 'instances',
+    instances: instancesArray
+  });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(msg);
+    }
+  }
+}
+
+// Per-instance log tailing: { instanceId -> { logFile, lastSize } }
+const logTails = new Map();
+
+function startLogTailForInstance(inst) {
+  if (!inst || !inst.logFile) return;
+  if (logTails.has(inst.id)) return;
+
+  const logFile = inst.logFile;
+  let lastSize = 0;
+
+  fs.stat(logFile, (err, stat) => {
+    if (!err && stat && typeof stat.size === 'number') {
+      lastSize = stat.size;
+    }
+  });
+
+  fs.watchFile(logFile, { interval: 1000 }, (prev, curr) => {
+    if (curr.size <= lastSize) {
+      lastSize = curr.size;
+      return;
+    }
+    const start = lastSize;
+    const end = curr.size;
+    lastSize = end;
+    const stream = fs.createReadStream(logFile, { start, end: end - 1, encoding: 'utf8' });
+    let buf = '';
+    stream.on('data', (chunk) => {
+      buf += chunk;
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        const msg = JSON.stringify({ type: 'log', instanceId: inst.id, line });
+        for (const client of wss.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(msg);
+          }
+        }
+      }
+    });
+  });
+
+  logTails.set(inst.id, { logFile, lastSize });
+}
+
+// Start log tailing for any instances that already exist
+for (const inst of instances.values()) {
+  startLogTailForInstance(inst);
+}
+
 wss.on('connection', (ws) => {
   const connByInstance = new Map();
 
@@ -434,45 +601,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Optional: tail the avplumber logfile and stream new lines as {type:"log", line}
-if (LOG_FILE) {
-  try {
-    let lastSize = 0;
-    fs.stat(LOG_FILE, (err, stat) => {
-      if (!err && stat && typeof stat.size === 'number') {
-        lastSize = stat.size;
-      }
-    });
-    fs.watchFile(LOG_FILE, { interval: 1000 }, (prev, curr) => {
-      if (curr.size <= lastSize) {
-        lastSize = curr.size;
-        return;
-      }
-      const start = lastSize;
-      const end = curr.size;
-      lastSize = end;
-      const stream = fs.createReadStream(LOG_FILE, { start, end: end - 1, encoding: 'utf8' });
-      let buf = '';
-      stream.on('data', (chunk) => {
-        buf += chunk;
-        let idx;
-        while ((idx = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, idx).replace(/\r$/, '');
-          buf = buf.slice(idx + 1);
-          const msg = JSON.stringify({ type: 'log', line });
-          for (const client of wss.clients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(msg);
-            }
-          }
-        }
-      });
-    });
-    console.log(`Log tailing enabled for ${LOG_FILE}`);
-  } catch (e) {
-    console.error('Failed to watch log file:', e);
-  }
-}
 
 server.listen(HTTP_PORT, () => {
   console.log(`avplumber web-ui listening on http://localhost:${HTTP_PORT}`);

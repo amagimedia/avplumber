@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
     args.Var(script_path, 's', "script", std::string(""), "Execute commands from this file");
     args.Var(tcp_port, 'p', "port", uint16_t(0), "Port to listen on, for commands (0 to disable)");
     args.Var(log_path, 'l', "logfile", std::string(""), "Write messages to this file (does not affect libav messages)");
-    args.Var(webui_api_url, 'w', "webui-api", std::string(""), "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:8080)");
+    args.Var(webui_api_url, 'w', "webui-api", std::string(""), "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:22222)");
     args.Var(instance_name, 'n', "instance-name", std::string(""), "Instance name for web UI registration");
     args.Bool(show_version, 'V', "version", std::string(""), "Show version and exit");
     args.Parse(argc, argv);

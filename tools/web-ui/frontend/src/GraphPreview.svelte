@@ -582,15 +582,19 @@
 <style>
   .rete-wrap {
     position: relative;
+    flex: 1;
     min-height: 280px;
     border: 1px solid #111827;
     border-radius: 0.25rem;
     overflow: hidden;
     background: #020617;
+    display: flex;
+    flex-direction: column;
   }
 
   .rete-container {
-    height: 420px;
+    flex: 1;
+    min-height: 0;
     width: 100%;
   }
 

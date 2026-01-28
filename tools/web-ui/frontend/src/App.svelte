@@ -231,6 +231,17 @@
         };
       } else if (msg.type === 'log') {
         appendLog(msg.line);
+      } else if (msg.type === 'instances') {
+        // Update instances list when backend notifies us
+        instances = Array.isArray(msg.instances) ? msg.instances : [];
+        // If current instance was removed, select first available or null
+        if (currentInstanceId && !instances.find(inst => inst.id === currentInstanceId)) {
+          currentInstanceId = instances.length > 0 ? instances[0].id : null;
+        }
+        // If no instance selected and instances are available, select first
+        if (!currentInstanceId && instances.length > 0) {
+          currentInstanceId = instances[0].id;
+        }
       }
     };
   }

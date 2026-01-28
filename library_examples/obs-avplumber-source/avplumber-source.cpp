@@ -164,7 +164,7 @@ static obs_properties_t *avplumber_source_get_properties(void *data) {
     obs_properties_add_text(props, "script", "Script", OBS_TEXT_MULTILINE);
     obs_properties_add_int(props, "control_port", "Control interface TCP port (0 to disable)", 0, 65535, 1);
     obs_properties_add_text(props, "log_path", "Write log to file (empty = use stderr)", OBS_TEXT_DEFAULT);
-    obs_properties_add_text(props, "webui_api_url", "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:8080)", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(props, "webui_api_url", "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:22222)", OBS_TEXT_DEFAULT);
     obs_properties_add_text(props, "instance_name", "Instance name for web UI registration", OBS_TEXT_DEFAULT);
 
     UNUSED_PARAMETER(data);
