@@ -206,9 +206,9 @@ private:
 			glBindTexture(GL_TEXTURE_2D, e.gl_tex_rgba);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 			glBindTexture(GL_TEXTURE_2D, 0);
-			EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, EGL_NONE };
+			EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, /*EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR,*/ EGL_NONE };
 			e.egl_image = egl_create_image_khr_(egl_display_, egl_context_, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)e.gl_tex_rgba, img_attrs);
 			if (e.egl_image == EGL_NO_IMAGE_KHR) return false;
 			if (effective_ctx) {
@@ -264,7 +264,7 @@ private:
 			// Back EGLImage with an sRGB-capable texture so OBS can decode to linear when sampling
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 			glBindTexture(GL_TEXTURE_2D, 0);
-			EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, EGL_NONE };
+			EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, /*EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR,*/ EGL_NONE };
 			e.egl_image = egl_create_image_khr_(egl_display_, egl_context_, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)e.gl_tex_rgba, img_attrs);
 			if (e.egl_image == EGL_NO_IMAGE_KHR) return false;
 			if (cu_ctx) {
