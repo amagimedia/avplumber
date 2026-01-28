@@ -720,7 +720,6 @@ void ObsSinkMediaSpecific<av::VideoFrame>::composeObsFrame(ObsVideoSink<av::Vide
 void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFrame> &vsink)
 {
     std::fill(reinterpret_cast<uint8_t*>(&vsink.obs_hw_), reinterpret_cast<uint8_t*>(&vsink.obs_hw_)+sizeof(vsink.obs_hw_), 0);
-    vsink.obs_hw_.type = OBS_HW_BUFFER_EGLIMAGE;
     vsink.obs_hw_.borrows_frames = true;
     vsink.obs_hw_.buffer_to_texture = [](void* opaque, gs_texture_t* tex, void* buf, size_t linesize) {
         (void)opaque; (void)linesize;
