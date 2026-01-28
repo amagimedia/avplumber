@@ -32,11 +32,15 @@ int main(int argc, char **argv) {
     std::string script_path;
     uint16_t tcp_port;
     std::string log_path;
+    std::string webui_api_url;
+    std::string instance_name;
     bool show_version;
 
     args.Var(script_path, 's', "script", std::string(""), "Execute commands from this file");
     args.Var(tcp_port, 'p', "port", uint16_t(0), "Port to listen on, for commands (0 to disable)");
     args.Var(log_path, 'l', "logfile", std::string(""), "Write messages to this file (does not affect libav messages)");
+    args.Var(webui_api_url, 'w', "webui-api", std::string(""), "Web UI server API endpoint URL for auto-registration (e.g., http://localhost:22222)");
+    args.Var(instance_name, 'n', "instance-name", std::string(""), "Instance name for web UI registration");
     args.Bool(show_version, 'V', "version", std::string(""), "Show version and exit");
     args.Parse(argc, argv);
     
@@ -54,6 +58,9 @@ int main(int argc, char **argv) {
     AVPlumber &avp = *avp_ptr;
     avp.setLogFile(log_path);
     avp.enableControlServer(tcp_port);
+    if (!webui_api_url.empty()) {
+        avp.registerWithWebUI(webui_api_url, instance_name, log_path);
+    }
     if (!script_path.empty()) {
         logstream << "Starting parsing file " << script_path;
         avp.executeCommandsFromFile(script_path);

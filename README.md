@@ -84,12 +84,14 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
+-   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
 
 ### Using as a library
@@ -742,6 +744,24 @@ Duplicate and drop frames to achieve requested FPS
 
 -   `fps` (string of rational) - target FPS as a string, e.g. `25` or `30000/1001`
 
+### `smooth_timestamps`
+
+Overwrite timestamps with a smoothed monotonic timeline (previous + duration), while keeping A/V sync by resyncing to input timestamps when averaged drift grows too large.
+
+This node is non-blocking.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+For video:
+- `duration` (string of rational, seconds) - frame duration, typically `1/FPS` (e.g. `1/25`, `1001/30000`), **or**
+- `fps` (string of rational) - frames per second (alternative to `duration`)
+
+For both video and audio:
+- `resync_threshold` (float seconds, default `0.02`) - resync output timeline to input PTS when averaged drift exceeds this
+- `drift_window` (int, default `300`) - drift averaging window size (samples); larger = smoother, smaller = more reactive
+- `min_samples_before_resync` (int, default `150`) - ignore drift until this many frames/samples have been observed
+- `discontinuity_threshold` (float seconds, default `2.0`) - hard reset (resync) when input PTS jump exceeds this
+
 ### `assume_video_format` / `assume_audio_format`
 
 Set initial metadata to allow nodes that rely on them to start
@@ -1109,6 +1129,23 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+
+### `drm_prime_to_egl_image`
+
+Import DRM PRIME (DMA-BUF) frames into an `EGLImageKHR` via `EGL_EXT_image_dma_buf_import` and output them as `EglImageFrame` (no CUDA processing).
+
+1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format"; non-DRM PRIME frames are dropped), 1 output: `EglImageFrame`
+
+Supported DRM formats (layer0/plane0 only):
+- `DRM_FORMAT_ABGR8888`
+- `DRM_FORMAT_ARGB8888`
+
+Cache behavior:
+- Maintains an internal cache keyed by the incoming DMA-BUF FD number.
+- Cache entries are evicted when an FD is not seen for `ttl` seconds, and the whole cache is purged when resolution changes.
+
+Parameters:
+- `ttl` (float seconds, optional, default `5.0`) - cache entry time-to-live
 
 ### `jittergen`
 

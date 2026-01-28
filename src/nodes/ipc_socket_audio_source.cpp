@@ -172,9 +172,14 @@ public:
             }
             const uint64_t ts_ns = hdr.timestampNs;
             const uint32_t payload_len = hdr.payloadLen;
+            if (payload_len > 65536*4) {
+                logstream << "ipc_socket_audio_source: payload length too large: " << payload_len;
+                inbuf_.erase(inbuf_.begin());
+                continue;
+            }
             size_t total_needed = sizeof(AFRMHeader) + (size_t)payload_len;
             if (!haveEnoughBytes(inbuf_, total_needed)) {
-                logstream << "ipc_socket_audio_source: not enough bytes: " << inbuf_.size() << " < " << total_needed;
+                // in the middle of read
                 if (!recvSome()) { closeSocket(); wallclock.sleepms(reconnect_delay_ms_); return; }
                 continue;
             }

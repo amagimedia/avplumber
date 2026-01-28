@@ -3,7 +3,7 @@
 #include "../EventLoop.hpp"
 #include "../RealTimeTeam.hpp"
 
-template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp {
+template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp, public IInputsObjects, public IReturnsObjects {
 protected:
     bool ready_ = false;
     
@@ -38,7 +38,20 @@ protected:
     std::atomic_int64_t eof_frame_timestamp_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
     std::atomic_int64_t last_frame_synclock_ = -1;
+    // Local fallback delay for nodes without a team (shouldn't happen in practice, but for safety)
+    std::atomic<AVTS> local_user_delay_{0};
+    // When user delay is decreased, we can't "consume faster than realtime". Instead, discard only
+    // as much already-buffered timeline as needed to catch up to the new delay.
+    AVTS last_user_delay_seen_ = 0;
+    AVTS catchup_remaining_ = 0;              // in timebase_ units
+    AVTS catchup_prev_pkt_ts_ = AV_NOPTS_VALUE; // last consumed pkt_ts (rescaled), used to estimate how much timeline we skipped
 
+    AVTS secondsToTs(float seconds) const {
+        return AVTS(seconds * (float)timebase_.den / (float)timebase_.num + 0.5f);
+    }
+    float tsToSeconds(AVTS ts) const {
+        return (float)ts * (float)timebase_.num / (float)timebase_.den;
+    }
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
             return "NOTS";
@@ -55,6 +68,7 @@ protected:
         return anything_buffered;
     }
     void maybeStopFlushing() {
+        if (!team_) return;
         if (team_->isFlushing()) {
             logstream << "done flushing";
             if (is_master_) {
@@ -62,6 +76,12 @@ protected:
             }
             team_->stopFlushing();
         }
+    }
+    AVTS getUserDelay() {
+        // Get total user delay: team delay (shared, in timebase units) + local delay (per-source, in timebase units)
+        AVTS team_delay = team_ ? team_->getUserDelayTS() : 0;
+        AVTS local_delay = local_user_delay_.load(std::memory_order_relaxed);
+        return team_delay + local_delay;
     }
 public:
     using NodeSISO<T, T>::NodeSISO;
@@ -124,9 +144,12 @@ public:
 
                     if (input_ts.isValid() && team_) {
                         float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
-                        if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
+                        float user_delay_sec = tsToSeconds(getUserDelay());
+                        float sec_min = min_buffered_ + user_delay_sec;
+                        float sec_max = max_buffered_ + user_delay_sec;
+                        if ((buffered > sec_max) || (team_->isFlushing() && (buffered > sec_min))) {
                             if (!team_->isFlushing()) {
-                                logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
+                                logstream << "too many seconds buffered: " << buffered << " > " << sec_max << ", flushing";
                                 team_->startFlushing();
                             }
                             ready_ = false;
@@ -148,7 +171,30 @@ public:
                     ready_ = offset_ != AV_NOPTS_VALUE; // if offset was initialized by a member of our team, trust it
                 }
                 if (ready_) {
-                    AVTS diff = (pkt_ts - offset_) - now_ts;
+                    AVTS user_delay = getUserDelay();
+
+                    // If user_delay decreased since last time, enter bounded "catch-up" mode.
+                    // We will discard enough frames to remove only the delta delay from already buffered timeline.
+                    if (user_delay < last_user_delay_seen_) {
+                        catchup_remaining_ += (last_user_delay_seen_ - user_delay);
+                        catchup_prev_pkt_ts_ = AV_NOPTS_VALUE;
+                    }
+                    last_user_delay_seen_ = user_delay;
+
+                    // Add user delay to shift output timeline (positive = more latency)
+                    AVTS diff = (pkt_ts - offset_) - now_ts + user_delay;
+
+                    // Catch-up: when delay is reduced, previously buffered frames are now "late".
+                    // Don't resync/flush everything; just discard enough timeline to match the new delay.
+                    if (catchup_remaining_ > 0 && diff < 0) {
+                        emit = false;
+                        // keep consume=true so we pop the frame and advance
+                        if (!ticks) {
+                            this->yieldAndProcess();
+                        } else {
+                            process_next = true;
+                        }
+                    } else
                     if ((!woken_too_late_) && (diff < negative_time_tolerance_)) {
                         logstream << "negative time to wait " << printDuration(diff) << ", resyncing.";
                         ready_ = false;
@@ -250,6 +296,21 @@ public:
             AVTS emitted = wallclock.pts();
 
             if (consume) {
+                // If we are catching up after delay decrease, track how much timeline we have discarded so far.
+                // Use pkt_ts delta between consumed frames to estimate skipped duration (works for audio+video).
+                if (catchup_remaining_ > 0 && pkt_ts != AV_NOPTS_VALUE && pkt_ts != (AV_NOPTS_VALUE + 1)) {
+                    if (catchup_prev_pkt_ts_ != AV_NOPTS_VALUE && pkt_ts > catchup_prev_pkt_ts_) {
+                        AVTS advanced = pkt_ts - catchup_prev_pkt_ts_;
+                        if (advanced > 0) {
+                            catchup_remaining_ -= std::min(catchup_remaining_, advanced);
+                        }
+                    }
+                    catchup_prev_pkt_ts_ = pkt_ts;
+                    if (catchup_remaining_ <= 0) {
+                        catchup_remaining_ = 0;
+                        catchup_prev_pkt_ts_ = AV_NOPTS_VALUE;
+                    }
+                }
                 this->source_->pop();
 
                 // check whether there is next packet in the input queue 
@@ -303,6 +364,23 @@ public:
             last_frame_timestamp_ = std::atoll(frame_ts->value);
         }
     }
+    void setLastFrame(EglImageFrame* frm) {
+        if (frm->hasMetadata("frame_no")) {
+            last_frame_number_ = std::atoll(frm->getMetadata("frame_no").c_str());
+        }
+        if (frm->hasMetadata("frame_ts")) {
+            last_frame_timestamp_ = std::atoll(frm->getMetadata("frame_ts").c_str());
+            if (is_eof_ && (eof_frame_wallclock_ != last_frame_wallclock_)) {
+                eof_frame_wallclock_ = -1;
+                eof_frame_timestamp_ = -1;
+                is_eof_ = false;
+                logstream << "no EOF anymore";
+            }
+        }
+        if (frm->hasMetadata("wallclock")) {
+            last_frame_wallclock_ = std::atoll(frm->getMetadata("wallclock").c_str());
+        }
+    }
     template<typename T2> void setLastFrame(T2) {
     }
     virtual int64_t getCurrentFrameNumber() override {
@@ -314,11 +392,85 @@ public:
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
     }
-    virtual int64_t getCurrentFrameSyncclock() override {
-        return last_frame_synclock_;
-    }
     bool isEof() override {
         return is_eof_;
+    }
+    Parameters getObject(const std::string name) override {
+        if (name == "info") {
+            Parameters res;
+            AVTS team_delay = team_ ? team_->getUserDelayTS() : 0;
+            AVTS local_delay = local_user_delay_.load(std::memory_order_relaxed);
+            AVTS total_delay = team_delay + local_delay;
+            float total_delay_sec = tsToSeconds(total_delay);
+            float team_delay_sec = tsToSeconds(team_delay);
+            float local_delay_sec = tsToSeconds(local_delay);
+            res["user_delay_sec"] = total_delay_sec;
+            res["user_delay_ts"] = total_delay;
+            res["team_delay_sec"] = team_delay_sec;
+            res["local_delay_sec"] = local_delay_sec;
+            res["timebase"] = std::to_string(timebase_.num) + "/" + std::to_string(timebase_.den);
+            res["ready"] = ready_;
+            res["offset_ts"] = offset_;
+            return res;
+        } else if (name == "delay") {
+            Parameters res;
+            AVTS team_delay = team_ ? team_->getUserDelayTS() : 0;
+            AVTS local_delay = local_user_delay_.load(std::memory_order_relaxed);
+            AVTS total_delay = team_delay + local_delay;
+            float total_delay_sec = tsToSeconds(total_delay);
+            float team_delay_sec = tsToSeconds(team_delay);
+            float local_delay_sec = tsToSeconds(local_delay);
+            res["sec"] = total_delay_sec;
+            res["ms"] = total_delay_sec * 1000.0f;
+            res["ts"] = total_delay;
+            res["team_sec"] = team_delay_sec;
+            res["team_ms"] = team_delay_sec * 1000.0f;
+            res["local_sec"] = local_delay_sec;
+            res["local_ms"] = local_delay_sec * 1000.0f;
+            return res;
+        } else if (name == "team_delay") {
+            if (!team_) {
+                throw Error("Node does not belong to a team");
+            }
+            Parameters res;
+            float team_delay_sec = team_->getUserDelay();
+            res["sec"] = team_delay_sec;
+            res["ms"] = team_delay_sec * 1000.0f;
+            return res;
+        }
+        throw Error("Unknown object to get");
+    }
+    void setObject(const std::string name, const Parameters& p) override {
+        // Accept either:
+        // - number: seconds (e.g. 0.250)
+        // - object: {"ms":250} or {"sec":0.25} or {"seconds":0.25}
+        float sec = 0.0f;
+
+        if (p.is_number()) {
+            sec = p.get<float>();
+        } else if (p.is_object()) {
+            if (p.contains("ms")) {
+                sec = p["ms"].get<float>() / 1000.0f;
+            } else if (p.contains("sec")) {
+                sec = p["sec"].get<float>();
+            } else if (p.contains("seconds")) {
+                sec = p["seconds"].get<float>();
+            } else {
+                throw Error("delay object must contain ms/sec/seconds");
+            }
+        } else {
+            throw Error("delay must be a number (seconds) or an object");
+        }
+
+        AVTS d = secondsToTs(sec);
+
+        if (name == "delay") {
+            // Set local delay (per-source), even when team exists
+            // This allows per-source compensation on top of shared team delay
+            local_user_delay_.store(d, std::memory_order_relaxed);
+        } else {
+            throw Error("Unknown object to set");
+        }
     }
     virtual void resetInput() override {
         last_wait_ = 0;
