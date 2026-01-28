@@ -4,6 +4,9 @@
 #include <limits>
 #include <fstream>
 #include <iostream>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/streambuf.hpp>
@@ -839,9 +842,15 @@ AVPlumber::AVPlumber() {
     std::shared_ptr<NodeManager> nm = std::make_shared<NodeManager>();
     impl_ = new ControlImpl(nm);
     control_port_ = 0;
+    webui_heartbeat_stop_ = false;
 }
 
 AVPlumber::~AVPlumber() {
+    // Stop heartbeat thread
+    webui_heartbeat_stop_ = true;
+    if (webui_heartbeat_thread_.joinable()) {
+        webui_heartbeat_thread_.join();
+    }
     delete impl_;
     impl_ = nullptr;
 }
@@ -1028,26 +1037,66 @@ void AVPlumber::registerWithWebUI(const std::string& webui_api_url, const std::s
         return; // No web UI URL provided or control server not enabled
     }
     
+    // Stop existing heartbeat thread if any
+    webui_heartbeat_stop_ = true;
+    if (webui_heartbeat_thread_.joinable()) {
+        webui_heartbeat_thread_.join();
+    }
+    
+    // Store webui configuration
+    webui_api_url_ = webui_api_url;
+    instance_name_ = instance_name;
+    log_file_ = log_file;
+    
+    // Start heartbeat thread
+    webui_heartbeat_stop_ = false;
+    webui_heartbeat_thread_ = start_thread("webui heartbeat", [this]() {
+        this->webuiHeartbeatThread();
+    });
+    
+    logstream << "Started web UI heartbeat to " << webui_api_url;
+}
+
+void AVPlumber::webuiHeartbeatThread() {
+    int heartbeat_interval_seconds = 25;
+    const char* heartbeat_interval_seconds_str = getenv("AVPLUMBER_UI_HEARTBEAT_INTERVAL");
+    if (heartbeat_interval_seconds_str && heartbeat_interval_seconds_str[0] != '\0') {
+        heartbeat_interval_seconds = atoi(heartbeat_interval_seconds_str);
+    }
+    
     try {
-        // Use RESTEndpoint for synchronous registration (non-blocking sendInternal handles rate limiting)
-        RESTEndpoint endpoint(webui_api_url);
+        RESTEndpoint endpoint(webui_api_url_);
         
-        // Build the instance registration JSON
+        // Build the instance heartbeat JSON
         json instance_data;
         instance_data["port"] = control_port_;
         instance_data["host"] = "127.0.0.1"; // Default to localhost
-        if (!instance_name.empty()) {
-            instance_data["name"] = instance_name;
+        if (!instance_name_.empty()) {
+            instance_data["name"] = instance_name_;
         }
-        if (!log_file.empty()) {
-            instance_data["logFile"] = log_file;
+        if (!log_file_.empty()) {
+            instance_data["logFile"] = log_file_;
         }
         
         std::string json_str = instance_data.dump();
-        endpoint.send("/api/instances", json_str);
-        logstream << "Registered with web UI at " << webui_api_url << "/api/instances";
+        
+        // Send initial heartbeat immediately
+        endpoint.send("/api/instances/heartbeat", json_str);
+        
+        // Then send heartbeats every 25 seconds
+        while (!webui_heartbeat_stop_) {
+            std::this_thread::sleep_for(std::chrono::seconds(heartbeat_interval_seconds));
+            if (webui_heartbeat_stop_) {
+                break;
+            }
+            try {
+                endpoint.send("/api/instances/heartbeat", json_str);
+            } catch (std::exception &e) {
+                logstream << "Failed to send web UI heartbeat: " << e.what();
+            }
+        }
     } catch (std::exception &e) {
-        logstream << "Failed to register with web UI: " << e.what();
+        logstream << "Web UI heartbeat thread error: " << e.what();
     }
 }
 

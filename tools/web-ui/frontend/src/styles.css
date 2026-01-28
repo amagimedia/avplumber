@@ -86,6 +86,27 @@ body {
 
 .gl-container {
   background: #020617;
+  height: 100%;
+}
+
+/* Ensure Golden Layout item containers fill available height */
+.lm_item_container {
+  height: 100%;
+}
+
+.lm_content {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.lm_stack {
+  height: 100%;
+}
+
+.lm_row,
+.lm_column {
+  height: 100%;
 }
 
 .layout {
@@ -103,6 +124,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
 }
 
 .panel-wide {
@@ -139,7 +161,6 @@ button:hover {
 .scrollable {
   flex: 1;
   min-height: 80px;
-  max-height: 260px;
   background: #020617;
   border-radius: 0.25rem;
   border: 1px solid #111827;
