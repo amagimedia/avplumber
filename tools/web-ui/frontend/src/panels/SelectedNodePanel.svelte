@@ -27,7 +27,7 @@
   }
 </script>
 
-<div class="panel avp-panel">
+<div class="panel avp-panel selected-node-panel">
   {#if !selectedNode}
     <div class="hint">Click a node in the graph or in the nodes list to inspect it.</div>
   {:else}
