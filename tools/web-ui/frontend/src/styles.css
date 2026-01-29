@@ -127,6 +127,10 @@ body {
   height: 100%;
 }
 
+.selected-node-panel {
+  overflow-y: auto;
+}
+
 .panel-wide {
   grid-column: 1 / -1;
 }
