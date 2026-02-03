@@ -5,7 +5,6 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GL/gl.h>
-#include <GL/glext.h>
 #include <libavutil/hwcontext.h>
 #include "../instance_shared.hpp"
 #include "../ObjectPool.hpp"
@@ -19,6 +18,10 @@ struct CudaEglImageEntry {
 	EGLImageKHR egl_image = EGL_NO_IMAGE_KHR;
 	CUgraphicsResource cu_tex_res = nullptr;
 };
+
+#ifndef GL_SRGB8_ALPHA8
+#define GL_SRGB8_ALPHA8 0x8C43
+#endif
 
 class CudaEglImagePool {
 private:
@@ -261,7 +264,7 @@ private:
 			glBindTexture(GL_TEXTURE_2D, e.gl_tex_rgba);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			// Back EGLImage with an sRGB-capable texture so OBS can decode to linear when sampling
+			// Allocate as sRGB so OBS can do a single sRGB->linear decode on sampling.
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 			glBindTexture(GL_TEXTURE_2D, 0);
 			EGLint img_attrs[] = { EGL_GL_TEXTURE_LEVEL_KHR, 0, /*EGL_GL_COLORSPACE_KHR, EGL_GL_COLORSPACE_SRGB_KHR,*/ EGL_NONE };
