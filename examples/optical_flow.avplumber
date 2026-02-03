@@ -17,33 +17,33 @@ node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "in", "n
 
 # FRUC 2× interpolation
 queue.plan_capacity v_fruc 60
-node.add { "type": "nvof_fruc", "src": "v_dec", "dst": "v_fruc", "hwaccel": "@gpu", "library": "/usr/local/Optical_Flow_SDK_5.0.7/./NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so", "passthrough_on_fail": true }
+node.add { "type": "nvof_fruc", "src": "v_dec", "dst": "v_fruc", "group": "in", "hwaccel": "@gpu", "library": "/usr/local/Optical_Flow_SDK_5.0.7/./NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so", "passthrough_on_fail": true }
 
 # Slow motion x2 (speed=0.5)
 queue.plan_capacity v_slow 60
-node.add { "type": "speed_video", "src": "v_fruc", "dst": "v_slow", "team": "slomo", "speed": 0.5 }
+node.add { "type": "speed_video", "src": "v_fruc", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.5 }
 
 # Force constant 60fps before output
-queue.plan_capacity v_cfr 60
-node.add { "type": "force_fps", "src": "v_slow", "dst": "v_cfr", "fps": "60/1", "group": "out", "auto_restart": "panic" }
+queue.plan_capacity v_fps_forced 60
+node.add { "type": "force_fps", "src": "v_slow", "dst": "v_fps_forced", "fps": "60/1", "group": "out", "auto_restart": "panic" }
+
+# Provide explicit video format metadata for downstream nodes (no conversion)
+queue.plan_capacity v0 60
+node.add { "type": "fake_video_format", "pixel_format": "cuda", "real_pixel_format": "yuv420p", "group": "out", "auto_restart": "panic", "src": "v_fps_forced", "dst": "v0" }
 
 # Pace in real-time using PTS
 queue.plan_capacity v_rt 60
-node.add { "type": "realtime<av::VideoFrame>", "team": "rt", "discontinuity_threshold": 30, "negative_time_tolerance": 0.02, "negative_time_discard": 0.02, "jitter_margin": 0.1, "initial_jitter_margin": 0.1, "src": "v_cfr", "dst": "v_rt", "group": "out", "name": "RTSync_v", "auto_restart": "on" }
+node.add { "type": "realtime<av::VideoFrame>", "team": "rt", "discontinuity_threshold": 30, "negative_time_tolerance": 0.02, "negative_time_discard": 0.02, "jitter_margin": 0.1, "initial_jitter_margin": 0.1, "src": "v0", "dst": "v_rt", "group": "out", "name": "RTSync_v", "auto_restart": "on" }
 
-# Download to CPU yuv420p for x264
-queue.plan_capacity v_sw 60
-node.add { "type": "filter_video", "src": "v_rt", "dst": "v_sw", "graph": "[v:0]hwdownload,format=yuv420p", "group": "out", "auto_restart": "panic", "name": "HWDownload" }
+# Encode + mux + output (video-only, NVENC)
+queue.plan_capacity keyframed_med 60
+node.add { "type": "force_keyframe", "src": "v_rt", "dst": "keyframed_med", "interval_sec": "1/1", "group": "out", "auto_restart": "panic" }
 
-# Encode + mux + output (video-only)
-queue.plan_capacity v_key 60
-node.add { "type": "force_keyframe", "src": "v_sw", "dst": "v_key", "interval_sec": "1/1", "group": "out", "auto_restart": "panic" }
-
-queue.plan_capacity v_outenc 240
-node.add { "type": "enc_video", "src": "v_key", "dst": "v_outenc", "codec": "libx264", "group": "out", "auto_restart": "panic", "name": "Video_Encode", "options": { "preset": "veryfast", "tune": "zerolatency", "profile": "main", "bframes": 0, "gop_size": 120, "b": "6000k" } }
+queue.plan_capacity venc_med 240
+node.add { "type": "enc_video", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "preset": "llhq", "b": "5000k", "minrate": "4120k", "maxrate": "5880k", "flags": "+cgop", "profile": "main", "level": "42", "bufsize": "5880k", "rc": "cbr", "g": 30 }, "type": "enc_video", "auto_restart": "panic", "name": "VEncode_med", "group": "out", "src": "keyframed_med", "dst": "venc_med" }
 
 queue.plan_capacity mux0 240
-node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux0", "group": "out", "auto_restart": "panic", "ts_sort_wait": 0 }
+node.add { "type": "mux", "src": ["venc_med"], "dst": "mux0", "group": "out", "auto_restart": "panic", "ts_sort_wait": 0 }
 
 node.add { "type": "output", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/fruc", "src": "mux0", "group": "out", "auto_restart": "panic", "name": "Out_rtmp" }
 
