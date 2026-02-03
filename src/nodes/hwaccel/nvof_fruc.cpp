@@ -5,6 +5,9 @@
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_cuda.h"
 
 #include <dlfcn.h>
+#ifdef __GLIBC__
+#include <link.h>   // dlmopen, lmid_t, LM_ID_NEWLM
+#endif
 #include <string>
 #include <vector>
 #include <optional>
@@ -48,6 +51,13 @@ private:
 
 	// FRUC dynamic library + function pointers
 	void* fruc_lib_ = nullptr;
+#ifdef __GLIBC__
+	// Load FRUC (and libcuda) into a separate link-map so it won't bind to avplumber's
+	// CUDA dynlink shim symbols (e.g. cuCtxGetCurrent as static storage).
+	void* fruc_ns_cuda_ = nullptr;
+	lmid_t fruc_lmid_ = LM_ID_BASE;
+	bool fruc_in_new_namespace_ = false;
+#endif
 	PtrToFuncNvOFFRUCCreate fn_create_ = nullptr;
 	PtrToFuncNvOFFRUCRegisterResource fn_register_ = nullptr;
 	PtrToFuncNvOFFRUCUnregisterResource fn_unregister_ = nullptr;
@@ -88,7 +98,23 @@ private:
 	{
 		if (fruc_lib_) return true;
 		const char* libname = fruc_library_path_.empty() ? "libNvOFFRUC.so" : fruc_library_path_.c_str();
-		fruc_lib_ = dlopen(libname, RTLD_LAZY);
+#ifdef __GLIBC__
+		// Critical: ensure libNvOFFRUC binds CUDA symbols from libcuda.so.1,
+		// not avplumber's CUDA dynlink shim. Use a new link-map namespace.
+		fruc_ns_cuda_ = dlmopen(LM_ID_NEWLM, "libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+		if (fruc_ns_cuda_) {
+			if (dlinfo(fruc_ns_cuda_, RTLD_DI_LMID, &fruc_lmid_) == 0) {
+				fruc_lib_ = dlmopen(fruc_lmid_, libname, RTLD_NOW | RTLD_LOCAL);
+				if (fruc_lib_) {
+					fruc_in_new_namespace_ = true;
+				}
+			}
+		}
+#endif
+		if (!fruc_lib_) {
+			// Fallback: normal dlopen (may crash if CUDA symbols interpose).
+			fruc_lib_ = dlopen(libname, RTLD_LAZY);
+		}
 		if (!fruc_lib_) {
 			logstream << "nvof_fruc: dlopen failed for " << libname << ": " << (dlerror() ? dlerror() : "unknown");
 			return false;
@@ -605,6 +631,12 @@ public:
 			dlclose(fruc_lib_);
 			fruc_lib_ = nullptr;
 		}
+#ifdef __GLIBC__
+		if (fruc_ns_cuda_) {
+			dlclose(fruc_ns_cuda_);
+			fruc_ns_cuda_ = nullptr;
+		}
+#endif
 	}
 };
 
