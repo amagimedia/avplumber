@@ -93,7 +93,7 @@ endif
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC),11)
 ifneq (,$(wildcard $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface/NvOFFRUC.h))
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/nvof_fruc.cpp
-override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)
+override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface
 else
 override CXXFLAGS += -DHAVE_NVOF_FRUC=0
 endif
