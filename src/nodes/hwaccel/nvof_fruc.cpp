@@ -345,7 +345,9 @@ private:
 	{
 		// Copies input into next render buffer and invokes FRUC to generate into interp_buf_.
 		render_idx_ = (render_idx_ + 1) & 1;
-		CUdeviceptr cur_render = render_buf_[render_idx_];
+		// IMPORTANT: NvOFFRUC uses the *address* of the registered CUdeviceptr as the resource handle.
+		// We must pass a pointer to our registered `render_buf_[i]`, not a pointer to a local copy.
+		CUdeviceptr *cur_render = &render_buf_[render_idx_];
 
 		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
 			logstream << "nvof_fruc: cuCtxPushCurrent failed (run_fruc_for_frame)";
@@ -353,7 +355,7 @@ private:
 		}
 
 		bool ok = true;
-		if (!copy_frame_to_nv12_buffer(in, cur_render)) {
+		if (!copy_frame_to_nv12_buffer(in, *cur_render)) {
 			logstream << "nvof_fruc: failed to copy input frame to FRUC buffer";
 			ok = false;
 		}
@@ -363,7 +365,7 @@ private:
 			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
 			bool repeated = false;
 
-			inParams.stFrameDataInput.pFrame = &cur_render; // CUdeviceptr*
+			inParams.stFrameDataInput.pFrame = cur_render; // CUdeviceptr*
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 0;
@@ -515,17 +517,20 @@ public:
 				return;
 			}
 			// Copy to current render buffer and call FRUC with skip-warp to update internal state.
-			CUdeviceptr cur_render = render_buf_[render_idx_];
-			(void)copy_frame_to_nv12_buffer(in, cur_render);
+			// IMPORTANT: pass the pointer to the registered CUdeviceptr.
+			CUdeviceptr *cur_render = &render_buf_[render_idx_];
+			(void)copy_frame_to_nv12_buffer(in, *cur_render);
 			NvOFFRUC_PROCESS_IN_PARAMS inParams{};
 			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
-			inParams.stFrameDataInput.pFrame = &cur_render;
+			bool repeated = false;
+			inParams.stFrameDataInput.pFrame = cur_render;
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 1;
 			outParams.stFrameDataOutput.pFrame = &interp_buf_;
 			outParams.stFrameDataOutput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
+			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
 			(void)fn_process_(h_fruc_, &inParams, &outParams);
 			CUcontext dummy;
 			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
