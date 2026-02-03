@@ -181,20 +181,22 @@ private:
 		// Reinitialize on size change
 		cleanup_fruc();
 
-		// Allocate our CUDA buffers (contiguous NV12: Y then UV)
-		nv12_size_bytes_ = (size_t)w * (size_t)h + ((size_t)w * (size_t)h) / 2;
-		if (CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
-			logstream << "nvof_fruc: cuCtxPushCurrent failed (ensure_fruc)";
+		// FRUC CUDA path requires a current CUDA context on this thread.
+		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
+			logstream << "nvof_fruc: cuCtxPushCurrent failed (ensure_fruc, pre-create)";
 			return false;
 		}
+
+		// Allocate our CUDA buffers (contiguous NV12: Y then UV)
+		nv12_size_bytes_ = (size_t)w * (size_t)h + ((size_t)w * (size_t)h) / 2;
 		int cuerr = 0;
 		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&interp_buf_, nv12_size_bytes_));
 		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&render_buf_[0], nv12_size_bytes_));
 		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&render_buf_[1], nv12_size_bytes_));
-		CUcontext dummy;
-		cuerr |= CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 		if (cuerr) {
 			logstream << "nvof_fruc: cuMemAlloc failed";
+			CUcontext dummy;
+			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 			return false;
 		}
 
@@ -211,6 +213,8 @@ private:
 		if (st != NvOFFRUC_SUCCESS || !h_fruc_) {
 			logstream << "nvof_fruc: NvOFFRUCCreate failed: " << (int)st;
 			cleanup_fruc();
+			CUcontext dummy;
+			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 			return false;
 		}
 
@@ -224,12 +228,17 @@ private:
 		if (st != NvOFFRUC_SUCCESS) {
 			logstream << "nvof_fruc: NvOFFRUCRegisterResource failed: " << (int)st;
 			cleanup_fruc();
+			CUcontext dummy;
+			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 			return false;
 		}
 		resources_registered_ = true;
 		render_idx_ = 0;
 		have_prev_pts_ = false;
 		prev_pts_ = NOTS;
+
+		CUcontext dummy;
+		CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 		return true;
 	}
 
