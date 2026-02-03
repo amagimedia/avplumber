@@ -1,0 +1,159 @@
+# RTMP (60fps) -> NVDEC(CUDA/NV12) -> NvOFFRUC FRUC (2x interp) -> slowmo x2 (speed=0.5) -> force CFR 60 -> x264 -> FLV/RTMP out
+#
+# Notes:
+# - Requires NVIDIA GPU (Turing+) and libNvOFFRUC.so available at runtime.
+# - nvof_fruc will passthrough if FRUC isn't available or input isn't CUDA/NV12 (passthrough_on_fail=true).
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add {
+  "type": "input",
+  "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/doom-eternal",
+  "dst": "in10",
+  "group": "in",
+  "auto_restart": "group",
+  "name": "input",
+  "initial_timeout": 20,
+  "timeout": 10
+}
+
+queue.plan_capacity v_in 600
+node.add {
+  "type": "demux",
+  "src": "in10",
+  "wait_for_keyframe": false,
+  "routing": { "v:0": "v_in" },
+  "group": "in",
+  "auto_restart": "group"
+}
+
+# --- HW decode to CUDA (NVDEC/cuvid) ---
+queue.plan_capacity v_dec 30
+node.add {
+  "type": "dec_video",
+  "src": "v_in",
+  "dst": "v_dec",
+  "group": "in",
+  "name": "Video_Dec",
+  "auto_restart": "group",
+  "optional": true,
+  "pixel_format": "?cuda",
+  "hwaccel": "@gpu",
+  "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" },
+  "hwaccel_only_for_codecs": ["h264", "hevc"]
+}
+
+# --- FRUC 2× interpolation ---
+queue.plan_capacity v_fruc 60
+node.add {
+  "type": "nvof_fruc",
+  "src": "v_dec",
+  "dst": "v_fruc",
+  "hwaccel": "@gpu",
+  "library": "/usr/local/Optical_Flow_SDK_5.0.7/./NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so",
+  "passthrough_on_fail": true
+}
+
+# --- Slow motion x2 (speed=0.5) ---
+queue.plan_capacity v_slow 60
+node.add {
+  "type": "speed_video",
+  "src": "v_fruc",
+  "dst": "v_slow",
+  "team": "slomo",
+  "speed": 0.5
+}
+
+# --- Force constant 60fps before output ---
+queue.plan_capacity v_cfr 60
+node.add {
+  "type": "force_fps",
+  "src": "v_slow",
+  "dst": "v_cfr",
+  "fps": "60/1",
+  "group": "out",
+  "auto_restart": "panic"
+}
+
+# --- Pace in real-time using PTS ---
+queue.plan_capacity v_rt 60
+node.add {
+  "type": "realtime<av::VideoFrame>",
+  "team": "rt",
+  "discontinuity_threshold": 30,
+  "negative_time_tolerance": 0.02,
+  "negative_time_discard": 0.02,
+  "jitter_margin": 0.1,
+  "initial_jitter_margin": 0.1,
+  "src": "v_cfr",
+  "dst": "v_rt",
+  "group": "out",
+  "name": "RTSync_v",
+  "auto_restart": "on"
+}
+
+# --- Download to CPU yuv420p for x264 ---
+queue.plan_capacity v_sw 60
+node.add {
+  "type": "filter_video",
+  "src": "v_rt",
+  "dst": "v_sw",
+  "graph": "[v:0]hwdownload,format=yuv420p",
+  "group": "out",
+  "auto_restart": "panic",
+  "name": "HWDownload"
+}
+
+# --- Encode + mux + output (video-only) ---
+queue.plan_capacity v_key 60
+node.add {
+  "type": "force_keyframe",
+  "src": "v_sw",
+  "dst": "v_key",
+  "interval_sec": "1/1",
+  "group": "out",
+  "auto_restart": "panic"
+}
+
+queue.plan_capacity v_outenc 240
+node.add {
+  "type": "enc_video",
+  "src": "v_key",
+  "dst": "v_outenc",
+  "codec": "libx264",
+  "group": "out",
+  "auto_restart": "panic",
+  "name": "Video_Encode",
+  "options": {
+    "preset": "veryfast",
+    "tune": "zerolatency",
+    "profile": "main",
+    "bframes": 0,
+    "gop_size": 120,
+    "b": "6000k"
+  }
+}
+
+queue.plan_capacity mux0 240
+node.add {
+  "type": "mux",
+  "src": ["v_outenc"],
+  "dst": "mux0",
+  "group": "out",
+  "auto_restart": "panic",
+  "ts_sort_wait": 0
+}
+
+node.add {
+  "type": "output",
+  "format": "flv",
+  "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/fruc",
+  "src": "mux0",
+  "group": "out",
+  "auto_restart": "panic",
+  "name": "Out_rtmp"
+}
+
+group.start out
+detach retry group.start in
+
