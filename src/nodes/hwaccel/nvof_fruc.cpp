@@ -57,10 +57,9 @@ private:
 	NvOFFRUCHandle h_fruc_ = nullptr;
 	bool resources_registered_ = false;
 
-	// CUDA buffers shared with FRUC (we copy into these)
-	CUdeviceptr render_buf_[2]{0, 0};
-	CUdeviceptr interp_buf_{0};
-	size_t nv12_size_bytes_ = 0;
+	// CUDA arrays shared with FRUC (we copy into these)
+	CUarray render_buf_[2]{nullptr, nullptr};
+	CUarray interp_buf_{nullptr};
 	int render_idx_ = 0;
 
 	// State for 2x output scheduling
@@ -120,9 +119,9 @@ private:
 		if (resources_registered_ && fn_unregister_ && h_fruc_) {
 			NvOFFRUC_UNREGISTER_RESOURCE_PARAM unreg{};
 			unreg.uiCount = NvOFFRUC_MIN_RESOURCE;
-			unreg.pArrResource[0] = &interp_buf_;
-			unreg.pArrResource[1] = &render_buf_[0];
-			unreg.pArrResource[2] = &render_buf_[1];
+			unreg.pArrResource[0] = interp_buf_;
+			unreg.pArrResource[1] = render_buf_[0];
+			unreg.pArrResource[2] = render_buf_[1];
 			(void)fn_unregister_(h_fruc_, &unreg);
 			resources_registered_ = false;
 		}
@@ -131,16 +130,15 @@ private:
 			h_fruc_ = nullptr;
 		}
 		if (interp_buf_) {
-			CHECK_CU_FRUC(cuMemFree(interp_buf_));
-			interp_buf_ = 0;
+			CHECK_CU_FRUC(cuArrayDestroy(interp_buf_));
+			interp_buf_ = nullptr;
 		}
 		for (auto &b : render_buf_) {
 			if (b) {
-				CHECK_CU_FRUC(cuMemFree(b));
-				b = 0;
+				CHECK_CU_FRUC(cuArrayDestroy(b));
+				b = nullptr;
 			}
 		}
-		nv12_size_bytes_ = 0;
 	}
 
 	bool ensure_hw_frames_ctx(int w, int h)
@@ -182,7 +180,7 @@ private:
 		if (!cuda_dev_ctx_) return false;
 		if (!load_fruc_library()) return false;
 
-		if (h_fruc_ && w == width_ && h == height_ && nv12_size_bytes_ != 0) {
+		if (h_fruc_ && w == width_ && h == height_ && interp_buf_ && render_buf_[0] && render_buf_[1]) {
 			return true;
 		}
 
@@ -195,14 +193,18 @@ private:
 			return false;
 		}
 
-		// Allocate our CUDA buffers (contiguous NV12: Y then UV)
-		nv12_size_bytes_ = (size_t)w * (size_t)h + ((size_t)w * (size_t)h) / 2;
+		// Allocate CUDA arrays for NV12 (single channel array with height * 3/2)
+		CUDA_ARRAY_DESCRIPTOR desc{};
+		desc.Format = CU_AD_FORMAT_UNSIGNED_INT8;
+		desc.Width = (size_t)w;
+		desc.Height = (size_t)h + (size_t)h / 2;
+		desc.NumChannels = 1;
 		int cuerr = 0;
-		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&interp_buf_, nv12_size_bytes_));
-		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&render_buf_[0], nv12_size_bytes_));
-		cuerr |= CHECK_CU_FRUC(cuMemAlloc(&render_buf_[1], nv12_size_bytes_));
+		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&interp_buf_, &desc));
+		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&render_buf_[0], &desc));
+		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&render_buf_[1], &desc));
 		if (cuerr) {
-			logstream << "nvof_fruc: cuMemAlloc failed";
+			logstream << "nvof_fruc: cuArrayCreate failed";
 			CUcontext dummy;
 			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 			return false;
@@ -215,7 +217,7 @@ private:
 		createParams.pDevice = nullptr; // for CUDA path, the sample uses internal CUDA ctx; driver-side impl ignores this
 		createParams.eResourceType = CudaResource;
 		createParams.eSurfaceFormat = NV12Surface;
-		createParams.eCUDAResourceType = CudaResourceCuDevicePtr;
+		createParams.eCUDAResourceType = CudaResourceCuArray;
 
 		NvOFFRUC_STATUS st = fn_create_(&createParams, &h_fruc_);
 		if (st != NvOFFRUC_SUCCESS || !h_fruc_) {
@@ -229,9 +231,9 @@ private:
 		// Register resources (1 interpolate + 2 render) like the sample
 		NvOFFRUC_REGISTER_RESOURCE_PARAM reg{};
 		reg.uiCount = NvOFFRUC_MIN_RESOURCE;
-		reg.pArrResource[0] = &interp_buf_;
-		reg.pArrResource[1] = &render_buf_[0];
-		reg.pArrResource[2] = &render_buf_[1];
+		reg.pArrResource[0] = interp_buf_;
+		reg.pArrResource[1] = render_buf_[0];
+		reg.pArrResource[2] = render_buf_[1];
 		st = fn_register_(h_fruc_, &reg);
 		if (st != NvOFFRUC_SUCCESS) {
 			logstream << "nvof_fruc: NvOFFRUCRegisterResource failed: " << (int)st;
@@ -250,9 +252,9 @@ private:
 		return true;
 	}
 
-	bool copy_frame_to_nv12_buffer(const av::VideoFrame &in, CUdeviceptr dst_nv12)
+	bool copy_frame_to_nv12_buffer(const av::VideoFrame &in, CUarray dst_nv12)
 	{
-		// Copy input CUDA NV12 planes into our contiguous NV12 buffer.
+		// Copy input CUDA NV12 planes into our CUDA array (Y then UV).
 		const int w = in.width();
 		const int h = in.height();
 		if (w <= 0 || h <= 0) return false;
@@ -268,9 +270,9 @@ private:
 		cpyY.srcMemoryType = CU_MEMORYTYPE_DEVICE;
 		cpyY.srcDevice = srcY;
 		cpyY.srcPitch = srcPitchY;
-		cpyY.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-		cpyY.dstDevice = dst_nv12;
-		cpyY.dstPitch = (size_t)w;
+		cpyY.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+		cpyY.dstArray = dst_nv12;
+		cpyY.dstY = 0;
 		cpyY.WidthInBytes = (size_t)w;
 		cpyY.Height = (size_t)h;
 
@@ -278,9 +280,9 @@ private:
 		cpyUV.srcMemoryType = CU_MEMORYTYPE_DEVICE;
 		cpyUV.srcDevice = srcUV;
 		cpyUV.srcPitch = srcPitchUV;
-		cpyUV.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-		cpyUV.dstDevice = dst_nv12 + (size_t)w * (size_t)h;
-		cpyUV.dstPitch = (size_t)w;
+		cpyUV.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+		cpyUV.dstArray = dst_nv12;
+		cpyUV.dstY = (size_t)h;
 		cpyUV.WidthInBytes = (size_t)w;
 		cpyUV.Height = (size_t)h / 2;
 
@@ -291,7 +293,7 @@ private:
 		return cuerr == 0;
 	}
 
-	bool copy_nv12_buffer_to_frame(CUdeviceptr src_nv12, av::VideoFrame &out)
+	bool copy_nv12_buffer_to_frame(CUarray src_nv12, av::VideoFrame &out)
 	{
 		const int w = out.width();
 		const int h = out.height();
@@ -305,9 +307,9 @@ private:
 		size_t dstPitchUV = (size_t)out.raw()->linesize[1];
 
 		CUDA_MEMCPY2D cpyY{};
-		cpyY.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-		cpyY.srcDevice = src_nv12;
-		cpyY.srcPitch = (size_t)w;
+		cpyY.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+		cpyY.srcArray = src_nv12;
+		cpyY.srcY = 0;
 		cpyY.dstMemoryType = CU_MEMORYTYPE_DEVICE;
 		cpyY.dstDevice = dstY;
 		cpyY.dstPitch = dstPitchY;
@@ -315,9 +317,9 @@ private:
 		cpyY.Height = (size_t)h;
 
 		CUDA_MEMCPY2D cpyUV{};
-		cpyUV.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-		cpyUV.srcDevice = src_nv12 + (size_t)w * (size_t)h;
-		cpyUV.srcPitch = (size_t)w;
+		cpyUV.srcMemoryType = CU_MEMORYTYPE_ARRAY;
+		cpyUV.srcArray = src_nv12;
+		cpyUV.srcY = (size_t)h;
 		cpyUV.dstMemoryType = CU_MEMORYTYPE_DEVICE;
 		cpyUV.dstDevice = dstUV;
 		cpyUV.dstPitch = dstPitchUV;
@@ -345,9 +347,7 @@ private:
 	{
 		// Copies input into next render buffer and invokes FRUC to generate into interp_buf_.
 		render_idx_ = (render_idx_ + 1) & 1;
-		// IMPORTANT: NvOFFRUC uses the *address* of the registered CUdeviceptr as the resource handle.
-		// We must pass a pointer to our registered `render_buf_[i]`, not a pointer to a local copy.
-		CUdeviceptr *cur_render = &render_buf_[render_idx_];
+		CUarray cur_render = render_buf_[render_idx_];
 
 		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
 			logstream << "nvof_fruc: cuCtxPushCurrent failed (run_fruc_for_frame)";
@@ -355,7 +355,7 @@ private:
 		}
 
 		bool ok = true;
-		if (!copy_frame_to_nv12_buffer(in, *cur_render)) {
+		if (!copy_frame_to_nv12_buffer(in, cur_render)) {
 			logstream << "nvof_fruc: failed to copy input frame to FRUC buffer";
 			ok = false;
 		}
@@ -365,12 +365,12 @@ private:
 			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
 			bool repeated = false;
 
-			inParams.stFrameDataInput.pFrame = cur_render; // CUdeviceptr*
+			inParams.stFrameDataInput.pFrame = cur_render; // CUarray
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 0;
 
-			outParams.stFrameDataOutput.pFrame = &interp_buf_; // CUdeviceptr*
+			outParams.stFrameDataOutput.pFrame = interp_buf_; // CUarray
 			outParams.stFrameDataOutput.nTimeStamp = (double)out_pts.timestamp({1, 1000});
 			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
 			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
@@ -517,9 +517,8 @@ public:
 				return;
 			}
 			// Copy to current render buffer and call FRUC with skip-warp to update internal state.
-			// IMPORTANT: pass the pointer to the registered CUdeviceptr.
-			CUdeviceptr *cur_render = &render_buf_[render_idx_];
-			(void)copy_frame_to_nv12_buffer(in, *cur_render);
+			CUarray cur_render = render_buf_[render_idx_];
+			(void)copy_frame_to_nv12_buffer(in, cur_render);
 			NvOFFRUC_PROCESS_IN_PARAMS inParams{};
 			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
 			bool repeated = false;
@@ -527,7 +526,7 @@ public:
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 1;
-			outParams.stFrameDataOutput.pFrame = &interp_buf_;
+			outParams.stFrameDataOutput.pFrame = interp_buf_;
 			outParams.stFrameDataOutput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
 			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
