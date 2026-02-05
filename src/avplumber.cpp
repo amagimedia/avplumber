@@ -845,7 +845,8 @@ int64_t AVPlumber::obs_get_time() {
         return -1;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
-        auto n = node->node();
+        std::shared_ptr<Node> n;
+        node->doLocked([&]() { n = node->node(); });
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
@@ -884,11 +885,11 @@ int64_t AVPlumber::obs_get_duration() {
         return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
-        auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
-        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
-        if (n_rec && n) {
-            auto duration = n->getObject("stream-limits");
+        try {
+            auto duration = node->getObject("stream-limits");
             return duration["duration"];
+        } catch (const std::exception &) {
+            return -1;
         }
     }
 
@@ -899,10 +900,11 @@ double AVPlumber::obs_get_speed() {
         return 1.00;
     auto node = impl_->manager()->node_if_exists(SPEED_NODE);
     if (node) {
-        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
-        if (n) {
-            auto info = n->getObject("info");
+        try {
+            auto info = node->getObject("info");
             return info["speed"];
+        } catch (const std::exception &) {
+            return 1.00;
         }
     }
 
@@ -913,7 +915,8 @@ bool AVPlumber::obs_is_eof() {
         return false;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
-        auto n = node->node();
+        std::shared_ptr<Node> n;
+        node->doLocked([&]() { n = node->node(); });
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
