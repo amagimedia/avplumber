@@ -846,7 +846,9 @@ int64_t AVPlumber::obs_get_time() {
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         std::shared_ptr<Node> n;
-        node->doLocked([&]() { n = node->node(); });
+        if (!node->doLockedTry([&]() { n = node->node(); })) {
+            return -1;
+        }
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
@@ -886,7 +888,10 @@ int64_t AVPlumber::obs_get_duration() {
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
         try {
-            auto duration = node->getObject("stream-limits");
+            Parameters duration;
+            if (!node->getObjectTry("stream-limits", duration)) {
+                return -1;
+            }
             return duration["duration"];
         } catch (const std::exception &) {
             return -1;
@@ -901,7 +906,10 @@ double AVPlumber::obs_get_speed() {
     auto node = impl_->manager()->node_if_exists(SPEED_NODE);
     if (node) {
         try {
-            auto info = node->getObject("info");
+            Parameters info;
+            if (!node->getObjectTry("info", info)) {
+                return 1.00;
+            }
             return info["speed"];
         } catch (const std::exception &) {
             return 1.00;
@@ -916,7 +924,9 @@ bool AVPlumber::obs_is_eof() {
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
         std::shared_ptr<Node> n;
-        node->doLocked([&]() { n = node->node(); });
+        if (!node->doLockedTry([&]() { n = node->node(); })) {
+            return false;
+        }
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {

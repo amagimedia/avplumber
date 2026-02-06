@@ -81,10 +81,35 @@ public:
         std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
         cb();
     }
+    // Non-blocking variant: if start/stop/create is in progress, return false
+    // instead of blocking the caller thread.
+    inline bool doLockedTry(std::function<void()> cb) {
+        if (!start_stop_mutex_.try_lock()) {
+            return false;
+        }
+        std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_, std::adopt_lock);
+        cb();
+        return true;
+    }
     bool start();
     bool stop(bool inhibit_actions = true);
     bool interrupt(bool optional = false);
     Parameters getObject(const std::string);
+    bool getObjectTry(const std::string object_name, Parameters &out) {
+        if (!start_stop_mutex_.try_lock()) {
+            return false;
+        }
+        std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_, std::adopt_lock);
+        if (node_==nullptr) {
+            return false;
+        }
+        IReturnsObjects* retobj = dynamic_cast<IReturnsObjects*>(node_.get());
+        if (retobj==nullptr) {
+            return false;
+        }
+        out = retobj->getObject(object_name);
+        return true;
+    }
     void setObject(const std::string, const Parameters&);
 
     bool stopAndWait();
