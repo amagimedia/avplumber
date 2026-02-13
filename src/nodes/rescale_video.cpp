@@ -17,7 +17,11 @@ protected:
         return src_params_ != VideoParameters(frame);
     }
     void createRescaler() {
-        rescaler_ = make_unique<av::VideoRescaler>(dst_params_.width, dst_params_.height, dst_params_.pixel_format, src_params_.width, src_params_.height, src_params_.pixel_format);
+        rescaler_ = make_unique<av::VideoRescaler>(
+            dst_params_.width ? dst_params_.width : src_params_.width,
+            dst_params_.height ? dst_params_.height : src_params_.height,
+            dst_params_.pixel_format,
+            src_params_.width, src_params_.height, src_params_.pixel_format);
     }
 public:
     virtual void process() {
@@ -71,9 +75,11 @@ public:
     static std::shared_ptr<DynamicVideoScaler> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
-        VideoParameters dst_params;
-        dst_params.width = params.at("dst_width").get<int>();
-        dst_params.height = params.at("dst_height").get<int>();
+        VideoParameters dst_params = {};
+        if (params.count("dst_width")==1)
+            dst_params.width = params.at("dst_width").get<int>();
+        if (params.count("dst_height")==1)
+            dst_params.height = params.at("dst_height").get<int>();
         int32_t flags_i = 0;
         if (params.count("flags")==1) {
             const Parameters &flags_list = params["flags"];
