@@ -67,6 +67,8 @@ protected:
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
     bool loop_ = false;
     std::atomic_bool notify_eof_ = false;
+    std::atomic_bool eof_sent_ = false;
+    bool send_eof_ = true;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -614,6 +616,7 @@ public:
             this->sink_->put(createEofPacket(video_stream_));
             doStop();
             notify_eof_ = false;
+            eof_sent_ = false;
             return;
         }
 
@@ -725,9 +728,12 @@ public:
             return;
         }
         if (pkt.isNull()) {
-            // we are at the end os recording
-            logstream << "end of video reached";
-            notify_eof_ = true;
+            if (!eof_sent_) {
+                // we are at the end os recording
+                logstream << "end of video reached";
+                notify_eof_ = send_eof_;
+                eof_sent_ = true;
+            }
             std::this_thread::sleep_for(5ms);
             return;
         } else {
@@ -1091,6 +1097,9 @@ public:
         }
         if (params.count("loop") > 0) {
             loop_ = params["loop"];
+        }
+        if (params.count("send_eof") > 0) {
+            send_eof_ = params["send_eof"];
         }
         if (params.count("timestamp_source") > 0) {
             std::string ts_source = params["timestamp_source"];
