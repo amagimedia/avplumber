@@ -1046,6 +1046,40 @@ Discards incoming packets just like `/dev/null`.
 
 no parameters
 
+
+### `write_audio_envelope`
+
+Writes audio envelope data for waveform display (no images; data only). One binary file per granularity level (like mipmaps for different zoom), plus an `index.json` describing layout. Files are appended incrementally; recording length need not be known in advance. To align envelope samples to video frames, use the video frame duration as one of the granularities (e.g. `"1/25"` for 25 fps).
+
+1 input: `av::AudioSamples`
+
+-   `path` (string) - directory (or base path) for output files; must be a filesystem path
+-   `granularities` (list of strings) - segment duration per envelope sample, as rationals in seconds (e.g. `["1/25", "1/2", "1"]`). One file per entry
+
+The node writes `index.json` (version, sample_rate, channels, **levels** map keyed by duration_sec with file name per level, **metrics** map keyed by id with offset_bytes and stride_bytes).
+
+#### Binary layout
+
+Each sample is stored as interleaved records with channel data, currently containing: positive peak, negative peak, RMS. To read one metric across channels, use `offset_bytes` and `stride_bytes` from `index.json`. For forward compatibility, do not assume that each channel's record will always contain 3 bytes.
+
+Example for 2 channels (one envelope sample = currently 6 bytes):
+
+```
+  byte index:   0     1     2   |  3     4     5   |  6   ...
+                ^     ^     ^   |  ^     ^     ^   |  ^
+  metric:      pos   neg   rms  | pos   neg   rms  | pos
+  channel:     ch0   ch0   ch0  | ch1   ch1   ch1  | ch0
+  time range:  \________________________________/    \____...
+                               0..1                     1...   (unit: segment duration)
+
+  positive_peak: offset_bytes=0, stride_bytes=3  -->  read at 0, 3
+  negative_peak: offset_bytes=1, stride_bytes=3  -->  read at 1, 4
+  rms:           offset_bytes=2, stride_bytes=3  -->  read at 2, 5
+```
+
+Each envelope sample is 1 byte per value, 0.5 dB resolution, -127..0 dB range: 0 = -127dB or less, 254 = -0.5..=0dB, 255 = clip
+
+
 ### `ipc_cuda_source`
 
 Get video frames from CUDA IPC memory. Frame pointer and parameters are read from named pipe. See `src/nodes/cuda/ipc_cuda_source.cpp` for structure.
