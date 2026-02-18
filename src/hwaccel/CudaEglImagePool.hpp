@@ -35,7 +35,14 @@ private:
 	CUcontext registered_cu_ctx_ = nullptr;
 
 	bool ensureEglContextLocked() {
-		if (egl_context_ != EGL_NO_CONTEXT) return true;
+		if (egl_context_ != EGL_NO_CONTEXT) {
+			// Context binding is thread-local. After node restart the worker thread can
+			// change, so rebind the existing EGL context on each ensure call.
+			if (!eglBindAPI(EGL_OPENGL_API)) return false;
+			if (egl_display_ == EGL_NO_DISPLAY || egl_surface_ == EGL_NO_SURFACE) return false;
+			if (!eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_)) return false;
+			return true;
+		}
 		egl_display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 		if (egl_display_ == EGL_NO_DISPLAY) return false;
 		EGLint major, minor;
@@ -305,6 +312,12 @@ public:
 		// If dimensions changed (or pool uninitialized), we must reinit.
 		if (!initializedFor(w, h)) {
 			return reinitLocked(w, h, pool_size, cu_ctx);
+		}
+		// CUDA-GL interop registrations are context-specific; when pipeline restart yields
+		// a different CUDA context, recreate registrations for the new context.
+		if (registered_cu_ctx_ && cu_ctx && registered_cu_ctx_ != cu_ctx) {
+			const int keep_size = std::max((int)pool_.size(), pool_size);
+			return reinitLocked(w, h, keep_size, cu_ctx);
 		}
 
 		// IMPORTANT: never shrink/reinit just because someone requested a different pool_size.

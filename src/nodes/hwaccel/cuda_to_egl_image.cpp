@@ -53,7 +53,6 @@ protected:
 
 	// CUDA
 	CUcontext cu_ctx_ = nullptr; // adopted from incoming frame
-	bool ctx_current_set_ = false;
 	CUmodule cu_module_ = nullptr;
 	CUfunction cu_kernel_444_ = nullptr;
 	CUfunction cu_kernel_420_ = nullptr;
@@ -106,13 +105,10 @@ protected:
 	{
 		if (cu_module_ && cu_kernel_444_ && cu_kernel_420_ && cu_kernel_nv12_) return true;
 		if (!cu_ctx_) return false;
-		// Make CUDA context current once for this thread (no per-frame push/pop)
-		if (!ctx_current_set_) {
-			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
-				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in ensure_kernel_loaded";
-				return false;
-			}
-			ctx_current_set_ = true;
+		// Rebind context every time: worker thread can change after node restart.
+		if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+			logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in ensure_kernel_loaded";
+			return false;
 		}
 		if (!cu_module_) {
 			char error_log[8192] = {0};
@@ -176,13 +172,10 @@ protected:
 			logstream << "cuda_to_egl_image: run_conversion_to_texture failed - cu_ctx_=" << (void*)cu_ctx_ << " cu_tex_res=" << (void*)cu_tex_res;
 			return false;
 		}
-		// Ensure context is current (only set once per node thread)
-		if (!ctx_current_set_) {
-			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
-				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in run_conversion_to_texture";
-				return false;
-			}
-			ctx_current_set_ = true;
+		// Rebind context every time: worker thread can change after node restart.
+		if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+			logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in run_conversion_to_texture";
+			return false;
 		}
 		if (CHECK_CU(cuGraphicsMapResources(1, &cu_tex_res, 0))) {
 			logstream << "cuda_to_egl_image: cuGraphicsMapResources failed";
@@ -309,7 +302,6 @@ public:
 				this->source_->pop();
 				return;
 			}
-			ctx_current_set_ = true;
 		}
 		int W = frm.width();
 		int H = frm.height();
@@ -345,10 +337,17 @@ public:
 			return;
 		}
 		if (!run_conversion_to_texture(frm, swfmt, entry.cu_tex_res, W, H)) {
-			logstream << "cuda_to_egl_image: run_conversion_to_texture failed, releasing pool entry";
-			pool_->release(idx);
-			this->source_->pop();
-			return;
+			// One recovery attempt: restart can leave CUDA/GL interop state stale for a frame.
+			const int keep_size = std::max((int)pool_->size(), std::max(1, pool_size_));
+			if (pool_->ensureInitialized(W, H, keep_size, cu_ctx_) &&
+			    run_conversion_to_texture(frm, swfmt, entry.cu_tex_res, W, H)) {
+				logstream << "cuda_to_egl_image: run_conversion_to_texture recovered after interop rebind";
+			} else {
+				logstream << "cuda_to_egl_image: run_conversion_to_texture failed, releasing pool entry";
+				pool_->release(idx);
+				this->source_->pop();
+				return;
+			}
 		}
 		// Create a token (owned by shared_ptr) to release the entry back to pool
 		auto token_sp = std::shared_ptr<EglImagePoolToken>(new EglImagePoolToken{
