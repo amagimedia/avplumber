@@ -1079,6 +1079,35 @@ Example for 2 channels (one envelope sample = currently 6 bytes):
 
 Each envelope sample is 1 byte per value, 0.5 dB resolution, -127..0 dB range: 0 = -127dB or less, 254 = -0.5..=0dB, 255 = clip
 
+#### Example `index.json`
+```
+{
+  "channels": 2,
+  "levels": {
+    "1": { "file": "level_2.bin" },
+    "1/60": { "file": "level_0.bin" },
+    "1/8": { "file": "level_1.bin" }
+  },
+  "metrics": {
+    "negative_peak": { "offset_bytes": 1, "stride_bytes": 3 },
+    "positive_peak": { "offset_bytes": 0, "stride_bytes": 3 },
+    "rms": { "offset_bytes": 2, "stride_bytes": 3 }
+  },
+  "sample_rate": 48000,
+  "version": 1
+}
+```
+
+#### Rendering envelope image recommendations
+
+The renderer needs to:
+1. read `index.json`
+2. open binary file corresponding to the needed time resolution (recommended: greater or equal to waveform image resolution), specified in `levels` map
+3. for each needed metric, initially jump to the `offset_bytes` and then jump by `stride_bytes` to read subsequent interleaved samples (so the actual stride for a single channel is `stride_bytes*channels`)
+4. if waveform is to be rectified, compute `max(positive_peak, negative_peak)`
+5. if mono waveform is to be displayed, compute maximum (for peaks) or RMS (for RMS) of all channels
+6. if the read time resolution was greater than resolution of the waveform to be displayed, compute maximum or RMS of waveform values that correspond to the same “pixel” on the resulting image
+
 
 ### `ipc_cuda_source`
 
