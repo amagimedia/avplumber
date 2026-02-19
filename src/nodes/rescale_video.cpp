@@ -18,8 +18,8 @@ protected:
     }
     void createRescaler() {
         rescaler_ = make_unique<av::VideoRescaler>(
-            dst_params_.width ? dst_params_.width : src_params_.width,
-            dst_params_.height ? dst_params_.height : src_params_.height,
+            (dst_params_.width > 0) ? dst_params_.width : src_params_.width,
+            (dst_params_.height > 0) ? dst_params_.height : src_params_.height,
             dst_params_.pixel_format,
             src_params_.width, src_params_.height, src_params_.pixel_format);
     }
