@@ -56,18 +56,6 @@ struct Detection {
     int cls = -1;
 };
 
-struct PreprocessMap {
-    bool valid = false;
-    int orig_w = 0;
-    int orig_h = 0;
-    float sx = 1.0f;
-    float sy = 1.0f;
-    float pad_left = 0.0f;
-    float pad_top = 0.0f;
-    float crop_x = 0.0f;
-    float crop_y = 0.0f;
-};
-
 static float halfToFloat(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
     uint32_t exp = (h >> 10) & 0x1Fu;
@@ -166,9 +154,7 @@ protected:
     std::vector<uint16_t> host_output_half_;
 
     std::string engine_path_;
-    std::string metadata_key_in_ = "avpl_preprocess_v1";
     std::string metadata_key_out_ = "yolo_detections_v1";
-    bool require_preprocess_metadata_ = true;
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 30;
     int infer_every_n_ = 1;
@@ -409,53 +395,6 @@ protected:
         return true;
     }
 
-    PreprocessMap parsePreprocessMetadata(const av::VideoFrame& frm) const {
-        PreprocessMap m;
-        if (!frm.raw() || !frm.raw()->metadata) return m;
-        AVDictionaryEntry* e = av_dict_get(frm.raw()->metadata, metadata_key_in_.c_str(), nullptr, 0);
-        if (!e || !e->value) return m;
-        try {
-            Parameters j = Parameters::parse(e->value);
-            if (j.count("orig_size") && j["orig_size"].is_array() && j["orig_size"].size() >= 2) {
-                m.orig_w = j["orig_size"][0].get<int>();
-                m.orig_h = j["orig_size"][1].get<int>();
-            }
-            if (j.count("scale")) {
-                const Parameters& s = j["scale"];
-                if (s.count("sx")) m.sx = s["sx"].get<float>();
-                if (s.count("sy")) m.sy = s["sy"].get<float>();
-            }
-            if (j.count("pad")) {
-                const Parameters& p = j["pad"];
-                if (p.count("left")) m.pad_left = p["left"].get<float>();
-                if (p.count("top")) m.pad_top = p["top"].get<float>();
-            }
-            if (j.count("crop")) {
-                const Parameters& c = j["crop"];
-                if (c.count("x")) m.crop_x = c["x"].get<float>();
-                if (c.count("y")) m.crop_y = c["y"].get<float>();
-            }
-            m.valid = (m.orig_w > 0 && m.orig_h > 0 && m.sx > 0.0f && m.sy > 0.0f);
-        } catch (std::exception& ex) {
-            logstream << "cuda_infer_yolo: failed parsing preprocess metadata: " << ex.what();
-        }
-        return m;
-    }
-
-    void remapToOriginal(std::vector<Detection>& dets, const PreprocessMap& map) const {
-        if (!map.valid) return;
-        for (Detection& d : dets) {
-            d.x1 = ((d.x1 - map.pad_left) / map.sx) + map.crop_x;
-            d.x2 = ((d.x2 - map.pad_left) / map.sx) + map.crop_x;
-            d.y1 = ((d.y1 - map.pad_top) / map.sy) + map.crop_y;
-            d.y2 = ((d.y2 - map.pad_top) / map.sy) + map.crop_y;
-            d.x1 = std::max(0.0f, std::min(d.x1, (float)map.orig_w - 1.0f));
-            d.x2 = std::max(0.0f, std::min(d.x2, (float)map.orig_w - 1.0f));
-            d.y1 = std::max(0.0f, std::min(d.y1, (float)map.orig_h - 1.0f));
-            d.y2 = std::max(0.0f, std::min(d.y2, (float)map.orig_h - 1.0f));
-        }
-    }
-
     std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d) const {
         std::vector<Detection> dets;
         if (!out) return dets;
@@ -551,10 +490,10 @@ protected:
         return kept;
     }
 
-    std::string buildDetectionMetadata(const std::vector<Detection>& dets, bool remapped) const {
+    std::string buildDetectionMetadata(const std::vector<Detection>& dets) const {
         Parameters j;
         j["version"] = 1;
-        j["coord_space"] = remapped ? "original" : "model";
+        j["coord_space"] = "model";
         j["thresholds"] = {
             {"conf", conf_thresh_},
             {"iou", iou_thresh_},
@@ -685,17 +624,7 @@ public:
             }
         }
         std::vector<Detection> dets = decodeYoloOutput(host_output_.data(), output_dims_);
-        const PreprocessMap map = parsePreprocessMetadata(frm);
-        bool remapped = false;
-        if (map.valid) {
-            remapToOriginal(dets, map);
-            remapped = true;
-        } else if (require_preprocess_metadata_) {
-            logstream << "cuda_infer_yolo: required preprocess metadata missing, dropping frame";
-            return;
-        }
-
-        std::string md = buildDetectionMetadata(dets, remapped);
+        std::string md = buildDetectionMetadata(dets);
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), md.c_str(), 0);
         if (debug_log_metadata_ && debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "cuda_infer_yolo: " << md;
@@ -729,9 +658,7 @@ public:
         if (params.count("iou_thresh")) r->iou_thresh_ = params["iou_thresh"];
         if (params.count("max_det")) r->max_det_ = params["max_det"];
         if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
-        if (params.count("metadata_key_in")) r->metadata_key_in_ = params["metadata_key_in"].get<std::string>();
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
-        if (params.count("require_preprocess_metadata")) r->require_preprocess_metadata_ = params["require_preprocess_metadata"];
         if (params.count("debug_log_metadata")) r->debug_log_metadata_ = params["debug_log_metadata"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         if (params.count("input_format")) {

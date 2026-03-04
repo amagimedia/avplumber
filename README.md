@@ -1210,8 +1210,6 @@ Parameters:
 -   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
--   `metadata_key_in` (string, optional, default `avpl_preprocess_v1`) - input frame metadata key with preprocess mapping JSON
--   `require_preprocess_metadata` (bool, optional, default `true`) - if true, frames without preprocess metadata are dropped
 -   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
 -   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
 -   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
@@ -1221,11 +1219,7 @@ Parameters:
 -   `debug_log_metadata` (bool, optional, default `false`) - print detection metadata to logs periodically
 -   `debug_log_every_n` (int, optional, default `30`) - log period used with `debug_log_metadata`
 
-Preprocess metadata schema (input key `avpl_preprocess_v1`) for remapping model-space boxes to original frame space:
-- `orig_size`: `[width,height]`
-- `scale`: `{ "sx": float, "sy": float }`
-- `pad`: `{ "left": float, "top": float }`
-- `crop`: `{ "x": float, "y": float }` (optional)
+Detection coordinates in metadata are emitted in model space (`coord_space = "model"`).
 
 Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
 - `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
