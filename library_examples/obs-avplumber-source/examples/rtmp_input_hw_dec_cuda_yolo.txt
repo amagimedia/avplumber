@@ -19,17 +19,17 @@ node.add {
 }
 
 # Preprocess outside infer node:
-# 1920x1080 (16:9) -> 640x360 -> pad to 640x640 (letterbox)
+# 1920x1080 (16:9) -> 640x360 (no padding)
 node.add {
   "type": "filter_video",
-  "graph": "scale_cuda=w=640:h=360,pad_cuda=w=640:h=640:x=0:y=140:color=black,format=nv12",
+  "graph": "scale_cuda=w=640:h=360",
   "src": "v_dec_cuda",
   "dst": "v_pre_yolo",
   "group": "in",
   "name": "Cuda_Preprocess",
   "auto_restart": "group",
   "dst_width": 640,
-  "dst_height": 640,
+  "dst_height": 360,
   "dst_pixel_format": "cuda",
   "hwaccel": "@gpu"
 }
@@ -42,7 +42,7 @@ node.add {
   "name": "Yolo_Infer",
   "auto_restart": "group",
   "hwaccel": "@gpu",
-  "engine": "/models/yolo26n_640_fp16.plan",
+  "engine": "/models/yolo26n_640x360_fp16.plan",
   "input_format": "RGB",
   "conf_thresh": 0.25,
   "iou_thresh": 0.45,
