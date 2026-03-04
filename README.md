@@ -82,14 +82,16 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
+-   HAVE_TENSORRT=1: enable TensorRT YOLO inference node (`cuda_infer_yolo`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
+-   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
 -   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
@@ -1192,6 +1194,41 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+
+### `cuda_infer_yolo`
+
+Run YOLO object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
+
+This node is inference-only in v1:
+- upstream graph must handle resize/pad/crop/format preprocessing
+- model input dimensions are read from the TensorRT engine
+- detections are attached in metadata key (default `yolo_detections_v1`)
+
+Parameters:
+-   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
+-   `metadata_key_in` (string, optional, default `avpl_preprocess_v1`) - input frame metadata key with preprocess mapping JSON
+-   `require_preprocess_metadata` (bool, optional, default `true`) - if true, frames without preprocess metadata are dropped
+-   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
+-   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
+-   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
+-   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
+-   `max_det` (int, optional, default `300`) - max detections per frame after NMS
+-   `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
+-   `debug_log_metadata` (bool, optional, default `false`) - print detection metadata to logs periodically
+-   `debug_log_every_n` (int, optional, default `30`) - log period used with `debug_log_metadata`
+
+Preprocess metadata schema (input key `avpl_preprocess_v1`) for remapping model-space boxes to original frame space:
+- `orig_size`: `[width,height]`
+- `scale`: `{ "sx": float, "sy": float }`
+- `pad`: `{ "left": float, "top": float }`
+- `crop`: `{ "x": float, "y": float }` (optional)
+
+Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
+- `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
 
 ### `drm_prime_to_egl_image`
 
