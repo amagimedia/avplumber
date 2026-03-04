@@ -56,6 +56,19 @@ struct Detection {
     int cls = -1;
 };
 
+static std::vector<std::string> coco80ClassNames() {
+    return {
+        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
+        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
+        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
+        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
+        "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
+        "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
+        "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
+        "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
+    };
+}
+
 static float halfToFloat(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
     uint32_t exp = (h >> 10) & 0x1Fu;
@@ -162,6 +175,7 @@ protected:
     float iou_thresh_ = 0.45f;
     int max_det_ = 300;
     uint64_t frame_counter_ = 0;
+    std::vector<std::string> class_names_;
 
     bool initialized_ = false;
 
@@ -572,6 +586,9 @@ protected:
         for (const Detection& d : dets) {
             Parameters item;
             item["cls"] = d.cls;
+            if (d.cls >= 0 && (size_t)d.cls < class_names_.size()) {
+                item["label"] = class_names_[(size_t)d.cls];
+            }
             item["conf"] = d.conf;
             item["xyxy"] = {d.x1, d.y1, d.x2, d.y2};
             j["detections"].push_back(item);
@@ -734,9 +751,25 @@ public:
             const std::string ifmt = params["input_format"].get<std::string>();
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
         }
+        if (params.count("class_names")) {
+            if (params["class_names"].is_string()) {
+                const std::string v = params["class_names"].get<std::string>();
+                if (v == "coco80" || v == "COCO80") {
+                    r->class_names_ = coco80ClassNames();
+                } else {
+                    logstream << "cuda_infer_yolo: unsupported class_names preset '" << v
+                              << "' (use \"coco80\" or provide an array)";
+                }
+            } else if (params["class_names"].is_array()) {
+                const std::list<std::string> names = jsonToStringList(params["class_names"]);
+                r->class_names_.assign(names.begin(), names.end());
+            } else {
+                logstream << "cuda_infer_yolo: class_names must be string preset or string array";
+            }
+        }
         return r;
     }
 };
 
-DECLNODE(cuda_infer_yolo, CudaInferYolo)
+DECLNODE(cuda_infer_yolo, CudaInferYolo);
 
