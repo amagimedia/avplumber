@@ -299,12 +299,14 @@ protected:
 
             if (is_input) {
                 ++input_count;
-                const bool is_image_input = (dims.nbDims == 3 && dims.d[0] == 3);
+                const bool is_image_input =
+                    (dims.nbDims == 3 && dims.d[0] == 3) ||
+                    (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == 3);
                 if (input_tensor_name_.empty()) {
                     input_tensor_name_ = tensor_name;
                     input_dims_ = dims;
                 }
-                // Prefer CHW image input in engines with auxiliary input tensors.
+                // Prefer image input in engines with auxiliary input tensors.
                 if (is_image_input && !selected_image_input) {
                     input_tensor_name_ = tensor_name;
                     input_dims_ = dims;
@@ -323,14 +325,18 @@ protected:
             return false;
         }
 
-        // Expect CHW
-        if (input_dims_.nbDims != 3 || input_dims_.d[0] != 3) {
-            logstream << "cuda_infer_yolo: expected image input dims CHW with C=3"
+        // Expect CHW or NCHW with batch=1.
+        if (input_dims_.nbDims == 3 && input_dims_.d[0] == 3) {
+            input_h_ = input_dims_.d[1];
+            input_w_ = input_dims_.d[2];
+        } else if (input_dims_.nbDims == 4 && input_dims_.d[0] == 1 && input_dims_.d[1] == 3) {
+            input_h_ = input_dims_.d[2];
+            input_w_ = input_dims_.d[3];
+        } else {
+            logstream << "cuda_infer_yolo: expected image input dims CHW(C=3) or NCHW(N=1,C=3)"
                       << " (engine inputs: " << input_count << ")";
             return false;
         }
-        input_h_ = input_dims_.d[1];
-        input_w_ = input_dims_.d[2];
         if (input_h_ <= 0 || input_w_ <= 0) {
             logstream << "cuda_infer_yolo: invalid input dims";
             return false;
