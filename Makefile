@@ -8,6 +8,11 @@ HAVE_DRM = 0
 HAVE_SCTE35 = 1
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
+HAVE_TENSORRT = 0
+TENSORRT_ROOT =
+ifeq ($(HAVE_NVCC),1)
+NVCC ?= /usr/local/cuda/bin/nvcc
+endif
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
 else
@@ -67,7 +72,6 @@ endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_NVCC),111)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
-NVCC ?= /usr/local/cuda/bin/nvcc
 # Build PTX and embed as header for driver-side kernel launch (no cudart)
 BUILD_PTX = 1
 CUDA_KERNEL = $(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu
@@ -77,11 +81,30 @@ else
 BUILD_PTX = 0
 endif
 
+ifeq ($(HAVE_CUDA)$(HAVE_TENSORRT)$(HAVE_NVCC),111)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_infer_yolo.cpp
+BUILD_YOLO_PTX = 1
+YOLO_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/yolo_preprocess.cu
+YOLO_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx
+YOLO_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx.h
+else
+BUILD_YOLO_PTX = 0
+endif
+
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+endif
+
+ifeq ($(HAVE_TENSORRT),1)
+override CXXFLAGS += -DHAVE_TENSORRT=1
+ifneq ($(strip $(TENSORRT_ROOT)),)
+override CXXFLAGS += -I$(TENSORRT_ROOT)/include
+override LFLAGS += -L$(TENSORRT_ROOT)/lib -Wl,-rpath,$(TENSORRT_ROOT)/lib
+endif
+override LIBS_FLAGS += -lnvinfer -lnvinfer_plugin
 endif
 
 ifeq ($(HAVE_DRM),1)
@@ -140,13 +163,13 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 $(nodes_list_file): ./generate_node_list $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
-$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H)
+$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)
 
 build: $(EXE) compile_flags.txt
 
 
-$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H)
+$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H)
 	ar -rcs $@ $^
 
 static_library: $(STATIC_LIBRARY)
@@ -200,6 +223,20 @@ $(PTX_H): $(PTX)
 
 # Ensure the sink object rebuilds if the generated header changes
 objs/src/nodes/hwaccel/cuda_to_egl_image.o: $(PTX_H)
+endif
+
+ifeq ($(BUILD_YOLO_PTX),1)
+$(YOLO_PREPROCESS_PTX): $(YOLO_PREPROCESS_KERNEL)
+	@mkdir -p $(dir $@)
+	$(NVCC) -ptx -o $@ $<
+
+$(YOLO_PREPROCESS_PTX_H): $(YOLO_PREPROCESS_PTX)
+	@mkdir -p $(dir $@)
+	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yolo_preprocess_ptx_len/const unsigned int avpl_yolo_preprocess_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yolo_preprocess_ptx/const char avpl_yolo_preprocess_ptx/' > $@
+	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
+
+objs/src/nodes/hwaccel/cuda_infer_yolo.o: $(YOLO_PREPROCESS_PTX_H)
 endif
 
 compile_flags.txt:
