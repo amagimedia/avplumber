@@ -1,0 +1,60 @@
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/cbcdemo", "dst": "in_v", "group": "in", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in", "auto_restart": "group" }
+
+# CUDA HW decode (CUVID)
+node.add {
+  "type": "dec_video",
+  "src": "v_pkt",
+  "dst": "v_dec_cuda",
+  "group": "in",
+  "name": "Video_Dec",
+  "auto_restart": "group",
+  "optional": true,
+  "pixel_format": "?cuda",
+  "hwaccel": "@gpu",
+  "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" },
+  "hwaccel_only_for_codecs": ["h264", "hevc"]
+}
+
+# Preprocess outside infer node:
+# 1920x1080 (16:9) -> 640x360 (no padding)
+node.add {
+  "type": "filter_video",
+  "graph": "scale_cuda=w=640:h=360",
+  "src": "v_dec_cuda",
+  "dst": "v_pre_yolo",
+  "group": "in",
+  "name": "Cuda_Preprocess",
+  "auto_restart": "group",
+  "dst_width": 640,
+  "dst_height": 360,
+  "dst_pixel_format": "cuda",
+  "hwaccel": "@gpu"
+}
+
+node.add {
+  "type": "cuda_infer_yolo",
+  "src": "v_pre_yolo",
+  "dst": "v_post_yolo",
+  "group": "in",
+  "name": "Yolo_Infer",
+  "auto_restart": "group",
+  "hwaccel": "@gpu",
+  "engine": "/home/fedora/tensorrt/yolo26n_640x360_fp16.plan",
+  "input_format": "RGB",
+  "conf_thresh": 0.25,
+  "iou_thresh": 0.45,
+  "max_det": 300,
+  "infer_every_n": 1,
+  "metadata_key_out": "yolo_detections_v1",
+  "debug_log_metadata": true,
+  "debug_log_every_n": 30
+}
+
+# Sink that discards frames; detections can be observed in avplumber debug logs
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_post_yolo", "group": "in", "name": "vnullsink", "auto_restart": "group" }
+
+detach retry group.start in
+
