@@ -17,6 +17,7 @@ extern "C" {
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // PTX blob for NV12->NCHW preprocess kernel.
@@ -144,12 +145,14 @@ protected:
     nvinfer1::ICudaEngine* trt_engine_ = nullptr;
     nvinfer1::IExecutionContext* trt_ctx_ = nullptr;
 
-    std::vector<void*> bindings_;
-    std::vector<size_t> binding_bytes_;
-    std::vector<CUdeviceptr> device_ptrs_;
-    int input_idx_ = -1;
-    int output_idx_ = -1; // first output only in v1
+    std::vector<std::string> io_tensor_names_;
+    std::vector<size_t> tensor_bytes_;
+    std::vector<CUdeviceptr> tensor_ptrs_;
+    std::unordered_map<std::string, size_t> tensor_index_;
+    std::string input_tensor_name_;
+    std::string output_tensor_name_; // first output only in v1
     nvinfer1::Dims input_dims_{};
+    nvinfer1::Dims output_dims_{};
     int input_w_ = 0;
     int input_h_ = 0;
     bool input_bgr_order_ = false;
@@ -255,19 +258,29 @@ protected:
     }
 
     bool allocateBindings() {
-        const int nb = trt_engine_->getNbBindings();
+        const int nb = trt_engine_->getNbIOTensors();
         if (nb <= 1) {
             logstream << "cuda_infer_yolo: engine has insufficient bindings";
             return false;
         }
 
-        bindings_.assign((size_t)nb, nullptr);
-        binding_bytes_.assign((size_t)nb, 0);
-        device_ptrs_.assign((size_t)nb, 0);
+        io_tensor_names_.clear();
+        tensor_bytes_.assign((size_t)nb, 0);
+        tensor_ptrs_.assign((size_t)nb, 0);
+        tensor_index_.clear();
 
         for (int i = 0; i < nb; ++i) {
-            const bool is_input = trt_engine_->bindingIsInput(i);
-            nvinfer1::Dims dims = trt_engine_->getBindingDimensions(i);
+            const char* tensor_name_c = trt_engine_->getIOTensorName(i);
+            if (!tensor_name_c) {
+                logstream << "cuda_infer_yolo: null I/O tensor name";
+                return false;
+            }
+            const std::string tensor_name = tensor_name_c;
+            io_tensor_names_.push_back(tensor_name);
+            tensor_index_[tensor_name] = (size_t)i;
+            const auto mode = trt_engine_->getTensorIOMode(tensor_name_c);
+            const bool is_input = (mode == nvinfer1::TensorIOMode::kINPUT);
+            nvinfer1::Dims dims = trt_engine_->getTensorShape(tensor_name_c);
             for (int d = 0; d < dims.nbDims; ++d) {
                 if (dims.d[d] <= 0) {
                     logstream << "cuda_infer_yolo: dynamic/invalid binding dims not supported in v1";
@@ -275,7 +288,7 @@ protected:
                 }
             }
             const size_t vol = volume(dims);
-            const size_t esz = elementSize(trt_engine_->getBindingDataType(i));
+            const size_t esz = elementSize(trt_engine_->getTensorDataType(tensor_name_c));
             if (vol == 0 || esz == 0) {
                 logstream << "cuda_infer_yolo: unsupported binding type/shape";
                 return false;
@@ -287,23 +300,23 @@ protected:
                 logstream << "cuda_infer_yolo: cuMemAlloc failed for binding " << i;
                 return false;
             }
-            bindings_[(size_t)i] = reinterpret_cast<void*>(ptr);
-            binding_bytes_[(size_t)i] = bytes;
-            device_ptrs_[(size_t)i] = ptr;
+            tensor_bytes_[(size_t)i] = bytes;
+            tensor_ptrs_[(size_t)i] = ptr;
 
             if (is_input) {
-                if (input_idx_ != -1) {
+                if (!input_tensor_name_.empty()) {
                     logstream << "cuda_infer_yolo: multiple inputs not supported in v1";
                     return false;
                 }
-                input_idx_ = i;
+                input_tensor_name_ = tensor_name;
                 input_dims_ = dims;
-            } else if (output_idx_ == -1) {
-                output_idx_ = i;
+            } else if (output_tensor_name_.empty()) {
+                output_tensor_name_ = tensor_name;
+                output_dims_ = dims;
             }
         }
 
-        if (input_idx_ < 0 || output_idx_ < 0) {
+        if (input_tensor_name_.empty() || output_tensor_name_.empty()) {
             logstream << "cuda_infer_yolo: failed to identify input/output bindings";
             return false;
         }
@@ -320,23 +333,29 @@ protected:
             return false;
         }
 
-        const nvinfer1::Dims out_dims = trt_engine_->getBindingDimensions(output_idx_);
-        output_dtype_ = trt_engine_->getBindingDataType(output_idx_);
+        output_dtype_ = trt_engine_->getTensorDataType(output_tensor_name_.c_str());
         if (!(output_dtype_ == nvinfer1::DataType::kFLOAT || output_dtype_ == nvinfer1::DataType::kHALF)) {
             logstream << "cuda_infer_yolo: output datatype must be float/half in v1";
             return false;
         }
-        host_output_.resize(volume(out_dims));
+        host_output_.resize(volume(output_dims_));
         if (output_dtype_ == nvinfer1::DataType::kHALF) {
-            host_output_half_.resize(volume(out_dims));
+            host_output_half_.resize(volume(output_dims_));
         }
 
-        input_dtype_ = trt_engine_->getBindingDataType(input_idx_);
+        input_dtype_ = trt_engine_->getTensorDataType(input_tensor_name_.c_str());
         if (!(input_dtype_ == nvinfer1::DataType::kFLOAT || input_dtype_ == nvinfer1::DataType::kHALF)) {
             logstream << "cuda_infer_yolo: input datatype must be float/half in v1";
             return false;
         }
 
+        // TRT10 API: bind tensor addresses by name.
+        for (size_t i = 0; i < io_tensor_names_.size(); ++i) {
+            if (!trt_ctx_->setTensorAddress(io_tensor_names_[i].c_str(), reinterpret_cast<void*>(tensor_ptrs_[i]))) {
+                logstream << "cuda_infer_yolo: setTensorAddress failed for " << io_tensor_names_[i];
+                return false;
+            }
+        }
         return true;
     }
 
@@ -362,7 +381,12 @@ protected:
         const CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
         const size_t pitchY = (size_t)frm.raw()->linesize[0];
         const size_t pitchUV = (size_t)frm.raw()->linesize[1];
-        void* out = bindings_[(size_t)input_idx_];
+        auto it = tensor_index_.find(input_tensor_name_);
+        if (it == tensor_index_.end()) {
+            logstream << "cuda_infer_yolo: input tensor index missing";
+            return false;
+        }
+        void* out = reinterpret_cast<void*>(tensor_ptrs_[it->second]);
         const int W = input_w_;
         const int H = input_h_;
         const int bgr = input_bgr_order_ ? 1 : 0;
@@ -551,29 +575,30 @@ public:
     using NodeSISO::NodeSISO;
 
     ~CudaInferYolo() override {
-        for (CUdeviceptr p : device_ptrs_) {
+        for (CUdeviceptr p : tensor_ptrs_) {
             if (p) {
                 CHECK_CU(cuMemFree(p));
             }
         }
-        device_ptrs_.clear();
-        bindings_.clear();
-        binding_bytes_.clear();
+        tensor_ptrs_.clear();
+        tensor_bytes_.clear();
+        io_tensor_names_.clear();
+        tensor_index_.clear();
 
         if (preprocess_module_) {
             CHECK_CU(cuModuleUnload(preprocess_module_));
             preprocess_module_ = nullptr;
         }
         if (trt_ctx_) {
-            trt_ctx_->destroy();
+            delete trt_ctx_;
             trt_ctx_ = nullptr;
         }
         if (trt_engine_) {
-            trt_engine_->destroy();
+            delete trt_engine_;
             trt_engine_ = nullptr;
         }
         if (trt_runtime_) {
-            trt_runtime_->destroy();
+            delete trt_runtime_;
             trt_runtime_ = nullptr;
         }
     }
@@ -615,19 +640,24 @@ public:
 
         if (!runPreprocessNV12(frm)) return;
 
-        if (!trt_ctx_->enqueueV2(bindings_.data(), cuda_dev_ctx_->stream, nullptr)) {
-            logstream << "cuda_infer_yolo: enqueueV2 failed";
+        if (!trt_ctx_->enqueueV3(reinterpret_cast<cudaStream_t>(cuda_dev_ctx_->stream))) {
+            logstream << "cuda_infer_yolo: enqueueV3 failed";
             return;
         }
 
-        const nvinfer1::Dims out_dims = trt_engine_->getBindingDimensions(output_idx_);
-        const size_t out_bytes = binding_bytes_[(size_t)output_idx_];
+        auto out_it = tensor_index_.find(output_tensor_name_);
+        if (out_it == tensor_index_.end()) {
+            logstream << "cuda_infer_yolo: output tensor index missing";
+            return;
+        }
+        const size_t out_idx = out_it->second;
+        const size_t out_bytes = tensor_bytes_[out_idx];
         if (output_dtype_ == nvinfer1::DataType::kFLOAT) {
             if (out_bytes != host_output_.size() * sizeof(float)) {
                 logstream << "cuda_infer_yolo: output size mismatch";
                 return;
             }
-            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_.data(), device_ptrs_[(size_t)output_idx_], out_bytes, cuda_dev_ctx_->stream))) {
+            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_.data(), tensor_ptrs_[out_idx], out_bytes, cuda_dev_ctx_->stream))) {
                 logstream << "cuda_infer_yolo: output D2H copy failed";
                 return;
             }
@@ -636,7 +666,7 @@ public:
                 logstream << "cuda_infer_yolo: output half size mismatch";
                 return;
             }
-            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_half_.data(), device_ptrs_[(size_t)output_idx_], out_bytes, cuda_dev_ctx_->stream))) {
+            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_half_.data(), tensor_ptrs_[out_idx], out_bytes, cuda_dev_ctx_->stream))) {
                 logstream << "cuda_infer_yolo: output D2H copy failed";
                 return;
             }
@@ -654,7 +684,7 @@ public:
                 host_output_[i] = halfToFloat(host_output_half_[i]);
             }
         }
-        std::vector<Detection> dets = decodeYoloOutput(host_output_.data(), out_dims);
+        std::vector<Detection> dets = decodeYoloOutput(host_output_.data(), output_dims_);
         const PreprocessMap map = parsePreprocessMetadata(frm);
         bool remapped = false;
         if (map.valid) {
