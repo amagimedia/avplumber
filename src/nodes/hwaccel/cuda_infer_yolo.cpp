@@ -254,6 +254,10 @@ protected:
         tensor_bytes_.assign((size_t)nb, 0);
         tensor_ptrs_.assign((size_t)nb, 0);
         tensor_index_.clear();
+        input_tensor_name_.clear();
+        output_tensor_name_.clear();
+        int input_count = 0;
+        bool selected_image_input = false;
 
         for (int i = 0; i < nb; ++i) {
             const char* tensor_name_c = trt_engine_->getIOTensorName(i);
@@ -286,16 +290,28 @@ protected:
                 logstream << "cuda_infer_yolo: cuMemAlloc failed for binding " << i;
                 return false;
             }
+            if (CHECK_CU(cuMemsetD8(ptr, 0, bytes))) {
+                logstream << "cuda_infer_yolo: cuMemsetD8 failed for binding " << i;
+                return false;
+            }
             tensor_bytes_[(size_t)i] = bytes;
             tensor_ptrs_[(size_t)i] = ptr;
 
             if (is_input) {
-                if (!input_tensor_name_.empty()) {
-                    logstream << "cuda_infer_yolo: multiple inputs not supported in v1";
-                    return false;
+                ++input_count;
+                const bool is_image_input = (dims.nbDims == 3 && dims.d[0] == 3);
+                if (input_tensor_name_.empty()) {
+                    input_tensor_name_ = tensor_name;
+                    input_dims_ = dims;
                 }
-                input_tensor_name_ = tensor_name;
-                input_dims_ = dims;
+                // Prefer CHW image input in engines with auxiliary input tensors.
+                if (is_image_input && !selected_image_input) {
+                    input_tensor_name_ = tensor_name;
+                    input_dims_ = dims;
+                    selected_image_input = true;
+                } else if (!is_image_input) {
+                    logstream << "cuda_infer_yolo: auxiliary input tensor detected (ignored by preprocess): " << tensor_name;
+                }
             } else if (output_tensor_name_.empty()) {
                 output_tensor_name_ = tensor_name;
                 output_dims_ = dims;
@@ -309,7 +325,8 @@ protected:
 
         // Expect CHW
         if (input_dims_.nbDims != 3 || input_dims_.d[0] != 3) {
-            logstream << "cuda_infer_yolo: expected input dims CHW with C=3";
+            logstream << "cuda_infer_yolo: expected image input dims CHW with C=3"
+                      << " (engine inputs: " << input_count << ")";
             return false;
         }
         input_h_ = input_dims_.d[1];
@@ -669,5 +686,5 @@ public:
     }
 };
 
-DECLNODE(cuda_infer_yolo, CudaInferYolo);
+DECLNODE(cuda_infer_yolo, CudaInferYolo)
 
