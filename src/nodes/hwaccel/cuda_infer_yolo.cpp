@@ -1,6 +1,6 @@
 #include "../node_common.hpp"
-#include "../../cuda.hpp"
 #include "../../hwaccel.hpp"
+#include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -705,9 +705,6 @@ public:
     }
 
     static std::shared_ptr<CudaInferYolo> create(NodeCreationInfo &nci) {
-        if (global_cuda.has_errors) {
-            throw Error("cuda_infer_yolo: CUDA not initialized");
-        }
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::VideoFrame>> src = edges.find<av::VideoFrame>(params["src"]);
