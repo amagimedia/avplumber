@@ -1,0 +1,719 @@
+#include "../node_common.hpp"
+#include "../../cuda.hpp"
+#include "../../hwaccel.hpp"
+
+extern "C" {
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
+#include <libavutil/dict.h>
+}
+
+#include <NvInfer.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <cstdint>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+// PTX blob for NV12->NCHW preprocess kernel.
+#include "../../../objs/src/nodes/hwaccel/yolo_preprocess.ptx.h"
+
+static int check_cu(CUresult err, const char *func) {
+    if (err == CUDA_SUCCESS) return 0;
+    const char *err_name = nullptr;
+    const char *err_string = nullptr;
+    if (cuGetErrorName && cuGetErrorString) {
+        cuGetErrorName(err, &err_name);
+        cuGetErrorString(err, &err_string);
+    }
+    logstream << "cuda function: " << func << " failed: " << (err_name ? err_name : "?") << ": " << (err_string ? err_string : "?");
+    return -1;
+}
+#define CHECK_CU(x) check_cu((x), #x)
+
+namespace {
+class TRTLogger : public nvinfer1::ILogger {
+public:
+    void log(Severity severity, const char* msg) noexcept override {
+        // keep warnings/errors to avoid noisy per-frame info logs
+        if (severity == Severity::kERROR || severity == Severity::kINTERNAL_ERROR || severity == Severity::kWARNING) {
+            logstream << "tensorrt: " << (msg ? msg : "");
+        }
+    }
+};
+
+struct Detection {
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
+    float conf = 0.0f;
+    int cls = -1;
+};
+
+struct PreprocessMap {
+    bool valid = false;
+    int orig_w = 0;
+    int orig_h = 0;
+    float sx = 1.0f;
+    float sy = 1.0f;
+    float pad_left = 0.0f;
+    float pad_top = 0.0f;
+    float crop_x = 0.0f;
+    float crop_y = 0.0f;
+};
+
+static float halfToFloat(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t frac = h & 0x03FFu;
+    uint32_t out = 0;
+    if (exp == 0) {
+        if (frac == 0) {
+            out = sign;
+        } else {
+            // subnormal half -> normalized float
+            exp = 1;
+            while ((frac & 0x0400u) == 0) {
+                frac <<= 1;
+                --exp;
+            }
+            frac &= 0x03FFu;
+            uint32_t exp32 = exp + (127 - 15);
+            out = sign | (exp32 << 23) | (frac << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        out = sign | 0x7F800000u | (frac << 13); // inf/nan
+    } else {
+        uint32_t exp32 = exp + (127 - 15);
+        out = sign | (exp32 << 23) | (frac << 13);
+    }
+    float f;
+    memcpy(&f, &out, sizeof(float));
+    return f;
+}
+
+static size_t elementSize(nvinfer1::DataType dt) {
+    switch (dt) {
+        case nvinfer1::DataType::kFLOAT: return 4;
+        case nvinfer1::DataType::kHALF: return 2;
+        case nvinfer1::DataType::kINT8: return 1;
+        case nvinfer1::DataType::kINT32: return 4;
+        case nvinfer1::DataType::kBOOL: return 1;
+        default: return 0;
+    }
+}
+
+static size_t volume(const nvinfer1::Dims& d) {
+    size_t v = 1;
+    for (int i = 0; i < d.nbDims; ++i) {
+        if (d.d[i] <= 0) return 0;
+        v *= (size_t)d.d[i];
+    }
+    return v;
+}
+
+static float iou(const Detection& a, const Detection& b) {
+    const float x1 = std::max(a.x1, b.x1);
+    const float y1 = std::max(a.y1, b.y1);
+    const float x2 = std::min(a.x2, b.x2);
+    const float y2 = std::min(a.y2, b.y2);
+    const float w = std::max(0.0f, x2 - x1);
+    const float h = std::max(0.0f, y2 - y1);
+    const float inter = w * h;
+    const float area_a = std::max(0.0f, a.x2 - a.x1) * std::max(0.0f, a.y2 - a.y1);
+    const float area_b = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
+    const float uni = area_a + area_b - inter;
+    if (uni <= 0.0f) return 0.0f;
+    return inter / uni;
+}
+}
+
+class CudaInferYolo : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+protected:
+    std::shared_ptr<HWAccelDevice> hwaccel_;
+    AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
+    CUcontext cu_ctx_ = nullptr;
+
+    TRTLogger trt_logger_;
+    nvinfer1::IRuntime* trt_runtime_ = nullptr;
+    nvinfer1::ICudaEngine* trt_engine_ = nullptr;
+    nvinfer1::IExecutionContext* trt_ctx_ = nullptr;
+
+    std::vector<void*> bindings_;
+    std::vector<size_t> binding_bytes_;
+    std::vector<CUdeviceptr> device_ptrs_;
+    int input_idx_ = -1;
+    int output_idx_ = -1; // first output only in v1
+    nvinfer1::Dims input_dims_{};
+    int input_w_ = 0;
+    int input_h_ = 0;
+    bool input_bgr_order_ = false;
+    nvinfer1::DataType input_dtype_ = nvinfer1::DataType::kFLOAT;
+    nvinfer1::DataType output_dtype_ = nvinfer1::DataType::kFLOAT;
+
+    CUmodule preprocess_module_ = nullptr;
+    CUfunction preprocess_kernel_ = nullptr;
+
+    std::vector<float> host_output_;
+    std::vector<uint16_t> host_output_half_;
+
+    std::string engine_path_;
+    std::string metadata_key_in_ = "avpl_preprocess_v1";
+    std::string metadata_key_out_ = "yolo_detections_v1";
+    bool require_preprocess_metadata_ = true;
+    bool debug_log_metadata_ = false;
+    int debug_log_every_n_ = 30;
+    int infer_every_n_ = 1;
+    float conf_thresh_ = 0.25f;
+    float iou_thresh_ = 0.45f;
+    int max_det_ = 300;
+    uint64_t frame_counter_ = 0;
+
+    bool initialized_ = false;
+
+    bool initCudaContextFromFrame(const av::VideoFrame& frm) {
+        if (cu_ctx_) return true;
+        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
+            logstream << "cuda_infer_yolo: missing hw_frames_ctx";
+            return false;
+        }
+        AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+        if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
+            logstream << "cuda_infer_yolo: missing device_ctx/hwctx in frame";
+            return false;
+        }
+        cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+        if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) {
+            logstream << "cuda_infer_yolo: missing cuda context in frame";
+            return false;
+        }
+        cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
+        if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+            logstream << "cuda_infer_yolo: cuCtxSetCurrent failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool loadPreprocessKernel() {
+        if (preprocess_module_ && preprocess_kernel_) return true;
+        if (!cu_ctx_) return false;
+        if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        const std::string ptx_str(avpl_yolo_preprocess_ptx, avpl_yolo_preprocess_ptx + avpl_yolo_preprocess_ptx_len);
+        if (CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
+            logstream << "cuda_infer_yolo: failed to load preprocess PTX module";
+            return false;
+        }
+        const char* kname = (input_dtype_ == nvinfer1::DataType::kHALF) ? "kNV12_to_NCHW_fp16" : "kNV12_to_NCHW_fp32";
+        if (CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, kname))) {
+            logstream << "cuda_infer_yolo: failed to get preprocess kernel";
+            return false;
+        }
+        return true;
+    }
+
+    bool parseEngine() {
+        std::ifstream f(engine_path_, std::ios::binary);
+        if (!f) {
+            logstream << "cuda_infer_yolo: cannot open engine file " << engine_path_;
+            return false;
+        }
+        f.seekg(0, std::ios::end);
+        std::streamsize size = f.tellg();
+        if (size <= 0) {
+            logstream << "cuda_infer_yolo: invalid engine size";
+            return false;
+        }
+        f.seekg(0, std::ios::beg);
+        std::vector<char> blob((size_t)size);
+        if (!f.read(blob.data(), size)) {
+            logstream << "cuda_infer_yolo: failed reading engine file";
+            return false;
+        }
+
+        trt_runtime_ = nvinfer1::createInferRuntime(trt_logger_);
+        if (!trt_runtime_) {
+            logstream << "cuda_infer_yolo: createInferRuntime failed";
+            return false;
+        }
+        trt_engine_ = trt_runtime_->deserializeCudaEngine(blob.data(), blob.size());
+        if (!trt_engine_) {
+            logstream << "cuda_infer_yolo: deserializeCudaEngine failed";
+            return false;
+        }
+        trt_ctx_ = trt_engine_->createExecutionContext();
+        if (!trt_ctx_) {
+            logstream << "cuda_infer_yolo: createExecutionContext failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool allocateBindings() {
+        const int nb = trt_engine_->getNbBindings();
+        if (nb <= 1) {
+            logstream << "cuda_infer_yolo: engine has insufficient bindings";
+            return false;
+        }
+
+        bindings_.assign((size_t)nb, nullptr);
+        binding_bytes_.assign((size_t)nb, 0);
+        device_ptrs_.assign((size_t)nb, 0);
+
+        for (int i = 0; i < nb; ++i) {
+            const bool is_input = trt_engine_->bindingIsInput(i);
+            nvinfer1::Dims dims = trt_engine_->getBindingDimensions(i);
+            for (int d = 0; d < dims.nbDims; ++d) {
+                if (dims.d[d] <= 0) {
+                    logstream << "cuda_infer_yolo: dynamic/invalid binding dims not supported in v1";
+                    return false;
+                }
+            }
+            const size_t vol = volume(dims);
+            const size_t esz = elementSize(trt_engine_->getBindingDataType(i));
+            if (vol == 0 || esz == 0) {
+                logstream << "cuda_infer_yolo: unsupported binding type/shape";
+                return false;
+            }
+            const size_t bytes = vol * esz;
+
+            CUdeviceptr ptr = 0;
+            if (CHECK_CU(cuMemAlloc(&ptr, bytes))) {
+                logstream << "cuda_infer_yolo: cuMemAlloc failed for binding " << i;
+                return false;
+            }
+            bindings_[(size_t)i] = reinterpret_cast<void*>(ptr);
+            binding_bytes_[(size_t)i] = bytes;
+            device_ptrs_[(size_t)i] = ptr;
+
+            if (is_input) {
+                if (input_idx_ != -1) {
+                    logstream << "cuda_infer_yolo: multiple inputs not supported in v1";
+                    return false;
+                }
+                input_idx_ = i;
+                input_dims_ = dims;
+            } else if (output_idx_ == -1) {
+                output_idx_ = i;
+            }
+        }
+
+        if (input_idx_ < 0 || output_idx_ < 0) {
+            logstream << "cuda_infer_yolo: failed to identify input/output bindings";
+            return false;
+        }
+
+        // Expect CHW
+        if (input_dims_.nbDims != 3 || input_dims_.d[0] != 3) {
+            logstream << "cuda_infer_yolo: expected input dims CHW with C=3";
+            return false;
+        }
+        input_h_ = input_dims_.d[1];
+        input_w_ = input_dims_.d[2];
+        if (input_h_ <= 0 || input_w_ <= 0) {
+            logstream << "cuda_infer_yolo: invalid input dims";
+            return false;
+        }
+
+        const nvinfer1::Dims out_dims = trt_engine_->getBindingDimensions(output_idx_);
+        output_dtype_ = trt_engine_->getBindingDataType(output_idx_);
+        if (!(output_dtype_ == nvinfer1::DataType::kFLOAT || output_dtype_ == nvinfer1::DataType::kHALF)) {
+            logstream << "cuda_infer_yolo: output datatype must be float/half in v1";
+            return false;
+        }
+        host_output_.resize(volume(out_dims));
+        if (output_dtype_ == nvinfer1::DataType::kHALF) {
+            host_output_half_.resize(volume(out_dims));
+        }
+
+        input_dtype_ = trt_engine_->getBindingDataType(input_idx_);
+        if (!(input_dtype_ == nvinfer1::DataType::kFLOAT || input_dtype_ == nvinfer1::DataType::kHALF)) {
+            logstream << "cuda_infer_yolo: input datatype must be float/half in v1";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ensureInitialized(const av::VideoFrame& frm) {
+        if (initialized_) return true;
+        if (!initCudaContextFromFrame(frm)) return false;
+        if (!parseEngine()) return false;
+        if (!allocateBindings()) return false;
+        if (!loadPreprocessKernel()) return false;
+        initialized_ = true;
+        return true;
+    }
+
+    AVPixelFormat hwSwFormat(const av::VideoFrame& frm) const {
+        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) return AV_PIX_FMT_NONE;
+        AVHWFramesContext* ctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+        if (!ctx) return AV_PIX_FMT_NONE;
+        return ctx->sw_format;
+    }
+
+    bool runPreprocessNV12(const av::VideoFrame& frm) {
+        const CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
+        const CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
+        const size_t pitchY = (size_t)frm.raw()->linesize[0];
+        const size_t pitchUV = (size_t)frm.raw()->linesize[1];
+        void* out = bindings_[(size_t)input_idx_];
+        const int W = input_w_;
+        const int H = input_h_;
+        const int bgr = input_bgr_order_ ? 1 : 0;
+
+        void* args[] = {
+            (void*)&dY, (void*)&pitchY,
+            (void*)&dUV, (void*)&pitchUV,
+            (void*)&out,
+            (void*)&W, (void*)&H,
+            (void*)&bgr
+        };
+        const unsigned int blockX = 32;
+        const unsigned int blockY = 8;
+        const unsigned int gridX = (unsigned int)(W + (int)blockX - 1) / blockX;
+        const unsigned int gridY = (unsigned int)(H + (int)blockY - 1) / blockY;
+        if (CHECK_CU(cuLaunchKernel(preprocess_kernel_, gridX, gridY, 1, blockX, blockY, 1, 0, cuda_dev_ctx_->stream, args, nullptr))) {
+            logstream << "cuda_infer_yolo: preprocess kernel launch failed";
+            return false;
+        }
+        return true;
+    }
+
+    PreprocessMap parsePreprocessMetadata(const av::VideoFrame& frm) const {
+        PreprocessMap m;
+        if (!frm.raw() || !frm.raw()->metadata) return m;
+        AVDictionaryEntry* e = av_dict_get(frm.raw()->metadata, metadata_key_in_.c_str(), nullptr, 0);
+        if (!e || !e->value) return m;
+        try {
+            Parameters j = Parameters::parse(e->value);
+            if (j.count("orig_size") && j["orig_size"].is_array() && j["orig_size"].size() >= 2) {
+                m.orig_w = j["orig_size"][0].get<int>();
+                m.orig_h = j["orig_size"][1].get<int>();
+            }
+            if (j.count("scale")) {
+                const Parameters& s = j["scale"];
+                if (s.count("sx")) m.sx = s["sx"].get<float>();
+                if (s.count("sy")) m.sy = s["sy"].get<float>();
+            }
+            if (j.count("pad")) {
+                const Parameters& p = j["pad"];
+                if (p.count("left")) m.pad_left = p["left"].get<float>();
+                if (p.count("top")) m.pad_top = p["top"].get<float>();
+            }
+            if (j.count("crop")) {
+                const Parameters& c = j["crop"];
+                if (c.count("x")) m.crop_x = c["x"].get<float>();
+                if (c.count("y")) m.crop_y = c["y"].get<float>();
+            }
+            m.valid = (m.orig_w > 0 && m.orig_h > 0 && m.sx > 0.0f && m.sy > 0.0f);
+        } catch (std::exception& ex) {
+            logstream << "cuda_infer_yolo: failed parsing preprocess metadata: " << ex.what();
+        }
+        return m;
+    }
+
+    void remapToOriginal(std::vector<Detection>& dets, const PreprocessMap& map) const {
+        if (!map.valid) return;
+        for (Detection& d : dets) {
+            d.x1 = ((d.x1 - map.pad_left) / map.sx) + map.crop_x;
+            d.x2 = ((d.x2 - map.pad_left) / map.sx) + map.crop_x;
+            d.y1 = ((d.y1 - map.pad_top) / map.sy) + map.crop_y;
+            d.y2 = ((d.y2 - map.pad_top) / map.sy) + map.crop_y;
+            d.x1 = std::max(0.0f, std::min(d.x1, (float)map.orig_w - 1.0f));
+            d.x2 = std::max(0.0f, std::min(d.x2, (float)map.orig_w - 1.0f));
+            d.y1 = std::max(0.0f, std::min(d.y1, (float)map.orig_h - 1.0f));
+            d.y2 = std::max(0.0f, std::min(d.y2, (float)map.orig_h - 1.0f));
+        }
+    }
+
+    std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d) const {
+        std::vector<Detection> dets;
+        if (!out) return dets;
+
+        // common YOLO export shape: [84, N] or [N, 84] (no batch dim in binding dims)
+        if (d.nbDims == 2) {
+            int a = d.d[0], b = d.d[1];
+            int attrs = 0, count = 0;
+            bool attrs_first = false;
+            if (a >= 6 && b >= 1) {
+                attrs = a; count = b; attrs_first = true;
+            }
+            if (b >= 6 && a >= 1 && b < a) {
+                attrs = b; count = a; attrs_first = false;
+            }
+            if (attrs >= 6 && count > 0) {
+                for (int i = 0; i < count; ++i) {
+                    auto at = [&](int k)->float {
+                        return attrs_first ? out[k * count + i] : out[i * attrs + k];
+                    };
+                    const float cx = at(0), cy = at(1), w = at(2), h = at(3);
+                    int best_cls = 0;
+                    float best = 0.0f;
+                    for (int c = 4; c < attrs; ++c) {
+                        float s = at(c);
+                        if (s > best) {
+                            best = s;
+                            best_cls = c - 4;
+                        }
+                    }
+                    if (best < conf_thresh_) continue;
+                    Detection det;
+                    det.x1 = cx - w * 0.5f;
+                    det.y1 = cy - h * 0.5f;
+                    det.x2 = cx + w * 0.5f;
+                    det.y2 = cy + h * 0.5f;
+                    det.conf = best;
+                    det.cls = best_cls;
+                    dets.push_back(det);
+                }
+            }
+        } else if (d.nbDims == 3) {
+            // fallback for [1,84,N] / [1,N,84]
+            const int d0 = d.d[0], d1 = d.d[1], d2 = d.d[2];
+            if (d0 == 1 && d1 >= 6) {
+                const int attrs = d1;
+                const int count = d2;
+                for (int i = 0; i < count; ++i) {
+                    const float cx = out[0 * attrs * count + 0 * count + i];
+                    const float cy = out[0 * attrs * count + 1 * count + i];
+                    const float w = out[0 * attrs * count + 2 * count + i];
+                    const float h = out[0 * attrs * count + 3 * count + i];
+                    int best_cls = 0;
+                    float best = 0.0f;
+                    for (int c = 4; c < attrs; ++c) {
+                        float s = out[0 * attrs * count + c * count + i];
+                        if (s > best) {
+                            best = s;
+                            best_cls = c - 4;
+                        }
+                    }
+                    if (best < conf_thresh_) continue;
+                    Detection det;
+                    det.x1 = cx - w * 0.5f;
+                    det.y1 = cy - h * 0.5f;
+                    det.x2 = cx + w * 0.5f;
+                    det.y2 = cy + h * 0.5f;
+                    det.conf = best;
+                    det.cls = best_cls;
+                    dets.push_back(det);
+                }
+            }
+        }
+
+        // class-aware NMS
+        std::sort(dets.begin(), dets.end(), [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
+        std::vector<Detection> kept;
+        kept.reserve((size_t)std::min((int)dets.size(), max_det_));
+        for (const Detection& dcur : dets) {
+            bool drop = false;
+            for (const Detection& dk : kept) {
+                if (dcur.cls != dk.cls) continue;
+                if (iou(dcur, dk) > iou_thresh_) {
+                    drop = true;
+                    break;
+                }
+            }
+            if (!drop) {
+                kept.push_back(dcur);
+                if ((int)kept.size() >= max_det_) break;
+            }
+        }
+        return kept;
+    }
+
+    std::string buildDetectionMetadata(const std::vector<Detection>& dets, bool remapped) const {
+        Parameters j;
+        j["version"] = 1;
+        j["coord_space"] = remapped ? "original" : "model";
+        j["thresholds"] = {
+            {"conf", conf_thresh_},
+            {"iou", iou_thresh_},
+            {"max_det", max_det_}
+        };
+        j["detections"] = Parameters::array();
+        for (const Detection& d : dets) {
+            Parameters item;
+            item["cls"] = d.cls;
+            item["conf"] = d.conf;
+            item["xyxy"] = {d.x1, d.y1, d.x2, d.y2};
+            j["detections"].push_back(item);
+        }
+        return j.dump();
+    }
+
+public:
+    using NodeSISO::NodeSISO;
+
+    ~CudaInferYolo() override {
+        for (CUdeviceptr p : device_ptrs_) {
+            if (p) {
+                CHECK_CU(cuMemFree(p));
+            }
+        }
+        device_ptrs_.clear();
+        bindings_.clear();
+        binding_bytes_.clear();
+
+        if (preprocess_module_) {
+            CHECK_CU(cuModuleUnload(preprocess_module_));
+            preprocess_module_ = nullptr;
+        }
+        if (trt_ctx_) {
+            trt_ctx_->destroy();
+            trt_ctx_ = nullptr;
+        }
+        if (trt_engine_) {
+            trt_engine_->destroy();
+            trt_engine_ = nullptr;
+        }
+        if (trt_runtime_) {
+            trt_runtime_->destroy();
+            trt_runtime_ = nullptr;
+        }
+    }
+
+    void process() override {
+        av::VideoFrame frm = this->source_->get();
+        if (!frm) return;
+
+        frame_counter_++;
+        if (infer_every_n_ > 1 && (frame_counter_ % (uint64_t)infer_every_n_) != 0) {
+            this->sink_->put(frm);
+            return;
+        }
+
+        if (frm.raw()->format != AV_PIX_FMT_CUDA) {
+            logstream << "cuda_infer_yolo: non-CUDA frame, passing through";
+            this->sink_->put(frm);
+            return;
+        }
+        if (!ensureInitialized(frm)) {
+            return;
+        }
+        if (frm.width() != input_w_ || frm.height() != input_h_) {
+            logstream << "cuda_infer_yolo: input frame size mismatch, expected " << input_w_ << "x" << input_h_
+                      << " got " << frm.width() << "x" << frm.height();
+            return;
+        }
+
+        AVPixelFormat swfmt = hwSwFormat(frm);
+        if (swfmt != AV_PIX_FMT_NV12) {
+            logstream << "cuda_infer_yolo: unsupported hw sw_format (expected NV12)";
+            return;
+        }
+
+        if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+            logstream << "cuda_infer_yolo: cuCtxSetCurrent failed in process";
+            return;
+        }
+
+        if (!runPreprocessNV12(frm)) return;
+
+        if (!trt_ctx_->enqueueV2(bindings_.data(), cuda_dev_ctx_->stream, nullptr)) {
+            logstream << "cuda_infer_yolo: enqueueV2 failed";
+            return;
+        }
+
+        const nvinfer1::Dims out_dims = trt_engine_->getBindingDimensions(output_idx_);
+        const size_t out_bytes = binding_bytes_[(size_t)output_idx_];
+        if (output_dtype_ == nvinfer1::DataType::kFLOAT) {
+            if (out_bytes != host_output_.size() * sizeof(float)) {
+                logstream << "cuda_infer_yolo: output size mismatch";
+                return;
+            }
+            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_.data(), device_ptrs_[(size_t)output_idx_], out_bytes, cuda_dev_ctx_->stream))) {
+                logstream << "cuda_infer_yolo: output D2H copy failed";
+                return;
+            }
+        } else {
+            if (out_bytes != host_output_half_.size() * sizeof(uint16_t)) {
+                logstream << "cuda_infer_yolo: output half size mismatch";
+                return;
+            }
+            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_half_.data(), device_ptrs_[(size_t)output_idx_], out_bytes, cuda_dev_ctx_->stream))) {
+                logstream << "cuda_infer_yolo: output D2H copy failed";
+                return;
+            }
+        }
+        if (CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream))) {
+            logstream << "cuda_infer_yolo: stream sync failed";
+            return;
+        }
+        if (output_dtype_ == nvinfer1::DataType::kHALF) {
+            if (host_output_.size() != host_output_half_.size()) {
+                logstream << "cuda_infer_yolo: output conversion buffer mismatch";
+                return;
+            }
+            for (size_t i = 0; i < host_output_half_.size(); ++i) {
+                host_output_[i] = halfToFloat(host_output_half_[i]);
+            }
+        }
+        std::vector<Detection> dets = decodeYoloOutput(host_output_.data(), out_dims);
+        const PreprocessMap map = parsePreprocessMetadata(frm);
+        bool remapped = false;
+        if (map.valid) {
+            remapToOriginal(dets, map);
+            remapped = true;
+        } else if (require_preprocess_metadata_) {
+            logstream << "cuda_infer_yolo: required preprocess metadata missing, dropping frame";
+            return;
+        }
+
+        std::string md = buildDetectionMetadata(dets, remapped);
+        av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), md.c_str(), 0);
+        if (debug_log_metadata_ && debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+            logstream << "cuda_infer_yolo: " << md;
+        }
+
+        this->sink_->put(frm);
+    }
+
+    static std::shared_ptr<CudaInferYolo> create(NodeCreationInfo &nci) {
+        if (global_cuda.has_errors) {
+            throw Error("cuda_infer_yolo: CUDA not initialized");
+        }
+        EdgeManager &edges = nci.edges;
+        const Parameters &params = nci.params;
+        std::shared_ptr<Edge<av::VideoFrame>> src = edges.find<av::VideoFrame>(params["src"]);
+        std::shared_ptr<Edge<av::VideoFrame>> dst = edges.find<av::VideoFrame>(params["dst"]);
+        auto r = std::make_shared<CudaInferYolo>(
+            make_unique<EdgeSource<av::VideoFrame>>(src),
+            make_unique<EdgeSink<av::VideoFrame>>(dst)
+        );
+        if (!params.count("engine")) {
+            throw Error("cuda_infer_yolo: missing required parameter: engine");
+        }
+        if (!params.count("hwaccel")) {
+            throw Error("cuda_infer_yolo: missing required parameter: hwaccel");
+        }
+        r->engine_path_ = params["engine"].get<std::string>();
+        r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        if (!r->hwaccel_) {
+            throw Error("cuda_infer_yolo: failed to get hwaccel");
+        }
+
+        if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];
+        if (params.count("iou_thresh")) r->iou_thresh_ = params["iou_thresh"];
+        if (params.count("max_det")) r->max_det_ = params["max_det"];
+        if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
+        if (params.count("metadata_key_in")) r->metadata_key_in_ = params["metadata_key_in"].get<std::string>();
+        if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
+        if (params.count("require_preprocess_metadata")) r->require_preprocess_metadata_ = params["require_preprocess_metadata"];
+        if (params.count("debug_log_metadata")) r->debug_log_metadata_ = params["debug_log_metadata"];
+        if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
+        if (params.count("input_format")) {
+            const std::string ifmt = params["input_format"].get<std::string>();
+            r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
+        }
+        return r;
+    }
+};
+
+DECLNODE(cuda_infer_yolo, CudaInferYolo);
+
