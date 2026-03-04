@@ -74,10 +74,12 @@ typedef struct CUgraphicsResource_st *CUgraphicsResource; /**< CUDA graphics int
 typedef unsigned long long CUtexObject;                   /**< CUDA texture object */
 typedef unsigned long long CUsurfObject;                  /**< CUDA surface object */
 
+#if !defined(__DRIVER_TYPES_H__) && !defined(__CUDA_RUNTIME_API_H__)
 typedef struct CUuuid_st                                  /**< CUDA definition of UUID */
 {
     char bytes[16];
 } CUuuid;
+#endif
 
 /**
  * Context creation flags
