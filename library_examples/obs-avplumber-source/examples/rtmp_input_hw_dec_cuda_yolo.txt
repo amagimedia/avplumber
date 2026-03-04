@@ -49,7 +49,6 @@ node.add {
   "max_det": 300,
   "infer_every_n": 1,
   "metadata_key_out": "yolo_detections_v1",
-  "require_preprocess_metadata": false,
   "debug_log_metadata": true,
   "debug_log_every_n": 30
 }
