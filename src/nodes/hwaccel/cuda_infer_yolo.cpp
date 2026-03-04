@@ -460,20 +460,66 @@ protected:
                 }
             }
         } else if (d.nbDims == 3) {
-            // fallback for [1,84,N] / [1,N,84]
+            // common export layouts:
+            // - raw head: [1,84,N] or [1,N,84]
+            // - end2end:  [1,N,6] or [1,6,N] with [x1,y1,x2,y2,conf,cls]
             const int d0 = d.d[0], d1 = d.d[1], d2 = d.d[2];
-            if (d0 == 1 && d1 >= 6) {
-                const int attrs = d1;
+            if (d0 == 1 && d2 == 6) {
+                const int count = d1;
+                for (int i = 0; i < count; ++i) {
+                    const float x1 = out[i * 6 + 0];
+                    const float y1 = out[i * 6 + 1];
+                    const float x2 = out[i * 6 + 2];
+                    const float y2 = out[i * 6 + 3];
+                    const float conf = out[i * 6 + 4];
+                    const int cls = (int)std::round(out[i * 6 + 5]);
+                    if (conf < conf_thresh_) continue;
+                    Detection det;
+                    det.x1 = x1;
+                    det.y1 = y1;
+                    det.x2 = x2;
+                    det.y2 = y2;
+                    det.conf = conf;
+                    det.cls = cls;
+                    dets.push_back(det);
+                }
+            } else if (d0 == 1 && d1 == 6) {
                 const int count = d2;
                 for (int i = 0; i < count; ++i) {
-                    const float cx = out[0 * attrs * count + 0 * count + i];
-                    const float cy = out[0 * attrs * count + 1 * count + i];
-                    const float w = out[0 * attrs * count + 2 * count + i];
-                    const float h = out[0 * attrs * count + 3 * count + i];
+                    const float x1 = out[0 * count + i];
+                    const float y1 = out[1 * count + i];
+                    const float x2 = out[2 * count + i];
+                    const float y2 = out[3 * count + i];
+                    const float conf = out[4 * count + i];
+                    const int cls = (int)std::round(out[5 * count + i]);
+                    if (conf < conf_thresh_) continue;
+                    Detection det;
+                    det.x1 = x1;
+                    det.y1 = y1;
+                    det.x2 = x2;
+                    det.y2 = y2;
+                    det.conf = conf;
+                    det.cls = cls;
+                    dets.push_back(det);
+                }
+            } else if (d0 == 1 && d1 >= 6 && d2 >= 1) {
+                bool attrs_first = true;
+                int attrs = d1;
+                int count = d2;
+                if (d2 >= 6 && d2 < d1) {
+                    attrs_first = false;
+                    attrs = d2;
+                    count = d1;
+                }
+                for (int i = 0; i < count; ++i) {
+                    auto at = [&](int k)->float {
+                        return attrs_first ? out[k * count + i] : out[i * attrs + k];
+                    };
+                    const float cx = at(0), cy = at(1), w = at(2), h = at(3);
                     int best_cls = 0;
                     float best = 0.0f;
                     for (int c = 4; c < attrs; ++c) {
-                        float s = out[0 * attrs * count + c * count + i];
+                        float s = at(c);
                         if (s > best) {
                             best = s;
                             best_cls = c - 4;
