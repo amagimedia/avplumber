@@ -870,6 +870,23 @@ input stream changes parameters.
 
 -   `drop` (bool) - drop packets if output queue is full, disabled by default
 
+### `join_metadata`
+
+Join metadata from an auxiliary stream into a primary stream by exact timestamp match.
+
+2 inputs, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+-   `src` must contain exactly 2 queues in this order: `[primary, auxiliary]`
+-   timestamps are compared exactly (`primary.pts == auxiliary.pts`)
+-   empty queue is treated as "not ready yet" (the node waits), not as missing frame
+-   when both heads are present:
+    - if timestamps match: copy auxiliary metadata to primary (`av_dict_copy`) and emit primary
+    - if `primary.pts < auxiliary.pts`: emit primary unchanged (auxiliary missing for that primary timestamp)
+    - if `auxiliary.pts < primary.pts`: drop auxiliary frame (primary missing for that auxiliary timestamp)
+-   output timestamp/timebase remains the same as primary input
+
+Useful for running heavy processing (e.g. neural network inference) on downscaled frames and merge produced metadata back onto original-resolution frames.
+
 ### `force_keyframe`
 
 Set keyframe flag in frame to make encoder output keyframe. Unlike `-g`

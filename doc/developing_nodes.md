@@ -206,6 +206,7 @@ Commonly used node source & sink patterns are available as base classes or templ
 * `NodeSISO<InputType, OutputType>` (Single Input, Single Output) - combines `NodeSingleInput` and `NodeSingleOutput`
 * `NodeMultiInput<InputType>`
   * use `int i = findSourceWithData()` to get index of source edge that has packet/frame waiting to be read. If returned value isn't -1, read if using `this->source_edges_[i]->peek()` and call `this->source_edges_[i]->pop()` when you've done using it (i.e. you've passed it along to the next node, or it is to be discarded)
+  * if your multi-input node has fixed roles (for example `primary` and `auxiliary`), treat order in `src` as part of node contract and validate expected input count in `create`
 * `NodeMultiOutputs<OutputType>`
   * use `this->sink_edges_[output_index]->enqueue(packet_or_frame)` (blocking function) to output packet/frame
   * or `this->sink_edges_[output_index]->try_enqueue(packet_or_frame)` for non-blocking operation
