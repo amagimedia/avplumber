@@ -43,6 +43,68 @@ public:
     virtual void stopSinks() = 0;
 };
 
+template<typename Object>
+class ILinkableTeam: public std::enable_shared_from_this<Object> {
+private:
+    std::recursive_mutex linked_teams_mutex_;
+    std::vector<std::shared_ptr<Object>> linked_teams_;
+    std::unique_lock<decltype(linked_teams_mutex_)> getLinkedTeamsLock() {
+        return std::unique_lock<decltype(linked_teams_mutex_)>(linked_teams_mutex_);
+    }
+    std::shared_ptr<Object> shared_from_this() {
+        return std::dynamic_pointer_cast<Object>(std::enable_shared_from_this<Object>::shared_from_this());
+    }
+protected:
+    virtual void teamLinked(std::shared_ptr<Object> team, bool synchronize) {
+        // noop
+    }
+    virtual void teamUnlinked(std::shared_ptr<Object> team, bool synchronize) {
+        // noop
+    }
+public:
+    std::vector<std::shared_ptr<Object>> getLinkedTeams() {
+        auto lock = getLinkedTeamsLock();
+        return linked_teams_;
+    }
+    virtual void linkTeam(std::shared_ptr<Object> team, bool link_back = true) {
+        bool linked = false;
+        {
+            auto lock = getLinkedTeamsLock();
+            if (std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
+                return t == team;
+            }) == linked_teams_.end()) {
+                linked_teams_.push_back(team);
+                linked = true;
+            }
+        }
+        if (linked) {
+            teamLinked(team, link_back);
+            if (link_back) {
+                team->linkTeam(shared_from_this(), false); // link back
+            }
+        }
+    }
+    virtual void unlinkTeam(std::shared_ptr<Object> team, bool unlink_back = true) {
+        bool unlinked = false;
+        {
+            auto lock = getLinkedTeamsLock();
+            auto linked_team = std::find_if(linked_teams_.begin(), linked_teams_.end(), [team](auto& t) {
+                return t == team;
+            });
+            if (linked_team != linked_teams_.end()) {
+                linked_teams_.erase(linked_team);
+                unlinked = true;
+            }
+        }
+        if (unlinked) {
+            teamUnlinked(team, unlink_back);
+            if (unlink_back) {
+                team->unlinkTeam(shared_from_this(), false); // unlink back
+            }
+        }
+    }
+};
+
 struct StreamTarget {
     enum class ETargetType {
         tt_Empty,
@@ -53,6 +115,7 @@ struct StreamTarget {
         tt_Live,
         tt_FrameRelative,
         tt_FrameAbsolute,
+        tt_SyncTime,
         tt_End,
         tt_Stop
     };
@@ -188,6 +251,9 @@ struct StreamTarget {
     bool isTimestamp() const {
         return type == ETargetType::tt_Timestamp;
     }
+    bool isSyncclock() const {
+        return type == ETargetType::tt_SyncTime;
+    }
     bool isValidTimestamp() const {
         return isTimestamp() && ts.isValid();
     }
@@ -224,8 +290,9 @@ public:
     };
     virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
-    virtual void fixInputTimestamp(StreamTarget& ts) = 0;
+    virtual bool convertStreamTarget(StreamTarget& st, StreamTarget::ETargetType target_type) = 0;
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
+    virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) = 0;
     virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;
     virtual EPlaybackDirection getPlaybackDirection() = 0;
     virtual size_t getFrameNumber(size_t start_frame, const av::Timestamp& offset) = 0;
@@ -236,6 +303,7 @@ class IFlushAndSeek {
 public:
     virtual void flushAndSeek_start(StreamTarget target) {};
     virtual void flushAndSeek_finish(StreamTarget target) {};
+    virtual void flushAndSeek_complete(StreamTarget target) {};
     virtual void flushAndSeek(StreamTarget target) = 0;
 };
 
@@ -248,6 +316,7 @@ class IFrameTimestamp {
 public:
     virtual int64_t getCurrentFrameTimestamp() = 0;
     virtual int64_t getCurrentFrameWallclock() = 0;
+    virtual int64_t getCurrentFrameSyncclock() = 0;
     virtual bool isEof() = 0;
 };
 

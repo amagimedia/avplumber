@@ -14,17 +14,29 @@ protected:
 public:
     using NodeSISO<T, T>::NodeSISO;
 
-    void rescaleFrameTS(T* frame) {
+    bool rescaleFrameTS(T* frame) {
         av::Timestamp orig_pts = frame->pts();
         av::Timestamp in_pts = orig_pts;
         if (timebase_.getNumerator() && timebase_.getDenominator()) {
             in_pts = rescaleTS(in_pts, timebase_);
         }
         av::Timestamp out_pts = team_->scalePTS(in_pts, discard_when_speed_changed_);
+
+        if (frame->raw()->sample_rate != 0) {
+            // Try to read sample_rate from frame metadata, if present
+            auto sample_rate_entry = av_dict_get(frame->raw()->metadata, "sample_rate", nullptr, 0);
+            if (sample_rate_entry) {
+                int orig_sample_rate = std::atoi(sample_rate_entry->value);
+                frame->raw()->sample_rate = int(float(orig_sample_rate) * team_->getSpeed() + 0.5);
+            }
+        }
+
         if (out_pts.isValid()) {
             frame->setTimeBase(av::Rational());
             frame->setPts(out_pts);
+            return true;
         }
+        return false;
     }
 
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
@@ -45,9 +57,20 @@ public:
             T &frame = *dataptr;
 
             av::Timestamp orig_pts = frame.pts();
+            int orig_sample_rate = frame.raw()->sample_rate;
 
             if (!orig_pts.isNoPts()) {
-                rescaleFrameTS(&frame);
+                if (!rescaleFrameTS(&frame)) {
+                    // frame dropped
+                    this->source_->pop();
+                    if (!ticks) {
+                        // process next packet
+                        this->yieldAndProcess();
+                    } else {
+                        process_next = true;
+                    }
+                    return;
+                }
                 // put it in the sink queue:
                 if (this->sink_->put(frame, true)) {
                     // store orifinal frame PTS
@@ -72,6 +95,9 @@ public:
                     // put returned false, no space in queue
                     frame.setTimeBase(av::Rational());
                     frame.setPts(orig_pts);
+                    if (frame.raw()) {
+                        frame.raw()->sample_rate = orig_sample_rate;
+                    }
                     if (!ticks) {
                         // retry when we have space in sink
                         this->processWhenSignalled(this->edgeSink()->edge()->consumedEvent());
@@ -146,8 +172,7 @@ public:
             T* p = edge->peek();
             if (p) {
                 auto frame_wc = av_dict_get(p->raw()->metadata, "frame_ts", nullptr, 0);
-                auto frame_no = av_dict_get(p->raw()->metadata, "frame_no", nullptr, 0);
-                if (frame_wc && frame_no) {
+                if (frame_wc) {
                     int64_t f_wc = atoll(frame_wc->value);
                     // rescale PTS again with current speed
                     for (const auto& it: scaled_pts_) {
@@ -155,7 +180,10 @@ public:
                             // found original PTS
                             p->setTimeBase(av::Rational());
                             p->setPts(std::get<1>(it));
-                            rescaleFrameTS(p);
+                            if (!rescaleFrameTS(p)) {
+                                // drop frame
+                                edge->pop();
+                            }
                             team_->setLastPTS(std::get<1>(it));
                             break;
                         }

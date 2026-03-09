@@ -120,11 +120,16 @@ public:
     void wrappedProcessNonBlocking(EventLoop& evl, bool ticks) {
         std::lock_guard<decltype(process_mutex_)> lock(process_mutex_);
         if (!this->nonblk_should_work_) return;
-        if (isPausedProcessing()) {
-            yieldAndProcess();
-        } else {
+        bool paused;
+        {
             NodeLocker lock_(shared_from_this());
-            processNonBlocking(evl, ticks);
+            paused = isPausedProcessing();
+            if (!paused) {
+                processNonBlocking(evl, ticks);
+            }
+        }
+        if (paused) {
+            yieldAndProcess();
         }
     }
     void prohibitProcessNonBlocking() {

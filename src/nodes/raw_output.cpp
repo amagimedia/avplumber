@@ -172,4 +172,4 @@ public:
     }
 };
 
-DECLNODE_ATD(raw_output, RawOutput);
+DECLNODE_ATD_TYPES(raw_output, RawOutput, av::VideoFrame, av::AudioSamples);

@@ -305,6 +305,26 @@ public:
         }
         logstream << APP_VERSION << " says goodbye!";
     }
+    template<typename Team>
+    auto command_team_link(std::string& args) {
+        std::stringstream ss(args);
+        std::string team_name, linked_team_name;
+        ss >> team_name >> linked_team_name;
+        
+        std::shared_ptr<Team> team = InstanceSharedObjects<Team>::get(manager_->instanceData(), team_name);
+        std::shared_ptr<Team> linked_team = InstanceSharedObjects<Team>::get(manager_->instanceData(), linked_team_name);
+        team->linkTeam(linked_team);
+    };
+    template<typename Team>
+    auto command_team_unlink(std::string& args) {
+        std::stringstream ss(args);
+        std::string team_name, linked_team_name;
+        ss >> team_name >> linked_team_name;
+
+        std::shared_ptr<Team> team = InstanceSharedObjects<Team>::get(manager_->instanceData(), team_name);
+        std::shared_ptr<Team> linked_team = InstanceSharedObjects<Team>::get(manager_->instanceData(), linked_team_name);
+        team->unlinkTeam(linked_team);
+    };
     ControlImpl(std::shared_ptr<NodeManager> manager):
         manager_(manager) {
         server_ready_.lock();
@@ -507,6 +527,24 @@ public:
             } else {
                 throw Error("invalid command parameters");
             }
+        };
+        commands_["team.link<pause>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<PauseControlTeam>(arg);
+        };
+        commands_["team.link<speed>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<SpeedControlTeam>(arg);
+        };
+        commands_["team.link<realtime>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_link<RealTimeTeam>(arg);
+        };
+        commands_["team.unlink<pause>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<PauseControlTeam>(arg);
+        };
+        commands_["team.unlink<speed>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<SpeedControlTeam>(arg);
+        };
+        commands_["team.unlink<realtime>"] = [this](ClientStream &cs, std::string &arg) {
+            command_team_unlink<RealTimeTeam>(arg);
         };
         commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
@@ -724,6 +762,8 @@ void AVPlumber::setObsSource(obs_source_t* obssrc) {
 }
 
 void AVPlumber::unsetObsSourceAndWait() {
+    if (!impl_ || !impl_->manager())
+        return;
     InstanceData &inst = impl_->manager()->instanceData();
     inst.obs_source_.store(nullptr);
     while (inst.obs_source_used_by_.load()!=0) {
@@ -732,6 +772,8 @@ void AVPlumber::unsetObsSourceAndWait() {
 }
 
 void AVPlumber::obsTick() {
+    if (!impl_)
+        return;
     impl_->tick();
 }
 
@@ -800,10 +842,13 @@ void AVPlumber::obs_play() {
 
 int64_t AVPlumber::obs_get_time() {
     if (!impl_ || !impl_->manager())
-        return 0;
+        return -1;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
-        auto n = node->node();
+        std::shared_ptr<Node> n;
+        if (!node->doLockedTry([&]() { n = node->node(); })) {
+            return -1;
+        }
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
@@ -811,7 +856,7 @@ int64_t AVPlumber::obs_get_time() {
             }
         }
     }
-    return 0;
+    return -1;
 }
 
 void AVPlumber::obs_set_time(int64_t ms) {
@@ -839,28 +884,35 @@ void AVPlumber::obs_restart() {
 
 int64_t AVPlumber::obs_get_duration() {
     if (!impl_ || !impl_->manager())
-        return 0;
+        return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
-        auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
-        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
-        if (n_rec && n) {
-            auto duration = n->getObject("stream-limits");
+        try {
+            Parameters duration;
+            if (!node->getObjectTry("stream-limits", duration)) {
+                return -1;
+            }
             return duration["duration"];
+        } catch (const std::exception &) {
+            return -1;
         }
     }
 
-    return 0;
+    return -1;
 }
 double AVPlumber::obs_get_speed() {
     if (!impl_ || !impl_->manager())
         return 1.00;
     auto node = impl_->manager()->node_if_exists(SPEED_NODE);
     if (node) {
-        auto n = dynamic_cast<IReturnsObjects*>(node->node().get());
-        if (n) {
-            auto info = n->getObject("info");
+        try {
+            Parameters info;
+            if (!node->getObjectTry("info", info)) {
+                return 1.00;
+            }
             return info["speed"];
+        } catch (const std::exception &) {
+            return 1.00;
         }
     }
 
@@ -871,7 +923,10 @@ bool AVPlumber::obs_is_eof() {
         return false;
     auto node = impl_->manager()->node_if_exists(REALTIME_NODE);
     if (node) {
-        auto n = node->node();
+        std::shared_ptr<Node> n;
+        if (!node->doLockedTry([&]() { n = node->node(); })) {
+            return false;
+        }
         if (n) {
             auto node_ts = dynamic_cast<IFrameTimestamp*>(n.get());
             if (node_ts) {
@@ -885,6 +940,7 @@ bool AVPlumber::obs_is_eof() {
 
 void AVPlumber::enableControlServer(const uint16_t tcp_port) {
     if (tcp_port) {
+        logstream << "Enabling control server on TCP port " << tcp_port;
         impl_->createServer<TcpControlServer>(*impl_, tcp_port);
     } // if port==0, then NOOP
 }

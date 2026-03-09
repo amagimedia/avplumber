@@ -70,7 +70,9 @@ public:
         // pause all nodes processing
         pauseProcessing();
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->pauseProcessing();
+            if (node) {
+                node->pauseProcessing();
+            }
         });
         // start flushing
         executeUpstream([target](EdgeBase& edge, std::shared_ptr<Node> node) {
@@ -85,8 +87,10 @@ public:
         unlockProcessing();
         // wait all nodes to complete its work
         executeUpstream([](EdgeBase& edge, std::shared_ptr<Node> node) {
-            node->lockProcessing();
-            node->unlockProcessing();
+            if (node) {
+                node->lockProcessing();
+                node->unlockProcessing();
+            }
         });
     }
     void flushAndSeek_finish(StreamTarget target) override {
@@ -95,17 +99,18 @@ public:
             edge.clear();
             edge.stopFlushing();
         });
-
+    }
+    void flushAndSeek_complete(StreamTarget target) override {
         std::shared_ptr<IPlaybackControl> input = findNodeUp<IPlaybackControl>();
         IPlaybackControl::EPlaybackDirection direction = IPlaybackControl::EPlaybackDirection::pd_Forward;
 
         if (input) {
-            input->fixInputTimestamp(target);
+            input->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
             direction = input->getPlaybackDirection();
         }
         // set-up discard until & execute seek
         executeUpstream([target, direction](EdgeBase& edge, std::shared_ptr<Node> node) {
-            if (!node->isPausedProcessing())
+            if (!node || !node->isPausedProcessing())
                 return;
             if (!target.isEmpty()) {
                 if (target.ts.isValid()) {
@@ -142,7 +147,9 @@ public:
             if (input && node->isPausedProcessing()) {
                 input->resumeAfterSeek();
             }
-            node->resumeProcessing();
+            if (node) {
+                node->resumeProcessing();
+            }
         });
         resumeProcessing();
     }

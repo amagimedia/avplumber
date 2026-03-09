@@ -216,6 +216,22 @@ bool NodeWrapper::interrupt(bool optional) {
     }
 }
 
+static void processNode(std::shared_ptr<Node> node)
+{
+    bool paused;
+    {
+        NodeLocker lock(node);
+        paused = node->isPausedProcessing();
+        if (!paused) {
+            node->process();
+        }
+    }
+    if (paused) {
+        // TODO: need to add some event for unpase
+        std::this_thread::sleep_for(1us);
+    }
+}
+
 void NodeWrapper::threadFunction() {
     decltype(node_) node = node_;
     if (node==nullptr) {
@@ -235,12 +251,7 @@ void NodeWrapper::threadFunction() {
                     return;
                 }
                 if (dowork_) {
-                    if (node->isPausedProcessing()) {
-                        std::this_thread::sleep_for(0us);
-                    } else {
-                        NodeLocker lock(node);
-                        node->process();
-                    }
+                    processNode(node);
                 } else if (node_flushable) {
                     // told to finish work
                     // and Node is IFlushable
@@ -251,12 +262,7 @@ void NodeWrapper::threadFunction() {
                     // but doesn't have flushing interface
                     // so to give it a chance to finish,
                     // call process()...
-                    if (node->isPausedProcessing()) {
-                        std::this_thread::sleep_for(0us);
-                    } else {
-                        NodeLocker lock(node);
-                        node->process();
-                    }
+                    processNode(node);
                 }
             }
             logstream << "Node " << name_ << " reported that it finished processing.";
@@ -267,12 +273,7 @@ void NodeWrapper::threadFunction() {
                     logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
                     return;
                 }
-                if (node->isPausedProcessing()) {
-                    std::this_thread::sleep_for(0us);
-                } else {
-                    NodeLocker lock(node);
-                    node->process();
-                }
+                processNode(node);
             }
             if (node_flushable) {
                 node_flushable->flush();
@@ -619,24 +620,24 @@ namespace NodeGroupUtils {
 
     // sorting algorithm source: https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
     enum SortNodeMark {
-        None, Temporary, Permanent
+        MarkNone, MarkTemporary, MarkPermanent
     };
     struct SortNode {
         NodeGroup::Item item;
         SortNodeMark mark;
-        SortNode(NodeGroup::Item a_item): item(a_item), mark(None) {
+        SortNode(NodeGroup::Item a_item): item(a_item), mark(MarkNone) {
         }
     };
     static void sortVisit(SortNode& n, std::list<SortNode>& all_nodes, std::list<NodeGroup::Item> &target_list) {
-        if (n.mark==Permanent) return;
-        if (n.mark==Temporary) {
+        if (n.mark==MarkPermanent) return;
+        if (n.mark==MarkTemporary) {
             throw Error("Graph has cycle!");
         }
         auto n_offers = offers(n.item);
         if (!n_offers.empty()) {
-            n.mark = Temporary;
+            n.mark = MarkTemporary;
             for (SortNode &m: all_nodes) {
-                if (m.mark != None) continue; // WARNING: this optimization may sabotage cycle checking
+                if (m.mark != MarkNone) continue; // WARNING: this optimization may sabotage cycle checking
                 auto m_needs = needs(m.item);
                 if (m_needs.empty()) continue; // skip the whole loop
                 bool has_edge = false;
@@ -655,7 +656,7 @@ namespace NodeGroupUtils {
                 }
             }
         }
-        n.mark = Permanent;
+        n.mark = MarkPermanent;
         target_list.push_front(n.item);
     }
     static void sort(std::list<NodeGroup::Item> &target_list, std::list<NodeGroup::Item> &source_list) {

@@ -8,39 +8,11 @@
 #include <json.hpp>
 #include <avcpp/dictionary.h>
 #include "util.hpp"
+#include "hwaccel/EglImageFrame.hpp"
 
 typedef int64_t AVTS;
 const av::Timestamp NOTS = {AV_NOPTS_VALUE, {0, 1}};
 using nlohmann::json;
-
-template<typename T> struct TSGetter {
-};
-template<typename T> struct FrameTSGetter {
-    static AVTS get(const T& data, const AVRational time_base) {
-        return data.pts().timestamp(time_base);
-    }
-    static av::Timestamp getWithTB(const T& data) {
-        return data.pts();
-    }
-    static bool isValid(const T& data) {
-        return data.isComplete() && data.pts().isValid();
-    }
-};
-template<> struct TSGetter<av::Packet> {
-    static AVTS get(const av::Packet& data, const AVRational time_base) {
-        return data.dts().timestamp(time_base);
-    }
-    static av::Timestamp getWithTB(const av::Packet& data) {
-        return data.dts();
-    }
-    static bool isValid(const av::Packet& data) {
-        return data.isComplete() && data.dts().isValid();
-    }
-};
-template<> struct TSGetter<av::AudioSamples>: public FrameTSGetter<av::AudioSamples> {
-};
-template<> struct TSGetter<av::VideoFrame>: public FrameTSGetter<av::VideoFrame> {
-};
 
 void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align = av::SampleFormat::Alignment::AlignDefault);
 
@@ -166,5 +138,47 @@ namespace {
 bool isEofMarker(const av::Packet& p);
 bool isEofMarker(const av::VideoFrame& f);
 bool isEofMarker(const av::AudioSamples& f);
+class EglImageFrame; // fwd
+bool isEofMarker(const EglImageFrame& f);
 
 av::Packet createEofPacket(int streamIndex = -1);
+
+template<typename T> struct TSGetter {
+};
+template<typename T> struct FrameTSGetter {
+    static AVTS get(const T& data, const AVRational time_base) {
+        return rescaleTS(data.pts(), time_base).timestamp();
+    }
+    static av::Timestamp getWithTB(const T& data) {
+        return data.pts();
+    }
+    static bool isValid(const T& data) {
+        return data.isComplete() && data.pts().isValid();
+    }
+};
+template<> struct TSGetter<av::Packet> {
+    static AVTS get(const av::Packet& data, const AVRational time_base) {
+        return rescaleTS(data.dts(), time_base).timestamp();
+    }
+    static av::Timestamp getWithTB(const av::Packet& data) {
+        return data.dts();
+    }
+    static bool isValid(const av::Packet& data) {
+        return data.isComplete() && data.dts().isValid();
+    }
+};
+template<> struct TSGetter<av::AudioSamples>: public FrameTSGetter<av::AudioSamples> {
+};
+template<> struct TSGetter<av::VideoFrame>: public FrameTSGetter<av::VideoFrame> {
+};
+template<> struct TSGetter<EglImageFrame> {
+    static AVTS get(const EglImageFrame& data, const AVRational time_base) {
+        return rescaleTS(data.pts(), time_base).timestamp();
+    }
+    static av::Timestamp getWithTB(const EglImageFrame& data) {
+        return data.pts();
+    }
+    static bool isValid(const EglImageFrame& data) {
+        return data.isComplete() && data.pts().isValid();
+    }
+};

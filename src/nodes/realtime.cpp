@@ -6,7 +6,7 @@
 template <typename T> class RealTimeSpeed: public NodeSISO<T, T>, public NonBlockingNode<RealTimeSpeed<T>>, public IInputReset, public IFrameNumber, public IFrameTimestamp {
 protected:
     bool ready_ = false;
-    bool first_ = true;
+    
     bool no_wait_notified_ = false;
     AVTS max_no_wait_period_ = INT64_MAX;
     AVTS last_wait_ = 0;
@@ -35,8 +35,9 @@ protected:
     std::atomic_int64_t last_frame_timestamp_ = -1;
     std::atomic_int64_t is_eof_ = false;
     std::atomic_int64_t eof_frame_wallclock_ = -1;
+    std::atomic_int64_t eof_frame_timestamp_ = -1;
     std::atomic_int64_t last_frame_wallclock_ = -1;
-    std::weak_ptr<IPlaybackControl> playback_control_;
+    std::atomic_int64_t last_frame_synclock_ = -1;
 
     std::string printDuration(AVTS duration) {
         if (duration==AV_NOPTS_VALUE) {
@@ -115,20 +116,21 @@ public:
 
             AVTS now_ts = now_ts_;
             AVTS new_pts = now_ts;
-            AVTS pkt_ts = TSGetter<T>::get(data, tb_to_rescale_ts_);
+            av::Timestamp pkt_ts_with_tb = TSGetter<T>::getWithTB(data);
+            AVTS pkt_ts = rescaleTS(pkt_ts_with_tb, tb_to_rescale_ts_).timestamp();
             if ( (pkt_ts != AV_NOPTS_VALUE) && (pkt_ts != (AV_NOPTS_VALUE+1)) ) { // FIXME: why +1 ???
                 if (input_ts_queue_ != nullptr) {
                     av::Timestamp input_ts = input_ts_queue_->lastTS();
 
                     if (input_ts.isValid() && team_) {
-                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(TSGetter<T>::getWithTB(data))).seconds() : 0;
+                        float buffered = anythingBuffered() ? addTS(input_ts, negateTS(pkt_ts_with_tb)).seconds() : 0;
                         if ((buffered > max_buffered_) || (team_->isFlushing() && (buffered > min_buffered_))) {
                             if (!team_->isFlushing()) {
                                 logstream << "too many seconds buffered: " << buffered << " > " << max_buffered_ << ", flushing";
                                 team_->startFlushing();
                             }
                             ready_ = false;
-                            first_ = true;
+                            if (team_) team_->setFirst(true);
                             this->source_->pop();
                             this->yieldAndProcess();
                             return;
@@ -167,8 +169,8 @@ public:
                                 emit = false;
                                 consume = false;
                                 woken_too_late_ = false;
-                                if (!ticks) {
-                                    // retry after waiting
+                                // retry after waiting – schedule even if called from a tick when no internal tick clock is used
+                                if (!ticks || (tick_period_ == 0)) {
                                     this->scheduleProcess(av::Timestamp(now_ts + diff, timebase_));
                                 }
                             } else {
@@ -180,7 +182,7 @@ public:
                                 no_wait_notified_ = true;
                             }
                             ready_ = false;
-                            first_ = true;
+                            if (team_) team_->setFirst(true);
                         }
                     } else {
                         // diff >= discontinuity_threshold_
@@ -189,23 +191,24 @@ public:
                             team_->reset();
                         }
                         ready_ = false;
-                        first_ = true;
+                        if (team_) team_->setFirst(true);
                     }
                 }
                 if ((!ready_) && consume) {
                     // offset_ must be set only when consuming, because it marks sync point
-                    offset_ = (pkt_ts - now_ts) - (first_ ? initial_jitter_margin_ : jitter_margin_);
-                    first_ = false;
+                    offset_ = (pkt_ts - now_ts) - ((team_ && team_->isFirst()) ? initial_jitter_margin_ : jitter_margin_);
+                    if (team_) team_->setFirst(false);
                     if (team_) {
                         offset_ = team_->updateOffset(offset_);
                     }
                     ready_ = true;
                 }
-            } else {
+            } else { // NO PTS
                 if (isEofMarker(data)) {
                     eof_frame_wallclock_.store(last_frame_wallclock_.load());
+                    eof_frame_timestamp_.store(last_frame_timestamp_.load());
                     is_eof_ = true;
-                    logstream << "EOF detected";
+                    logstream << "EOF detected (wallclock: " << eof_frame_wallclock_.load() << ", timestamp: " << eof_frame_timestamp_.load() << ")";
                 }
                 emit = false;
                 if (!ticks) {
@@ -273,7 +276,7 @@ public:
         AVTS wclk_diff = exit_wclk - now_ts_wclk;
         if (wclk_diff>4) logstream << "RealTimeSpeed::processNonBlocking took " << wclk_diff << "ms, did " << iter << " iterations";
     }
-    template<typename T2=T, typename=decltype(&T2::pixelFormat)> void setLastFrame(T2* frm) {
+    void setLastFrame(av::VideoFrame* frm) {
         auto frame_no = av_dict_get(frm->raw()->metadata, "frame_no", nullptr, 0);
         if (frame_no) {
             last_frame_number_ = std::atoll(frame_no->value);
@@ -283,6 +286,7 @@ public:
             last_frame_timestamp_ = std::atoll(frame_ts->value);
             if (is_eof_ && (eof_frame_wallclock_ != last_frame_wallclock_)) {
                 eof_frame_wallclock_ = -1;
+                eof_frame_timestamp_ = -1;
                 is_eof_ = false;
                 logstream << "no EOF anymore";
             }
@@ -290,6 +294,13 @@ public:
         auto frame_wc = av_dict_get(frm->raw()->metadata, "wallclock", nullptr, 0);
         if (frame_wc) {
             last_frame_wallclock_ = std::atoll(frame_wc->value);
+        }
+    }
+    void setLastFrame(av::AudioSamples* frm) {
+        // read only frame_ts
+        auto frame_ts = av_dict_get(frm->raw()->metadata, "frame_ts", nullptr, 0);
+        if (frame_ts) {
+            last_frame_timestamp_ = std::atoll(frame_ts->value);
         }
     }
     template<typename T2> void setLastFrame(T2) {
@@ -302,6 +313,9 @@ public:
     }
     virtual int64_t getCurrentFrameWallclock() override {
         return last_frame_wallclock_;
+    }
+    virtual int64_t getCurrentFrameSyncclock() override {
+        return last_frame_synclock_;
     }
     bool isEof() override {
         return is_eof_;

@@ -8,11 +8,14 @@ avplumber was created because we were experienced with FFmpeg and wanted to have
 * filter video (using FFmpeg's filter graph syntax) in multiple threads. It is possible since FFmpeg 6.0, but we needed this feature long before its release.
 * maintain output timestamps continuity **and** audio-video synchronization even when input timestamps jump.
 * insert fallback slate ("we'll be back shortly") when input stream breaks.
+* monitor input stream health, analyzing speed, actual FPS & sample rate, audio levels.
+* reconfigure processing graph on the fly.
 
 Furthermore, it was designed to allow easy prototyping of new video & audio processing blocks (nodes in graph) without writing so much boilerplate code that is needed in case of libavfilter or GStreamer.
 
-So does it replace FFmpeg in all use cases? Not at all. It is targetted at live use - currently it can't seek the input at all. Also, subtitles aren't supported due to limitations of the underlying library - avcpp.
+However, it does not replace FFmpeg in all use cases. For example, subtitles aren't supported due to limitations of the underlying library - avcpp.
 
+Curious about history and applications of this project? **Read [Story of avplumber — open source multimedia streaming engine from Amagi](https://medium.com/amagi-engineering/story-of-avplumber-open-source-multimedia-streaming-engine-from-amagi-fc649cce2637)** at [Amagi Engineering](https://medium.com/amagi-engineering) blog.
 
 ## Quick start
 
@@ -66,6 +69,29 @@ This demo uses [MediaMTX](https://github.com/bluenviron/mediamtx) as streaming s
     brew install docker docker-compose colima
     colima start
 
+## Build process details
+
+The build is driven by Makefile variables. Set them on the `make` command line, e.g.:
+
+    make -j`nproc` HAVE_CUDA=1 HAVE_DRM=1 HAVE_NVCC=1
+
+-   BUILD_TYPE: `Debug` (default) or `Release`
+    -   Debug enables debug-only nodes (`jittergen`, `delaygen`).
+    -   Release sets compiler flags to more optimization.
+-   HAVE_CUDA=1: enable CUDA support and CUDA-based nodes. Uses dynlink loader, so does not require anything during compilation and lack of CUDA libraries in runtime is non-fatal (nodes not using CUDA will work normally)
+-   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
+-   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
+-   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
+-   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
+-   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
+
+Feature gates:
+-   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
+-   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
+-   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
+
+
 ### Using as a library
 
 avplumber can be built as a static library: `make static_library` will make `libavplumber.a` which your app or library can link to. [`library_examples/obs-avplumber-source/CMakeLists.txt`](library_examples/obs-avplumber-source/CMakeLists.txt) is an example of CMake integration.
@@ -74,7 +100,7 @@ Public API is contained in [`src/avplumber.hpp`](src/avplumber.hpp).
 
 Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https://github.com/obsproject/obs-studio) supporting video decoder to texture direct VRAM copy.
 
-### Developing custom nodes
+## Developing custom nodes
 
 See [doc/developing_nodes.md](doc/developing_nodes.md)
 
@@ -88,6 +114,7 @@ Data types:
 * [`av::Packet`](https://h4tr3d.github.io/avcpp/classav_1_1Packet.html) - encoded media packet
 * [`av::VideoFrame`](https://h4tr3d.github.io/avcpp/classav_1_1VideoFrame.html) - raw video frame
 * [`av::AudioSamples`](https://h4tr3d.github.io/avcpp/classav_1_1AudioSamples.html) - raw audio frame (usually 1024 samples of all channels)
+* `EglImageFrame` - GPU RGBA image passed by `EGLImageKHR` handle with PTS/timebase
 
 Some nodes support multiple input/output types - they work like templates/generics in programming languages (and are implemented this way). If the data type can be deduced from source or sink edges, there is no need to provide it explicitly. But if it can't be, use template syntax in `type` field of the node JSON object:
 
@@ -96,6 +123,7 @@ Some nodes support multiple input/output types - they work like templates/generi
 for example:
 
 ```split<av::VideoFrame>```
+
 
 ### Topology
 
@@ -334,6 +362,19 @@ Set speed of the `speed` nodes belonging to the team `team_name` to `speed` (flo
 ```speed.get team_name```
 
 Get current playback speed of the team `team_name`.
+
+### Teams synchronization
+
+```team.link<Pause> pause-team-A pause-team-B```
+```team.link<Speed> speed-team-A speed-team-B```
+```team.link<RealTime> realtime-team-A realtime-team-B```
+```team.unlink<Pause> pause-team-A pause-team-B```
+```team.unlink<Speed> speed-team-A speed-team-B```
+```team.unlink<RealTime> realtime-team-A realtime-team-B```
+
+It is possible to dynamically link & unlink teams to act as a single "super-team".
+When teams are linked, commands like ```speed.set``` are automatically sent to all linked teams.
+Linking teams will also copy team's current status (like pause status) to linked team (from ```team A``` to ```team B```).
 
 ### Hardware acceleration
 
@@ -741,8 +782,7 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
     -   `true`: if input streams are present when starting the sentinels,
         forward relative shifts of their first packets (i.e. A-V offset)
         to output.
-    -   `false` (default): start all output streams at exact PTS = 10
-        seconds (hardcoded in `PTSCorrectorCommon` class)
+    -   `false` (default): start all output streams at exact PTS = `start_ts`
 -   `max_streams_diff` (float, seconds) - default `0.001`, tolerance in seconds
 -   `start_ts` (float, seconds) - default `10`, first output timestamp
 -   `lock_timeshift` (bool) - after receiving first PTS, maintain constant input-output PTS difference. Disabled by default. Enable only if you're sure that input timestamps are synchronized to real-time clock.
@@ -912,6 +952,63 @@ format.
     to synchronize audio with video by cutting first audio frame to make
     it start together with first video frame.
 
+### `reinterpret_planes_video` / `reinterpret_planes_audio`
+
+Reinterpret plane pointers (like [`reinterpret_cast`](https://en.cppreference.com/w/cpp/language/reinterpret_cast.html)) without copying data. Works like a controlled cast of frame layout:
+- For video, re-map data planes and change destination pixel format metadata.
+- For audio (not tested yet), re-map planar channels and change destination sample format metadata.
+
+No memory copies are performed. Plane pointers and buffer references are reused. Dimensions and linesizes are validated using `av_pix_fmt_` functions.
+
+Intended as a more versatile alternative to [`shuffleplanes`](https://ffmpeg.org/ffmpeg-filters.html#shuffleplanes) which does not support hardware frames.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples` respectively
+
+-   `plane_map` (object) - optional, `{ "dst_plane": src_plane }` mapping. If omitted, planes are mapped 1:1 up to the minimum plane count (e.g. `yuva420p` -> `yuv420p` drops alpha by default).
+
+For video only:
+
+-   `dst_pixel_format` (string, required) - destination software pixel format name (e.g. `gray`, `yuv420p`). When using hardware frames, this updates only `hw_frames_ctx->sw_format`; `AVFrame::format` (the hardware pixel format, e.g. `cuda`) stays unchanged.
+-   `hw_frames` (bool, video) - default `false`. If `true`, the node expects a hardware input frame and keeps the hardware `AVFrame::format` unchanged. It clones `hw_frames_ctx` and sets its `sw_format` to `dst_pixel_format`.
+
+For audio only:
+
+-   `dst_sample_format` (string, required) - destination sample format name (e.g. `fltp`). Interleaved audio is supported only when source and destination sample formats match exactly (no copying is performed).
+
+Constraints:
+-   No conversions are performed. The node does not copy, up/download, or resample; it only reinterprets pointers and metadata.
+-   For video, mapping between hardware and non-hardware must be consistent: `hw_frames=true` is required for hardware inputs; `hw_frames=false` rejects hardware inputs. Otherwise pointers would become invalid.
+-   For audio, planar-to-planar remaps are supported; interleaved requires identical formats and is effectively pass-through.
+
+Examples:
+
+Map V component of `yuv420p` to grayscale:
+
+```
+{"type":"reinterpret_planes_video","name":"v_to_gray","group":"proc",
+ "src":"v_in","dst":"v_out",
+ "dst_pixel_format":"gray",
+ "plane_map":{"0":2}}
+```
+
+Drop alpha from `yuva420p` to `yuv420p` (default plane map) in hardware frames:
+
+```
+{"type":"reinterpret_planes_video","name":"drop_alpha","group":"proc",
+ "src":"v_in","dst":"v_out",
+ "dst_pixel_format":"yuv420p",
+ "hw_frames":true}
+```
+
+Audio: select channel 1 (second plane) as mono FLT planar:
+
+```
+{"type":"reinterpret_planes_audio","name":"pick_ch1","group":"proc",
+ "src":"a_in","dst":"a_out",
+ "dst_sample_format":"fltp",
+ "plane_map":{"0":1}}
+```
+
 ### `picture_buffer_sink`
 
 Take a frame and write it to picture buffer that can be later used by `sentinel_video`.
@@ -962,6 +1059,56 @@ Parse SCTE35 `SPLICE_INSERT` command.
 Extract ATSC A53 Part 4 Closed Captions data from video frame. Subtitle codec is usually EIA-708 or 608 in such side data. When outputted to UDP with libavformat's [special `data` 'muxer'](https://ffmpeg.org/ffmpeg-formats.html#Raw-muxers) (see [`examples/extract_cc_data.avplumber`](examples/extract_cc_data.avplumber)), subtitles can be parsed using [CCExtractor](https://ccextractor.org/) or GStreamer (YMMV).
 
 no parameters
+
+### `firewall`
+
+Drop data with invalid timestamps; pass through otherwise. Useful to prevent malformed inputs from propagating downstream.
+
+1 input, 1 output: anything
+
+no parameters
+
+### `ipc_dmabuf_source`
+
+Receive GPU frames via a UNIX domain socket with FD passing (DMA-BUF). Produces DRM PRIME frames with metadata taken from the sender.
+
+1 output: `av::VideoFrame` (hardware "pixel format" `DRM_PRIME`)
+
+Parameters:
+-   `socket` (string, required) - path to the UNIX domain socket
+-   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
+
+### `ipc_socket_audio_source`
+
+Receive audio frames over a UNIX domain socket. Expects a simple header followed by interleaved float32 PCM.
+
+1 output: `av::AudioSamples`
+
+Parameters:
+-   `socket` (string, required) - path to the UNIX domain socket
+-   `sample_rate` (int, default `48000`)
+-   `channels` (int, default `2`)
+<!-- -   `bytes_per_sample` (int, default `4` for float32) CHANGING NOT IMPLEMENTED -->
+-   `reconnect_delay_ms` (int, default `50`)
+
+### `cuda_to_egl_image`
+
+Convert CUDA `av::VideoFrame` to `EglImageFrame` (RGBA) using CUDA kernels and an EGL-backed texture pool. Intended for zero-copy rendering paths (e.g. OBS).
+
+1 input: `av::VideoFrame` (pixel format `cuda`), 1 output: `EglImageFrame`
+
+Parameters:
+-   `pool_id` (name of instance-shared object, default `"default"`) - shared EGL image pool id
+-   `pool_size` (int, default `8`) - pool capacity
+
+### `drm_prime_to_cuda`
+
+Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frames are passed through unchanged.
+
+1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format", pass-through otherwise), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
+
+Parameters:
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 
 ### `jittergen`
 

@@ -22,7 +22,7 @@
 /**
  * CUDA API versioning support
  */
-#define __CUDA_API_VERSION 5000
+#define __CUDA_API_VERSION 7000
 
 /**
  * \defgroup CUDA_DRIVER CUDA Driver API
@@ -1511,7 +1511,7 @@ typedef CUresult CUDAAPI tcuIpcCloseMemHandle(CUdeviceptr dptr);
 #endif
 
 typedef CUresult CUDAAPI tcuMemHostRegister(void *p, size_t bytesize, unsigned int Flags);
-typedef CUresult CUDAAPI tcuMemHostUnregister(void *p);;
+typedef CUresult CUDAAPI tcuMemHostUnregister(void *p);
 typedef CUresult CUDAAPI tcuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
 typedef CUresult CUDAAPI tcuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount);
 
@@ -1788,6 +1788,16 @@ typedef CUresult CUDAAPI tcuGraphicsResourceSetMapFlags(CUgraphicsResource resou
 typedef CUresult CUDAAPI tcuGraphicsMapResources(unsigned int count, CUgraphicsResource *resources, CUstream hStream);
 typedef CUresult CUDAAPI tcuGraphicsUnmapResources(unsigned int count, CUgraphicsResource *resources, CUstream hStream);
 
+
+
+/* Surface object API typedefs (CUDA 5.0+) */
+typedef CUresult CUDAAPI tcuSurfObjectCreate(CUsurfObject *pSurfObject, const struct CUDA_RESOURCE_DESC_st *pResDesc);
+typedef CUresult CUDAAPI tcuSurfObjectDestroy(CUsurfObject surfObject);
+
+
+/* Missing name-to-string error API */
+typedef CUresult CUDAAPI tcuGetErrorName(CUresult error, const char **pStr);
+
 /************************************
  **
  **    Export tables
@@ -1830,6 +1840,7 @@ extern tcuDeviceComputeCapability      *cuDeviceComputeCapability;
 extern tcuDeviceGetProperties          *cuDeviceGetProperties;
 extern tcuDeviceGetAttribute           *cuDeviceGetAttribute;
 extern tcuGetErrorString               *cuGetErrorString;
+extern tcuGetErrorName                 *cuGetErrorName;
 extern tcuCtxDestroy                   *cuCtxDestroy;
 extern tcuCtxAttach                    *cuCtxAttach;
 extern tcuCtxDetach                    *cuCtxDetach;
@@ -1917,6 +1928,9 @@ extern tcuGraphicsUnmapResources             *cuGraphicsUnmapResources;
 extern tcuGetExportTable                     *cuGetExportTable;
 extern tcuCtxSetLimit                        *cuCtxSetLimit;
 extern tcuCtxGetLimit                        *cuCtxGetLimit;
+/* Surface object function pointers */
+extern tcuSurfObjectCreate              *cuSurfObjectCreate;
+extern tcuSurfObjectDestroy             *cuSurfObjectDestroy;
 
 // These functions could be using the CUDA 3.2 interface (_v2)
 extern tcuMemcpyHtoD                   *cuMemcpyHtoD;

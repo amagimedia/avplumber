@@ -3,7 +3,7 @@
 #include "avutils.hpp"
 #include "instance_shared.hpp"
 
-class SpeedControlTeam: public InstanceShared<SpeedControlTeam> {
+class SpeedControlTeam: public InstanceShared<SpeedControlTeam>, public ILinkableTeam<SpeedControlTeam> {
 protected:
     std::mutex mutex_;
     float speed_ = 1;
@@ -11,14 +11,13 @@ protected:
     av::Timestamp last_pts_ = NOTS;
     av::Timestamp last_sync_ = NOTS;
     av::Timestamp shift_ = {0, {1, 1}};
-    av::Timestamp previous_shift_ = {0, {1, 1}};
     std::vector<std::weak_ptr<ISpeed>> nodes_;
     std::weak_ptr<IFlushAndSeek> sync_obj_;
     std::unique_lock<decltype(mutex_)> getLock() {
         return std::unique_lock<decltype(mutex_)>(mutex_);
     }
-public:
-    void setSpeed(float speed) {
+
+    void setSpeedNonRecursive(float speed) {
         bool direction_changed = false;
         {
             auto lock = getLock();
@@ -26,7 +25,6 @@ public:
             if (!last_sync_.isNoPts()) {
                 av::Timestamp elapsed = addTS(last_pts_, negateTS(last_sync_));
                 av::Timestamp scaled = { AVTS(std::round(double(elapsed.timestamp()) * double(inv_speed_))), elapsed.timebase() };
-                previous_shift_ = shift_;
                 shift_ = addTS(shift_, last_sync_, scaled, negateTS(last_pts_));
             }
 
@@ -72,6 +70,26 @@ public:
             }
         }
     }
+
+    virtual void teamLinked(std::shared_ptr<SpeedControlTeam> team, bool synchronize) override {
+        if (synchronize && (getSpeed() != team->getSpeed())) {
+            team->setSpeedNonRecursive(getSpeed());
+        }
+        last_pts_ = NOTS;
+        last_sync_ = NOTS;
+        shift_ = {0, {1, 1}};
+    }
+
+public:
+    void setSpeed(float speed) {
+        setSpeedNonRecursive(speed);
+        {
+            for (auto team: getLinkedTeams()) {
+                team->setSpeedNonRecursive(speed);
+            }
+        }
+    }
+
     float getSpeed() {
         auto lock = getLock();
         return speed_;
@@ -104,7 +122,7 @@ public:
         sync_obj_ = obj;
     }
     void setLastSync(av::Timestamp s) {
-        shift_ = previous_shift_;
+        auto lock = getLock();
         last_sync_ = s;
     }
 };
