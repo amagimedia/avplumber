@@ -83,12 +83,18 @@ endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_TENSORRT)$(HAVE_NVCC),111)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_infer_yolo.cpp
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/vert_infer.cpp
 BUILD_YOLO_PTX = 1
 YOLO_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/yolo_preprocess.cu
 YOLO_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx
 YOLO_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx.h
+BUILD_VERT_PTX = 1
+VERT_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/vert_preprocess.cu
+VERT_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/vert_preprocess.ptx
+VERT_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/vert_preprocess.ptx.h
 else
 BUILD_YOLO_PTX = 0
+BUILD_VERT_PTX = 0
 endif
 
 ifeq ($(HAVE_CUDA),1)
@@ -163,13 +169,13 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 $(nodes_list_file): ./generate_node_list $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
-$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H)
+$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H) $(VERT_PREPROCESS_PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)
 
 build: $(EXE) compile_flags.txt
 
 
-$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H)
+$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H) $(VERT_PREPROCESS_PTX_H)
 	ar -rcs $@ $^
 
 static_library: $(STATIC_LIBRARY)
@@ -237,6 +243,20 @@ $(YOLO_PREPROCESS_PTX_H): $(YOLO_PREPROCESS_PTX)
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
 objs/src/nodes/hwaccel/cuda_infer_yolo.o: $(YOLO_PREPROCESS_PTX_H)
+endif
+
+ifeq ($(BUILD_VERT_PTX),1)
+$(VERT_PREPROCESS_PTX): $(VERT_PREPROCESS_KERNEL)
+	@mkdir -p $(dir $@)
+	$(NVCC) -ptx -o $@ $<
+
+$(VERT_PREPROCESS_PTX_H): $(VERT_PREPROCESS_PTX)
+	@mkdir -p $(dir $@)
+	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_vert_preprocess_ptx_len/const unsigned int avpl_vert_preprocess_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_vert_preprocess_ptx/const char avpl_vert_preprocess_ptx/' > $@
+	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
+
+objs/src/nodes/hwaccel/vert_infer.o: $(VERT_PREPROCESS_PTX_H)
 endif
 
 compile_flags.txt:

@@ -82,9 +82,9 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
--   HAVE_TENSORRT=1: enable TensorRT YOLO inference node (`cuda_infer_yolo`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
+-   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `vert_infer`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`). Requires `nvcc`.
+-   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `vert_infer`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
@@ -92,6 +92,7 @@ Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
+-   `vert_infer` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
 -   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
@@ -1240,6 +1241,34 @@ Detection coordinates in metadata are emitted in model space (`coord_space = "mo
 
 Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
 - `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
+
+### `vert_infer`
+
+Run a TensorRT-exported vertical retargeting policy on CUDA NV12 frames and attach crop metadata to each output frame.
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with crop metadata attached)
+
+Behavior in v1:
+- model input dimensions are read from the TensorRT engine
+- the node buffers `history_length` frames before inference
+- crop metadata is emitted in pixel space so downstream CUDA crop can use it directly
+- output metadata contains `x1`, `x2`, `y`, `w`, `h`, chosen `action`, and measured `latency_ms`
+
+Parameters:
+-   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `history_length` (int, optional, default `3`) - temporal queue depth; must match the model input
+-   `metadata_key_out` (string, optional, default `vert_crop_v1`) - output frame metadata key for crop JSON
+-   `visual_mode` (string, optional, default `grayscale`) - expected visual tensor mode (`grayscale` or `rgb`)
+-   `input_format` (string, optional, default `RGB`) - channel order used when `visual_mode=rgb` (`RGB` or `BGR`)
+-   `viewport_width` (int, optional) - crop width in pixels; defaults to an even 9:16 width derived from model input height
+-   `warmup_mode` (string, optional, default `wait`) - behavior before `history_length` real frames are buffered (`wait` or `center_crop`)
+-   `friction` (float, optional, default `0.1`) - viewport smoothing parameter matching the Python environment
+-   `force_to_pixels` (float, optional, default `10.0/1280.0`) - horizontal movement scale factor before multiplying by frame width
+-   `default_fps` (float, optional, default `30`) - fallback FPS used when frame timestamps are missing or unusable
+-   `debug_log_every_n` (int, optional, default `0`) - emit crop/latency debug logs every N frames; `0` disables logging
+-   `debug_log_action_scores` (bool, optional, default `false`) - include raw 5-score action output in debug logs and metadata
+-   `visual_tensor_name`, `kinematics_tensor_name`, `output_tensor_name` (string, optional) - override TensorRT tensor-name autodetection if needed
 
 ### `drm_prime_to_egl_image`
 
