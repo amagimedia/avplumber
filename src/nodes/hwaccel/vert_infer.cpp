@@ -201,11 +201,10 @@ protected:
     std::string output_tensor_name_param_;
     std::string visual_mode_ = "grayscale";
     float friction_ = 0.1f;
-    float force_to_pixels_ratio_ = 10.0f / 1280.0f;
-    float default_fps_ = 30.0f;
+    int full_frame_width_ = 1920;
+    int full_frame_height_ = 1080;
+    float fallback_fps_ = 0.0f;
     int viewport_width_override_ = 0;
-    int background_width_override_ = 0;
-    int background_height_override_ = 0;
     WarmupMode warmup_mode_ = WarmupMode::Wait;
     int debug_log_every_n_ = 0;
     bool debug_log_action_scores_ = false;
@@ -328,6 +327,11 @@ protected:
         int w = (input_h_ * 9) / 16;
         if (w <= 0) return 0;
         return alignEvenDown(w);
+    }
+
+    float defaultForceToPixelsRatio() const {
+        const int width = full_frame_width_ > 0 ? full_frame_width_ : 1920;
+        return 10.0f / (float)width;
     }
 
     bool allocateBindings() {
@@ -475,13 +479,6 @@ protected:
             throw Error("vert_infer: visual_mode=rgb but engine expects non-RGB visual tensor");
         }
 
-        if (background_width_override_ > 0 && background_width_override_ != input_w_) {
-            throw Error("vert_infer: background_width parameter does not match engine visual width");
-        }
-        if (background_height_override_ > 0 && background_height_override_ != input_h_) {
-            throw Error("vert_infer: background_height parameter does not match engine visual height");
-        }
-
         viewport_width_ = viewport_width_override_ > 0 ? alignEvenDown(viewport_width_override_) : defaultViewportWidthFromHeight();
         if (viewport_width_ <= 0 || viewport_width_ > input_w_) {
             throw Error("vert_infer: invalid viewport_width after initialization");
@@ -560,7 +557,7 @@ protected:
     }
 
     float frameDeltaSeconds(const av::VideoFrame& frm) {
-        float fallback_dt = (default_fps_ > 0.0f) ? (1.0f / default_fps_) : (1.0f / 30.0f);
+        float fallback_dt = (fallback_fps_ > 0.0f) ? (1.0f / fallback_fps_) : (1.0f / 30.0f);
         if (!frm.pts().isValid()) return fallback_dt;
         if (!last_input_pts_.isValid()) {
             last_input_pts_ = frm.pts();
@@ -701,7 +698,7 @@ protected:
     void updateViewportState(int action_idx, float dt_seconds) {
         float force = 0.0f;
         action_idx = forceFromActionIndex(action_idx, force);
-        float pixel_movement = force * (force_to_pixels_ratio_ * (float)input_w_);
+        float pixel_movement = force * (defaultForceToPixelsRatio() * (float)input_w_);
         pixel_movement *= (1.0f - friction_);
 
         current_state_.center_x += pixel_movement;
@@ -963,11 +960,10 @@ public:
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
         if (params.count("history_length")) r->history_length_ = params["history_length"];
         if (params.count("viewport_width")) r->viewport_width_override_ = params["viewport_width"];
-        if (params.count("background_width")) r->background_width_override_ = params["background_width"];
-        if (params.count("background_height")) r->background_height_override_ = params["background_height"];
         if (params.count("friction")) r->friction_ = params["friction"];
-        if (params.count("force_to_pixels")) r->force_to_pixels_ratio_ = params["force_to_pixels"];
-        if (params.count("default_fps")) r->default_fps_ = params["default_fps"];
+        if (params.count("full_frame_width")) r->full_frame_width_ = params["full_frame_width"];
+        if (params.count("full_frame_height")) r->full_frame_height_ = params["full_frame_height"];
+        if (params.count("fallback_fps")) r->fallback_fps_ = params["fallback_fps"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         if (params.count("debug_log_action_scores")) r->debug_log_action_scores_ = params["debug_log_action_scores"];
         if (params.count("visual_tensor_name")) r->visual_tensor_name_param_ = params["visual_tensor_name"].get<std::string>();
@@ -992,6 +988,9 @@ public:
             } else {
                 throw Error("vert_infer: warmup_mode must be 'wait' or 'center_crop'");
             }
+        }
+        if (r->full_frame_width_ <= 0 || r->full_frame_height_ <= 0) {
+            throw Error("vert_infer: full_frame_width and full_frame_height must be positive");
         }
         return r;
     }

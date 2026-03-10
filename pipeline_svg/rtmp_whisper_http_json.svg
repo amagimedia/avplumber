@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="440" viewBox="0 0 1700 440">
+  <defs>
+    <style>
+      .box { fill: #111827; stroke: #a78bfa; stroke-width: 2; rx: 10; ry: 10; }
+      .src { fill: #0f172a; stroke: #22d3ee; }
+      .ai { fill: #1f2937; stroke: #f59e0b; }
+      .sink { fill: #111827; stroke: #f43f5e; }
+      .net { fill: #0b1220; stroke: #34d399; }
+      .txt { fill: #f3f4f6; font-family: Arial, Helvetica, sans-serif; font-size: 15px; text-anchor: middle; dominant-baseline: middle; }
+      .small { font-size: 13px; fill: #d1d5db; }
+      .arrow { stroke: #94a3b8; stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+      .dash { stroke-dasharray: 7 6; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+    </marker>
+  </defs>
+
+  <rect x="20" y="90" width="150" height="56" class="box src"/>
+  <text x="95" y="112" class="txt">input</text>
+  <text x="95" y="130" class="txt small">RTMP / FLV source</text>
+
+  <rect x="220" y="90" width="130" height="56" class="box"/>
+  <text x="285" y="118" class="txt">demux</text>
+
+  <rect x="400" y="90" width="170" height="56" class="box"/>
+  <text x="485" y="110" class="txt">dec_audio</text>
+  <text x="485" y="128" class="txt small">AAC packet to PCM</text>
+
+  <rect x="620" y="90" width="250" height="56" class="box"/>
+  <text x="745" y="110" class="txt">filter_audio</text>
+  <text x="745" y="128" class="txt small">highpass, lowpass, 16 kHz mono</text>
+
+  <rect x="920" y="90" width="250" height="56" class="box ai"/>
+  <text x="1045" y="110" class="txt">whisper</text>
+  <text x="1045" y="128" class="txt small">ASR, format=json</text>
+
+  <rect x="1220" y="90" width="150" height="56" class="box sink"/>
+  <text x="1295" y="110" class="txt">null_sink</text>
+  <text x="1295" y="128" class="txt small">discard audio</text>
+
+  <rect x="930" y="230" width="280" height="56" class="box net"/>
+  <text x="1070" y="252" class="txt">HTTP destination</text>
+  <text x="1070" y="270" class="txt small">POST / transcript JSON</text>
+
+  <path d="M170 118 L220 118" class="arrow"/>
+  <path d="M350 118 L400 118" class="arrow"/>
+  <path d="M570 118 L620 118" class="arrow"/>
+  <path d="M870 118 L920 118" class="arrow"/>
+  <path d="M1170 118 L1220 118" class="arrow"/>
+  <path d="M1045 146 L1070 230" class="arrow dash"/>
+</svg>
