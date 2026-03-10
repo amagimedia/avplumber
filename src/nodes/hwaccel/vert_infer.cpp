@@ -945,7 +945,7 @@ public:
             make_unique<EdgeSource<av::VideoFrame>>(src),
             make_unique<EdgeSink<av::VideoFrame>>(dst)
         );
-        src->addConsumer(r);
+        src->setConsumer(r);
         dst->setProducer(r);
 
         if (!params.count("engine")) {
