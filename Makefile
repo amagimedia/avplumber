@@ -172,7 +172,7 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	$(CXX) $(CXXFLAGS) -c -o $@ $< -include $(BUILD_DATE_FILE)
 
 
-$(nodes_list_file): ./generate_node_list $(NODES_SRC)
+$(nodes_list_file): ./generate_node_list Makefile src/edge_types.hpp $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
 $(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(YOLO_PREPROCESS_PTX_H) $(VERT_PREPROCESS_PTX_H) $(REFRAMER_PREPROCESS_PTX_H)
