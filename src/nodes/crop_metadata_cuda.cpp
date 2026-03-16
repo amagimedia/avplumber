@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include "../video_parameters.hpp"
+#include <fstream>
 
 extern "C" {
 #include <libavfilter/avfilter.h>
@@ -14,9 +15,11 @@ class MetadataDrivenCudaCrop: public NodeSISO<av::VideoFrame, av::VideoFrame>,
                               public ITimeBaseSource {
 private:
     std::string metadata_key_ = "reframer_bbox";
+    std::string offset_log_path_ = "reframer.log";
     int dst_width_ = 0;
     int dst_height_ = 0;
     int debug_log_every_n_ = 0;
+    std::ofstream offset_log_;
 
     VideoParameters input_params_{};
     av::Rational frame_rate_{0, 0};
@@ -283,10 +286,17 @@ private:
                   << " h=" << dst_height_;
     }
 
+    void writeOffsetLog() {
+        if (!offset_log_.is_open()) return;
+        offset_log_ << last_crop_x_ << "\n";
+        offset_log_.flush();
+    }
+
 public:
     MetadataDrivenCudaCrop(std::unique_ptr<Source<av::VideoFrame>> &&source,
                            std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                            std::string metadata_key,
+                           std::string offset_log_path,
                            int dst_width,
                            int dst_height,
                            av::Rational frame_rate,
@@ -294,6 +304,7 @@ public:
                            int debug_log_every_n)
         : NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
+          offset_log_path_(std::move(offset_log_path)),
           dst_width_(dst_width),
           dst_height_(dst_height),
           debug_log_every_n_(debug_log_every_n),
@@ -304,6 +315,10 @@ public:
         }
         if ((dst_width_ & 1) || (dst_height_ & 1)) {
             throw Error("crop_metadata_cuda: dst_width and dst_height must be even");
+        }
+        offset_log_.open(offset_log_path_, std::ios::out | std::ios::trunc);
+        if (!offset_log_.is_open()) {
+            throw Error("crop_metadata_cuda: failed to open offset log file " + offset_log_path_);
         }
     }
 
@@ -350,6 +365,7 @@ public:
 
         updateCropPosition(frm);
         applyCropCommandsIfNeeded();
+        writeOffsetLog();
 
         int ret = av_buffersrc_add_frame_flags(buffersrc_ctx_, frm.raw(), 0);
         if (ret < 0) {
@@ -401,6 +417,7 @@ public:
         auto timebase_src = src_edge->findNodeUp<ITimeBaseSource>();
 
         const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
+        const std::string offset_log_path = params.value("offset_log_path", std::string("reframer.log"));
         const int dst_width = params.at("dst_width").get<int>();
         const int dst_height = params.at("dst_height").get<int>();
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
@@ -408,7 +425,7 @@ public:
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MetadataDrivenCudaCrop>(
-            edges, params, metadata_key, dst_width, dst_height, frame_rate, timebase, debug_log_every_n);
+            edges, params, metadata_key, offset_log_path, dst_width, dst_height, frame_rate, timebase, debug_log_every_n);
     }
 };
 
