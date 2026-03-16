@@ -65,8 +65,13 @@ private:
         if (timebase_.getNumerator() == 0 || timebase_.getDenominator() == 0) {
             throw Error("crop_metadata_cuda: unknown input timebase");
         }
-        if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
-            throw Error("crop_metadata_cuda: unknown input frame rate");
+
+        av::Rational frame_rate = frame_rate_;
+        if (frame_rate.getNumerator() == 0 || frame_rate.getDenominator() == 0) {
+            frame_rate = av::Rational(timebase_.getDenominator(), timebase_.getNumerator());
+        }
+        if (frame_rate.getNumerator() == 0 || frame_rate.getDenominator() == 0) {
+            frame_rate = av::Rational(30, 1);
         }
 
         std::stringstream ss;
@@ -74,7 +79,7 @@ private:
            << ":pix_fmt=" << static_cast<int>(input_params_.pixel_format.get())
            << ":pixel_aspect=1/1"
            << ":time_base=" << timebase_.getNumerator() << "/" << timebase_.getDenominator()
-           << ":frame_rate=" << frame_rate_;
+           << ":frame_rate=" << frame_rate;
         return ss.str();
     }
 
@@ -328,6 +333,14 @@ public:
         if (inputChanged(frm) || !filter_graph_) {
             input_params_ = VideoParameters(frm);
             timebase_ = frm.timeBase();
+            if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
+                if (timebase_.getNumerator() > 0 && timebase_.getDenominator() > 0) {
+                    frame_rate_ = av::Rational(timebase_.getDenominator(), timebase_.getNumerator());
+                }
+                if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
+                    frame_rate_ = av::Rational(30, 1);
+                }
+            }
             if (!have_last_crop_) {
                 std::tie(last_crop_x_, last_crop_y_) = centerCrop();
                 have_last_crop_ = true;
@@ -385,16 +398,13 @@ public:
 
         auto src_edge = edges.find<av::VideoFrame>(params["src"]);
         auto frame_rate_src = src_edge->findNodeUp<IFrameRateSource>();
-        if (!frame_rate_src) {
-            throw Error("crop_metadata_cuda: unknown input video frame rate");
-        }
         auto timebase_src = src_edge->findNodeUp<ITimeBaseSource>();
 
         const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
         const int dst_width = params.at("dst_width").get<int>();
         const int dst_height = params.at("dst_height").get<int>();
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
-        const av::Rational frame_rate = frame_rate_src->frameRate();
+        const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MetadataDrivenCudaCrop>(
