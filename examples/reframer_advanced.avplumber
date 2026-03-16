@@ -27,7 +27,7 @@ node.add { "type": "crop_metadata_cuda", "src": "v_1080p_with_md", "dst": "v_cro
 
 # Re-introduce stable timing/format metadata for the encoder path.
 node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_cropped_cuda", "dst": "v_cropped_fps", "auto_restart": "group" }
-node.add { "type": "assume_video_format", "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_cropped_fps", "dst": "v_preenc", "auto_restart": "panic" }
+node.add { "type": "assume_video_format", "width": 608, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_cropped_fps", "dst": "v_preenc", "auto_restart": "panic" }
 
 # Encode the cropped branch using NVENC.
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "auto_restart": "group", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0 } }
