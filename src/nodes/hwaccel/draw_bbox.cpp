@@ -1,0 +1,404 @@
+#include "../node_common.hpp"
+#include "../../video_parameters.hpp"
+#include "../../hwaccel.hpp"
+#include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
+
+extern "C" {
+#include <libavutil/dict.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
+}
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <string>
+
+#include "../../../objs/src/nodes/hwaccel/draw_bbox.ptx.h"
+
+static int check_cu(CUresult err, const char *func) {
+    if (err == CUDA_SUCCESS) return 0;
+    const char *err_name = nullptr;
+    const char *err_string = nullptr;
+    if (cuGetErrorName && cuGetErrorString) {
+        cuGetErrorName(err, &err_name);
+        cuGetErrorString(err, &err_string);
+    }
+    logstream << "draw_bbox: cuda function " << func << " failed: "
+              << (err_name ? err_name : "?") << ": " << (err_string ? err_string : "?");
+    return -1;
+}
+#define CHECK_CU(x) check_cu((x), #x)
+
+namespace {
+struct BBox {
+    int x1 = 0;
+    int y1 = 0;
+    int x2 = 0;
+    int y2 = 0;
+};
+}
+
+class DrawBBox : public NodeSISO<av::VideoFrame, av::VideoFrame>,
+                 public ReportsFinishByFlag,
+                 public IVideoFormatSource,
+                 public IFrameRateSource,
+                 public ITimeBaseSource {
+private:
+    std::string metadata_key_ = "reframer_bbox";
+    int bbox_thickness_ = 2;
+    int debug_log_every_n_ = 0;
+
+    VideoParameters input_params_{};
+    av::Rational frame_rate_{0, 0};
+    av::Rational timebase_{0, 0};
+
+    AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
+    CUcontext cu_ctx_ = nullptr;
+    CUmodule draw_module_ = nullptr;
+    CUfunction draw_luma_kernel_ = nullptr;
+    CUfunction draw_chroma_kernel_ = nullptr;
+
+    uint64_t frame_counter_ = 0;
+
+    void unloadKernels() {
+        if (draw_module_ && cu_ctx_) {
+            CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+            CHECK_CU(cuModuleUnload(draw_module_));
+        }
+        draw_module_ = nullptr;
+        draw_luma_kernel_ = nullptr;
+        draw_chroma_kernel_ = nullptr;
+    }
+
+    bool initCudaContextFromFrame(const av::VideoFrame& frm) {
+        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
+            logstream << "draw_bbox: missing hw_frames_ctx";
+            return false;
+        }
+        AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+        if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
+            logstream << "draw_bbox: missing device_ctx/hwctx in frame";
+            return false;
+        }
+        AVCUDADeviceContext* next_dev_ctx = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+        if (!next_dev_ctx || !next_dev_ctx->cuda_ctx) {
+            logstream << "draw_bbox: missing CUDA context in frame";
+            return false;
+        }
+        if (cu_ctx_ && cu_ctx_ != next_dev_ctx->cuda_ctx) {
+            unloadKernels();
+        }
+        cuda_dev_ctx_ = next_dev_ctx;
+        cu_ctx_ = next_dev_ctx->cuda_ctx;
+        return CHECK_CU(cuCtxSetCurrent(cu_ctx_)) == 0;
+    }
+
+    bool loadKernels() {
+        if (draw_module_ && draw_luma_kernel_ && draw_chroma_kernel_) return true;
+        if (!cu_ctx_) return false;
+        if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+
+        const std::string ptx_str(avpl_draw_bbox_ptx, avpl_draw_bbox_ptx + avpl_draw_bbox_ptx_len);
+        if (CHECK_CU(cuModuleLoadDataEx(&draw_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
+            logstream << "draw_bbox: failed to load PTX module";
+            return false;
+        }
+        if (CHECK_CU(cuModuleGetFunction(&draw_luma_kernel_, draw_module_, "kDrawBBoxNV12Luma"))) {
+            logstream << "draw_bbox: failed to get luma kernel";
+            return false;
+        }
+        if (CHECK_CU(cuModuleGetFunction(&draw_chroma_kernel_, draw_module_, "kDrawBBoxNV12Chroma"))) {
+            logstream << "draw_bbox: failed to get chroma kernel";
+            return false;
+        }
+        return true;
+    }
+
+    static int clampInt(int value, int lo, int hi) {
+        return std::max(lo, std::min(hi, value));
+    }
+
+    bool parseBBox(const av::VideoFrame &frm, BBox &bbox_out) const {
+        const AVFrame *raw = frm.raw();
+        if (!raw || !raw->metadata) return false;
+
+        AVDictionaryEntry *entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
+        if (!entry || !entry->value) return false;
+
+        try {
+            Parameters md = Parameters::parse(entry->value);
+
+            double x1 = NAN;
+            double y1 = NAN;
+            double x2 = NAN;
+            double y2 = NAN;
+
+            if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
+                const auto &bbox = md["viewport_bbox"];
+                const double fw = md.value("full_frame_width", (double)input_params_.width);
+                const double fh = md.value("full_frame_height", (double)input_params_.height);
+                const double sx = fw > 0.0 ? (double)input_params_.width / fw : 1.0;
+                const double sy = fh > 0.0 ? (double)input_params_.height / fh : 1.0;
+                x1 = bbox[0].get<double>() * sx;
+                y1 = bbox[1].get<double>() * sy;
+                x2 = bbox[2].get<double>() * sx;
+                y2 = bbox[3].get<double>() * sy;
+            } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
+                const auto &bbox = md["bbox_norm"];
+                x1 = bbox[0].get<double>() * (double)input_params_.width;
+                y1 = bbox[1].get<double>() * (double)input_params_.height;
+                x2 = bbox[2].get<double>() * (double)input_params_.width;
+                y2 = bbox[3].get<double>() * (double)input_params_.height;
+            } else {
+                return false;
+            }
+
+            if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) {
+                return false;
+            }
+
+            bbox_out.x1 = clampInt((int)std::lround(x1), 0, input_params_.width);
+            bbox_out.y1 = clampInt((int)std::lround(y1), 0, input_params_.height);
+            bbox_out.x2 = clampInt((int)std::lround(x2), 0, input_params_.width);
+            bbox_out.y2 = clampInt((int)std::lround(y2), 0, input_params_.height);
+            if (bbox_out.x2 < bbox_out.x1) std::swap(bbox_out.x1, bbox_out.x2);
+            if (bbox_out.y2 < bbox_out.y1) std::swap(bbox_out.y1, bbox_out.y2);
+            return bbox_out.x2 > bbox_out.x1 && bbox_out.y2 > bbox_out.y1;
+        } catch (const std::exception &) {
+            return false;
+        }
+    }
+
+    bool copyPlane(CUdeviceptr dst, size_t dst_pitch,
+                   CUdeviceptr src, size_t src_pitch,
+                   size_t width_bytes, size_t height) const {
+        CUDA_MEMCPY2D cpy{};
+        cpy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+        cpy.srcDevice = src;
+        cpy.srcPitch = src_pitch;
+        cpy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+        cpy.dstDevice = dst;
+        cpy.dstPitch = dst_pitch;
+        cpy.WidthInBytes = width_bytes;
+        cpy.Height = height;
+        return CHECK_CU(cuMemcpy2DAsync(&cpy, cuda_dev_ctx_->stream)) == 0;
+    }
+
+    bool copyInputFrame(const av::VideoFrame &frm, av::VideoFrame &out) {
+        out.raw()->format = frm.raw()->format;
+        out.raw()->width = frm.width();
+        out.raw()->height = frm.height();
+
+        int ret = av_hwframe_get_buffer(frm.raw()->hw_frames_ctx, out.raw(), 0);
+        if (ret < 0) {
+            logstream << "draw_bbox: av_hwframe_get_buffer failed: " << av::error2string(ret);
+            return false;
+        }
+
+        if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[0], (size_t)out.raw()->linesize[0],
+                       (CUdeviceptr)(uintptr_t)frm.raw()->data[0], (size_t)frm.raw()->linesize[0],
+                       (size_t)frm.width(), (size_t)frm.height())) {
+            logstream << "draw_bbox: luma plane copy failed";
+            return false;
+        }
+
+        if (!copyPlane((CUdeviceptr)(uintptr_t)out.raw()->data[1], (size_t)out.raw()->linesize[1],
+                       (CUdeviceptr)(uintptr_t)frm.raw()->data[1], (size_t)frm.raw()->linesize[1],
+                       (size_t)frm.width(), (size_t)((frm.height() + 1) / 2))) {
+            logstream << "draw_bbox: chroma plane copy failed";
+            return false;
+        }
+
+        ret = av_frame_copy_props(out.raw(), frm.raw());
+        if (ret < 0) {
+            logstream << "draw_bbox: av_frame_copy_props failed: " << av::error2string(ret);
+            return false;
+        }
+        return true;
+    }
+
+    bool drawBBoxOnFrame(av::VideoFrame &frm, const BBox &bbox) {
+        if (bbox_thickness_ <= 0) return true;
+
+        const unsigned int block_x = 32;
+        const unsigned int block_y = 8;
+        const unsigned int grid_x = (unsigned int)(frm.width() + (int)block_x - 1) / block_x;
+        const unsigned int grid_y = (unsigned int)(frm.height() + (int)block_y - 1) / block_y;
+        const int uv_width = (frm.width() + 1) / 2;
+        const int uv_height = (frm.height() + 1) / 2;
+        const unsigned int uv_grid_x = (unsigned int)(uv_width + (int)block_x - 1) / block_x;
+        const unsigned int uv_grid_y = (unsigned int)(uv_height + (int)block_y - 1) / block_y;
+
+        CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
+        size_t pitch_y = (size_t)frm.raw()->linesize[0];
+        CUdeviceptr uv_plane = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
+        size_t pitch_uv = (size_t)frm.raw()->linesize[1];
+        int width = frm.width();
+        int height = frm.height();
+        int x1 = bbox.x1;
+        int y1 = bbox.y1;
+        int x2 = bbox.x2;
+        int y2 = bbox.y2;
+        int thickness = bbox_thickness_;
+
+        void* y_args[] = {
+            (void*)&y_plane, (void*)&pitch_y,
+            (void*)&width, (void*)&height,
+            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
+            (void*)&thickness
+        };
+        if (CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
+                                    grid_x, grid_y, 1,
+                                    block_x, block_y, 1,
+                                    0, cuda_dev_ctx_->stream, y_args, nullptr))) {
+            logstream << "draw_bbox: failed launching luma kernel";
+            return false;
+        }
+
+        void* uv_args[] = {
+            (void*)&uv_plane, (void*)&pitch_uv,
+            (void*)&width, (void*)&height,
+            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
+            (void*)&thickness
+        };
+        if (CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
+                                    uv_grid_x, uv_grid_y, 1,
+                                    block_x, block_y, 1,
+                                    0, cuda_dev_ctx_->stream, uv_args, nullptr))) {
+            logstream << "draw_bbox: failed launching chroma kernel";
+            return false;
+        }
+
+        return CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream)) == 0;
+    }
+
+    void maybeLogFrame(bool drew_bbox, const BBox* bbox) const {
+        if (debug_log_every_n_ <= 0) return;
+        if ((frame_counter_ % (uint64_t)debug_log_every_n_) != 0) return;
+        if (!drew_bbox || !bbox) {
+            logstream << "draw_bbox: frame=" << frame_counter_ << " no bbox metadata";
+            return;
+        }
+        logstream << "draw_bbox: frame=" << frame_counter_
+                  << " bbox=[" << bbox->x1 << "," << bbox->y1 << "," << bbox->x2 << "," << bbox->y2 << "]"
+                  << " thickness=" << bbox_thickness_;
+    }
+
+public:
+    DrawBBox(std::unique_ptr<Source<av::VideoFrame>> &&source,
+             std::unique_ptr<Sink<av::VideoFrame>> &&sink,
+             std::string metadata_key,
+             int bbox_thickness,
+             av::Rational frame_rate,
+             av::Rational timebase,
+             int debug_log_every_n)
+        : NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)),
+          metadata_key_(std::move(metadata_key)),
+          bbox_thickness_(bbox_thickness),
+          debug_log_every_n_(debug_log_every_n),
+          frame_rate_(frame_rate),
+          timebase_(timebase) {
+        if (bbox_thickness_ <= 0) {
+            throw Error("draw_bbox: bbox_thickness must be positive");
+        }
+    }
+
+    ~DrawBBox() override {
+        unloadKernels();
+    }
+
+    void process() override {
+        av::VideoFrame frm = this->source_->get();
+
+        if (isEofMarker(frm)) {
+            this->sink_->put(frm);
+            return;
+        }
+        if (!frm) return;
+
+        ++frame_counter_;
+
+        if (frm.raw()->format != AV_PIX_FMT_CUDA) {
+            throw Error("draw_bbox: non-CUDA frame received");
+        }
+
+        input_params_ = VideoParameters(frm);
+        timebase_ = frm.timeBase();
+        if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
+            if (timebase_.getNumerator() > 0 && timebase_.getDenominator() > 0) {
+                frame_rate_ = av::Rational(timebase_.getDenominator(), timebase_.getNumerator());
+            }
+            if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
+                frame_rate_ = av::Rational(30, 1);
+            }
+        }
+
+        if (input_params_.realPixelFormat() != AV_PIX_FMT_NV12) {
+            throw Error("draw_bbox: only NV12 CUDA frames are supported");
+        }
+        if (!initCudaContextFromFrame(frm) || !loadKernels()) {
+            throw Error("draw_bbox: failed to initialize CUDA kernels");
+        }
+
+        av::VideoFrame out;
+        if (!copyInputFrame(frm, out)) {
+            throw Error("draw_bbox: failed to copy input frame");
+        }
+
+        BBox bbox;
+        const bool have_bbox = parseBBox(frm, bbox);
+        if (have_bbox && !drawBBoxOnFrame(out, bbox)) {
+            throw Error("draw_bbox: failed drawing bbox");
+        }
+
+        out.setTimeBase(frm.timeBase());
+        out.setComplete(true);
+        maybeLogFrame(have_bbox, have_bbox ? &bbox : nullptr);
+        this->sink_->put(out);
+    }
+
+    int width() override {
+        return input_params_.width;
+    }
+
+    int height() override {
+        return input_params_.height;
+    }
+
+    av::PixelFormat pixelFormat() override {
+        return input_params_.pixel_format == AV_PIX_FMT_NONE ? av::PixelFormat(AV_PIX_FMT_CUDA) : input_params_.pixel_format;
+    }
+
+    av::PixelFormat realPixelFormat() override {
+        return input_params_.real_pixel_format == AV_PIX_FMT_NONE ? pixelFormat() : input_params_.real_pixel_format;
+    }
+
+    av::Rational frameRate() override {
+        return frame_rate_;
+    }
+
+    av::Rational timeBase() override {
+        return timebase_;
+    }
+
+    static std::shared_ptr<DrawBBox> create(NodeCreationInfo &nci) {
+        EdgeManager &edges = nci.edges;
+        const Parameters &params = nci.params;
+
+        auto src_edge = edges.find<av::VideoFrame>(params["src"]);
+        auto frame_rate_src = src_edge->findNodeUp<IFrameRateSource>();
+        auto timebase_src = src_edge->findNodeUp<ITimeBaseSource>();
+
+        const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
+        const int bbox_thickness = params.value("bbox_thickness", 2);
+        const int debug_log_every_n = params.value("debug_log_every_n", 0);
+        const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
+        const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
+
+        return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
+            edges, params, metadata_key, bbox_thickness, frame_rate, timebase, debug_log_every_n);
+    }
+};
+
+DECLNODE(draw_bbox, DrawBBox);
