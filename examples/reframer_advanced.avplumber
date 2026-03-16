@@ -1,6 +1,6 @@
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "input", "url": "full_game_nba4_000_clip4_from140s_to150s.mp4", "dst": "in_v", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1 }
+node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_v", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1 }
 node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in", "auto_restart": "group" }
 
 # CUDA HW decode (CUVID)
@@ -17,7 +17,7 @@ node.add { "type": "split", "src": "v_rt", "dst": ["v_dec_1080p", "v_dec_for_ref
 node.add { "type": "filter_video", "graph": "scale_cuda=w=640:h=360", "src": "v_dec_for_reframer", "dst": "v_pre_reframer", "group": "in", "name": "Cuda_Preprocess_Reframer", "auto_restart": "group", "dst_width": 640, "dst_height": 360, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 
 # Run reframer on the small branch; metadata is written onto the auxiliary frames.
-node.add { "type": "reframer", "src": "v_pre_reframer", "dst": "v_post_reframer", "group": "in", "name": "Reframer_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/models/reframer.plan", "full_frame_width": 1920, "full_frame_height": 1080, "input_format": "RGB", "metadata_key_out": "reframer_bbox", "debug_log_every_n": 3 }
+node.add { "type": "reframer", "src": "v_pre_reframer", "dst": "v_post_reframer", "group": "in", "name": "Reframer_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/models/reframer.plan", "full_frame_width": 1920, "full_frame_height": 1080, "input_format": "RGB", "metadata_key_out": "reframer_bbox", "debug_log_every_n": 1 }
 
 # Merge reframer metadata from the 360p auxiliary branch back onto the 1080p branch by exact PTS match.
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_post_reframer"], "dst": "v_1080p_with_md", "group": "in" }
@@ -29,7 +29,7 @@ node.add { "type": "crop_metadata_cuda", "src": "v_1080p_with_md", "dst": "v_cro
 node.add { "type": "enc_video", "src": "v_cropped_cuda", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "auto_restart": "group", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0 } }
 
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
-node.add { "type": "output", "format": "mpegts", "url": "output.ts", "src": "mux_v", "group": "in", "auto_restart": "panic" }
+node.add { "type": "output", "format": "mp4", "url": "reframer.mp4", "src": "mux_v", "group": "in", "auto_restart": "panic" }
 
 detach retry group.start in
 
