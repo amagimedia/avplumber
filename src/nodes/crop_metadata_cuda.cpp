@@ -6,6 +6,7 @@ extern "C" {
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+    #include <libavutil/pixdesc.h>
 }
 
 class MetadataDrivenCudaCrop: public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -171,12 +172,31 @@ private:
 
     int clampCropX(int x) const {
         const int max_x = std::max(0, input_params_.width - dst_width_);
-        return std::max(0, std::min(x, max_x));
+        const int clamped = std::max(0, std::min(x, max_x));
+        return alignCropCoord(clamped, chromaXAlign());
     }
 
     int clampCropY(int y) const {
         const int max_y = std::max(0, input_params_.height - dst_height_);
-        return std::max(0, std::min(y, max_y));
+        const int clamped = std::max(0, std::min(y, max_y));
+        return alignCropCoord(clamped, chromaYAlign());
+    }
+
+    int chromaXAlign() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(input_params_.realPixelFormat().get());
+        if (!desc || desc->log2_chroma_w < 0) return 1;
+        return 1 << desc->log2_chroma_w;
+    }
+
+    int chromaYAlign() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(input_params_.realPixelFormat().get());
+        if (!desc || desc->log2_chroma_h < 0) return 1;
+        return 1 << desc->log2_chroma_h;
+    }
+
+    static int alignCropCoord(int value, int align) {
+        if (align <= 1) return value;
+        return value & ~(align - 1);
     }
 
     std::pair<int, int> centerCrop() const {
