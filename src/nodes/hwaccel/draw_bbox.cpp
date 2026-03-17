@@ -290,6 +290,7 @@ public:
              std::unique_ptr<Sink<av::VideoFrame>> &&sink,
              std::string metadata_key,
              int bbox_thickness,
+             VideoParameters input_params,
              av::Rational frame_rate,
              av::Rational timebase,
              int debug_log_every_n)
@@ -297,6 +298,7 @@ public:
           metadata_key_(std::move(metadata_key)),
           bbox_thickness_(bbox_thickness),
           debug_log_every_n_(debug_log_every_n),
+          input_params_(input_params),
           frame_rate_(frame_rate),
           timebase_(timebase) {
         if (bbox_thickness_ <= 0) {
@@ -387,17 +389,25 @@ public:
         const Parameters &params = nci.params;
 
         auto src_edge = edges.find<av::VideoFrame>(params["src"]);
+        auto video_format_src = src_edge->findNodeUp<IVideoFormatSource>();
         auto frame_rate_src = src_edge->findNodeUp<IFrameRateSource>();
         auto timebase_src = src_edge->findNodeUp<ITimeBaseSource>();
 
         const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
         const int bbox_thickness = params.value("bbox_thickness", 2);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
+        VideoParameters input_params;
+        if (video_format_src) {
+            input_params.width = video_format_src->width();
+            input_params.height = video_format_src->height();
+            input_params.pixel_format = video_format_src->pixelFormat();
+            input_params.real_pixel_format = video_format_src->realPixelFormat();
+        }
         const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
-            edges, params, metadata_key, bbox_thickness, frame_rate, timebase, debug_log_every_n);
+            edges, params, metadata_key, bbox_thickness, input_params, frame_rate, timebase, debug_log_every_n);
     }
 };
 
