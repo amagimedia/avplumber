@@ -1,6 +1,6 @@
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_v", "group": "in", "name": "input", "timeout": -1 }
+node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_v", "group": "in", "name": "input", "auto_restart": "panic", "timeout": -1 }
 node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in" }
 
 # CUDA HW decode (CUVID)
