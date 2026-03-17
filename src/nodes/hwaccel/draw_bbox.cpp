@@ -40,7 +40,6 @@ struct BBox {
 }
 
 class DrawBBox : public NodeSISO<av::VideoFrame, av::VideoFrame>,
-                 public ReportsFinishByFlag,
                  public IVideoFormatSource,
                  public IFrameRateSource,
                  public ITimeBaseSource {
