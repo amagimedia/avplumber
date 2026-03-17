@@ -22,10 +22,14 @@ node.add { "type": "reframer", "src": "v_pre_reframer", "dst": "v_post_reframer"
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_post_reframer"], "dst": "v_1080p_with_md", "group": "in" }
 
 # Draw the reframer bbox directly onto a copied 1080p CUDA frame before NVENC.
-node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Reframer_BBox", "metadata_key": "reframer_bbox", "bbox_thickness": 2, "debug_log_every_n": 30 }
+node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Reframer_BBox", "metadata_key": "reframer_bbox", "bbox_thickness": 2, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 30 }
+
+# Re-introduce stable timing/format metadata for the encoder path.
+node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps" }
+node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_annotated_fps", "dst": "v_preenc", "auto_restart": "panic" }
 
 # Encode the full-resolution annotated branch using NVENC.
-node.add { "type": "enc_video", "src": "v_annotated_cuda", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
 
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
 node.add { "type": "output", "format": "mpegts", "url": "reframer_bbox.ts", "src": "mux_v", "group": "in", "auto_restart": "panic" }

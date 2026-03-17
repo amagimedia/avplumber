@@ -403,6 +403,10 @@ public:
             input_params.pixel_format = video_format_src->pixelFormat();
             input_params.real_pixel_format = video_format_src->realPixelFormat();
         }
+        if (params.count("width")) input_params.width = params["width"];
+        if (params.count("height")) input_params.height = params["height"];
+        if (params.count("pixel_format")) input_params.pixel_format = av::PixelFormat(params["pixel_format"].get<std::string>());
+        if (params.count("real_pixel_format")) input_params.real_pixel_format = av::PixelFormat(params["real_pixel_format"].get<std::string>());
         const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
