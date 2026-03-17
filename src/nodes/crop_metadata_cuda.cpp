@@ -10,7 +10,6 @@ extern "C" {
 }
 
 class MetadataDrivenCudaCrop: public NodeSISO<av::VideoFrame, av::VideoFrame>,
-                              public ReportsFinishByFlag,
                               public IVideoFormatSource,
                               public IFrameRateSource,
                               public ITimeBaseSource {
