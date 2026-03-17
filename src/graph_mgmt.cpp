@@ -348,7 +348,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                 logstream << "Node " << n->name() << " finished, restarting";
                 start_thread(std::string("R:") + n->name(), [n]() {
                     n->start();
-                });
+                }).detach(); // TODO: should be in a thread pool, not orphaned
             });
         } else if (auto_restart == "group") {
             if (!in_group) {
@@ -366,7 +366,7 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
                 logstream << "Node " << n->name() << " finished but it should never finish (declared as auto_restart=panic)";
                 start_thread(std::string("PANIC:") + n->name(), [this]() {
                     this->panic();
-                });
+                }).detach(); // TODO: should be in a thread pool, not orphaned
             });
         } else if (auto_restart == "off") {
             // don't do anything
