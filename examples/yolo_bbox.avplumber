@@ -16,14 +16,14 @@ node.add { "type": "split", "src": "v_dec_30fps", "dst": ["v_dec_1080p", "v_dec_
 node.add { "type": "filter_video", "graph": "scale_cuda=w=1280:h=720", "src": "v_dec_for_yolo", "dst": "v_scaled_1280x720", "group": "in", "name": "Cuda_Scale_Yolo", "auto_restart": "group", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 node.add { "type": "filter_video", "graph": "pad_cuda=w=1280:h=736", "src": "v_scaled_1280x720", "dst": "v_pre_yolo", "group": "in", "name": "Cuda_Pad_Yolo", "auto_restart": "group", "dst_width": 1280, "dst_height": 736, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 
-node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/home/fedora/tensorrt/yolo11x_1280x736_fp16.plan", "input_format": "RGB", "class_names": "coco80", "conf_thresh": 0.05, "iou_thresh": 0.45, "max_det": 300, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": true, "debug_log_every_n": 30 }
-node.add { "type": "track_ball", "src": "v_post_yolo", "dst": "v_tracked_yolo", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "ball_track_v1", "target_label": "sports ball", "min_conf": 0.05, "max_missed_frames": 4, "max_center_distance": 160, "min_iou_match": 0.0, "emit_predicted": true, "debug_log_every_n": 30 }
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/home/fedora/tensorrt/yolo11x_1280x736_fp16.plan", "input_format": "RGB", "class_names": "coco80", "conf_thresh": 0.05, "iou_thresh": 0.45, "max_det": 300, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": true, "debug_log_every_n": 1 }
+node.add { "type": "track_ball", "src": "v_post_yolo", "dst": "v_tracked_yolo", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "ball_track_v1", "target_label": "sports ball", "min_conf": 0.05, "max_missed_frames": 4, "max_center_distance": 160, "min_iou_match": 0.0, "emit_predicted": true, "debug_log_every_n": 1 }
 
 # Merge metadata from YOLO branch onto 1080p branch by exact PTS match
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_tracked_yolo"], "dst": "v_1080p_with_md", "group": "in" }
 
 # Draw all YOLO detections on the full-resolution branch
-node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "ball_track_v1", "bbox_thickness": 2, "min_conf": 0.05, "allowed_labels": ["sports ball"], "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 30 }
+node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "ball_track_v1", "bbox_thickness": 2, "min_conf": 0.05, "allowed_labels": ["sports ball"], "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
 
 # Re-introduce stable timing/format metadata for the encoder path.
 node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps" }
