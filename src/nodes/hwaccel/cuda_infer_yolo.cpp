@@ -577,6 +577,8 @@ protected:
         Parameters j;
         j["version"] = 1;
         j["coord_space"] = "model";
+        j["model_width"] = input_w_;
+        j["model_height"] = input_h_;
         j["thresholds"] = {
             {"conf", conf_thresh_},
             {"iou", iou_thresh_},
