@@ -13,6 +13,7 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "../../../objs/src/nodes/hwaccel/draw_bbox.ptx.h"
@@ -48,6 +49,9 @@ private:
     std::string metadata_key_ = "reframer_bbox";
     int bbox_thickness_ = 2;
     int debug_log_every_n_ = 0;
+    double min_conf_ = 0.0;
+    std::unordered_set<int> allowed_classes_;
+    std::unordered_set<std::string> allowed_labels_;
 
     VideoParameters input_params_{};
     av::Rational frame_rate_{0, 0};
@@ -162,6 +166,25 @@ private:
         return scaleAndClampBBox(x1, y1, x2, y2, bbox_out);
     }
 
+    bool yoloDetectionAllowed(const Parameters& det) const {
+        const double conf = det.value("conf", 0.0);
+        if (conf < min_conf_) return false;
+
+        if (allowed_classes_.empty() && allowed_labels_.empty()) {
+            return true;
+        }
+
+        bool class_match = false;
+        bool label_match = false;
+        if (!allowed_classes_.empty() && det.contains("cls")) {
+            class_match = allowed_classes_.count(det["cls"].get<int>()) > 0;
+        }
+        if (!allowed_labels_.empty() && det.contains("label") && det["label"].is_string()) {
+            label_match = allowed_labels_.count(det["label"].get<std::string>()) > 0;
+        }
+        return class_match || label_match;
+    }
+
     void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
         if (!md.contains("detections") || !md["detections"].is_array()) return;
 
@@ -173,6 +196,7 @@ private:
 
         for (const auto& det : md["detections"]) {
             if (!det.is_object()) continue;
+            if (!yoloDetectionAllowed(det)) continue;
             if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
             const auto& xyxy = det["xyxy"];
             BBox bbox;
@@ -332,6 +356,9 @@ public:
              std::unique_ptr<Sink<av::VideoFrame>> &&sink,
              std::string metadata_key,
              int bbox_thickness,
+             double min_conf,
+             std::unordered_set<int> allowed_classes,
+             std::unordered_set<std::string> allowed_labels,
              VideoParameters input_params,
              av::Rational frame_rate,
              av::Rational timebase,
@@ -340,6 +367,9 @@ public:
           metadata_key_(std::move(metadata_key)),
           bbox_thickness_(bbox_thickness),
           debug_log_every_n_(debug_log_every_n),
+          min_conf_(min_conf),
+          allowed_classes_(std::move(allowed_classes)),
+          allowed_labels_(std::move(allowed_labels)),
           input_params_(input_params),
           frame_rate_(frame_rate),
           timebase_(timebase) {
@@ -442,6 +472,9 @@ public:
         const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
         const int bbox_thickness = params.value("bbox_thickness", 2);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
+        const double min_conf = params.value("min_conf", 0.0);
+        std::unordered_set<int> allowed_classes;
+        std::unordered_set<std::string> allowed_labels;
         VideoParameters input_params;
         if (video_format_src) {
             input_params.width = video_format_src->width();
@@ -453,11 +486,21 @@ public:
         if (params.count("height")) input_params.height = params["height"];
         if (params.count("pixel_format")) input_params.pixel_format = av::PixelFormat(params["pixel_format"].get<std::string>());
         if (params.count("real_pixel_format")) input_params.real_pixel_format = av::PixelFormat(params["real_pixel_format"].get<std::string>());
+        if (params.count("allowed_classes") && params["allowed_classes"].is_array()) {
+            for (const auto& item : params["allowed_classes"]) {
+                allowed_classes.insert(item.get<int>());
+            }
+        }
+        if (params.count("allowed_labels") && params["allowed_labels"].is_array()) {
+            for (const auto& item : params["allowed_labels"]) {
+                allowed_labels.insert(item.get<std::string>());
+            }
+        }
         const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
-            edges, params, metadata_key, bbox_thickness, input_params, frame_rate, timebase, debug_log_every_n);
+            edges, params, metadata_key, bbox_thickness, min_conf, std::move(allowed_classes), std::move(allowed_labels), input_params, frame_rate, timebase, debug_log_every_n);
     }
 };
 
