@@ -13,6 +13,7 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../../../objs/src/nodes/hwaccel/draw_bbox.ptx.h"
 
@@ -118,7 +119,75 @@ private:
         return std::max(lo, std::min(hi, value));
     }
 
-    bool parseBBox(const av::VideoFrame &frm, BBox &bbox_out) const {
+    bool scaleAndClampBBox(double x1, double y1, double x2, double y2, BBox &bbox_out) const {
+        if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) {
+            return false;
+        }
+
+        bbox_out.x1 = clampInt((int)std::lround(x1), 0, input_params_.width);
+        bbox_out.y1 = clampInt((int)std::lround(y1), 0, input_params_.height);
+        bbox_out.x2 = clampInt((int)std::lround(x2), 0, input_params_.width);
+        bbox_out.y2 = clampInt((int)std::lround(y2), 0, input_params_.height);
+        if (bbox_out.x2 < bbox_out.x1) std::swap(bbox_out.x1, bbox_out.x2);
+        if (bbox_out.y2 < bbox_out.y1) std::swap(bbox_out.y1, bbox_out.y2);
+        return bbox_out.x2 > bbox_out.x1 && bbox_out.y2 > bbox_out.y1;
+    }
+
+    bool parseSingleBBoxMetadata(const Parameters &md, BBox &bbox_out) const {
+        double x1 = NAN;
+        double y1 = NAN;
+        double x2 = NAN;
+        double y2 = NAN;
+
+        if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
+            const auto &bbox = md["viewport_bbox"];
+            const double fw = md.value("full_frame_width", (double)input_params_.width);
+            const double fh = md.value("full_frame_height", (double)input_params_.height);
+            const double sx = fw > 0.0 ? (double)input_params_.width / fw : 1.0;
+            const double sy = fh > 0.0 ? (double)input_params_.height / fh : 1.0;
+            x1 = bbox[0].get<double>() * sx;
+            y1 = bbox[1].get<double>() * sy;
+            x2 = bbox[2].get<double>() * sx;
+            y2 = bbox[3].get<double>() * sy;
+        } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
+            const auto &bbox = md["bbox_norm"];
+            x1 = bbox[0].get<double>() * (double)input_params_.width;
+            y1 = bbox[1].get<double>() * (double)input_params_.height;
+            x2 = bbox[2].get<double>() * (double)input_params_.width;
+            y2 = bbox[3].get<double>() * (double)input_params_.height;
+        } else {
+            return false;
+        }
+
+        return scaleAndClampBBox(x1, y1, x2, y2, bbox_out);
+    }
+
+    void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
+        if (!md.contains("detections") || !md["detections"].is_array()) return;
+
+        const std::string coord_space = md.value("coord_space", std::string("model"));
+        const double model_w = md.value("model_width", (double)input_params_.width);
+        const double model_h = md.value("model_height", (double)input_params_.height);
+        const double sx = (coord_space == "model" && model_w > 0.0) ? (double)input_params_.width / model_w : 1.0;
+        const double sy = (coord_space == "model" && model_h > 0.0) ? (double)input_params_.height / model_h : 1.0;
+
+        for (const auto& det : md["detections"]) {
+            if (!det.is_object()) continue;
+            if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
+            const auto& xyxy = det["xyxy"];
+            BBox bbox;
+            if (scaleAndClampBBox(
+                    xyxy[0].get<double>() * sx,
+                    xyxy[1].get<double>() * sy,
+                    xyxy[2].get<double>() * sx,
+                    xyxy[3].get<double>() * sy,
+                    bbox)) {
+                boxes_out.push_back(bbox);
+            }
+        }
+    }
+
+    bool parseBBoxes(const av::VideoFrame &frm, std::vector<BBox> &boxes_out) const {
         const AVFrame *raw = frm.raw();
         if (!raw || !raw->metadata) return false;
 
@@ -127,43 +196,15 @@ private:
 
         try {
             Parameters md = Parameters::parse(entry->value);
+            boxes_out.clear();
 
-            double x1 = NAN;
-            double y1 = NAN;
-            double x2 = NAN;
-            double y2 = NAN;
-
-            if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
-                const auto &bbox = md["viewport_bbox"];
-                const double fw = md.value("full_frame_width", (double)input_params_.width);
-                const double fh = md.value("full_frame_height", (double)input_params_.height);
-                const double sx = fw > 0.0 ? (double)input_params_.width / fw : 1.0;
-                const double sy = fh > 0.0 ? (double)input_params_.height / fh : 1.0;
-                x1 = bbox[0].get<double>() * sx;
-                y1 = bbox[1].get<double>() * sy;
-                x2 = bbox[2].get<double>() * sx;
-                y2 = bbox[3].get<double>() * sy;
-            } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
-                const auto &bbox = md["bbox_norm"];
-                x1 = bbox[0].get<double>() * (double)input_params_.width;
-                y1 = bbox[1].get<double>() * (double)input_params_.height;
-                x2 = bbox[2].get<double>() * (double)input_params_.width;
-                y2 = bbox[3].get<double>() * (double)input_params_.height;
+            BBox single_bbox;
+            if (parseSingleBBoxMetadata(md, single_bbox)) {
+                boxes_out.push_back(single_bbox);
             } else {
-                return false;
+                parseYoloDetections(md, boxes_out);
             }
-
-            if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) {
-                return false;
-            }
-
-            bbox_out.x1 = clampInt((int)std::lround(x1), 0, input_params_.width);
-            bbox_out.y1 = clampInt((int)std::lround(y1), 0, input_params_.height);
-            bbox_out.x2 = clampInt((int)std::lround(x2), 0, input_params_.width);
-            bbox_out.y2 = clampInt((int)std::lround(y2), 0, input_params_.height);
-            if (bbox_out.x2 < bbox_out.x1) std::swap(bbox_out.x1, bbox_out.x2);
-            if (bbox_out.y2 < bbox_out.y1) std::swap(bbox_out.y1, bbox_out.y2);
-            return bbox_out.x2 > bbox_out.x1 && bbox_out.y2 > bbox_out.y1;
+            return !boxes_out.empty();
         } catch (const std::exception &) {
             return false;
         }
@@ -272,15 +313,17 @@ private:
         return CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream)) == 0;
     }
 
-    void maybeLogFrame(bool drew_bbox, const BBox* bbox) const {
+    void maybeLogFrame(const std::vector<BBox>& boxes) const {
         if (debug_log_every_n_ <= 0) return;
         if ((frame_counter_ % (uint64_t)debug_log_every_n_) != 0) return;
-        if (!drew_bbox || !bbox) {
+        if (boxes.empty()) {
             logstream << "draw_bbox: frame=" << frame_counter_ << " no bbox metadata";
             return;
         }
+        const BBox& bbox = boxes.front();
         logstream << "draw_bbox: frame=" << frame_counter_
-                  << " bbox=[" << bbox->x1 << "," << bbox->y1 << "," << bbox->x2 << "," << bbox->y2 << "]"
+                  << " boxes=" << boxes.size()
+                  << " first_bbox=[" << bbox.x1 << "," << bbox.y1 << "," << bbox.x2 << "," << bbox.y2 << "]"
                   << " thickness=" << bbox_thickness_;
     }
 
@@ -347,15 +390,19 @@ public:
             throw Error("draw_bbox: failed to copy input frame");
         }
 
-        BBox bbox;
-        const bool have_bbox = parseBBox(frm, bbox);
-        if (have_bbox && !drawBBoxOnFrame(out, bbox)) {
-            throw Error("draw_bbox: failed drawing bbox");
+        std::vector<BBox> boxes;
+        const bool have_bbox = parseBBoxes(frm, boxes);
+        if (have_bbox) {
+            for (const BBox& bbox : boxes) {
+                if (!drawBBoxOnFrame(out, bbox)) {
+                    throw Error("draw_bbox: failed drawing bbox");
+                }
+            }
         }
 
         out.setTimeBase(frm.timeBase());
         out.setComplete(true);
-        maybeLogFrame(have_bbox, have_bbox ? &bbox : nullptr);
+        maybeLogFrame(boxes);
         this->sink_->put(out);
     }
 
