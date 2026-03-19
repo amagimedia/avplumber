@@ -1229,6 +1229,8 @@ Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
 -   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
+-   `yolo_classes` (string, optional) - path to a whitespace-separated class-label file loaded at node startup; use `class_names` if any label itself contains spaces
+-   `class_names` (array of strings, optional) - class-label mapping embedded directly in the graph JSON
 -   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
 -   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
 -   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
