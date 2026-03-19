@@ -52,6 +52,10 @@ private:
     double min_conf_ = 0.0;
     std::unordered_set<int> allowed_classes_;
     std::unordered_set<std::string> allowed_labels_;
+    double model_content_width_ = 0.0;
+    double model_content_height_ = 0.0;
+    double model_content_offset_x_ = 0.0;
+    double model_content_offset_y_ = 0.0;
 
     VideoParameters input_params_{};
     av::Rational frame_rate_{0, 0};
@@ -185,26 +189,50 @@ private:
         return class_match || label_match;
     }
 
+    bool remapModelCoord(double x, double y,
+                         double model_w, double model_h,
+                         double& out_x, double& out_y) const {
+        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
+            const double content_x = std::max(0.0, std::min(x - model_content_offset_x_, model_content_width_));
+            const double content_y = std::max(0.0, std::min(y - model_content_offset_y_, model_content_height_));
+            out_x = content_x * ((double)input_params_.width / model_content_width_);
+            out_y = content_y * ((double)input_params_.height / model_content_height_);
+            return true;
+        }
+
+        const double sx = model_w > 0.0 ? (double)input_params_.width / model_w : 1.0;
+        const double sy = model_h > 0.0 ? (double)input_params_.height / model_h : 1.0;
+        out_x = x * sx;
+        out_y = y * sy;
+        return true;
+    }
+
     void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
         if (!md.contains("detections") || !md["detections"].is_array()) return;
 
         const std::string coord_space = md.value("coord_space", std::string("model"));
         const double model_w = md.value("model_width", (double)input_params_.width);
         const double model_h = md.value("model_height", (double)input_params_.height);
-        const double sx = (coord_space == "model" && model_w > 0.0) ? (double)input_params_.width / model_w : 1.0;
-        const double sy = (coord_space == "model" && model_h > 0.0) ? (double)input_params_.height / model_h : 1.0;
 
         for (const auto& det : md["detections"]) {
             if (!det.is_object()) continue;
             if (!yoloDetectionAllowed(det)) continue;
             if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
             const auto& xyxy = det["xyxy"];
+            double x1 = xyxy[0].get<double>();
+            double y1 = xyxy[1].get<double>();
+            double x2 = xyxy[2].get<double>();
+            double y2 = xyxy[3].get<double>();
+            if (coord_space == "model") {
+                if (!remapModelCoord(x1, y1, model_w, model_h, x1, y1)) continue;
+                if (!remapModelCoord(x2, y2, model_w, model_h, x2, y2)) continue;
+            }
             BBox bbox;
             if (scaleAndClampBBox(
-                    xyxy[0].get<double>() * sx,
-                    xyxy[1].get<double>() * sy,
-                    xyxy[2].get<double>() * sx,
-                    xyxy[3].get<double>() * sy,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
                     bbox)) {
                 boxes_out.push_back(bbox);
             }
@@ -359,6 +387,10 @@ public:
              double min_conf,
              std::unordered_set<int> allowed_classes,
              std::unordered_set<std::string> allowed_labels,
+             double model_content_width,
+             double model_content_height,
+             double model_content_offset_x,
+             double model_content_offset_y,
              VideoParameters input_params,
              av::Rational frame_rate,
              av::Rational timebase,
@@ -370,11 +402,22 @@ public:
           min_conf_(min_conf),
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
+          model_content_width_(model_content_width),
+          model_content_height_(model_content_height),
+          model_content_offset_x_(model_content_offset_x),
+          model_content_offset_y_(model_content_offset_y),
           input_params_(input_params),
           frame_rate_(frame_rate),
           timebase_(timebase) {
         if (bbox_thickness_ <= 0) {
             throw Error("draw_bbox: bbox_thickness must be positive");
+        }
+        if ((model_content_width_ > 0.0 || model_content_height_ > 0.0)
+                && !(model_content_width_ > 0.0 && model_content_height_ > 0.0)) {
+            throw Error("draw_bbox: model_content_width and model_content_height must both be positive when set");
+        }
+        if (model_content_offset_x_ < 0.0 || model_content_offset_y_ < 0.0) {
+            throw Error("draw_bbox: model_content offsets must be non-negative");
         }
     }
 
@@ -473,6 +516,10 @@ public:
         const int bbox_thickness = params.value("bbox_thickness", 2);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double min_conf = params.value("min_conf", 0.0);
+        const double model_content_width = params.value("model_content_width", 0.0);
+        const double model_content_height = params.value("model_content_height", 0.0);
+        const double model_content_offset_x = params.value("model_content_offset_x", 0.0);
+        const double model_content_offset_y = params.value("model_content_offset_y", 0.0);
         std::unordered_set<int> allowed_classes;
         std::unordered_set<std::string> allowed_labels;
         VideoParameters input_params;
@@ -500,7 +547,10 @@ public:
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
-            edges, params, metadata_key, bbox_thickness, min_conf, std::move(allowed_classes), std::move(allowed_labels), input_params, frame_rate, timebase, debug_log_every_n);
+            edges, params, metadata_key, bbox_thickness, min_conf,
+            std::move(allowed_classes), std::move(allowed_labels),
+            model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
+            input_params, frame_rate, timebase, debug_log_every_n);
     }
 };
 
