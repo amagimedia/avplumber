@@ -104,22 +104,30 @@ Coordinates are emitted in model input space, not remapped back to an original s
 - `input_format`
   Channel order for RGB preprocessing. Values `BGR` or `bgr` enable BGR ordering; any other value is treated as RGB.
 
+- `yolo_classes`
+  Optional path to a whitespace-separated class-label file.
+  The node reads the file at startup and maps class IDs to labels by index.
+
 - `class_names`
   Optional class label mapping.
-  Supported forms:
-  - string preset `coco80`
+  Supported form:
   - array of class-name strings
 
 ## Class Names
 
-If `class_names` is not provided, detections still include numeric `cls` IDs.
+If neither `yolo_classes` nor `class_names` is provided, detections still include numeric `cls` IDs.
+
+If `yolo_classes` is provided:
+
+- the file is parsed as whitespace-separated labels
+- labels are mapped to class IDs by index
+- use `class_names` instead if a label itself contains spaces
 
 If `class_names` is provided:
 
-- `coco80` loads the built-in COCO 80-class label list
 - a string array maps class IDs to labels by index
 
-Unsupported presets are logged and ignored.
+Do not set both `yolo_classes` and `class_names` at the same time.
 
 ## Runtime Notes
 
@@ -142,5 +150,5 @@ cuda_infer_yolo:
   infer_every_n: 1
   metadata_key_out: yolo_detections_v1
   input_format: RGB
-  class_names: coco80
+  yolo_classes: /models/yolo_classes.txt
 ```
