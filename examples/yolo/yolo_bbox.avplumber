@@ -17,13 +17,12 @@ node.add { "type": "filter_video", "graph": "scale_cuda=w=960:h=540", "src": "v_
 node.add { "type": "filter_video", "graph": "pad_cuda=w=960:h=960", "src": "v_scaled_960x540", "dst": "v_pre_yolo", "group": "in", "name": "Cuda_Pad_Yolo", "auto_restart": "group", "dst_width": 960, "dst_height": 960, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 
 node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/home/fedora/tensorrt/trained_960_fp16.plan", "input_format": "RGB", "yolo_classes": "examples/yolo/basketball.txt", "conf_thresh": 0.20, "iou_thresh": 0.45, "max_det": 300, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": true, "debug_log_every_n": 1 }
-node.add { "type": "track_ball", "src": "v_post_yolo", "dst": "v_tracked_yolo", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "ball_track_v1", "target_labels": ["ball", "foot", "player"], "min_conf": 0.20, "max_missed_frames": 12, "max_center_distance": 300, "min_iou_match": 0.0, "emit_predicted": true, "debug_log_every_n": 1 }
 
-# Merge metadata from YOLO branch onto 1080p branch by exact PTS match
-node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_tracked_yolo"], "dst": "v_1080p_with_md", "group": "in" }
+# Merge raw YOLO detections onto the 1080p branch by exact PTS match
+node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_post_yolo"], "dst": "v_1080p_with_md", "group": "in" }
 
 # Draw all YOLO detections on the full-resolution branch
-node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "ball_track_v1", "bbox_thickness": 2, "min_conf": 0.20, "allowed_labels": ["ball", "foot", "player"], "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
+node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "yolo_detections_v1", "bbox_thickness": 2, "min_conf": 0.20, "allowed_labels": ["ball", "foot", "player"], "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
 
 # Re-introduce stable timing/format metadata for the encoder path.
 node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps" }
