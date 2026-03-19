@@ -56,17 +56,29 @@ struct Detection {
     int cls = -1;
 };
 
-static std::vector<std::string> coco80ClassNames() {
-    return {
-        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
-        "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
-        "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
-        "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
-        "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
-        "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
-        "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
-        "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
-    };
+static bool loadClassNamesFromFile(const std::string& path, std::vector<std::string>& out, std::string& err) {
+    std::ifstream f(path);
+    if (!f) {
+        err = "cannot open class names file " + path;
+        return false;
+    }
+
+    std::vector<std::string> names;
+    std::string token;
+    while (f >> token) {
+        names.push_back(token);
+    }
+    if (f.bad()) {
+        err = "failed reading class names file " + path;
+        return false;
+    }
+    if (names.empty()) {
+        err = "class names file is empty " + path;
+        return false;
+    }
+
+    out = std::move(names);
+    return true;
 }
 
 static float halfToFloat(uint16_t h) {
@@ -753,20 +765,27 @@ public:
             const std::string ifmt = params["input_format"].get<std::string>();
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
         }
-        if (params.count("class_names")) {
-            if (params["class_names"].is_string()) {
-                const std::string v = params["class_names"].get<std::string>();
-                if (v == "coco80" || v == "COCO80") {
-                    r->class_names_ = coco80ClassNames();
-                } else {
-                    logstream << "cuda_infer_yolo: unsupported class_names preset '" << v
-                              << "' (use \"coco80\" or provide an array)";
-                }
-            } else if (params["class_names"].is_array()) {
+        if (params.count("yolo_classes") && params.count("class_names")) {
+            throw Error("cuda_infer_yolo: use either yolo_classes or class_names, not both");
+        }
+        if (params.count("yolo_classes")) {
+            if (!params["yolo_classes"].is_string()) {
+                throw Error("cuda_infer_yolo: yolo_classes must be a string path");
+            }
+            const std::string path = params["yolo_classes"].get<std::string>();
+            std::string err;
+            if (!loadClassNamesFromFile(path, r->class_names_, err)) {
+                throw Error("cuda_infer_yolo: " + err);
+            }
+        } else if (params.count("class_names")) {
+            if (params["class_names"].is_array()) {
                 const std::list<std::string> names = jsonToStringList(params["class_names"]);
                 r->class_names_.assign(names.begin(), names.end());
+                if (r->class_names_.empty()) {
+                    throw Error("cuda_infer_yolo: class_names array must not be empty");
+                }
             } else {
-                logstream << "cuda_infer_yolo: class_names must be string preset or string array";
+                throw Error("cuda_infer_yolo: class_names must be a string array");
             }
         }
         return r;
