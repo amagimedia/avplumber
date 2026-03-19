@@ -115,6 +115,8 @@ private:
     std::string metadata_key_out_ = "ball_track_v1";
     std::string target_label_ = "sports ball";
     int target_class_ = -1;
+    std::vector<std::string> target_labels_;
+    std::vector<int> target_classes_;
     double min_conf_ = 0.10;
     int max_missed_frames_ = 4;
     double max_center_distance_ = 160.0;
@@ -137,10 +139,26 @@ private:
         if (target_class_ >= 0 && det.cls == target_class_) {
             class_match = true;
         }
+        for (int cls : target_classes_) {
+            if (det.cls == cls) {
+                class_match = true;
+                break;
+            }
+        }
         if (!target_label_.empty() && det.has_label && det.label == target_label_) {
             label_match = true;
         }
-        if (target_class_ < 0 && target_label_.empty()) {
+        if (det.has_label) {
+            for (const std::string& label : target_labels_) {
+                if (det.label == label) {
+                    label_match = true;
+                    break;
+                }
+            }
+        }
+        const bool have_class_targets = target_class_ >= 0 || !target_classes_.empty();
+        const bool have_label_targets = !target_label_.empty() || !target_labels_.empty();
+        if (!have_class_targets && !have_label_targets) {
             return true;
         }
         return class_match || label_match;
@@ -397,6 +415,24 @@ public:
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
         if (params.count("target_label")) r->target_label_ = params["target_label"].get<std::string>();
         if (params.count("target_class")) r->target_class_ = params["target_class"];
+        if (params.count("target_labels")) {
+            if (!params["target_labels"].is_array()) {
+                throw Error("track_ball: target_labels must be a string array");
+            }
+            const std::list<std::string> labels = jsonToStringList(params["target_labels"]);
+            r->target_labels_.assign(labels.begin(), labels.end());
+        }
+        if (params.count("target_classes")) {
+            if (!params["target_classes"].is_array()) {
+                throw Error("track_ball: target_classes must be an integer array");
+            }
+            for (const auto& item : params["target_classes"]) {
+                if (!item.is_number_integer()) {
+                    throw Error("track_ball: target_classes must be an integer array");
+                }
+                r->target_classes_.push_back(item.get<int>());
+            }
+        }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
         if (params.count("max_missed_frames")) r->max_missed_frames_ = params["max_missed_frames"];
         if (params.count("max_center_distance")) r->max_center_distance_ = params["max_center_distance"];
