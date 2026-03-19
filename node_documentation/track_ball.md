@@ -1,6 +1,6 @@
 # `track_ball`
 
-`track_ball` is a lightweight metadata-only tracker for basketball workflows. It reads YOLO-style detection metadata from each incoming frame, keeps one active `sports ball` track, and can emit predicted boxes for short detection gaps.
+`track_ball` is a lightweight metadata-only tracker for basketball workflows. It reads YOLO-style detection metadata from each incoming frame, keeps one active target track, and can emit predicted boxes for short detection gaps.
 
 ## What It Does
 
@@ -86,8 +86,14 @@ This is intended to bridge short gaps, not long occlusions.
 - `target_label`
   Detection label to track. Default: `sports ball`.
 
+- `target_labels`
+  Optional array of detection labels to track.
+
 - `target_class`
   Optional class ID to track. Default: disabled.
+
+- `target_classes`
+  Optional array of class IDs to track.
 
 - `min_conf`
   Minimum confidence required for incoming detections. Default: `0.10`.
@@ -119,6 +125,7 @@ This is intended to bridge short gaps, not long occlusions.
 - The node forwards the original frame and only mutates metadata.
 - The node implements `IInputReset` so track state clears on upstream resets.
 - The tracker is ball-focused and intentionally does not keep multiple simultaneous tracks.
+- If multiple target filters are configured, a detection is accepted when it matches any configured label or class.
 
 ## Example
 
@@ -128,7 +135,7 @@ track_ball:
   dst: v_tracked_yolo
   metadata_key_in: yolo_detections_v1
   metadata_key_out: ball_track_v1
-  target_label: sports ball
+  target_labels: [ball, foot]
   min_conf: 0.10
   max_missed_frames: 4
   max_center_distance: 160
