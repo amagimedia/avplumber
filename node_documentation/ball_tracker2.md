@@ -68,6 +68,8 @@ The node also writes a top-level `tracker` object for debugging.
 - it penalizes abrupt acceleration and jerk spikes
 - it can keep a slow or briefly static ball if it still aligns with the predicted trajectory
 - it applies output-selection hysteresis so the final box does not bounce back and forth between far-away hypotheses
+- it constrains each hypothesis using its own recent motion envelope, so a crowd false positive cannot easily inject a large step into an otherwise smooth ball trajectory
+- it can be configured to emit no ball at all rather than switch the visible output to a far-away false positive
 - it emits only one selected track downstream even though several hypotheses may exist internally
 
 ## Parameters
@@ -133,6 +135,12 @@ The node also writes a top-level `tracker` object for debugging.
 - `min_track_quality_margin`
   Minimum score margin required to switch away from the currently selected track when two hypotheses are close. Default: `2.0`.
 
+- `trajectory_max_step_scale`
+  Multiplier applied to the recent maximum per-frame trajectory step when deriving the allowed step envelope for continuing a hypothesis. Lower values make the tracker more conservative. Default: `1.4`.
+
+- `trajectory_step_slack`
+  Extra pixel slack added on top of the history-derived step envelope for continuing a hypothesis. Default: `8.0`.
+
 - `max_output_jump_frame_fraction`
   Maximum allowed jump for switching the emitted output to a different hypothesis, expressed as a fraction of the larger frame dimension. Default: `0.12`.
 
@@ -141,6 +149,12 @@ The node also writes a top-level `tracker` object for debugging.
 
 - `min_switch_hits`
   Minimum hit count required before a competing hypothesis may steal the emitted output after a large spatial jump. Default: `4`.
+
+- `selected_track_grace_missed_frames`
+  Number of missed frames for which the currently selected track is still protected from a large switch to a distant competing hypothesis. Default: `3`.
+
+- `suppress_far_switch_output`
+  If `true`, emit no output instead of switching the visible box to a far-away competing hypothesis. Default: `true`.
 
 - `prediction_decay`
   Velocity/confidence decay applied while predicting through misses. Default: `0.92`.
@@ -188,9 +202,13 @@ ball_tracker2:
   max_jerk: 28.0
   slow_mode_max_prediction_error: 12.0
   min_track_quality_margin: 2.0
+  trajectory_max_step_scale: 1.4
+  trajectory_step_slack: 8.0
   max_output_jump_frame_fraction: 0.12
   output_switch_margin: 8.0
   min_switch_hits: 4
+  selected_track_grace_missed_frames: 3
+  suppress_far_switch_output: true
   prediction_decay: 0.92
   velocity_smoothing: 0.60
   min_confirmed_hits: 2

@@ -173,6 +173,7 @@ private:
     double output_switch_margin_ = 8.0;
     int min_switch_hits_ = 4;
     int selected_track_grace_missed_frames_ = 3;
+    bool suppress_far_switch_output_ = true;
     double prediction_decay_ = 0.92;
     double velocity_smoothing_ = 0.60;
     int min_confirmed_hits_ = 2;
@@ -557,6 +558,7 @@ private:
 
         const double frame_span = std::max(env.model_width, env.model_height);
         const double max_output_jump = std::max(1.0, frame_span * max_output_jump_frame_fraction_);
+        bool suppress_output = false;
 
         if (best.track_id > 0 && second.track_id > 0
             && (best.score - second.score) < min_track_quality_margin_
@@ -573,7 +575,11 @@ private:
             if (current.missed_frames <= selected_track_grace_missed_frames_ && huge_switch) {
                 best = current;
             } else if (huge_switch && (!best_is_mature || !decisive_margin)) {
-                best = current;
+                if (suppress_far_switch_output_) {
+                    suppress_output = true;
+                } else {
+                    best = current;
+                }
             } else if (!huge_switch && (best.score - current.score) < min_track_quality_margin_) {
                 best = current;
             }
@@ -583,11 +589,20 @@ private:
             const double output_jump = centerDistance(last_output_box_, best.box);
             const bool huge_output_jump = output_jump > max_output_jump;
             const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
-            if (huge_output_jump && !best_is_mature) {
-                if (have_current) {
+            const bool decisive_switch = have_current
+                ? (best.score - current.score) >= output_switch_margin_
+                : best_is_mature;
+            if (huge_output_jump && (!best_is_mature || !decisive_switch)) {
+                if (suppress_far_switch_output_) {
+                    suppress_output = true;
+                } else if (have_current) {
                     best = current;
                 }
             }
+        }
+
+        if (suppress_output) {
+            return TrackOutput{};
         }
 
         selected_track_id_ = best.track_id;
@@ -763,6 +778,7 @@ public:
         if (params.count("output_switch_margin")) r->output_switch_margin_ = params["output_switch_margin"];
         if (params.count("min_switch_hits")) r->min_switch_hits_ = params["min_switch_hits"];
         if (params.count("selected_track_grace_missed_frames")) r->selected_track_grace_missed_frames_ = params["selected_track_grace_missed_frames"];
+        if (params.count("suppress_far_switch_output")) r->suppress_far_switch_output_ = params["suppress_far_switch_output"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
         if (params.count("min_confirmed_hits")) r->min_confirmed_hits_ = params["min_confirmed_hits"];
