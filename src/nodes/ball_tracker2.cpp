@@ -174,6 +174,9 @@ private:
     int min_switch_hits_ = 4;
     int selected_track_grace_missed_frames_ = 3;
     bool suppress_far_switch_output_ = true;
+    int reacquire_after_empty_frames_ = 30;
+    int reacquire_min_confirmed_hits_ = 3;
+    int reacquire_min_track_age_ = 3;
     double prediction_decay_ = 0.92;
     double velocity_smoothing_ = 0.60;
     int min_confirmed_hits_ = 2;
@@ -185,6 +188,7 @@ private:
     int selected_track_id_ = 0;
     DetectionBox last_output_box_;
     bool last_output_valid_ = false;
+    int consecutive_empty_output_frames_ = 0;
     std::vector<Hypothesis> hypotheses_;
 
     void clearState() {
@@ -192,6 +196,7 @@ private:
         selected_track_id_ = 0;
         last_output_box_ = DetectionBox{};
         last_output_valid_ = false;
+        consecutive_empty_output_frames_ = 0;
     }
 
     bool detectionMatchesTarget(const DetectionBox& det) const {
@@ -505,9 +510,12 @@ private:
     TrackOutput chooseOutput(const MetadataEnvelope& env) {
         std::vector<TrackOutput> candidates;
         candidates.reserve(hypotheses_.size());
+        const bool reacquire_mode = consecutive_empty_output_frames_ >= std::max(1, reacquire_after_empty_frames_);
+        const int required_hits = reacquire_mode ? std::max(1, reacquire_min_confirmed_hits_) : std::max(1, min_confirmed_hits_);
+        const int required_age = reacquire_mode ? std::max(1, reacquire_min_track_age_) : std::max(1, min_track_age_);
         for (const Hypothesis& hypothesis : hypotheses_) {
-            if (hypothesis.hits < std::max(1, min_confirmed_hits_)) continue;
-            if (hypothesis.age < std::max(1, min_track_age_)) continue;
+            if (hypothesis.hits < required_hits) continue;
+            if (hypothesis.age < required_age) continue;
             DetectionBox box = hypothesis.box;
             bool predicted = hypothesis.missed_frames > 0;
             if (!finiteBox(box)) {
@@ -532,32 +540,45 @@ private:
 
         if (candidates.empty()) {
             selected_track_id_ = 0;
-            last_output_valid_ = false;
             return TrackOutput{};
         }
 
-        std::sort(candidates.begin(), candidates.end(), [](const TrackOutput& a, const TrackOutput& b) {
+        const double frame_span = std::max(env.model_width, env.model_height);
+        const double max_output_jump = std::max(1.0, frame_span * max_output_jump_frame_fraction_);
+
+        std::vector<TrackOutput> near_candidates;
+        near_candidates.reserve(candidates.size());
+        if (last_output_valid_ && !reacquire_mode) {
+            for (const TrackOutput& candidate : candidates) {
+                if (centerDistance(last_output_box_, candidate.box) <= max_output_jump) {
+                    near_candidates.push_back(candidate);
+                }
+            }
+            if (near_candidates.empty() && suppress_far_switch_output_) {
+                return TrackOutput{};
+            }
+        }
+
+        std::vector<TrackOutput>& ranked = (!near_candidates.empty() ? near_candidates : candidates);
+        std::sort(ranked.begin(), ranked.end(), [](const TrackOutput& a, const TrackOutput& b) {
             return a.score > b.score;
         });
 
-        TrackOutput best = candidates.front();
+        TrackOutput best = ranked.front();
         TrackOutput second;
-        if (candidates.size() > 1) {
-            second = candidates[1];
+        if (ranked.size() > 1) {
+            second = ranked[1];
         }
 
         TrackOutput current;
         bool have_current = false;
-        for (const TrackOutput& candidate : candidates) {
+        for (const TrackOutput& candidate : ranked) {
             if (candidate.track_id == selected_track_id_) {
                 current = candidate;
                 have_current = true;
                 break;
             }
         }
-
-        const double frame_span = std::max(env.model_width, env.model_height);
-        const double max_output_jump = std::max(1.0, frame_span * max_output_jump_frame_fraction_);
         bool suppress_output = false;
 
         if (best.track_id > 0 && second.track_id > 0
@@ -566,7 +587,7 @@ private:
             best = current;
         }
 
-        if (have_current && best.track_id != current.track_id) {
+        if (have_current && best.track_id != current.track_id && !reacquire_mode) {
             const double current_to_best = centerDistance(current.box, best.box);
             const bool huge_switch = current_to_best > max_output_jump;
             const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
@@ -585,7 +606,7 @@ private:
             }
         }
 
-        if (last_output_valid_ && best.track_id > 0 && best.track_id != selected_track_id_) {
+        if (last_output_valid_ && best.track_id > 0 && best.track_id != selected_track_id_ && !reacquire_mode) {
             const double output_jump = centerDistance(last_output_box_, best.box);
             const bool huge_output_jump = output_jump > max_output_jump;
             const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
@@ -606,10 +627,6 @@ private:
         }
 
         selected_track_id_ = best.track_id;
-        if (best.track_id > 0 && finiteBox(best.box)) {
-            last_output_box_ = best.box;
-            last_output_valid_ = true;
-        }
         return best;
     }
 
@@ -731,6 +748,17 @@ public:
         const Parameters md = buildOutputMetadata(env, output);
         const std::string serialized = md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
+        if (output.track_id > 0 && finiteBox(output.box)) {
+            last_output_box_ = output.box;
+            last_output_valid_ = true;
+            consecutive_empty_output_frames_ = 0;
+        } else {
+            selected_track_id_ = 0;
+            consecutive_empty_output_frames_ += 1;
+            if (consecutive_empty_output_frames_ >= std::max(1, reacquire_after_empty_frames_)) {
+                last_output_valid_ = false;
+            }
+        }
         maybeLog(output);
         this->sink_->put(frm);
     }
@@ -779,6 +807,9 @@ public:
         if (params.count("min_switch_hits")) r->min_switch_hits_ = params["min_switch_hits"];
         if (params.count("selected_track_grace_missed_frames")) r->selected_track_grace_missed_frames_ = params["selected_track_grace_missed_frames"];
         if (params.count("suppress_far_switch_output")) r->suppress_far_switch_output_ = params["suppress_far_switch_output"];
+        if (params.count("reacquire_after_empty_frames")) r->reacquire_after_empty_frames_ = params["reacquire_after_empty_frames"];
+        if (params.count("reacquire_min_confirmed_hits")) r->reacquire_min_confirmed_hits_ = params["reacquire_min_confirmed_hits"];
+        if (params.count("reacquire_min_track_age")) r->reacquire_min_track_age_ = params["reacquire_min_track_age"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
         if (params.count("min_confirmed_hits")) r->min_confirmed_hits_ = params["min_confirmed_hits"];
