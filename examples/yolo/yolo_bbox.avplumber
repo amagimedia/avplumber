@@ -18,14 +18,14 @@ node.add { "type": "filter_video", "graph": "pad_cuda=w=640:h=640:x=0:y=140", "s
 
 node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/home/fedora/tensorrt/ball.plan", "input_format": "RGB", "output_box_format": "end2end_xyxy", "yolo_classes": "examples/yolo/basketball3.txt", "conf_thresh": 0.20, "iou_thresh": 0.45, "max_det": 20, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": true, "debug_log_every_n": 1 }
 
-# ByteTrack-style single-ball tracking over YOLO detections.
-node.add { "type": "byte_track_ball", "src": "v_post_yolo", "dst": "v_tracked_yolo", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "ball_track_v1", "target_label": "basketball", "min_conf": 0.20, "high_conf_thresh": 0.30, "new_track_conf_thresh": 0.30, "match_iou_thresh": 0.05, "low_match_iou_thresh": 0.01, "match_max_center_distance": 140, "low_match_max_center_distance": 200, "max_time_lost": 10, "min_confirmed_hits": 2, "emit_predicted": true, "prediction_decay": 0.92, "velocity_smoothing": 0.60, "debug_log_every_n": 1 }
+# Long-window single-ball trajectory tracking over YOLO detections.
+node.add { "type": "ball_tracker2", "src": "v_post_yolo", "dst": "v_tracked_yolo", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "ball_track_v2", "target_label": "basketball", "min_conf": 0.20, "history_size": 120, "history_motion_window": 12, "max_missed_frames": 8, "max_jump_frame_fraction": 0.25, "match_max_center_distance": 140, "min_iou_match": 0.01, "max_acceleration": 28.0, "max_jerk": 28.0, "slow_mode_max_prediction_error": 12.0, "min_track_quality_margin": 2.0, "prediction_decay": 0.92, "velocity_smoothing": 0.60, "min_confirmed_hits": 2, "min_track_age": 2, "max_hypotheses": 6, "debug_log_every_n": 1 }
 
 # Merge raw YOLO detections onto the 1080p branch by exact PTS match
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_tracked_yolo"], "dst": "v_1080p_with_md", "group": "in" }
 
-# Draw only the selected ByteTrack-style basketball track on the full-resolution branch
-node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "ball_track_v1", "bbox_thickness": 2, "min_conf": 0.20, "allowed_labels": ["basketball"], "model_content_width": 640, "model_content_height": 360, "model_content_offset_x": 0, "model_content_offset_y": 140, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
+# Draw only the selected long-window basketball track on the full-resolution branch
+node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_key": "ball_track_v2", "bbox_thickness": 2, "min_conf": 0.20, "allowed_labels": ["basketball"], "model_content_width": 640, "model_content_height": 360, "model_content_offset_x": 0, "model_content_offset_y": 140, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
 
 # Re-introduce stable timing/format metadata for the encoder path.
 node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps" }
