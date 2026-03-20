@@ -67,7 +67,7 @@ private:
     std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
     int context_grace_frames_ = 3;
-    double max_ball_switch_distance_px_ = 8.0;
+    double max_ball_switch_distance_px_ = 50.0;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
     std::vector<DetectionBox> last_context_output_dets_;
@@ -165,10 +165,7 @@ private:
 
     bool shouldEmitContextDetection(const DetectionBox& det) const {
         if (det.model_index != context_model_index_) return false;
-        if (!det.has_label) return false;
-        if (det.label == context_ball_label_) return false;
-        if (context_output_labels_.empty()) return true;
-        return context_output_labels_.count(det.label) > 0;
+        return det.has_label;
     }
 
     bool fallbackBallAllowed(const DetectionBox& candidate, bool switching_to_ball_only) const {
@@ -176,10 +173,18 @@ private:
             return true;
         }
         if (!have_last_context_ball_) {
-            return true;
+            return false;
         }
         const double dist = centerDistance(last_context_ball_, candidate);
-        return dist <= max_ball_switch_distance_px_;
+        if (dist > max_ball_switch_distance_px_) {
+            return false;
+        }
+        for (const DetectionBox& det : last_context_output_dets_) {
+            if (centerDistance(det, candidate) > max_ball_switch_distance_px_) {
+                return false;
+            }
+        }
+        return true;
     }
 
     std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets,
