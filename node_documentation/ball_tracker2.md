@@ -70,6 +70,7 @@ The node also writes a top-level `tracker` object for debugging.
 - it applies output-selection hysteresis so the final box does not bounce back and forth between far-away hypotheses
 - it constrains each hypothesis using its own recent motion envelope, so a crowd false positive cannot easily inject a large step into an otherwise smooth ball trajectory
 - it can be configured to emit no ball at all rather than switch the visible output to a far-away false positive
+- after a long enough empty-output streak, it can deliberately re-enter reacquisition mode and accept a new stable ball track from elsewhere in the frame
 - it emits only one selected track downstream even though several hypotheses may exist internally
 
 ## Parameters
@@ -156,6 +157,15 @@ The node also writes a top-level `tracker` object for debugging.
 - `suppress_far_switch_output`
   If `true`, emit no output instead of switching the visible box to a far-away competing hypothesis. Default: `true`.
 
+- `reacquire_after_empty_frames`
+  Number of consecutive empty-output frames after which the tracker stops anchoring to the previous visible ball position and allows a fresh distant reacquisition. Default: `30`.
+
+- `reacquire_min_confirmed_hits`
+  Minimum hit count required before a reacquired track may become visible after the empty-output threshold is reached. Default: `3`.
+
+- `reacquire_min_track_age`
+  Minimum age required before a reacquired track may become visible after the empty-output threshold is reached. Default: `3`.
+
 - `prediction_decay`
   Velocity/confidence decay applied while predicting through misses. Default: `0.92`.
 
@@ -209,6 +219,9 @@ ball_tracker2:
   min_switch_hits: 4
   selected_track_grace_missed_frames: 3
   suppress_far_switch_output: true
+  reacquire_after_empty_frames: 30
+  reacquire_min_confirmed_hits: 3
+  reacquire_min_track_age: 3
   prediction_decay: 0.92
   velocity_smoothing: 0.60
   min_confirmed_hits: 2
