@@ -167,9 +167,12 @@ private:
     double max_jerk_ = 28.0;
     double slow_mode_max_prediction_error_ = 12.0;
     double min_track_quality_margin_ = 2.0;
+    double trajectory_max_step_scale_ = 1.4;
+    double trajectory_step_slack_ = 8.0;
     double max_output_jump_frame_fraction_ = 0.12;
     double output_switch_margin_ = 8.0;
     int min_switch_hits_ = 4;
+    int selected_track_grace_missed_frames_ = 3;
     double prediction_decay_ = 0.92;
     double velocity_smoothing_ = 0.60;
     int min_confirmed_hits_ = 2;
@@ -361,24 +364,35 @@ private:
                              double& delta_score) const {
         const int frame_gap = hypothesis.missed_frames + 1;
         const double gap = std::max(1, frame_gap);
+        const HistoryStats stats = computeHistoryStats(hypothesis);
         const DetectionBox predicted = predictBox(hypothesis, env);
         const double dist_pred = centerDistance(predicted, det);
         const double overlap = iou(predicted, det);
-        if (dist_pred > match_max_center_distance_ && overlap < min_iou_match_) {
+        const double frame_span = std::max(env.model_width, env.model_height);
+        const double max_jump = std::max(1.0, max_jump_frame_fraction_ * frame_span * gap);
+        double dynamic_step_cap = max_jump;
+        double dynamic_pred_error_cap = match_max_center_distance_ * gap;
+        if (stats.have_velocity) {
+            const double learned_step_cap = std::max(slow_mode_max_prediction_error_ * 2.0,
+                                                     stats.max_step * trajectory_max_step_scale_ + trajectory_step_slack_) * gap;
+            const double learned_error_cap = std::max(slow_mode_max_prediction_error_,
+                                                      stats.avg_step * trajectory_max_step_scale_ + trajectory_step_slack_) * gap;
+            dynamic_step_cap = std::min(dynamic_step_cap, learned_step_cap);
+            dynamic_pred_error_cap = std::min(dynamic_pred_error_cap, learned_error_cap);
+        }
+
+        if (dist_pred > dynamic_pred_error_cap && overlap < min_iou_match_) {
             return false;
         }
 
-        const double frame_span = std::max(env.model_width, env.model_height);
-        const double max_jump = std::max(1.0, max_jump_frame_fraction_ * frame_span * gap);
         const double step_dist = centerDistance(hypothesis.box, det);
-        if (step_dist > max_jump) {
+        if (step_dist > dynamic_step_cap) {
             return false;
         }
 
         const double meas_vx = (centerX(det) - centerX(hypothesis.box)) / gap;
         const double meas_vy = (centerY(det) - centerY(hypothesis.box)) / gap;
         const double velocity_delta = velocityMagnitude(meas_vx - hypothesis.vx, meas_vy - hypothesis.vy);
-        const HistoryStats stats = computeHistoryStats(hypothesis);
         if (stats.have_velocity && velocity_delta > max_acceleration_) {
             return false;
         }
@@ -556,7 +570,9 @@ private:
             const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
             const bool decisive_margin = (best.score - current.score) >= output_switch_margin_;
 
-            if (huge_switch && (!best_is_mature || !decisive_margin)) {
+            if (current.missed_frames <= selected_track_grace_missed_frames_ && huge_switch) {
+                best = current;
+            } else if (huge_switch && (!best_is_mature || !decisive_margin)) {
                 best = current;
             } else if (!huge_switch && (best.score - current.score) < min_track_quality_margin_) {
                 best = current;
@@ -741,9 +757,12 @@ public:
         if (params.count("max_jerk")) r->max_jerk_ = params["max_jerk"];
         if (params.count("slow_mode_max_prediction_error")) r->slow_mode_max_prediction_error_ = params["slow_mode_max_prediction_error"];
         if (params.count("min_track_quality_margin")) r->min_track_quality_margin_ = params["min_track_quality_margin"];
+        if (params.count("trajectory_max_step_scale")) r->trajectory_max_step_scale_ = params["trajectory_max_step_scale"];
+        if (params.count("trajectory_step_slack")) r->trajectory_step_slack_ = params["trajectory_step_slack"];
         if (params.count("max_output_jump_frame_fraction")) r->max_output_jump_frame_fraction_ = params["max_output_jump_frame_fraction"];
         if (params.count("output_switch_margin")) r->output_switch_margin_ = params["output_switch_margin"];
         if (params.count("min_switch_hits")) r->min_switch_hits_ = params["min_switch_hits"];
+        if (params.count("selected_track_grace_missed_frames")) r->selected_track_grace_missed_frames_ = params["selected_track_grace_missed_frames"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
         if (params.count("min_confirmed_hits")) r->min_confirmed_hits_ = params["min_confirmed_hits"];

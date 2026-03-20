@@ -67,6 +67,7 @@ The node also writes a top-level `tracker` object for debugging.
 - it rejects assignments that imply a very large jump in one frame
 - it penalizes abrupt acceleration and jerk spikes
 - it can keep a slow or briefly static ball if it still aligns with the predicted trajectory
+- it applies output-selection hysteresis so the final box does not bounce back and forth between far-away hypotheses
 - it emits only one selected track downstream even though several hypotheses may exist internally
 
 ## Parameters
@@ -132,6 +133,15 @@ The node also writes a top-level `tracker` object for debugging.
 - `min_track_quality_margin`
   Minimum score margin required to switch away from the currently selected track when two hypotheses are close. Default: `2.0`.
 
+- `max_output_jump_frame_fraction`
+  Maximum allowed jump for switching the emitted output to a different hypothesis, expressed as a fraction of the larger frame dimension. Default: `0.12`.
+
+- `output_switch_margin`
+  Minimum score advantage required before the tracker will switch the emitted output to a distant competing hypothesis. Default: `8.0`.
+
+- `min_switch_hits`
+  Minimum hit count required before a competing hypothesis may steal the emitted output after a large spatial jump. Default: `4`.
+
 - `prediction_decay`
   Velocity/confidence decay applied while predicting through misses. Default: `0.92`.
 
@@ -178,6 +188,9 @@ ball_tracker2:
   max_jerk: 28.0
   slow_mode_max_prediction_error: 12.0
   min_track_quality_margin: 2.0
+  max_output_jump_frame_fraction: 0.12
+  output_switch_margin: 8.0
+  min_switch_hits: 4
   prediction_decay: 0.92
   velocity_smoothing: 0.60
   min_confirmed_hits: 2
