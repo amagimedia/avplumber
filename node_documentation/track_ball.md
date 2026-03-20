@@ -7,10 +7,11 @@
 1. Reads `av::VideoFrame` input from `src` and forwards the same frame to `dst`.
 2. Parses YOLO-compatible metadata from `metadata_key_in`.
 3. Filters detections to the configured ball target by `label` and/or `cls`.
-4. Matches the best current ball detection against the active track using center-distance and IoU gates.
-5. Updates the active track velocity from matched detections.
-6. When the detector misses briefly, optionally predicts the next box for a short miss window.
-7. Writes YOLO-compatible tracked metadata to `metadata_key_out`.
+4. When no track is active, only acquires a new ball from detections that show frame-to-frame motion.
+5. Matches the best current ball detection against the active track using center-distance and IoU gates.
+6. Updates the active track velocity from matched detections.
+7. When the detector misses briefly, optionally predicts the next box for a short miss window.
+8. Writes YOLO-compatible tracked metadata to `metadata_key_out`.
 
 ## Input Metadata
 
@@ -58,12 +59,12 @@ The node also writes a top-level `tracker` object for debugging.
 
 This first version keeps only one active track:
 
-- if no track is active, it starts one from the highest-confidence ball detection
+- if no track is active, it starts one only after seeing a ball candidate move across consecutive frames
 - if a track is active, it tries to match the best current ball detection
 - if no suitable detection matches, it can emit a predicted box for up to `max_missed_frames`
 - once the miss window expires, the track is dropped
 
-This is intended to bridge short gaps, not long occlusions.
+This is intended to bridge short gaps and avoid latching onto static false positives such as crowd objects, not long occlusions.
 
 ## Parameters
 
@@ -107,6 +108,12 @@ This is intended to bridge short gaps, not long occlusions.
 - `min_iou_match`
   Minimum IoU allowed for matching. Default: `0.0`.
 
+- `acquisition_min_motion`
+  Minimum center motion in metadata pixel space between consecutive frames before a new idle track may be acquired. Default: `4.0`.
+
+- `acquisition_max_match_distance`
+  Maximum center distance used when comparing current detections to the previous frame during idle-track acquisition. Default: `120`.
+
 - `emit_predicted`
   If `true`, emit predicted boxes during short misses. Default: `true`.
 
@@ -125,6 +132,7 @@ This is intended to bridge short gaps, not long occlusions.
 - The node forwards the original frame and only mutates metadata.
 - The node implements `IInputReset` so track state clears on upstream resets.
 - The tracker is ball-focused and intentionally does not keep multiple simultaneous tracks.
+- Idle-track acquisition prefers moving detections and ignores nearly static candidates, which helps suppress persistent far-away false positives.
 - If multiple target filters are configured, a detection is accepted when it matches any configured label or class.
 
 ## Example
@@ -137,6 +145,8 @@ track_ball:
   metadata_key_out: ball_track_v1
   target_labels: [ball, foot]
   min_conf: 0.10
+  acquisition_min_motion: 4.0
+  acquisition_max_match_distance: 120
   max_missed_frames: 4
   max_center_distance: 160
   emit_predicted: true
