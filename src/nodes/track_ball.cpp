@@ -121,6 +121,8 @@ private:
     int max_missed_frames_ = 4;
     double max_center_distance_ = 160.0;
     double min_iou_match_ = 0.0;
+    double acquisition_min_motion_ = 4.0;
+    double acquisition_max_match_distance_ = 120.0;
     bool emit_predicted_ = true;
     double prediction_decay_ = 0.85;
     double velocity_smoothing_ = 0.60;
@@ -128,9 +130,14 @@ private:
     uint64_t frame_counter_ = 0;
     int next_track_id_ = 1;
     TrackState track_;
+    std::vector<DetectionBox> prev_dets_;
 
     void clearTrack() {
         track_ = TrackState{};
+    }
+
+    void clearHistory() {
+        prev_dets_.clear();
     }
 
     bool detectionMatchesTarget(const DetectionBox& det) const {
@@ -226,17 +233,19 @@ private:
         return clampBoxToCanvas(predicted, env.model_width, env.model_height);
     }
 
-    int chooseBestMatch(const std::vector<DetectionBox>& dets, const DetectionBox& reference_box) const {
+    int chooseBestMatch(const std::vector<DetectionBox>& dets,
+                        const DetectionBox& reference_box,
+                        double max_center_distance) const {
         int best_index = -1;
         double best_score = -std::numeric_limits<double>::infinity();
         for (size_t i = 0; i < dets.size(); ++i) {
             const DetectionBox& det = dets[i];
             const double dist = centerDistance(reference_box, det);
             const double overlap = iou(reference_box, det);
-            if (dist > max_center_distance_ && overlap < min_iou_match_) {
+            if (dist > max_center_distance && overlap < min_iou_match_) {
                 continue;
             }
-            const double score = det.conf * 4.0 + overlap * 2.0 - dist / std::max(1.0, max_center_distance_);
+            const double score = det.conf * 4.0 + overlap * 2.0 - dist / std::max(1.0, max_center_distance);
             if (score > best_score) {
                 best_score = score;
                 best_index = (int)i;
@@ -245,10 +254,36 @@ private:
         return best_index;
     }
 
-    DetectionBox highestConfidence(const std::vector<DetectionBox>& dets) const {
-        return *std::max_element(dets.begin(), dets.end(), [](const DetectionBox& a, const DetectionBox& b) {
-            return a.conf < b.conf;
-        });
+    int chooseMovingAcquisition(const std::vector<DetectionBox>& dets) const {
+        if (prev_dets_.empty()) {
+            return -1;
+        }
+
+        int best_index = -1;
+        double best_score = -std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < dets.size(); ++i) {
+            const DetectionBox& det = dets[i];
+
+            double best_prev_dist = std::numeric_limits<double>::infinity();
+            for (const DetectionBox& prev : prev_dets_) {
+                const double dist = centerDistance(prev, det);
+                if (dist < best_prev_dist) {
+                    best_prev_dist = dist;
+                }
+            }
+
+            if (!std::isfinite(best_prev_dist)) continue;
+            if (best_prev_dist > acquisition_max_match_distance_) continue;
+            if (best_prev_dist < acquisition_min_motion_) continue;
+
+            const double motion_score = best_prev_dist / std::max(1.0, acquisition_min_motion_);
+            const double score = det.conf * 4.0 + motion_score;
+            if (score > best_score) {
+                best_score = score;
+                best_index = (int)i;
+            }
+        }
+        return best_index;
     }
 
     void startTrack(const DetectionBox& det) {
@@ -330,6 +365,7 @@ public:
 
     void resetInput() override {
         clearTrack();
+        clearHistory();
     }
 
     void process() override {
@@ -338,6 +374,7 @@ public:
 
         if (isEofMarker(frm)) {
             clearTrack();
+            clearHistory();
             this->sink_->put(frm);
             return;
         }
@@ -355,12 +392,15 @@ public:
 
         if (!dets.empty()) {
             if (!track_.active) {
-                startTrack(highestConfidence(dets));
-                output_det = track_.box;
-                output_ptr = &output_det;
+                const int match_index = chooseMovingAcquisition(dets);
+                if (match_index >= 0) {
+                    startTrack(dets[(size_t)match_index]);
+                    output_det = track_.box;
+                    output_ptr = &output_det;
+                }
             } else {
                 DetectionBox reference = track_.missed_frames > 0 ? predictBox(env) : track_.box;
-                const int match_index = chooseBestMatch(dets, reference);
+                const int match_index = chooseBestMatch(dets, reference, max_center_distance_);
                 if (match_index >= 0) {
                     const int frame_gap = track_.missed_frames + 1;
                     updateTrack(dets[(size_t)match_index], frame_gap);
@@ -404,6 +444,7 @@ public:
         const std::string serialized = md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
         maybeLog(output_ptr, predicted, missed_frames);
+        prev_dets_ = dets;
         this->sink_->put(frm);
     }
 
@@ -437,6 +478,8 @@ public:
         if (params.count("max_missed_frames")) r->max_missed_frames_ = params["max_missed_frames"];
         if (params.count("max_center_distance")) r->max_center_distance_ = params["max_center_distance"];
         if (params.count("min_iou_match")) r->min_iou_match_ = params["min_iou_match"];
+        if (params.count("acquisition_min_motion")) r->acquisition_min_motion_ = params["acquisition_min_motion"];
+        if (params.count("acquisition_max_match_distance")) r->acquisition_max_match_distance_ = params["acquisition_max_match_distance"];
         if (params.count("emit_predicted")) r->emit_predicted_ = params["emit_predicted"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
