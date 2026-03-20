@@ -41,6 +41,11 @@ struct TrackState {
     int missed_frames = 0;
 };
 
+struct TrackSample {
+    DetectionBox box;
+    bool predicted = false;
+};
+
 static bool finiteBox(const DetectionBox& box) {
     return std::isfinite(box.x1) && std::isfinite(box.y1)
         && std::isfinite(box.x2) && std::isfinite(box.y2)
@@ -118,22 +123,28 @@ private:
     std::vector<std::string> target_labels_;
     std::vector<int> target_classes_;
     double min_conf_ = 0.10;
-    int max_missed_frames_ = 4;
+    int max_missed_frames_ = 8;
     double max_center_distance_ = 160.0;
     double min_iou_match_ = 0.0;
     double match_min_motion_ = 2.0;
     double match_max_motion_ = 64.0;
     double match_min_cosine_similarity_ = -0.2;
+    int history_size_ = 30;
+    int history_motion_window_ = 12;
+    double history_match_min_cosine_similarity_ = -0.1;
+    double history_max_motion_scale_ = 2.5;
+    double history_max_motion_slack_ = 16.0;
     double acquisition_min_motion_ = 4.0;
     double acquisition_max_match_distance_ = 120.0;
     double acquisition_min_cosine_similarity_ = 0.2;
     bool emit_predicted_ = true;
-    double prediction_decay_ = 0.85;
+    double prediction_decay_ = 0.92;
     double velocity_smoothing_ = 0.60;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
     int next_track_id_ = 1;
     TrackState track_;
+    std::vector<TrackSample> track_history_;
     std::vector<DetectionBox> prev_prev_dets_;
     std::vector<DetectionBox> prev_dets_;
 
@@ -142,8 +153,76 @@ private:
     }
 
     void clearHistory() {
+        track_history_.clear();
         prev_prev_dets_.clear();
         prev_dets_.clear();
+    }
+
+    void resetTrackHistory() {
+        track_history_.clear();
+    }
+
+    void pushTrackHistory(const DetectionBox& box, bool predicted) {
+        track_history_.push_back(TrackSample{box, predicted});
+        const int keep = std::max(1, history_size_);
+        if ((int)track_history_.size() > keep) {
+            track_history_.erase(track_history_.begin(),
+                                 track_history_.begin() + ((int)track_history_.size() - keep));
+        }
+    }
+
+    struct MotionStats {
+        bool have_history = false;
+        bool have_direction = false;
+        double avg_vx = 0.0;
+        double avg_vy = 0.0;
+        double avg_speed = 0.0;
+        double max_speed = 0.0;
+    };
+
+    MotionStats computeMotionStats() const {
+        MotionStats stats;
+        if (track_history_.size() < 2) {
+            const double speed = std::sqrt(track_.vx * track_.vx + track_.vy * track_.vy);
+            if (speed > 0.0) {
+                stats.have_history = true;
+                stats.avg_vx = track_.vx;
+                stats.avg_vy = track_.vy;
+                stats.avg_speed = speed;
+                stats.max_speed = speed;
+                stats.have_direction = speed >= match_min_motion_;
+            }
+            return stats;
+        }
+
+        const size_t motion_count = track_history_.size() - 1;
+        const size_t take = (size_t)std::max(1, history_motion_window_);
+        const size_t start = motion_count > take ? track_history_.size() - take : 1;
+
+        int used = 0;
+        for (size_t i = start; i < track_history_.size(); ++i) {
+            const DetectionBox& prev = track_history_[i - 1].box;
+            const DetectionBox& cur = track_history_[i].box;
+            const double vx = centerX(cur) - centerX(prev);
+            const double vy = centerY(cur) - centerY(prev);
+            const double speed = std::sqrt(vx * vx + vy * vy);
+            stats.avg_vx += vx;
+            stats.avg_vy += vy;
+            stats.avg_speed += speed;
+            stats.max_speed = std::max(stats.max_speed, speed);
+            ++used;
+        }
+
+        if (used <= 0) {
+            return stats;
+        }
+
+        stats.have_history = true;
+        stats.avg_vx /= used;
+        stats.avg_vy /= used;
+        stats.avg_speed /= used;
+        stats.have_direction = std::sqrt(stats.avg_vx * stats.avg_vx + stats.avg_vy * stats.avg_vy) >= match_min_motion_;
+        return stats;
     }
 
     bool detectionMatchesTarget(const DetectionBox& det) const {
@@ -247,6 +326,10 @@ private:
         double best_score = -std::numeric_limits<double>::infinity();
         const double gap = std::max(1, frame_gap);
         const double track_speed = std::sqrt(track_.vx * track_.vx + track_.vy * track_.vy);
+        const MotionStats stats = computeMotionStats();
+        const double history_max_motion = stats.have_history
+            ? std::max(match_max_motion_, stats.max_speed * history_max_motion_scale_ + history_max_motion_slack_)
+            : match_max_motion_;
         for (size_t i = 0; i < dets.size(); ++i) {
             const DetectionBox& det = dets[i];
             const double dist = centerDistance(reference_box, det);
@@ -258,14 +341,14 @@ private:
             if (step_dist < match_min_motion_) {
                 continue;
             }
-            if (step_dist > match_max_motion_) {
+            if (step_dist > history_max_motion) {
                 continue;
             }
 
+            const double meas_vx = (centerX(det) - centerX(track_.box)) / gap;
+            const double meas_vy = (centerY(det) - centerY(track_.box)) / gap;
             double cosine_bonus = 0.0;
             if (track_speed >= match_min_motion_) {
-                const double meas_vx = (centerX(det) - centerX(track_.box)) / gap;
-                const double meas_vy = (centerY(det) - centerY(track_.box)) / gap;
                 const double denom = std::max(1.0, track_speed * step_dist);
                 const double cosine = (track_.vx * meas_vx + track_.vy * meas_vy) / denom;
                 if (cosine < match_min_cosine_similarity_) {
@@ -274,9 +357,21 @@ private:
                 cosine_bonus = cosine * 2.0;
             }
 
+            double history_bonus = 0.0;
+            if (stats.have_direction) {
+                const double history_speed = std::sqrt(stats.avg_vx * stats.avg_vx + stats.avg_vy * stats.avg_vy);
+                const double denom = std::max(1.0, history_speed * step_dist);
+                const double cosine = (stats.avg_vx * meas_vx + stats.avg_vy * meas_vy) / denom;
+                if (cosine < history_match_min_cosine_similarity_) {
+                    continue;
+                }
+                history_bonus = cosine * 3.0;
+            }
+
             const double score = det.conf * 4.0
                                + overlap * 2.0
                                + cosine_bonus
+                               + history_bonus
                                - dist / std::max(1.0, max_center_distance);
             if (score > best_score) {
                 best_score = score;
@@ -333,6 +428,7 @@ private:
 
     void startTrack(const DetectionBox& det) {
         clearTrack();
+        resetTrackHistory();
         track_.active = true;
         track_.track_id = next_track_id_++;
         track_.box = det;
@@ -484,6 +580,7 @@ public:
 
         if (output_ptr) {
             missed_frames = track_.missed_frames;
+            pushTrackHistory(*output_ptr, predicted);
         }
         Parameters md = buildOutputMetadata(env, output_ptr, predicted, missed_frames);
         const std::string serialized = md.dump();
@@ -527,6 +624,11 @@ public:
         if (params.count("match_min_motion")) r->match_min_motion_ = params["match_min_motion"];
         if (params.count("match_max_motion")) r->match_max_motion_ = params["match_max_motion"];
         if (params.count("match_min_cosine_similarity")) r->match_min_cosine_similarity_ = params["match_min_cosine_similarity"];
+        if (params.count("history_size")) r->history_size_ = params["history_size"];
+        if (params.count("history_motion_window")) r->history_motion_window_ = params["history_motion_window"];
+        if (params.count("history_match_min_cosine_similarity")) r->history_match_min_cosine_similarity_ = params["history_match_min_cosine_similarity"];
+        if (params.count("history_max_motion_scale")) r->history_max_motion_scale_ = params["history_max_motion_scale"];
+        if (params.count("history_max_motion_slack")) r->history_max_motion_slack_ = params["history_max_motion_slack"];
         if (params.count("acquisition_min_motion")) r->acquisition_min_motion_ = params["acquisition_min_motion"];
         if (params.count("acquisition_max_match_distance")) r->acquisition_max_match_distance_ = params["acquisition_max_match_distance"];
         if (params.count("acquisition_min_cosine_similarity")) r->acquisition_min_cosine_similarity_ = params["acquisition_min_cosine_similarity"];
