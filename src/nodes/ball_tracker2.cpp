@@ -167,6 +167,9 @@ private:
     double max_jerk_ = 28.0;
     double slow_mode_max_prediction_error_ = 12.0;
     double min_track_quality_margin_ = 2.0;
+    double max_output_jump_frame_fraction_ = 0.12;
+    double output_switch_margin_ = 8.0;
+    int min_switch_hits_ = 4;
     double prediction_decay_ = 0.92;
     double velocity_smoothing_ = 0.60;
     int min_confirmed_hits_ = 2;
@@ -176,11 +179,15 @@ private:
     uint64_t frame_counter_ = 0;
     int next_track_id_ = 1;
     int selected_track_id_ = 0;
+    DetectionBox last_output_box_;
+    bool last_output_valid_ = false;
     std::vector<Hypothesis> hypotheses_;
 
     void clearState() {
         hypotheses_.clear();
         selected_track_id_ = 0;
+        last_output_box_ = DetectionBox{};
+        last_output_valid_ = false;
     }
 
     bool detectionMatchesTarget(const DetectionBox& det) const {
@@ -481,8 +488,8 @@ private:
     }
 
     TrackOutput chooseOutput(const MetadataEnvelope& env) {
-        TrackOutput best;
-        TrackOutput second;
+        std::vector<TrackOutput> candidates;
+        candidates.reserve(hypotheses_.size());
         for (const Hypothesis& hypothesis : hypotheses_) {
             if (hypothesis.hits < std::max(1, min_confirmed_hits_)) continue;
             if (hypothesis.age < std::max(1, min_track_age_)) continue;
@@ -505,39 +512,73 @@ private:
             candidate.hits = hypothesis.hits;
             candidate.age = hypothesis.age;
             candidate.score = score;
-            if (candidate.score > best.score) {
-                second = best;
-                best = candidate;
-            } else if (candidate.score > second.score) {
-                second = candidate;
-            }
+            candidates.push_back(candidate);
         }
 
-        if (best.track_id > 0 && second.track_id > 0
-            && (best.score - second.score) < min_track_quality_margin_
-            && selected_track_id_ > 0) {
-            for (const Hypothesis& hypothesis : hypotheses_) {
-                if (hypothesis.track_id != selected_track_id_) continue;
-                if (hypothesis.hits < std::max(1, min_confirmed_hits_)) continue;
-                if (hypothesis.age < std::max(1, min_track_age_)) continue;
-                DetectionBox box = hypothesis.box;
-                bool predicted = hypothesis.missed_frames > 0;
-                if (!finiteBox(box)) {
-                    box = predictBox(hypothesis, env);
-                    predicted = true;
-                }
-                if (!finiteBox(box)) continue;
-                best.box = box;
-                best.track_id = hypothesis.track_id;
-                best.predicted = predicted;
-                best.missed_frames = hypothesis.missed_frames;
-                best.hits = hypothesis.hits;
-                best.age = hypothesis.age;
+        if (candidates.empty()) {
+            selected_track_id_ = 0;
+            last_output_valid_ = false;
+            return TrackOutput{};
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [](const TrackOutput& a, const TrackOutput& b) {
+            return a.score > b.score;
+        });
+
+        TrackOutput best = candidates.front();
+        TrackOutput second;
+        if (candidates.size() > 1) {
+            second = candidates[1];
+        }
+
+        TrackOutput current;
+        bool have_current = false;
+        for (const TrackOutput& candidate : candidates) {
+            if (candidate.track_id == selected_track_id_) {
+                current = candidate;
+                have_current = true;
                 break;
             }
         }
 
+        const double frame_span = std::max(env.model_width, env.model_height);
+        const double max_output_jump = std::max(1.0, frame_span * max_output_jump_frame_fraction_);
+
+        if (best.track_id > 0 && second.track_id > 0
+            && (best.score - second.score) < min_track_quality_margin_
+            && have_current) {
+            best = current;
+        }
+
+        if (have_current && best.track_id != current.track_id) {
+            const double current_to_best = centerDistance(current.box, best.box);
+            const bool huge_switch = current_to_best > max_output_jump;
+            const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
+            const bool decisive_margin = (best.score - current.score) >= output_switch_margin_;
+
+            if (huge_switch && (!best_is_mature || !decisive_margin)) {
+                best = current;
+            } else if (!huge_switch && (best.score - current.score) < min_track_quality_margin_) {
+                best = current;
+            }
+        }
+
+        if (last_output_valid_ && best.track_id > 0 && best.track_id != selected_track_id_) {
+            const double output_jump = centerDistance(last_output_box_, best.box);
+            const bool huge_output_jump = output_jump > max_output_jump;
+            const bool best_is_mature = best.hits >= std::max(min_switch_hits_, min_confirmed_hits_);
+            if (huge_output_jump && !best_is_mature) {
+                if (have_current) {
+                    best = current;
+                }
+            }
+        }
+
         selected_track_id_ = best.track_id;
+        if (best.track_id > 0 && finiteBox(best.box)) {
+            last_output_box_ = best.box;
+            last_output_valid_ = true;
+        }
         return best;
     }
 
@@ -700,6 +741,9 @@ public:
         if (params.count("max_jerk")) r->max_jerk_ = params["max_jerk"];
         if (params.count("slow_mode_max_prediction_error")) r->slow_mode_max_prediction_error_ = params["slow_mode_max_prediction_error"];
         if (params.count("min_track_quality_margin")) r->min_track_quality_margin_ = params["min_track_quality_margin"];
+        if (params.count("max_output_jump_frame_fraction")) r->max_output_jump_frame_fraction_ = params["max_output_jump_frame_fraction"];
+        if (params.count("output_switch_margin")) r->output_switch_margin_ = params["output_switch_margin"];
+        if (params.count("min_switch_hits")) r->min_switch_hits_ = params["min_switch_hits"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
         if (params.count("min_confirmed_hits")) r->min_confirmed_hits_ = params["min_confirmed_hits"];
