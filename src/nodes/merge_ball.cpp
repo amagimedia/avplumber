@@ -6,6 +6,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <string>
 #include <unordered_set>
@@ -57,6 +58,21 @@ static bool finiteBox(const DetectionBox& box) {
 
 class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
 private:
+    struct PendingFrame {
+        av::VideoFrame frame;
+        uint64_t frame_index = 0;
+        MetadataEnvelope env;
+        std::vector<DetectionBox> context_dets;
+        DetectionBox best_ball_label;
+        DetectionBox best_ball_any;
+        bool have_context_presence = false;
+        bool have_best_ball_label = false;
+        bool have_best_ball_any = false;
+        DetectionBox anchor_ball;
+        bool have_anchor_ball = false;
+        uint64_t anchor_frame_index = 0;
+    };
+
     std::string metadata_key_in_ = "yolo_detections_v1";
     std::string metadata_key_out_ = "merge_ball_v1";
     int ball_model_index_ = 0;
@@ -66,14 +82,17 @@ private:
     std::unordered_set<std::string> context_presence_labels_ = {"foot", "player", "ball"};
     std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
+    int fallback_delay_frames_ = 12;
     double max_ball_velocity_px_per_frame_ = 100.0;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
+    std::deque<PendingFrame> pending_frames_;
     DetectionBox last_context_ball_;
     bool have_last_context_ball_ = false;
     uint64_t last_context_ball_frame_index_ = 0;
 
     void resetState() {
+        pending_frames_.clear();
         last_context_ball_ = DetectionBox{};
         have_last_context_ball_ = false;
         last_context_ball_frame_index_ = 0;
@@ -162,74 +181,59 @@ private:
         return context_output_labels_.count(det.label) > 0;
     }
 
-    bool fallbackBallAllowed(const DetectionBox& candidate, uint64_t frame_index) const {
-        if (!have_last_context_ball_) {
-            return true;
-        }
-        const uint64_t frame_gap_u64 = frame_index > last_context_ball_frame_index_
-            ? (frame_index - last_context_ball_frame_index_)
-            : 1;
-        const double frame_gap = (double)std::max<uint64_t>(1, frame_gap_u64);
-        const double dist = centerDistance(last_context_ball_, candidate);
-        return (dist / frame_gap) <= max_ball_velocity_px_per_frame_;
-    }
-
-    std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets,
-                                               uint64_t frame_index,
-                                               std::string& mode_out) const {
-        std::vector<DetectionBox> context_dets;
-        bool have_context_presence = false;
-        DetectionBox best_ball_label;
-        DetectionBox best_ball_any;
-        bool have_best_ball_label = false;
-        bool have_best_ball_any = false;
+    PendingFrame buildPendingFrame(const av::VideoFrame& frm,
+                                   uint64_t frame_index,
+                                   const MetadataEnvelope& env,
+                                   const std::vector<DetectionBox>& dets) const {
+        PendingFrame pending;
+        pending.frame = frm;
+        pending.frame_index = frame_index;
+        pending.env = env;
+        pending.anchor_ball = last_context_ball_;
+        pending.have_anchor_ball = have_last_context_ball_;
+        pending.anchor_frame_index = last_context_ball_frame_index_;
 
         for (const DetectionBox& det : dets) {
             if (det.model_index == context_model_index_ && det.has_label) {
                 if (context_presence_labels_.count(det.label) > 0) {
-                    have_context_presence = true;
+                    pending.have_context_presence = true;
                 }
                 if (shouldEmitContextDetection(det)) {
-                    context_dets.push_back(det);
+                    pending.context_dets.push_back(det);
                 }
             }
             if (det.model_index == ball_model_index_) {
-                if (!have_best_ball_any || det.conf > best_ball_any.conf) {
-                    best_ball_any = det;
-                    have_best_ball_any = true;
+                if (!pending.have_best_ball_any || det.conf > pending.best_ball_any.conf) {
+                    pending.best_ball_any = det;
+                    pending.have_best_ball_any = true;
                 }
                 if ((!ball_label_.empty() && det.has_label && det.label == ball_label_) || ball_label_.empty()) {
-                    if (!have_best_ball_label || det.conf > best_ball_label.conf) {
-                        best_ball_label = det;
-                        have_best_ball_label = true;
+                    if (!pending.have_best_ball_label || det.conf > pending.best_ball_label.conf) {
+                        pending.best_ball_label = det;
+                        pending.have_best_ball_label = true;
                     }
                 }
             }
         }
+        return pending;
+    }
 
-        if (have_context_presence) {
-            mode_out = "context";
-            return context_dets;
+    bool fallbackBallAllowed(const PendingFrame& pending, const DetectionBox& candidate) const {
+        if (!pending.have_anchor_ball) {
+            return true;
         }
-        if (have_best_ball_label && fallbackBallAllowed(best_ball_label, frame_index)) {
-            mode_out = "ball_fallback";
-            return {best_ball_label};
-        }
-        if (have_best_ball_any && fallbackBallAllowed(best_ball_any, frame_index)) {
-            mode_out = "ball_fallback";
-            return {best_ball_any};
-        }
-        if (have_best_ball_label || have_best_ball_any) {
-            mode_out = "ball_rejected_discontinuity";
-            return {};
-        }
-        mode_out = "empty";
-        return {};
+        const uint64_t frame_gap_u64 = pending.frame_index > pending.anchor_frame_index
+            ? (pending.frame_index - pending.anchor_frame_index)
+            : 1;
+        const double frame_gap = (double)std::max<uint64_t>(1, frame_gap_u64);
+        const double dist = centerDistance(pending.anchor_ball, candidate);
+        return (dist / frame_gap) <= max_ball_velocity_px_per_frame_;
     }
 
     Parameters buildOutputMetadata(const MetadataEnvelope& env,
                                    const std::vector<DetectionBox>& dets,
-                                   const std::string& mode) const {
+                                   const std::string& mode,
+                                   int pending_miss_run_length) const {
         Parameters md;
         md["version"] = 1;
         md["coord_space"] = env.coord_space;
@@ -257,6 +261,8 @@ private:
             {"mode", mode},
             {"ball_model_index", ball_model_index_},
             {"context_model_index", context_model_index_},
+            {"fallback_delay_frames", fallback_delay_frames_},
+            {"pending_miss_run_length", pending_miss_run_length},
             {"max_ball_velocity_px_per_frame", max_ball_velocity_px_per_frame_}
         };
         return md;
@@ -268,6 +274,56 @@ private:
         logstream << "merge_ball: frame=" << frame_counter_
                   << " mode=" << mode
                   << " detections=" << dets.size();
+    }
+
+    void emitPendingFront(const std::vector<DetectionBox>& dets,
+                          const std::string& mode,
+                          int pending_miss_run_length) {
+        if (pending_frames_.empty()) return;
+        PendingFrame pending = pending_frames_.front();
+        pending_frames_.pop_front();
+        const Parameters md = buildOutputMetadata(pending.env, dets, mode, pending_miss_run_length);
+        const std::string serialized = md.dump();
+        av_dict_set(&pending.frame.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
+        maybeLog(dets, mode);
+        this->sink_->put(pending.frame);
+    }
+
+    void resolvePending(bool eof) {
+        const int delay = std::max(1, fallback_delay_frames_);
+        while (!pending_frames_.empty()) {
+            if (pending_frames_.front().have_context_presence) {
+                emitPendingFront(pending_frames_.front().context_dets, "context", 0);
+                continue;
+            }
+
+            size_t miss_run_length = 0;
+            while (miss_run_length < pending_frames_.size() && !pending_frames_[miss_run_length].have_context_presence) {
+                ++miss_run_length;
+            }
+            const bool terminated_by_context = miss_run_length < pending_frames_.size();
+
+            if ((int)miss_run_length >= delay) {
+                const PendingFrame& pending = pending_frames_.front();
+                if (pending.have_best_ball_label && fallbackBallAllowed(pending, pending.best_ball_label)) {
+                    emitPendingFront({pending.best_ball_label}, "ball_fallback", (int)miss_run_length);
+                } else if (pending.have_best_ball_any && fallbackBallAllowed(pending, pending.best_ball_any)) {
+                    emitPendingFront({pending.best_ball_any}, "ball_fallback", (int)miss_run_length);
+                } else if (pending.have_best_ball_label || pending.have_best_ball_any) {
+                    emitPendingFront({}, "ball_rejected_discontinuity", (int)miss_run_length);
+                } else {
+                    emitPendingFront({}, "empty", (int)miss_run_length);
+                }
+                continue;
+            }
+
+            if (terminated_by_context || eof) {
+                emitPendingFront({}, "grace", (int)miss_run_length);
+                continue;
+            }
+
+            break;
+        }
     }
 
 public:
@@ -282,6 +338,7 @@ public:
         if (!frm) return;
 
         if (isEofMarker(frm)) {
+            resolvePending(true);
             resetState();
             this->sink_->put(frm);
             return;
@@ -299,13 +356,8 @@ public:
             have_last_context_ball_ = true;
             last_context_ball_frame_index_ = frame_counter_;
         }
-        std::string mode;
-        const std::vector<DetectionBox> merged = selectDetections(dets, frame_counter_, mode);
-        const Parameters md = buildOutputMetadata(env, merged, mode);
-        const std::string serialized = md.dump();
-        av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
-        maybeLog(merged, mode);
-        this->sink_->put(frm);
+        pending_frames_.push_back(buildPendingFrame(frm, frame_counter_, env, dets));
+        resolvePending(false);
     }
 
     static std::shared_ptr<MergeBall> create(NodeCreationInfo& nci) {
@@ -343,6 +395,7 @@ public:
             }
         }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
+        if (params.count("fallback_delay_frames")) r->fallback_delay_frames_ = params["fallback_delay_frames"];
         if (params.count("max_ball_velocity_px_per_frame")) r->max_ball_velocity_px_per_frame_ = params["max_ball_velocity_px_per_frame"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         return r;
