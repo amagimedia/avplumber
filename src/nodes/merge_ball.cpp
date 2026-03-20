@@ -66,13 +66,14 @@ private:
     std::unordered_set<std::string> context_presence_labels_ = {"foot", "player", "ball"};
     std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
-    int context_grace_frames_ = 12;
-    double max_ball_velocity_px_per_frame_ = 15.0;
+    int context_grace_frames_ = 3;
+    double max_ball_switch_distance_px_ = 8.0;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
     std::vector<DetectionBox> last_context_output_dets_;
     bool have_last_context_output_ = false;
     int consecutive_context_misses_ = 0;
+    bool using_ball_fallback_ = false;
     DetectionBox last_context_ball_;
     bool have_last_context_ball_ = false;
     uint64_t last_context_ball_frame_index_ = 0;
@@ -81,6 +82,7 @@ private:
         last_context_output_dets_.clear();
         have_last_context_output_ = false;
         consecutive_context_misses_ = 0;
+        using_ball_fallback_ = false;
         last_context_ball_ = DetectionBox{};
         have_last_context_ball_ = false;
         last_context_ball_frame_index_ = 0;
@@ -169,20 +171,18 @@ private:
         return context_output_labels_.count(det.label) > 0;
     }
 
-    bool fallbackBallAllowed(const DetectionBox& candidate, uint64_t frame_index) const {
+    bool fallbackBallAllowed(const DetectionBox& candidate, bool switching_to_ball_only) const {
+        if (!switching_to_ball_only) {
+            return true;
+        }
         if (!have_last_context_ball_) {
             return true;
         }
-        const uint64_t frame_gap_u64 = frame_index > last_context_ball_frame_index_
-            ? (frame_index - last_context_ball_frame_index_)
-            : 1;
-        const double frame_gap = (double)std::max<uint64_t>(1, frame_gap_u64);
         const double dist = centerDistance(last_context_ball_, candidate);
-        return (dist / frame_gap) <= max_ball_velocity_px_per_frame_;
+        return dist <= max_ball_switch_distance_px_;
     }
 
     std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets,
-                                               uint64_t frame_index,
                                                std::string& mode_out) {
         std::vector<DetectionBox> context_dets;
         bool have_context_presence = false;
@@ -216,6 +216,7 @@ private:
 
         if (have_context_presence) {
             consecutive_context_misses_ = 0;
+            using_ball_fallback_ = false;
             if (!context_dets.empty()) {
                 last_context_output_dets_ = context_dets;
                 have_last_context_output_ = true;
@@ -225,19 +226,24 @@ private:
         }
         ++consecutive_context_misses_;
         if (have_last_context_output_ && consecutive_context_misses_ <= std::max(0, context_grace_frames_)) {
+            using_ball_fallback_ = false;
             mode_out = "context_grace";
             return last_context_output_dets_;
         }
-        if (have_best_ball_label && fallbackBallAllowed(best_ball_label, frame_index)) {
+        const bool switching_to_ball_only = !using_ball_fallback_;
+        if (have_best_ball_label && fallbackBallAllowed(best_ball_label, switching_to_ball_only)) {
+            using_ball_fallback_ = true;
             mode_out = "ball_fallback";
             return {best_ball_label};
         }
-        if (have_best_ball_any && fallbackBallAllowed(best_ball_any, frame_index)) {
+        if (have_best_ball_any && fallbackBallAllowed(best_ball_any, switching_to_ball_only)) {
+            using_ball_fallback_ = true;
             mode_out = "ball_fallback";
             return {best_ball_any};
         }
+        using_ball_fallback_ = false;
         if (have_best_ball_label || have_best_ball_any) {
-            mode_out = "ball_rejected_discontinuity";
+            mode_out = "ball_rejected_switch_distance";
             return {};
         }
         mode_out = "empty";
@@ -276,7 +282,8 @@ private:
             {"context_model_index", context_model_index_},
             {"context_grace_frames", context_grace_frames_},
             {"consecutive_context_misses", consecutive_context_misses_},
-            {"max_ball_velocity_px_per_frame", max_ball_velocity_px_per_frame_}
+            {"using_ball_fallback", using_ball_fallback_},
+            {"max_ball_switch_distance_px", max_ball_switch_distance_px_}
         };
         return md;
     }
@@ -319,7 +326,7 @@ public:
             last_context_ball_frame_index_ = frame_counter_;
         }
         std::string mode;
-        const std::vector<DetectionBox> merged = selectDetections(dets, frame_counter_, mode);
+        const std::vector<DetectionBox> merged = selectDetections(dets, mode);
         const Parameters md = buildOutputMetadata(env, merged, mode);
         const std::string serialized = md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
@@ -363,7 +370,7 @@ public:
         }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
         if (params.count("context_grace_frames")) r->context_grace_frames_ = params["context_grace_frames"];
-        if (params.count("max_ball_velocity_px_per_frame")) r->max_ball_velocity_px_per_frame_ = params["max_ball_velocity_px_per_frame"];
+        if (params.count("max_ball_switch_distance_px")) r->max_ball_switch_distance_px_ = params["max_ball_switch_distance_px"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         return r;
     }
