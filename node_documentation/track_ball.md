@@ -1,6 +1,6 @@
 # `track_ball`
 
-`track_ball` is a lightweight metadata-only tracker for basketball workflows. It reads YOLO-style detection metadata from each incoming frame, keeps one active target track, and can emit predicted boxes for short detection gaps.
+`track_ball` is a lightweight metadata-only tracker for basketball workflows. It reads YOLO-style detection metadata from each incoming frame, keeps one active target track, and can emit predicted boxes through short detection gaps.
 
 ## What It Does
 
@@ -8,10 +8,11 @@
 2. Parses YOLO-compatible metadata from `metadata_key_in`.
 3. Filters detections to the configured ball target by `label` and/or `cls`.
 4. When no track is active, only acquires a new ball from detections that show frame-to-frame motion.
-5. Matches the best current ball detection against the active track using center-distance and IoU gates.
-6. Updates the active track velocity from matched detections.
-7. When the detector misses briefly, optionally predicts the next box for a short miss window.
-8. Writes YOLO-compatible tracked metadata to `metadata_key_out`.
+5. Maintains a rolling history of accepted ball positions and derives recent motion statistics from that history.
+6. Matches the best current ball detection against the active track using predicted position plus motion-vector sanity checks.
+7. Rejects candidates that are too static, jump too far, or disagree strongly with the recent motion history.
+8. When the detector misses briefly, optionally predicts the next box for a configurable miss window.
+9. Writes YOLO-compatible tracked metadata to `metadata_key_out`.
 
 ## Input Metadata
 
@@ -64,7 +65,7 @@ This first version keeps only one active track:
 - if no suitable detection matches, it can emit a predicted box for up to `max_missed_frames`
 - once the miss window expires, the track is dropped
 
-This is intended to bridge short gaps and avoid latching onto static false positives such as crowd objects, not long occlusions.
+This is intended to bridge short gaps and avoid latching onto static false positives such as crowd objects, reflections, or far-away distractors, not long occlusions.
 
 ## Parameters
 
@@ -100,7 +101,7 @@ This is intended to bridge short gaps and avoid latching onto static false posit
   Minimum confidence required for incoming detections. Default: `0.10`.
 
 - `max_missed_frames`
-  Maximum number of consecutive missed frames for which predicted boxes may be emitted. Default: `4`.
+  Maximum number of consecutive missed frames for which predicted boxes may be emitted. Default: `8`.
 
 - `max_center_distance`
   Maximum center distance in metadata pixel space for detection-to-track matching unless IoU also passes. Default: `160`.
@@ -117,6 +118,21 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - `match_min_cosine_similarity`
   Minimum cosine similarity between the current track velocity and a candidate detection motion vector. Higher values require a more consistent direction of travel. Default: `-0.2`.
 
+- `history_size`
+  Maximum number of accepted tracked positions to retain for motion modeling. Default: `30`.
+
+- `history_motion_window`
+  Number of most-recent history steps used to compute average motion statistics for candidate filtering. Default: `12`.
+
+- `history_match_min_cosine_similarity`
+  Minimum cosine similarity between the recent history motion vector and a candidate detection motion vector. Higher values require a more consistent direction of travel relative to the longer history. Default: `-0.1`.
+
+- `history_max_motion_scale`
+  Multiplier applied to the recent history max per-frame speed when deriving the allowed motion ceiling for active matches. Default: `2.5`.
+
+- `history_max_motion_slack`
+  Extra per-frame motion slack added on top of the history-derived motion ceiling for active matches. Default: `16.0`.
+
 - `acquisition_min_motion`
   Minimum center motion in metadata pixel space between consecutive frames before a new idle track may be acquired. Default: `4.0`.
 
@@ -130,7 +146,7 @@ This is intended to bridge short gaps and avoid latching onto static false posit
   If `true`, emit predicted boxes during short misses. Default: `true`.
 
 - `prediction_decay`
-  Velocity/confidence decay applied while predicting through misses. Default: `0.85`.
+  Velocity/confidence decay applied while predicting through misses. Default: `0.92`.
 
 - `velocity_smoothing`
   Blend factor for reusing previous velocity when a new detection arrives. Default: `0.60`.
@@ -146,7 +162,7 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - The tracker is ball-focused and intentionally does not keep multiple simultaneous tracks.
 - Idle-track acquisition prefers moving detections and ignores nearly static candidates, which helps suppress persistent far-away false positives.
 - Idle-track acquisition also requires a short, roughly consistent motion vector across consecutive frames before a new target is accepted.
-- Active-track matching rejects candidates that are nearly static, jump too far in one frame, or move in a direction that is strongly inconsistent with the recent ball trajectory.
+- Active-track matching uses a rolling history of accepted ball positions to reject candidates that are nearly static, jump too far in one frame, or move in a direction that is strongly inconsistent with the recent ball trajectory.
 - If multiple target filters are configured, a detection is accepted when it matches any configured label or class.
 
 ## Example
@@ -162,10 +178,16 @@ track_ball:
   match_min_motion: 2.0
   match_max_motion: 64.0
   match_min_cosine_similarity: -0.2
+  history_size: 30
+  history_motion_window: 12
+  history_match_min_cosine_similarity: -0.1
+  history_max_motion_scale: 2.5
+  history_max_motion_slack: 16.0
   acquisition_min_motion: 4.0
   acquisition_max_match_distance: 120
   acquisition_min_cosine_similarity: 0.2
-  max_missed_frames: 4
+  max_missed_frames: 8
   max_center_distance: 160
+  prediction_decay: 0.92
   emit_predicted: true
 ```
