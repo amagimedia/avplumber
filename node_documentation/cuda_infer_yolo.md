@@ -36,6 +36,10 @@ The node supports several common YOLO export layouts:
   - `[1, N, 84]`
   - end-to-end layouts `[1, N, 6]` or `[1, 6, N]` with `[x1, y1, x2, y2, conf, cls]`
 
+For the ambiguous `[1, N, 6]` / `[1, 6, N]` case, the default decoder keeps the legacy interpretation above.
+Use `output_box_format: raw_cxcywh` to instead treat those tensors as raw YOLO output with
+`[cx, cy, w, h, score0, score1]`.
+
 For class-score layouts, the node:
 
 - selects the best-scoring class per candidate
@@ -104,6 +108,12 @@ Coordinates are emitted in model input space, not remapped back to an original s
 - `input_format`
   Channel order for RGB preprocessing. Values `BGR` or `bgr` enable BGR ordering; any other value is treated as RGB.
 
+- `output_box_format`
+  Optional override for ambiguous `[1, N, 6]` / `[1, 6, N]` outputs.
+  Supported values:
+  - `end2end_xyxy` for `[x1, y1, x2, y2, conf, cls]` (default)
+  - `raw_cxcywh` for `[cx, cy, w, h, score0, score1]`
+
 - `yolo_classes`
   Optional path to a whitespace-separated class-label file.
   The node reads the file at startup and maps class IDs to labels by index.
@@ -150,5 +160,6 @@ cuda_infer_yolo:
   infer_every_n: 1
   metadata_key_out: yolo_detections_v1
   input_format: RGB
+  output_box_format: raw_cxcywh
   yolo_classes: /models/yolo_classes.txt
 ```

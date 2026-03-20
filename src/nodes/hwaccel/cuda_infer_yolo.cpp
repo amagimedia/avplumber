@@ -56,6 +56,11 @@ struct Detection {
     int cls = -1;
 };
 
+enum class OutputBoxFormat {
+    EndToEndXYXY,
+    RawCXCYWH
+};
+
 static bool loadClassNamesFromFile(const std::string& path, std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path);
     if (!f) {
@@ -188,6 +193,7 @@ protected:
     int max_det_ = 300;
     uint64_t frame_counter_ = 0;
     std::vector<std::string> class_names_;
+    OutputBoxFormat output_box_format_ = OutputBoxFormat::EndToEndXYXY;
 
     bool initialized_ = false;
 
@@ -448,6 +454,30 @@ protected:
         std::vector<Detection> dets;
         if (!out) return dets;
 
+        auto pushCenterBox = [&](float cx, float cy, float w, float h, float conf, int cls) {
+            if (conf < conf_thresh_) return;
+            Detection det;
+            det.x1 = cx - w * 0.5f;
+            det.y1 = cy - h * 0.5f;
+            det.x2 = cx + w * 0.5f;
+            det.y2 = cy + h * 0.5f;
+            det.conf = conf;
+            det.cls = cls;
+            dets.push_back(det);
+        };
+
+        auto pushCornerBox = [&](float x1, float y1, float x2, float y2, float conf, int cls) {
+            if (conf < conf_thresh_) return;
+            Detection det;
+            det.x1 = x1;
+            det.y1 = y1;
+            det.x2 = x2;
+            det.y2 = y2;
+            det.conf = conf;
+            det.cls = cls;
+            dets.push_back(det);
+        };
+
         // common YOLO export shape: [84, N] or [N, 84] (no batch dim in binding dims)
         if (d.nbDims == 2) {
             int a = d.d[0], b = d.d[1];
@@ -474,59 +504,60 @@ protected:
                             best_cls = c - 4;
                         }
                     }
-                    if (best < conf_thresh_) continue;
-                    Detection det;
-                    det.x1 = cx - w * 0.5f;
-                    det.y1 = cy - h * 0.5f;
-                    det.x2 = cx + w * 0.5f;
-                    det.y2 = cy + h * 0.5f;
-                    det.conf = best;
-                    det.cls = best_cls;
-                    dets.push_back(det);
+                    pushCenterBox(cx, cy, w, h, best, best_cls);
                 }
             }
         } else if (d.nbDims == 3) {
             // common export layouts:
             // - raw head: [1,84,N] or [1,N,84]
             // - end2end:  [1,N,6] or [1,6,N] with [x1,y1,x2,y2,conf,cls]
+            // - optional raw override: [1,N,6] or [1,6,N] with [cx,cy,w,h,score0,score1]
             const int d0 = d.d[0], d1 = d.d[1], d2 = d.d[2];
             if (d0 == 1 && d2 == 6) {
                 const int count = d1;
                 for (int i = 0; i < count; ++i) {
-                    const float x1 = out[i * 6 + 0];
-                    const float y1 = out[i * 6 + 1];
-                    const float x2 = out[i * 6 + 2];
-                    const float y2 = out[i * 6 + 3];
-                    const float conf = out[i * 6 + 4];
-                    const int cls = (int)std::round(out[i * 6 + 5]);
-                    if (conf < conf_thresh_) continue;
-                    Detection det;
-                    det.x1 = x1;
-                    det.y1 = y1;
-                    det.x2 = x2;
-                    det.y2 = y2;
-                    det.conf = conf;
-                    det.cls = cls;
-                    dets.push_back(det);
+                    if (output_box_format_ == OutputBoxFormat::RawCXCYWH) {
+                        const float cx = out[i * 6 + 0];
+                        const float cy = out[i * 6 + 1];
+                        const float w = out[i * 6 + 2];
+                        const float h = out[i * 6 + 3];
+                        const float score0 = out[i * 6 + 4];
+                        const float score1 = out[i * 6 + 5];
+                        const int cls = (score1 > score0) ? 1 : 0;
+                        const float conf = std::max(score0, score1);
+                        pushCenterBox(cx, cy, w, h, conf, cls);
+                    } else {
+                        const float x1 = out[i * 6 + 0];
+                        const float y1 = out[i * 6 + 1];
+                        const float x2 = out[i * 6 + 2];
+                        const float y2 = out[i * 6 + 3];
+                        const float conf = out[i * 6 + 4];
+                        const int cls = (int)std::round(out[i * 6 + 5]);
+                        pushCornerBox(x1, y1, x2, y2, conf, cls);
+                    }
                 }
             } else if (d0 == 1 && d1 == 6) {
                 const int count = d2;
                 for (int i = 0; i < count; ++i) {
-                    const float x1 = out[0 * count + i];
-                    const float y1 = out[1 * count + i];
-                    const float x2 = out[2 * count + i];
-                    const float y2 = out[3 * count + i];
-                    const float conf = out[4 * count + i];
-                    const int cls = (int)std::round(out[5 * count + i]);
-                    if (conf < conf_thresh_) continue;
-                    Detection det;
-                    det.x1 = x1;
-                    det.y1 = y1;
-                    det.x2 = x2;
-                    det.y2 = y2;
-                    det.conf = conf;
-                    det.cls = cls;
-                    dets.push_back(det);
+                    if (output_box_format_ == OutputBoxFormat::RawCXCYWH) {
+                        const float cx = out[0 * count + i];
+                        const float cy = out[1 * count + i];
+                        const float w = out[2 * count + i];
+                        const float h = out[3 * count + i];
+                        const float score0 = out[4 * count + i];
+                        const float score1 = out[5 * count + i];
+                        const int cls = (score1 > score0) ? 1 : 0;
+                        const float conf = std::max(score0, score1);
+                        pushCenterBox(cx, cy, w, h, conf, cls);
+                    } else {
+                        const float x1 = out[0 * count + i];
+                        const float y1 = out[1 * count + i];
+                        const float x2 = out[2 * count + i];
+                        const float y2 = out[3 * count + i];
+                        const float conf = out[4 * count + i];
+                        const int cls = (int)std::round(out[5 * count + i]);
+                        pushCornerBox(x1, y1, x2, y2, conf, cls);
+                    }
                 }
             } else if (d0 == 1 && d1 >= 6 && d2 >= 1) {
                 bool attrs_first = true;
@@ -551,15 +582,7 @@ protected:
                             best_cls = c - 4;
                         }
                     }
-                    if (best < conf_thresh_) continue;
-                    Detection det;
-                    det.x1 = cx - w * 0.5f;
-                    det.y1 = cy - h * 0.5f;
-                    det.x2 = cx + w * 0.5f;
-                    det.y2 = cy + h * 0.5f;
-                    det.conf = best;
-                    det.cls = best_cls;
-                    dets.push_back(det);
+                    pushCenterBox(cx, cy, w, h, best, best_cls);
                 }
             }
         }
@@ -764,6 +787,16 @@ public:
         if (params.count("input_format")) {
             const std::string ifmt = params["input_format"].get<std::string>();
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
+        }
+        if (params.count("output_box_format")) {
+            const std::string fmt = params["output_box_format"].get<std::string>();
+            if (fmt == "end2end_xyxy") {
+                r->output_box_format_ = OutputBoxFormat::EndToEndXYXY;
+            } else if (fmt == "raw_cxcywh") {
+                r->output_box_format_ = OutputBoxFormat::RawCXCYWH;
+            } else {
+                throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh'");
+            }
         }
         if (params.count("yolo_classes") && params.count("class_names")) {
             throw Error("cuda_infer_yolo: use either yolo_classes or class_names, not both");
