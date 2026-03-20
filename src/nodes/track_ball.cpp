@@ -129,6 +129,8 @@ private:
     double match_min_motion_ = 2.0;
     double match_max_motion_ = 64.0;
     double match_min_cosine_similarity_ = -0.2;
+    double match_max_prediction_error_ = 28.0;
+    double match_max_velocity_delta_ = 24.0;
     int history_size_ = 30;
     int history_motion_window_ = 12;
     double history_match_min_cosine_similarity_ = -0.1;
@@ -338,6 +340,9 @@ private:
             if (dist > max_center_distance && overlap < min_iou_match_) {
                 continue;
             }
+            if (dist > match_max_prediction_error_) {
+                continue;
+            }
             if (step_dist < match_min_motion_) {
                 continue;
             }
@@ -355,6 +360,12 @@ private:
                     continue;
                 }
                 cosine_bonus = cosine * 2.0;
+
+                const double velocity_delta = std::sqrt((meas_vx - track_.vx) * (meas_vx - track_.vx)
+                                                      + (meas_vy - track_.vy) * (meas_vy - track_.vy));
+                if (velocity_delta > match_max_velocity_delta_) {
+                    continue;
+                }
             }
 
             double history_bonus = 0.0;
@@ -372,7 +383,8 @@ private:
                                + overlap * 2.0
                                + cosine_bonus
                                + history_bonus
-                               - dist / std::max(1.0, max_center_distance);
+                               - 2.0 * dist / std::max(1.0, match_max_prediction_error_)
+                               - step_dist / std::max(1.0, history_max_motion);
             if (score > best_score) {
                 best_score = score;
                 best_index = (int)i;
@@ -541,7 +553,7 @@ public:
                 }
             } else {
                 const DetectionBox reference = predictBox(env);
-                const int frame_gap = track_.missed_frames + 1;
+                const int frame_gap = emit_predicted_ ? 1 : (track_.missed_frames + 1);
                 const int match_index = chooseBestMatch(dets, reference, max_center_distance_, frame_gap);
                 if (match_index >= 0) {
                     updateTrack(dets[(size_t)match_index], frame_gap);
@@ -624,6 +636,8 @@ public:
         if (params.count("match_min_motion")) r->match_min_motion_ = params["match_min_motion"];
         if (params.count("match_max_motion")) r->match_max_motion_ = params["match_max_motion"];
         if (params.count("match_min_cosine_similarity")) r->match_min_cosine_similarity_ = params["match_min_cosine_similarity"];
+        if (params.count("match_max_prediction_error")) r->match_max_prediction_error_ = params["match_max_prediction_error"];
+        if (params.count("match_max_velocity_delta")) r->match_max_velocity_delta_ = params["match_max_velocity_delta"];
         if (params.count("history_size")) r->history_size_ = params["history_size"];
         if (params.count("history_motion_window")) r->history_motion_window_ = params["history_motion_window"];
         if (params.count("history_match_min_cosine_similarity")) r->history_match_min_cosine_similarity_ = params["history_match_min_cosine_similarity"];
