@@ -121,8 +121,12 @@ private:
     int max_missed_frames_ = 4;
     double max_center_distance_ = 160.0;
     double min_iou_match_ = 0.0;
+    double match_min_motion_ = 2.0;
+    double match_max_motion_ = 64.0;
+    double match_min_cosine_similarity_ = -0.2;
     double acquisition_min_motion_ = 4.0;
     double acquisition_max_match_distance_ = 120.0;
+    double acquisition_min_cosine_similarity_ = 0.2;
     bool emit_predicted_ = true;
     double prediction_decay_ = 0.85;
     double velocity_smoothing_ = 0.60;
@@ -130,6 +134,7 @@ private:
     uint64_t frame_counter_ = 0;
     int next_track_id_ = 1;
     TrackState track_;
+    std::vector<DetectionBox> prev_prev_dets_;
     std::vector<DetectionBox> prev_dets_;
 
     void clearTrack() {
@@ -137,6 +142,7 @@ private:
     }
 
     void clearHistory() {
+        prev_prev_dets_.clear();
         prev_dets_.clear();
     }
 
@@ -235,17 +241,43 @@ private:
 
     int chooseBestMatch(const std::vector<DetectionBox>& dets,
                         const DetectionBox& reference_box,
-                        double max_center_distance) const {
+                        double max_center_distance,
+                        int frame_gap) const {
         int best_index = -1;
         double best_score = -std::numeric_limits<double>::infinity();
+        const double gap = std::max(1, frame_gap);
+        const double track_speed = std::sqrt(track_.vx * track_.vx + track_.vy * track_.vy);
         for (size_t i = 0; i < dets.size(); ++i) {
             const DetectionBox& det = dets[i];
             const double dist = centerDistance(reference_box, det);
             const double overlap = iou(reference_box, det);
+            const double step_dist = centerDistance(track_.box, det) / gap;
             if (dist > max_center_distance && overlap < min_iou_match_) {
                 continue;
             }
-            const double score = det.conf * 4.0 + overlap * 2.0 - dist / std::max(1.0, max_center_distance);
+            if (step_dist < match_min_motion_) {
+                continue;
+            }
+            if (step_dist > match_max_motion_) {
+                continue;
+            }
+
+            double cosine_bonus = 0.0;
+            if (track_speed >= match_min_motion_) {
+                const double meas_vx = (centerX(det) - centerX(track_.box)) / gap;
+                const double meas_vy = (centerY(det) - centerY(track_.box)) / gap;
+                const double denom = std::max(1.0, track_speed * step_dist);
+                const double cosine = (track_.vx * meas_vx + track_.vy * meas_vy) / denom;
+                if (cosine < match_min_cosine_similarity_) {
+                    continue;
+                }
+                cosine_bonus = cosine * 2.0;
+            }
+
+            const double score = det.conf * 4.0
+                               + overlap * 2.0
+                               + cosine_bonus
+                               - dist / std::max(1.0, max_center_distance);
             if (score > best_score) {
                 best_score = score;
                 best_index = (int)i;
@@ -255,7 +287,7 @@ private:
     }
 
     int chooseMovingAcquisition(const std::vector<DetectionBox>& dets) const {
-        if (prev_dets_.empty()) {
+        if (prev_dets_.empty() || prev_prev_dets_.empty()) {
             return -1;
         }
 
@@ -263,24 +295,37 @@ private:
         double best_score = -std::numeric_limits<double>::infinity();
         for (size_t i = 0; i < dets.size(); ++i) {
             const DetectionBox& det = dets[i];
-
-            double best_prev_dist = std::numeric_limits<double>::infinity();
             for (const DetectionBox& prev : prev_dets_) {
-                const double dist = centerDistance(prev, det);
-                if (dist < best_prev_dist) {
-                    best_prev_dist = dist;
+                const double step_dist = centerDistance(prev, det);
+                if (step_dist > acquisition_max_match_distance_) continue;
+                if (step_dist < acquisition_min_motion_) continue;
+
+                const double vx1 = centerX(det) - centerX(prev);
+                const double vy1 = centerY(det) - centerY(prev);
+                const double mag1 = std::sqrt(vx1 * vx1 + vy1 * vy1);
+                if (mag1 < acquisition_min_motion_) continue;
+
+                for (const DetectionBox& prev_prev : prev_prev_dets_) {
+                    const double prev_step_dist = centerDistance(prev_prev, prev);
+                    if (prev_step_dist > acquisition_max_match_distance_) continue;
+                    if (prev_step_dist < acquisition_min_motion_) continue;
+
+                    const double vx0 = centerX(prev) - centerX(prev_prev);
+                    const double vy0 = centerY(prev) - centerY(prev_prev);
+                    const double mag0 = std::sqrt(vx0 * vx0 + vy0 * vy0);
+                    if (mag0 < acquisition_min_motion_) continue;
+
+                    const double denom = std::max(1.0, mag0 * mag1);
+                    const double cosine = (vx0 * vx1 + vy0 * vy1) / denom;
+                    if (cosine < acquisition_min_cosine_similarity_) continue;
+
+                    const double motion_score = (mag0 + mag1) / std::max(1.0, acquisition_min_motion_);
+                    const double score = det.conf * 4.0 + prev.conf * 2.0 + motion_score + cosine * 2.0;
+                    if (score > best_score) {
+                        best_score = score;
+                        best_index = (int)i;
+                    }
                 }
-            }
-
-            if (!std::isfinite(best_prev_dist)) continue;
-            if (best_prev_dist > acquisition_max_match_distance_) continue;
-            if (best_prev_dist < acquisition_min_motion_) continue;
-
-            const double motion_score = best_prev_dist / std::max(1.0, acquisition_min_motion_);
-            const double score = det.conf * 4.0 + motion_score;
-            if (score > best_score) {
-                best_score = score;
-                best_index = (int)i;
             }
         }
         return best_index;
@@ -399,10 +444,10 @@ public:
                     output_ptr = &output_det;
                 }
             } else {
-                DetectionBox reference = track_.missed_frames > 0 ? predictBox(env) : track_.box;
-                const int match_index = chooseBestMatch(dets, reference, max_center_distance_);
+                const DetectionBox reference = predictBox(env);
+                const int frame_gap = track_.missed_frames + 1;
+                const int match_index = chooseBestMatch(dets, reference, max_center_distance_, frame_gap);
                 if (match_index >= 0) {
-                    const int frame_gap = track_.missed_frames + 1;
                     updateTrack(dets[(size_t)match_index], frame_gap);
                     output_det = track_.box;
                     output_ptr = &output_det;
@@ -444,6 +489,7 @@ public:
         const std::string serialized = md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
         maybeLog(output_ptr, predicted, missed_frames);
+        prev_prev_dets_ = prev_dets_;
         prev_dets_ = dets;
         this->sink_->put(frm);
     }
@@ -478,8 +524,12 @@ public:
         if (params.count("max_missed_frames")) r->max_missed_frames_ = params["max_missed_frames"];
         if (params.count("max_center_distance")) r->max_center_distance_ = params["max_center_distance"];
         if (params.count("min_iou_match")) r->min_iou_match_ = params["min_iou_match"];
+        if (params.count("match_min_motion")) r->match_min_motion_ = params["match_min_motion"];
+        if (params.count("match_max_motion")) r->match_max_motion_ = params["match_max_motion"];
+        if (params.count("match_min_cosine_similarity")) r->match_min_cosine_similarity_ = params["match_min_cosine_similarity"];
         if (params.count("acquisition_min_motion")) r->acquisition_min_motion_ = params["acquisition_min_motion"];
         if (params.count("acquisition_max_match_distance")) r->acquisition_max_match_distance_ = params["acquisition_max_match_distance"];
+        if (params.count("acquisition_min_cosine_similarity")) r->acquisition_min_cosine_similarity_ = params["acquisition_min_cosine_similarity"];
         if (params.count("emit_predicted")) r->emit_predicted_ = params["emit_predicted"];
         if (params.count("prediction_decay")) r->prediction_decay_ = params["prediction_decay"];
         if (params.count("velocity_smoothing")) r->velocity_smoothing_ = params["velocity_smoothing"];
