@@ -124,6 +124,18 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - `match_max_velocity_delta`
   Maximum allowed change in per-frame velocity between the active track and a candidate detection. Detections that imply an abrupt velocity jump are ignored. Default: `24.0`.
 
+- `slow_match_max_prediction_error`
+  Maximum center-distance error allowed for a slow or nearly static candidate to still match the active track, as long as it remains close to the predicted path. Default: `12.0`.
+
+- `slow_match_min_overlap`
+  Minimum IoU overlap that allows a slow or nearly static candidate to match the active track when it is close to the predicted path. Default: `0.10`.
+
+- `huge_jump_frame_fraction`
+  Fraction of the frame span treated as a huge jump when examining recent track history. Slow/static candidates are rejected if the recent history contains a jump at or above this threshold. Default: `0.25`.
+
+- `huge_jump_history_window`
+  Number of most-recent track-history steps checked for a huge jump before allowing a slow/static candidate. Default: `8`.
+
 - `history_size`
   Maximum number of accepted tracked positions to retain for motion modeling. Default: `30`.
 
@@ -168,7 +180,8 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - The tracker is ball-focused and intentionally does not keep multiple simultaneous tracks.
 - Idle-track acquisition prefers moving detections and ignores nearly static candidates, which helps suppress persistent far-away false positives.
 - Idle-track acquisition also requires a short, roughly consistent motion vector across consecutive frames before a new target is accepted.
-- Active-track matching uses a rolling history of accepted ball positions plus the predicted current-frame position to reject candidates that are nearly static, jump too far in one frame, land too far from the predicted path, or move in a direction that is strongly inconsistent with the recent ball trajectory.
+- Active-track matching uses a rolling history of accepted ball positions plus the predicted current-frame position to reject candidates that jump too far in one frame, land too far from the predicted path, or move in a direction that is strongly inconsistent with the recent ball trajectory.
+- Slow or nearly static candidates can still match when they stay close to the predicted path, but only if the recent history did not include a huge jump across the frame.
 - If multiple target filters are configured, a detection is accepted when it matches any configured label or class.
 
 ## Example
@@ -186,6 +199,10 @@ track_ball:
   match_min_cosine_similarity: 0.0
   match_max_prediction_error: 22.0
   match_max_velocity_delta: 18.0
+  slow_match_max_prediction_error: 10.0
+  slow_match_min_overlap: 0.08
+  huge_jump_frame_fraction: 0.25
+  huge_jump_history_window: 8
   history_size: 30
   history_motion_window: 12
   history_match_min_cosine_similarity: 0.1
