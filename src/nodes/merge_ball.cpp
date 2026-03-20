@@ -66,14 +66,21 @@ private:
     std::unordered_set<std::string> context_presence_labels_ = {"foot", "player", "ball"};
     std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
-    double max_ball_velocity_px_per_frame_ = 100.0;
+    int context_grace_frames_ = 12;
+    double max_ball_velocity_px_per_frame_ = 15.0;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
+    std::vector<DetectionBox> last_context_output_dets_;
+    bool have_last_context_output_ = false;
+    int consecutive_context_misses_ = 0;
     DetectionBox last_context_ball_;
     bool have_last_context_ball_ = false;
     uint64_t last_context_ball_frame_index_ = 0;
 
     void resetState() {
+        last_context_output_dets_.clear();
+        have_last_context_output_ = false;
+        consecutive_context_misses_ = 0;
         last_context_ball_ = DetectionBox{};
         have_last_context_ball_ = false;
         last_context_ball_frame_index_ = 0;
@@ -176,7 +183,7 @@ private:
 
     std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets,
                                                uint64_t frame_index,
-                                               std::string& mode_out) const {
+                                               std::string& mode_out) {
         std::vector<DetectionBox> context_dets;
         bool have_context_presence = false;
         DetectionBox best_ball_label;
@@ -208,8 +215,18 @@ private:
         }
 
         if (have_context_presence) {
+            consecutive_context_misses_ = 0;
+            if (!context_dets.empty()) {
+                last_context_output_dets_ = context_dets;
+                have_last_context_output_ = true;
+            }
             mode_out = "context";
             return context_dets;
+        }
+        ++consecutive_context_misses_;
+        if (have_last_context_output_ && consecutive_context_misses_ <= std::max(0, context_grace_frames_)) {
+            mode_out = "context_grace";
+            return last_context_output_dets_;
         }
         if (have_best_ball_label && fallbackBallAllowed(best_ball_label, frame_index)) {
             mode_out = "ball_fallback";
@@ -257,6 +274,8 @@ private:
             {"mode", mode},
             {"ball_model_index", ball_model_index_},
             {"context_model_index", context_model_index_},
+            {"context_grace_frames", context_grace_frames_},
+            {"consecutive_context_misses", consecutive_context_misses_},
             {"max_ball_velocity_px_per_frame", max_ball_velocity_px_per_frame_}
         };
         return md;
@@ -343,6 +362,7 @@ public:
             }
         }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
+        if (params.count("context_grace_frames")) r->context_grace_frames_ = params["context_grace_frames"];
         if (params.count("max_ball_velocity_px_per_frame")) r->max_ball_velocity_px_per_frame_ = params["max_ball_velocity_px_per_frame"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         return r;
