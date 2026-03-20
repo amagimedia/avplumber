@@ -131,6 +131,10 @@ private:
     double match_min_cosine_similarity_ = -0.2;
     double match_max_prediction_error_ = 28.0;
     double match_max_velocity_delta_ = 24.0;
+    double slow_match_max_prediction_error_ = 12.0;
+    double slow_match_min_overlap_ = 0.10;
+    double huge_jump_frame_fraction_ = 0.25;
+    int huge_jump_history_window_ = 8;
     int history_size_ = 30;
     int history_motion_window_ = 12;
     double history_match_min_cosine_similarity_ = -0.1;
@@ -225,6 +229,24 @@ private:
         stats.avg_speed /= used;
         stats.have_direction = std::sqrt(stats.avg_vx * stats.avg_vx + stats.avg_vy * stats.avg_vy) >= match_min_motion_;
         return stats;
+    }
+
+    bool recentHistoryHasHugeJump(double frame_span) const {
+        if (frame_span <= 0.0 || track_history_.size() < 2) {
+            return false;
+        }
+
+        const double huge_jump_px = frame_span * huge_jump_frame_fraction_;
+        const size_t take = (size_t)std::max(1, huge_jump_history_window_);
+        const size_t start = track_history_.size() > (take + 1) ? track_history_.size() - (take + 1) : 1;
+        for (size_t i = start; i < track_history_.size(); ++i) {
+            const DetectionBox& prev = track_history_[i - 1].box;
+            const DetectionBox& cur = track_history_[i].box;
+            if (centerDistance(prev, cur) >= huge_jump_px) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool detectionMatchesTarget(const DetectionBox& det) const {
@@ -322,6 +344,7 @@ private:
 
     int chooseBestMatch(const std::vector<DetectionBox>& dets,
                         const DetectionBox& reference_box,
+                        double frame_span,
                         double max_center_distance,
                         int frame_gap) const {
         int best_index = -1;
@@ -329,6 +352,7 @@ private:
         const double gap = std::max(1, frame_gap);
         const double track_speed = std::sqrt(track_.vx * track_.vx + track_.vy * track_.vy);
         const MotionStats stats = computeMotionStats();
+        const bool recent_huge_jump = recentHistoryHasHugeJump(frame_span);
         const double history_max_motion = stats.have_history
             ? std::max(match_max_motion_, stats.max_speed * history_max_motion_scale_ + history_max_motion_slack_)
             : match_max_motion_;
@@ -343,8 +367,15 @@ private:
             if (dist > match_max_prediction_error_) {
                 continue;
             }
-            if (step_dist < match_min_motion_) {
-                continue;
+
+            const bool slow_candidate = step_dist < match_min_motion_;
+            if (slow_candidate) {
+                if (recent_huge_jump) {
+                    continue;
+                }
+                if (dist > slow_match_max_prediction_error_ && overlap < slow_match_min_overlap_) {
+                    continue;
+                }
             }
             if (step_dist > history_max_motion) {
                 continue;
@@ -353,7 +384,7 @@ private:
             const double meas_vx = (centerX(det) - centerX(track_.box)) / gap;
             const double meas_vy = (centerY(det) - centerY(track_.box)) / gap;
             double cosine_bonus = 0.0;
-            if (track_speed >= match_min_motion_) {
+            if (!slow_candidate && track_speed >= match_min_motion_) {
                 const double denom = std::max(1.0, track_speed * step_dist);
                 const double cosine = (track_.vx * meas_vx + track_.vy * meas_vy) / denom;
                 if (cosine < match_min_cosine_similarity_) {
@@ -369,7 +400,7 @@ private:
             }
 
             double history_bonus = 0.0;
-            if (stats.have_direction) {
+            if (!slow_candidate && stats.have_direction) {
                 const double history_speed = std::sqrt(stats.avg_vx * stats.avg_vx + stats.avg_vy * stats.avg_vy);
                 const double denom = std::max(1.0, history_speed * step_dist);
                 const double cosine = (stats.avg_vx * meas_vx + stats.avg_vy * meas_vy) / denom;
@@ -379,10 +410,16 @@ private:
                 history_bonus = cosine * 3.0;
             }
 
+            double slow_bonus = 0.0;
+            if (slow_candidate) {
+                slow_bonus = overlap * 3.0 + (1.0 - dist / std::max(1.0, slow_match_max_prediction_error_)) * 3.0;
+            }
+
             const double score = det.conf * 4.0
                                + overlap * 2.0
                                + cosine_bonus
                                + history_bonus
+                               + slow_bonus
                                - 2.0 * dist / std::max(1.0, match_max_prediction_error_)
                                - step_dist / std::max(1.0, history_max_motion);
             if (score > best_score) {
@@ -554,7 +591,8 @@ public:
             } else {
                 const DetectionBox reference = predictBox(env);
                 const int frame_gap = emit_predicted_ ? 1 : (track_.missed_frames + 1);
-                const int match_index = chooseBestMatch(dets, reference, max_center_distance_, frame_gap);
+                const double frame_span = std::max(env.model_width, env.model_height);
+                const int match_index = chooseBestMatch(dets, reference, frame_span, max_center_distance_, frame_gap);
                 if (match_index >= 0) {
                     updateTrack(dets[(size_t)match_index], frame_gap);
                     output_det = track_.box;
@@ -638,6 +676,10 @@ public:
         if (params.count("match_min_cosine_similarity")) r->match_min_cosine_similarity_ = params["match_min_cosine_similarity"];
         if (params.count("match_max_prediction_error")) r->match_max_prediction_error_ = params["match_max_prediction_error"];
         if (params.count("match_max_velocity_delta")) r->match_max_velocity_delta_ = params["match_max_velocity_delta"];
+        if (params.count("slow_match_max_prediction_error")) r->slow_match_max_prediction_error_ = params["slow_match_max_prediction_error"];
+        if (params.count("slow_match_min_overlap")) r->slow_match_min_overlap_ = params["slow_match_min_overlap"];
+        if (params.count("huge_jump_frame_fraction")) r->huge_jump_frame_fraction_ = params["huge_jump_frame_fraction"];
+        if (params.count("huge_jump_history_window")) r->huge_jump_history_window_ = params["huge_jump_history_window"];
         if (params.count("history_size")) r->history_size_ = params["history_size"];
         if (params.count("history_motion_window")) r->history_motion_window_ = params["history_motion_window"];
         if (params.count("history_match_min_cosine_similarity")) r->history_match_min_cosine_similarity_ = params["history_match_min_cosine_similarity"];
