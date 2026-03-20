@@ -118,6 +118,12 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - `match_min_cosine_similarity`
   Minimum cosine similarity between the current track velocity and a candidate detection motion vector. Higher values require a more consistent direction of travel. Default: `-0.2`.
 
+- `match_max_prediction_error`
+  Maximum center-distance error allowed between the predicted ball position for the current frame and a candidate detection. Detections that land too far from the predicted path are ignored. Default: `28.0`.
+
+- `match_max_velocity_delta`
+  Maximum allowed change in per-frame velocity between the active track and a candidate detection. Detections that imply an abrupt velocity jump are ignored. Default: `24.0`.
+
 - `history_size`
   Maximum number of accepted tracked positions to retain for motion modeling. Default: `30`.
 
@@ -162,7 +168,7 @@ This is intended to bridge short gaps and avoid latching onto static false posit
 - The tracker is ball-focused and intentionally does not keep multiple simultaneous tracks.
 - Idle-track acquisition prefers moving detections and ignores nearly static candidates, which helps suppress persistent far-away false positives.
 - Idle-track acquisition also requires a short, roughly consistent motion vector across consecutive frames before a new target is accepted.
-- Active-track matching uses a rolling history of accepted ball positions to reject candidates that are nearly static, jump too far in one frame, or move in a direction that is strongly inconsistent with the recent ball trajectory.
+- Active-track matching uses a rolling history of accepted ball positions plus the predicted current-frame position to reject candidates that are nearly static, jump too far in one frame, land too far from the predicted path, or move in a direction that is strongly inconsistent with the recent ball trajectory.
 - If multiple target filters are configured, a detection is accepted when it matches any configured label or class.
 
 ## Example
@@ -175,17 +181,19 @@ track_ball:
   metadata_key_out: ball_track_v1
   target_labels: [ball, foot]
   min_conf: 0.10
-  match_min_motion: 2.0
-  match_max_motion: 64.0
-  match_min_cosine_similarity: -0.2
+  match_min_motion: 3.0
+  match_max_motion: 40.0
+  match_min_cosine_similarity: 0.0
+  match_max_prediction_error: 22.0
+  match_max_velocity_delta: 18.0
   history_size: 30
   history_motion_window: 12
-  history_match_min_cosine_similarity: -0.1
-  history_max_motion_scale: 2.5
-  history_max_motion_slack: 16.0
+  history_match_min_cosine_similarity: 0.1
+  history_max_motion_scale: 1.8
+  history_max_motion_slack: 10.0
   acquisition_min_motion: 4.0
   acquisition_max_match_distance: 120
-  acquisition_min_cosine_similarity: 0.2
+  acquisition_min_cosine_similarity: 0.4
   max_missed_frames: 8
   max_center_distance: 160
   prediction_decay: 0.92
