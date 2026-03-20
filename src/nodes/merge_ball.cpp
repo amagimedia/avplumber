@@ -41,7 +41,7 @@ static bool finiteBox(const DetectionBox& box) {
 }
 }
 
-class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
 private:
     std::string metadata_key_in_ = "yolo_detections_v1";
     std::string metadata_key_out_ = "merge_ball_v1";
@@ -51,8 +51,14 @@ private:
     std::unordered_set<std::string> context_presence_labels_ = {"foot", "player", "ball"};
     std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
+    int fallback_delay_frames_ = 6;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
+    int consecutive_context_misses_ = 0;
+
+    void resetState() {
+        consecutive_context_misses_ = 0;
+    }
 
     bool parseDetections(const av::VideoFrame& frm,
                          MetadataEnvelope& env_out,
@@ -116,7 +122,7 @@ private:
         }
     }
 
-    std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets, std::string& mode_out) const {
+    std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets, std::string& mode_out) {
         std::vector<DetectionBox> context_dets;
         bool have_context_presence = false;
         DetectionBox best_ball_label;
@@ -148,8 +154,14 @@ private:
         }
 
         if (have_context_presence) {
+            consecutive_context_misses_ = 0;
             mode_out = "context";
             return context_dets;
+        }
+        ++consecutive_context_misses_;
+        if (consecutive_context_misses_ < std::max(1, fallback_delay_frames_)) {
+            mode_out = "grace";
+            return {};
         }
         if (have_best_ball_label) {
             mode_out = "ball_fallback";
@@ -192,7 +204,9 @@ private:
         md["merge_ball"] = {
             {"mode", mode},
             {"ball_model_index", ball_model_index_},
-            {"context_model_index", context_model_index_}
+            {"context_model_index", context_model_index_},
+            {"fallback_delay_frames", fallback_delay_frames_},
+            {"consecutive_context_misses", consecutive_context_misses_}
         };
         return md;
     }
@@ -208,11 +222,16 @@ private:
 public:
     using NodeSISO::NodeSISO;
 
+    void resetInput() override {
+        resetState();
+    }
+
     void process() override {
         av::VideoFrame frm = this->source_->get();
         if (!frm) return;
 
         if (isEofMarker(frm)) {
+            resetState();
             this->sink_->put(frm);
             return;
         }
@@ -266,6 +285,7 @@ public:
             }
         }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
+        if (params.count("fallback_delay_frames")) r->fallback_delay_frames_ = params["fallback_delay_frames"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         return r;
     }
