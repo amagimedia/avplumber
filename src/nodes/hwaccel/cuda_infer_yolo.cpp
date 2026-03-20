@@ -3,21 +3,21 @@
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
+#include <libavutil/dict.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
-#include <libavutil/dict.h>
 }
 
 #include <NvInfer.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // PTX blob for NV12->NCHW preprocess kernel.
@@ -40,7 +40,6 @@ namespace {
 class TRTLogger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
-        // keep warnings/errors to avoid noisy per-frame info logs
         if (severity == Severity::kERROR || severity == Severity::kINTERNAL_ERROR || severity == Severity::kWARNING) {
             logstream << "tensorrt: " << (msg ? msg : "");
         }
@@ -54,37 +53,13 @@ struct Detection {
     float y2 = 0.0f;
     float conf = 0.0f;
     int cls = -1;
+    int model_index = -1;
 };
 
 enum class OutputBoxFormat {
     EndToEndXYXY,
     RawCXCYWH
 };
-
-static bool loadClassNamesFromFile(const std::string& path, std::vector<std::string>& out, std::string& err) {
-    std::ifstream f(path);
-    if (!f) {
-        err = "cannot open class names file " + path;
-        return false;
-    }
-
-    std::vector<std::string> names;
-    std::string token;
-    while (f >> token) {
-        names.push_back(token);
-    }
-    if (f.bad()) {
-        err = "failed reading class names file " + path;
-        return false;
-    }
-    if (names.empty()) {
-        err = "class names file is empty " + path;
-        return false;
-    }
-
-    out = std::move(names);
-    return true;
-}
 
 static float halfToFloat(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -95,7 +70,6 @@ static float halfToFloat(uint16_t h) {
         if (frac == 0) {
             out = sign;
         } else {
-            // subnormal half -> normalized float
             exp = 1;
             while ((frac & 0x0400u) == 0) {
                 frac <<= 1;
@@ -106,7 +80,7 @@ static float halfToFloat(uint16_t h) {
             out = sign | (exp32 << 23) | (frac << 13);
         }
     } else if (exp == 0x1Fu) {
-        out = sign | 0x7F800000u | (frac << 13); // inf/nan
+        out = sign | 0x7F800000u | (frac << 13);
     } else {
         uint32_t exp32 = exp + (127 - 15);
         out = sign | (exp32 << 23) | (frac << 13);
@@ -136,54 +110,55 @@ static size_t volume(const nvinfer1::Dims& d) {
     return v;
 }
 
-static float iou(const Detection& a, const Detection& b) {
-    const float x1 = std::max(a.x1, b.x1);
-    const float y1 = std::max(a.y1, b.y1);
-    const float x2 = std::min(a.x2, b.x2);
-    const float y2 = std::min(a.y2, b.y2);
-    const float w = std::max(0.0f, x2 - x1);
-    const float h = std::max(0.0f, y2 - y1);
-    const float inter = w * h;
-    const float area_a = std::max(0.0f, a.x2 - a.x1) * std::max(0.0f, a.y2 - a.y1);
-    const float area_b = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
-    const float uni = area_a + area_b - inter;
-    if (uni <= 0.0f) return 0.0f;
-    return inter / uni;
+static std::string shortEngineName(const std::string& path) {
+    const size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos) return path;
+    return path.substr(slash + 1);
 }
 }
 
 class CudaInferYolo : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 protected:
+    struct ModelRunner {
+        std::string engine_path;
+        std::string engine_name;
+
+        nvinfer1::IRuntime* trt_runtime = nullptr;
+        nvinfer1::ICudaEngine* trt_engine = nullptr;
+        nvinfer1::IExecutionContext* trt_ctx = nullptr;
+
+        std::vector<std::string> io_tensor_names;
+        std::vector<size_t> tensor_bytes;
+        std::vector<CUdeviceptr> tensor_ptrs;
+        std::unordered_map<std::string, size_t> tensor_index;
+        std::string input_tensor_name;
+        std::string output_tensor_name;
+        nvinfer1::Dims input_dims{};
+        nvinfer1::Dims output_dims{};
+        int input_w = 0;
+        int input_h = 0;
+        nvinfer1::DataType input_dtype = nvinfer1::DataType::kFLOAT;
+        nvinfer1::DataType output_dtype = nvinfer1::DataType::kFLOAT;
+        CUfunction preprocess_kernel = nullptr;
+        CUstream stream = nullptr;
+        std::vector<float> host_output;
+        std::vector<uint16_t> host_output_half;
+    };
+
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
     CUcontext cu_ctx_ = nullptr;
 
     TRTLogger trt_logger_;
-    nvinfer1::IRuntime* trt_runtime_ = nullptr;
-    nvinfer1::ICudaEngine* trt_engine_ = nullptr;
-    nvinfer1::IExecutionContext* trt_ctx_ = nullptr;
+    std::vector<ModelRunner> models_;
+    std::vector<std::vector<std::string>> class_names_per_model_;
 
-    std::vector<std::string> io_tensor_names_;
-    std::vector<size_t> tensor_bytes_;
-    std::vector<CUdeviceptr> tensor_ptrs_;
-    std::unordered_map<std::string, size_t> tensor_index_;
-    std::string input_tensor_name_;
-    std::string output_tensor_name_; // first output only in v1
-    nvinfer1::Dims input_dims_{};
-    nvinfer1::Dims output_dims_{};
     int input_w_ = 0;
     int input_h_ = 0;
-    bool input_bgr_order_ = false;
     nvinfer1::DataType input_dtype_ = nvinfer1::DataType::kFLOAT;
-    nvinfer1::DataType output_dtype_ = nvinfer1::DataType::kFLOAT;
-
+    bool input_bgr_order_ = false;
     CUmodule preprocess_module_ = nullptr;
-    CUfunction preprocess_kernel_ = nullptr;
 
-    std::vector<float> host_output_;
-    std::vector<uint16_t> host_output_half_;
-
-    std::string engine_path_;
     std::string metadata_key_out_ = "yolo_detections_v1";
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 30;
@@ -192,7 +167,6 @@ protected:
     float iou_thresh_ = 0.45f;
     int max_det_ = 300;
     uint64_t frame_counter_ = 0;
-    std::vector<std::string> class_names_;
     OutputBoxFormat output_box_format_ = OutputBoxFormat::EndToEndXYXY;
 
     bool initialized_ = false;
@@ -221,8 +195,8 @@ protected:
         return true;
     }
 
-    bool loadPreprocessKernel() {
-        if (preprocess_module_ && preprocess_kernel_) return true;
+    bool loadPreprocessModule() {
+        if (preprocess_module_) return true;
         if (!cu_ctx_) return false;
         if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
         const std::string ptx_str(avpl_yolo_preprocess_ptx, avpl_yolo_preprocess_ptx + avpl_yolo_preprocess_ptx_len);
@@ -230,172 +204,201 @@ protected:
             logstream << "cuda_infer_yolo: failed to load preprocess PTX module";
             return false;
         }
-        const char* kname = (input_dtype_ == nvinfer1::DataType::kHALF) ? "kNV12_to_NCHW_fp16" : "kNV12_to_NCHW_fp32";
-        if (CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, kname))) {
-            logstream << "cuda_infer_yolo: failed to get preprocess kernel";
-            return false;
-        }
         return true;
     }
 
-    bool parseEngine() {
-        std::ifstream f(engine_path_, std::ios::binary);
+    bool parseEngine(ModelRunner& model) {
+        std::ifstream f(model.engine_path, std::ios::binary);
         if (!f) {
-            logstream << "cuda_infer_yolo: cannot open engine file " << engine_path_;
+            logstream << "cuda_infer_yolo: cannot open engine file " << model.engine_path;
             return false;
         }
         f.seekg(0, std::ios::end);
         std::streamsize size = f.tellg();
         if (size <= 0) {
-            logstream << "cuda_infer_yolo: invalid engine size";
+            logstream << "cuda_infer_yolo: invalid engine size for " << model.engine_path;
             return false;
         }
         f.seekg(0, std::ios::beg);
         std::vector<char> blob((size_t)size);
         if (!f.read(blob.data(), size)) {
-            logstream << "cuda_infer_yolo: failed reading engine file";
+            logstream << "cuda_infer_yolo: failed reading engine file " << model.engine_path;
             return false;
         }
 
-        trt_runtime_ = nvinfer1::createInferRuntime(trt_logger_);
-        if (!trt_runtime_) {
-            logstream << "cuda_infer_yolo: createInferRuntime failed";
+        model.trt_runtime = nvinfer1::createInferRuntime(trt_logger_);
+        if (!model.trt_runtime) {
+            logstream << "cuda_infer_yolo: createInferRuntime failed for " << model.engine_path;
             return false;
         }
-        trt_engine_ = trt_runtime_->deserializeCudaEngine(blob.data(), blob.size());
-        if (!trt_engine_) {
-            logstream << "cuda_infer_yolo: deserializeCudaEngine failed";
+        model.trt_engine = model.trt_runtime->deserializeCudaEngine(blob.data(), blob.size());
+        if (!model.trt_engine) {
+            logstream << "cuda_infer_yolo: deserializeCudaEngine failed for " << model.engine_path;
             return false;
         }
-        trt_ctx_ = trt_engine_->createExecutionContext();
-        if (!trt_ctx_) {
-            logstream << "cuda_infer_yolo: createExecutionContext failed";
+        model.trt_ctx = model.trt_engine->createExecutionContext();
+        if (!model.trt_ctx) {
+            logstream << "cuda_infer_yolo: createExecutionContext failed for " << model.engine_path;
             return false;
         }
         return true;
     }
 
-    bool allocateBindings() {
-        const int nb = trt_engine_->getNbIOTensors();
+    bool allocateBindings(ModelRunner& model) {
+        const int nb = model.trt_engine->getNbIOTensors();
         if (nb <= 1) {
-            logstream << "cuda_infer_yolo: engine has insufficient bindings";
+            logstream << "cuda_infer_yolo: engine has insufficient bindings for " << model.engine_path;
             return false;
         }
 
-        io_tensor_names_.clear();
-        tensor_bytes_.assign((size_t)nb, 0);
-        tensor_ptrs_.assign((size_t)nb, 0);
-        tensor_index_.clear();
-        input_tensor_name_.clear();
-        output_tensor_name_.clear();
+        model.io_tensor_names.clear();
+        model.tensor_bytes.assign((size_t)nb, 0);
+        model.tensor_ptrs.assign((size_t)nb, 0);
+        model.tensor_index.clear();
+        model.input_tensor_name.clear();
+        model.output_tensor_name.clear();
         int input_count = 0;
         bool selected_image_input = false;
 
         for (int i = 0; i < nb; ++i) {
-            const char* tensor_name_c = trt_engine_->getIOTensorName(i);
+            const char* tensor_name_c = model.trt_engine->getIOTensorName(i);
             if (!tensor_name_c) {
                 logstream << "cuda_infer_yolo: null I/O tensor name";
                 return false;
             }
             const std::string tensor_name = tensor_name_c;
-            io_tensor_names_.push_back(tensor_name);
-            tensor_index_[tensor_name] = (size_t)i;
-            const auto mode = trt_engine_->getTensorIOMode(tensor_name_c);
+            model.io_tensor_names.push_back(tensor_name);
+            model.tensor_index[tensor_name] = (size_t)i;
+
+            const auto mode = model.trt_engine->getTensorIOMode(tensor_name_c);
             const bool is_input = (mode == nvinfer1::TensorIOMode::kINPUT);
-            nvinfer1::Dims dims = trt_engine_->getTensorShape(tensor_name_c);
+            nvinfer1::Dims dims = model.trt_engine->getTensorShape(tensor_name_c);
             for (int d = 0; d < dims.nbDims; ++d) {
                 if (dims.d[d] <= 0) {
-                    logstream << "cuda_infer_yolo: dynamic/invalid binding dims not supported in v1";
+                    logstream << "cuda_infer_yolo: dynamic/invalid binding dims not supported for " << model.engine_path;
                     return false;
                 }
             }
             const size_t vol = volume(dims);
-            const size_t esz = elementSize(trt_engine_->getTensorDataType(tensor_name_c));
+            const size_t esz = elementSize(model.trt_engine->getTensorDataType(tensor_name_c));
             if (vol == 0 || esz == 0) {
-                logstream << "cuda_infer_yolo: unsupported binding type/shape";
+                logstream << "cuda_infer_yolo: unsupported binding type/shape for " << model.engine_path;
                 return false;
             }
             const size_t bytes = vol * esz;
 
             CUdeviceptr ptr = 0;
             if (CHECK_CU(cuMemAlloc(&ptr, bytes))) {
-                logstream << "cuda_infer_yolo: cuMemAlloc failed for binding " << i;
+                logstream << "cuda_infer_yolo: cuMemAlloc failed for " << model.engine_path << " binding " << i;
                 return false;
             }
             if (CHECK_CU(cuMemsetD8(ptr, 0, bytes))) {
-                logstream << "cuda_infer_yolo: cuMemsetD8 failed for binding " << i;
+                logstream << "cuda_infer_yolo: cuMemsetD8 failed for " << model.engine_path << " binding " << i;
                 return false;
             }
-            tensor_bytes_[(size_t)i] = bytes;
-            tensor_ptrs_[(size_t)i] = ptr;
+            model.tensor_bytes[(size_t)i] = bytes;
+            model.tensor_ptrs[(size_t)i] = ptr;
 
             if (is_input) {
                 ++input_count;
                 const bool is_image_input =
                     (dims.nbDims == 3 && dims.d[0] == 3) ||
                     (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == 3);
-                if (input_tensor_name_.empty()) {
-                    input_tensor_name_ = tensor_name;
-                    input_dims_ = dims;
+                if (model.input_tensor_name.empty()) {
+                    model.input_tensor_name = tensor_name;
+                    model.input_dims = dims;
                 }
-                // Prefer image input in engines with auxiliary input tensors.
                 if (is_image_input && !selected_image_input) {
-                    input_tensor_name_ = tensor_name;
-                    input_dims_ = dims;
+                    model.input_tensor_name = tensor_name;
+                    model.input_dims = dims;
                     selected_image_input = true;
                 } else if (!is_image_input) {
-                    logstream << "cuda_infer_yolo: auxiliary input tensor detected (ignored by preprocess): " << tensor_name;
+                    logstream << "cuda_infer_yolo: auxiliary input tensor ignored for " << model.engine_path << ": " << tensor_name;
                 }
-            } else if (output_tensor_name_.empty()) {
-                output_tensor_name_ = tensor_name;
-                output_dims_ = dims;
+            } else if (model.output_tensor_name.empty()) {
+                model.output_tensor_name = tensor_name;
+                model.output_dims = dims;
             }
         }
 
-        if (input_tensor_name_.empty() || output_tensor_name_.empty()) {
-            logstream << "cuda_infer_yolo: failed to identify input/output bindings";
+        if (model.input_tensor_name.empty() || model.output_tensor_name.empty()) {
+            logstream << "cuda_infer_yolo: failed to identify input/output bindings for " << model.engine_path;
             return false;
         }
 
-        // Expect CHW or NCHW with batch=1.
-        if (input_dims_.nbDims == 3 && input_dims_.d[0] == 3) {
-            input_h_ = input_dims_.d[1];
-            input_w_ = input_dims_.d[2];
-        } else if (input_dims_.nbDims == 4 && input_dims_.d[0] == 1 && input_dims_.d[1] == 3) {
-            input_h_ = input_dims_.d[2];
-            input_w_ = input_dims_.d[3];
+        if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == 3) {
+            model.input_h = model.input_dims.d[1];
+            model.input_w = model.input_dims.d[2];
+        } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == 3) {
+            model.input_h = model.input_dims.d[2];
+            model.input_w = model.input_dims.d[3];
         } else {
-            logstream << "cuda_infer_yolo: expected image input dims CHW(C=3) or NCHW(N=1,C=3)"
+            logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor for " << model.engine_path
                       << " (engine inputs: " << input_count << ")";
             return false;
         }
-        if (input_h_ <= 0 || input_w_ <= 0) {
-            logstream << "cuda_infer_yolo: invalid input dims";
+        if (model.input_h <= 0 || model.input_w <= 0) {
+            logstream << "cuda_infer_yolo: invalid input dims for " << model.engine_path;
             return false;
         }
 
-        output_dtype_ = trt_engine_->getTensorDataType(output_tensor_name_.c_str());
-        if (!(output_dtype_ == nvinfer1::DataType::kFLOAT || output_dtype_ == nvinfer1::DataType::kHALF)) {
-            logstream << "cuda_infer_yolo: output datatype must be float/half in v1";
+        model.output_dtype = model.trt_engine->getTensorDataType(model.output_tensor_name.c_str());
+        if (!(model.output_dtype == nvinfer1::DataType::kFLOAT || model.output_dtype == nvinfer1::DataType::kHALF)) {
+            logstream << "cuda_infer_yolo: output datatype must be float/half for " << model.engine_path;
             return false;
         }
-        host_output_.resize(volume(output_dims_));
-        if (output_dtype_ == nvinfer1::DataType::kHALF) {
-            host_output_half_.resize(volume(output_dims_));
+        model.host_output.resize(volume(model.output_dims));
+        if (model.output_dtype == nvinfer1::DataType::kHALF) {
+            model.host_output_half.resize(volume(model.output_dims));
         }
 
-        input_dtype_ = trt_engine_->getTensorDataType(input_tensor_name_.c_str());
-        if (!(input_dtype_ == nvinfer1::DataType::kFLOAT || input_dtype_ == nvinfer1::DataType::kHALF)) {
-            logstream << "cuda_infer_yolo: input datatype must be float/half in v1";
+        model.input_dtype = model.trt_engine->getTensorDataType(model.input_tensor_name.c_str());
+        if (!(model.input_dtype == nvinfer1::DataType::kFLOAT || model.input_dtype == nvinfer1::DataType::kHALF)) {
+            logstream << "cuda_infer_yolo: input datatype must be float/half for " << model.engine_path;
             return false;
         }
 
-        // TRT10 API: bind tensor addresses by name.
-        for (size_t i = 0; i < io_tensor_names_.size(); ++i) {
-            if (!trt_ctx_->setTensorAddress(io_tensor_names_[i].c_str(), reinterpret_cast<void*>(tensor_ptrs_[i]))) {
-                logstream << "cuda_infer_yolo: setTensorAddress failed for " << io_tensor_names_[i];
+        for (size_t i = 0; i < model.io_tensor_names.size(); ++i) {
+            if (!model.trt_ctx->setTensorAddress(model.io_tensor_names[i].c_str(), reinterpret_cast<void*>(model.tensor_ptrs[i]))) {
+                logstream << "cuda_infer_yolo: setTensorAddress failed for " << model.io_tensor_names[i]
+                          << " in " << model.engine_path;
                 return false;
             }
+        }
+        return true;
+    }
+
+    bool ensureCompatibleInput(const ModelRunner& model, size_t model_index) {
+        if (model_index == 0) {
+            input_w_ = model.input_w;
+            input_h_ = model.input_h;
+            input_dtype_ = model.input_dtype;
+            return true;
+        }
+        if (model.input_w != input_w_ || model.input_h != input_h_) {
+            logstream << "cuda_infer_yolo: all engines must share the same input size, model[0]="
+                      << input_w_ << "x" << input_h_ << " model[" << model_index << "]="
+                      << model.input_w << "x" << model.input_h;
+            return false;
+        }
+        if (model.input_dtype != input_dtype_) {
+            logstream << "cuda_infer_yolo: all engines must share the same input dtype";
+            return false;
+        }
+        return true;
+    }
+
+    bool configureRunnerPreprocess(ModelRunner& model) {
+        const char* kname = (model.input_dtype == nvinfer1::DataType::kHALF)
+            ? "kNV12_to_NCHW_fp16"
+            : "kNV12_to_NCHW_fp32";
+        if (CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
+            logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
+            return false;
+        }
+        if (CHECK_CU(cuStreamCreate(&model.stream, 0))) {
+            logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
+            return false;
         }
         return true;
     }
@@ -403,9 +406,16 @@ protected:
     bool ensureInitialized(const av::VideoFrame& frm) {
         if (initialized_) return true;
         if (!initCudaContextFromFrame(frm)) return false;
-        if (!parseEngine()) return false;
-        if (!allocateBindings()) return false;
-        if (!loadPreprocessKernel()) return false;
+        if (!loadPreprocessModule()) return false;
+
+        for (size_t i = 0; i < models_.size(); ++i) {
+            ModelRunner& model = models_[i];
+            if (!parseEngine(model)) return false;
+            if (!allocateBindings(model)) return false;
+            if (!ensureCompatibleInput(model, i)) return false;
+            if (!configureRunnerPreprocess(model)) return false;
+        }
+
         initialized_ = true;
         return true;
     }
@@ -417,19 +427,19 @@ protected:
         return ctx->sw_format;
     }
 
-    bool runPreprocessNV12(const av::VideoFrame& frm) {
+    bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model) {
         const CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
         const CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
         const size_t pitchY = (size_t)frm.raw()->linesize[0];
         const size_t pitchUV = (size_t)frm.raw()->linesize[1];
-        auto it = tensor_index_.find(input_tensor_name_);
-        if (it == tensor_index_.end()) {
-            logstream << "cuda_infer_yolo: input tensor index missing";
+        auto it = model.tensor_index.find(model.input_tensor_name);
+        if (it == model.tensor_index.end()) {
+            logstream << "cuda_infer_yolo: input tensor index missing for " << model.engine_path;
             return false;
         }
-        void* out = reinterpret_cast<void*>(tensor_ptrs_[it->second]);
-        const int W = input_w_;
-        const int H = input_h_;
+        void* out = reinterpret_cast<void*>(model.tensor_ptrs[it->second]);
+        const int W = model.input_w;
+        const int H = model.input_h;
         const int bgr = input_bgr_order_ ? 1 : 0;
 
         void* args[] = {
@@ -443,14 +453,14 @@ protected:
         const unsigned int blockY = 8;
         const unsigned int gridX = (unsigned int)(W + (int)blockX - 1) / blockX;
         const unsigned int gridY = (unsigned int)(H + (int)blockY - 1) / blockY;
-        if (CHECK_CU(cuLaunchKernel(preprocess_kernel_, gridX, gridY, 1, blockX, blockY, 1, 0, cuda_dev_ctx_->stream, args, nullptr))) {
-            logstream << "cuda_infer_yolo: preprocess kernel launch failed";
+        if (CHECK_CU(cuLaunchKernel(model.preprocess_kernel, gridX, gridY, 1, blockX, blockY, 1, 0, model.stream, args, nullptr))) {
+            logstream << "cuda_infer_yolo: preprocess kernel launch failed for " << model.engine_path;
             return false;
         }
         return true;
     }
 
-    std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d) const {
+    std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d, int model_index) const {
         std::vector<Detection> dets;
         if (!out) return dets;
 
@@ -463,6 +473,7 @@ protected:
             det.y2 = cy + h * 0.5f;
             det.conf = conf;
             det.cls = cls;
+            det.model_index = model_index;
             dets.push_back(det);
         };
 
@@ -475,10 +486,10 @@ protected:
             det.y2 = y2;
             det.conf = conf;
             det.cls = cls;
+            det.model_index = model_index;
             dets.push_back(det);
         };
 
-        // common YOLO export shape: [84, N] or [N, 84] (no batch dim in binding dims)
         if (d.nbDims == 2) {
             int a = d.d[0], b = d.d[1];
             int attrs = 0, count = 0;
@@ -508,10 +519,6 @@ protected:
                 }
             }
         } else if (d.nbDims == 3) {
-            // common export layouts:
-            // - raw head: [1,84,N] or [1,N,84]
-            // - end2end:  [1,N,6] or [1,6,N] with [x1,y1,x2,y2,conf,cls]
-            // - optional raw override: [1,N,6] or [1,6,N] with [cx,cy,w,h,score0,score1]
             const int d0 = d.d[0], d1 = d.d[1], d2 = d.d[2];
             if (d0 == 1 && d2 == 6) {
                 const int count = d1;
@@ -587,30 +594,21 @@ protected:
             }
         }
 
-        // class-aware NMS
-        std::sort(dets.begin(), dets.end(), [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
-        std::vector<Detection> kept;
-        kept.reserve((size_t)std::min((int)dets.size(), max_det_));
-        for (const Detection& dcur : dets) {
-            bool drop = false;
-            for (const Detection& dk : kept) {
-                if (dcur.cls != dk.cls) continue;
-                if (iou(dcur, dk) > iou_thresh_) {
-                    drop = true;
-                    break;
-                }
-            }
-            if (!drop) {
-                kept.push_back(dcur);
-                if ((int)kept.size() >= max_det_) break;
-            }
+        return dets;
+    }
+
+    void finalizeDetections(std::vector<Detection>& dets) const {
+        std::sort(dets.begin(), dets.end(), [](const Detection& a, const Detection& b) {
+            return a.conf > b.conf;
+        });
+        if (max_det_ > 0 && (int)dets.size() > max_det_) {
+            dets.resize((size_t)max_det_);
         }
-        return kept;
     }
 
     std::string buildDetectionMetadata(const std::vector<Detection>& dets) const {
         Parameters j;
-        j["version"] = 1;
+        j["version"] = 2;
         j["coord_space"] = "model";
         j["model_width"] = input_w_;
         j["model_height"] = input_h_;
@@ -619,49 +617,78 @@ protected:
             {"iou", iou_thresh_},
             {"max_det", max_det_}
         };
+        j["models"] = Parameters::array();
+        for (size_t i = 0; i < models_.size(); ++i) {
+            Parameters model_item;
+            model_item["model_index"] = (int)i;
+            model_item["engine"] = models_[i].engine_path;
+            model_item["engine_name"] = models_[i].engine_name;
+            j["models"].push_back(model_item);
+        }
         j["detections"] = Parameters::array();
         for (const Detection& d : dets) {
             Parameters item;
             item["cls"] = d.cls;
-            if (d.cls >= 0 && (size_t)d.cls < class_names_.size()) {
-                item["label"] = class_names_[(size_t)d.cls];
-            }
             item["conf"] = d.conf;
             item["xyxy"] = {d.x1, d.y1, d.x2, d.y2};
+            item["model_index"] = d.model_index;
+            if (d.model_index >= 0 && (size_t)d.model_index < models_.size()) {
+                item["engine_name"] = models_[(size_t)d.model_index].engine_name;
+            }
+            if (d.model_index >= 0 && (size_t)d.model_index < class_names_per_model_.size()) {
+                const std::vector<std::string>& class_names = class_names_per_model_[(size_t)d.model_index];
+                if (d.cls >= 0 && (size_t)d.cls < class_names.size()) {
+                    item["label"] = class_names[(size_t)d.cls];
+                }
+            }
             j["detections"].push_back(item);
         }
         return j.dump();
+    }
+
+    void cleanupModel(ModelRunner& model) {
+        if (model.stream) {
+            CHECK_CU(cuStreamDestroy(model.stream));
+            model.stream = nullptr;
+        }
+        for (CUdeviceptr ptr : model.tensor_ptrs) {
+            if (ptr) {
+                CHECK_CU(cuMemFree(ptr));
+            }
+        }
+        model.tensor_ptrs.clear();
+        model.tensor_bytes.clear();
+        model.io_tensor_names.clear();
+        model.tensor_index.clear();
+        model.host_output.clear();
+        model.host_output_half.clear();
+        if (model.trt_ctx) {
+            delete model.trt_ctx;
+            model.trt_ctx = nullptr;
+        }
+        if (model.trt_engine) {
+            delete model.trt_engine;
+            model.trt_engine = nullptr;
+        }
+        if (model.trt_runtime) {
+            delete model.trt_runtime;
+            model.trt_runtime = nullptr;
+        }
     }
 
 public:
     using NodeSISO::NodeSISO;
 
     ~CudaInferYolo() override {
-        for (CUdeviceptr p : tensor_ptrs_) {
-            if (p) {
-                CHECK_CU(cuMemFree(p));
-            }
+        if (cu_ctx_) {
+            CHECK_CU(cuCtxSetCurrent(cu_ctx_));
         }
-        tensor_ptrs_.clear();
-        tensor_bytes_.clear();
-        io_tensor_names_.clear();
-        tensor_index_.clear();
-
+        for (ModelRunner& model : models_) {
+            cleanupModel(model);
+        }
         if (preprocess_module_) {
             CHECK_CU(cuModuleUnload(preprocess_module_));
             preprocess_module_ = nullptr;
-        }
-        if (trt_ctx_) {
-            delete trt_ctx_;
-            trt_ctx_ = nullptr;
-        }
-        if (trt_engine_) {
-            delete trt_engine_;
-            trt_engine_ = nullptr;
-        }
-        if (trt_runtime_) {
-            delete trt_runtime_;
-            trt_runtime_ = nullptr;
         }
     }
 
@@ -669,7 +696,7 @@ public:
         av::VideoFrame frm = this->source_->get();
         if (!frm) return;
 
-        frame_counter_++;
+        ++frame_counter_;
         if (infer_every_n_ > 1 && (frame_counter_ % (uint64_t)infer_every_n_) != 0) {
             this->sink_->put(frm);
             return;
@@ -700,54 +727,65 @@ public:
             return;
         }
 
-        if (!runPreprocessNV12(frm)) return;
+        for (ModelRunner& model : models_) {
+            if (!runPreprocessNV12(frm, model)) return;
 
-        if (!trt_ctx_->enqueueV3(reinterpret_cast<cudaStream_t>(cuda_dev_ctx_->stream))) {
-            logstream << "cuda_infer_yolo: enqueueV3 failed";
-            return;
+            if (!model.trt_ctx->enqueueV3(reinterpret_cast<cudaStream_t>(model.stream))) {
+                logstream << "cuda_infer_yolo: enqueueV3 failed for " << model.engine_path;
+                return;
+            }
+
+            auto out_it = model.tensor_index.find(model.output_tensor_name);
+            if (out_it == model.tensor_index.end()) {
+                logstream << "cuda_infer_yolo: output tensor index missing for " << model.engine_path;
+                return;
+            }
+            const size_t out_idx = out_it->second;
+            const size_t out_bytes = model.tensor_bytes[out_idx];
+            if (model.output_dtype == nvinfer1::DataType::kFLOAT) {
+                if (out_bytes != model.host_output.size() * sizeof(float)) {
+                    logstream << "cuda_infer_yolo: output size mismatch for " << model.engine_path;
+                    return;
+                }
+                if (CHECK_CU(cuMemcpyDtoHAsync(model.host_output.data(), model.tensor_ptrs[out_idx], out_bytes, model.stream))) {
+                    logstream << "cuda_infer_yolo: output D2H copy failed for " << model.engine_path;
+                    return;
+                }
+            } else {
+                if (out_bytes != model.host_output_half.size() * sizeof(uint16_t)) {
+                    logstream << "cuda_infer_yolo: output half size mismatch for " << model.engine_path;
+                    return;
+                }
+                if (CHECK_CU(cuMemcpyDtoHAsync(model.host_output_half.data(), model.tensor_ptrs[out_idx], out_bytes, model.stream))) {
+                    logstream << "cuda_infer_yolo: output D2H copy failed for " << model.engine_path;
+                    return;
+                }
+            }
         }
 
-        auto out_it = tensor_index_.find(output_tensor_name_);
-        if (out_it == tensor_index_.end()) {
-            logstream << "cuda_infer_yolo: output tensor index missing";
-            return;
+        std::vector<Detection> dets;
+        for (size_t model_index = 0; model_index < models_.size(); ++model_index) {
+            ModelRunner& model = models_[model_index];
+            if (CHECK_CU(cuStreamSynchronize(model.stream))) {
+                logstream << "cuda_infer_yolo: stream sync failed for " << model.engine_path;
+                return;
+            }
+            if (model.output_dtype == nvinfer1::DataType::kHALF) {
+                if (model.host_output.size() != model.host_output_half.size()) {
+                    logstream << "cuda_infer_yolo: output conversion buffer mismatch for " << model.engine_path;
+                    return;
+                }
+                for (size_t i = 0; i < model.host_output_half.size(); ++i) {
+                    model.host_output[i] = halfToFloat(model.host_output_half[i]);
+                }
+            }
+
+            std::vector<Detection> model_dets = decodeYoloOutput(model.host_output.data(), model.output_dims, (int)model_index);
+            dets.insert(dets.end(), model_dets.begin(), model_dets.end());
         }
-        const size_t out_idx = out_it->second;
-        const size_t out_bytes = tensor_bytes_[out_idx];
-        if (output_dtype_ == nvinfer1::DataType::kFLOAT) {
-            if (out_bytes != host_output_.size() * sizeof(float)) {
-                logstream << "cuda_infer_yolo: output size mismatch";
-                return;
-            }
-            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_.data(), tensor_ptrs_[out_idx], out_bytes, cuda_dev_ctx_->stream))) {
-                logstream << "cuda_infer_yolo: output D2H copy failed";
-                return;
-            }
-        } else {
-            if (out_bytes != host_output_half_.size() * sizeof(uint16_t)) {
-                logstream << "cuda_infer_yolo: output half size mismatch";
-                return;
-            }
-            if (CHECK_CU(cuMemcpyDtoHAsync(host_output_half_.data(), tensor_ptrs_[out_idx], out_bytes, cuda_dev_ctx_->stream))) {
-                logstream << "cuda_infer_yolo: output D2H copy failed";
-                return;
-            }
-        }
-        if (CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream))) {
-            logstream << "cuda_infer_yolo: stream sync failed";
-            return;
-        }
-        if (output_dtype_ == nvinfer1::DataType::kHALF) {
-            if (host_output_.size() != host_output_half_.size()) {
-                logstream << "cuda_infer_yolo: output conversion buffer mismatch";
-                return;
-            }
-            for (size_t i = 0; i < host_output_half_.size(); ++i) {
-                host_output_[i] = halfToFloat(host_output_half_[i]);
-            }
-        }
-        std::vector<Detection> dets = decodeYoloOutput(host_output_.data(), output_dims_);
-        std::string md = buildDetectionMetadata(dets);
+
+        finalizeDetections(dets);
+        const std::string md = buildDetectionMetadata(dets);
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), md.c_str(), 0);
         if (debug_log_metadata_ && debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "cuda_infer_yolo: " << md;
@@ -765,13 +803,29 @@ public:
             make_unique<EdgeSource<av::VideoFrame>>(src),
             make_unique<EdgeSink<av::VideoFrame>>(dst)
         );
-        if (!params.count("engine")) {
-            throw Error("cuda_infer_yolo: missing required parameter: engine");
+
+        if (!params.count("engines")) {
+            throw Error("cuda_infer_yolo: missing required parameter: engines");
         }
+        if (!params["engines"].is_array()) {
+            throw Error("cuda_infer_yolo: engines must be a string array");
+        }
+        for (const auto& item : params["engines"]) {
+            if (!item.is_string()) {
+                throw Error("cuda_infer_yolo: engines must be a string array");
+            }
+            ModelRunner model;
+            model.engine_path = item.get<std::string>();
+            model.engine_name = shortEngineName(model.engine_path);
+            r->models_.push_back(std::move(model));
+        }
+        if (r->models_.empty()) {
+            throw Error("cuda_infer_yolo: engines array must not be empty");
+        }
+
         if (!params.count("hwaccel")) {
             throw Error("cuda_infer_yolo: missing required parameter: hwaccel");
         }
-        r->engine_path_ = params["engine"].get<std::string>();
         r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         if (!r->hwaccel_) {
             throw Error("cuda_infer_yolo: failed to get hwaccel");
@@ -798,29 +852,30 @@ public:
                 throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh'");
             }
         }
-        if (params.count("yolo_classes") && params.count("class_names")) {
-            throw Error("cuda_infer_yolo: use either yolo_classes or class_names, not both");
-        }
-        if (params.count("yolo_classes")) {
-            if (!params["yolo_classes"].is_string()) {
-                throw Error("cuda_infer_yolo: yolo_classes must be a string path");
+
+        r->class_names_per_model_.resize(r->models_.size());
+        if (params.count("class_names_per_model")) {
+            if (!params["class_names_per_model"].is_array()) {
+                throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
             }
-            const std::string path = params["yolo_classes"].get<std::string>();
-            std::string err;
-            if (!loadClassNamesFromFile(path, r->class_names_, err)) {
-                throw Error("cuda_infer_yolo: " + err);
+            if (params["class_names_per_model"].size() != r->models_.size()) {
+                throw Error("cuda_infer_yolo: class_names_per_model must match engines length");
             }
-        } else if (params.count("class_names")) {
-            if (params["class_names"].is_array()) {
-                const std::list<std::string> names = jsonToStringList(params["class_names"]);
-                r->class_names_.assign(names.begin(), names.end());
-                if (r->class_names_.empty()) {
-                    throw Error("cuda_infer_yolo: class_names array must not be empty");
+            size_t model_index = 0;
+            for (const auto& names_item : params["class_names_per_model"]) {
+                if (!names_item.is_array()) {
+                    throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
                 }
-            } else {
-                throw Error("cuda_infer_yolo: class_names must be a string array");
+                for (const auto& name : names_item) {
+                    if (!name.is_string()) {
+                        throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
+                    }
+                    r->class_names_per_model_[model_index].push_back(name.get<std::string>());
+                }
+                ++model_index;
             }
         }
+
         return r;
     }
 };
