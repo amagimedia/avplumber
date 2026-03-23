@@ -4,11 +4,7 @@ extern "C" {
 #include <libavutil/dict.h>
 }
 
-#include <algorithm>
-#include <cmath>
-#include <limits>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -33,60 +29,13 @@ struct MetadataEnvelope {
     double model_height = 0.0;
     Parameters thresholds;
 };
-
-static double centerX(const DetectionBox& box) {
-    return (box.x1 + box.x2) * 0.5;
 }
 
-static double centerY(const DetectionBox& box) {
-    return (box.y1 + box.y2) * 0.5;
-}
-
-static double centerDistance(const DetectionBox& a, const DetectionBox& b) {
-    const double dx = centerX(a) - centerX(b);
-    const double dy = centerY(a) - centerY(b);
-    return std::sqrt(dx * dx + dy * dy);
-}
-
-static bool finiteBox(const DetectionBox& box) {
-    return std::isfinite(box.x1) && std::isfinite(box.y1)
-        && std::isfinite(box.x2) && std::isfinite(box.y2)
-        && box.x2 > box.x1 && box.y2 > box.y1;
-}
-}
-
-class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
+class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 private:
     std::string metadata_key_in_ = "yolo_detections_v1";
     std::string metadata_key_out_ = "merge_ball_v1";
-    int ball_model_index_ = 0;
-    int context_model_index_ = 1;
-    std::string ball_label_ = "basketball";
-    std::string context_ball_label_ = "ball";
-    std::unordered_set<std::string> context_presence_labels_ = {"foot", "player", "ball"};
-    std::unordered_set<std::string> context_output_labels_ = {"foot", "player"};
     double min_conf_ = 0.0;
-    int context_grace_frames_ = 3;
-    double max_ball_switch_distance_px_ = 50.0;
-    int debug_log_every_n_ = 0;
-    uint64_t frame_counter_ = 0;
-    std::vector<DetectionBox> last_context_output_dets_;
-    bool have_last_context_output_ = false;
-    int consecutive_context_misses_ = 0;
-    bool using_ball_fallback_ = false;
-    DetectionBox last_context_ball_;
-    bool have_last_context_ball_ = false;
-    uint64_t last_context_ball_frame_index_ = 0;
-
-    void resetState() {
-        last_context_output_dets_.clear();
-        have_last_context_output_ = false;
-        consecutive_context_misses_ = 0;
-        using_ball_fallback_ = false;
-        last_context_ball_ = DetectionBox{};
-        have_last_context_ball_ = false;
-        last_context_ball_frame_index_ = 0;
-    }
 
     bool parseDetections(const av::VideoFrame& frm,
                          MetadataEnvelope& env_out,
@@ -137,130 +86,16 @@ private:
                 }
 
                 if (det.conf < min_conf_) continue;
-                if (!finiteBox(det)) continue;
                 dets_out.push_back(det);
             }
-
-            std::sort(dets_out.begin(), dets_out.end(), [](const DetectionBox& a, const DetectionBox& b) {
-                return a.conf > b.conf;
-            });
             return true;
         } catch (const std::exception&) {
             return false;
         }
     }
 
-    bool extractBestContextBall(const std::vector<DetectionBox>& dets, DetectionBox& out) const {
-        bool found = false;
-        for (const DetectionBox& det : dets) {
-            if (det.model_index != context_model_index_) continue;
-            if (!det.has_label || det.label != context_ball_label_) continue;
-            if (!found || det.conf > out.conf) {
-                out = det;
-                found = true;
-            }
-        }
-        return found;
-    }
-
-    bool shouldEmitContextDetection(const DetectionBox& det) const {
-        if (det.model_index != context_model_index_) return false;
-        return det.has_label;
-    }
-
-    bool fallbackBallAllowed(const DetectionBox& candidate, bool switching_to_ball_only) const {
-        if (!switching_to_ball_only) {
-            return true;
-        }
-        if (!have_last_context_ball_) {
-            return false;
-        }
-        const double dist = centerDistance(last_context_ball_, candidate);
-        if (dist > max_ball_switch_distance_px_) {
-            return false;
-        }
-        for (const DetectionBox& det : last_context_output_dets_) {
-            if (!det.has_label || det.label != "player") {
-                continue;
-            }
-            if (centerDistance(det, candidate) > max_ball_switch_distance_px_) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    std::vector<DetectionBox> selectDetections(const std::vector<DetectionBox>& dets,
-                                               std::string& mode_out) {
-        std::vector<DetectionBox> context_dets;
-        bool have_context_presence = false;
-        DetectionBox best_ball_label;
-        DetectionBox best_ball_any;
-        bool have_best_ball_label = false;
-        bool have_best_ball_any = false;
-
-        for (const DetectionBox& det : dets) {
-            if (det.model_index == context_model_index_ && det.has_label) {
-                if (context_presence_labels_.count(det.label) > 0) {
-                    have_context_presence = true;
-                }
-                if (shouldEmitContextDetection(det)) {
-                    context_dets.push_back(det);
-                }
-            }
-            if (det.model_index == ball_model_index_) {
-                if (!have_best_ball_any || det.conf > best_ball_any.conf) {
-                    best_ball_any = det;
-                    have_best_ball_any = true;
-                }
-                if ((!ball_label_.empty() && det.has_label && det.label == ball_label_) || ball_label_.empty()) {
-                    if (!have_best_ball_label || det.conf > best_ball_label.conf) {
-                        best_ball_label = det;
-                        have_best_ball_label = true;
-                    }
-                }
-            }
-        }
-
-        if (have_context_presence) {
-            consecutive_context_misses_ = 0;
-            using_ball_fallback_ = false;
-            if (!context_dets.empty()) {
-                last_context_output_dets_ = context_dets;
-                have_last_context_output_ = true;
-            }
-            mode_out = "context";
-            return context_dets;
-        }
-        ++consecutive_context_misses_;
-        if (have_last_context_output_ && consecutive_context_misses_ <= std::max(0, context_grace_frames_)) {
-            using_ball_fallback_ = false;
-            mode_out = "context_grace";
-            return last_context_output_dets_;
-        }
-        const bool switching_to_ball_only = !using_ball_fallback_;
-        if (have_best_ball_label && fallbackBallAllowed(best_ball_label, switching_to_ball_only)) {
-            using_ball_fallback_ = true;
-            mode_out = "ball_fallback";
-            return {best_ball_label};
-        }
-        if (have_best_ball_any && fallbackBallAllowed(best_ball_any, switching_to_ball_only)) {
-            using_ball_fallback_ = true;
-            mode_out = "ball_fallback";
-            return {best_ball_any};
-        }
-        using_ball_fallback_ = false;
-        if (have_best_ball_label || have_best_ball_any) {
-            mode_out = "ball_rejected_switch_distance";
-            return {};
-        }
-        mode_out = "empty";
-        return {};
-    }
-
     Parameters buildOutputMetadata(const MetadataEnvelope& env,
-                                   const std::vector<DetectionBox>& dets,
-                                   const std::string& mode) const {
+                                   const std::vector<DetectionBox>& dets) const {
         Parameters md;
         md["version"] = 1;
         md["coord_space"] = env.coord_space;
@@ -284,61 +119,28 @@ private:
             }
             md["detections"].push_back(item);
         }
-        md["merge_ball"] = {
-            {"mode", mode},
-            {"ball_model_index", ball_model_index_},
-            {"context_model_index", context_model_index_},
-            {"context_grace_frames", context_grace_frames_},
-            {"consecutive_context_misses", consecutive_context_misses_},
-            {"using_ball_fallback", using_ball_fallback_},
-            {"max_ball_switch_distance_px", max_ball_switch_distance_px_}
-        };
         return md;
-    }
-
-    void maybeLog(const std::vector<DetectionBox>& dets, const std::string& mode) const {
-        if (debug_log_every_n_ <= 0) return;
-        if ((frame_counter_ % (uint64_t)debug_log_every_n_) != 0) return;
-        logstream << "merge_ball: frame=" << frame_counter_
-                  << " mode=" << mode
-                  << " detections=" << dets.size();
     }
 
 public:
     using NodeSISO::NodeSISO;
-
-    void resetInput() override {
-        resetState();
-    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
         if (!frm) return;
 
         if (isEofMarker(frm)) {
-            resetState();
             this->sink_->put(frm);
             return;
         }
-
-        ++frame_counter_;
 
         MetadataEnvelope env;
         std::vector<DetectionBox> dets;
         (void)parseDetections(frm, env, dets);
 
-        DetectionBox context_ball;
-        if (extractBestContextBall(dets, context_ball)) {
-            last_context_ball_ = context_ball;
-            have_last_context_ball_ = true;
-            last_context_ball_frame_index_ = frame_counter_;
-        }
-        std::string mode;
-        const std::vector<DetectionBox> merged = selectDetections(dets, mode);
-        const Parameters md = buildOutputMetadata(env, merged, mode);
+        const Parameters md = buildOutputMetadata(env, dets);
         const std::string serialized = md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
-        maybeLog(merged, mode);
         this->sink_->put(frm);
     }
 
@@ -348,38 +150,7 @@ public:
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MergeBall>(edges, params);
         if (params.count("metadata_key_in")) r->metadata_key_in_ = params["metadata_key_in"].get<std::string>();
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
-        if (params.count("ball_model_index")) r->ball_model_index_ = params["ball_model_index"];
-        if (params.count("context_model_index")) r->context_model_index_ = params["context_model_index"];
-        if (params.count("ball_label")) r->ball_label_ = params["ball_label"].get<std::string>();
-        if (params.count("context_ball_label")) r->context_ball_label_ = params["context_ball_label"].get<std::string>();
-        if (params.count("context_presence_labels")) {
-            if (!params["context_presence_labels"].is_array()) {
-                throw Error("merge_ball: context_presence_labels must be a string array");
-            }
-            r->context_presence_labels_.clear();
-            for (const auto& item : params["context_presence_labels"]) {
-                if (!item.is_string()) {
-                    throw Error("merge_ball: context_presence_labels must be a string array");
-                }
-                r->context_presence_labels_.insert(item.get<std::string>());
-            }
-        }
-        if (params.count("context_output_labels")) {
-            if (!params["context_output_labels"].is_array()) {
-                throw Error("merge_ball: context_output_labels must be a string array");
-            }
-            r->context_output_labels_.clear();
-            for (const auto& item : params["context_output_labels"]) {
-                if (!item.is_string()) {
-                    throw Error("merge_ball: context_output_labels must be a string array");
-                }
-                r->context_output_labels_.insert(item.get<std::string>());
-            }
-        }
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
-        if (params.count("context_grace_frames")) r->context_grace_frames_ = params["context_grace_frames"];
-        if (params.count("max_ball_switch_distance_px")) r->max_ball_switch_distance_px_ = params["max_ball_switch_distance_px"];
-        if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         return r;
     }
 };
