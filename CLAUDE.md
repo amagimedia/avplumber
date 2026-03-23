@@ -32,10 +32,13 @@ make clean_deps  # also clean submodule dependencies
 # SSH to remote
 ssh -i /home/jp/work-misc-stuff/awsdev.pem fedora@172.17.36.132
 
-# Rsync files to remote
-rsync -avz -e "ssh -i /home/jp/work-misc-stuff/awsdev.pem" <files> fedora@172.17.36.132:/home/fedora/avplumber/
+# Rsync changed files to remote while preserving repo-relative paths
+rsync -avz --relative -e "ssh -i /home/jp/work-misc-stuff/awsdev.pem" \
+  /home/jp/git/avplumber/./<files> \
+  fedora@172.17.36.132:/home/fedora/avplumber/
 
-# Build on remote (always use this exact command)
+# Clean and rebuild on remote (always use this exact routine)
+make clean
 make -j8 \
   HAVE_CUDA=1 \
   HAVE_TENSORRT=1 \
