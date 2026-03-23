@@ -123,6 +123,10 @@ Coordinates are emitted in model input space, not remapped back to an original s
   Supported form:
   - array of class-name strings
 
+- `class_index_remap_per_model`
+  Optional array matching `engines`, where each item is an integer array used to remap decoded class IDs for that model.
+  Example: `[[], [], [1, 0]]` swaps class `0` and `1` for the third model before labels are attached.
+
 ## Class Names
 
 If neither `yolo_classes` nor `class_names` is provided, detections still include numeric `cls` IDs.
