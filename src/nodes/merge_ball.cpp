@@ -180,6 +180,9 @@ private:
             return false;
         }
         for (const DetectionBox& det : last_context_output_dets_) {
+            if (!det.has_label || det.label != "player") {
+                continue;
+            }
             if (centerDistance(det, candidate) > max_ball_switch_distance_px_) {
                 return false;
             }
