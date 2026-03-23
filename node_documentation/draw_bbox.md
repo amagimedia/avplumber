@@ -27,6 +27,7 @@ Each YOLO detection may include:
 - `label`
 - `conf`
 - `xyxy`
+- `model_index`
 
 ## Letterbox Remap
 
@@ -80,6 +81,10 @@ Then set:
 - `allowed_labels`
   Optional array of labels to draw.
 
+- `model_colors`
+  Optional object mapping YOLO `model_index` values to named colors. Supported values: `red`, `green`, `light_blue`.
+  Detections from models without an override keep the default draw color.
+
 - `model_content_width`
   Width of the real image area inside the model canvas. Default: disabled.
 
@@ -110,6 +115,7 @@ node.add {
   "dst": "v_annotated_cuda",
   "metadata_key": "yolo_detections_v1",
   "allowed_labels": ["ball", "foot", "player"],
+  "model_colors": { "0": "red", "1": "green", "2": "light_blue" },
   "model_content_width": 960,
   "model_content_height": 540,
   "model_content_offset_x": 0,

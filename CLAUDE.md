@@ -26,6 +26,29 @@ make clean
 make clean_deps  # also clean submodule dependencies
 ```
 
+### Remote build & test (AWS g4 instance)
+
+```bash
+# SSH to remote
+ssh -i /home/jp/work-misc-stuff/awsdev.pem fedora@172.17.36.132
+
+# Rsync files to remote
+rsync -avz -e "ssh -i /home/jp/work-misc-stuff/awsdev.pem" <files> fedora@172.17.36.132:/home/fedora/avplumber/
+
+# Build on remote (always use this exact command)
+make -j8 \
+  HAVE_CUDA=1 \
+  HAVE_TENSORRT=1 \
+  HAVE_NVCC=1 \
+  NVCC=/usr/local/cuda-13.0/bin/nvcc \
+  TENSORRT_ROOT=/opt/tensorrt \
+  PKG_CONFIG_PATH=/apps/ffmpeg/lib/pkgconfig \
+  CXXFLAGS+=' -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' \
+  LFLAGS+=' -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib'
+```
+
+Remote avplumber path: `/home/fedora/avplumber`
+
 ### Build flags
 | Flag | Effect |
 |------|--------|

@@ -5,6 +5,8 @@ extern "C" {
 }
 
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -31,11 +33,17 @@ struct MetadataEnvelope {
 };
 }
 
-class MergeBall : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class SimpleMerge : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 private:
     std::string metadata_key_in_ = "yolo_detections_v1";
     std::string metadata_key_out_ = "merge_ball_v1";
     double min_conf_ = 0.0;
+    int pfb_model_index_ = 1;
+    int external_ball_release_frames_ = 3;
+    int consecutive_frames_without_pfb_ = 0;
+    std::unordered_set<std::string> pfb_presence_labels_ = {"foot", "player", "ball"};
+    std::unordered_set<std::string> suppressed_labels_when_pfb_present_ = {"ball", "basketball"};
+    std::unordered_map<int, std::unordered_set<std::string>> blacklist_labels_by_model_;
 
     bool parseDetections(const av::VideoFrame& frm,
                          MetadataEnvelope& env_out,
@@ -122,6 +130,65 @@ private:
         return md;
     }
 
+    bool isBlacklisted(const DetectionBox& det) const {
+        if (!det.has_label) {
+            return false;
+        }
+        const auto it = blacklist_labels_by_model_.find(det.model_index);
+        if (it == blacklist_labels_by_model_.end()) {
+            return false;
+        }
+        return it->second.count(det.label) > 0;
+    }
+
+    std::vector<DetectionBox> applyModelLabelBlacklist(const std::vector<DetectionBox>& dets) const {
+        std::vector<DetectionBox> filtered;
+        filtered.reserve(dets.size());
+        for (const DetectionBox& det : dets) {
+            if (isBlacklisted(det)) {
+                continue;
+            }
+            filtered.push_back(det);
+        }
+        return filtered;
+    }
+
+    bool hasPfbPresence(const std::vector<DetectionBox>& dets) const {
+        for (const DetectionBox& det : dets) {
+            if (det.model_index == pfb_model_index_
+                    && det.has_label
+                    && pfb_presence_labels_.count(det.label) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::vector<DetectionBox> applyPfbSuppressionRule(const std::vector<DetectionBox>& dets) {
+        if (hasPfbPresence(dets)) {
+            consecutive_frames_without_pfb_ = 0;
+        } else {
+            ++consecutive_frames_without_pfb_;
+        }
+
+        if (consecutive_frames_without_pfb_ >= external_ball_release_frames_) {
+            return dets;
+        }
+
+        std::vector<DetectionBox> filtered;
+        filtered.reserve(dets.size());
+        for (const DetectionBox& det : dets) {
+            const bool is_non_pfb_model = det.model_index != pfb_model_index_;
+            const bool is_suppressed_label = det.has_label
+                && suppressed_labels_when_pfb_present_.count(det.label) > 0;
+            if (is_non_pfb_model && is_suppressed_label) {
+                continue;
+            }
+            filtered.push_back(det);
+        }
+        return filtered;
+    }
+
 public:
     using NodeSISO::NodeSISO;
 
@@ -137,6 +204,8 @@ public:
         MetadataEnvelope env;
         std::vector<DetectionBox> dets;
         (void)parseDetections(frm, env, dets);
+        dets = applyModelLabelBlacklist(dets);
+        dets = applyPfbSuppressionRule(dets);
 
         const Parameters md = buildOutputMetadata(env, dets);
         const std::string serialized = md.dump();
@@ -144,15 +213,41 @@ public:
         this->sink_->put(frm);
     }
 
-    static std::shared_ptr<MergeBall> create(NodeCreationInfo& nci) {
+    static std::shared_ptr<SimpleMerge> create(NodeCreationInfo& nci) {
         EdgeManager& edges = nci.edges;
         const Parameters& params = nci.params;
-        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MergeBall>(edges, params);
+        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<SimpleMerge>(edges, params);
         if (params.count("metadata_key_in")) r->metadata_key_in_ = params["metadata_key_in"].get<std::string>();
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
         if (params.count("min_conf")) r->min_conf_ = params["min_conf"];
+        if (params.count("pfb_model_index")) r->pfb_model_index_ = params["pfb_model_index"];
+        if (params.count("external_ball_release_frames")) r->external_ball_release_frames_ = std::max(1, params["external_ball_release_frames"].get<int>());
+        if (params.count("pfb_presence_labels") && params["pfb_presence_labels"].is_array()) {
+            r->pfb_presence_labels_.clear();
+            for (const auto& item : params["pfb_presence_labels"]) {
+                r->pfb_presence_labels_.insert(item.get<std::string>());
+            }
+        }
+        if (params.count("suppress_labels_when_pfb_present") && params["suppress_labels_when_pfb_present"].is_array()) {
+            r->suppressed_labels_when_pfb_present_.clear();
+            for (const auto& item : params["suppress_labels_when_pfb_present"]) {
+                r->suppressed_labels_when_pfb_present_.insert(item.get<std::string>());
+            }
+        }
+        if (params.count("blacklist_labels_by_model") && params["blacklist_labels_by_model"].is_object()) {
+            r->blacklist_labels_by_model_.clear();
+            for (auto it = params["blacklist_labels_by_model"].begin(); it != params["blacklist_labels_by_model"].end(); ++it) {
+                if (!it.value().is_array()) {
+                    throw Error("simple_merge_ball: blacklist_labels_by_model values must be arrays");
+                }
+                auto& labels = r->blacklist_labels_by_model_[std::stoi(it.key())];
+                for (const auto& item : it.value()) {
+                    labels.insert(item.get<std::string>());
+                }
+            }
+        }
         return r;
     }
 };
 
-DECLNODE(merge_ball, MergeBall)
+DECLNODE(simple_merge_ball, SimpleMerge)
