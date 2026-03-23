@@ -165,6 +165,7 @@ private:
     double shot_make_min_travel_px_     = 70.0;
     int    shot_exit_min_frames_        = 8;
     double shot_exit_min_travel_px_     = 80.0;
+    double hoop_min_conf_               = 0.0;
 
     // ── State ───────────────────────────────────────────────
     MergeMode mode_ = MergeMode::PFB;
@@ -211,7 +212,9 @@ private:
     // Hoop tracking: use hoop bbox to validate shots
     DetectionBox last_hoop_det_;
     bool     have_hoop_                    = false;
+    uint64_t last_hoop_frame_              = 0;
     std::string hoop_label_                = "hoop";
+    static constexpr int kHoopHoldFrames   = 2;
 
     // Shot/pass counting (persists across resetState — game total)
     int      total_shots_detected_         = 0;
@@ -250,8 +253,15 @@ private:
         last_ball_only_exit_frame_ = 0;
         active_shot_id_ = -1;
         shot_extrapolated_frames_ = 0;
+        have_hoop_ = false;
+        last_hoop_frame_ = 0;
         last_event_ball_id_ = -1;
         is_shot_attempt_ = false;
+    }
+
+    bool hasFreshHoop() const {
+        return have_hoop_
+            && (frame_counter_ - last_hoop_frame_) <= (uint64_t)kHoopHoldFrames;
     }
 
     // ── Parsing ─────────────────────────────────────────────
@@ -350,6 +360,7 @@ private:
                         }
                         if (!found) break;
                     }
+                    if (d.has_label && d.label == hoop_label_ && d.conf < hoop_min_conf_) break;
                     if (d.has_label && d.label == hoop_label_) saw_passthrough_hoop = true;
                     dets.push_back(d);
                     break;
@@ -357,8 +368,8 @@ private:
             }
         }
 
-        // Keep the hoop drawn even when the hoop model briefly drops it.
-        if (!saw_passthrough_hoop && have_hoop_) dets.push_back(last_hoop_det_);
+        // Reuse the last hoop briefly to smooth single-frame detector drops.
+        if (!saw_passthrough_hoop && hasFreshHoop()) dets.push_back(last_hoop_det_);
     }
 
     void writeMetadata(av::VideoFrame& frm, const MetadataEnvelope& env,
@@ -702,7 +713,7 @@ private:
                   << "px, release_from_pfb=" << (int)best_release_dist
                   << "px, speed=" << (int)best_release->speed << "px/f"
                   << ", confirm_frames=" << confirmed_frames
-                  << (have_hoop_ ? ", hoop visible" : ", hoop not visible")
+                  << (hasFreshHoop() ? ", hoop visible" : ", hoop not visible")
                   << ")";
     }
 
@@ -775,7 +786,7 @@ private:
     void trackBallEvent(const DetectionBox& ball_det, int ball_id) {
         shot_tracking_frames_++;
 
-        if (!is_shot_attempt_ || !have_hoop_) return;
+        if (!is_shot_attempt_ || !hasFreshHoop()) return;
 
         double bcx = centerX(ball_det), bcy = centerY(ball_det);
         double hcx = centerX(last_hoop_det_), hcy = centerY(last_hoop_det_);
@@ -849,10 +860,9 @@ private:
         }
     }
 
-    // Check if ball candidate is moving toward the hoop (dot product of velocity
-    // with ball→hoop vector). Returns true if no hoop data (fallback: allow).
+    // Check if recent motion points toward the latest hoop position.
     bool ballMovingTowardHoop(const BallCandidate& c) const {
-        if (!have_hoop_) return false; // require hoop visibility
+        if (!hasFreshHoop()) return false;
         if (c.history.size() < 2) return false;
         const auto& h1 = c.history[c.history.size() - 2];
         const auto& h2 = c.history.back();
@@ -1200,9 +1210,10 @@ public:
         parseDetections(*pfrm, env, all_dets);
 
         for (const auto& d : all_dets) {
-            if (d.has_label && d.label == hoop_label_) {
+            if (d.has_label && d.label == hoop_label_ && d.conf >= hoop_min_conf_) {
                 last_hoop_det_ = d;
                 have_hoop_ = true;
+                last_hoop_frame_ = frame_counter_;
                 break;
             }
         }
@@ -1283,6 +1294,8 @@ public:
             r->shot_exit_min_travel_px_ = params["shot_exit_min_travel_px"];
         if (params.count("hoop_label"))
             r->hoop_label_ = params["hoop_label"].get<std::string>();
+        if (params.count("hoop_min_conf"))
+            r->hoop_min_conf_ = params["hoop_min_conf"];
         if (params.count("passthrough_model_indices")) {
             for (const auto& idx : params["passthrough_model_indices"])
                 r->passthrough_model_indices_.push_back(idx.get<int>());
