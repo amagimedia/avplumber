@@ -41,6 +41,11 @@ static double centerDist(const DetectionBox& a, const DetectionBox& b) {
     return std::sqrt(dx * dx + dy * dy);
 }
 
+static bool boxesIntersect(const DetectionBox& a, const DetectionBox& b) {
+    return a.x1 <= b.x2 && a.x2 >= b.x1 &&
+           a.y1 <= b.y2 && a.y2 >= b.y1;
+}
+
 // Distance from point (px,py) to nearest edge of box. Zero when inside.
 static double edgeDistance(double px, double py, const DetectionBox& box) {
     double dx = std::max({0.0, box.x1 - px, px - box.x2});
@@ -138,12 +143,29 @@ struct BallCandidate {
 } // namespace
 
 enum class MergeMode { PFB, PFB_GAP, BALL_ONLY };
+enum class AnalysisEventType { NONE, SHOT };
+
+static const char* analysisEventTypeName(AnalysisEventType type) {
+    switch (type) {
+    case AnalysisEventType::SHOT: return "shot";
+    case AnalysisEventType::NONE: default: return "none";
+    }
+}
 
 class BasketballAnalysis : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
 private:
+    struct AnalysisEventSnapshot {
+        AnalysisEventType type = AnalysisEventType::NONE;
+        int ball_id = -1;
+        uint64_t frame = 0;
+        double travel_px = 0.0;
+        int tracked_frames = 0;
+        int extrapolated_frames = 0;
+    };
+
     // ── Config ──────────────────────────────────────────────
     std::string metadata_key_in_       = "yolo_detections_v1";
-    std::string metadata_key_out_      = "merge_ball_v1";
+    std::string metadata_key_out_      = "basketball_analysis_v1";
     int    ball_model_index_           = 0;
     int    context_model_index_        = 1;
     std::vector<int> passthrough_model_indices_;
@@ -161,11 +183,11 @@ private:
     int    candidate_drop_frames_      = 3;
     int    pfb_possession_grace_frames_ = 2;
     int    release_confirm_frames_      = 2;
+    int    release_possession_memory_frames_ = 6;
     int    shot_make_min_frames_        = 4;
     double shot_make_min_travel_px_     = 70.0;
-    int    shot_exit_min_frames_        = 8;
-    double shot_exit_min_travel_px_     = 80.0;
-    double hoop_min_conf_               = 0.0;
+    int    shot_hoop_memory_frames_     = 24;
+    double hoop_min_conf_               = 0.80;
 
     // ── State ───────────────────────────────────────────────
     MergeMode mode_ = MergeMode::PFB;
@@ -189,6 +211,7 @@ private:
     bool     current_pfb_visible_           = false;
     bool     current_pfb_possession_        = false;
     bool     recent_pfb_possession_         = false;
+    bool     awaiting_fresh_pfb_release_    = false;
     int      pending_release_ball_id_       = -1;
     int      pending_release_frames_        = 0;
 
@@ -205,7 +228,7 @@ private:
     uint64_t last_ball_only_exit_frame_     = 0;
     static constexpr int kBallOnlyCooldownFrames = 30; // ~1 second at 30fps
 
-    // Active shot: track ball in PFB mode when armed ball leaves player (shot/pass)
+    // Active shot: track a confirmed release until it reaches the hoop zone or ends.
     int      active_shot_id_               = -1;
     int      shot_extrapolated_frames_     = 0;
 
@@ -216,14 +239,18 @@ private:
     std::string hoop_label_                = "hoop";
     static constexpr int kHoopHoldFrames   = 2;
 
-    // Shot/pass counting (persists across resetState — game total)
+    // Shot outcome counting (persists across resetState — game total)
     int      total_shots_detected_         = 0;
-    int      total_passes_detected_        = 0;
     int      last_event_ball_id_           = -1;
     double   shot_start_x_                 = 0;
     double   shot_start_y_                 = 0;
     int      shot_tracking_frames_         = 0;
-    bool     is_shot_attempt_              = false; // true=shot (toward hoop), false=pass
+    bool     shot_counted_                 = false;
+    bool     shot_reached_hoop_zone_       = false;
+    bool     shot_scored_                  = false;
+    DetectionBox last_shot_eval_det_;
+    bool     have_last_shot_eval_det_      = false;
+    AnalysisEventSnapshot last_event_;
 
     // ── Reset ───────────────────────────────────────────────
 
@@ -243,6 +270,7 @@ private:
         current_pfb_visible_ = false;
         current_pfb_possession_ = false;
         recent_pfb_possession_ = false;
+        awaiting_fresh_pfb_release_ = false;
         pending_release_ball_id_ = -1;
         pending_release_frames_ = 0;
         gap_buffer_.clear();
@@ -256,12 +284,47 @@ private:
         have_hoop_ = false;
         last_hoop_frame_ = 0;
         last_event_ball_id_ = -1;
-        is_shot_attempt_ = false;
+        shot_counted_ = false;
+        shot_reached_hoop_zone_ = false;
+        shot_scored_ = false;
+        have_last_shot_eval_det_ = false;
+        last_event_ = AnalysisEventSnapshot{};
     }
 
     bool hasFreshHoop() const {
         return have_hoop_
             && (frame_counter_ - last_hoop_frame_) <= (uint64_t)kHoopHoldFrames;
+    }
+
+    bool hasShotHoopReference() const {
+        return have_hoop_
+            && (frame_counter_ - last_hoop_frame_) <= (uint64_t)shot_hoop_memory_frames_;
+    }
+
+    bool shouldDrawHeldHoop() const {
+        if (!have_hoop_) return false;
+        if (hasFreshHoop()) return true;
+        return active_shot_id_ >= 0 || mode_ == MergeMode::BALL_ONLY;
+    }
+
+    int currentExtrapolatedFrames() const {
+        return mode_ == MergeMode::BALL_ONLY ? ball_only_extrapolated_frames_
+                                             : shot_extrapolated_frames_;
+    }
+
+    const char* activeEventName() const {
+        if (active_shot_id_ >= 0 || active_ball_id_ >= 0)
+            return "shot";
+        return "none";
+    }
+
+    void recordCompletedEvent(AnalysisEventType type, int ball_id, double travel_px) {
+        last_event_.type = type;
+        last_event_.ball_id = ball_id;
+        last_event_.frame = frame_counter_;
+        last_event_.travel_px = travel_px;
+        last_event_.tracked_frames = shot_tracking_frames_;
+        last_event_.extrapolated_frames = currentExtrapolatedFrames();
     }
 
     // ── Parsing ─────────────────────────────────────────────
@@ -334,9 +397,31 @@ private:
             if (det.extrapolated)    item["extrapolated"] = true;
             md["detections"].push_back(item);
         }
-        md["merge_ball"] = {
+        md["basketball_analysis"] = {
             {"mode", mode_tag},
-            {"active_ball_candidate_id", active_ball_id_}
+            {"active_ball_candidate_id", active_ball_id_},
+            {"analysis", {
+                {"event", {
+                    {"type", analysisEventTypeName(last_event_.type)},
+                    {"ball_id", last_event_.ball_id},
+                    {"frame", last_event_.frame},
+                    {"travel_px", last_event_.travel_px},
+                    {"tracked_frames", last_event_.tracked_frames},
+                    {"extrapolated_frames", last_event_.extrapolated_frames}
+                }},
+                {"state", {
+                    {"active_event", activeEventName()},
+                    {"shot_attempt", shot_counted_},
+                    {"has_fresh_hoop", hasFreshHoop()},
+                    {"ball_only_mode", mode_ == MergeMode::BALL_ONLY},
+                    {"pending_release_frames", pending_release_frames_},
+                    {"reached_hoop_zone", shot_reached_hoop_zone_},
+                    {"scored", shot_scored_}
+                }},
+                {"totals", {
+                    {"shots", total_shots_detected_}
+                }}
+            }}
         };
         return md;
     }
@@ -368,8 +453,8 @@ private:
             }
         }
 
-        // Reuse the last hoop briefly to smooth single-frame detector drops.
-        if (!saw_passthrough_hoop && hasFreshHoop()) dets.push_back(last_hoop_det_);
+        // Keep the last valid hoop visible through an active shot event.
+        if (!saw_passthrough_hoop && shouldDrawHeldHoop()) dets.push_back(last_hoop_det_);
     }
 
     void writeMetadata(av::VideoFrame& frm, const MetadataEnvelope& env,
@@ -482,6 +567,7 @@ private:
             if (best_idx >= 0 && best_dist <= arm_dist_px_) {
                 current_pfb_possession_ = true;
                 recent_pfb_possession_ = true;
+                awaiting_fresh_pfb_release_ = false;
                 last_pfb_possession_ball_det_ = pfb_ball_dets[best_idx];
                 have_last_pfb_possession_ball_ = true;
                 last_pfb_possession_frame_ = frame_counter_;
@@ -500,6 +586,79 @@ private:
     bool candidateMatchesRecentPfbPossession(const BallCandidate& c) const {
         if (!have_last_pfb_possession_ball_) return false;
         return centerDist(c.last_det, last_pfb_possession_ball_det_) <= max_match_distance_px_;
+    }
+
+    bool hasRecentReleaseSource() const {
+        return have_last_pfb_possession_ball_
+            && (frame_counter_ - last_pfb_possession_frame_)
+                   <= (uint64_t)release_possession_memory_frames_;
+    }
+
+    DetectionBox expandedHoopZone() const {
+        DetectionBox zone = last_hoop_det_;
+        const double hoop_w = std::max(1.0, last_hoop_det_.x2 - last_hoop_det_.x1);
+        const double hoop_h = std::max(1.0, last_hoop_det_.y2 - last_hoop_det_.y1);
+        const double pad_x = hoop_w * 1.10;
+        const double pad_top = hoop_h * 1.10;
+        const double pad_bottom = hoop_h * 1.85;
+        zone.x1 -= pad_x;
+        zone.x2 += pad_x;
+        zone.y1 -= pad_top;
+        zone.y2 += pad_bottom;
+        return zone;
+    }
+
+    DetectionBox goodShotDropZone() const {
+        DetectionBox zone = last_hoop_det_;
+        const double hoop_w = std::max(1.0, last_hoop_det_.x2 - last_hoop_det_.x1);
+        const double hoop_h = std::max(1.0, last_hoop_det_.y2 - last_hoop_det_.y1);
+        zone.x1 -= hoop_w * 0.35;
+        zone.x2 += hoop_w * 0.35;
+        zone.y1 = centerY(last_hoop_det_) - hoop_h * 0.25;
+        zone.y2 += hoop_h * 1.5;
+        return zone;
+    }
+
+    bool ballCenterInside(const DetectionBox& box, const DetectionBox& ball_det) const {
+        const double bx = centerX(ball_det);
+        const double by = centerY(ball_det);
+        return bx >= box.x1 && bx <= box.x2 && by >= box.y1 && by <= box.y2;
+    }
+
+    bool isGoodShotGeometry(const DetectionBox& ball_det) const {
+        if (boxesIntersect(ball_det, last_hoop_det_)) return true;
+        if (!shot_reached_hoop_zone_) return false;
+
+        const double hoop_w = std::max(1.0, last_hoop_det_.x2 - last_hoop_det_.x1);
+        const double hoop_center_y = centerY(last_hoop_det_);
+        const double bx = centerX(ball_det);
+        const double by = centerY(ball_det);
+        if (!ballCenterInside(goodShotDropZone(), ball_det)) return false;
+        if (bx < last_hoop_det_.x1 - hoop_w || bx > last_hoop_det_.x2 + hoop_w) return false;
+        if (by < hoop_center_y) return false;
+        if (!have_last_shot_eval_det_) return true;
+
+        const double prev_y = centerY(last_shot_eval_det_);
+        return prev_y <= by && prev_y <= last_hoop_det_.y2 + hoop_w;
+    }
+
+    void finalizeShotOutcome(int ball_id, const DetectionBox* det) {
+        (void)ball_id;
+        (void)det;
+    }
+
+    void countShotAttemptIfNeeded(int ball_id, double travel_px) {
+        if (ball_id == last_event_ball_id_) return;
+        total_shots_detected_++;
+        last_event_ball_id_ = ball_id;
+        shot_counted_ = true;
+        recordCompletedEvent(AnalysisEventType::SHOT, ball_id, travel_px);
+    }
+
+    double shotTravelPx(const DetectionBox& ball_det) const {
+        const double dx = centerX(ball_det) - shot_start_x_;
+        const double dy = centerY(ball_det) - shot_start_y_;
+        return std::sqrt(dx * dx + dy * dy);
     }
 
     // ── Ball candidate tracker ──────────────────────────────
@@ -533,7 +692,17 @@ private:
         std::vector<std::tuple<double, int, int>> pairs;
         for (int ci = 0; ci < (int)candidates_.size(); ci++)
             for (int di = 0; di < (int)ball_dets.size(); di++) {
-                double d = centerDist(candidates_[ci].last_det, ball_dets[di]);
+                DetectionBox match_ref = candidates_[ci].last_det;
+                const bool is_tracked_release = candidates_[ci].id == active_shot_id_
+                    || candidates_[ci].id == active_ball_id_;
+                if (is_tracked_release &&
+                    candidates_[ci].last_match_frame < frame_counter_ &&
+                    candidates_[ci].traj.valid) {
+                    match_ref = extrapolateBall(
+                        candidates_[ci],
+                        (int)(frame_counter_ - candidates_[ci].last_match_frame));
+                }
+                double d = centerDist(match_ref, ball_dets[di]);
                 if (d <= max_match_distance_px_) pairs.emplace_back(d, ci, di);
             }
         std::sort(pairs.begin(), pairs.end());
@@ -601,7 +770,7 @@ private:
                 c.last_near_player_frame = frame_counter_;
                 c.last_near_player_dist = dist;
                 if (c.consecutive_near_frames >= arm_frames_ && !c.armed) {
-                    logstream << "merge_ball: arming: ball candidate #" << c.id
+                    logstream << "basketball_analysis: arming: ball candidate #" << c.id
                               << " within " << (int)dist
                               << "px of player box edge for "
                               << c.consecutive_near_frames << " consecutive frames"
@@ -624,9 +793,10 @@ private:
         if (active_shot_id_ >= 0) {
             BallCandidate* shot = findCandidate(active_shot_id_);
             if (!shot) {
-                logstream << "merge_ball: shot tracking lost: active shot candidate #"
+                logstream << "basketball_analysis: shot tracking lost: active shot candidate #"
                           << active_shot_id_
                           << " was removed before event completion";
+                finalizeShotOutcome(active_shot_id_, nullptr);
                 active_shot_id_ = -1;
                 shot_extrapolated_frames_ = 0;
                 return;
@@ -641,7 +811,8 @@ private:
                     double bcx = centerX(shot->last_det), bcy = centerY(shot->last_det);
                     double dist = nearestPlayerEdgeDist(bcx, bcy, prox_players);
                     if (dist <= arm_dist_px_) {
-                        logstream << "merge_ball: shot attempt ended: ball #" << shot->id
+                        finalizeShotOutcome(shot->id, &shot->last_det);
+                        logstream << "basketball_analysis: shot attempt ended: ball #" << shot->id
                                   << " returned near player (dist=" << (int)dist << "px)";
                         active_shot_id_ = -1;
                         return;
@@ -649,8 +820,20 @@ private:
                 }
             } else {
                 shot_extrapolated_frames_++;
+                if (shot->traj.valid) {
+                    DetectionBox extrap = extrapolateBall(*shot, shot_extrapolated_frames_);
+                    trackBallEvent(extrap, shot->id);
+                } else {
+                    DetectionBox held = shot->last_det;
+                    held.extrapolated = true;
+                    trackBallEvent(held, shot->id);
+                }
                 if (shot_extrapolated_frames_ > max_hold_frames_) {
-                    logstream << "merge_ball: shot ended: ball #" << shot->id
+                    DetectionBox final_det = shot->traj.valid
+                        ? extrapolateBall(*shot, shot_extrapolated_frames_)
+                        : shot->last_det;
+                    finalizeShotOutcome(shot->id, &final_det);
+                    logstream << "basketball_analysis: shot ended: ball #" << shot->id
                               << " lost after " << shot_extrapolated_frames_ << " frames";
                     active_shot_id_ = -1;
                     shot_extrapolated_frames_ = 0;
@@ -660,7 +843,13 @@ private:
             return; // already tracking a shot
         }
 
-        if (current_pfb_possession_ || !recent_pfb_possession_ || prox_players.empty()) {
+        if (current_pfb_possession_ || !hasRecentReleaseSource() || prox_players.empty()) {
+            pending_release_ball_id_ = -1;
+            pending_release_frames_ = 0;
+            return;
+        }
+
+        if (awaiting_fresh_pfb_release_) {
             pending_release_ball_id_ = -1;
             pending_release_frames_ = 0;
             return;
@@ -700,15 +889,14 @@ private:
         if (pending_release_frames_ < release_confirm_frames_) return;
 
         const int confirmed_frames = pending_release_frames_;
-        bool toward_hoop = ballMovingTowardHoop(*best_release);
         active_shot_id_ = best_release->id;
         shot_extrapolated_frames_ = 0;
+        awaiting_fresh_pfb_release_ = true;
         pending_release_ball_id_ = -1;
         pending_release_frames_ = 0;
-        startEventTracking(best_release->last_det, toward_hoop);
-        logstream << "merge_ball: confirmed " << (toward_hoop ? "shot" : "pass")
-                  << " release: ball #" << best_release->id
-                  << (toward_hoop ? " heading toward hoop" : " leaving player")
+        startEventTracking(best_release->last_det);
+        logstream << "basketball_analysis: confirmed release: ball #"
+                  << best_release->id
                   << " (dist_from_player=" << (int)best_player_dist
                   << "px, release_from_pfb=" << (int)best_release_dist
                   << "px, speed=" << (int)best_release->speed << "px/f"
@@ -750,14 +938,13 @@ private:
     }
 
     BallCandidate* findArmedValidCandidate() {
-        // Only enter BALL_ONLY if updateActiveShot() already detected a shot or pass
         if (active_shot_id_ < 0) return nullptr;
 
         // Cooldown: don't re-enter BALL_ONLY too soon after leaving it
         if (frame_counter_ - last_ball_only_exit_frame_ < (uint64_t)kBallOnlyCooldownFrames)
             return nullptr;
 
-        // Return the active shot/pass candidate
+        // Return the active shot candidate
         BallCandidate* shot = findCandidate(active_shot_id_);
         if (shot && shot->valid) return shot;
         return nullptr;
@@ -782,93 +969,58 @@ private:
         return det;
     }
 
-    // Track ball during BALL_ONLY mode. Counts shot if ball reaches hoop proximity.
+    // Track shot progress during BALL_ONLY mode.
     void trackBallEvent(const DetectionBox& ball_det, int ball_id) {
         shot_tracking_frames_++;
 
-        if (!is_shot_attempt_ || !hasFreshHoop()) return;
+        if (!hasShotHoopReference()) return;
+        if (ball_det.extrapolated) return;
 
-        double bcx = centerX(ball_det), bcy = centerY(ball_det);
-        double hcx = centerX(last_hoop_det_), hcy = centerY(last_hoop_det_);
-        double dx = bcx - hcx, dy = bcy - hcy;
-        double dist_to_hoop = std::sqrt(dx * dx + dy * dy);
+        const double travel = shotTravelPx(ball_det);
+        if (shot_tracking_frames_ < shot_make_min_frames_ ||
+            travel < shot_make_min_travel_px_) {
+            return;
+        }
 
-        double tdx = bcx - shot_start_x_, tdy = bcy - shot_start_y_;
-        double travel = std::sqrt(tdx * tdx + tdy * tdy);
+        if (boxesIntersect(ball_det, expandedHoopZone()) ||
+            ballCenterInside(expandedHoopZone(), ball_det)) {
+            shot_reached_hoop_zone_ = true;
+        }
 
-        double hoop_proximity = arm_dist_px_ * 0.6; // ~30px: ball must be very close to hoop
-        if (dist_to_hoop < hoop_proximity &&
-            shot_tracking_frames_ >= shot_make_min_frames_ &&
-            travel >= shot_make_min_travel_px_ &&
-            ball_id != last_event_ball_id_) {
-            total_shots_detected_++;
-            last_event_ball_id_ = ball_id;
-            logstream << "merge_ball: SHOT #" << total_shots_detected_
-                      << " at basket: ball #" << ball_id
-                      << " reached hoop (dist=" << (int)dist_to_hoop
-                      << "px, traveled=" << (int)travel
+        if (shot_reached_hoop_zone_ && !shot_counted_) {
+            countShotAttemptIfNeeded(ball_id, travel);
+            logstream << "basketball_analysis: shot confirmed at hoop: ball #"
+                      << ball_id
+                      << ", traveled " << (int)travel
                       << "px in " << shot_tracking_frames_ << " frames)";
         }
+
+        if (isGoodShotGeometry(ball_det)) {
+            shot_scored_ = true;
+            logstream << "basketball_analysis: shot reached relaxed hoop zone: ball #"
+                      << ball_id
+                      << ", traveled " << (int)travel
+                      << "px in " << shot_tracking_frames_ << " frames)";
+        }
+
+        last_shot_eval_det_ = ball_det;
+        have_last_shot_eval_det_ = true;
     }
 
-    void startEventTracking(const DetectionBox& ball_det, bool toward_hoop) {
+    void startEventTracking(const DetectionBox& ball_det) {
         shot_start_x_ = centerX(ball_det);
         shot_start_y_ = centerY(ball_det);
         shot_tracking_frames_ = 0;
-        is_shot_attempt_ = toward_hoop;
+        shot_counted_ = false;
+        shot_reached_hoop_zone_ = false;
+        shot_scored_ = false;
+        have_last_shot_eval_det_ = false;
     }
 
-    // Count shot or pass on BALL_ONLY exit based on tracking duration and travel
-    void countEventOnBallOnlyExit(int ball_id, const BallCandidate* active, bool returned_to_player) {
-        double travel = 0;
-        if (active) {
-            double bcx = centerX(active->last_det), bcy = centerY(active->last_det);
-            double tdx = bcx - shot_start_x_, tdy = bcy - shot_start_y_;
-            travel = std::sqrt(tdx * tdx + tdy * tdy);
-        }
-        if (ball_id == last_event_ball_id_) return;
-        if (shot_tracking_frames_ < 3) return;
-        if (travel < 80.0) return;
-
-        last_event_ball_id_ = ball_id;
-
-        if (is_shot_attempt_) {
-            // Shot: ball was heading toward hoop
-            if (shot_tracking_frames_ >= shot_exit_min_frames_ &&
-                travel >= shot_exit_min_travel_px_) {
-                total_shots_detected_++;
-                logstream << "merge_ball: SHOT #" << total_shots_detected_
-                          << " (on exit): ball #" << ball_id
-                          << " tracked " << shot_tracking_frames_
-                          << " frames, traveled " << (int)travel << "px";
-            }
-        } else if (returned_to_player) {
-            // Pass: ball left player, traveled, and reached another player
-            total_passes_detected_++;
-            logstream << "merge_ball: PASS #" << total_passes_detected_
-                      << ": ball #" << ball_id
-                      << " tracked " << shot_tracking_frames_
-                      << " frames, traveled " << (int)travel << "px";
-        } else {
-            // Ball left player but lost tracking without reaching another player
-            // Could be a pass that went out of frame or a loose ball
-            total_passes_detected_++;
-            logstream << "merge_ball: PASS #" << total_passes_detected_
-                      << " (lost): ball #" << ball_id
-                      << " tracked " << shot_tracking_frames_
-                      << " frames, traveled " << (int)travel << "px";
-        }
-    }
-
-    // Check if recent motion points toward the latest hoop position.
-    bool ballMovingTowardHoop(const BallCandidate& c) const {
-        if (!hasFreshHoop()) return false;
-        if (c.history.size() < 2) return false;
-        const auto& h1 = c.history[c.history.size() - 2];
-        const auto& h2 = c.history.back();
-        double vx = h2.cx - h1.cx, vy = h2.cy - h1.cy;
-        double dx = centerX(last_hoop_det_) - h2.cx, dy = centerY(last_hoop_det_) - h2.cy;
-        return (vx * dx + vy * dy) > 0;
+    // Count a miss only if the shot reached the padded hoop zone
+    // without ever entering the actual hoop box.
+    void countEventOnBallOnlyExit(int ball_id, const BallCandidate* active) {
+        finalizeShotOutcome(ball_id, active ? &active->last_det : nullptr);
     }
 
     // ── Buffer operations ───────────────────────────────────
@@ -899,7 +1051,7 @@ private:
             max_disp = std::max(max_disp,
                                 centerDist(last_player_dets_[li], resume_players[ci]));
 
-        logstream << "merge_ball: PFB gap interpolated: " << gap_buffer_.size()
+        logstream << "basketball_analysis: PFB gap interpolated: " << gap_buffer_.size()
                   << " frames, " << matches.size() << "/" << resume_players.size()
                   << " players matched (max displacement="
                   << (int)max_disp << "px)";
@@ -1051,12 +1203,10 @@ private:
                 ball_only_extrapolated_frames_ = 0;
                 hold_frames_emitted_           = 0;
                 active_shot_id_                = -1; // BALL_ONLY takes over
-                // is_shot_attempt_ was already set by updateActiveShot()
+                // The release is tracked, but it still counts only after hoop reach.
 
-                logstream << "merge_ball: PFB -> BALL_ONLY ("
-                          << (is_shot_attempt_ ? "shot" : "pass") << "): "
+                logstream << "basketball_analysis: PFB -> BALL_ONLY (tracked release): "
                           << "ball candidate #" << armed->id
-                          << (is_shot_attempt_ ? " heading toward hoop" : " leaving player")
                           << ", was near player for " << armed->consecutive_near_frames
                           << " frames (edge dist=" << (int)armed->last_near_player_dist << "px)"
                           << ", players lost for " << (frame_counter_ - last_player_frame_)
@@ -1070,7 +1220,7 @@ private:
                 emitOneHeld();
             } else {
                 if (hold_frames_emitted_ == max_hold_frames_) {
-                    logstream << "merge_ball: PFB hold timeout: "
+                    logstream << "basketball_analysis: PFB hold timeout: "
                               << "no player detection for "
                               << (frame_counter_ - last_player_frame_) << " frames"
                               << ", last real detection at frame " << last_player_frame_
@@ -1102,14 +1252,14 @@ private:
             if (consecutive_player_frames_ >= confirm_frames_) {
                 int total = ball_only_tracked_frames_ +
                             ball_only_extrapolated_frames_;
-                logstream << "merge_ball: BALL_ONLY -> PFB: "
+                logstream << "basketball_analysis: BALL_ONLY -> PFB: "
                           << "player detected for "
                           << consecutive_player_frames_ << " consecutive frames"
                           << ", was in BALL_ONLY for " << total << " frames ("
                           << ball_only_tracked_frames_ << " tracked, "
                           << ball_only_extrapolated_frames_ << " extrapolated)";
 
-                countEventOnBallOnlyExit(active_ball_id_, active, true);
+                countEventOnBallOnlyExit(active_ball_id_, active);
                 flushGapBufferPFB();
                 if (!player_dets.empty()) {
                     last_player_dets_      = player_dets;
@@ -1148,6 +1298,7 @@ private:
                    hold_frames_emitted_ < max_hold_frames_) {
             int ahead = (int)(frame_counter_ - active->last_match_frame);
             DetectionBox extrap = extrapolateBall(*active, ahead);
+            trackBallEvent(extrap, active->id);
             writeMetadata(frm, env, {extrap}, "ball_only_extrapolated");
             this->sink_->put(frm);
             ball_only_extrapolated_frames_++;
@@ -1156,6 +1307,7 @@ private:
             // No trajectory fit — hold last position
             DetectionBox held = active->last_det;
             held.extrapolated = true;
+            trackBallEvent(held, active->id);
             writeMetadata(frm, env, {held}, "ball_only_held");
             this->sink_->put(frm);
             hold_frames_emitted_++;
@@ -1166,12 +1318,12 @@ private:
             if (hold_frames_emitted_ >= max_hold_frames_ || !active) {
                 uint64_t last_real = active ? active->last_match_frame : ball_only_entered_frame_;
                 double residual = active ? active->traj.residual : 0.0;
-                logstream << "merge_ball: BALL_ONLY extrapolation timeout: "
+                logstream << "basketball_analysis: BALL_ONLY extrapolation timeout: "
                           << "no ball detection for "
                           << (frame_counter_ - last_real) << " frames"
                           << ", last real detection at frame " << last_real
                           << ", trajectory residual was " << residual << "px";
-                countEventOnBallOnlyExit(active_ball_id_, active, false);
+                countEventOnBallOnlyExit(active_ball_id_, active);
                 mode_                      = MergeMode::PFB;
                 active_ball_id_            = -1;
                 hold_frames_emitted_       = 0;
@@ -1194,9 +1346,8 @@ public:
             av::VideoFrame eof = *pfrm;
             this->source_->pop();
             flushGapBufferRaw();
-            logstream << "merge_ball: GAME STATS: "
-                      << total_shots_detected_ << " shots, "
-                      << total_passes_detected_ << " passes in "
+            logstream << "basketball_analysis: GAME STATS: "
+                      << total_shots_detected_ << " shots in "
                       << frame_counter_ << " frames";
             resetState();
             this->sink_->put(eof);
@@ -1284,14 +1435,14 @@ public:
             r->pfb_possession_grace_frames_ = params["pfb_possession_grace_frames"];
         if (params.count("release_confirm_frames"))
             r->release_confirm_frames_ = params["release_confirm_frames"];
+        if (params.count("release_possession_memory_frames"))
+            r->release_possession_memory_frames_ = params["release_possession_memory_frames"];
         if (params.count("shot_make_min_frames"))
             r->shot_make_min_frames_ = params["shot_make_min_frames"];
         if (params.count("shot_make_min_travel_px"))
             r->shot_make_min_travel_px_ = params["shot_make_min_travel_px"];
-        if (params.count("shot_exit_min_frames"))
-            r->shot_exit_min_frames_ = params["shot_exit_min_frames"];
-        if (params.count("shot_exit_min_travel_px"))
-            r->shot_exit_min_travel_px_ = params["shot_exit_min_travel_px"];
+        if (params.count("shot_hoop_memory_frames"))
+            r->shot_hoop_memory_frames_ = params["shot_hoop_memory_frames"];
         if (params.count("hoop_label"))
             r->hoop_label_ = params["hoop_label"].get<std::string>();
         if (params.count("hoop_min_conf"))
