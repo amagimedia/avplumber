@@ -1,4 +1,4 @@
-// Draw a green bounding box onto an NV12 CUDA frame.
+// Draw a configurable-color bounding box onto an NV12 CUDA frame.
 #include <stdint.h>
 #include <cuda_runtime.h>
 
@@ -17,15 +17,15 @@ extern "C" __global__ void kDrawBBoxNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
     int width, int height,
     int x1, int y1, int x2, int y2,
-    int thickness)
+    int thickness,
+    int y_color)
 {
     const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (x >= width || y >= height) return;
 
     if (inside_bbox_border(x, y, x1, y1, x2, y2, thickness)) {
-        // BT.709 limited-range luma for bright green.
-        y_plane[(size_t)y * pitch_y + (size_t)x] = 173;
+        y_plane[(size_t)y * pitch_y + (size_t)x] = (uint8_t)y_color;
     }
 }
 
@@ -33,7 +33,8 @@ extern "C" __global__ void kDrawBBoxNV12Chroma(
     uint8_t* __restrict__ uv_plane, size_t pitch_uv,
     int width, int height,
     int x1, int y1, int x2, int y2,
-    int thickness)
+    int thickness,
+    int u_color, int v_color)
 {
     const int uv_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int uv_y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -54,8 +55,7 @@ extern "C" __global__ void kDrawBBoxNV12Chroma(
 
     if (draw) {
         uint8_t* row = uv_plane + (size_t)uv_y * pitch_uv;
-        // BT.709 limited-range UV for green.
-        row[(size_t)(uv_x << 1) + 0] = 42;
-        row[(size_t)(uv_x << 1) + 1] = 26;
+        row[(size_t)(uv_x << 1) + 0] = (uint8_t)u_color;
+        row[(size_t)(uv_x << 1) + 1] = (uint8_t)v_color;
     }
 }

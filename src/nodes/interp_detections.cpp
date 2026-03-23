@@ -181,6 +181,8 @@ private:
         }
 
         const int n = (int)gap_buffer_.size();
+        logstream << "interp_detections: interpolating " << n << " gap frame(s) with "
+                  << matches.size() << "/" << resume_dets.size() << " matched player boxes";
         for (int i = 0; i < n; i++) {
             const double t = (double)(i + 1) / (double)(n + 1);
 

@@ -12,7 +12,9 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -38,6 +40,15 @@ struct BBox {
     int y1 = 0;
     int x2 = 0;
     int y2 = 0;
+    int y_color = 173;
+    int u_color = 42;
+    int v_color = 26;
+};
+
+struct DrawColor {
+    int y = 173;
+    int u = 42;
+    int v = 26;
 };
 }
 
@@ -52,6 +63,8 @@ private:
     double min_conf_ = 0.0;
     std::unordered_set<int> allowed_classes_;
     std::unordered_set<std::string> allowed_labels_;
+    DrawColor default_color_{};
+    std::unordered_map<int, DrawColor> model_colors_;
     double model_content_width_ = 0.0;
     double model_content_height_ = 0.0;
     double model_content_offset_x_ = 0.0;
@@ -125,6 +138,42 @@ private:
 
     static int clampInt(int value, int lo, int hi) {
         return std::max(lo, std::min(hi, value));
+    }
+
+    static std::string normalizeColorName(std::string color_name) {
+        std::transform(color_name.begin(), color_name.end(), color_name.begin(), [](unsigned char c) {
+            if (c == '-' || c == ' ') return '_';
+            return (char)std::tolower(c);
+        });
+        return color_name;
+    }
+
+    static bool tryParseNamedColor(const std::string& color_name, DrawColor& color_out) {
+        const std::string normalized = normalizeColorName(color_name);
+        if (normalized == "green") {
+            color_out = DrawColor{173, 42, 26};
+            return true;
+        }
+        if (normalized == "red") {
+            color_out = DrawColor{81, 90, 240};
+            return true;
+        }
+        if (normalized == "light_blue") {
+            color_out = DrawColor{169, 166, 16};
+            return true;
+        }
+        return false;
+    }
+
+    DrawColor resolveModelColor(const Parameters& det) const {
+        if (det.contains("model_index")) {
+            const int model_index = det["model_index"].get<int>();
+            const auto it = model_colors_.find(model_index);
+            if (it != model_colors_.end()) {
+                return it->second;
+            }
+        }
+        return default_color_;
     }
 
     bool scaleAndClampBBox(double x1, double y1, double x2, double y2, BBox &bbox_out) const {
@@ -234,6 +283,10 @@ private:
                     x2,
                     y2,
                     bbox)) {
+                const DrawColor color = resolveModelColor(det);
+                bbox.y_color = color.y;
+                bbox.u_color = color.u;
+                bbox.v_color = color.v;
                 boxes_out.push_back(bbox);
             }
         }
@@ -333,12 +386,15 @@ private:
         int x2 = bbox.x2;
         int y2 = bbox.y2;
         int thickness = bbox_thickness_;
+        int y_color = bbox.y_color;
+        int u_color = bbox.u_color;
+        int v_color = bbox.v_color;
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
             (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
-            (void*)&thickness
+            (void*)&thickness, (void*)&y_color
         };
         if (CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                     grid_x, grid_y, 1,
@@ -352,7 +408,7 @@ private:
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
             (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
-            (void*)&thickness
+            (void*)&thickness, (void*)&u_color, (void*)&v_color
         };
         if (CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                     uv_grid_x, uv_grid_y, 1,
@@ -387,6 +443,7 @@ public:
              double min_conf,
              std::unordered_set<int> allowed_classes,
              std::unordered_set<std::string> allowed_labels,
+             std::unordered_map<int, DrawColor> model_colors,
              double model_content_width,
              double model_content_height,
              double model_content_offset_x,
@@ -402,6 +459,7 @@ public:
           min_conf_(min_conf),
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
+          model_colors_(std::move(model_colors)),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -522,6 +580,7 @@ public:
         const double model_content_offset_y = params.value("model_content_offset_y", 0.0);
         std::unordered_set<int> allowed_classes;
         std::unordered_set<std::string> allowed_labels;
+        std::unordered_map<int, DrawColor> model_colors;
         VideoParameters input_params;
         if (video_format_src) {
             input_params.width = video_format_src->width();
@@ -543,12 +602,21 @@ public:
                 allowed_labels.insert(item.get<std::string>());
             }
         }
+        if (params.count("model_colors") && params["model_colors"].is_object()) {
+            for (auto it = params["model_colors"].begin(); it != params["model_colors"].end(); ++it) {
+                DrawColor color;
+                if (!it.value().is_string() || !tryParseNamedColor(it.value().get<std::string>(), color)) {
+                    throw Error("draw_bbox: model_colors values must be one of: red, green, light_blue");
+                }
+                model_colors[std::stoi(it.key())] = color;
+            }
+        }
         const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
             edges, params, metadata_key, bbox_thickness, min_conf,
-            std::move(allowed_classes), std::move(allowed_labels),
+            std::move(allowed_classes), std::move(allowed_labels), std::move(model_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             input_params, frame_rate, timebase, debug_log_every_n);
     }

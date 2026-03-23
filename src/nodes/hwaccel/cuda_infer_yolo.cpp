@@ -143,6 +143,7 @@ protected:
         CUstream stream = nullptr;
         std::vector<float> host_output;
         std::vector<uint16_t> host_output_half;
+        OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
     };
 
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -152,6 +153,7 @@ protected:
     TRTLogger trt_logger_;
     std::vector<ModelRunner> models_;
     std::vector<std::vector<std::string>> class_names_per_model_;
+    std::vector<std::vector<int>> class_index_remap_per_model_;
 
     int input_w_ = 0;
     int input_h_ = 0;
@@ -167,7 +169,6 @@ protected:
     float iou_thresh_ = 0.45f;
     int max_det_ = 300;
     uint64_t frame_counter_ = 0;
-    OutputBoxFormat output_box_format_ = OutputBoxFormat::EndToEndXYXY;
 
     bool initialized_ = false;
 
@@ -460,7 +461,7 @@ protected:
         return true;
     }
 
-    std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d, int model_index) const {
+    std::vector<Detection> decodeYoloOutput(const float* out, const nvinfer1::Dims& d, int model_index, OutputBoxFormat box_format) const {
         std::vector<Detection> dets;
         if (!out) return dets;
 
@@ -523,7 +524,7 @@ protected:
             if (d0 == 1 && d2 == 6) {
                 const int count = d1;
                 for (int i = 0; i < count; ++i) {
-                    if (output_box_format_ == OutputBoxFormat::RawCXCYWH) {
+                    if (box_format == OutputBoxFormat::RawCXCYWH) {
                         const float cx = out[i * 6 + 0];
                         const float cy = out[i * 6 + 1];
                         const float w = out[i * 6 + 2];
@@ -546,7 +547,7 @@ protected:
             } else if (d0 == 1 && d1 == 6) {
                 const int count = d2;
                 for (int i = 0; i < count; ++i) {
-                    if (output_box_format_ == OutputBoxFormat::RawCXCYWH) {
+                    if (box_format == OutputBoxFormat::RawCXCYWH) {
                         const float cx = out[0 * count + i];
                         const float cy = out[1 * count + i];
                         const float w = out[2 * count + i];
@@ -595,6 +596,23 @@ protected:
         }
 
         return dets;
+    }
+
+    int remapClassIndex(int model_index, int cls) const {
+        if (cls < 0 || model_index < 0 || (size_t)model_index >= class_index_remap_per_model_.size()) {
+            return cls;
+        }
+        const std::vector<int>& remap = class_index_remap_per_model_[(size_t)model_index];
+        if (remap.empty() || (size_t)cls >= remap.size()) {
+            return cls;
+        }
+        return remap[(size_t)cls];
+    }
+
+    void applyClassRemap(std::vector<Detection>& dets, int model_index) const {
+        for (Detection& det : dets) {
+            det.cls = remapClassIndex(model_index, det.cls);
+        }
     }
 
     void finalizeDetections(std::vector<Detection>& dets) const {
@@ -780,7 +798,8 @@ public:
                 }
             }
 
-            std::vector<Detection> model_dets = decodeYoloOutput(model.host_output.data(), model.output_dims, (int)model_index);
+            std::vector<Detection> model_dets = decodeYoloOutput(model.host_output.data(), model.output_dims, (int)model_index, model.output_box_format);
+            applyClassRemap(model_dets, (int)model_index);
             dets.insert(dets.end(), model_dets.begin(), model_dets.end());
         }
 
@@ -843,17 +862,29 @@ public:
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
         }
         if (params.count("output_box_format")) {
-            const std::string fmt = params["output_box_format"].get<std::string>();
-            if (fmt == "end2end_xyxy") {
-                r->output_box_format_ = OutputBoxFormat::EndToEndXYXY;
-            } else if (fmt == "raw_cxcywh") {
-                r->output_box_format_ = OutputBoxFormat::RawCXCYWH;
+            auto parseFmt = [](const std::string& fmt) -> OutputBoxFormat {
+                if (fmt == "end2end_xyxy") return OutputBoxFormat::EndToEndXYXY;
+                if (fmt == "raw_cxcywh") return OutputBoxFormat::RawCXCYWH;
+                throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh', got: " + fmt);
+            };
+            if (params["output_box_format"].is_array()) {
+                // Per-model format array
+                const auto& arr = params["output_box_format"];
+                if (arr.size() != r->models_.size()) {
+                    throw Error("cuda_infer_yolo: output_box_format array size must match engines array size");
+                }
+                for (size_t i = 0; i < arr.size(); i++) {
+                    r->models_[i].output_box_format = parseFmt(arr[i].get<std::string>());
+                }
             } else {
-                throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh'");
+                // Single format for all models
+                OutputBoxFormat fmt = parseFmt(params["output_box_format"].get<std::string>());
+                for (auto& m : r->models_) m.output_box_format = fmt;
             }
         }
 
         r->class_names_per_model_.resize(r->models_.size());
+        r->class_index_remap_per_model_.resize(r->models_.size());
         if (params.count("class_names_per_model")) {
             if (!params["class_names_per_model"].is_array()) {
                 throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
@@ -875,10 +906,31 @@ public:
                 ++model_index;
             }
         }
+        if (params.count("class_index_remap_per_model")) {
+            if (!params["class_index_remap_per_model"].is_array()) {
+                throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
+            }
+            if (params["class_index_remap_per_model"].size() != r->models_.size()) {
+                throw Error("cuda_infer_yolo: class_index_remap_per_model must match engines length");
+            }
+            size_t model_index = 0;
+            for (const auto& remap_item : params["class_index_remap_per_model"]) {
+                if (!remap_item.is_array()) {
+                    throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
+                }
+                for (const auto& cls_item : remap_item) {
+                    if (!cls_item.is_number_integer()) {
+                        throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
+                    }
+                    r->class_index_remap_per_model_[model_index].push_back(cls_item.get<int>());
+                }
+                ++model_index;
+            }
+        }
 
         return r;
     }
 };
 
-DECLNODE(cuda_infer_yolo, CudaInferYolo);
+DECLNODE(cuda_infer_yolo, CudaInferYolo)
 
