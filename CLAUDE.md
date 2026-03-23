@@ -108,7 +108,7 @@ See `doc/developing_nodes.md` for a full tutorial. Key points:
 
 1. Create `.cpp` in `src/nodes/` — the `generate_node_list` script will auto-register it.
 2. Subclass one of the node templates or `Node` directly.
-3. Use `DECLNODE` / `DECLNODE_ATD_RAW` macros to register the node type name.
+3. Use `DECLNODE` / `DECLNODE_ATD_RAW` macros to register the node type name. **Never put a semicolon after `DECLNODE(...)`** — it will silently break node registration.
 4. Implement `process()` (blocking nodes) or register callbacks with the event loop (non-blocking nodes).
 5. Use `params` (nlohmann/json) for configuration; node params are set at creation time and can be updated via `node.param.set`.
 6. Implement `IParameterizable` if the node accepts dynamic param updates.
