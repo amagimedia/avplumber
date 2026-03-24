@@ -823,23 +823,8 @@ public:
             make_unique<EdgeSink<av::VideoFrame>>(dst)
         );
 
-        if (!params.count("engines")) {
-            throw Error("cuda_infer_yolo: missing required parameter: engines");
-        }
-        if (!params["engines"].is_array()) {
-            throw Error("cuda_infer_yolo: engines must be a string array");
-        }
-        for (const auto& item : params["engines"]) {
-            if (!item.is_string()) {
-                throw Error("cuda_infer_yolo: engines must be a string array");
-            }
-            ModelRunner model;
-            model.engine_path = item.get<std::string>();
-            model.engine_name = shortEngineName(model.engine_path);
-            r->models_.push_back(std::move(model));
-        }
-        if (r->models_.empty()) {
-            throw Error("cuda_infer_yolo: engines array must not be empty");
+        if (!params.count("models") || !params["models"].is_array() || params["models"].empty()) {
+            throw Error("cuda_infer_yolo: missing or empty required parameter: models (array of model objects)");
         }
 
         if (!params.count("hwaccel")) {
@@ -861,71 +846,58 @@ public:
             const std::string ifmt = params["input_format"].get<std::string>();
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");
         }
-        if (params.count("output_box_format")) {
-            auto parseFmt = [](const std::string& fmt) -> OutputBoxFormat {
-                if (fmt == "end2end_xyxy") return OutputBoxFormat::EndToEndXYXY;
-                if (fmt == "raw_cxcywh") return OutputBoxFormat::RawCXCYWH;
-                throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh', got: " + fmt);
-            };
-            if (params["output_box_format"].is_array()) {
-                // Per-model format array
-                const auto& arr = params["output_box_format"];
-                if (arr.size() != r->models_.size()) {
-                    throw Error("cuda_infer_yolo: output_box_format array size must match engines array size");
-                }
-                for (size_t i = 0; i < arr.size(); i++) {
-                    r->models_[i].output_box_format = parseFmt(arr[i].get<std::string>());
-                }
-            } else {
-                // Single format for all models
-                OutputBoxFormat fmt = parseFmt(params["output_box_format"].get<std::string>());
-                for (auto& m : r->models_) m.output_box_format = fmt;
-            }
-        }
 
-        r->class_names_per_model_.resize(r->models_.size());
-        r->class_index_remap_per_model_.resize(r->models_.size());
-        if (params.count("class_names_per_model")) {
-            if (!params["class_names_per_model"].is_array()) {
-                throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
+        auto parseFmt = [](const std::string& fmt) -> OutputBoxFormat {
+            if (fmt == "end2end_xyxy") return OutputBoxFormat::EndToEndXYXY;
+            if (fmt == "raw_cxcywh") return OutputBoxFormat::RawCXCYWH;
+            throw Error("cuda_infer_yolo: output_box_format must be 'end2end_xyxy' or 'raw_cxcywh', got: " + fmt);
+        };
+
+        for (const auto& model_params : params["models"]) {
+            if (!model_params.is_object()) {
+                throw Error("cuda_infer_yolo: each item in models must be an object");
             }
-            if (params["class_names_per_model"].size() != r->models_.size()) {
-                throw Error("cuda_infer_yolo: class_names_per_model must match engines length");
+            if (!model_params.count("engine") || !model_params["engine"].is_string()) {
+                throw Error("cuda_infer_yolo: each model must have an 'engine' string");
             }
-            size_t model_index = 0;
-            for (const auto& names_item : params["class_names_per_model"]) {
-                if (!names_item.is_array()) {
-                    throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
+
+            ModelRunner model;
+            model.engine_path = model_params["engine"].get<std::string>();
+            model.engine_name = shortEngineName(model.engine_path);
+
+            if (model_params.count("output_box_format")) {
+                model.output_box_format = parseFmt(model_params["output_box_format"].get<std::string>());
+            }
+
+            r->models_.push_back(std::move(model));
+
+            std::vector<std::string> class_names;
+            if (model_params.count("class_names")) {
+                if (!model_params["class_names"].is_array()) {
+                    throw Error("cuda_infer_yolo: class_names must be a string array");
                 }
-                for (const auto& name : names_item) {
+                for (const auto& name : model_params["class_names"]) {
                     if (!name.is_string()) {
-                        throw Error("cuda_infer_yolo: class_names_per_model must be an array of string arrays");
+                        throw Error("cuda_infer_yolo: class_names must be a string array");
                     }
-                    r->class_names_per_model_[model_index].push_back(name.get<std::string>());
+                    class_names.push_back(name.get<std::string>());
                 }
-                ++model_index;
             }
-        }
-        if (params.count("class_index_remap_per_model")) {
-            if (!params["class_index_remap_per_model"].is_array()) {
-                throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
-            }
-            if (params["class_index_remap_per_model"].size() != r->models_.size()) {
-                throw Error("cuda_infer_yolo: class_index_remap_per_model must match engines length");
-            }
-            size_t model_index = 0;
-            for (const auto& remap_item : params["class_index_remap_per_model"]) {
-                if (!remap_item.is_array()) {
-                    throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
+            r->class_names_per_model_.push_back(std::move(class_names));
+
+            std::vector<int> class_index_remap;
+            if (model_params.count("class_index_remap")) {
+                if (!model_params["class_index_remap"].is_array()) {
+                    throw Error("cuda_infer_yolo: class_index_remap must be an int array");
                 }
-                for (const auto& cls_item : remap_item) {
+                for (const auto& cls_item : model_params["class_index_remap"]) {
                     if (!cls_item.is_number_integer()) {
-                        throw Error("cuda_infer_yolo: class_index_remap_per_model must be an array of int arrays");
+                        throw Error("cuda_infer_yolo: class_index_remap must be an int array");
                     }
-                    r->class_index_remap_per_model_[model_index].push_back(cls_item.get<int>());
+                    class_index_remap.push_back(cls_item.get<int>());
                 }
-                ++model_index;
             }
+            r->class_index_remap_per_model_.push_back(std::move(class_index_remap));
         }
 
         return r;
