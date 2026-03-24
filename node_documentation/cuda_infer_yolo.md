@@ -76,11 +76,17 @@ Coordinates are emitted in model input space, not remapped back to an original s
 - `dst`
   Output video edge.
 
-- `engine`
-  Path to the TensorRT engine file.
-
 - `hwaccel`
   Name of the shared `HWAccelDevice` instance to use.
+
+- `models`
+  Array of model objects. Each model object has:
+  - `engine` (required) — path to the TensorRT engine file.
+  - `class_names` (optional) — array of class-name strings, mapped to class IDs by index.
+  - `class_index_remap` (optional) — integer array used to remap decoded class IDs before labels are attached. Example: `[1, 0]` swaps class 0 and 1.
+  - `output_box_format` (optional) — override for ambiguous `[1, N, 6]` / `[1, 6, N]` outputs. Values: `end2end_xyxy` (default) or `raw_cxcywh`.
+
+  All models must share the same input dimensions and data type.
 
 ### Optional
 
@@ -108,41 +114,6 @@ Coordinates are emitted in model input space, not remapped back to an original s
 - `input_format`
   Channel order for RGB preprocessing. Values `BGR` or `bgr` enable BGR ordering; any other value is treated as RGB.
 
-- `output_box_format`
-  Optional override for ambiguous `[1, N, 6]` / `[1, 6, N]` outputs.
-  Supported values:
-  - `end2end_xyxy` for `[x1, y1, x2, y2, conf, cls]` (default)
-  - `raw_cxcywh` for `[cx, cy, w, h, score0, score1]`
-
-- `yolo_classes`
-  Optional path to a whitespace-separated class-label file.
-  The node reads the file at startup and maps class IDs to labels by index.
-
-- `class_names`
-  Optional class label mapping.
-  Supported form:
-  - array of class-name strings
-
-- `class_index_remap_per_model`
-  Optional array matching `engines`, where each item is an integer array used to remap decoded class IDs for that model.
-  Example: `[[], [], [1, 0]]` swaps class `0` and `1` for the third model before labels are attached.
-
-## Class Names
-
-If neither `yolo_classes` nor `class_names` is provided, detections still include numeric `cls` IDs.
-
-If `yolo_classes` is provided:
-
-- the file is parsed as whitespace-separated labels
-- labels are mapped to class IDs by index
-- use `class_names` instead if a label itself contains spaces
-
-If `class_names` is provided:
-
-- a string array maps class IDs to labels by index
-
-Do not set both `yolo_classes` and `class_names` at the same time.
-
 ## Runtime Notes
 
 - Auxiliary engine input tensors may exist, but the node preprocesses only the detected image input tensor
@@ -150,20 +121,30 @@ Do not set both `yolo_classes` and `class_names` at the same time.
 - Only the first output tensor is decoded in this version
 - On preprocessing, TensorRT, or copy failures, the node logs the error and returns without producing output for that frame
 
-## Example
+## Examples
 
-```txt
-cuda_infer_yolo:
-  src: decoded_cuda
-  dst: detected_cuda
-  engine: /models/yolo.engine
-  hwaccel: cuda0
-  conf_thresh: 0.25
-  iou_thresh: 0.45
-  max_det: 300
-  infer_every_n: 1
-  metadata_key_out: yolo_detections_v1
-  input_format: RGB
-  output_box_format: raw_cxcywh
-  yolo_classes: /models/yolo_classes.txt
+Single model:
+
+```json
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
+  "hwaccel": "@gpu", "input_format": "RGB",
+  "conf_thresh": 0.25, "iou_thresh": 0.45, "max_det": 300,
+  "models": [
+    { "engine": "/models/yolo.engine", "class_names": ["person", "car", "dog"] }
+  ]
+}
+```
+
+Multiple models with per-model settings:
+
+```json
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
+  "hwaccel": "@gpu", "input_format": "RGB",
+  "conf_thresh": 0.20, "max_det": 20,
+  "models": [
+    { "engine": "/models/ball.plan", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" },
+    { "engine": "/models/player-ball.plan", "class_names": ["foot", "player", "ball"] },
+    { "engine": "/models/hoop-ball.plan", "class_names": ["hoop", "ball"], "class_index_remap": [1, 0], "output_box_format": "raw_cxcywh" }
+  ]
+}
 ```
