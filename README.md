@@ -1225,12 +1225,14 @@ This node is inference-only in v1:
 - detections are attached in metadata key (default `yolo_detections_v1`)
 
 Parameters:
--   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+-   `models` (array of objects, required) - one or more model definitions. Each object has:
+    -   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+    -   `class_names` (array of strings, optional) - class-label mapping by index
+    -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
+    -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
 -   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
--   `yolo_classes` (string, optional) - path to a whitespace-separated class-label file loaded at node startup; use `class_names` if any label itself contains spaces
--   `class_names` (array of strings, optional) - class-label mapping embedded directly in the graph JSON
 -   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
 -   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
 -   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
