@@ -18,6 +18,8 @@ private:
     std::string offset_log_path_ = "reframer.log";
     int dst_width_ = 0;
     int dst_height_ = 0;
+    int fallback_dst_width_ = 0;
+    int fallback_dst_height_ = 0;
     int debug_log_every_n_ = 0;
     std::ofstream offset_log_;
 
@@ -169,6 +171,48 @@ private:
             || hwFramesCtxChanged(frm);
     }
 
+    bool loadCropMetadata(const av::VideoFrame &frm, Parameters &md_out) const {
+        const AVFrame *raw = frm.raw();
+        if (!raw || !raw->metadata) return false;
+        AVDictionaryEntry *entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
+        if (!entry || !entry->value) return false;
+        try {
+            md_out = Parameters::parse(entry->value);
+            return true;
+        } catch (const std::exception &) {
+            return false;
+        }
+    }
+
+    void validateAndSetDstSize(int w, int h, int frame_w, int frame_h) {
+        if (w <= 0 || h <= 0) {
+            throw Error("crop_metadata_cuda: crop width and height must be positive");
+        }
+        if ((w & 1) || (h & 1)) {
+            throw Error("crop_metadata_cuda: crop width and height must be even");
+        }
+        if (w > frame_w || h > frame_h) {
+            throw Error("crop_metadata_cuda: crop size exceeds input frame size");
+        }
+        dst_width_ = w;
+        dst_height_ = h;
+    }
+
+    void updateDstDimensionsFromMetadata(const Parameters &md, int frame_w, int frame_h) {
+        if (md.contains("viewport_dst_width") && md.contains("viewport_dst_height")) {
+            const int w = md["viewport_dst_width"].get<int>();
+            const int h = md["viewport_dst_height"].get<int>();
+            validateAndSetDstSize(w, h, frame_w, frame_h);
+            return;
+        }
+        if (fallback_dst_width_ > 0 && fallback_dst_height_ > 0) {
+            validateAndSetDstSize(fallback_dst_width_, fallback_dst_height_, frame_w, frame_h);
+            return;
+        }
+        throw Error("crop_metadata_cuda: metadata missing viewport_dst_width/viewport_dst_height "
+                    "(set dst_width/dst_height on the node if the producer does not emit them)");
+    }
+
     int clampCropX(int x) const {
         const int max_x = std::max(0, input_params_.width - dst_width_);
         const int clamped = std::max(0, std::min(x, max_x));
@@ -205,58 +249,46 @@ private:
         };
     }
 
-    bool parseCropPosition(const av::VideoFrame &frm, int &x_out, int &y_out) const {
-        const AVFrame *raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
+    bool parseCropPositionFromMd(const Parameters &md, int &x_out, int &y_out) const {
+        double center_x = NAN;
+        double center_y = NAN;
 
-        AVDictionaryEntry *entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
-        if (!entry || !entry->value) return false;
-
-        try {
-            Parameters md = Parameters::parse(entry->value);
-
-            double center_x = NAN;
-            double center_y = NAN;
-
-            if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
-                const auto &bbox = md["viewport_bbox"];
-                const double x1 = bbox[0].get<double>();
-                const double y1 = bbox[1].get<double>();
-                const double x2 = bbox[2].get<double>();
-                const double y2 = bbox[3].get<double>();
-                center_x = (x1 + x2) * 0.5;
-                center_y = (y1 + y2) * 0.5;
-            } else if (md.contains("viewport_center_x")) {
-                center_x = md["viewport_center_x"].get<double>();
-                center_y = input_params_.height * 0.5;
-            } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
-                const auto &bbox = md["bbox_norm"];
-                const double fw = md.value("full_frame_width", input_params_.width);
-                const double fh = md.value("full_frame_height", input_params_.height);
-                const double x1 = bbox[0].get<double>() * fw;
-                const double y1 = bbox[1].get<double>() * fh;
-                const double x2 = bbox[2].get<double>() * fw;
-                const double y2 = bbox[3].get<double>() * fh;
-                center_x = (x1 + x2) * 0.5;
-                center_y = (y1 + y2) * 0.5;
-            } else {
-                return false;
-            }
-
-            if (!std::isfinite(center_x) || !std::isfinite(center_y)) return false;
-
-            x_out = clampCropX((int)std::lround(center_x - (double)dst_width_ * 0.5));
-            y_out = clampCropY((int)std::lround(center_y - (double)dst_height_ * 0.5));
-            return true;
-        } catch (const std::exception &) {
+        if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
+            const auto &bbox = md["viewport_bbox"];
+            const double x1 = bbox[0].get<double>();
+            const double y1 = bbox[1].get<double>();
+            const double x2 = bbox[2].get<double>();
+            const double y2 = bbox[3].get<double>();
+            center_x = (x1 + x2) * 0.5;
+            center_y = (y1 + y2) * 0.5;
+        } else if (md.contains("viewport_center_x")) {
+            center_x = md["viewport_center_x"].get<double>();
+            center_y = input_params_.height * 0.5;
+        } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
+            const auto &bbox = md["bbox_norm"];
+            const double fw = md.value("full_frame_width", input_params_.width);
+            const double fh = md.value("full_frame_height", input_params_.height);
+            const double x1 = bbox[0].get<double>() * fw;
+            const double y1 = bbox[1].get<double>() * fh;
+            const double x2 = bbox[2].get<double>() * fw;
+            const double y2 = bbox[3].get<double>() * fh;
+            center_x = (x1 + x2) * 0.5;
+            center_y = (y1 + y2) * 0.5;
+        } else {
             return false;
         }
+
+        if (!std::isfinite(center_x) || !std::isfinite(center_y)) return false;
+
+        x_out = clampCropX((int)std::lround(center_x - (double)dst_width_ * 0.5));
+        y_out = clampCropY((int)std::lround(center_y - (double)dst_height_ * 0.5));
+        return true;
     }
 
-    void updateCropPosition(const av::VideoFrame &frm) {
+    void updateCropPosition(const Parameters &md) {
         int next_x = 0;
         int next_y = 0;
-        bool parsed = parseCropPosition(frm, next_x, next_y);
+        bool parsed = parseCropPositionFromMd(md, next_x, next_y);
 
         if (!parsed) {
             if (have_last_crop_) {
@@ -316,23 +348,23 @@ public:
                            std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                            std::string metadata_key,
                            std::string offset_log_path,
-                           int dst_width,
-                           int dst_height,
+                           int fallback_dst_width,
+                           int fallback_dst_height,
                            av::Rational frame_rate,
                            av::Rational timebase,
                            int debug_log_every_n)
         : NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
           offset_log_path_(std::move(offset_log_path)),
-          dst_width_(dst_width),
-          dst_height_(dst_height),
+          fallback_dst_width_(fallback_dst_width),
+          fallback_dst_height_(fallback_dst_height),
           debug_log_every_n_(debug_log_every_n),
           frame_rate_(frame_rate),
           timebase_(timebase) {
-        if (dst_width_ <= 0 || dst_height_ <= 0) {
-            throw Error("crop_metadata_cuda: dst_width and dst_height must be positive");
+        if ((fallback_dst_width_ > 0) != (fallback_dst_height_ > 0)) {
+            throw Error("crop_metadata_cuda: dst_width and dst_height must both be set or both zero");
         }
-        if ((dst_width_ & 1) || (dst_height_ & 1)) {
+        if (fallback_dst_width_ > 0 && ((fallback_dst_width_ & 1) || (fallback_dst_height_ & 1))) {
             throw Error("crop_metadata_cuda: dst_width and dst_height must be even");
         }
         offset_log_.open(offset_log_path_, std::ios::out | std::ios::trunc);
@@ -363,9 +395,20 @@ public:
             throw Error("crop_metadata_cuda: non-CUDA frame received");
         }
 
+        Parameters md;
+        if (!loadCropMetadata(frm, md)) {
+            throw Error("crop_metadata_cuda: missing metadata key " + metadata_key_);
+        }
+
+        const VideoParameters vp(frm);
+        const int prev_dw = dst_width_;
+        const int prev_dh = dst_height_;
+        updateDstDimensionsFromMetadata(md, vp.width, vp.height);
+        const bool dst_changed = (dst_width_ != prev_dw || dst_height_ != prev_dh);
+
         captureInitialHWFramesCtxFromFrame(frm);
-        if (inputChanged(frm) || !filter_graph_) {
-            input_params_ = VideoParameters(frm);
+        if (inputChanged(frm) || dst_changed || !filter_graph_) {
+            input_params_ = vp;
             timebase_ = frm.timeBase();
             if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {
                 if (timebase_.getNumerator() > 0 && timebase_.getDenominator() > 0) {
@@ -375,14 +418,14 @@ public:
                     frame_rate_ = av::Rational(30, 1);
                 }
             }
-            if (!have_last_crop_) {
+            if (dst_changed || !have_last_crop_) {
                 std::tie(last_crop_x_, last_crop_y_) = centerCrop();
                 have_last_crop_ = true;
             }
             initFilterGraph();
         }
 
-        updateCropPosition(frm);
+        updateCropPosition(md);
         applyCropCommandsIfNeeded();
         writeOffsetLog();
 
@@ -437,14 +480,15 @@ public:
 
         const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
         const std::string offset_log_path = params.value("offset_log_path", std::string("reframer.log"));
-        const int dst_width = params.at("dst_width").get<int>();
-        const int dst_height = params.at("dst_height").get<int>();
+        const int fallback_dw = params.value("dst_width", 0);
+        const int fallback_dh = params.value("dst_height", 0);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const av::Rational frame_rate = frame_rate_src ? frame_rate_src->frameRate() : av::Rational{0, 0};
         const av::Rational timebase = timebase_src ? timebase_src->timeBase() : av::Rational{0, 0};
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MetadataDrivenCudaCrop>(
-            edges, params, metadata_key, offset_log_path, dst_width, dst_height, frame_rate, timebase, debug_log_every_n);
+            edges, params, metadata_key, offset_log_path, fallback_dw, fallback_dh, frame_rate, timebase,
+            debug_log_every_n);
     }
 };
 
