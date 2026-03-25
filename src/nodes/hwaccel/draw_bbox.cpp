@@ -7,6 +7,10 @@
 
 #include "../../../objs/src/nodes/hwaccel/draw_bbox.ptx.h"
 
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
+
 using cuda_overlay::DrawColor;
 
 namespace {
@@ -23,7 +27,14 @@ struct BBox {
 
 class DrawBBox : public CudaOverlayBase {
 private:
-    std::string metadata_key_ = "reframer_bbox";
+    std::vector<std::string> metadata_keys_;
+    bool have_last_viewport_crop_ = false;
+    int last_viewport_crop_x_ = 0;
+    int last_viewport_crop_y_ = 0;
+    int last_viewport_input_w_ = 0;
+    int last_viewport_input_h_ = 0;
+    int last_viewport_dst_w_ = 0;
+    int last_viewport_dst_h_ = 0;
     int bbox_thickness_ = 2;
     int debug_log_every_n_ = 0;
     double min_conf_ = 0.0;
@@ -67,6 +78,143 @@ private:
         return bbox_out.x2 > bbox_out.x1 && bbox_out.y2 > bbox_out.y1;
     }
 
+    int viewportChromaXAlign() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(input_params_.realPixelFormat().get());
+        if (!desc || desc->log2_chroma_w < 0) return 1;
+        return 1 << desc->log2_chroma_w;
+    }
+
+    int viewportChromaYAlign() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(input_params_.realPixelFormat().get());
+        if (!desc || desc->log2_chroma_h < 0) return 1;
+        return 1 << desc->log2_chroma_h;
+    }
+
+    static int alignViewportCropCoord(int value, int align) {
+        if (align <= 1) return value;
+        return value & ~(align - 1);
+    }
+
+    int clampViewportCropX(int x, int dst_w) const {
+        const int max_x = std::max(0, input_params_.width - dst_w);
+        const int clamped = std::max(0, std::min(x, max_x));
+        return alignViewportCropCoord(clamped, viewportChromaXAlign());
+    }
+
+    int clampViewportCropY(int y, int dst_h) const {
+        const int max_y = std::max(0, input_params_.height - dst_h);
+        const int clamped = std::max(0, std::min(y, max_y));
+        return alignViewportCropCoord(clamped, viewportChromaYAlign());
+    }
+
+    std::pair<int, int> centerViewportCrop(int dst_w, int dst_h) const {
+        return {
+            clampViewportCropX((input_params_.width - dst_w) / 2, dst_w),
+            clampViewportCropY((input_params_.height - dst_h) / 2, dst_h)
+        };
+    }
+
+    static bool metadataHasViewportDstDims(const Parameters &md) {
+        return md.contains("viewport_dst_width") && md["viewport_dst_width"].is_number()
+            && md.contains("viewport_dst_height") && md["viewport_dst_height"].is_number();
+    }
+
+    // Same interpretation as crop_metadata_cuda::parseCropPosition (metadata + crop size).
+    bool parseViewportCropPositionFromMd(const Parameters &md, int dst_w, int dst_h, int &x_out, int &y_out) const {
+        double center_x = NAN;
+        double center_y = NAN;
+
+        if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
+            const auto &bbox = md["viewport_bbox"];
+            const double x1 = bbox[0].get<double>();
+            const double y1 = bbox[1].get<double>();
+            const double x2 = bbox[2].get<double>();
+            const double y2 = bbox[3].get<double>();
+            center_x = (x1 + x2) * 0.5;
+            center_y = (y1 + y2) * 0.5;
+        } else if (md.contains("viewport_center_x")) {
+            center_x = md["viewport_center_x"].get<double>();
+            center_y = input_params_.height * 0.5;
+        } else if (md.contains("bbox_norm") && md["bbox_norm"].is_array() && md["bbox_norm"].size() >= 4) {
+            const auto &bbox = md["bbox_norm"];
+            const double fw = md.value("full_frame_width", input_params_.width);
+            const double fh = md.value("full_frame_height", input_params_.height);
+            const double x1 = bbox[0].get<double>() * fw;
+            const double y1 = bbox[1].get<double>() * fh;
+            const double x2 = bbox[2].get<double>() * fw;
+            const double y2 = bbox[3].get<double>() * fh;
+            center_x = (x1 + x2) * 0.5;
+            center_y = (y1 + y2) * 0.5;
+        } else {
+            return false;
+        }
+
+        if (!std::isfinite(center_x) || !std::isfinite(center_y)) return false;
+
+        x_out = clampViewportCropX((int)std::lround(center_x - (double)dst_w * 0.5), dst_w);
+        y_out = clampViewportCropY((int)std::lround(center_y - (double)dst_h * 0.5), dst_h);
+        return true;
+    }
+
+    bool tryParseViewportCropFromFrame(const av::VideoFrame &frm, int dst_w, int dst_h, int &x_out, int &y_out) const {
+        const AVFrame *raw = frm.raw();
+        if (!raw || !raw->metadata) return false;
+        for (const std::string &key : metadata_keys_) {
+            AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
+            if (!entry || !entry->value) continue;
+            try {
+                Parameters md = Parameters::parse(entry->value);
+                if (parseViewportCropPositionFromMd(md, dst_w, dst_h, x_out, y_out)) return true;
+            } catch (const std::exception &) {
+                continue;
+            }
+        }
+        return false;
+    }
+
+    bool tryReadViewportDstDims(const av::VideoFrame &frm, int &w_out, int &h_out) const {
+        const AVFrame *raw = frm.raw();
+        if (!raw || !raw->metadata) return false;
+        for (const std::string &key : metadata_keys_) {
+            AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
+            if (!entry || !entry->value) continue;
+            try {
+                Parameters md = Parameters::parse(entry->value);
+                if (!metadataHasViewportDstDims(md)) continue;
+                const int w = md["viewport_dst_width"].get<int>();
+                const int h = md["viewport_dst_height"].get<int>();
+                if (w <= 0 || h <= 0) continue;
+                if ((w & 1) || (h & 1)) continue;
+                if (w > input_params_.width || h > input_params_.height) continue;
+                w_out = w;
+                h_out = h;
+                return true;
+            } catch (const std::exception &) {
+                continue;
+            }
+        }
+        return false;
+    }
+
+    void updateViewportCropPosition(const av::VideoFrame &frm, int dst_w, int dst_h, int &x_out, int &y_out) {
+        int next_x = 0;
+        int next_y = 0;
+        const bool parsed = tryParseViewportCropFromFrame(frm, dst_w, dst_h, next_x, next_y);
+        if (!parsed) {
+            if (have_last_viewport_crop_) {
+                next_x = last_viewport_crop_x_;
+                next_y = last_viewport_crop_y_;
+            } else {
+                std::tie(next_x, next_y) = centerViewportCrop(dst_w, dst_h);
+            }
+        }
+        last_viewport_crop_x_ = next_x;
+        last_viewport_crop_y_ = next_y;
+        have_last_viewport_crop_ = true;
+        x_out = next_x;
+        y_out = next_y;
+    }
+
     bool parseSingleBBoxMetadata(const Parameters &md, BBox &bbox_out) const {
         double x1 = NAN;
         double y1 = NAN;
@@ -74,6 +222,9 @@ private:
         double y2 = NAN;
 
         if (md.contains("viewport_bbox") && md["viewport_bbox"].is_array() && md["viewport_bbox"].size() >= 4) {
+            if (metadataHasViewportDstDims(md)) {
+                return false;
+            }
             const auto &bbox = md["viewport_bbox"];
             const double fw = md.value("full_frame_width", (double)input_params_.width);
             const double fh = md.value("full_frame_height", (double)input_params_.height);
@@ -133,6 +284,18 @@ private:
         return true;
     }
 
+    // Appends to boxes_out. Returns true if at least one bbox was added from this JSON blob.
+    bool parseMetadataBlob(const Parameters& md, std::vector<BBox>& boxes_out) const {
+        BBox single_bbox;
+        if (parseSingleBBoxMetadata(md, single_bbox)) {
+            boxes_out.push_back(single_bbox);
+            return true;
+        }
+        const size_t before = boxes_out.size();
+        parseYoloDetections(md, boxes_out);
+        return boxes_out.size() > before;
+    }
+
     void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
         if (!md.contains("detections") || !md["detections"].is_array()) return;
 
@@ -166,25 +329,24 @@ private:
 
     bool parseBBoxes(const av::VideoFrame &frm, std::vector<BBox> &boxes_out) const {
         const AVFrame *raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
-
-        AVDictionaryEntry *entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
-        if (!entry || !entry->value) return false;
-
-        try {
-            Parameters md = Parameters::parse(entry->value);
-            boxes_out.clear();
-
-            BBox single_bbox;
-            if (parseSingleBBoxMetadata(md, single_bbox)) {
-                boxes_out.push_back(single_bbox);
-            } else {
-                parseYoloDetections(md, boxes_out);
-            }
-            return !boxes_out.empty();
-        } catch (const std::exception &) {
+        if (!raw || !raw->metadata)
             return false;
+
+        boxes_out.clear();
+        bool any = false;
+        for (const std::string &key : metadata_keys_) {
+            AVDictionaryEntry *entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
+            if (!entry || !entry->value)
+                continue;
+            try {
+                Parameters md = Parameters::parse(entry->value);
+                if (parseMetadataBlob(md, boxes_out))
+                    any = true;
+            } catch (const std::exception &) {
+                continue;
+            }
         }
+        return any && !boxes_out.empty();
     }
 
     bool drawBBoxOnFrame(av::VideoFrame &frm, const BBox &bbox) {
@@ -265,6 +427,41 @@ private:
             throw Error("draw_bbox: failed to initialize CUDA kernels");
         }
 
+        int vdw = 0;
+        int vdh = 0;
+        if (tryReadViewportDstDims(input, vdw, vdh)) {
+            if (input_params_.width != last_viewport_input_w_ || input_params_.height != last_viewport_input_h_) {
+                have_last_viewport_crop_ = false;
+                last_viewport_input_w_ = input_params_.width;
+                last_viewport_input_h_ = input_params_.height;
+            }
+            if (vdw != last_viewport_dst_w_ || vdh != last_viewport_dst_h_) {
+                have_last_viewport_crop_ = false;
+                last_viewport_dst_w_ = vdw;
+                last_viewport_dst_h_ = vdh;
+            }
+            int vx = 0;
+            int vy = 0;
+            updateViewportCropPosition(input, vdw, vdh, vx, vy);
+            DrawColor white{};
+            if (!cuda_overlay::tryParseNamedColor("white", white)) {
+                white = DrawColor{235, 128, 128};
+            }
+            BBox viewport{};
+            viewport.x1 = clampInt(vx, 0, input_params_.width);
+            viewport.y1 = clampInt(vy, 0, input_params_.height);
+            viewport.x2 = clampInt(vx + vdw, 0, input_params_.width);
+            viewport.y2 = clampInt(vy + vdh, 0, input_params_.height);
+            viewport.y_color = white.y;
+            viewport.u_color = white.u;
+            viewport.v_color = white.v;
+            if (viewport.x2 > viewport.x1 && viewport.y2 > viewport.y1) {
+                if (!drawBBoxOnFrame(output, viewport)) {
+                    throw Error("draw_bbox: failed drawing viewport bbox");
+                }
+            }
+        }
+
         std::vector<BBox> boxes;
         const bool have_bbox = parseBBoxes(input, boxes);
         if (have_bbox) {
@@ -280,7 +477,7 @@ private:
 public:
     DrawBBox(std::unique_ptr<Source<av::VideoFrame>> &&source,
              std::unique_ptr<Sink<av::VideoFrame>> &&sink,
-             std::string metadata_key,
+             std::vector<std::string> metadata_keys,
              int bbox_thickness,
              double min_conf,
              std::unordered_set<int> allowed_classes,
@@ -295,7 +492,7 @@ public:
              av::Rational timebase,
              int debug_log_every_n)
         : CudaOverlayBase(std::move(source), std::move(sink)),
-          metadata_key_(std::move(metadata_key)),
+          metadata_keys_(std::move(metadata_keys)),
           bbox_thickness_(bbox_thickness),
           debug_log_every_n_(debug_log_every_n),
           min_conf_(min_conf),
@@ -309,6 +506,9 @@ public:
         input_params_ = input_params;
         frame_rate_ = frame_rate;
         timebase_ = timebase;
+        if (metadata_keys_.empty()) {
+            throw Error("draw_bbox: metadata_keys must be non-empty (or pass metadata_key)");
+        }
         if (bbox_thickness_ <= 0) {
             throw Error("draw_bbox: bbox_thickness must be positive");
         }
@@ -328,7 +528,26 @@ public:
         auto src_edge = edges.find<av::VideoFrame>(params["src"]);
         const auto upstream = resolveUpstreamInfo(src_edge, params);
 
-        const std::string metadata_key = params.value("metadata_key", std::string("reframer_bbox"));
+        std::vector<std::string> metadata_keys;
+        if (params.count("metadata_keys") && params["metadata_keys"].is_array()) {
+            for (const auto &item : params["metadata_keys"]) {
+                if (!item.is_string())
+                    throw Error("draw_bbox: metadata_keys entries must be strings");
+                metadata_keys.push_back(item.get<std::string>());
+            }
+        }
+        if (metadata_keys.empty()) {
+            metadata_keys.push_back(params.value("metadata_key", std::string("reframer_bbox")));
+        } else {
+            std::unordered_set<std::string> seen;
+            std::vector<std::string> unique_keys;
+            unique_keys.reserve(metadata_keys.size());
+            for (std::string &k : metadata_keys) {
+                if (seen.insert(k).second)
+                    unique_keys.push_back(std::move(k));
+            }
+            metadata_keys = std::move(unique_keys);
+        }
         const int bbox_thickness = params.value("bbox_thickness", 2);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double min_conf = params.value("min_conf", 0.0);
@@ -360,7 +579,7 @@ public:
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
-            edges, params, metadata_key, bbox_thickness, min_conf,
+            edges, params, std::move(metadata_keys), bbox_thickness, min_conf,
             std::move(allowed_classes), std::move(allowed_labels), std::move(model_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
