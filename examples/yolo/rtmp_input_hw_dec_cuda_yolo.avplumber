@@ -10,7 +10,7 @@ node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "i
 # 1920x1080 (16:9) -> 640x384 (matches current engine input)
 node.add { "type": "filter_video", "graph": "scale_cuda=w=640:h=384", "src": "v_dec_cuda", "dst": "v_pre_yolo", "group": "in", "name": "Cuda_Preprocess", "auto_restart": "group", "dst_width": 640, "dst_height": 384, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 
-node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "input_format": "RGB", "conf_thresh": 0.25, "iou_thresh": 0.45, "max_det": 300, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": true, "debug_log_every_n": 30, "models": [{ "engine": "/home/fedora/tensorrt/yolo26n_640x360_fp16.plan" }] }
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 300, "infer_every_n": 1, "metadata_key_detection": "yolo_detections", "debug_log_metadata": true, "debug_log_every_n": 30, "models": [{ "engine": "/home/fedora/tensorrt/yolo26n_640x360_fp16.plan", "task_type": "detection" }] }
 
 # Sink that discards frames; detections can be observed in avplumber debug logs
 node.add { "type": "null_sink<av::VideoFrame>", "src": "v_post_yolo", "group": "in", "name": "vnullsink", "auto_restart": "group" }
