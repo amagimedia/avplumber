@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add embedded, in-process Python bindings for `avplumber` so a Python application can:
+Add Python bindings for `avplumber` so a Python application can:
 
 - construct and run an embedded `AVPlumber` instance
 - build graphs in pure Python with full typing and IDE-friendly node APIs
@@ -12,18 +12,24 @@ Add embedded, in-process Python bindings for `avplumber` so a Python application
 - create Python-originated synthetic media objects, especially metadata-bearing sidecar frames, and pass them downstream into C++ nodes
 - monitor graph, node, queue, and pipeline lifecycle state from Python
 
+The bindings must support two deployment modes:
+
+- embedded mode for lowest-latency, in-process integration
+- worker mode for crash isolation when native faults must not terminate the Python host
+
 The recommended architecture is a hybrid design:
 
 - Python exposes a native, typed SDK
 - C++ remains the owner of media transport, graph execution, and heavy processing
 - internal graph construction may compile to existing avplumber command semantics where practical
-- new C++ binding surfaces are added where the current control model is insufficient, especially for typed schemas, subscriptions, synthetic frame emission, and state snapshots
+- new C++ binding surfaces are added where the current control model is insufficient, especially for typed schemas, subscriptions, synthetic frame emission, state snapshots, and runtime backend selection
 
 ## Scope
 
 ### In scope
 
-- embedded, in-process Python only
+- embedded, in-process Python mode
+- worker-backed Python mode for local crash-isolated execution
 - Python package API plus a documented underlying C++/pybind surface for maintainers
 - typed graph authoring in Python
 - mixed Python and C++ node graphs
@@ -34,7 +40,7 @@ The recommended architecture is a hybrid design:
 
 ### Out of scope
 
-- remote control of an external avplumber process in v1
+- remote control of arbitrary pre-existing avplumber processes over the network
 - full general-purpose two-way FFmpeg binding for arbitrary `AVFrame` and `AVPacket` mutation from Python
 - Python-generated media objects that are automatically valid for every downstream media-processing node
 - distributed execution, multi-process orchestration, or RPC transport in v1
@@ -54,7 +60,7 @@ This makes avplumber a strong fit for a split architecture:
 - C++ handles low-level media movement, codec work, GPU work, and deterministic graph behavior
 - Python handles high-level intelligence, math, application logic, model orchestration, analytics, and custom domain-specific processing
 
-## Recommended Approach: Hybrid Embedded Runtime
+## Recommended Approach: Hybrid Runtime With Two Backends
 
 ### Layers
 
@@ -63,16 +69,23 @@ This makes avplumber a strong fit for a split architecture:
 - Python users interact with typed `Pipeline`, `Runtime`, node classes, subscriptions, and state snapshots.
 - Python users do not author raw command strings in normal usage.
 
-2. C++ binding surface
+2. Runtime backends
+
+- `EmbeddedRuntime`: avplumber runs in the same process as the Python app.
+- `WorkerRuntime`: avplumber runs in a dedicated local worker process supervised by the Python app.
+- Both backends implement the same logical runtime API as far as possible.
+
+3. C++ binding surface
 
 - C++ exposes runtime lifecycle, node schemas, subscriptions, read-only frame views, and synthetic frame builders.
 - This is the canonical maintainers' API layer beneath the Python package.
 
-3. Internal command compatibility
+4. Internal command compatibility
 
 - Where practical, graph authoring compiles to existing avplumber node JSON and command semantics.
 - Existing `.avplumber` scripts remain conceptually compatible.
-- Python does not depend on remote transport or TCP control mode.
+- Python does not depend on TCP control mode for normal embedded operation.
+- Worker mode may reuse command-compatible graph serialization internally, but this remains an implementation detail.
 
 ### Alternatives considered
 
@@ -115,10 +128,12 @@ Pros:
 - best balance of ergonomics and leverage
 - allows incremental implementation
 - preserves compatibility with current architecture
+- naturally supports both embedded and worker-backed runtimes behind one SDK
 
 Cons:
 
 - requires clear separation between public SDK and internal command-derived representation
+- requires care to keep callback and media-view APIs portable across process boundaries
 
 ## High-Level Architecture
 
@@ -126,6 +141,7 @@ Cons:
 
 - `Runtime`
 - `Pipeline`
+- runtime backend abstraction
 - typed node schema registry
 - typed Python node classes
 - subscription and event delivery layer
@@ -141,6 +157,22 @@ Cons:
 - Python may emit synthetic media objects through a controlled builder API.
 - Python does not receive raw ownership of FFmpeg internals in v1.
 
+### Runtime modes
+
+#### Embedded mode
+
+- Python and avplumber run in the same process.
+- Lowest overhead and simplest shared-memory media views.
+- Best fit for trusted code paths and development workflows.
+- Native crashes in avplumber, FFmpeg, CUDA, TensorRT, or custom C++ nodes can terminate the Python host process.
+
+#### Worker mode
+
+- avplumber runs in a dedicated local worker process managed by the Python application.
+- Provides process-level crash isolation.
+- Python can detect worker death, surface the failure, and restart or rebuild the pipeline.
+- Media subscriptions and synthetic frame emission cross a process boundary and therefore require transport-safe event and object forms.
+
 ## User-Facing Python API
 
 ### Runtime
@@ -148,7 +180,7 @@ Cons:
 ```python
 import avplumber as avp
 
-rt = avp.Runtime(name="basketball-app")
+rt = avp.Runtime(name="basketball-app", mode="embedded")
 pipe = avp.Pipeline(name="game-1")
 
 pipe.add(avp.nodes.Input(name="input", url="nba.mp4", dst="in_v", group="in"))
@@ -167,8 +199,15 @@ rt.stop()
 rt.shutdown()
 ```
 
+Equivalent worker-backed form:
+
+```python
+rt = avp.Runtime(name="basketball-app", mode="worker")
+```
+
 ### Runtime API requirements
 
+- `Runtime(..., mode="embedded" | "worker")`
 - `Runtime.load(pipeline)`
 - `Runtime.start()`
 - `Runtime.stop()`
@@ -198,6 +237,8 @@ rt.shutdown()
 - `Pipeline.hwaccel_init(name, type, **kwargs)`
 - `Pipeline.to_dict()`
 - `Pipeline.to_script()`
+
+The `Pipeline` model must be backend-neutral. A graph authored in Python should be loadable by either runtime mode unless it uses explicitly embedded-only features.
 
 ## Node Typing and Schema System
 
@@ -371,6 +412,14 @@ Not required in v1:
 - general GPU pointer exposure
 - raw `AVFrame*` ownership handoff
 
+### Backend portability requirement
+
+The logical Python callback contract must not assume that all media views are backed by same-process memory.
+
+- Embedded mode may expose zero-copy or near-zero-copy read-only views.
+- Worker mode may expose serialized metadata-only events, copied CPU payloads, shared-memory handles, or backend-specific transport objects behind the same logical event interface.
+- The public Python API should be expressed in terms of typed event objects and media views, not raw pointers.
+
 ## Python-Originated Synthetic Media Objects
 
 Python must be able to create its own downstream object and pass it into C++.
@@ -502,6 +551,8 @@ Callbacks must receive a structured event object containing:
 - parsed metadata
 - enqueue timestamp if useful
 
+The callback event object must be defined at the logical SDK level so that it works in both embedded and worker modes.
+
 ### Delivery modes
 
 #### Async mode
@@ -532,6 +583,19 @@ The spec must define:
 - queue overflow policy
 - configurable drop or latest-only strategies
 - visibility into dropped callback events
+
+### Backend-specific notes
+
+#### Embedded mode
+
+- Async delivery should still be the default to avoid stalling the graph from Python callbacks.
+- Sync callbacks may be offered as an advanced low-latency option.
+
+#### Worker mode
+
+- Callback delivery is always transport-mediated.
+- Sync callback semantics are not required.
+- Payload size controls and event filtering become more important than in embedded mode.
 
 ## Pipeline State Model
 
@@ -624,6 +688,15 @@ Runtime was destroyed and may not be reused.
 - rate counters
 - timestamp information
 
+### Worker-specific state additions
+
+When running in worker mode, `Runtime.state_details()` should also expose:
+
+- worker process alive or dead
+- worker exit status if known
+- crash or clean-exit classification
+- restart attempt count if supervision is enabled
+
 ## C++ Binding Surface
 
 This spec is for a Python package plus maintainers' C++ binding API.
@@ -631,6 +704,7 @@ This spec is for a Python package plus maintainers' C++ binding API.
 ### Required C++ exported concepts
 
 - `RuntimeHandle`
+- `RuntimeBackend`
 - `PipelineSpec`
 - `NodeSchemaRegistry`
 - `SubscriptionHandle`
@@ -662,6 +736,8 @@ A Python-backed node adapter must:
 - convert C++ media into Python wrapper views
 - convert Python synthetic outputs into C++ media objects
 - propagate Python exceptions into node failure or configured policy behavior
+
+In worker mode, Python-backed nodes may still run inside the worker process, but the application-facing Python SDK must treat them as managed graph components rather than same-process callback objects.
 
 ### Required error policies
 
@@ -695,6 +771,32 @@ At minimum:
 - `join_metadata` merges Python-generated metadata onto the main video branch
 - downstream overlays use merged metadata for debug-only visualization
 
+## Crash Domain and Fault Isolation
+
+### Embedded mode
+
+- Embedded mode does not provide hard crash isolation.
+- A native segfault in avplumber or its dependencies can terminate the entire Python process.
+- Embedded mode is therefore best for trusted native code paths, development, and performance-sensitive deployments where shared crash domain is acceptable.
+
+### Worker mode
+
+- Worker mode is the crash-isolated deployment path.
+- Native segfaults terminate the worker process but should not terminate the Python host.
+- The Python host must detect worker death, transition runtime state to `FAILED`, and make restart or teardown decisions available to the application.
+
+### Design consequence
+
+The Python SDK must be designed so that most app-facing concepts are backend-neutral:
+
+- graph authoring
+- lifecycle methods
+- state queries
+- subscriptions
+- synthetic object emission
+
+This avoids locking the SDK into an embedded-only design and allows applications to choose between performance and isolation.
+
 ## Documentation Requirements
 
 The binding must produce user-facing docs from canonical schemas.
@@ -721,6 +823,7 @@ README prose and examples remain supplementary, not canonical.
 - Existing `.avplumber` scripts remain conceptually compatible.
 - Python graph authoring may export an equivalent script representation where possible.
 - The binding must not require remote control or TCP server enablement.
+- Worker mode may use local IPC internally, but this must remain an implementation detail of the runtime backend rather than a required user-facing deployment model.
 
 ## Performance and Safety Constraints
 
@@ -731,6 +834,7 @@ README prose and examples remain supplementary, not canonical.
 - callback delivery must not silently stall the pipeline in default mode.
 - synthetic media objects must validate timestamps and required structural fields.
 - Python exception handling must be explicit and policy-driven.
+- crash isolation is only guaranteed in worker mode
 
 ### Required performance principles
 
@@ -744,14 +848,24 @@ README prose and examples remain supplementary, not canonical.
 ### Phase 1: Foundation
 
 - introduce canonical C++ node schema system
+- define backend-neutral Python SDK surface
 - expose runtime lifecycle binding
 - expose node, group, and queue snapshots
 - expose typed Python node classes for a core subset
 - support Python graph construction and loading
-- support read-only frame and packet views
-- support edge subscriptions in async mode
+- support embedded runtime backend
+- support read-only frame and packet views in embedded mode
+- support edge subscriptions in async mode in embedded mode
 
-### Phase 2: Python graph intelligence
+### Phase 2: Worker runtime foundation
+
+- introduce worker backend process model
+- define local IPC transport for lifecycle, state, subscriptions, and synthetic object flow
+- surface worker crash detection and failure state
+- keep the same Python authoring API across embedded and worker modes
+- support metadata-first subscriptions in worker mode
+
+### Phase 3: Python graph intelligence
 
 - add Python-backed transform node
 - add synthetic metadata-bearing video frame emission
@@ -759,7 +873,7 @@ README prose and examples remain supplementary, not canonical.
 - provide basketball-analysis example graph in Python
 - generate docs from schemas
 
-### Phase 3: Expanded media support
+### Phase 4: Expanded media support
 
 - add audio sample bindings
 - add structured packet bindings if not already delivered
@@ -767,7 +881,7 @@ README prose and examples remain supplementary, not canonical.
 - add richer side-data access
 - add advanced subscription policies
 
-### Phase 4: Future work
+### Phase 5: Future work
 
 - optional data-backed synthetic frames
 - optional GPU read-only view support
@@ -781,12 +895,13 @@ README prose and examples remain supplementary, not canonical.
 - Whether packet emission from Python is required in v1 or can follow later.
 - Whether `group` concepts should be surfaced as explicit Python objects or remain metadata on nodes plus runtime group snapshots.
 - Whether async callback delivery should integrate with `asyncio` in v1 or start with thread-based delivery only.
+- Which worker-mode transport best balances portability, performance, and implementation cost for local process supervision.
 
 ## Decision Summary
 
 This spec chooses:
 
-- embedded in-process Python only
+- dual runtime backends: embedded and worker
 - hybrid architecture
 - canonical C++ node schemas
 - typed Python graph authoring as a required feature
@@ -801,6 +916,7 @@ This spec chooses:
 The design is successful when a Python application can:
 
 - create an embedded `Runtime`
+- create a worker-backed `Runtime`
 - inspect available node schemas with full typing metadata
 - build a valid graph in Python with typed node classes
 - mix at least one Python-backed node with existing C++ nodes
@@ -809,3 +925,4 @@ The design is successful when a Python application can:
 - merge Python-generated metadata into a C++ video branch through existing graph patterns
 - start, stop, and monitor the pipeline through a first-class Python lifecycle API
 - receive generated documentation and IDE autocomplete for supported nodes
+- survive a native worker crash without terminating the Python host when using worker mode
