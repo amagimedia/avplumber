@@ -63,6 +63,28 @@ struct DetectionBox {
 static double centerX(const DetectionBox &b) { return (b.x1 + b.x2) * 0.5; }
 static double centerY(const DetectionBox &b) { return (b.y1 + b.y2) * 0.5; }
 
+// Crop center (cx, cy) so fixed viewport [cx±half_w, cy±half_h] contains [ux1,ux2]×[uy1,uy2].
+// If the union is wider/taller than the viewport, use union centroid clamped to valid crop centers.
+static void centerForFixedViewportContain(double ux1, double uy1, double ux2, double uy2, int fw, int fh, double half_w,
+                                          double half_h, double &cx, double &cy) {
+    double cx_lo = std::max(ux2 - half_w, half_w);
+    double cx_hi = std::min(ux1 + half_w, (double)fw - half_w);
+    if (cx_lo <= cx_hi)
+        cx = 0.5 * (cx_lo + cx_hi);
+    else {
+        const double mid = 0.5 * (ux1 + ux2);
+        cx = std::max(half_w, std::min((double)fw - half_w, mid));
+    }
+    double cy_lo = std::max(uy2 - half_h, half_h);
+    double cy_hi = std::min(uy1 + half_h, (double)fh - half_h);
+    if (cy_lo <= cy_hi)
+        cy = 0.5 * (cy_lo + cy_hi);
+    else {
+        const double mid = 0.5 * (uy1 + uy2);
+        cy = std::max(half_h, std::min((double)fh - half_h, mid));
+    }
+}
+
 // RBJ lowpass; returns coeffs with a0 normalized to 1.
 static void rbjLowpass(double w0, double Q, double &b0, double &b1, double &b2, double &a1, double &a2) {
     const double cosw0 = std::cos(w0);
@@ -369,7 +391,7 @@ struct DerivSlewAxis {
 } // namespace
 
 class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
-    std::string metadata_key_in_;
+    std::vector<std::string> metadata_keys_in_;
     std::string metadata_key_out_;
     double model_content_width_ = 0;
     double model_content_height_ = 0;
@@ -381,6 +403,10 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     std::unordered_set<int> allowed_model_indices_;
     std::vector<std::string> label_priority_;
     std::string focus_mode_;
+    /// "center": focus_mode centroid / best box only. "contain": place crop so viewport_dst contains union of selected dets.
+    std::string viewport_fit_;
+    double viewport_contain_margin_px_ = 0;
+    std::unordered_set<std::string> label_priority_set_;
     std::string lost_target_mode_;
 
     std::unique_ptr<LowpassBackend> lowpass_;
@@ -404,6 +430,13 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     DerivSlewAxis slew_x_, slew_y_;
 
     int lookahead_frames_ = 0;
+    /// Require this many consecutive frames with a detection on the *output* frame before
+    /// measurements drive the lowpass / slew (ignores brief false positives; loss resets streak).
+    int min_visible_frames_ = 1;
+    int visible_streak_ = 0;
+    double viewport_marker_half_extent_ = 1.0;
+    int viewport_dst_width_ = 0;
+    int viewport_dst_height_ = 0;
     struct BufSlot {
         av::VideoFrame frm;
         double mx = 0, my = 0;
@@ -422,6 +455,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         latched_ = false;
         low_speed_frames_ = latched_age_ = 0;
         have_prev_meas_ = false;
+        visible_streak_ = 0;
         buffer_.clear();
         slew_x_.reset(0);
         slew_y_.reset(0);
@@ -463,75 +497,90 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         const AVFrame *raw = frm.raw();
         if (!raw || !raw->metadata)
             return false;
-        AVDictionaryEntry *entry = av_dict_get(raw->metadata, metadata_key_in_.c_str(), nullptr, 0);
-        if (!entry || !entry->value)
-            return false;
-        try {
-            Parameters md = Parameters::parse(entry->value);
-            if (!md.contains("detections") || !md["detections"].is_array())
-                return false;
-            const std::string coord_space = md.value("coord_space", std::string("model"));
-            const double model_w = md.value("model_width", (double)frm.width());
-            const double model_h = md.value("model_height", (double)frm.height());
-            const int fw = frm.width();
-            const int fh = frm.height();
+        for (const std::string &meta_key : metadata_keys_in_) {
+            AVDictionaryEntry *entry = av_dict_get(raw->metadata, meta_key.c_str(), nullptr, 0);
+            if (!entry || !entry->value)
+                continue;
+            try {
+                Parameters md = Parameters::parse(entry->value);
+                if (!md.contains("detections") || !md["detections"].is_array())
+                    continue;
+                const std::string coord_space = md.value("coord_space", std::string("model"));
+                const double model_w = md.value("model_width", (double)frm.width());
+                const double model_h = md.value("model_height", (double)frm.height());
+                const int fw = frm.width();
+                const int fh = frm.height();
 
-            for (const auto &item : md["detections"]) {
-                if (!item.is_object())
-                    continue;
-                if (!item.contains("xyxy") || !item["xyxy"].is_array() || item["xyxy"].size() < 4)
-                    continue;
-                DetectionBox det;
-                det.cls = item.value("cls", -1);
-                det.conf = item.value("conf", 0.0);
-                det.model_index = item.value("model_index", -1);
-                det.x1 = item["xyxy"][0].get<double>();
-                det.y1 = item["xyxy"][1].get<double>();
-                det.x2 = item["xyxy"][2].get<double>();
-                det.y2 = item["xyxy"][3].get<double>();
-                if (item.contains("label") && item["label"].is_string()) {
-                    det.label = item["label"].get<std::string>();
-                    det.has_label = true;
-                }
-                if (!detAllowed(det))
-                    continue;
-                if (coord_space == "model") {
-                    if (!remapModelCoord(det.x1, det.y1, model_w, model_h, fw, fh, det.x1, det.y1))
+                for (const auto &item : md["detections"]) {
+                    if (!item.is_object())
                         continue;
-                    if (!remapModelCoord(det.x2, det.y2, model_w, model_h, fw, fh, det.x2, det.y2))
+                    if (!item.contains("xyxy") || !item["xyxy"].is_array() || item["xyxy"].size() < 4)
                         continue;
+                    DetectionBox det;
+                    det.cls = item.value("cls", -1);
+                    det.conf = item.value("conf", 0.0);
+                    det.model_index = item.value("model_index", -1);
+                    det.x1 = item["xyxy"][0].get<double>();
+                    det.y1 = item["xyxy"][1].get<double>();
+                    det.x2 = item["xyxy"][2].get<double>();
+                    det.y2 = item["xyxy"][3].get<double>();
+                    if (item.contains("label") && item["label"].is_string()) {
+                        det.label = item["label"].get<std::string>();
+                        det.has_label = true;
+                    }
+                    if (!detAllowed(det))
+                        continue;
+                    if (coord_space == "model") {
+                        if (!remapModelCoord(det.x1, det.y1, model_w, model_h, fw, fh, det.x1, det.y1))
+                            continue;
+                        if (!remapModelCoord(det.x2, det.y2, model_w, model_h, fw, fh, det.x2, det.y2))
+                            continue;
+                    }
+                    det.x1 = std::max(0.0, std::min((double)fw, det.x1));
+                    det.x2 = std::max(0.0, std::min((double)fw, det.x2));
+                    det.y1 = std::max(0.0, std::min((double)fh, det.y1));
+                    det.y2 = std::max(0.0, std::min((double)fh, det.y2));
+                    if (det.x2 < det.x1)
+                        std::swap(det.x1, det.x2);
+                    if (det.y2 < det.y1)
+                        std::swap(det.y1, det.y2);
+                    if (det.x2 > det.x1 && det.y2 > det.y1)
+                        out.push_back(det);
                 }
-                det.x1 = std::max(0.0, std::min((double)fw, det.x1));
-                det.x2 = std::max(0.0, std::min((double)fw, det.x2));
-                det.y1 = std::max(0.0, std::min((double)fh, det.y1));
-                det.y2 = std::max(0.0, std::min((double)fh, det.y2));
-                if (det.x2 < det.x1)
-                    std::swap(det.x1, det.x2);
-                if (det.y2 < det.y1)
-                    std::swap(det.y1, det.y2);
-                if (det.x2 > det.x1 && det.y2 > det.y1)
-                    out.push_back(det);
+                if (!out.empty())
+                    return true;
+            } catch (const std::exception &) {
+                continue;
             }
-            return true;
-        } catch (const std::exception &) {
-            return false;
         }
+        return false;
     }
 
     bool computeFocus(const std::vector<DetectionBox> &dets, int fw, int fh, double &cx, double &cy) const {
         if (dets.empty())
             return false;
         if (focus_mode_ == "label_priority") {
-            for (const std::string &want : label_priority_) {
-                for (const auto &d : dets) {
-                    if (d.has_label && d.label == want) {
-                        cx = centerX(d);
-                        cy = centerY(d);
-                        return true;
+            if (!label_priority_.empty()) {
+                for (const std::string &want : label_priority_) {
+                    for (const auto &d : dets) {
+                        if (d.has_label && d.label == want) {
+                            cx = centerX(d);
+                            cy = centerY(d);
+                            return true;
+                        }
                     }
                 }
+                return false;
             }
-            return false;
+            // Empty label_priority with this focus mode: same as best_conf (avoids stuck-at-center filter).
+            const DetectionBox *best = &dets[0];
+            for (size_t i = 1; i < dets.size(); ++i) {
+                if (dets[i].conf > best->conf)
+                    best = &dets[i];
+            }
+            cx = centerX(*best);
+            cy = centerY(*best);
+            return true;
         }
         if (focus_mode_ == "conf_weighted_centroid") {
             double sw = 0, sx = 0, sy = 0;
@@ -565,6 +614,73 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         }
         cx = centerX(*best);
         cy = centerY(*best);
+        return true;
+    }
+
+    bool collectDetsForContain(const std::vector<DetectionBox> &dets,
+                               std::vector<const DetectionBox *> &sel) const {
+        sel.clear();
+        if (dets.empty())
+            return false;
+        if (focus_mode_ == "label_priority") {
+            if (!label_priority_set_.empty()) {
+                for (const auto &d : dets) {
+                    if (d.has_label && label_priority_set_.count(d.label))
+                        sel.push_back(&d);
+                }
+                return !sel.empty();
+            }
+            // Empty label_priority: same as computeFocus — treat as all detections.
+            for (const auto &d : dets)
+                sel.push_back(&d);
+            return true;
+        }
+        if (focus_mode_ == "best_conf") {
+            const DetectionBox *best = &dets[0];
+            for (size_t i = 1; i < dets.size(); ++i) {
+                if (dets[i].conf > best->conf)
+                    best = &dets[i];
+            }
+            sel.push_back(best);
+            return true;
+        }
+        for (const auto &d : dets)
+            sel.push_back(&d);
+        return true;
+    }
+
+    bool computeViewportMeasurement(const std::vector<DetectionBox> &dets, int fw, int fh, double &mx, double &my) const {
+        if (viewport_fit_ != "contain")
+            return computeFocus(dets, fw, fh, mx, my);
+        std::vector<const DetectionBox *> sel;
+        if (!collectDetsForContain(dets, sel))
+            return false;
+        double x1 = sel[0]->x1, y1 = sel[0]->y1, x2 = sel[0]->x2, y2 = sel[0]->y2;
+        for (size_t i = 1; i < sel.size(); ++i) {
+            x1 = std::min(x1, sel[i]->x1);
+            y1 = std::min(y1, sel[i]->y1);
+            x2 = std::max(x2, sel[i]->x2);
+            y2 = std::max(y2, sel[i]->y2);
+        }
+        double m = viewport_contain_margin_px_;
+        if (!std::isfinite(m))
+            m = 0;
+        m = std::max(0.0, m);
+        if (m > 0) {
+            x1 -= m;
+            y1 -= m;
+            x2 += m;
+            y2 += m;
+        }
+        x1 = std::max(0.0, std::min((double)fw, x1));
+        y1 = std::max(0.0, std::min((double)fh, y1));
+        x2 = std::max(0.0, std::min((double)fw, x2));
+        y2 = std::max(0.0, std::min((double)fh, y2));
+        if (!(x2 > x1 && y2 > y1))
+            return false;
+        const double half_w = viewport_dst_width_ * 0.5;
+        const double half_h = viewport_dst_height_ * 0.5;
+        centerForFixedViewportContain(x1, y1, x2, y2, fw, fh, half_w, half_h, mx, my);
         return true;
     }
 
@@ -651,13 +767,16 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
     void writeViewportMetadata(av::VideoFrame &frm, double cx, double cy) {
         Parameters j;
-        j["viewport_bbox"] = {cx - 1.0, cy - 1.0, cx + 1.0, cy + 1.0};
+        const double h = std::max(1.0, viewport_marker_half_extent_);
+        j["viewport_bbox"] = {cx - h, cy - h, cx + h, cy + h};
         j["full_frame_width"] = frm.width();
         j["full_frame_height"] = frm.height();
+        j["viewport_dst_width"] = viewport_dst_width_;
+        j["viewport_dst_height"] = viewport_dst_height_;
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), j.dump().c_str(), 0);
     }
 
-    void processOneFrame(av::VideoFrame &frm, double agg_mx, double agg_my, bool agg_valid) {
+    void processOneFrame(av::VideoFrame &frm, double agg_mx, double agg_my, bool current_frame_has_det) {
         const int fw = frm.width();
         const int fh = frm.height();
         const double dt = frameDt();
@@ -669,31 +788,49 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             slew_x_.reset(fw * 0.5);
             slew_y_.reset(fh * 0.5);
         }
+        if (viewport_dst_width_ > fw || viewport_dst_height_ > fh) {
+            throw Error("smooth_crop_viewport: viewport_dst_width/height exceed frame dimensions");
+        }
 
         std::vector<DetectionBox> dets;
         double mx = 0, my = 0;
-        bool valid = false;
-        if (agg_valid && finitePos(agg_mx) && finitePos(agg_my)) {
+        bool frame_det = false;
+        if (current_frame_has_det && finitePos(agg_mx) && finitePos(agg_my)) {
             mx = agg_mx;
             my = agg_my;
-            valid = true;
-        } else if (parseMetadata(frm, dets) && computeFocus(dets, fw, fh, mx, my)) {
-            valid = true;
+            frame_det = true;
+        } else if (parseMetadata(frm, dets) && computeViewportMeasurement(dets, fw, fh, mx, my)) {
+            frame_det = true;
         }
+
+        if (frame_det)
+            ++visible_streak_;
+        else
+            visible_streak_ = 0;
+
+        const int need = std::max(1, min_visible_frames_);
+        const bool meas_valid = frame_det && visible_streak_ >= need;
 
         const bool lost_center = (lost_target_mode_ == "frame_center");
         double lp_x = 0, lp_y = 0;
-        lowpass_->step(mx, my, valid, dt, fw, fh, lost_center, lp_x, lp_y);
+        lowpass_->step(mx, my, meas_valid, dt, fw, fh, lost_center, lp_x, lp_y);
 
         double out_x = 0, out_y = 0;
-        runHoldAndDeriv(mx, my, valid, lp_x, lp_y, fw, fh, dt, out_x, out_y);
+        runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, fw, fh, dt, out_x, out_y);
+
+        {
+            const double half_w = viewport_dst_width_ * 0.5;
+            const double half_h = viewport_dst_height_ * 0.5;
+            out_x = std::max(half_w, std::min((double)fw - half_w, out_x));
+            out_y = std::max(half_h, std::min((double)fh - half_h, out_y));
+        }
 
         writeViewportMetadata(frm, out_x, out_y);
 
         ++frame_counter_;
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "smooth_crop_viewport: frame=" << frame_counter_ << " out=(" << out_x << "," << out_y << ")"
-                      << " valid_meas=" << (valid ? 1 : 0);
+                      << " meas_valid=" << (meas_valid ? 1 : 0) << " streak=" << visible_streak_;
         }
     }
 
@@ -716,39 +853,49 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
                     ++cnt;
                 }
             }
-            const bool ok = cnt > 0;
-            const double ax = ok ? sx / cnt : 0;
-            const double ay = ok ? sy / cnt : 0;
-            processOneFrame(slot.frm, ax, ay, ok);
+            const bool current_det = slot.valid;
+            const double ax = current_det && cnt > 0 ? sx / cnt : 0;
+            const double ay = current_det && cnt > 0 ? sy / cnt : 0;
+            processOneFrame(slot.frm, ax, ay, current_det);
             this->sink_->put(std::move(slot.frm));
         }
     }
 
 public:
     SmoothCropViewport(std::unique_ptr<Source<av::VideoFrame>> &&source, std::unique_ptr<Sink<av::VideoFrame>> &&sink,
-                       std::string metadata_key_in, std::string metadata_key_out, av::Rational frame_rate,
+                       std::vector<std::string> metadata_keys_in, std::string metadata_key_out, av::Rational frame_rate,
                        double model_content_width, double model_content_height, double model_content_offset_x,
                        double model_content_offset_y, double min_conf, std::unordered_set<int> allowed_classes,
                        std::unordered_set<std::string> allowed_labels, std::unordered_set<int> allowed_model_indices,
-                       std::vector<std::string> label_priority, std::string focus_mode, std::string lost_target_mode,
+                       std::vector<std::string> label_priority, std::string focus_mode, std::string viewport_fit,
+                       double viewport_contain_margin_px, std::string lost_target_mode,
                        std::unique_ptr<LowpassBackend> &&lowpass, double kalman_q_pos,
                        double kalman_q_vel, double kalman_r, double iir_fc_hz, size_t fir_taps, bool hold_enabled,
                        double hold_speed_px_per_s, int hold_min_frames, double hold_break_px, int hold_max_frames,
-                       std::vector<double> derivative_limit_by_order, int lookahead_frames, int debug_log_every_n)
+                       std::vector<double> derivative_limit_by_order, double viewport_marker_half_extent,
+                       int viewport_dst_width, int viewport_dst_height, int lookahead_frames, int min_visible_frames,
+                       int debug_log_every_n)
         : NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)),
-          metadata_key_in_(std::move(metadata_key_in)), metadata_key_out_(std::move(metadata_key_out)),
+          metadata_keys_in_(std::move(metadata_keys_in)), metadata_key_out_(std::move(metadata_key_out)),
           frame_rate_(frame_rate), model_content_width_(model_content_width),
           model_content_height_(model_content_height), model_content_offset_x_(model_content_offset_x),
           model_content_offset_y_(model_content_offset_y), min_conf_(min_conf),
           allowed_classes_(std::move(allowed_classes)), allowed_labels_(std::move(allowed_labels)),
           allowed_model_indices_(std::move(allowed_model_indices)), label_priority_(std::move(label_priority)),
-          focus_mode_(std::move(focus_mode)), lost_target_mode_(std::move(lost_target_mode)),
+          focus_mode_(std::move(focus_mode)), viewport_fit_(std::move(viewport_fit)),
+          viewport_contain_margin_px_(viewport_contain_margin_px), lost_target_mode_(std::move(lost_target_mode)),
           lowpass_(std::move(lowpass)), kalman_q_pos_(kalman_q_pos),
           kalman_q_vel_(kalman_q_vel), kalman_r_(kalman_r), iir_fc_hz_(iir_fc_hz), fir_taps_(fir_taps),
           hold_enabled_(hold_enabled), hold_speed_px_per_s_(hold_speed_px_per_s),
           hold_min_frames_(hold_min_frames), hold_break_px_(hold_break_px), hold_max_frames_(hold_max_frames),
-          derivative_limit_by_order_(std::move(derivative_limit_by_order)), lookahead_frames_(lookahead_frames),
-          debug_log_every_n_(debug_log_every_n) {}
+          derivative_limit_by_order_(std::move(derivative_limit_by_order)),
+          lookahead_frames_(lookahead_frames), min_visible_frames_(min_visible_frames),
+          viewport_marker_half_extent_(viewport_marker_half_extent),
+          viewport_dst_width_(viewport_dst_width), viewport_dst_height_(viewport_dst_height),
+          debug_log_every_n_(debug_log_every_n) {
+        for (const auto &s : label_priority_)
+            label_priority_set_.insert(s);
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
@@ -763,7 +910,8 @@ public:
         BufSlot slot;
         slot.frm = std::move(frm);
         std::vector<DetectionBox> dets;
-        if (parseMetadata(slot.frm, dets) && computeFocus(dets, slot.frm.width(), slot.frm.height(), slot.mx, slot.my)) {
+        if (parseMetadata(slot.frm, dets) &&
+            computeViewportMeasurement(dets, slot.frm.width(), slot.frm.height(), slot.mx, slot.my)) {
             slot.valid = true;
         }
 
@@ -778,24 +926,24 @@ public:
 
         double sx = 0, sy = 0;
         int cnt = 0;
-        // Window: out + next lookahead_frames_ entries still in buffer (total lookahead+1 samples)
+        // Average only when the *output* frame has a detection; lookahead smooths target, not validity.
         if (out.valid) {
             sx += out.mx;
             sy += out.my;
             ++cnt;
-        }
-        for (int i = 0; i < lookahead_frames_ && i < (int)buffer_.size(); ++i) {
-            if (buffer_[(size_t)i].valid) {
-                sx += buffer_[(size_t)i].mx;
-                sy += buffer_[(size_t)i].my;
-                ++cnt;
+            for (int i = 0; i < lookahead_frames_ && i < (int)buffer_.size(); ++i) {
+                if (buffer_[(size_t)i].valid) {
+                    sx += buffer_[(size_t)i].mx;
+                    sy += buffer_[(size_t)i].my;
+                    ++cnt;
+                }
             }
         }
-        const bool ok = cnt > 0;
-        const double ax = ok ? sx / cnt : 0;
-        const double ay = ok ? sy / cnt : 0;
+        const bool current_det = out.valid;
+        const double ax = current_det && cnt > 0 ? sx / cnt : 0;
+        const double ay = current_det && cnt > 0 ? sy / cnt : 0;
 
-        processOneFrame(out.frm, ax, ay, ok);
+        processOneFrame(out.frm, ax, ay, current_det);
         this->sink_->put(std::move(out.frm));
     }
 
@@ -811,7 +959,13 @@ public:
                 frame_rate = av::Rational((int)std::lround(fps * 1000), 1000);
         }
 
-        const std::string metadata_key_in = params.value("metadata_key_in", std::string("basketball_analysis_v1"));
+        std::vector<std::string> metadata_keys_in;
+        if (params.contains("metadata_key_ins") && params["metadata_key_ins"].is_array()) {
+            for (const auto &v : params["metadata_key_ins"])
+                metadata_keys_in.push_back(v.get<std::string>());
+        }
+        if (metadata_keys_in.empty())
+            metadata_keys_in.push_back(params.value("metadata_key_in", std::string("basketball_analysis_v1")));
         const std::string metadata_key_out = params.value("metadata_key_out", std::string("smoothed_crop_viewport_v1"));
         const double mcw = params.value("model_content_width", 0.0);
         const double mch = params.value("model_content_height", 0.0);
@@ -839,6 +993,11 @@ public:
                 label_priority.push_back(v.get<std::string>());
         }
         const std::string focus_mode = params.value("focus_mode", std::string("best_conf"));
+        const std::string viewport_fit = params.value("viewport_fit", std::string("contain"));
+        if (viewport_fit != "center" && viewport_fit != "contain") {
+            throw Error("smooth_crop_viewport: viewport_fit must be \"center\" or \"contain\"");
+        }
+        const double contain_margin = params.value("viewport_contain_margin_px", 0.0);
         const std::string lost_target = params.value("lost_target", std::string("hold_last"));
         const std::string filter_type = params.value("filter_type", std::string("kalman"));
 
@@ -878,15 +1037,31 @@ public:
         const int hold_max = (int)params.value("hold_max_frames", 90);
 
         std::vector<double> deriv_lim = parseDerivativeLimits(params);
+        const double viewport_marker_half_extent = params.value("viewport_marker_half_extent", 1.0);
+        if (!std::isfinite(viewport_marker_half_extent) || viewport_marker_half_extent < 0.0) {
+            throw Error("smooth_crop_viewport: viewport_marker_half_extent must be finite and >= 0");
+        }
+        const int viewport_dst_width = params.at("viewport_dst_width").get<int>();
+        const int viewport_dst_height = params.at("viewport_dst_height").get<int>();
+        if (viewport_dst_width <= 0 || viewport_dst_height <= 0) {
+            throw Error("smooth_crop_viewport: viewport_dst_width and viewport_dst_height must be positive");
+        }
+        if ((viewport_dst_width & 1) || (viewport_dst_height & 1)) {
+            throw Error("smooth_crop_viewport: viewport_dst_width and viewport_dst_height must be even");
+        }
         const int lookahead = (int)params.value("lookahead_frames", 0);
+        int min_visible = (int)params.value("min_visible_frames", 3);
+        if (min_visible < 1)
+            min_visible = 1;
         const int dbg = (int)params.value("debug_log_every_n", 0);
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<SmoothCropViewport>(
-            edges, params, metadata_key_in, metadata_key_out, frame_rate, mcw, mch, mcx, mcy, min_conf,
+            edges, params, std::move(metadata_keys_in), metadata_key_out, frame_rate, mcw, mch, mcx, mcy, min_conf,
             std::move(allowed_classes), std::move(allowed_labels), std::move(allowed_model_indices),
-            std::move(label_priority), focus_mode, lost_target, std::move(lp), kq_pos, kq_vel, kr,
+            std::move(label_priority), focus_mode, viewport_fit, contain_margin, lost_target, std::move(lp), kq_pos,
+            kq_vel, kr,
             iir_fc, fir_taps, hold_enabled, hold_spd, hold_min, hold_break, hold_max, std::move(deriv_lim),
-            lookahead, dbg);
+            viewport_marker_half_extent, viewport_dst_width, viewport_dst_height, lookahead, min_visible, dbg);
     }
 };
 
