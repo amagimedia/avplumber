@@ -1,0 +1,35 @@
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_v", "group": "in", "name": "input", "timeout": -1, "auto_restart": "panic" }
+node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in" }
+
+node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "in", "name": "Video_Dec", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "force_fps", "fps": "30", "group": "in", "src": "v_dec_cuda", "dst": "v_dec_30fps" }
+
+node.add { "type": "split", "src": "v_dec_30fps", "dst": ["v_dec_1080p", "v_dec_for_yolo"], "group": "in" }
+
+node.add { "type": "filter_video", "graph": "scale_cuda=w=960:h=540", "src": "v_dec_for_yolo", "dst": "v_scaled_960x540", "group": "in", "name": "Cuda_Scale_Yolo", "auto_restart": "group", "dst_width": 960, "dst_height": 540, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+node.add { "type": "filter_video", "graph": "pad_cuda=w=960:h=960:x=0:y=210", "src": "v_scaled_960x540", "dst": "v_pre_yolo", "group": "in", "name": "Cuda_Pad_Yolo", "auto_restart": "group", "dst_width": 960, "dst_height": 960, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "group": "in", "name": "Yolo_Infer", "auto_restart": "group", "hwaccel": "@gpu", "input_format": "RGB", "conf_thresh": 0.20, "iou_thresh": 0.45, "max_det": 20, "infer_every_n": 1, "metadata_key_out": "yolo_detections_v1", "debug_log_metadata": false, "debug_log_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/ball.plan", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" }, { "engine": "/home/fedora/tensorrt/player-ball.plan", "class_names": ["foot", "player", "ball"], "output_box_format": "end2end_xyxy" }, { "engine": "/home/fedora/tensorrt/hoop-ball.plan", "class_names": ["hoop", "ball"], "class_index_remap": [1, 0], "output_box_format": "raw_cxcywh" }] }
+
+node.add { "type": "basketball_analysis", "src": "v_post_yolo", "dst": "v_merged_ball", "group": "in", "metadata_key_in": "yolo_detections_v1", "metadata_key_out": "basketball_analysis_v1", "ball_model_index": 0, "context_model_index": 1, "ball_label": "basketball", "player_label": "player", "pfb_ball_label": "ball", "min_speed_px_per_frame": 5.0, "arm_dist_px": 50.0, "arm_frames": 2, "confirm_frames": 6, "max_hold_frames": 18, "max_match_distance_px": 200.0, "history_frames": 6, "candidate_drop_frames": 3, "pfb_possession_grace_frames": 2, "release_confirm_frames": 2, "shot_make_min_frames": 4, "shot_make_min_travel_px": 70.0, "shot_hoop_memory_frames": 40, "shot_exit_min_frames": 8, "shot_exit_min_travel_px": 80.0, "hoop_min_conf": 0.80, "passthrough_model_indices": [2], "passthrough_labels": ["hoop"] }
+
+node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_merged_ball"], "dst": "v_1080p_with_md", "group": "in" }
+
+# Smooth viewport center from detections, then CUDA crop to target aspect.
+# 1920x1080 full frame: 9:16 portrait using full height -> crop width = round(1080 * 9/16) = 608 (even).
+# Other examples: 1:1 -> 1080x1080; 5:4 -> 1350x1080 (fits within 1920 width).
+node.add { "type": "smooth_crop_viewport", "src": "v_1080p_with_md", "dst": "v_smoothed_crop_md", "group": "in", "name": "Smooth_Crop_Viewport", "metadata_key_in": "basketball_analysis_v1", "metadata_key_out": "smoothed_crop_viewport_v1", "model_content_width": 960, "model_content_height": 540, "model_content_offset_x": 0, "model_content_offset_y": 210, "min_conf": 0.20, "allowed_labels": ["basketball", "foot", "player", "ball", "hoop"], "focus_mode": "best_conf", "lost_target": "hold_last", "filter_type": "kalman", "lookahead_frames": 0, "hold_enabled": false, "max_velocity_px_per_s": 2400, "max_acceleration_px_per_s2": 80000, "debug_log_every_n": 0 }
+
+node.add { "type": "crop_metadata_cuda", "src": "v_smoothed_crop_md", "dst": "v_cropped_cuda", "group": "in", "name": "Crop_9_16", "metadata_key": "smoothed_crop_viewport_v1", "offset_log_path": "reframe_crop_offset.log", "dst_width": 608, "dst_height": 1080, "debug_log_every_n": 0 }
+
+node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_cropped_cuda", "dst": "v_cropped_fps" }
+node.add { "type": "assume_video_format", "width": 608, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_cropped_fps", "dst": "v_preenc", "auto_restart": "panic" }
+
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "4000k", "maxrate": "4000k", "bufsize": "8000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
+
+node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
+node.add { "type": "output", "format": "mpegts", "url": "yolo_reframe_916.ts", "src": "mux_v", "group": "in", "auto_restart": "panic" }
+
+group.start in
