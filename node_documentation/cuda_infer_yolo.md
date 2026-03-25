@@ -1,16 +1,17 @@
 # `cuda_infer_yolo`
 
-`cuda_infer_yolo` runs TensorRT-based YOLO inference on CUDA video frames and writes detection metadata onto each output frame. The node forwards the original frame downstream and augments it with JSON detection results.
+`cuda_infer_yolo` runs TensorRT-based YOLO inference on CUDA video frames and writes detection (and optionally segmentation) metadata onto each output frame. The node forwards the original frame downstream and augments it with JSON detection results and optional mask data.
 
 ## What It Does
 
 1. Reads CUDA `av::VideoFrame` input from `src` and forwards the same frame to `dst`.
-2. Initializes TensorRT from `engine` and discovers the image input tensor and first output tensor.
+2. Initializes TensorRT from each model's `engine` and discovers input/output tensors.
 3. Uses a CUDA preprocess kernel to convert the incoming `NV12` frame into the model's input tensor format.
-4. Runs TensorRT inference on the current frame.
+4. Runs TensorRT inference on the current frame (all models).
 5. Decodes YOLO-style output tensors into bounding boxes, class IDs, and confidences.
-6. Applies class-aware non-maximum suppression (NMS).
+6. For segmentation models: assembles per-detection masks from prototype masks and coefficients via GPU kernel.
 7. Writes JSON detections metadata onto the output frame.
+8. Optionally outputs GPU masks on `dst_seg` and/or CPU masks as AVFrame side data.
 
 ## Input Requirements
 
@@ -18,7 +19,7 @@
 - The hardware-backed software format must be `NV12`
 - The incoming frame dimensions must match the model input tensor dimensions
 - The TensorRT engine must expose at least one image input tensor and one output tensor
-- Dynamic TensorRT dimensions are not supported in this version
+- Dynamic TensorRT dimensions are not supported
 - Supported input tensor layouts:
   - `CHW` with `C=3`
   - `NCHW` with `N=1, C=3`
@@ -26,9 +27,13 @@
   - `float`
   - `half`
 
-## Output Decoding
+## Task Types
 
-The node supports several common YOLO export layouts:
+Each model has a `task_type` that determines how its output is decoded:
+
+### Detection (`task_type: "detection"`)
+
+Decodes bounding boxes from a single output tensor. Supports several common YOLO export layouts:
 
 - `2D` outputs such as `[84, N]` or `[N, 84]`
 - `3D` outputs such as:
@@ -36,35 +41,57 @@ The node supports several common YOLO export layouts:
   - `[1, N, 84]`
   - end-to-end layouts `[1, N, 6]` or `[1, 6, N]` with `[x1, y1, x2, y2, conf, cls]`
 
-For the ambiguous `[1, N, 6]` / `[1, 6, N]` case, the default decoder keeps the legacy interpretation above.
-Use `output_box_format: raw_cxcywh` to instead treat those tensors as raw YOLO output with
-`[cx, cy, w, h, score0, score1]`.
+### Segmentation (`task_type: "segmentation"`)
 
-For class-score layouts, the node:
+Decodes bounding boxes plus 32 mask coefficients from output tensor 0, and mask prototypes from output tensor 1. The segmentation model must have exactly 2 output tensors:
 
-- selects the best-scoring class per candidate
-- filters by `conf_thresh`
-- converts center-width-height boxes to `xyxy`
-- applies class-aware NMS using `iou_thresh`
-- limits final results to `max_det`
+- **output0**: detections + 32 mask coefficients per detection (same layout as detection but with 32 extra attrs after class scores)
+- **output1**: mask prototypes `[1, 32, proto_h, proto_w]` or `[32, proto_h, proto_w]`
+
+Mask assembly is performed on GPU: matrix multiply of coefficients x prototypes followed by sigmoid activation.
+
+**GPU mask output** (`dst_seg` edge): AVFrame containing assembled masks at prototype resolution, with PTS matching the input frame. Controlled by `mask_gpu_every_n`.
+
+**CPU mask output** (AVFrame side data): Downsampled masks attached as binary side data on the passthrough frame. Controlled by `mask_cpu_every_n`.
 
 ## Output Metadata
 
-By default, the node stores JSON metadata under `yolo_detections_v1`. The JSON contains:
+The node stores JSON metadata under `metadata_key_detection` (default: `yolo_detections`). The JSON contains:
 
-- `version`
 - `coord_space`
-- `thresholds`
-- `detections`
+- `model_width`, `model_height`
+- `models` array
+- `detections` array
 
 Each detection entry contains:
 
 - `cls`
-- `label` if class names are available
+- `label` (if class names are available)
 - `conf`
 - `xyxy`
+- `model_index`
+- `engine_name`
 
 Coordinates are emitted in model input space, not remapped back to an original source resolution. The metadata marks this explicitly with `coord_space = "model"`.
+
+## CPU Mask Side Data Format
+
+When segmentation models emit CPU masks, they are stored as AVFrame side data with type `0x59534D00`. Binary layout:
+
+```
+Header (16 bytes):
+  uint32_t  num_detections    -- number of masks (matches detection count)
+  uint32_t  mask_width        -- mask_cpu_resolution
+  uint32_t  mask_height       -- mask_cpu_resolution
+  uint32_t  reserved          -- padding, set to 0
+
+Masks (num_detections * mask_width * mask_height * sizeof(float) bytes):
+  float[]   mask_0            -- mask_width * mask_height floats, row-major
+  float[]   mask_1
+  ...
+```
+
+Masks are in the same order as detections in the JSON metadata.
 
 ## Parameters
 
@@ -74,36 +101,46 @@ Coordinates are emitted in model input space, not remapped back to an original s
   Input video edge.
 
 - `dst`
-  Output video edge.
-
-- `hwaccel`
-  Name of the shared `HWAccelDevice` instance to use.
+  Output video edge (passthrough frame with detection metadata).
 
 - `models`
   Array of model objects. Each model object has:
   - `engine` (required) — path to the TensorRT engine file.
+  - `task_type` (optional) — `"detection"` (default), `"segmentation"`, or `"pose"` (future).
+  - `output_box_format` (optional) — `"end2end_xyxy"` (default) or `"raw_cxcywh"`.
   - `class_names` (optional) — array of class-name strings, mapped to class IDs by index.
-  - `class_index_remap` (optional) — integer array used to remap decoded class IDs before labels are attached. Example: `[1, 0]` swaps class 0 and 1.
-  - `output_box_format` (optional) — override for ambiguous `[1, N, 6]` / `[1, 6, N]` outputs. Values: `end2end_xyxy` (default) or `raw_cxcywh`.
+  - `class_index_remap` (optional) — integer array used to remap decoded class IDs.
 
   All models must share the same input dimensions and data type.
 
 ### Optional
 
-- `conf_thresh`
-  Confidence threshold applied before NMS. Default: `0.25`.
+- `dst_seg`
+  Optional output edge for GPU segmentation masks. Only used when segmentation models are present.
 
-- `iou_thresh`
-  IoU threshold used for class-aware NMS. Default: `0.45`.
+- `conf_thresh`
+  Confidence threshold. Default: `0.25`.
 
 - `max_det`
-  Maximum number of detections kept after NMS. Default: `300`.
+  Maximum number of detections kept after sorting. Default: `300`.
 
 - `infer_every_n`
-  Run inference only on every Nth frame. Frames skipped by this setting are passed through without new detection metadata. Default: `1`.
+  Run inference only on every Nth frame. Default: `1`.
 
-- `metadata_key_out`
-  Metadata key written to the outgoing frame. Default: `yolo_detections_v1`.
+- `metadata_key_detection`
+  Metadata key for detection JSON. Default: `"yolo_detections"`.
+
+- `metadata_key_segmentation`
+  Metadata key for segmentation info. Default: `"yolo_segmentation"`.
+
+- `mask_gpu_every_n`
+  Output GPU masks every Nth inference frame. Default: `1`.
+
+- `mask_cpu_every_n`
+  Attach CPU mask side data every Nth inference frame. Default: `2`.
+
+- `mask_cpu_resolution`
+  Square resolution for downsampled CPU masks. Default: `120`.
 
 - `debug_log_metadata`
   If `true`, log serialized detection metadata periodically. Default: `false`.
@@ -116,35 +153,34 @@ Coordinates are emitted in model input space, not remapped back to an original s
 
 ## Runtime Notes
 
-- Auxiliary engine input tensors may exist, but the node preprocesses only the detected image input tensor
+- The CUDA context is obtained from the incoming frame's `hw_frames_ctx` (no `hwaccel` parameter needed)
+- Auxiliary engine input tensors may exist but only the detected image input tensor is preprocessed
 - The node binds tensor addresses by name using the TensorRT 10 API
-- Only the first output tensor is decoded in this version
 - On preprocessing, TensorRT, or copy failures, the node logs the error and returns without producing output for that frame
+- `mask_gpu_every_n` and `mask_cpu_every_n` count inference frames, not total frames
 
 ## Examples
 
-Single model:
+Detection only:
 
 ```json
 node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
-  "hwaccel": "@gpu", "input_format": "RGB",
-  "conf_thresh": 0.25, "iou_thresh": 0.45, "max_det": 300,
+  "input_format": "RGB", "conf_thresh": 0.25, "max_det": 300,
   "models": [
-    { "engine": "/models/yolo.engine", "class_names": ["person", "car", "dog"] }
+    { "engine": "/models/yolo.engine", "task_type": "detection", "class_names": ["person", "car", "dog"] }
   ]
 }
 ```
 
-Multiple models with per-model settings:
+Multiple models with segmentation:
 
 ```json
-node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
-  "hwaccel": "@gpu", "input_format": "RGB",
-  "conf_thresh": 0.20, "max_det": 20,
+node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo", "dst_seg": "v_seg_masks",
+  "input_format": "RGB", "conf_thresh": 0.20, "max_det": 20,
+  "mask_gpu_every_n": 1, "mask_cpu_every_n": 3, "mask_cpu_resolution": 120,
   "models": [
-    { "engine": "/models/ball.plan", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" },
-    { "engine": "/models/player-ball.plan", "class_names": ["foot", "player", "ball"] },
-    { "engine": "/models/hoop-ball.plan", "class_names": ["hoop", "ball"], "class_index_remap": [1, 0], "output_box_format": "raw_cxcywh" }
+    { "engine": "/models/ball.plan", "task_type": "detection", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" },
+    { "engine": "/models/yolo-seg.plan", "task_type": "segmentation", "class_names": ["person"], "output_box_format": "raw_cxcywh" }
   ]
 }
 ```
