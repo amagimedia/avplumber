@@ -44,6 +44,9 @@
 #include <avcpp/av.h>
 #include <avcpp/avutils.h>
 
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+
 using boost::asio::ip::tcp;
 using nlohmann::json;
 
@@ -1142,6 +1145,14 @@ void AVPlumber::setLogFile(const std::string path) {
     }
 }
 
+void AVPlumber::setLogCallback(std::function<void(const std::string &)> callback) {
+    if (callback) {
+        current_thread.logger = std::make_shared<CallbackLogger>(callback);
+    } else {
+        current_thread.logger = default_logger;
+    }
+}
+
 void AVPlumber::setReady() {
     logstream << APP_VERSION << " READY." << std::endl;
     impl_->setReady();
@@ -1167,4 +1178,34 @@ void AVPlumber::stopMainLoop() {
 
 void AVPlumber::heartbeat() {
     impl_->printAllQueues();
+}
+
+
+void py_registerAVPlumber(py::module_ &m) {
+    py::class_<AVPlumber>(m, "AVPlumber")
+        .def(py::init<>())
+        .def("enableControlServer", &AVPlumber::enableControlServer)
+        .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
+        .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString)
+        .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile)
+        .def("setLogFile", &AVPlumber::setLogFile)
+        .def("setLogCallback", [&](AVPlumber &avp, py::function callback) {
+            avp.setLogCallback([callback](const std::string &s) {
+                py::gil_scoped_acquire acquire;
+                py::object py_s = py::str(s);
+                callback(py_s);
+            });
+        })
+        .def("setReady", &AVPlumber::setReady)
+        .def("shutdown", &AVPlumber::shutdown)
+        .def("mainLoop", &AVPlumber::mainLoop)
+        .def("stopMainLoop", &AVPlumber::stopMainLoop)
+        .def("heartbeat", &AVPlumber::heartbeat)
+        .def_property_readonly("controlImpl", [](AVPlumber &avp) { return avp.controlImpl(); })
+//        .def_property_readonly("manager", [](AVPlumber &avp) { return avp.manager(); }
+    ;
+
+    py::class_<ControlImpl>(m, "ControlImpl")
+        .def_property_readonly("manager", [](ControlImpl &ci) { return ci.manager(); })
+    ;
 }
