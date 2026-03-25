@@ -11,6 +11,8 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
 
 using namespace std::chrono_literals;
 
@@ -788,4 +790,23 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
     }
 }
 
+void py_registerNodeManager(py::module_ &m) {
+    py::class_<NodeManager, std::shared_ptr<NodeManager>>(m, "NodeManager")
+        .def(py::init<>())
+//        .def("createNode", &NodeManager::createNode)
+//        .def("deleteNode", &NodeManager::deleteNode)
+       .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
+//       .def_property_readonly("groups", [](NodeManager &nm) { return nm.groups(); })
+//       .def_property_readonly("nodes", [](NodeManager &nm) { return nm.nodes(); })
+       .def_property_readonly("allNodes", [](NodeManager &nm) { return nm.allNodes(); })
+    ;
 
+   py::class_<NodeWrapper, std::shared_ptr<NodeWrapper>>(m, "NodeWrapper")
+//        .def(py::init<std::shared_ptr<NodeManager>, const Parameters&, const bool>())
+    //        .def_property_readonly("name", [](NodeWrapper &nw) { return nw.name(); })
+       .def_property_readonly("type", [](NodeWrapper &nw) { return nw.type(); })
+       .def_property_readonly("node", [](NodeWrapper &nw) { return nw.node(); })
+       .def_property_readonly("name", [](NodeWrapper &nw) { return nw.name(); })
+       .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
+    ;
+}

@@ -22,3 +22,15 @@ public:
     FileLogger(const std::string file_name): Logger(), file_(file_name, std::ios::binary | std::ios::app) {
     }
 };
+
+class CallbackLogger: public Logger {
+    protected:
+        std::function<void(const std::string &)> callback_;
+        virtual void write(const std::string &s) override {
+            callback_(s);
+        }
+    public:
+        CallbackLogger(std::function<void(const std::string &)> callback): Logger(), callback_(callback) {
+        }
+    };
+    

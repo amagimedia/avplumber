@@ -3,6 +3,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <functional>
 
 class ControlImpl;
 
@@ -10,7 +11,6 @@ class ControlImpl;
 struct obs_source;
 typedef struct obs_source obs_source_t;
 #endif
-
 
 /*
  * Usage #1: (as in standalone application)
@@ -50,6 +50,7 @@ public:
     ~AVPlumber();
     void enableControlServer(const uint16_t tcp_port);
     void registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name = "", const std::string& log_file = "");
+    ControlImpl* controlImpl() { return impl_; }
 #ifdef EMBED_IN_OBS
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
@@ -70,6 +71,7 @@ public:
     void executeCommandsFromFile(const std::string path);
     void executeCommandsFromString(const std::string script);
     void setLogFile(const std::string path);
+    void setLogCallback(std::function<void(const std::string &)> callback);
     void setReady();
     void shutdown();
     void mainLoop();

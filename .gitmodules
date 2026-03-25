@@ -22,3 +22,7 @@
 [submodule "deps/libklscte35"]
 	path = deps/libklscte35
 	url = https://github.com/stoth68000/libklscte35
+[submodule "deps/pybind11"]
+	path = deps/pybind11
+	url = ../../pybind/pybind11
+	branch = stable
