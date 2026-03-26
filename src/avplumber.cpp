@@ -1201,11 +1201,6 @@ void py_registerAVPlumber(py::module_ &m) {
         .def("mainLoop", &AVPlumber::mainLoop)
         .def("stopMainLoop", &AVPlumber::stopMainLoop)
         .def("heartbeat", &AVPlumber::heartbeat)
-        .def_property_readonly("controlImpl", [](AVPlumber &avp) { return avp.controlImpl(); })
-//        .def_property_readonly("manager", [](AVPlumber &avp) { return avp.manager(); }
-    ;
-
-    py::class_<ControlImpl>(m, "ControlImpl")
-        .def_property_readonly("manager", [](ControlImpl &ci) { return ci.manager(); })
+        .def_property_readonly("manager", [](AVPlumber &avp) { return avp.controlImpl()->manager(); })
     ;
 }

@@ -9,10 +9,19 @@ EdgeManager EdgeManager::global_edge_manager_;
 namespace {
 
 template <typename T>
-void py_registerEdge(py::module_ &m, const char *name) {
-    py::class_<Edge<T>, std::shared_ptr<Edge<T>>>(m, name)
+void py_registerEdge(py::module_ &m, const char *type_name) {
+    py::class_<Edge<T>, std::shared_ptr<Edge<T>>>(m, type_name)
         .def(py::init<size_t>())
+        .def("__repr__", [](Edge<T> &e) {
+            return "Edge(), " + std::to_string(e.occupied()) + "/" + std::to_string(e.capacity());
+        })
         .def("addWiretapCallback", [](Edge<T> &e, py::function f) {
+            e.addWiretapCallback([f](const T &p) {
+                py::gil_scoped_acquire gil;
+                f(py::cast(p));
+            });
+        })
+        .def("addPacketCallback", [](Edge<T> &e, py::function f) {
             e.addWiretapCallback([f](const T &p) {
                 py::gil_scoped_acquire gil;
                 f(py::cast(p));
@@ -24,6 +33,8 @@ void py_registerEdge(py::module_ &m, const char *name) {
         .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
         .def("enqueue", &Edge<T>::enqueue)
         .def("pop", &Edge<T>::pop);
+        .def("peek", &Edge<T>::peek)
+        .def("wait_peek", &Edge<T>::wait_peek)
 }
 
 }  // namespace
@@ -72,8 +83,34 @@ void py_registerEdgeManager(py::module_ &m) {
         .def_property_readonly("dts", [](const av::Packet &p) { return p.dts(); })
         .def_property_readonly("duration", [](const av::Packet &p) { return p.duration(); })
         .def_property_readonly("size", [](const av::Packet &p) { return p.size(); })
-        .def_property_readonly("data", [](const av::Packet &p) { return p.data(); })
+        .def_property_readonly("data", [](const av::Packet &p) -> py::bytes { 
+            return py::bytes(reinterpret_cast<const char*>(p.data()), p.size());
+        })
         .def_property_readonly("stream_index", [](const av::Packet &p) { return p.streamIndex(); })
         .def_property_readonly("flags", [](const av::Packet &p) { return p.flags(); })
+    ;
+
+    py::class_<av::VideoFrame, std::shared_ptr<av::VideoFrame>>(m, "VideoFrame")
+        .def(py::init<>())
+        .def("__repr__", [](const av::VideoFrame &f) {
+            return "VideoFrame(" + std::to_string(f.width()) + "x" + std::to_string(f.height()) + ", " + f.pixelFormat().name() + ", " + std::to_string(f.pts().timestamp()) + ")";
+        })
+        .def_property_readonly("width", &av::VideoFrame::width)
+        .def_property_readonly("height", &av::VideoFrame::height)
+        .def_property_readonly("format", &av::VideoFrame::pixelFormat)
+        .def_property_readonly("pts", &av::VideoFrame::pts)
+        .def_property("keyFrame", &av::VideoFrame::isKeyFrame, &av::VideoFrame::setKeyFrame )
+        .def_property("quality", &av::VideoFrame::quality, &av::VideoFrame::setQuality )
+    ;
+
+    py::class_<av::PixelFormat, std::shared_ptr<av::PixelFormat>>(m, "PixelFormat")
+        .def(py::init<>())
+        .def_property_readonly("value", [&](const av::PixelFormat &pf) { return static_cast<int>(pf); })
+        .def_property_readonly("name", [&](const av::PixelFormat &pf) -> py::str {
+            py::str name = pf.name();
+            return name;
+        })
+        .def_property_readonly("bitsPerPixel", &av::PixelFormat::bitsPerPixel)
+        .def_property_readonly("planesCount", &av::PixelFormat::planesCount)
     ;
 }

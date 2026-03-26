@@ -26,3 +26,7 @@
 	path = deps/pybind11
 	url = ../../pybind/pybind11
 	branch = stable
+[submodule "deps/pybind11_json"]
+	path = deps/pybind11_json
+	url = ../../pybind/pybind11_json
+	branch = master
