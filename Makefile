@@ -20,7 +20,7 @@ else
 OPTIMIZATION_FLAGS = -O3 -flto
 endif
 
-override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes `python3-config --includes` $(OPTIMIZATION_FLAGS)
+override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes -Ideps/pybind11/include -Ideps/pybind11_json/include `python3-config --includes` $(OPTIMIZATION_FLAGS)
 override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib `python3-config --ldflags` $(OPTIMIZATION_FLAGS)
 PKG_CONFIG_PATH := /apps/ffmpeg/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
@@ -135,9 +135,6 @@ builddate:
 
 
 $(BUILD_DATE_FILE): builddate
-
-# pybind11 headers (submodule: deps/pybind11)
-objs/src/avplumber_pybind.o: CXXFLAGS += -Ideps/pybind11/include
 
 $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 	@mkdir -p $(dir $@)
