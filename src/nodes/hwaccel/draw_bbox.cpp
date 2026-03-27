@@ -459,6 +459,15 @@ private:
                 if (!drawBBoxOnFrame(output, viewport)) {
                     throw Error("draw_bbox: failed drawing viewport bbox");
                 }
+                if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                    logstream << "draw_bbox: frame=" << frame_counter_
+                              << " viewport=[" << viewport.x1 << "," << viewport.y1
+                              << "," << viewport.x2 << "," << viewport.y2 << "]";
+                }
+            }
+        } else {
+            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "draw_bbox: frame=" << frame_counter_ << " no viewport dims found";
             }
         }
 
