@@ -37,9 +37,13 @@ node.add { "type": "smooth_crop_viewport", "src": "v_1080p_with_md", "dst": "v_s
 
 node.add { "type": "draw_bbox", "src": "v_smoothed_crop_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_Yolo_BBoxes", "metadata_keys": ["basketball_analysis_v1", "smoothed_crop_viewport_v1"], "bbox_thickness": 2, "min_conf": 0.20, "allowed_labels": ["basketball", "foot", "player", "ball", "hoop"], "model_colors": { "0": "red", "1": "green", "2": "light_blue" }, "model_content_width": 960, "model_content_height": 540, "model_content_offset_x": 0, "model_content_offset_y": 210, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 1 }
 
-#node.add { "type": "crop_metadata_cuda", "src": "v_annotated_cuda", "dst": "v_cropped_cuda", "group": "in", "name": "Crop_9_16", "metadata_key": "smoothed_crop_viewport_v1", "offset_log_path": "reframe_crop_offset.log", "debug_log_every_n": 0 }
+# Shot metadata text overlay (basketball_analysis_v1)
+queue.plan_capacity v_text_overlay 60
+node.add { "type": "draw_text", "src": "v_annotated_cuda", "dst": "v_text_overlay", "group": "in", "name": "Draw_Shot_Text", "metadata_key": "basketball_analysis_v1", "analysis_object_key": "basketball_analysis", "origin_x": 48, "origin_y": 48, "font_scale": 4, "line_spacing": 12, "text_color": "white", "background_color": "black", "debug_log_every_n": 30 }
 
-node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_cropped_fps" }
+#node.add { "type": "crop_metadata_cuda", "src": "v_text_overlay", "dst": "v_cropped_cuda", "group": "in", "name": "Crop_9_16", "metadata_key": "smoothed_crop_viewport_v1", "offset_log_path": "reframe_crop_offset.log", "debug_log_every_n": 0 }
+
+node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_text_overlay", "dst": "v_cropped_fps" }
 node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_cropped_fps", "dst": "v_preenc", "auto_restart": "panic" }
 
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "14000k", "bufsize": "20000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
