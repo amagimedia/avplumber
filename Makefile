@@ -6,6 +6,11 @@ HAVE_DRM = 0
 # Optional bundled deps/features
 # - HAVE_SCTE35 controls whether we build/link libklvanc + libklscte35 and enable the SCTE-35 parser node.
 HAVE_SCTE35 = 1
+# Build NvOFFRUC-based frame interpolation node (requires CUDA + Optical_Flow_SDK_5.0.7 headers at build time,
+# and libNvOFFRUC.so available at runtime)
+HAVE_NVOF_FRUC ?= 1
+# Path to NVIDIA Optical Flow SDK root dir (can be overridden by environment)
+OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
 HAVE_TENSORRT = 0
@@ -137,6 +142,16 @@ override CXXFLAGS += -I$(TENSORRT_ROOT)/include
 override LFLAGS += -L$(TENSORRT_ROOT)/lib -Wl,-rpath,$(TENSORRT_ROOT)/lib
 endif
 override LIBS_FLAGS += -lnvinfer -lnvinfer_plugin
+endif
+
+# NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC),11)
+ifneq (,$(wildcard $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface/NvOFFRUC.h))
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/nvof_fruc.cpp
+override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface
+else
+override CXXFLAGS += -DHAVE_NVOF_FRUC=0
+endif
 endif
 
 ifeq ($(HAVE_DRM),1)
