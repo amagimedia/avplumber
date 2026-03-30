@@ -27,6 +27,17 @@ extern "C" {
 
 // Project-local side data type for segmentation masks
 static const AVFrameSideDataType AV_FRAME_DATA_YOLO_SEG_MASKS = (AVFrameSideDataType)0x59534D00;
+static const AVFrameSideDataType AV_FRAME_DATA_YOLO_SEG_MASKS_GPU = (AVFrameSideDataType)0x59534D01;
+
+// Header for GPU mask side data (lives in CPU memory, gpu_ptr is a CUdeviceptr)
+struct GpuMaskSideDataHeader {
+    uint64_t gpu_ptr;
+    uint32_t num_masks;
+    uint32_t proto_w;
+    uint32_t proto_h;
+    uint32_t model_w;
+    uint32_t model_h;
+};
 
 namespace yolo_base {
 
@@ -178,6 +189,7 @@ struct ModelRunner {
     // Config
     OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
     TaskType task_type = TaskType::Detection;
+    bool include_in_detection_metadata = true;
     std::vector<std::string> class_names;
     std::vector<int> class_index_remap;
 
