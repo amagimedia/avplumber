@@ -10,6 +10,97 @@ EdgeManager EdgeManager::global_edge_manager_;
 
 namespace {
 
+class MetadataProxy {
+    av::VideoFrame* frame_ = nullptr;
+    py::object owner_ = py::none();
+
+    AVFrame* raw() const {
+        return frame_ ? frame_->raw() : nullptr;
+    }
+
+public:
+    MetadataProxy() = default;
+    MetadataProxy(av::VideoFrame& frame, py::object owner): frame_(&frame), owner_(std::move(owner)) {}
+
+    py::dict asDict() const {
+        py::dict out;
+        const AVFrame* r = raw();
+        if (!r || !r->metadata) {
+            return out;
+        }
+
+        const AVDictionaryEntry* entry = nullptr;
+        while ((entry = av_dict_get(r->metadata, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+            out[py::str(entry->key)] = py::str(entry->value ? entry->value : "");
+        }
+        return out;
+    }
+
+    void assign(const py::dict& d) {
+        AVFrame* r = raw();
+        if (!r) {
+            return;
+        }
+        av_dict_free(&r->metadata);
+        for (auto item: d) {
+            std::string key = py::cast<std::string>(py::str(item.first));
+            std::string value = py::cast<std::string>(py::str(item.second));
+            av_dict_set(&r->metadata, key.c_str(), value.c_str(), 0);
+        }
+    }
+
+    py::object getItem(const std::string& key) const {
+        const AVFrame* r = raw();
+        if (!r || !r->metadata) {
+            throw py::key_error(key);
+        }
+        const AVDictionaryEntry* entry = av_dict_get(r->metadata, key.c_str(), nullptr, 0);
+        if (!entry) {
+            throw py::key_error(key);
+        }
+        return py::str(entry->value ? entry->value : "");
+    }
+
+    void setItem(const std::string& key, const py::object& value) {
+        AVFrame* r = raw();
+        if (!r) {
+            return;
+        }
+        std::string str_value = py::cast<std::string>(py::str(value));
+        av_dict_set(&r->metadata, key.c_str(), str_value.c_str(), 0);
+    }
+
+    void delItem(const std::string& key) {
+        AVFrame* r = raw();
+        if (!r || !r->metadata) {
+            throw py::key_error(key);
+        }
+        const AVDictionaryEntry* entry = av_dict_get(r->metadata, key.c_str(), nullptr, 0);
+        if (!entry) {
+            throw py::key_error(key);
+        }
+        av_dict_set(&r->metadata, key.c_str(), nullptr, 0);
+    }
+
+    bool contains(const std::string& key) const {
+        const AVFrame* r = raw();
+        return r && r->metadata && av_dict_get(r->metadata, key.c_str(), nullptr, 0);
+    }
+
+    size_t size() const {
+        const AVFrame* r = raw();
+        size_t count = 0;
+        if (!r || !r->metadata) {
+            return count;
+        }
+        const AVDictionaryEntry* entry = nullptr;
+        while ((entry = av_dict_get(r->metadata, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+            ++count;
+        }
+        return count;
+    }
+};
+
 template <typename T>
 void py_registerEdge(py::module_ &m, const char *type_name) {
     py::class_<Edge<T>, std::shared_ptr<Edge<T>>>(m, type_name)
@@ -18,12 +109,6 @@ void py_registerEdge(py::module_ &m, const char *type_name) {
             return "Edge(), " + std::to_string(e.occupied()) + "/" + std::to_string(e.capacity());
         })
         .def("addWiretapCallback", [](Edge<T> &e, py::function f) {
-            e.addWiretapCallback([f](const T &p) {
-                py::gil_scoped_acquire gil;
-                f(py::cast(p));
-            });
-        })
-        .def("addPacketCallback", [](Edge<T> &e, py::function f) {
             e.addWiretapCallback([f](const T &p) {
                 py::gil_scoped_acquire gil;
                 f(py::cast(p));
@@ -43,6 +128,19 @@ void py_registerEdge(py::module_ &m, const char *type_name) {
 }  // namespace
 
 void py_registerEdgeManager(py::module_ &m) {
+    py::class_<MetadataProxy>(m, "MetadataProxy")
+        .def("__repr__", [](const MetadataProxy& md) {
+            py::object dict_obj = md.asDict();
+            return "MetadataProxy(" + py::repr(dict_obj).cast<std::string>() + ")";
+        })
+        .def("__len__", &MetadataProxy::size)
+        .def("__contains__", &MetadataProxy::contains)
+        .def("__getitem__", &MetadataProxy::getItem)
+        .def("__setitem__", &MetadataProxy::setItem)
+        .def("__delitem__", &MetadataProxy::delItem)
+        .def("as_dict", &MetadataProxy::asDict)
+    ;
+
     py::class_<EdgeManager, std::shared_ptr<EdgeManager>>(m, "EdgeManager")
         .def(py::init<>())
 //        .def_property_readonly("edges", [](EdgeManager &em) { return em.edges(); })
@@ -99,10 +197,19 @@ void py_registerEdgeManager(py::module_ &m) {
         .def_property_readonly("height", &av::VideoFrame::height)
         .def_property_readonly("format", &av::VideoFrame::pixelFormat)
         .def_property_readonly("pts", &av::VideoFrame::pts)
+        
         .def_property("keyFrame", &av::VideoFrame::isKeyFrame, &av::VideoFrame::setKeyFrame )
         .def_property("quality", &av::VideoFrame::quality, &av::VideoFrame::setQuality )
         .def_property("pictureType", &av::VideoFrame::pictureType, &av::VideoFrame::setPictureType )
         .def_property("sampleAspectRatio", &av::VideoFrame::sampleAspectRatio, &av::VideoFrame::setSampleAspectRatio )
+        .def_property("metadata",
+            [](av::VideoFrame &f) -> MetadataProxy {
+                return MetadataProxy(f, py::cast(&f, py::return_value_policy::reference));
+            },
+            [](av::VideoFrame &f, const py::dict &d) {
+                MetadataProxy(f, py::none()).assign(d);
+            }
+        )
     ;
 
     py::class_<av::PixelFormat, std::shared_ptr<av::PixelFormat>>(m, "PixelFormat")
