@@ -110,6 +110,7 @@ Masks are in the same order as detections in the JSON metadata.
   - `output_box_format` (optional) — `"end2end_xyxy"` (default) or `"raw_cxcywh"`.
   - `class_names` (optional) — array of class-name strings, mapped to class IDs by index.
   - `class_index_remap` (optional) — integer array used to remap decoded class IDs.
+  - `include_in_detection_metadata` (optional) — boolean, defaults to `true`. When `false`, the model still runs and can emit masks/side data, but its decoded detections are excluded from the shared JSON metadata list.
 
   All models must share the same input dimensions and data type.
 

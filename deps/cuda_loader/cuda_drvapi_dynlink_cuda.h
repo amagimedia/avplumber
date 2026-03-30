@@ -1766,6 +1766,7 @@ typedef CUresult CUDAAPI tcuStreamAddCallback(CUstream hStream, CUstreamCallback
 typedef CUresult CUDAAPI tcuStreamQuery(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamSynchronize(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamDestroy(CUstream hStream);
+typedef CUresult CUDAAPI tcuStreamGetCtx(CUstream hStream, CUcontext *pctx);
 
 /************************************
  **
@@ -1917,6 +1918,7 @@ extern tcuStreamWaitEvent              *cuStreamWaitEvent;
 extern tcuStreamAddCallback            *cuStreamAddCallback;
 extern tcuStreamSynchronize            *cuStreamSynchronize;
 extern tcuStreamDestroy                *cuStreamDestroy;
+extern tcuStreamGetCtx                 *cuStreamGetCtx;
 extern tcuGraphicsUnregisterResource         *cuGraphicsUnregisterResource;
 extern tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArray;
 extern tcuGraphicsResourceSetMapFlags        *cuGraphicsResourceSetMapFlags;
