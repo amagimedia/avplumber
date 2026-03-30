@@ -25,6 +25,9 @@ public:
         cu_ctx_ = cu_ctx;
         max_det_ = max_det;
 
+        // Ensure correct CUDA context (TensorRT engine loading may have changed it)
+        if (YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+
         // Load PTX module
         const std::string ptx_str(avpl_yolo_mask_assemble_ptx,
             avpl_yolo_mask_assemble_ptx + avpl_yolo_mask_assemble_ptx_len);
@@ -77,6 +80,32 @@ public:
     ) {
         SegmentationResult result;
         if (host_outputs.size() < 2 || !host_outputs[0] || !host_outputs[1]) return result;
+        auto log_ctx = [&](const char* stage, CUdeviceptr ptr = 0) {
+            if (!cuCtxGetCurrent) return;
+            CUcontext current = nullptr;
+            CUcontext stream_ctx = nullptr;
+            CUresult err = cuCtxGetCurrent(&current);
+            if (err != CUDA_SUCCESS) {
+                YOLO_CHECK_CU(err);
+                return;
+            }
+            if (cuStreamGetCtx) {
+                CUresult stream_err = cuStreamGetCtx(stream, &stream_ctx);
+                if (stream_err != CUDA_SUCCESS) {
+                    YOLO_CHECK_CU(stream_err);
+                }
+            }
+            logstream << "cuda_infer_yolo: seg_ctx"
+                      << " stage=" << stage
+                      << " current=" << (void*)current
+                      << " decoder=" << (void*)cu_ctx_
+                      << " stream_ctx=" << (void*)stream_ctx
+                      << " stream=" << (void*)stream
+                      << " scratch=" << (void*)(uintptr_t)gpu_mask_scratch_
+                      << " coeff=" << (void*)(uintptr_t)gpu_coeff_buf_
+                      << " proto=" << (void*)(uintptr_t)gpu_proto_buf_
+                      << " ptr=" << (void*)(uintptr_t)ptr;
+        };
 
         const float* out0 = host_outputs[0];
         const nvinfer1::Dims& d = output_dims[0];
@@ -204,15 +233,24 @@ public:
         unsigned int gridZ = (unsigned int)num_dets;
         if (YOLO_CHECK_CU(cuLaunchKernel(mask_assemble_kernel_, gridX, gridY, gridZ, 32, 8, 1, 0, stream, mask_args, nullptr)))
             return result;
+        if (YOLO_CHECK_CU(cuStreamSynchronize(stream))) {
+            log_ctx("after_mask_assemble_sync_failed");
+            return result;
+        }
 
+        // Keep using the same active context that owns the stream and scratch buffers.
+        // Switching contexts here can make the subsequent output allocation/copy invalid.
         // 5. GPU path: wrap assembled masks in AVBufferRef
         if (emit_gpu_mask) {
+            log_ctx("before_gpu_output");
             size_t mask_bytes = (size_t)num_dets * proto_h_ * proto_w_ * sizeof(float);
             CUdeviceptr gpu_out = 0;
             if (YOLO_CHECK_CU(cuMemAlloc(&gpu_out, mask_bytes))) {
                 // continue without GPU mask
             } else {
+                log_ctx("after_gpu_out_alloc", gpu_out);
                 if (YOLO_CHECK_CU(cuMemcpyDtoDAsync(gpu_out, gpu_mask_scratch_, mask_bytes, stream))) {
+                    log_ctx("gpu_copy_failed", gpu_out);
                     YOLO_CHECK_CU(cuMemFree(gpu_out));
                 } else {
                     // Wrap in AVBufferRef with custom free callback

@@ -104,7 +104,9 @@ public:
 
             if (model.task_type == TaskType::Detection && model.det_decoder) {
                 DetectionResult dr = model.det_decoder->decode(host_outputs, output_dims, dp);
-                all_dets.insert(all_dets.end(), dr.detections.begin(), dr.detections.end());
+                if (model.include_in_detection_metadata) {
+                    all_dets.insert(all_dets.end(), dr.detections.begin(), dr.detections.end());
+                }
             } else if (model.task_type == TaskType::Segmentation && model.seg_decoder) {
                 bool emit_gpu = (mask_gpu_every_n_ > 0) && (infer_counter_ % (uint64_t)mask_gpu_every_n_ == 0);
                 bool emit_cpu = (mask_cpu_every_n_ > 0) && (infer_counter_ % (uint64_t)mask_cpu_every_n_ == 0);
@@ -112,8 +114,30 @@ public:
                     host_outputs, output_dims, dp,
                     emit_gpu, emit_cpu, mask_cpu_resolution_, model.stream);
 
-                // Add seg detections to all_dets
-                all_dets.insert(all_dets.end(), sr.detections.begin(), sr.detections.end());
+                if (model.include_in_detection_metadata) {
+                    all_dets.insert(all_dets.end(), sr.detections.begin(), sr.detections.end());
+                }
+
+                // Write segmentation detections to separate metadata key (preserving mask order)
+                // Truncate to match the number of assembled masks
+                {
+                    std::vector<Detection> seg_dets = sr.detections;
+                    if (sr.num_masks > 0 && (int)seg_dets.size() > sr.num_masks) {
+                        seg_dets.resize((size_t)sr.num_masks);
+                    }
+                    std::string seg_md = buildDetectionMetadata(seg_dets);
+                    av_dict_set(&frm.raw()->metadata, metadata_key_segmentation_.c_str(), seg_md.c_str(), 0);
+                }
+
+                if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
+                    (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                    logstream << "cuda_infer_yolo: seg model=" << model.engine_name
+                              << " detections=" << sr.detections.size()
+                              << " masks=" << sr.num_masks
+                              << " proto=" << sr.mask_proto_w << "x" << sr.mask_proto_h
+                              << " gpu=" << (emit_gpu && sr.gpu_mask_buf ? "yes" : "no")
+                              << " cpu=" << (emit_cpu && !sr.cpu_masks.empty() ? "yes" : "no");
+                }
 
                 // CPU path: attach side data to frame
                 if (emit_cpu && !sr.cpu_masks.empty()) {
@@ -138,13 +162,40 @@ public:
                     mask_frame.raw()->pts = frm.raw()->pts;
                     mask_frame.raw()->width = sr.mask_proto_w;
                     mask_frame.raw()->height = sr.mask_proto_h;
-                    // Attach the GPU mask buffer as the frame's data[0] via buf[0]
-                    mask_frame.raw()->buf[0] = sr.gpu_mask_buf;
+                    mask_frame.raw()->buf[0] = av_buffer_ref(sr.gpu_mask_buf);
                     mask_frame.raw()->data[0] = sr.gpu_mask_buf->data;
                     mask_frame.raw()->linesize[0] = sr.mask_proto_w * (int)sizeof(float);
-                    sr.gpu_mask_buf = nullptr; // ownership transferred to frame
                     sink_seg_->put(mask_frame);
-                } else if (sr.gpu_mask_buf) {
+                }
+
+                // GPU path: also attach as side data on passthrough frame
+                if (emit_gpu && sr.gpu_mask_buf) {
+                    auto* header = (GpuMaskSideDataHeader*)av_malloc(sizeof(GpuMaskSideDataHeader));
+                    if (header) {
+                        header->gpu_ptr = (uint64_t)(uintptr_t)sr.gpu_mask_buf->data;
+                        header->num_masks = (uint32_t)sr.num_masks;
+                        header->proto_w = (uint32_t)sr.mask_proto_w;
+                        header->proto_h = (uint32_t)sr.mask_proto_h;
+                        header->model_w = (uint32_t)input_w_;
+                        header->model_h = (uint32_t)input_h_;
+                        // Transfer ownership of GPU buffer to the side data
+                        AVBufferRef* gpu_ref = sr.gpu_mask_buf;
+                        sr.gpu_mask_buf = nullptr;
+                        AVBufferRef* sd_buf = av_buffer_create(
+                            (uint8_t*)header, sizeof(GpuMaskSideDataHeader),
+                            [](void* opaque, uint8_t* data) {
+                                av_buffer_unref((AVBufferRef**)&opaque);
+                                av_free(data);
+                            }, gpu_ref, 0);
+                        if (sd_buf) {
+                            av_frame_new_side_data_from_buf(frm.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU, sd_buf);
+                        } else {
+                            av_buffer_unref(&gpu_ref);
+                            av_free(header);
+                        }
+                    }
+                }
+                if (sr.gpu_mask_buf) {
                     av_buffer_unref(&sr.gpu_mask_buf);
                 }
             }
@@ -267,6 +318,10 @@ public:
 
             if (mp.count("output_box_format")) {
                 model.output_box_format = parseFmt(mp["output_box_format"].get<std::string>());
+            }
+
+            if (mp.count("include_in_detection_metadata")) {
+                model.include_in_detection_metadata = mp["include_in_detection_metadata"].get<bool>();
             }
 
             // task_type defaults to Detection if not specified (backward compat)
