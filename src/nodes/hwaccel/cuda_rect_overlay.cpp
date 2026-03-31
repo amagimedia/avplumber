@@ -214,6 +214,46 @@ static bool blitLayerPlanes(CUstream stream, AVPixelFormat sw_fmt, const AVFrame
     return true;
 }
 
+// Returns true when src_fmt can be overlaid onto canvas_fmt by treating the source as fully opaque:
+// canvas must have a separate alpha plane, source must not, and all other plane layouts must match.
+static bool isAlphaCompatible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(src_fmt);
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
+    if (!sd || !cd) return false;
+    if (!(cd->flags & AV_PIX_FMT_FLAG_ALPHA)) return false;
+    if (sd->flags & AV_PIX_FMT_FLAG_ALPHA) return false;
+    if (sd->nb_components != cd->nb_components - 1) return false;
+    if (sd->log2_chroma_w != cd->log2_chroma_w) return false;
+    if (sd->log2_chroma_h != cd->log2_chroma_h) return false;
+    if (numPlanes(src_fmt) != numPlanes(canvas_fmt) - 1) return false;
+    return true;
+}
+
+// Returns the plane index of the alpha component for planar formats, or -1 if there is none /
+// the format is packed (all components on plane 0).
+static int alphaPlaneIndex(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    if (!d || !(d->flags & AV_PIX_FMT_FLAG_ALPHA)) return -1;
+    int max_plane = -1;
+    for (int i = 0; i < d->nb_components; ++i)
+        max_plane = std::max(max_plane, d->comp[i].plane);
+    return max_plane > 0 ? max_plane : -1;
+}
+
+// Set a rectangular region of one plane to a constant byte value (synchronous cuMemsetD8).
+static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
+                           int lx, int ly, int lw, int lh, uint8_t value) {
+    if (!f->data[plane] || f->linesize[plane] <= 0) return;
+    int bx, by, bw, bh;
+    lumaRectToPlaneRegion(fmt, lx, ly, lw, lh, plane, bx, by, bw, bh);
+    if (bw <= 0 || bh <= 0) return;
+    const size_t pitch = (size_t)f->linesize[plane];
+    CUdeviceptr base = (CUdeviceptr)(uintptr_t)f->data[plane];
+    for (int row = 0; row < bh; ++row)
+        CHECK_CU(cuMemsetD8(base + (CUdeviceptr)((size_t)(by + row) * pitch + (size_t)bx),
+                            value, (unsigned int)bw));
+}
+
 } // namespace
 
 class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
@@ -291,7 +331,15 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         if (!f.raw() || !f.raw()->hw_frames_ctx || !f.raw()->hw_frames_ctx->data)
             return false;
         AVHWFramesContext *ctx = (AVHWFramesContext *)f.raw()->hw_frames_ctx->data;
-        return ctx && ctx->sw_format == sw_fmt_;
+        if (!ctx) return false;
+        return ctx->sw_format == sw_fmt_ || isAlphaCompatible(ctx->sw_format, sw_fmt_);
+    }
+
+    static AVPixelFormat frameSwFormat(const av::VideoFrame &f) {
+        if (!f.raw() || !f.raw()->hw_frames_ctx || !f.raw()->hw_frames_ctx->data)
+            return AV_PIX_FMT_NONE;
+        AVHWFramesContext *ctx = (AVHWFramesContext *)f.raw()->hw_frames_ctx->data;
+        return ctx ? ctx->sw_format : AV_PIX_FMT_NONE;
     }
 
     void processComposite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
@@ -336,6 +384,16 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,
                                  L.crop_h, L.dst_x, L.dst_y))
                 throw Error("cuda_rect_overlay: GPU blit failed");
+
+            // When a non-alpha source is drawn onto an alpha canvas, fill the destination
+            // alpha rect with 255 (fully opaque) so the output alpha is well-defined.
+            const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
+            if (src_sw_fmt != AV_PIX_FMT_NONE && src_sw_fmt != sw_fmt_) {
+                const int alpha_p = alphaPlaneIndex(sw_fmt_);
+                if (alpha_p >= 0)
+                    fillPlaneRect(sw_fmt_, outf.raw(), alpha_p,
+                                  L.dst_x, L.dst_y, L.crop_w, L.crop_h, 255);
+            }
         }
 
         if (metadata_src && metadata_src->raw()) {
