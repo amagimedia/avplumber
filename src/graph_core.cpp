@@ -10,21 +10,22 @@ EdgeManager EdgeManager::global_edge_manager_;
 
 namespace {
 
+template <typename T>
 class MetadataProxy {
-    av::VideoFrame* frame_ = nullptr;
+    T* item_ = nullptr;
     py::object owner_ = py::none();
 
-    AVFrame* raw() const {
-        return frame_ ? frame_->raw() : nullptr;
+    auto raw() const -> decltype(item_->raw()) {
+        return item_ ? item_->raw() : nullptr;
     }
 
 public:
     MetadataProxy() = default;
-    MetadataProxy(av::VideoFrame& frame, py::object owner): frame_(&frame), owner_(std::move(owner)) {}
+    MetadataProxy(T& item, py::object owner): item_(&item), owner_(std::move(owner)) {}
 
     py::dict asDict() const {
         py::dict out;
-        const AVFrame* r = raw();
+        const auto* r = raw();
         if (!r || !r->metadata) {
             return out;
         }
@@ -37,7 +38,7 @@ public:
     }
 
     void assign(const py::dict& d) {
-        AVFrame* r = raw();
+        auto* r = raw();
         if (!r) {
             return;
         }
@@ -50,7 +51,7 @@ public:
     }
 
     py::object getItem(const std::string& key) const {
-        const AVFrame* r = raw();
+        const auto* r = raw();
         if (!r || !r->metadata) {
             throw py::key_error(key);
         }
@@ -62,7 +63,7 @@ public:
     }
 
     void setItem(const std::string& key, const py::object& value) {
-        AVFrame* r = raw();
+        auto* r = raw();
         if (!r) {
             return;
         }
@@ -71,7 +72,7 @@ public:
     }
 
     void delItem(const std::string& key) {
-        AVFrame* r = raw();
+        auto* r = raw();
         if (!r || !r->metadata) {
             throw py::key_error(key);
         }
@@ -83,12 +84,12 @@ public:
     }
 
     bool contains(const std::string& key) const {
-        const AVFrame* r = raw();
+        const auto* r = raw();
         return r && r->metadata && av_dict_get(r->metadata, key.c_str(), nullptr, 0);
     }
 
     size_t size() const {
-        const AVFrame* r = raw();
+        const auto* r = raw();
         size_t count = 0;
         if (!r || !r->metadata) {
             return count;
@@ -128,17 +129,33 @@ void py_registerEdge(py::module_ &m, const char *type_name) {
 }  // namespace
 
 void py_registerEdgeManager(py::module_ &m) {
-    py::class_<MetadataProxy>(m, "MetadataProxy")
-        .def("__repr__", [](const MetadataProxy& md) {
+    using VideoFrameMetadataProxy = MetadataProxy<av::VideoFrame>;
+    using AudioSamplesMetadataProxy = MetadataProxy<av::AudioSamples>;
+
+    py::class_<VideoFrameMetadataProxy>(m, "VideoFrameMetadataProxy")
+        .def("__repr__", [](const VideoFrameMetadataProxy& md) {
             py::object dict_obj = md.asDict();
-            return "MetadataProxy(" + py::repr(dict_obj).cast<std::string>() + ")";
+            return "VideoFrameMetadataProxy(" + py::repr(dict_obj).cast<std::string>() + ")";
         })
-        .def("__len__", &MetadataProxy::size)
-        .def("__contains__", &MetadataProxy::contains)
-        .def("__getitem__", &MetadataProxy::getItem)
-        .def("__setitem__", &MetadataProxy::setItem)
-        .def("__delitem__", &MetadataProxy::delItem)
-        .def("as_dict", &MetadataProxy::asDict)
+        .def("__len__", &VideoFrameMetadataProxy::size)
+        .def("__contains__", &VideoFrameMetadataProxy::contains)
+        .def("__getitem__", &VideoFrameMetadataProxy::getItem)
+        .def("__setitem__", &VideoFrameMetadataProxy::setItem)
+        .def("__delitem__", &VideoFrameMetadataProxy::delItem)
+        .def("as_dict", &VideoFrameMetadataProxy::asDict)
+    ;
+
+    py::class_<AudioSamplesMetadataProxy>(m, "AudioSamplesMetadataProxy")
+        .def("__repr__", [](const AudioSamplesMetadataProxy& md) {
+            py::object dict_obj = md.asDict();
+            return "AudioSamplesMetadataProxy(" + py::repr(dict_obj).cast<std::string>() + ")";
+        })
+        .def("__len__", &AudioSamplesMetadataProxy::size)
+        .def("__contains__", &AudioSamplesMetadataProxy::contains)
+        .def("__getitem__", &AudioSamplesMetadataProxy::getItem)
+        .def("__setitem__", &AudioSamplesMetadataProxy::setItem)
+        .def("__delitem__", &AudioSamplesMetadataProxy::delItem)
+        .def("as_dict", &AudioSamplesMetadataProxy::asDict)
     ;
 
     py::class_<EdgeManager, std::shared_ptr<EdgeManager>>(m, "EdgeManager")
@@ -188,6 +205,21 @@ void py_registerEdgeManager(py::module_ &m) {
         .def_property_readonly("flags", [](const av::Packet &p) { return p.flags(); })
     ;
 
+    py::class_<av::AudioSamples, std::shared_ptr<av::AudioSamples>>(m, "AudioSamples")
+        .def(py::init<>())
+        .def_property_readonly("pts", &av::AudioSamples::pts)
+        .def_property_readonly("samplesCount", &av::AudioSamples::samplesCount)
+        .def_property_readonly("sampleRate", &av::AudioSamples::sampleRate)
+        .def_property("metadata",
+            [](av::AudioSamples &s) -> AudioSamplesMetadataProxy {
+                return AudioSamplesMetadataProxy(s, py::cast(&s, py::return_value_policy::reference));
+            },
+            [](av::AudioSamples &s, const py::dict &d) {
+                AudioSamplesMetadataProxy(s, py::none()).assign(d);
+            }
+        )
+    ;
+
     py::class_<av::VideoFrame, std::shared_ptr<av::VideoFrame>>(m, "VideoFrame")
         .def(py::init<>())
         .def("__repr__", [](const av::VideoFrame &f) {
@@ -203,11 +235,11 @@ void py_registerEdgeManager(py::module_ &m) {
         .def_property("pictureType", &av::VideoFrame::pictureType, &av::VideoFrame::setPictureType )
         .def_property("sampleAspectRatio", &av::VideoFrame::sampleAspectRatio, &av::VideoFrame::setSampleAspectRatio )
         .def_property("metadata",
-            [](av::VideoFrame &f) -> MetadataProxy {
-                return MetadataProxy(f, py::cast(&f, py::return_value_policy::reference));
+            [](av::VideoFrame &f) -> VideoFrameMetadataProxy {
+                return VideoFrameMetadataProxy(f, py::cast(&f, py::return_value_policy::reference));
             },
             [](av::VideoFrame &f, const py::dict &d) {
-                MetadataProxy(f, py::none()).assign(d);
+                VideoFrameMetadataProxy(f, py::none()).assign(d);
             }
         )
     ;
