@@ -91,6 +91,11 @@ struct SegmentationResult : DetectionResult {
     int cpu_mask_w = 0, cpu_mask_h = 0;
 };
 
+struct PoseResult : DetectionResult {
+    std::vector<float> keypoints;  // flat [x, y, conf, x, y, conf, ...] per detection
+    int num_keypoints = 0;         // keypoints per detection (e.g. 34)
+};
+
 struct DecodeParams {
     int model_index;
     float conf_thresh;
@@ -146,6 +151,7 @@ inline size_t volume(const nvinfer1::Dims& d) {
 // Forward declarations for decoders
 class DetectionDecoder;
 class SegmentationDecoder;
+class PoseDecoder;
 
 // --- Output tensor info (supports multiple output tensors per model) ---
 struct OutputTensor {
@@ -196,6 +202,8 @@ struct ModelRunner {
     // Decoder (only one is non-null)
     std::unique_ptr<DetectionDecoder> det_decoder;
     std::unique_ptr<SegmentationDecoder> seg_decoder;
+    std::unique_ptr<PoseDecoder> pose_decoder;
+    int num_classes = -1;  // -1 = auto-detect; required for pose to disambiguate class scores from keypoints
 };
 
 // --- CudaInferYoloBase ---
