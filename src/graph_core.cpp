@@ -3,6 +3,7 @@
 #include <pybind11/gil.h>
 #include <pybind11/native_enum.h>
 #include <libavutil/avutil.h>
+#include <libavutil/imgutils.h>
 
 namespace py = pybind11;
 
@@ -229,6 +230,56 @@ void py_registerEdgeManager(py::module_ &m) {
         .def_property_readonly("height", &av::VideoFrame::height)
         .def_property_readonly("format", &av::VideoFrame::pixelFormat)
         .def_property_readonly("pts", &av::VideoFrame::pts)
+        .def_property_readonly("linesize", [](const av::VideoFrame &f) {
+            py::list out;
+            const AVFrame* raw = f.raw();
+            for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i) {
+                out.append(raw ? raw->linesize[i] : 0);
+            }
+            return out;
+        })
+        .def_property_readonly("data_ptr", [](const av::VideoFrame &f) {
+            py::list out;
+            const AVFrame* raw = f.raw();
+            for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i) {
+                uintptr_t ptr = (raw && raw->data[i]) ? reinterpret_cast<uintptr_t>(raw->data[i]) : uintptr_t(0);
+                out.append(py::int_(ptr));
+            }
+            return out;
+        })
+        .def_property_readonly("data", [](const av::VideoFrame &f) {
+            py::list out;
+            const AVFrame* raw = f.raw();
+            if (!raw) {
+                for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i) {
+                    out.append(py::bytes());
+                }
+                return out;
+            }
+
+            size_t plane_sizes[4] = {0, 0, 0, 0};
+            ptrdiff_t linesizes[4] = {
+                raw->linesize[0], raw->linesize[1], raw->linesize[2], raw->linesize[3]
+            };
+            bool have_plane_sizes = (raw->height > 0) &&
+                (av_image_fill_plane_sizes(plane_sizes, (AVPixelFormat)raw->format, raw->height, linesizes) >= 0);
+
+            for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i) {
+                if (!raw->data[i]) {
+                    out.append(py::bytes());
+                    continue;
+                }
+
+                size_t size = 0;
+                if (have_plane_sizes && i < 4) {
+                    size = plane_sizes[i];
+                } else if (raw->height > 0 && raw->linesize[i] != 0) {
+                    size = static_cast<size_t>(std::abs(raw->linesize[i])) * static_cast<size_t>(raw->height);
+                }
+                out.append(py::bytes(reinterpret_cast<const char*>(raw->data[i]), size));
+            }
+            return out;
+        })
         
         .def_property("keyFrame", &av::VideoFrame::isKeyFrame, &av::VideoFrame::setKeyFrame )
         .def_property("quality", &av::VideoFrame::quality, &av::VideoFrame::setQuality )
