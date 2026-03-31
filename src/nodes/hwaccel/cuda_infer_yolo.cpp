@@ -1,6 +1,7 @@
 #include "cuda_infer_yolo_base.hpp"
 #include "yolo_decode_detection.hpp"
 #include "yolo_decode_segmentation.hpp"
+#include "yolo_decode_pose.hpp"
 
 using namespace yolo_base;
 
@@ -11,6 +12,7 @@ protected:
 
     std::string metadata_key_detection_ = "yolo_detections";
     std::string metadata_key_segmentation_ = "yolo_segmentation";
+    std::string metadata_key_pose_ = "yolo_pose";
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 30;
     int infer_every_n_ = 1;
@@ -198,6 +200,54 @@ public:
                 if (sr.gpu_mask_buf) {
                     av_buffer_unref(&sr.gpu_mask_buf);
                 }
+            } else if (model.task_type == TaskType::Pose && model.pose_decoder) {
+                PoseResult pr = model.pose_decoder->decode(host_outputs, output_dims, dp);
+                if (model.include_in_detection_metadata) {
+                    all_dets.insert(all_dets.end(), pr.detections.begin(), pr.detections.end());
+                }
+
+                // Build pose metadata
+                if (!pr.detections.empty()) {
+                    Parameters pose_md;
+                    pose_md["coord_space"] = "model";
+                    pose_md["model_width"] = input_w_;
+                    pose_md["model_height"] = input_h_;
+                    pose_md["num_keypoints"] = pr.num_keypoints;
+                    pose_md["poses"] = Parameters::array();
+
+                    int kpt_stride = pr.num_keypoints * 3;
+                    for (size_t di = 0; di < pr.detections.size(); ++di) {
+                        const Detection& d = pr.detections[di];
+                        Parameters item;
+                        item["cls"] = d.cls;
+                        item["conf"] = d.conf;
+                        item["xyxy"] = {d.x1, d.y1, d.x2, d.y2};
+                        item["model_index"] = d.model_index;
+                        if (d.model_index >= 0 && (size_t)d.model_index < models_.size()) {
+                            item["engine_name"] = models_[(size_t)d.model_index].engine_name;
+                            const auto& cn = models_[(size_t)d.model_index].class_names;
+                            if (d.cls >= 0 && (size_t)d.cls < cn.size()) {
+                                item["label"] = cn[(size_t)d.cls];
+                            }
+                        }
+                        // Flat keypoint array [x1, y1, c1, x2, y2, c2, ...]
+                        item["keypoints"] = Parameters::array();
+                        size_t kpt_off = di * (size_t)kpt_stride;
+                        for (int k = 0; k < kpt_stride && kpt_off + (size_t)k < pr.keypoints.size(); ++k) {
+                            item["keypoints"].push_back(pr.keypoints[kpt_off + (size_t)k]);
+                        }
+                        pose_md["poses"].push_back(item);
+                    }
+
+                    av_dict_set(&frm.raw()->metadata, metadata_key_pose_.c_str(), pose_md.dump().c_str(), 0);
+                }
+
+                if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
+                    (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                    logstream << "cuda_infer_yolo: pose model=" << model.engine_name
+                              << " detections=" << pr.detections.size()
+                              << " keypoints_per_det=" << pr.num_keypoints;
+                }
             }
         }
 
@@ -281,6 +331,7 @@ public:
         if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
         if (params.count("metadata_key_detection")) r->metadata_key_detection_ = params["metadata_key_detection"].get<std::string>();
         if (params.count("metadata_key_segmentation")) r->metadata_key_segmentation_ = params["metadata_key_segmentation"].get<std::string>();
+        if (params.count("metadata_key_pose")) r->metadata_key_pose_ = params["metadata_key_pose"].get<std::string>();
         if (params.count("debug_log_metadata")) r->debug_log_metadata_ = params["debug_log_metadata"];
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
         if (params.count("mask_gpu_every_n")) r->mask_gpu_every_n_ = params["mask_gpu_every_n"];
@@ -352,11 +403,23 @@ public:
                 }
             }
 
+            int num_classes = -1;
+            if (mp.count("num_classes")) {
+                num_classes = mp["num_classes"].get<int>();
+            }
+            model.num_classes = num_classes;
+
             // Create decoder
             if (model.task_type == TaskType::Detection) {
                 model.det_decoder = std::make_unique<DetectionDecoder>();
             } else if (model.task_type == TaskType::Segmentation) {
                 model.seg_decoder = std::make_unique<SegmentationDecoder>();
+            } else if (model.task_type == TaskType::Pose) {
+                int nc = model.num_classes;
+                if (nc < 1) nc = 1;  // default for pose models
+                float nms_iou = 0.45f;
+                if (mp.count("nms_iou_thresh")) nms_iou = mp["nms_iou_thresh"].get<float>();
+                model.pose_decoder = std::make_unique<PoseDecoder>(nc, nms_iou);
             }
 
             r->models_.push_back(std::move(model));

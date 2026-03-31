@@ -1,6 +1,7 @@
 #include "cuda_infer_yolo_base.hpp"
 #include "yolo_decode_detection.hpp"
 #include "yolo_decode_segmentation.hpp"
+#include "yolo_decode_pose.hpp"
 
 // PTX blob for NV12->NCHW preprocess kernel.
 #include "../../../objs/src/nodes/hwaccel/yolo_preprocess.ptx.h"
