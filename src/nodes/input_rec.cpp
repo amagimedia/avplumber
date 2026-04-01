@@ -121,6 +121,11 @@ private:
 
         if (seek_table_.empty()) {
             // no seek table available, only seeks by time
+            if (st.isFrameAbsolute() && st.frame_number == 0) {
+                // Can't resolve frame-based target without seek table; fall back to seeking start of stream
+                st.ts = first_video_ts_.isValid() ? first_video_ts_ : av::Timestamp(0, {1, 1});
+                st.type = StreamTarget::ETargetType::tt_Timestamp;
+            }
             return;
         }
 
