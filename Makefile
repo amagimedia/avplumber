@@ -91,6 +91,7 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_bbox.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_text.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_keypoints.cpp
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_trail.cpp
 BUILD_DRAW_BBOX_PTX = 1
 DRAW_BBOX_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_bbox.cu
 DRAW_BBOX_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_bbox.ptx
@@ -107,11 +108,16 @@ BUILD_DRAW_KEYPOINTS_PTX = 1
 DRAW_KEYPOINTS_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_keypoints.cu
 DRAW_KEYPOINTS_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_keypoints.ptx
 DRAW_KEYPOINTS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_keypoints.ptx.h
+BUILD_DRAW_TRAIL_PTX = 1
+DRAW_TRAIL_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_trail.cu
+DRAW_TRAIL_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_trail.ptx
+DRAW_TRAIL_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_trail.ptx.h
 else
 BUILD_DRAW_BBOX_PTX = 0
 BUILD_DRAW_TEXT_PTX = 0
 BUILD_DRAW_SEGMASK_PTX = 0
 BUILD_DRAW_KEYPOINTS_PTX = 0
+BUILD_DRAW_TRAIL_PTX = 0
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_TENSORRT)$(HAVE_NVCC),111)
@@ -338,6 +344,20 @@ $(DRAW_KEYPOINTS_PTX_H): $(DRAW_KEYPOINTS_PTX)
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
 objs/src/nodes/hwaccel/draw_keypoints.o: $(DRAW_KEYPOINTS_PTX_H)
+endif
+
+ifeq ($(BUILD_DRAW_TRAIL_PTX),1)
+$(DRAW_TRAIL_PTX): $(DRAW_TRAIL_KERNEL)
+	@mkdir -p $(dir $@)
+	$(NVCC) -ptx -o $@ $<
+
+$(DRAW_TRAIL_PTX_H): $(DRAW_TRAIL_PTX)
+	@mkdir -p $(dir $@)
+	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_trail_ptx_len/const unsigned int avpl_draw_trail_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_trail_ptx/const char avpl_draw_trail_ptx/' > $@
+	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
+
+objs/src/nodes/hwaccel/draw_trail.o: $(DRAW_TRAIL_PTX_H)
 endif
 
 ifeq ($(BUILD_YOLO_PTX),1)
