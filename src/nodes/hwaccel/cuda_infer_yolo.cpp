@@ -1,3 +1,5 @@
+#include <array>
+#include <map>
 #include "cuda_infer_yolo_base.hpp"
 #include "yolo_decode_detection.hpp"
 #include "yolo_decode_segmentation.hpp"
@@ -23,6 +25,8 @@ protected:
     int mask_cpu_resolution_ = 120;
     uint64_t frame_counter_ = 0;
     uint64_t infer_counter_ = 0;
+    std::map<int, uint64_t> detection_count_histogram_;
+    std::array<uint64_t, 10> conf_histogram_{}; // buckets: [0.0,0.1), [0.1,0.2), ... [0.9,1.0]
     bool seg_decoders_initialized_ = false;
 
 public:
@@ -32,6 +36,28 @@ public:
         : NodeSingleInput(std::move(source))
         , sink_(std::move(sink))
         , sink_seg_(std::move(sink_seg)) {}
+
+    ~CudaInferYolo() {
+        if (detection_count_histogram_.empty()) return;
+        uint64_t total = 0;
+        uint64_t with_dets = 0;
+        for (auto& [count, frames] : detection_count_histogram_) {
+            total += frames;
+            if (count > 0) with_dets += frames;
+        }
+        logstream << "cuda_infer_yolo: detection summary:"
+                  << " detected frames: " << with_dets
+                  << " / total frames: " << total
+                  << " (" << (100.0 * with_dets / total) << "%)";
+        logstream << "cuda_infer_yolo: detection count histogram:";
+        for (auto& [count, frames] : detection_count_histogram_) {
+            logstream << "  " << count << " detections: " << frames << " frames";
+        }
+        logstream << "cuda_infer_yolo: confidence histogram:";
+        for (int i = 0; i < 10; ++i) {
+            logstream << "  " << (i * 0.1) << "-" << ((i + 1) * 0.1) << ": " << conf_histogram_[(size_t)i] << " detections";
+        }
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
@@ -256,6 +282,13 @@ public:
             [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
         if (max_det_ > 0 && (int)all_dets.size() > max_det_) {
             all_dets.resize((size_t)max_det_);
+        }
+
+        // Track detection statistics
+        ++detection_count_histogram_[(int)all_dets.size()];
+        for (const Detection& d : all_dets) {
+            int bucket = std::min((int)(d.conf * 10.0f), 9);
+            ++conf_histogram_[(size_t)bucket];
         }
 
         // Build and attach detection metadata
