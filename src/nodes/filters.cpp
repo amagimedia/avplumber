@@ -403,10 +403,29 @@ public:
                         this->finished_ = true;
                     }
                 } else { // filter_graph_==nullptr
-                    // filter_graph_ couldn't be created
-                    // because not all input parameters are known
-                    // so wait for some more packetz
-                    this->waitForInput();
+                    // filter_graph_ couldn't be created because not all input
+                    // parameters are known yet.
+                    //
+                    // Peek at every source that still lacks in_args_ and try to
+                    // capture its parameters now.  Without this, a deadlock occurs
+                    // when the input queues fill up before all parameters are known:
+                    // waitForInput() polls eventfds that have already been drained,
+                    // no new items can be added to the full queues, so poll() blocks
+                    // forever while upstream nodes are stuck in enqueue().
+                    for (int i = 0; i < (int)this->source_edges_.size(); i++) {
+                        if (sources_[i].isSourceReadyToInit()) continue;
+                        auto &ei = this->source_edges_[i];
+                        T* fi = ei->peek();
+                        if (fi && (!fi->isNull()) && fi->isComplete() &&
+                                fi->timeBase().getNumerator() && fi->timeBase().getDenominator()) {
+                            sources_[i].checkFrame(*fi, ei);
+                            sources_[i].captureInitialHWFramesCtxFromFrame(*fi);
+                        }
+                    }
+                    maybeInitFilterGraph();
+                    if (filter_graph_ == nullptr) {
+                        this->waitForInput();
+                    }
                 }
             } else {
                 edge->pop();
