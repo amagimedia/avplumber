@@ -50,13 +50,15 @@ static bool frameUsable(const av::VideoFrame &f) {
 static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_x = obj.value("dst_x", 0);
     out.dst_y = obj.value("dst_y", 0);
-    if (!obj.contains("crop") || !obj["crop"].is_object())
-        throw Error("cuda_rect_overlay: each layer needs crop object {x,y,w,h}");
-    const auto &c = obj["crop"];
-    out.crop_x = c.value("x", 0);
-    out.crop_y = c.value("y", 0);
-    out.crop_w = c.at("w").get<int>();
-    out.crop_h = c.at("h").get<int>();
+    if (obj.contains("crop") && obj["crop"].is_object()) {
+        const auto &c = obj["crop"];
+        out.crop_x = c.value("x", 0);
+        out.crop_y = c.value("y", 0);
+        // 0 means "use remaining source width/height from crop_x/crop_y" (resolved per-frame in processComposite).
+        out.crop_w = c.value("w", 0);
+        out.crop_h = c.value("h", 0);
+    }
+    // No crop object → crop_x/y/w/h all stay 0 (full source frame from origin).
 }
 
 static std::vector<LayerSpec> parseLayersParam(const Parameters &params) {
@@ -322,7 +324,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         parseLayerFromJson(md[k], layers[i]);
                 }
             }
-        } catch (const std::exception &) {
+        } catch (const std::exception &e) {
+            logstream << "cuda_rect_overlay: ignoring bad per-frame metadata: " << e.what();
         }
         return layers;
     }
@@ -366,6 +369,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             if (!srcp || !srcp->raw())
                 continue;
             LayerSpec L = layers[i];
+            // 0 means "remaining source extent from the crop origin".
+            if (L.crop_w <= 0) L.crop_w = srcp->width()  - L.crop_x;
+            if (L.crop_h <= 0) L.crop_h = srcp->height() - L.crop_y;
             if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()))
                 continue;
             if (!clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w_, canvas_h_))

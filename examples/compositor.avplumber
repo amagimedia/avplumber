@@ -1,0 +1,54 @@
+hwaccel.init { "name": "@drm", "type": "drm", "device": "/dev/dri/renderD128" }
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+queue.plan_capacity * 3
+
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/fise_live_final_bmx", "dst": "in_v1", "group": "g", "name": "input1", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_v1", "wait_for_keyframe": false, "routing": { "?v:0": "v1_pkt" }, "group": "g", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "v1_pkt", "dst": "v1_dec", "group": "g", "name": "dec1", "auto_restart": "group", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "realtime", "src": "v1_dec", "dst": "v1_rt", "set_pts": true, "group": "g" }
+
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/bunny", "dst": "in_v2", "group": "g", "name": "input2", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_v2", "wait_for_keyframe": false, "routing": { "?v:0": "v2_pkt" }, "group": "g", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "v2_pkt", "dst": "v2_dec", "group": "g", "name": "dec2", "auto_restart": "group", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+
+node.add { "type": "filter_video", "src": "v2_dec", "dst": "v2_scaled", "graph": "scale_cuda=w=640:h=360", "group": "g" }
+node.add { "type": "realtime", "src": "v2_scaled", "dst": "v2_rt", "set_pts": true, "group": "g" }
+
+
+node.add {"type":"ipc_dmabuf_source","auto_restart":"group","name":"Video_Receive","group":"g","dst":"v_ipc_in","socket":"/tmp/electron-hwaccel/test.sock", "hwaccel":"@drm"}
+
+node.add {"type":"drm_prime_to_cuda","auto_restart":"group","name":"to_cuda","group":"g","src":"v_ipc_in","dst":"v_cuda", "hwaccel":"@gpu"}
+node.add { "type": "force_fps", "fps": "30/1", "group": "g", "src": "v_cuda", "dst": "v_cuda_fps" }
+# note to potential users: convert_cuda is developed in-house, not public for now
+node.add {"type":"filter_video", "graph": "convert_cuda=format=yuva420p", "group":"g", "auto_restart":"panic", "name":"Filter_cuda", "src":"v_cuda_fps", "dst":"v_overlay", "dst_width":1920,"dst_height":1080,"dst_pixel_format":"cuda","hwaccel":"@gpu"}
+node.add { "type": "realtime", "src": "v_overlay", "dst": "v_overlay_rt", "set_pts": true, "group": "g" }
+
+
+#node.add { "type": "input_rec", "url": "/home/fedora/overlay.mov", "dst": "in_v3", "group": "g", "name": "input3", "initial_timeout": 20, "timeout": 10, "loop": true }
+#node.add { "type": "demux", "src": "in_v3", "wait_for_keyframe": false, "routing": { "?v:0": "v3_pkt" }, "group": "g", "auto_restart": "group" }
+#node.add { "type": "dec_video", "src": "v3_pkt", "dst": "v3_dec", "group": "g", "name": "dec3", "auto_restart": "group" }
+#node.add { "type": "filter_video", "src": "v3_dec", "dst": "v3_scaled", "graph": "hwupload_cuda,convert_cuda=format=yuva420p", "group": "g", "hwaccel": "@gpu" }
+#node.add { "type": "realtime", "src": "v3_scaled", "dst": "v3_rt", "set_pts": true, "group": "g" }
+
+
+node.add { "type": "cuda_rect_overlay", "src": ["v1_rt", "v2_rt"], "dst": "v_videos", "group": "g", "auto_restart": "group", "hwaccel": "@gpu", "width": 1920, "height": 1080, "sw_format": "nv12", "metadata_key": "rect_overlay_v1", "layers": [ { "dst_x": 0, "dst_y": 0 }, { "dst_x": 80, "dst_y": 500 } ] }
+node.add {"type":"filter_video", "graph": "scale_cuda=w=1920:h=1080:format=yuv420p", "group":"g", "auto_restart":"panic", "name":"convert_videos", "src":"v_videos", "dst":"v_videos_yuv", "dst_width":1920,"dst_height":1080,"dst_pixel_format":"cuda","hwaccel":"@gpu"}
+
+
+#node.add { "type": "null_sink", "src": "v_overlay_rt", "group": "g" }
+
+node.add { "type": "filter_video", "src": ["v_videos_yuv", "v_overlay_rt"], "dst": "v_comp", "name":"Overlay", "graph": "overlay_cuda", "hwaccel": "@gpu", "group": "g" }
+
+
+node.add { "type": "force_fps", "fps": "30/1", "group": "g", "src": "v_comp", "dst": "v_comp_fps" }
+
+node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "yuv420p", "group": "g", "src": "v_comp_fps", "dst": "v_preenc", "auto_restart": "panic" }
+
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "g", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "14000k", "bufsize": "20000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
+
+node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "g", "ts_sort_wait": 0 }
+node.add { "type": "output", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output", "src": "mux_v", "group": "g", "auto_restart": "panic" }
+
+
+detach retry group.start g
