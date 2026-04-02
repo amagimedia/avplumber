@@ -9,6 +9,7 @@ extern "C" {
 #include <array>
 #include <cmath>
 #include <deque>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -119,6 +120,7 @@ private:
     double override_conf_ = 0.28;
     int override_after_ = 2;
     int reacquire_frames_ = 6;
+    double override_max_jump_per_frame_rel_ = 0.24;
 
     // Coasting
     bool coast_ = true;
@@ -134,6 +136,10 @@ private:
 
     // Debug
     int debug_log_every_n_ = 0;
+
+    // Dump file
+    std::string dump_file_path_;
+    std::ofstream dump_file_;
 
     // --- Internal state ---
     Kalman1D kx_, ky_;
@@ -163,6 +169,30 @@ private:
     double stat_vel_max_ = 0.0;
     double stat_vel_sum_ = 0.0;
     uint64_t stat_vel_count_ = 0;
+
+    double dump_last_x_ = 0.0, dump_last_y_ = 0.0;
+    bool dump_have_last_ = false;
+
+    void dumpFrame(const std::string& source, double x, double y, double conf) {
+        if (!dump_file_.is_open()) return;
+        dump_file_ << frame_counter_ << ",";
+        if (!source.empty()) {
+            double dx = 0.0, dy = 0.0, dist = 0.0;
+            if (dump_have_last_) {
+                dx = x - dump_last_x_;
+                dy = y - dump_last_y_;
+                dist = std::sqrt(dx * dx + dy * dy);
+            }
+            dump_file_ << x << "," << y << "," << conf << "," << source
+                       << "," << dx << "," << dy << "," << dist;
+            dump_last_x_ = x;
+            dump_last_y_ = y;
+            dump_have_last_ = true;
+        } else {
+            dump_file_ << ",,,,,,";
+        }
+        dump_file_ << "\n";
+    }
 
     void initKalman(double cx, double cy) {
         kx_ = Kalman1D(kalman_q_pos_, kalman_q_vel_, kalman_r_meas_);
@@ -314,23 +344,35 @@ private:
         return (distance_ok && iou_ok && speed_ok) || prediction_ok;
     }
 
-    // detection_override: force accept after gap/streak
+    // detection_override: force accept after gap/streak, with distance cap
     bool detectionOverride(const DetectionBox& cand, double model_w, double model_h) {
         if (cand.conf < override_conf_) return false;
 
+        const double cx = centerX(cand);
+        const double cy = centerY(cand);
         const double min_dim = std::min(model_w, model_h);
         const double base_gate = std::max(gate_min_px_, gate_rel_ * min_dim);
 
+        // Close enough to predicted/trail — always allow
+        double dist_ref = 1e18;
+        if (kalman_initialized_) {
+            dist_ref = hypot2(cx - kx_.pos(), cy - ky_.pos());
+        } else if (!trail_.empty()) {
+            dist_ref = hypot2(cx - trail_.back().x, cy - trail_.back().y);
+        }
+        if (dist_ref <= 2.5 * base_gate) return true;
+
+        // For streak/gap overrides, enforce a distance cap
         uint64_t gap_frames = 9999;
-        double dist_prev = 0.0;
         if (!trail_.empty()) {
             gap_frames = frame_counter_ - trail_.back().frame;
-            dist_prev = hypot2(centerX(cand) - trail_.back().x, centerY(cand) - trail_.back().y);
         }
 
+        double max_dist = override_max_jump_per_frame_rel_ * min_dim * std::max(1.0, (double)gap_frames);
+        if (dist_ref > max_dist) return false;
+
         if (det_reject_streak_ >= override_after_
-            || (int)gap_frames >= reacquire_frames_
-            || dist_prev <= 2.5 * base_gate) {
+            || (int)gap_frames >= reacquire_frames_) {
             return true;
         }
         return false;
@@ -490,6 +532,7 @@ public:
             if (kalman_initialized_) kx_.predict(1.0);
             if (kalman_initialized_) ky_.predict(1.0);
             stat_no_ball_++;
+            dumpFrame("", 0.0, 0.0, 0.0);
             this->sink_->put(frm);
             return;
         }
@@ -498,6 +541,7 @@ public:
         if (!entry || !entry->value) {
             if (kalman_initialized_) { kx_.predict(1.0); ky_.predict(1.0); }
             stat_no_ball_++;
+            dumpFrame("", 0.0, 0.0, 0.0);
             this->sink_->put(frm);
             return;
         }
@@ -508,6 +552,7 @@ public:
         } catch (...) {
             if (kalman_initialized_) { kx_.predict(1.0); ky_.predict(1.0); }
             stat_no_ball_++;
+            dumpFrame("", 0.0, 0.0, 0.0);
             this->sink_->put(frm);
             return;
         }
@@ -674,6 +719,13 @@ public:
         std::string serialized = out_md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), serialized.c_str(), 0);
 
+        // Dump frame to CSV
+        if (accepted && finiteBox(tracked_det)) {
+            dumpFrame(source, centerX(tracked_det), centerY(tracked_det), tracked_det.conf);
+        } else {
+            dumpFrame("", 0.0, 0.0, 0.0);
+        }
+
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "ball_tracker: frame=" << frame_counter_
                       << " candidates=" << ball_dets.size()
@@ -720,6 +772,7 @@ public:
         if (params.count("override_conf")) r->override_conf_ = params["override_conf"];
         if (params.count("override_after")) r->override_after_ = params["override_after"];
         if (params.count("reacquire_frames")) r->reacquire_frames_ = params["reacquire_frames"];
+        if (params.count("override_max_jump_per_frame_rel")) r->override_max_jump_per_frame_rel_ = params["override_max_jump_per_frame_rel"];
 
         // Coasting
         if (params.count("coast")) r->coast_ = params["coast"];
@@ -735,6 +788,17 @@ public:
 
         // Debug
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
+
+        // Dump file
+        if (params.count("dump_file")) {
+            r->dump_file_path_ = params["dump_file"].get<std::string>();
+            r->dump_file_.open(r->dump_file_path_, std::ios::out | std::ios::trunc);
+            if (r->dump_file_.is_open()) {
+                r->dump_file_ << "frame,x,y,conf,source,dx,dy,dist\n";
+            } else {
+                std::cerr << "ball_tracker: WARNING: could not open dump file: " << r->dump_file_path_ << std::endl;
+            }
+        }
 
         // Initialize Kalman with configured params
         r->kx_ = Kalman1D(r->kalman_q_pos_, r->kalman_q_vel_, r->kalman_r_meas_);
