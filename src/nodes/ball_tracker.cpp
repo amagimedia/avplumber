@@ -120,7 +120,6 @@ private:
     double override_conf_ = 0.28;
     int override_after_ = 2;
     int reacquire_frames_ = 6;
-    double override_max_jump_per_frame_rel_ = 0.24;
 
     // Coasting
     bool coast_ = true;
@@ -344,35 +343,23 @@ private:
         return (distance_ok && iou_ok && speed_ok) || prediction_ok;
     }
 
-    // detection_override: force accept after gap/streak, with distance cap
+    // detection_override: force accept after gap/streak
     bool detectionOverride(const DetectionBox& cand, double model_w, double model_h) {
         if (cand.conf < override_conf_) return false;
 
-        const double cx = centerX(cand);
-        const double cy = centerY(cand);
         const double min_dim = std::min(model_w, model_h);
         const double base_gate = std::max(gate_min_px_, gate_rel_ * min_dim);
 
-        // Close enough to predicted/trail — always allow
-        double dist_ref = 1e18;
-        if (kalman_initialized_) {
-            dist_ref = hypot2(cx - kx_.pos(), cy - ky_.pos());
-        } else if (!trail_.empty()) {
-            dist_ref = hypot2(cx - trail_.back().x, cy - trail_.back().y);
-        }
-        if (dist_ref <= 2.5 * base_gate) return true;
-
-        // For streak/gap overrides, enforce a distance cap
         uint64_t gap_frames = 9999;
+        double dist_prev = 0.0;
         if (!trail_.empty()) {
             gap_frames = frame_counter_ - trail_.back().frame;
+            dist_prev = hypot2(centerX(cand) - trail_.back().x, centerY(cand) - trail_.back().y);
         }
 
-        double max_dist = override_max_jump_per_frame_rel_ * min_dim * std::max(1.0, (double)gap_frames);
-        if (dist_ref > max_dist) return false;
-
         if (det_reject_streak_ >= override_after_
-            || (int)gap_frames >= reacquire_frames_) {
+            || (int)gap_frames >= reacquire_frames_
+            || dist_prev <= 2.5 * base_gate) {
             return true;
         }
         return false;
@@ -772,7 +759,6 @@ public:
         if (params.count("override_conf")) r->override_conf_ = params["override_conf"];
         if (params.count("override_after")) r->override_after_ = params["override_after"];
         if (params.count("reacquire_frames")) r->reacquire_frames_ = params["reacquire_frames"];
-        if (params.count("override_max_jump_per_frame_rel")) r->override_max_jump_per_frame_rel_ = params["override_max_jump_per_frame_rel"];
 
         // Coasting
         if (params.count("coast")) r->coast_ = params["coast"];
