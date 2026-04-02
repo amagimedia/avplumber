@@ -46,7 +46,7 @@ override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
-CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_core_pybind.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp
+CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python is linked via python3-config in LFLAGS (-lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
@@ -112,15 +112,19 @@ EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
 CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
-# Python extension: single TU with PYBIND11_MODULE (not linked into the avplumber binary).
-CPPSRC_PYTHON = src/avplumber_pybind.cpp
+# Python extension translation units (not linked into the avplumber binary/static library).
+CPPSRC_PYTHON = src/graph_core_pybind.cpp src/avplumber_pybind.cpp
 CPPSRC_COMPILE := $(CPPSRC_EXE) $(CPPSRC_PYTHON)
 CPPSRC_ALL = $(CPPSRC_COMPILE)
 
 PYTHON_EXT_SUFFIX := $(shell python3-config --extension-suffix 2>/dev/null)
 # Must match PYBIND11_MODULE name in src/avplumber_pybind.cpp (avplumber.py imports _avplumber).
 PYTHON_MODULE := _avplumber$(PYTHON_EXT_SUFFIX)
-PYTHON_MODULE_OBJS = $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o objs/src/avplumber_pybind.o
+# Build python-specific variants for translation units that depend on PYTHON_MODULE.
+PYTHON_MODULE_DEFINE_SRCS = src/avplumber.cpp src/graph_mgmt.cpp
+PYTHON_MODULE_DEFINE_OBJS = $(patsubst src/%.cpp,objs/python/src/%.o,$(PYTHON_MODULE_DEFINE_SRCS))
+PYTHON_MODULE_COMMON_OBJS = $(filter-out $(patsubst %.cpp,objs/%.o,$(PYTHON_MODULE_DEFINE_SRCS)),$(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)))
+PYTHON_MODULE_OBJS = $(PYTHON_MODULE_COMMON_OBJS) $(PYTHON_MODULE_DEFINE_OBJS) objs/src/app_version.o $(patsubst %.cpp,objs/%.o,$(CPPSRC_PYTHON))
 
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 DEPDIR := objs
@@ -141,6 +145,10 @@ $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
 	$(POSTCOMPILE)
 
+$(PYTHON_MODULE_DEFINE_OBJS): objs/python/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DPYTHON_MODULE -c -o $@ $<
+
 objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $< -include $(BUILD_DATE_FILE)
@@ -160,7 +168,6 @@ $(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version
 
 static_library: $(STATIC_LIBRARY)
 
-# Import as: PYTHONPATH=. python3 -c "import avplumber"  (same dir as the .so)
 $(PYTHON_MODULE): $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -shared -o $@ $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(LIBS_FLAGS)
 
