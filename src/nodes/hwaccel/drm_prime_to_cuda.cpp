@@ -31,7 +31,6 @@ protected:
     EGLSurface egl_surf_ = EGL_NO_SURFACE;
 
     GLuint src_tex_ = 0;
-    GLuint dst_tex_ = 0;
 
     bool have_dma_buf_import_ = false;
     bool have_mods_ = false;
@@ -40,6 +39,15 @@ protected:
 
     // CUDA state
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
+
+    struct GresEntry {
+        int width = 0;
+        int height = 0;
+        AVPixelFormat swfmt = AV_PIX_FMT_NONE;
+        GLuint dst_tex = 0;
+        CUgraphicsResource gres = nullptr;
+    };
+    std::vector<GresEntry> gres_cache_;
 
     static inline const char* safe_str(const char* s) { return s ? s : ""; }
 
@@ -175,28 +183,32 @@ protected:
             glDeleteTextures(1, &src_tex_);
             src_tex_ = 0;
         }
-        if (dst_tex_ != 0) {
-            glDeleteTextures(1, &dst_tex_);
-            dst_tex_ = 0;
-        }
         if (width_ <= 0 || height_ <= 0) return;
         
         glGenTextures(1, &src_tex_);
-        glGenTextures(1, &dst_tex_);
-
         glBindTexture(GL_TEXTURE_2D, src_tex_);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 
-        glBindTexture(GL_TEXTURE_2D, dst_tex_);
+    // Find a cache entry matching (w, h, swfmt), or allocate a new GL texture and add one.
+    // Must be called with the EGL/GL context current and NO CUDA context pushed.
+    int findOrCreateEntryIdx(int w, int h, AVPixelFormat swfmt) {
+        for (int i = 0; i < (int)gres_cache_.size(); ++i) {
+            const auto& e = gres_cache_[i];
+            if (e.width == w && e.height == h && e.swfmt == swfmt) return i;
+        }
+        GresEntry e;
+        e.width = w; e.height = h; e.swfmt = swfmt;
+        glGenTextures(1, &e.dst_tex);
+        glBindTexture(GL_TEXTURE_2D, e.dst_tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-            width_, height_, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE,
-            NULL);
-        
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
+        gres_cache_.push_back(std::move(e));
+        return (int)gres_cache_.size() - 1;
     }
 
     static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc) {
@@ -264,6 +276,10 @@ protected:
             return false;
         }
 
+        // Resolve (or allocate) the dst_tex+gres cache entry for this frame's dimensions.
+        // Must happen before cuCtxPushCurrent to keep GL and CUDA contexts separate.
+        int entry_idx = findOrCreateEntryIdx(width, height, swfmt);
+
         EGLAttrib attrs[64];
         int a = 0;
         attrs[a++] = EGL_WIDTH;  attrs[a++] = (EGLint)width;
@@ -299,7 +315,7 @@ protected:
         glBindTexture(GL_TEXTURE_2D, 0);
         
         glCopyImageSubData(src_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
-            dst_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
+            gres_cache_[entry_idx].dst_tex, GL_TEXTURE_2D, 0, 0, 0, 0,
             width, height, 1);
 
         err = glGetError();
@@ -319,14 +335,19 @@ protected:
             return false;
         }
 
-        CUgraphicsResource gres = nullptr;
-        CUresult cr = cuGraphicsGLRegisterImage(&gres, dst_tex_, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-        if (cr != CUDA_SUCCESS) {
-            logstream << "drm2cuda: cuGraphicsGLRegisterImage failed: " << cr;
-            CUcontext dummy; cuCtxPopCurrent(&dummy);
-            p_eglDestroyImageKHR_(egl_dpy_, img);
-            return false;
+        // Register the dst_tex with CUDA once per cache entry (lazy, first use only).
+        GresEntry& entry = gres_cache_[entry_idx];
+        if (!entry.gres) {
+            CUresult cr = cuGraphicsGLRegisterImage(&entry.gres, entry.dst_tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+            if (cr != CUDA_SUCCESS) {
+                logstream << "drm2cuda: cuGraphicsGLRegisterImage failed: " << cr;
+                entry.gres = nullptr;
+                CUcontext dummy; cuCtxPopCurrent(&dummy);
+                p_eglDestroyImageKHR_(egl_dpy_, img);
+                return false;
+            }
         }
+        CUgraphicsResource gres = entry.gres;
         cuGraphicsMapResources(1, &gres, 0);
         CUarray garr = nullptr;
         cuGraphicsSubResourceGetMappedArray(&garr, gres, 0, 0);
@@ -350,7 +371,6 @@ protected:
         cuda_error |= CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
 
         cuGraphicsUnmapResources(1, &gres, 0);
-        cuGraphicsUnregisterResource(gres);
         p_eglDestroyImageKHR_(egl_dpy_, img);
 
         CUcontext dummy;
@@ -420,6 +440,17 @@ public:
             av_buffer_unref(&hw_frames_ctx_);
             hw_frames_ctx_ = nullptr;
         }
+        if (cuda_dev_ctx_ && !gres_cache_.empty()) {
+            cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx);
+            for (auto& e : gres_cache_) {
+                if (e.gres) {
+                    cuGraphicsUnregisterResource(e.gres);
+                    e.gres = nullptr;
+                }
+            }
+            CUcontext dummy;
+            cuCtxPopCurrent(&dummy);
+        }
         if (egl_dpy_ != EGL_NO_DISPLAY) {
             eglTerminate(egl_dpy_);
             egl_dpy_ = EGL_NO_DISPLAY;
@@ -428,10 +459,13 @@ public:
             glDeleteTextures(1, &src_tex_);
             src_tex_ = 0;
         }
-        if (dst_tex_ != 0) {
-            glDeleteTextures(1, &dst_tex_);
-            dst_tex_ = 0;
+        for (auto& e : gres_cache_) {
+            if (e.dst_tex) {
+                glDeleteTextures(1, &e.dst_tex);
+                e.dst_tex = 0;
+            }
         }
+        gres_cache_.clear();
     }
 
     static std::shared_ptr<DRMPrimeToCUDA> create(NodeCreationInfo &nci) {
