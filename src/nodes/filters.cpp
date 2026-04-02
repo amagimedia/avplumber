@@ -3,6 +3,7 @@ extern "C" {
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+#include <libavutil/pixdesc.h>
 }
 #include "../ts_equalizer.hpp"
 #include "../video_parameters.hpp"
@@ -47,6 +48,10 @@ template<> struct FilterMediaSpecific<av::VideoFrame> {
         frmctx.height = par_.height;
         frmctx.format = hw_format;
     }
+    bool inputIsHWFormat() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(par_.pixel_format.get());
+        return desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    }
 };
 template<> struct FilterMediaSpecific<av::AudioSamples> {
     using Parameters = AudioParameters;
@@ -73,6 +78,9 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
     void initHWAccel(AVHWFramesContext&, AVPixelFormat) {
         throw Error("hwaccel specified for audio filter");
+    }
+    bool inputIsHWFormat() const {
+        return false;
     }
 };
 
@@ -171,7 +179,12 @@ protected:
                 av_buffer_unref(&params->hw_frames_ctx);
                 av_freep(&params);
                 // Keep our captured copy to detect future hw_frames_ctx changes reliably
-            } else if (hwaccel) {
+            } else if (hwaccel && ms_.inputIsHWFormat()) {
+                // Only set a HW hw_frames_ctx on the buffersrc when the upstream is already
+                // delivering HW frames (e.g. cuda decoder output). For software inputs
+                // (e.g. rgba from a PNG decoder), leave the buffersrc as software —
+                // filter_graph_->hw_device_ctx (set in maybeInitFilterGraph) provides the
+                // CUDA device to hwupload_cuda / hwupload filters further downstream.
                 soft_assert(ctx_ != nullptr, "source context null");
                 AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
                 params->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
@@ -267,6 +280,18 @@ protected:
         ret = avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), &inputs, &outputs);
         if (ret < 0) {
             throw Error("Couldn't parse filter graph");
+        }
+        
+        // Provide the hardware device to any filter in the graph that requests it
+        // (e.g. hwupload_cuda, hwupload, scale_cuda). This lets those filters
+        // allocate output HW frames even when the buffersrc is a software format.
+        if (hwaccel_) {
+            for (unsigned j = 0; j < filter_graph_->nb_filters; j++) {
+                AVFilterContext *fctx = filter_graph_->filters[j];
+                if (fctx->filter->flags & AVFILTER_FLAG_HWDEVICE) {
+                    fctx->hw_device_ctx = hwaccel_->refDeviceContext();
+                }
+            }
         }
         
         auto forEachInOut = [](AVFilterInOut *inout, std::function<void(AVFilterInOut*)> cb) {
