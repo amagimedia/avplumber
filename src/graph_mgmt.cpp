@@ -11,9 +11,11 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#ifdef PYTHON_MODULE
 #include <pybind11/pybind11.h>
 #include <pybind11_json/pybind11_json.hpp>
 namespace py = pybind11;
+#endif
 
 using namespace std::chrono_literals;
 
@@ -791,6 +793,7 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
     }
 }
 
+#ifdef PYTHON_MODULE
 void py_registerNodeManager(py::module_ &m) {
     py::class_<NodeManager, std::shared_ptr<NodeManager>>(m, "NodeManager")
         .def(py::init<>())
@@ -840,3 +843,4 @@ void py_registerNodeManager(py::module_ &m) {
         .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
     ;
 }
+#endif
