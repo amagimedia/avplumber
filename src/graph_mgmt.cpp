@@ -11,6 +11,9 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <pybind11/pybind11.h>
+#include <pybind11_json/pybind11_json.hpp>
+namespace py = pybind11;
 
 using namespace std::chrono_literals;
 
@@ -788,4 +791,52 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
     }
 }
 
+void py_registerNodeManager(py::module_ &m) {
+    py::class_<NodeManager, std::shared_ptr<NodeManager>>(m, "NodeManager")
+        .def(py::init<>())
+//        .def("createNode", &NodeManager::createNode)
+        .def("deleteNode", &NodeManager::deleteNode)
+        .def("node", &NodeManager::node, py::arg("name"))
+        .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
+        .def("nodes", &NodeManager::nodes, py::arg("type"))
+        .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
+        .def("group", &NodeManager::group, py::arg("name"))
+        .def_property_readonly("allNodes", [](NodeManager &nm) { return nm.allNodes(); })
+    ;
 
+    py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
+        .def(py::init<NodeManager*, const std::string>())
+        .def("startNodes", &NodeGroup::startNodes)
+        .def("stopNodes", &NodeGroup::stopNodes)
+        .def("restartNodes", &NodeGroup::restartNodes)
+        .def_property_readonly("sortedNodes", [](NodeGroup &ng) -> py::list {
+            py::list sorted_nodes;
+            for (auto &weak_node: ng.sortedNodes()) {
+                auto node = weak_node.lock();
+                if (node) sorted_nodes.append(node);
+            }
+            return sorted_nodes;
+        })
+    ;
+
+    py::class_<NodeWrapper, std::shared_ptr<NodeWrapper>>(m, "NodeWrapper")
+//        .def(py::init<std::shared_ptr<NodeManager>, const Parameters&, const bool>())
+    //        .def_property_readonly("name", [](NodeWrapper &nw) { return nw.name(); })
+        
+        .def_property_readonly("type", [](NodeWrapper &nw) { return nw.type(); })
+        .def_property_readonly("name", [](NodeWrapper &nw) { return nw.name(); })
+        .def("__repr__", [](NodeWrapper &nw) {
+            return "Node(" + nw.type() + " / " + nw.name() + ")";
+        })
+        .def_property_readonly("parameters", &NodeWrapper::parameters)
+        .def("getObject", &NodeWrapper::getObject)
+    //    .def("getObjectTry", &NodeWrapper::getObjectTry)
+    //    .def("setObject", &NodeWrapper::setObject)
+    //    .def("start", &NodeWrapper::start)
+    //    .def("stop", &NodeWrapper::stop)
+    //    .def("interrupt", &NodeWrapper::interrupt)
+    //    .def("stopAndWait", &NodeWrapper::stopAndWait)
+    //    .def("join", &NodeWrapper::join)
+        .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
+    ;
+}

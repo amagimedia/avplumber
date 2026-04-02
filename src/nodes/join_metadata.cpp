@@ -37,6 +37,7 @@ public:
 
         if (ts_primary == ts_auxiliary) {
             av_dict_copy(&primary->raw()->metadata, auxiliary->raw()->metadata, 0);
+<<<<<<< HEAD
             // Copy side data from auxiliary to primary (for segmentation masks, etc.)
             if (auxiliary->raw()->nb_side_data > 0) {
                 for (int i = 0; i < auxiliary->raw()->nb_side_data; ++i) {
@@ -53,6 +54,8 @@ public:
                     }
                 }
             }
+=======
+>>>>>>> python
             this->sink_->put(*primary);
             this->source_edges_[primary_index_]->pop();
             this->source_edges_[auxiliary_index_]->pop();
