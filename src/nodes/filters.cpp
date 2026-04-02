@@ -148,6 +148,9 @@ protected:
         AVFilterContext* context() {
             return ctx_;
         }
+        void invalidateFilterContext() {
+            ctx_ = nullptr;
+        }
         void initSourceFilter(const int index, AVFilterGraph *filter_graph, std::shared_ptr<HWAccelDevice> hwaccel, AVFilterInOut *dst) {
             std::string name = "in" + std::to_string(index);
             
@@ -232,6 +235,8 @@ protected:
             return getSinkLink()->type == media_type;
         }
         int putFrame(T &frm) {
+            if (!ctx_)
+                throw Error("graph input count does not match node sources");
             return av_buffersrc_add_frame_flags(ctx_, frm.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
         }
         int getFrame(T &frm) {
@@ -254,6 +259,10 @@ protected:
         avfilter_graph_free(&filter_graph_);
         filter_graph_ = nullptr;
         out_ctx_ = nullptr;
+        for (Port &p : sources_)
+            p.invalidateFilterContext();
+        for (Port &p : sinks_)
+            p.invalidateFilterContext();
     }
     void initPorts() {
         sources_.resize(this->source_edges_.size());
@@ -309,6 +318,15 @@ protected:
             sources_[i].initSourceFilter(i, filter_graph_, hwaccel_, in);
             i++;
         });
+        if (i != (int)sources_.size()) {
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+            freeFilterGraph();
+            throw Error("Filter graph exposes " + std::to_string(i) + " input pad(s) but this node has " +
+                std::to_string(sources_.size()) +
+                " source(s). For filters with a configurable input count (e.g. overlay_many_cuda), "
+                "set inputs=N in the graph string, e.g. overlay_many_cuda=inputs=3");
+        }
         i = 0;
         forEachInOut(outputs, [this, &i](AVFilterInOut* out) {
             if (i >= sinks_.size()) {
@@ -317,6 +335,13 @@ protected:
             sinks_[i].initSinkFilter(i, filter_graph_, out);
             i++;
         });
+        if (i != (int)sinks_.size()) {
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+            freeFilterGraph();
+            throw Error("Filter graph exposes " + std::to_string(i) + " output pad(s) but this node has " +
+                std::to_string(sinks_.size()) + " sink(s)");
+        }
         avfilter_inout_free(&inputs);
         avfilter_inout_free(&outputs);
         
