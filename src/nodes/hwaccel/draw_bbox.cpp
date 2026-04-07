@@ -42,6 +42,7 @@ private:
     std::unordered_set<std::string> allowed_labels_;
     DrawColor default_color_{};
     std::unordered_map<int, DrawColor> model_colors_;
+    std::unordered_map<std::string, DrawColor> label_colors_;
     double model_content_width_ = 0.0;
     double model_content_height_ = 0.0;
     double model_content_offset_x_ = 0.0;
@@ -54,6 +55,12 @@ private:
     }
 
     DrawColor resolveModelColor(const Parameters& det) const {
+        if (!label_colors_.empty() && det.contains("label") && det["label"].is_string()) {
+            const auto it = label_colors_.find(det["label"].get<std::string>());
+            if (it != label_colors_.end()) {
+                return it->second;
+            }
+        }
         if (det.contains("model_index")) {
             const int model_index = det["model_index"].get<int>();
             const auto it = model_colors_.find(model_index);
@@ -492,6 +499,7 @@ public:
              std::unordered_set<int> allowed_classes,
              std::unordered_set<std::string> allowed_labels,
              std::unordered_map<int, DrawColor> model_colors,
+             std::unordered_map<std::string, DrawColor> label_colors,
              double model_content_width,
              double model_content_height,
              double model_content_offset_x,
@@ -508,6 +516,7 @@ public:
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
           model_colors_(std::move(model_colors)),
+          label_colors_(std::move(label_colors)),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -581,15 +590,25 @@ public:
             for (auto it = params["model_colors"].begin(); it != params["model_colors"].end(); ++it) {
                 DrawColor color;
                 if (!it.value().is_string() || !cuda_overlay::tryParseNamedColor(it.value().get<std::string>(), color)) {
-                    throw Error("draw_bbox: model_colors values must be one of: red, green, light_blue");
+                    throw Error("draw_bbox: model_colors values must be a named color");
                 }
                 model_colors[std::stoi(it.key())] = color;
+            }
+        }
+        std::unordered_map<std::string, DrawColor> label_colors;
+        if (params.count("label_colors") && params["label_colors"].is_object()) {
+            for (auto it = params["label_colors"].begin(); it != params["label_colors"].end(); ++it) {
+                DrawColor color;
+                if (!it.value().is_string() || !cuda_overlay::tryParseNamedColor(it.value().get<std::string>(), color)) {
+                    throw Error("draw_bbox: label_colors values must be a named color");
+                }
+                label_colors[it.key()] = color;
             }
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
             edges, params, std::move(metadata_keys), bbox_thickness, min_conf,
-            std::move(allowed_classes), std::move(allowed_labels), std::move(model_colors),
+            std::move(allowed_classes), std::move(allowed_labels), std::move(model_colors), std::move(label_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }
