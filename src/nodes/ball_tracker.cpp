@@ -417,8 +417,12 @@ private:
         }
 
         updateSpeed(cx, cy);
-        addTrailPoint(trail_, (int)std::round(cx), (int)std::round(cy),
-                      frame_counter_, true, 5, trail_max_);
+        if (source == "override") {
+            trail_.clear();
+        } else {
+            addTrailPoint(trail_, (int)std::round(cx), (int)std::round(cy),
+                          frame_counter_, true, 5, trail_max_);
+        }
 
         last_emitted_box_ = det;
         have_last_emitted_ = true;
