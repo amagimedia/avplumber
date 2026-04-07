@@ -73,6 +73,22 @@ inline bool tryParseNamedColor(const std::string& color_name, DrawColor& color_o
         color_out = DrawColor{210, 16, 146};
         return true;
     }
+    if (normalized == "orange") {
+        color_out = DrawColor{156, 44, 200};
+        return true;
+    }
+    if (normalized == "magenta" || normalized == "pink") {
+        color_out = DrawColor{105, 212, 235};
+        return true;
+    }
+    if (normalized == "cyan") {
+        color_out = DrawColor{188, 154, 16};
+        return true;
+    }
+    if (normalized == "purple") {
+        color_out = DrawColor{76, 184, 230};
+        return true;
+    }
     return false;
 }
 
