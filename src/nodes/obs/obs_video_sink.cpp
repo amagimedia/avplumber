@@ -27,28 +27,8 @@
 
 #if (HAVE_CUDA || HAVE_VAAPI)
 
-#include <array>
-#include <cmath>
 #include <GL/gl.h>
 #include <GL/glext.h>
-#ifndef GL_TEXTURE_INTERNAL_FORMAT
-#define GL_TEXTURE_INTERNAL_FORMAT 0x1003
-#endif
-#ifndef GL_TEXTURE_SRGB_DECODE_EXT
-#define GL_TEXTURE_SRGB_DECODE_EXT 0x8A48
-#endif
-#ifndef GL_DECODE_EXT
-#define GL_DECODE_EXT 0x8A49
-#endif
-#ifndef GL_SKIP_DECODE_EXT
-#define GL_SKIP_DECODE_EXT 0x8A4A
-#endif
-#ifndef GL_SRGB8
-#define GL_SRGB8 0x8C41
-#endif
-#ifndef GL_SRGB8_ALPHA8
-#define GL_SRGB8_ALPHA8 0x8C43
-#endif
 
 struct gs_device {
   struct gl_platform *plat;
@@ -752,34 +732,10 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
         gl_tex_param_i(tex->gl_target, GL_TEXTURE_MAX_LEVEL, 0);
         gl_tex_param_i(tex->gl_target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         gl_tex_param_i(tex->gl_target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-        // One-time debug: confirm actual GL internal format and SRGB_DECODE state.
-        static std::atomic<bool> logged{false};
-        const bool do_log = !logged.exchange(true, std::memory_order_acq_rel);
-        GLint pre_ifmt = 0, post_ifmt = 0;
-        GLint srgb_decode = -1;
-        if (do_log) {
-            glGetTexLevelParameteriv(tex->gl_target, 0, GL_TEXTURE_INTERNAL_FORMAT, &pre_ifmt);
-            glGetTexParameteriv(tex->gl_target, GL_TEXTURE_SRGB_DECODE_EXT, &srgb_decode);
-            logstream << "EGLImage import: before glEGLImageTargetTexture2DOES"
-                      << " gs_format=" << (int)tex->format
-                      << " gl_internal_format(field)=0x" << std::hex << (unsigned)tex->gl_internal_format << std::dec
-                      << " GL_TEXTURE_INTERNAL_FORMAT=0x" << std::hex << (unsigned)pre_ifmt << std::dec
-                      << " GL_TEXTURE_SRGB_DECODE_EXT=" << (srgb_decode == GL_DECODE_EXT ? "DECODE" : (srgb_decode == GL_SKIP_DECODE_EXT ? "SKIP" : "UNKNOWN"))
-                      << " gs_get_linear_srgb=" << (gs_get_linear_srgb() ? "true" : "false");
-        }
-
         g_EGLImageTargetTexture2DOES(tex->gl_target, image);
         if (!gl_success("glEGLImageTargetTexture2DOES")) {
             logstream << "EGLImage -> texture import failed; frame may repeat";
         }
-
-        if (do_log) {
-            glGetTexLevelParameteriv(tex->gl_target, 0, GL_TEXTURE_INTERNAL_FORMAT, &post_ifmt);
-            logstream << "EGLImage import: after glEGLImageTargetTexture2DOES"
-                      << " GL_TEXTURE_INTERNAL_FORMAT=0x" << std::hex << (unsigned)post_ifmt << std::dec;
-        }
-
         gl_bind_texture(tex->gl_target, 0);
     };
     vsink.obs_hw_.copy_frame_data_plane_from_hw = [](void* opaque, struct obs_source_frame *dst, const struct obs_source_frame *src, uint32_t plane, uint32_t lines) {
@@ -833,8 +789,6 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
         }
 
         bool ok = true;
-        GLint imported_internal_fmt = 0;
-        bool imported_is_srgb = false;
 
         // Import EGLImage into a temporary GL texture.
         ok = ok && gl_bind_texture(GL_TEXTURE_2D, tmp_tex);
@@ -844,12 +798,6 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
         ok = ok && gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         g_EGLImageTargetTexture2DOES(GL_TEXTURE_2D, (void*)src->data[0]);
         ok = ok && gl_success("glEGLImageTargetTexture2DOES(hwdownload)");
-        if (ok) {
-            // Determine whether the imported texture is sRGB. Some GL drivers will
-            // return *linearized* values when reading pixels from an sRGB FBO.
-            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &imported_internal_fmt);
-            imported_is_srgb = (imported_internal_fmt == (GLint)GL_SRGB8_ALPHA8) || (imported_internal_fmt == (GLint)GL_SRGB8);
-        }
 
         // Attach to FBO and read back.
         glBindFramebuffer(GL_FRAMEBUFFER, tmp_fbo);
@@ -893,41 +841,6 @@ void ObsSinkMediaSpecific<EglImageFrame>::initOnCreate(ObsVideoSink<EglImageFram
                 }
             }
 #endif
-        }
-
-        // If the source was imported as an sRGB texture, GL readback may yield
-        // *linear* bytes. OBS' normal CPU-frame pipeline assumes RGB bytes are
-        // sRGB/nonlinear (it will decode to linear when sampling in linear-sRGB mode).
-        // Convert linear->sRGB here so replay/copy paths match the on-screen source.
-        if (ok && imported_is_srgb) {
-            static const std::array<uint8_t, 256> lin8_to_srgb8 = []() {
-                std::array<uint8_t, 256> t{};
-                for (int i = 0; i < 256; i++) {
-                    const float u = (float)i / 255.0f; // linear [0,1]
-                    float s;
-                    if (u <= 0.0031308f) {
-                        s = 12.92f * u;
-                    } else {
-                        s = 1.055f * std::pow(u, 1.0f / 2.4f) - 0.055f;
-                    }
-                    int v = (int)std::lround(s * 255.0f);
-                    if (v < 0) v = 0;
-                    if (v > 255) v = 255;
-                    t[(size_t)i] = (uint8_t)v;
-                }
-                return t;
-            }();
-
-            for (uint32_t y = 0; y < copy_lines; y++) {
-                uint8_t* row = dst->data[0] + (size_t)y * dst_pitch;
-                for (uint32_t x = 0; x < width; x++) {
-                    uint8_t* px = row + (size_t)x * 4;
-                    px[0] = lin8_to_srgb8[px[0]];
-                    px[1] = lin8_to_srgb8[px[1]];
-                    px[2] = lin8_to_srgb8[px[2]];
-                    // alpha unchanged
-                }
-            }
         }
 
         // Restore bindings/state and delete temp objects.
