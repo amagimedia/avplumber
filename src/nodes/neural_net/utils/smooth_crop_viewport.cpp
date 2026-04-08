@@ -1,4 +1,4 @@
-#include "node_common.hpp"
+#include "../../node_common.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>
@@ -136,7 +136,7 @@ public:
 };
 
 // Kalman1D is now in a shared header
-#include "../kalman1d.hpp"
+#include "../../../kalman1d.hpp"
 
 class LowpassKalman2 : public LowpassBackend {
     Kalman1D kx_, ky_;

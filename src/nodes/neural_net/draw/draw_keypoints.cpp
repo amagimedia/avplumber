@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "../../../objs/src/nodes/hwaccel/draw_keypoints.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/draw/draw_keypoints.ptx.h"
 
 using cuda_overlay::DrawColor;
 

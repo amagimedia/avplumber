@@ -1,13 +1,13 @@
 #include <array>
 #include <map>
-#include "cuda_infer_yolo_base.hpp"
-#include "yolo_decode_detection.hpp"
-#include "yolo_decode_segmentation.hpp"
-#include "yolo_decode_pose.hpp"
+#include "../common/infer_trt_base.hpp"
+#include "decode_detection.hpp"
+#include "decode_segmentation.hpp"
+#include "decode_pose.hpp"
 
 using namespace yolo_base;
 
-class CudaInferYolo : public NodeSingleInput<av::VideoFrame>, public CudaInferYoloBase {
+class CudaInferYolo : public NodeSingleInput<av::VideoFrame>, public CudaInferTrtBase {
 protected:
     std::unique_ptr<EdgeSink<av::VideoFrame>> sink_;
     std::unique_ptr<EdgeSink<av::VideoFrame>> sink_seg_;  // optional, for segmentation mask output
@@ -101,7 +101,7 @@ public:
             return;
         }
 
-        if (YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+        if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
             logstream << "cuda_infer_yolo: cuCtxSetCurrent failed in process";
             return;
         }
@@ -444,15 +444,15 @@ public:
 
             // Create decoder
             if (model.task_type == TaskType::Detection) {
-                model.det_decoder = std::make_unique<DetectionDecoder>();
+                model.det_decoder.reset(new DetectionDecoder());
             } else if (model.task_type == TaskType::Segmentation) {
-                model.seg_decoder = std::make_unique<SegmentationDecoder>();
+                model.seg_decoder.reset(new SegmentationDecoder());
             } else if (model.task_type == TaskType::Pose) {
                 int nc = model.num_classes;
                 if (nc < 1) nc = 1;  // default for pose models
                 float nms_iou = 0.45f;
                 if (mp.count("nms_iou_thresh")) nms_iou = mp["nms_iou_thresh"].get<float>();
-                model.pose_decoder = std::make_unique<PoseDecoder>(nc, nms_iou);
+                model.pose_decoder.reset(new PoseDecoder(nc, nms_iou));
             }
 
             r->models_.push_back(std::move(model));
