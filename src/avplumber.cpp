@@ -44,11 +44,6 @@
 #include <avcpp/av.h>
 #include <avcpp/avutils.h>
 
-#ifdef PYTHON_MODULE
-#include <pybind11/pybind11.h>
-namespace py = pybind11;
-#endif
-
 using boost::asio::ip::tcp;
 using nlohmann::json;
 
@@ -1164,6 +1159,10 @@ void AVPlumber::shutdown() {
     impl_->shutdown();
 }
 
+std::shared_ptr<NodeManager> AVPlumber::manager() {
+    return impl_->manager();
+}
+
 void AVPlumber::mainLoop() {
     setReady();
     do {
@@ -1182,31 +1181,3 @@ void AVPlumber::heartbeat() {
     impl_->printAllQueues();
 }
 
-
-#ifdef PYTHON_MODULE
-
-void py_registerAVPlumber(py::module_ &m) {
-    py::class_<AVPlumber>(m, "AVPlumber")
-        .def(py::init<>())
-        .def("enableControlServer", &AVPlumber::enableControlServer)
-        .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
-        .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString)
-        .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile)
-        .def("setLogFile", &AVPlumber::setLogFile)
-        .def("setLogCallback", [&](AVPlumber &avp, py::function callback) {
-            avp.setLogCallback([callback](const std::string &s) {
-                py::gil_scoped_acquire acquire;
-                py::object py_s = py::str(s);
-                callback(py_s);
-            });
-        })
-        .def("setReady", &AVPlumber::setReady)
-        .def("shutdown", &AVPlumber::shutdown)
-        .def("mainLoop", &AVPlumber::mainLoop)
-        .def("stopMainLoop", &AVPlumber::stopMainLoop)
-        .def("heartbeat", &AVPlumber::heartbeat)
-        .def_property_readonly("manager", [](AVPlumber &avp) { return avp.controlImpl()->manager(); })
-    ;
-}
-
-#endif

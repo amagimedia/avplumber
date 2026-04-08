@@ -4,8 +4,10 @@
 #include <thread>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 class ControlImpl;
+class NodeManager;
 
 #ifdef EMBED_IN_OBS
 struct obs_source;
@@ -51,6 +53,7 @@ public:
     void enableControlServer(const uint16_t tcp_port);
     void registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name = "", const std::string& log_file = "");
     ControlImpl* controlImpl() { return impl_; }
+    std::shared_ptr<NodeManager> manager();
 #ifdef EMBED_IN_OBS
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
