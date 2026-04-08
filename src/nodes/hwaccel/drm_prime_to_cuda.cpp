@@ -28,9 +28,9 @@ protected:
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
     EGLContext egl_ctx_ = EGL_NO_CONTEXT;
+    EGLSurface egl_surf_ = EGL_NO_SURFACE;
 
     GLuint src_tex_ = 0;
-    GLuint dst_tex_ = 0;
 
     bool have_dma_buf_import_ = false;
     bool have_mods_ = false;
@@ -40,23 +40,44 @@ protected:
     // CUDA state
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
 
+    struct GresEntry {
+        int width = 0;
+        int height = 0;
+        AVPixelFormat swfmt = AV_PIX_FMT_NONE;
+        GLuint dst_tex = 0;
+        CUgraphicsResource gres = nullptr;
+    };
+    std::vector<GresEntry> gres_cache_;
+
     static inline const char* safe_str(const char* s) { return s ? s : ""; }
 
     bool ensureEGL() {
-        if (egl_dpy_ != EGL_NO_DISPLAY) return true;
-        egl_dpy_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (egl_dpy_ == EGL_NO_DISPLAY) {
+        if (egl_ctx_ != EGL_NO_CONTEXT) {
+            // Re-bind on every call: cuCtxPushCurrent/PopCurrent each frame can
+            // release the GL context on the current thread, so we must restore it.
+            if (!eglMakeCurrent(egl_dpy_, egl_surf_, egl_surf_, egl_ctx_)) {
+                logstream << "drm2cuda: eglMakeCurrent (re-bind) failed: " << eglGetError();
+                return false;
+            }
+            return true;
+        }
+
+        EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (dpy == EGL_NO_DISPLAY) {
             logstream << "drm2cuda: eglGetDisplay failed";
             return false;
         }
         EGLint major=0, minor=0;
-        if (!eglInitialize(egl_dpy_, &major, &minor)) {
+        if (!eglInitialize(dpy, &major, &minor)) {
             logstream << "drm2cuda: eglInitialize failed";
-            egl_dpy_ = EGL_NO_DISPLAY;
             return false;
         }
 
-        eglBindAPI(EGL_OPENGL_API);
+        if (!eglBindAPI(EGL_OPENGL_API)) {
+            logstream << "drm2cuda: eglBindAPI(EGL_OPENGL_API) failed: " << eglGetError();
+            return false;
+        }
+        logstream << "drm2cuda: EGL vendor: " << safe_str(eglQueryString(dpy, EGL_VENDOR));
 
         static const EGLint ctx_config_attribs[] = {EGL_STENCIL_SIZE,
             0,
@@ -69,16 +90,22 @@ protected:
             EGL_RENDERABLE_TYPE,
             EGL_OPENGL_BIT,
             EGL_SURFACE_TYPE,
-            EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+            EGL_PBUFFER_BIT,
             EGL_NONE};
         
         EGLConfig cfg = nullptr;
         EGLint num = 0;
-        if (!eglChooseConfig(egl_dpy_, ctx_config_attribs, &cfg, 1, &num) || num < 1) return false;
+        if (!eglChooseConfig(dpy, ctx_config_attribs, &cfg, 1, &num) || num < 1) {
+            logstream << "drm2cuda: eglChooseConfig failed";
+            return false;
+        }
 
         static int ctx_pbuffer_attribs[] = {EGL_WIDTH, 2, EGL_HEIGHT, 2, EGL_NONE};
-        EGLSurface egl_surf = eglCreatePbufferSurface(egl_dpy_, cfg, ctx_pbuffer_attribs);
-        if (egl_surf == EGL_NO_SURFACE) return false;
+        EGLSurface surf = eglCreatePbufferSurface(dpy, cfg, ctx_pbuffer_attribs);
+        if (surf == EGL_NO_SURFACE) {
+            logstream << "drm2cuda: eglCreatePbufferSurface failed: " << eglGetError();
+            return false;
+        }
         
         static const int ctx_attribs[] = {
             #ifdef _DEBUG
@@ -94,13 +121,20 @@ protected:
                 EGL_NONE,
         };
         
-        egl_ctx_ = eglCreateContext(egl_dpy_, cfg, EGL_NO_CONTEXT, ctx_attribs);
+        EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attribs);
+        if (ctx == EGL_NO_CONTEXT) {
+            logstream << "drm2cuda: eglCreateContext failed: " << eglGetError();
+            eglDestroySurface(dpy, surf);
+            return false;
+        }
 
-        const char* exts = eglQueryString(egl_dpy_, EGL_EXTENSIONS);
+        const char* exts = eglQueryString(dpy, EGL_EXTENSIONS);
         have_dma_buf_import_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import");
         have_mods_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers");
         if (!have_dma_buf_import_) {
             logstream << "drm2cuda: EGL_EXT_image_dma_buf_import missing";
+            eglDestroyContext(dpy, ctx);
+            eglDestroySurface(dpy, surf);
             return false;
         }
         // Resolve extension function pointers at runtime to avoid link-time deps
@@ -119,9 +153,22 @@ protected:
         }
         if (!p_eglCreateImageKHR_ || !p_eglDestroyImageKHR_) {
             logstream << "drm2cuda: failed to load eglCreateImageKHR/eglDestroyImageKHR";
+            eglDestroyContext(dpy, ctx);
+            eglDestroySurface(dpy, surf);
             return false;
         }
-        if (!eglMakeCurrent(egl_dpy_, egl_surf, egl_surf, egl_ctx_)) return false;
+        if (!eglMakeCurrent(dpy, surf, surf, ctx)) {
+            logstream << "drm2cuda: eglMakeCurrent failed: " << eglGetError();
+            eglDestroyContext(dpy, ctx);
+            eglDestroySurface(dpy, surf);
+            return false;
+        }
+
+        // Commit — only store members after full successful init
+        egl_dpy_ = dpy;
+        egl_surf_ = surf;
+        egl_ctx_ = ctx;
+
         auto get_string = [](GLenum key) {
             const char* s = (const char*)glGetString(key);
             return s ? std::string(s) : std::string("null");
@@ -136,28 +183,32 @@ protected:
             glDeleteTextures(1, &src_tex_);
             src_tex_ = 0;
         }
-        if (dst_tex_ != 0) {
-            glDeleteTextures(1, &dst_tex_);
-            dst_tex_ = 0;
-        }
         if (width_ <= 0 || height_ <= 0) return;
         
         glGenTextures(1, &src_tex_);
-        glGenTextures(1, &dst_tex_);
-
         glBindTexture(GL_TEXTURE_2D, src_tex_);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 
-        glBindTexture(GL_TEXTURE_2D, dst_tex_);
+    // Find a cache entry matching (w, h, swfmt), or allocate a new GL texture and add one.
+    // Must be called with the EGL/GL context current and NO CUDA context pushed.
+    int findOrCreateEntryIdx(int w, int h, AVPixelFormat swfmt) {
+        for (int i = 0; i < (int)gres_cache_.size(); ++i) {
+            const auto& e = gres_cache_[i];
+            if (e.width == w && e.height == h && e.swfmt == swfmt) return i;
+        }
+        GresEntry e;
+        e.width = w; e.height = h; e.swfmt = swfmt;
+        glGenTextures(1, &e.dst_tex);
+        glBindTexture(GL_TEXTURE_2D, e.dst_tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-            width_, height_, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE,
-            NULL);
-        
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
+        gres_cache_.push_back(std::move(e));
+        return (int)gres_cache_.size() - 1;
     }
 
     static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc) {
@@ -210,15 +261,11 @@ protected:
 
     bool import_one_plane_to_cuda(const AVDRMFrameDescriptor* desc, int layer_index, int plane_index,
                                   int width, int height, AVPixelFormat swfmt, av::VideoFrame &dst) {
-        
-        // Make CUDA context current BEFORE calling any CUDA-EGL interop
-        int cuda_error = 0;
-        cuda_error |= CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
-        if (cuda_error) {
-            logstream << "drm2cuda: cuCtxPushCurrent failed";
-            return false;
-        }
 
+        // Ensure GL context is current BEFORE any GL work (including texture creation).
+        // Do NOT push CUDA context yet — on NVIDIA, having the CUDA context current
+        // while calling glGenTextures / eglMakeCurrent can prevent the GL context from
+        // becoming usable, leaving all glGen* calls returning 0 (invalid).
         if (!ensureEGL()) return false;
 
         const AVDRMLayerDescriptor &layer = desc->layers[layer_index];
@@ -226,9 +273,12 @@ protected:
         const AVDRMObjectDescriptor &obj = desc->objects[pl.object_index];
 
         if (!ensureCudaFramesCtxAndTextures(width, height, swfmt)) {
-            CUcontext dummy; CHECK_CU(cuCtxPopCurrent(&dummy));
             return false;
         }
+
+        // Resolve (or allocate) the dst_tex+gres cache entry for this frame's dimensions.
+        // Must happen before cuCtxPushCurrent to keep GL and CUDA contexts separate.
+        int entry_idx = findOrCreateEntryIdx(width, height, swfmt);
 
         EGLAttrib attrs[64];
         int a = 0;
@@ -265,7 +315,7 @@ protected:
         glBindTexture(GL_TEXTURE_2D, 0);
         
         glCopyImageSubData(src_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
-            dst_tex_, GL_TEXTURE_2D, 0, 0, 0, 0,
+            gres_cache_[entry_idx].dst_tex, GL_TEXTURE_2D, 0, 0, 0, 0,
             width, height, 1);
 
         err = glGetError();
@@ -276,14 +326,28 @@ protected:
 
         glFinish();
 
-        CUgraphicsResource gres = nullptr;
-        CUresult cr = cuGraphicsGLRegisterImage(&gres, dst_tex_, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-        if (cr != CUDA_SUCCESS) {
-            logstream << "drm2cuda: cuGraphicsGLRegisterImage failed";
-            CUcontext dummy; CHECK_CU(cuCtxPopCurrent(&dummy));
+        // All GL work is done. Now push the CUDA context for CUDA-GL interop.
+        int cuda_error = 0;
+        cuda_error |= CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
+        if (cuda_error) {
+            logstream << "drm2cuda: cuCtxPushCurrent failed";
             p_eglDestroyImageKHR_(egl_dpy_, img);
             return false;
         }
+
+        // Register the dst_tex with CUDA once per cache entry (lazy, first use only).
+        GresEntry& entry = gres_cache_[entry_idx];
+        if (!entry.gres) {
+            CUresult cr = cuGraphicsGLRegisterImage(&entry.gres, entry.dst_tex, GL_TEXTURE_2D, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+            if (cr != CUDA_SUCCESS) {
+                logstream << "drm2cuda: cuGraphicsGLRegisterImage failed: " << cr;
+                entry.gres = nullptr;
+                CUcontext dummy; cuCtxPopCurrent(&dummy);
+                p_eglDestroyImageKHR_(egl_dpy_, img);
+                return false;
+            }
+        }
+        CUgraphicsResource gres = entry.gres;
         cuGraphicsMapResources(1, &gres, 0);
         CUarray garr = nullptr;
         cuGraphicsSubResourceGetMappedArray(&garr, gres, 0, 0);
@@ -307,8 +371,7 @@ protected:
         cuda_error |= CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
 
         cuGraphicsUnmapResources(1, &gres, 0);
-        cuGraphicsUnregisterResource(gres);
-        eglDestroyImage(egl_dpy_, img);
+        p_eglDestroyImageKHR_(egl_dpy_, img);
 
         CUcontext dummy;
         cuda_error |= CHECK_CU(cuCtxPopCurrent(&dummy));
@@ -377,6 +440,17 @@ public:
             av_buffer_unref(&hw_frames_ctx_);
             hw_frames_ctx_ = nullptr;
         }
+        if (cuda_dev_ctx_ && !gres_cache_.empty()) {
+            cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx);
+            for (auto& e : gres_cache_) {
+                if (e.gres) {
+                    cuGraphicsUnregisterResource(e.gres);
+                    e.gres = nullptr;
+                }
+            }
+            CUcontext dummy;
+            cuCtxPopCurrent(&dummy);
+        }
         if (egl_dpy_ != EGL_NO_DISPLAY) {
             eglTerminate(egl_dpy_);
             egl_dpy_ = EGL_NO_DISPLAY;
@@ -385,10 +459,13 @@ public:
             glDeleteTextures(1, &src_tex_);
             src_tex_ = 0;
         }
-        if (dst_tex_ != 0) {
-            glDeleteTextures(1, &dst_tex_);
-            dst_tex_ = 0;
+        for (auto& e : gres_cache_) {
+            if (e.dst_tex) {
+                glDeleteTextures(1, &e.dst_tex);
+                e.dst_tex = 0;
+            }
         }
+        gres_cache_.clear();
     }
 
     static std::shared_ptr<DRMPrimeToCUDA> create(NodeCreationInfo &nci) {
