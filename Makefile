@@ -113,7 +113,7 @@ STATIC_LIBRARY = libavplumber.a
 CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 # Python extension translation units (not linked into the avplumber binary/static library).
-CPPSRC_PYTHON = src/graph_core_pybind.cpp src/avplumber_pybind.cpp
+CPPSRC_PYTHON = src/avplumber_pybind.cpp
 CPPSRC_COMPILE := $(CPPSRC_EXE) $(CPPSRC_PYTHON)
 CPPSRC_ALL = $(CPPSRC_COMPILE)
 
