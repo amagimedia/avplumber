@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1550" height="420" viewBox="0 0 1550 420">
+  <defs>
+    <style>
+      .box { fill: #111827; stroke: #a78bfa; stroke-width: 2; rx: 10; ry: 10; }
+      .src { fill: #0f172a; stroke: #22d3ee; }
+      .ai { fill: #1f2937; stroke: #f59e0b; }
+      .sink { fill: #111827; stroke: #f43f5e; }
+      .txt { fill: #f3f4f6; font-family: Arial, Helvetica, sans-serif; font-size: 15px; text-anchor: middle; dominant-baseline: middle; }
+      .small { font-size: 13px; fill: #d1d5db; }
+      .arrow { stroke: #94a3b8; stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+      .dash { stroke-dasharray: 7 6; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+    </marker>
+  </defs>
+
+  <rect x="20" y="80" width="140" height="56" class="box src"/>
+  <text x="90" y="102" class="txt">input</text>
+  <text x="90" y="120" class="txt small">rtmp://.../input</text>
+
+  <rect x="210" y="80" width="130" height="56" class="box"/>
+  <text x="275" y="108" class="txt">demux</text>
+
+  <rect x="390" y="80" width="170" height="56" class="box"/>
+  <text x="475" y="100" class="txt">dec_audio</text>
+  <text x="475" y="118" class="txt small">AAC packet to PCM</text>
+
+  <rect x="620" y="80" width="260" height="56" class="box ai"/>
+  <text x="750" y="100" class="txt">filter_audio</text>
+  <text x="750" y="118" class="txt small">highpass, lowpass, resample, whisper</text>
+
+  <rect x="940" y="80" width="150" height="56" class="box sink"/>
+  <text x="1015" y="100" class="txt">null_sink</text>
+  <text x="1015" y="118" class="txt small">discard audio</text>
+
+  <rect x="690" y="210" width="240" height="56" class="box src"/>
+  <text x="810" y="232" class="txt">transcript output</text>
+  <text x="810" y="250" class="txt small">destination=/tmp/rtmp_whisper.srt</text>
+
+  <path d="M160 108 L210 108" class="arrow"/>
+  <path d="M340 108 L390 108" class="arrow"/>
+  <path d="M560 108 L620 108" class="arrow"/>
+  <path d="M880 108 L940 108" class="arrow"/>
+  <path d="M790 136 L810 210" class="arrow dash"/>
+</svg>
