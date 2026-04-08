@@ -1,4 +1,4 @@
-#include "node_common.hpp"
+#include "../../node_common.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>

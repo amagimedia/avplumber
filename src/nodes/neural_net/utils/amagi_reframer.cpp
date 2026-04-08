@@ -1,5 +1,5 @@
-#include "../node_common.hpp"
-#include "../../hwaccel.hpp"
+#include "../../node_common.hpp"
+#include "../../../hwaccel.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -24,7 +24,7 @@ extern "C" {
 #include <unordered_map>
 #include <vector>
 
-#include "../../../objs/src/nodes/hwaccel/reframer.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/utils/amagi_reframer.ptx.h"
 
 static int check_cu(CUresult err, const char *func) {
     if (err == CUDA_SUCCESS) return 0;
@@ -604,7 +604,7 @@ protected:
         if (preprocess_module_ && preprocess_rgb_kernel_) return true;
         if (!cu_ctx_) return false;
         if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
-        const std::string ptx_str(avpl_reframer_ptx, avpl_reframer_ptx + avpl_reframer_ptx_len);
+        const std::string ptx_str(avpl_amagi_reframer_ptx, avpl_amagi_reframer_ptx + avpl_amagi_reframer_ptx_len);
         if (CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
             logstream << "reframer: failed to load preprocess PTX module";
             return false;

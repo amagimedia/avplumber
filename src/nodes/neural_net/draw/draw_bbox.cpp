@@ -5,7 +5,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../../../objs/src/nodes/hwaccel/draw_bbox.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/draw/draw_bbox.ptx.h"
 
 extern "C" {
 #include <libavutil/pixdesc.h>

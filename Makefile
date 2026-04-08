@@ -14,10 +14,12 @@ OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
 HAVE_TENSORRT = 0
+# Build neural_net nodes except sport_specific (draw, yolo/rtdetr, preprocess, utils)
+NEURAL_NET_COMMON ?= 0
+# Build neural_net sport-specific nodes
+NEURAL_NET_SPECIFIC ?= 0
 TENSORRT_ROOT =
-ifeq ($(HAVE_NVCC),1)
 NVCC ?= /usr/local/cuda/bin/nvcc
-endif
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
 else
@@ -39,6 +41,12 @@ BUILD_DATE_FILE = builddate.h
 SRCDIR = src
 
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
+ifeq ($(NEURAL_NET_SPECIFIC),1)
+NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
+endif
+ifeq ($(NEURAL_NET_COMMON),1)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/smooth_crop_viewport.cpp
+endif
 
 # hwaccel nodes moved from nodes/cuda to nodes/hwaccel
 DRM_PRIME_TO_CUDA_SRC = $(SRCDIR)/nodes/hwaccel/drm_prime_to_cuda.cpp
@@ -86,32 +94,32 @@ else
 BUILD_PTX = 0
 endif
 
-ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_bbox.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_text.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_segmask.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_keypoints.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/draw_trail.cpp
+ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
 BUILD_DRAW_BBOX_PTX = 1
-DRAW_BBOX_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_bbox.cu
-DRAW_BBOX_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_bbox.ptx
-DRAW_BBOX_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_bbox.ptx.h
+DRAW_BBOX_KERNEL = $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu
+DRAW_BBOX_PTX = objs/$(SRCDIR)/nodes/neural_net/draw/draw_bbox.ptx
+DRAW_BBOX_PTX_H = objs/$(SRCDIR)/nodes/neural_net/draw/draw_bbox.ptx.h
 BUILD_DRAW_TEXT_PTX = 1
-DRAW_TEXT_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_text.cu
-DRAW_TEXT_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_text.ptx
-DRAW_TEXT_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_text.ptx.h
+DRAW_TEXT_KERNEL = $(SRCDIR)/nodes/neural_net/draw/draw_text.cu
+DRAW_TEXT_PTX = objs/$(SRCDIR)/nodes/neural_net/draw/draw_text.ptx
+DRAW_TEXT_PTX_H = objs/$(SRCDIR)/nodes/neural_net/draw/draw_text.ptx.h
 BUILD_DRAW_SEGMASK_PTX = 1
-DRAW_SEGMASK_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_segmask.cu
-DRAW_SEGMASK_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_segmask.ptx
-DRAW_SEGMASK_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_segmask.ptx.h
+DRAW_SEGMASK_KERNEL = $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu
+DRAW_SEGMASK_PTX = objs/$(SRCDIR)/nodes/neural_net/draw/draw_segmask.ptx
+DRAW_SEGMASK_PTX_H = objs/$(SRCDIR)/nodes/neural_net/draw/draw_segmask.ptx.h
 BUILD_DRAW_KEYPOINTS_PTX = 1
-DRAW_KEYPOINTS_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_keypoints.cu
-DRAW_KEYPOINTS_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_keypoints.ptx
-DRAW_KEYPOINTS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_keypoints.ptx.h
+DRAW_KEYPOINTS_KERNEL = $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu
+DRAW_KEYPOINTS_PTX = objs/$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.ptx
+DRAW_KEYPOINTS_PTX_H = objs/$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.ptx.h
 BUILD_DRAW_TRAIL_PTX = 1
-DRAW_TRAIL_KERNEL = $(SRCDIR)/nodes/hwaccel/draw_trail.cu
-DRAW_TRAIL_PTX = objs/$(SRCDIR)/nodes/hwaccel/draw_trail.ptx
-DRAW_TRAIL_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/draw_trail.ptx.h
+DRAW_TRAIL_KERNEL = $(SRCDIR)/nodes/neural_net/draw/draw_trail.cu
+DRAW_TRAIL_PTX = objs/$(SRCDIR)/nodes/neural_net/draw/draw_trail.ptx
+DRAW_TRAIL_PTX_H = objs/$(SRCDIR)/nodes/neural_net/draw/draw_trail.ptx.h
 else
 BUILD_DRAW_BBOX_PTX = 0
 BUILD_DRAW_TEXT_PTX = 0
@@ -120,29 +128,24 @@ BUILD_DRAW_KEYPOINTS_PTX = 0
 BUILD_DRAW_TRAIL_PTX = 0
 endif
 
-ifeq ($(HAVE_CUDA)$(HAVE_TENSORRT)$(HAVE_NVCC),111)
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_infer_yolo_base.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_infer_yolo.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/vert_infer.cpp
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/reframer.cpp
+ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cpp
 BUILD_YOLO_PTX = 1
-YOLO_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/yolo_preprocess.cu
-YOLO_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx
-YOLO_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yolo_preprocess.ptx.h
-YOLO_MASK_ASSEMBLE_KERNEL = $(SRCDIR)/nodes/hwaccel/yolo_mask_assemble.cu
-YOLO_MASK_ASSEMBLE_PTX = objs/$(SRCDIR)/nodes/hwaccel/yolo_mask_assemble.ptx
-YOLO_MASK_ASSEMBLE_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/yolo_mask_assemble.ptx.h
-BUILD_VERT_PTX = 1
-VERT_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/vert_preprocess.cu
-VERT_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/vert_preprocess.ptx
-VERT_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/vert_preprocess.ptx.h
+YOLO_PREPROCESS_KERNEL = $(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu
+YOLO_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.ptx
+YOLO_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.ptx.h
+YOLO_MASK_ASSEMBLE_KERNEL = $(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu
+YOLO_MASK_ASSEMBLE_PTX = objs/$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.ptx
+YOLO_MASK_ASSEMBLE_PTX_H = objs/$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.ptx.h
 BUILD_REFRAMER_PTX = 1
-REFRAMER_PREPROCESS_KERNEL = $(SRCDIR)/nodes/hwaccel/reframer.cu
-REFRAMER_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/hwaccel/reframer.ptx
-REFRAMER_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/hwaccel/reframer.ptx.h
+REFRAMER_PREPROCESS_KERNEL = $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu
+REFRAMER_PREPROCESS_PTX = objs/$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.ptx
+REFRAMER_PREPROCESS_PTX_H = objs/$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.ptx.h
 else
 BUILD_YOLO_PTX = 0
-BUILD_VERT_PTX = 0
 BUILD_REFRAMER_PTX = 0
 endif
 
@@ -153,7 +156,7 @@ override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 
-ifeq ($(HAVE_TENSORRT),1)
+ifeq ($(NEURAL_NET_COMMON),1)
 override CXXFLAGS += -DHAVE_TENSORRT=1
 ifneq ($(strip $(TENSORRT_ROOT)),)
 override CXXFLAGS += -I$(TENSORRT_ROOT)/include
@@ -165,7 +168,7 @@ endif
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC),11)
 ifneq (,$(wildcard $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface/NvOFFRUC.h))
-NODES_SRC += $(SRCDIR)/nodes/hwaccel/nvof_fruc.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/nvof/nvof_fruc.cpp
 override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface
 else
 override CXXFLAGS += -DHAVE_NVOF_FRUC=0
@@ -228,13 +231,13 @@ objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 $(nodes_list_file): ./generate_node_list Makefile src/edge_types.hpp $(NODES_SRC)
 	./generate_node_list $(NODES_SRC) > $(nodes_list_file)
 
-$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(DRAW_BBOX_PTX_H) $(DRAW_TEXT_PTX_H) $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H) $(VERT_PREPROCESS_PTX_H) $(REFRAMER_PREPROCESS_PTX_H)
+$(EXE): $(patsubst %.cpp,objs/%.o,$(CPPSRC_EXE)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(DRAW_BBOX_PTX_H) $(DRAW_TEXT_PTX_H) $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H) $(REFRAMER_PREPROCESS_PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) -o $@ $^ $(LIBS_FLAGS)
 
 build: $(EXE) compile_flags.txt
 
 
-$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(DRAW_BBOX_PTX_H) $(DRAW_TEXT_PTX_H) $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H) $(VERT_PREPROCESS_PTX_H) $(REFRAMER_PREPROCESS_PTX_H)
+$(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version.o $(DEPS_LIBS) $(PTX_H) $(DRAW_BBOX_PTX_H) $(DRAW_TEXT_PTX_H) $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H) $(REFRAMER_PREPROCESS_PTX_H)
 	ar -rcs $@ $^
 
 static_library: $(STATIC_LIBRARY)
@@ -298,10 +301,10 @@ $(DRAW_BBOX_PTX): $(DRAW_BBOX_KERNEL)
 $(DRAW_BBOX_PTX_H): $(DRAW_BBOX_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_bbox_ptx_len/const unsigned int avpl_draw_bbox_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_bbox_ptx/const char avpl_draw_bbox_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_draw_draw_bbox_ptx_len/const unsigned int avpl_draw_bbox_ptx_len/; s/unsigned char objs_src_nodes_neural_net_draw_draw_bbox_ptx/const char avpl_draw_bbox_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/draw_bbox.o: $(DRAW_BBOX_PTX_H)
+objs/src/nodes/neural_net/draw/draw_bbox.o: $(DRAW_BBOX_PTX_H)
 endif
 
 ifeq ($(BUILD_DRAW_TEXT_PTX),1)
@@ -312,10 +315,10 @@ $(DRAW_TEXT_PTX): $(DRAW_TEXT_KERNEL)
 $(DRAW_TEXT_PTX_H): $(DRAW_TEXT_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_text_ptx_len/const unsigned int avpl_draw_text_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_text_ptx/const char avpl_draw_text_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_draw_draw_text_ptx_len/const unsigned int avpl_draw_text_ptx_len/; s/unsigned char objs_src_nodes_neural_net_draw_draw_text_ptx/const char avpl_draw_text_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/draw_text.o: $(DRAW_TEXT_PTX_H)
+objs/src/nodes/neural_net/draw/draw_text.o: $(DRAW_TEXT_PTX_H)
 endif
 
 ifeq ($(BUILD_DRAW_SEGMASK_PTX),1)
@@ -326,10 +329,10 @@ $(DRAW_SEGMASK_PTX): $(DRAW_SEGMASK_KERNEL)
 $(DRAW_SEGMASK_PTX_H): $(DRAW_SEGMASK_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_segmask_ptx_len/const unsigned int avpl_draw_segmask_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_segmask_ptx/const char avpl_draw_segmask_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_draw_draw_segmask_ptx_len/const unsigned int avpl_draw_segmask_ptx_len/; s/unsigned char objs_src_nodes_neural_net_draw_draw_segmask_ptx/const char avpl_draw_segmask_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/draw_segmask.o: $(DRAW_SEGMASK_PTX_H)
+objs/src/nodes/neural_net/draw/draw_segmask.o: $(DRAW_SEGMASK_PTX_H)
 endif
 
 ifeq ($(BUILD_DRAW_KEYPOINTS_PTX),1)
@@ -340,10 +343,10 @@ $(DRAW_KEYPOINTS_PTX): $(DRAW_KEYPOINTS_KERNEL)
 $(DRAW_KEYPOINTS_PTX_H): $(DRAW_KEYPOINTS_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_keypoints_ptx_len/const unsigned int avpl_draw_keypoints_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_keypoints_ptx/const char avpl_draw_keypoints_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_draw_draw_keypoints_ptx_len/const unsigned int avpl_draw_keypoints_ptx_len/; s/unsigned char objs_src_nodes_neural_net_draw_draw_keypoints_ptx/const char avpl_draw_keypoints_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/draw_keypoints.o: $(DRAW_KEYPOINTS_PTX_H)
+objs/src/nodes/neural_net/draw/draw_keypoints.o: $(DRAW_KEYPOINTS_PTX_H)
 endif
 
 ifeq ($(BUILD_DRAW_TRAIL_PTX),1)
@@ -354,10 +357,10 @@ $(DRAW_TRAIL_PTX): $(DRAW_TRAIL_KERNEL)
 $(DRAW_TRAIL_PTX_H): $(DRAW_TRAIL_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_draw_trail_ptx_len/const unsigned int avpl_draw_trail_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_draw_trail_ptx/const char avpl_draw_trail_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_draw_draw_trail_ptx_len/const unsigned int avpl_draw_trail_ptx_len/; s/unsigned char objs_src_nodes_neural_net_draw_draw_trail_ptx/const char avpl_draw_trail_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/draw_trail.o: $(DRAW_TRAIL_PTX_H)
+objs/src/nodes/neural_net/draw/draw_trail.o: $(DRAW_TRAIL_PTX_H)
 endif
 
 ifeq ($(BUILD_YOLO_PTX),1)
@@ -368,11 +371,11 @@ $(YOLO_PREPROCESS_PTX): $(YOLO_PREPROCESS_KERNEL)
 $(YOLO_PREPROCESS_PTX_H): $(YOLO_PREPROCESS_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yolo_preprocess_ptx_len/const unsigned int avpl_yolo_preprocess_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yolo_preprocess_ptx/const char avpl_yolo_preprocess_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_preprocess_nv12_to_nchw_ptx_len/const unsigned int avpl_yolo_preprocess_ptx_len/; s/unsigned char objs_src_nodes_neural_net_preprocess_nv12_to_nchw_ptx/const char avpl_yolo_preprocess_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/cuda_infer_yolo_base.o: $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H)
-objs/src/nodes/hwaccel/cuda_infer_yolo.o: $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H)
+objs/src/nodes/neural_net/common/infer_trt_base.o: $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H)
+objs/src/nodes/neural_net/yolo/infer_yolo.o: $(YOLO_PREPROCESS_PTX_H) $(YOLO_MASK_ASSEMBLE_PTX_H)
 
 $(YOLO_MASK_ASSEMBLE_PTX): $(YOLO_MASK_ASSEMBLE_KERNEL)
 	@mkdir -p $(dir $@)
@@ -381,22 +384,8 @@ $(YOLO_MASK_ASSEMBLE_PTX): $(YOLO_MASK_ASSEMBLE_KERNEL)
 $(YOLO_MASK_ASSEMBLE_PTX_H): $(YOLO_MASK_ASSEMBLE_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_yolo_mask_assemble_ptx_len/const unsigned int avpl_yolo_mask_assemble_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_yolo_mask_assemble_ptx/const char avpl_yolo_mask_assemble_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_preprocess_mask_assemble_ptx_len/const unsigned int avpl_yolo_mask_assemble_ptx_len/; s/unsigned char objs_src_nodes_neural_net_preprocess_mask_assemble_ptx/const char avpl_yolo_mask_assemble_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
-endif
-
-ifeq ($(BUILD_VERT_PTX),1)
-$(VERT_PREPROCESS_PTX): $(VERT_PREPROCESS_KERNEL)
-	@mkdir -p $(dir $@)
-	$(NVCC) -ptx -o $@ $<
-
-$(VERT_PREPROCESS_PTX_H): $(VERT_PREPROCESS_PTX)
-	@mkdir -p $(dir $@)
-	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_vert_preprocess_ptx_len/const unsigned int avpl_vert_preprocess_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_vert_preprocess_ptx/const char avpl_vert_preprocess_ptx/' > $@
-	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
-
-objs/src/nodes/hwaccel/vert_infer.o: $(VERT_PREPROCESS_PTX_H)
 endif
 
 ifeq ($(BUILD_REFRAMER_PTX),1)
@@ -407,10 +396,10 @@ $(REFRAMER_PREPROCESS_PTX): $(REFRAMER_PREPROCESS_KERNEL)
 $(REFRAMER_PREPROCESS_PTX_H): $(REFRAMER_PREPROCESS_PTX)
 	@mkdir -p $(dir $@)
 	@if [ ! -s $< ]; then echo "Error: PTX file $< is empty or missing" >&2; exit 1; fi
-	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_hwaccel_reframer_ptx_len/const unsigned int avpl_reframer_ptx_len/; s/unsigned char objs_src_nodes_hwaccel_reframer_ptx/const char avpl_reframer_ptx/' > $@
+	xxd -i $< | sed -E 's/unsigned int objs_src_nodes_neural_net_utils_amagi_reframer_ptx_len/const unsigned int avpl_amagi_reframer_ptx_len/; s/unsigned char objs_src_nodes_neural_net_utils_amagi_reframer_ptx/const char avpl_amagi_reframer_ptx/' > $@
 	@if [ ! -s $@ ]; then echo "Error: Generated header $@ is empty. Check PTX file: $<" >&2; exit 1; fi
 
-objs/src/nodes/hwaccel/reframer.o: $(REFRAMER_PREPROCESS_PTX_H)
+objs/src/nodes/neural_net/utils/amagi_reframer.o: $(REFRAMER_PREPROCESS_PTX_H)
 endif
 
 compile_flags.txt:

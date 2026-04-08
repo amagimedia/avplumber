@@ -1,11 +1,11 @@
 #include "cuda_overlay_base.hpp"
-#include "cuda_infer_yolo_base.hpp"
+#include "../common/infer_trt_base.hpp"
 
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
 
-#include "../../../objs/src/nodes/hwaccel/draw_segmask.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/draw/draw_segmask.ptx.h"
 
 extern "C" {
 #include <libavutil/pixdesc.h>

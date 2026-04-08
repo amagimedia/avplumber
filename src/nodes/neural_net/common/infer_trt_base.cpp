@@ -1,35 +1,44 @@
-#include "cuda_infer_yolo_base.hpp"
-#include "yolo_decode_detection.hpp"
-#include "yolo_decode_segmentation.hpp"
-#include "yolo_decode_pose.hpp"
+#include "infer_trt_base.hpp"
+#include "../yolo/decode_detection.hpp"
+#include "../yolo/decode_segmentation.hpp"
+#include "../yolo/decode_pose.hpp"
 
 // PTX blob for NV12->NCHW preprocess kernel.
-#include "../../../objs/src/nodes/hwaccel/yolo_preprocess.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/preprocess/nv12_to_nchw.ptx.h"
 
 namespace yolo_base {
 
-CudaInferYoloBase::~CudaInferYoloBase() {
+void DetectionDecoderDeleter::operator()(DetectionDecoder* p) const { delete p; }
+void SegmentationDecoderDeleter::operator()(SegmentationDecoder* p) const { delete p; }
+void PoseDecoderDeleter::operator()(PoseDecoder* p) const { delete p; }
+
+ModelRunner::ModelRunner() = default;
+ModelRunner::~ModelRunner() = default;
+ModelRunner::ModelRunner(ModelRunner&&) noexcept = default;
+ModelRunner& ModelRunner::operator=(ModelRunner&&) noexcept = default;
+
+CudaInferTrtBase::~CudaInferTrtBase() {
     cleanupAll();
 }
 
-void CudaInferYoloBase::cleanupAll() {
+void CudaInferTrtBase::cleanupAll() {
     if (cu_ctx_) {
-        YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+        CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
     }
     for (ModelRunner& model : models_) {
         cleanupModel(model);
     }
     if (preprocess_module_) {
-        YOLO_CHECK_CU(cuModuleUnload(preprocess_module_));
+        CUDA_CHECK_CU(cuModuleUnload(preprocess_module_));
         preprocess_module_ = nullptr;
     }
 }
 
-void CudaInferYoloBase::cleanupModel(ModelRunner& model) {
+void CudaInferTrtBase::cleanupModel(ModelRunner& model) {
     // Sync stream before destroying anything
     if (model.stream) {
-        YOLO_CHECK_CU(cuStreamSynchronize(model.stream));
-        YOLO_CHECK_CU(cuStreamDestroy(model.stream));
+        CUDA_CHECK_CU(cuStreamSynchronize(model.stream));
+        CUDA_CHECK_CU(cuStreamDestroy(model.stream));
         model.stream = nullptr;
     }
     // Clean up decoder GPU resources
@@ -38,7 +47,7 @@ void CudaInferYoloBase::cleanupModel(ModelRunner& model) {
     }
     // Free GPU tensors
     for (CUdeviceptr ptr : model.tensor_ptrs) {
-        if (ptr) YOLO_CHECK_CU(cuMemFree(ptr));
+        if (ptr) CUDA_CHECK_CU(cuMemFree(ptr));
     }
     model.tensor_ptrs.clear();
     model.tensor_bytes.clear();
@@ -51,7 +60,7 @@ void CudaInferYoloBase::cleanupModel(ModelRunner& model) {
     if (model.trt_runtime) { delete model.trt_runtime; model.trt_runtime = nullptr; }
 }
 
-bool CudaInferYoloBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
+bool CudaInferTrtBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
     if (cu_ctx_) return true;
     if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
         logstream << "cuda_infer_yolo: missing hw_frames_ctx";
@@ -68,26 +77,26 @@ bool CudaInferYoloBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
         return false;
     }
     cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
-    if (YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+    if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
         logstream << "cuda_infer_yolo: cuCtxSetCurrent failed";
         return false;
     }
     return true;
 }
 
-bool CudaInferYoloBase::loadPreprocessModule() {
+bool CudaInferTrtBase::loadPreprocessModule() {
     if (preprocess_module_) return true;
     if (!cu_ctx_) return false;
-    if (YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+    if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
     const std::string ptx_str(avpl_yolo_preprocess_ptx, avpl_yolo_preprocess_ptx + avpl_yolo_preprocess_ptx_len);
-    if (YOLO_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
+    if (CUDA_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
         logstream << "cuda_infer_yolo: failed to load preprocess PTX module";
         return false;
     }
     return true;
 }
 
-bool CudaInferYoloBase::parseEngine(ModelRunner& model) {
+bool CudaInferTrtBase::parseEngine(ModelRunner& model) {
     std::ifstream f(model.engine_path, std::ios::binary);
     if (!f) {
         logstream << "cuda_infer_yolo: cannot open engine file " << model.engine_path;
@@ -124,7 +133,7 @@ bool CudaInferYoloBase::parseEngine(ModelRunner& model) {
     return true;
 }
 
-bool CudaInferYoloBase::allocateBindings(ModelRunner& model) {
+bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
     const int nb = model.trt_engine->getNbIOTensors();
     if (nb <= 1) {
         logstream << "cuda_infer_yolo: engine has insufficient bindings for " << model.engine_path;
@@ -169,11 +178,11 @@ bool CudaInferYoloBase::allocateBindings(ModelRunner& model) {
         const size_t bytes = vol * esz;
 
         CUdeviceptr ptr = 0;
-        if (YOLO_CHECK_CU(cuMemAlloc(&ptr, bytes))) {
+        if (CUDA_CHECK_CU(cuMemAlloc(&ptr, bytes))) {
             logstream << "cuda_infer_yolo: cuMemAlloc failed for " << model.engine_path << " binding " << i;
             return false;
         }
-        if (YOLO_CHECK_CU(cuMemsetD8(ptr, 0, bytes))) {
+        if (CUDA_CHECK_CU(cuMemsetD8(ptr, 0, bytes))) {
             logstream << "cuda_infer_yolo: cuMemsetD8 failed for " << model.engine_path << " binding " << i;
             return false;
         }
@@ -208,6 +217,12 @@ bool CudaInferYoloBase::allocateBindings(ModelRunner& model) {
                 if (dt == nvinfer1::DataType::kHALF) {
                     ot.host_output_half.resize(vol);
                 }
+            } else if (dt == nvinfer1::DataType::kINT32) {
+                ot.host_output.resize(vol);
+                ot.host_output_i32.resize(vol);
+            } else if (dt == nvinfer1::DataType::kINT64) {
+                ot.host_output.resize(vol);
+                ot.host_output_i64.resize(vol);
             }
             model.outputs.push_back(std::move(ot));
         }
@@ -236,8 +251,11 @@ bool CudaInferYoloBase::allocateBindings(ModelRunner& model) {
 
     // Validate output dtypes
     for (const OutputTensor& ot : model.outputs) {
-        if (!(ot.dtype == nvinfer1::DataType::kFLOAT || ot.dtype == nvinfer1::DataType::kHALF)) {
-            logstream << "cuda_infer_yolo: output datatype must be float/half for " << model.engine_path
+        if (!(ot.dtype == nvinfer1::DataType::kFLOAT ||
+              ot.dtype == nvinfer1::DataType::kHALF ||
+              ot.dtype == nvinfer1::DataType::kINT32 ||
+              ot.dtype == nvinfer1::DataType::kINT64)) {
+            logstream << "cuda_infer_yolo: output datatype must be float/half/int32/int64 for " << model.engine_path
                       << " tensor " << ot.name;
             return false;
         }
@@ -259,7 +277,7 @@ bool CudaInferYoloBase::allocateBindings(ModelRunner& model) {
     return true;
 }
 
-bool CudaInferYoloBase::ensureCompatibleInput(const ModelRunner& model, size_t model_index) {
+bool CudaInferTrtBase::ensureCompatibleInput(const ModelRunner& model, size_t model_index) {
     if (model_index == 0) {
         input_w_ = model.input_w;
         input_h_ = model.input_h;
@@ -279,22 +297,22 @@ bool CudaInferYoloBase::ensureCompatibleInput(const ModelRunner& model, size_t m
     return true;
 }
 
-bool CudaInferYoloBase::configureRunnerPreprocess(ModelRunner& model) {
+bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
     const char* kname = (model.input_dtype == nvinfer1::DataType::kHALF)
         ? "kNV12_to_NCHW_fp16"
         : "kNV12_to_NCHW_fp32";
-    if (YOLO_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
+    if (CUDA_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
         logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
         return false;
     }
-    if (YOLO_CHECK_CU(cuStreamCreate(&model.stream, 0))) {
+    if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, 0))) {
         logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
         return false;
     }
     return true;
 }
 
-bool CudaInferYoloBase::ensureInitialized(const av::VideoFrame& frm) {
+bool CudaInferTrtBase::ensureInitialized(const av::VideoFrame& frm) {
     if (initialized_) return true;
     if (!initCudaContextFromFrame(frm)) return false;
     if (!loadPreprocessModule()) return false;
@@ -313,14 +331,14 @@ bool CudaInferYoloBase::ensureInitialized(const av::VideoFrame& frm) {
     return true;
 }
 
-AVPixelFormat CudaInferYoloBase::hwSwFormat(const av::VideoFrame& frm) const {
+AVPixelFormat CudaInferTrtBase::hwSwFormat(const av::VideoFrame& frm) const {
     if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) return AV_PIX_FMT_NONE;
     AVHWFramesContext* ctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
     if (!ctx) return AV_PIX_FMT_NONE;
     return ctx->sw_format;
 }
 
-bool CudaInferYoloBase::runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model) {
+bool CudaInferTrtBase::runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model) {
     const CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
     const CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
     const size_t pitchY = (size_t)frm.raw()->linesize[0];
@@ -346,14 +364,14 @@ bool CudaInferYoloBase::runPreprocessNV12(const av::VideoFrame& frm, ModelRunner
     const unsigned int blockY = 8;
     const unsigned int gridX = (unsigned int)(W + (int)blockX - 1) / blockX;
     const unsigned int gridY = (unsigned int)(H + (int)blockY - 1) / blockY;
-    if (YOLO_CHECK_CU(cuLaunchKernel(model.preprocess_kernel, gridX, gridY, 1, blockX, blockY, 1, 0, model.stream, args, nullptr))) {
+    if (CUDA_CHECK_CU(cuLaunchKernel(model.preprocess_kernel, gridX, gridY, 1, blockX, blockY, 1, 0, model.stream, args, nullptr))) {
         logstream << "cuda_infer_yolo: preprocess kernel launch failed for " << model.engine_path;
         return false;
     }
     return true;
 }
 
-bool CudaInferYoloBase::runInference(ModelRunner& model) {
+bool CudaInferTrtBase::runInference(ModelRunner& model) {
     if (!model.trt_ctx->enqueueV3(reinterpret_cast<cudaStream_t>(model.stream))) {
         logstream << "cuda_infer_yolo: enqueueV3 failed for " << model.engine_name;
         return false;
@@ -361,22 +379,37 @@ bool CudaInferYoloBase::runInference(ModelRunner& model) {
     for (OutputTensor& ot : model.outputs) {
         size_t idx = ot.tensor_index;
         size_t bytes = model.tensor_bytes[idx];
-        void* dst = (ot.dtype == nvinfer1::DataType::kHALF)
-            ? (void*)ot.host_output_half.data()
-            : (void*)ot.host_output.data();
-        if (YOLO_CHECK_CU(cuMemcpyDtoHAsync(dst, model.tensor_ptrs[idx], bytes, model.stream))) {
+        void* dst = nullptr;
+        if (ot.dtype == nvinfer1::DataType::kHALF) {
+            dst = (void*)ot.host_output_half.data();
+        } else if (ot.dtype == nvinfer1::DataType::kINT32) {
+            dst = (void*)ot.host_output_i32.data();
+        } else if (ot.dtype == nvinfer1::DataType::kINT64) {
+            dst = (void*)ot.host_output_i64.data();
+        } else {
+            dst = (void*)ot.host_output.data();
+        }
+        if (CUDA_CHECK_CU(cuMemcpyDtoHAsync(dst, model.tensor_ptrs[idx], bytes, model.stream))) {
             return false;
         }
     }
     return true;
 }
 
-bool CudaInferYoloBase::syncModel(ModelRunner& model) {
-    if (YOLO_CHECK_CU(cuStreamSynchronize(model.stream))) return false;
+bool CudaInferTrtBase::syncModel(ModelRunner& model) {
+    if (CUDA_CHECK_CU(cuStreamSynchronize(model.stream))) return false;
     for (OutputTensor& ot : model.outputs) {
         if (ot.dtype == nvinfer1::DataType::kHALF) {
             for (size_t i = 0; i < ot.host_output_half.size(); ++i) {
                 ot.host_output[i] = halfToFloat(ot.host_output_half[i]);
+            }
+        } else if (ot.dtype == nvinfer1::DataType::kINT32) {
+            for (size_t i = 0; i < ot.host_output_i32.size(); ++i) {
+                ot.host_output[i] = (float)ot.host_output_i32[i];
+            }
+        } else if (ot.dtype == nvinfer1::DataType::kINT64) {
+            for (size_t i = 0; i < ot.host_output_i64.size(); ++i) {
+                ot.host_output[i] = (float)ot.host_output_i64[i];
             }
         }
     }

@@ -1,8 +1,8 @@
-#include "../node_common.hpp"
-#include "../../hwaccel.hpp"
-#include "../../cuda.hpp"
+#include "../../node_common.hpp"
+#include "../../../hwaccel.hpp"
+#include "../../../cuda.hpp"
 // CUDA driver API (dynlink)
-#include "../../../deps/cuda_loader/cuda_drvapi_dynlink_cuda.h"
+#include "../../../../deps/cuda_loader/cuda_drvapi_dynlink_cuda.h"
 
 #include <dlfcn.h>
 #include <string>
@@ -621,4 +621,3 @@ public:
 };
 
 DECLNODE(nvof_fruc, NvOFFruc);
-

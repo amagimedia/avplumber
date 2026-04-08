@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../../../objs/src/nodes/hwaccel/draw_text.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/draw/draw_text.ptx.h"
 
 using cuda_overlay::DrawColor;
 

@@ -12,6 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Debug build (default)
 make -j$(nproc)
 
+# Debug build with neural_net + CUDA + NVOF
+make -j$(nproc) \
+  NEURAL_NET_COMMON=1 \
+  NEURAL_NET_SPORT_SPECIFIC=1 \
+  HAVE_CUDA=1 \
+  HAVE_NVOF_FRUC=1 \
+  HAVE_NVCC=1
+
 # Release build
 make BUILD_TYPE=Release -j$(nproc)
 
@@ -40,8 +48,10 @@ rsync -avz --relative -e "ssh -i /home/jp/work-misc-stuff/awsdev.pem" \
 # Clean and rebuild on remote (always use this exact routine)
 make clean
 make -j8 \
+  NEURAL_NET_COMMON=1 \
+  NEURAL_NET_SPORT_SPECIFIC=1 \
   HAVE_CUDA=1 \
-  HAVE_TENSORRT=1 \
+  HAVE_NVOF_FRUC=1 \
   HAVE_NVCC=1 \
   NVCC=/usr/local/cuda-13.0/bin/nvcc \
   TENSORRT_ROOT=/opt/tensorrt \
@@ -56,8 +66,11 @@ Remote avplumber path: `/home/fedora/avplumber`
 | Flag | Effect |
 |------|--------|
 | `HAVE_CUDA=1` | Enable CUDA support (dynamic linking) |
+| `NEURAL_NET_COMMON=1` | Build neural_net common stack (draw, preprocess, yolo, rtdetr, utils/reframer, smooth_crop_viewport) |
+| `NEURAL_NET_SPORT_SPECIFIC=1` | Build neural_net sport-specific nodes |
+| `HAVE_NVOF_FRUC=1` | Try to build NvOFFRUC interpolation node when SDK headers are present |
 | `HAVE_NVCC=1` | Compile CUDA PTX kernels |
-| `HAVE_TENSORRT=1` | Enable TensorRT inference (YOLO, reframer, vert_infer) |
+| `HAVE_TENSORRT=1` | Optional legacy TensorRT gate; neural_net common enables TensorRT usage directly |
 | `HAVE_VAAPI=1` | VAAPI hardware accel (also enables GL) |
 | `HAVE_DRM=1` | DMA-BUF IPC and DRM paths |
 | `HAVE_GL=1` | OpenGL/EGL support |
