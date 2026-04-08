@@ -149,6 +149,7 @@ tcuStreamAddCallback                  *cuStreamAddCallback;
 tcuStreamQuery                        *cuStreamQuery;
 tcuStreamSynchronize                  *cuStreamSynchronize;
 tcuStreamDestroy                      *cuStreamDestroy;
+tcuStreamGetCtx                       *cuStreamGetCtx;
 tcuGraphicsUnregisterResource         *cuGraphicsUnregisterResource;
 tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArray;
 tcuGraphicsResourceGetMappedPointer   *cuGraphicsResourceGetMappedPointer;
@@ -503,6 +504,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC_V2(cuMemcpy3D);
         GET_PROC_V2(cuMemcpyHtoDAsync);
         GET_PROC_V2(cuMemcpyDtoHAsync);
+        GET_PROC_V2(cuMemcpyDtoDAsync);
         GET_PROC_V2(cuMemcpyHtoAAsync);
         GET_PROC_V2(cuMemcpyAtoHAsync);
         GET_PROC_V2(cuMemcpy2DAsync);
@@ -555,6 +557,7 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuMemcpy3D);
         GET_PROC(cuMemcpyHtoDAsync);
         GET_PROC(cuMemcpyDtoHAsync);
+        GET_PROC(cuMemcpyDtoDAsync);
         GET_PROC(cuMemcpyHtoAAsync);
         GET_PROC(cuMemcpyAtoHAsync);
         GET_PROC(cuMemcpy2DAsync);
@@ -600,8 +603,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
 
     if (driverVer >= 3000)
     {
-        GET_PROC(cuMemcpyDtoDAsync);
         GET_PROC(cuFuncSetCacheConfig);
+        GET_PROC_OPTIONAL(cuStreamGetCtx);
 #ifdef CUDA_INIT_D3D11
         GET_PROC(cuD3D11GetDevice);
         GET_PROC(cuD3D11CtxCreate);
