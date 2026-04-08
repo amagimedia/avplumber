@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../node_common.hpp"
-#include "../../hwaccel.hpp"
+#include "../../node_common.hpp"
+#include "../../../hwaccel.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -54,7 +54,7 @@ inline int check_cu(CUresult err, const char *func) {
               << (err_name ? err_name : "?") << ": " << (err_string ? err_string : "?");
     return -1;
 }
-#define YOLO_CHECK_CU(x) yolo_base::check_cu((x), #x)
+#define CUDA_CHECK_CU(x) yolo_base::check_cu((x), #x)
 
 // --- TensorRT logger ---
 class TRTLogger : public nvinfer1::ILogger {
@@ -134,6 +134,7 @@ inline size_t elementSize(nvinfer1::DataType dt) {
         case nvinfer1::DataType::kHALF: return 2;
         case nvinfer1::DataType::kINT8: return 1;
         case nvinfer1::DataType::kINT32: return 4;
+        case nvinfer1::DataType::kINT64: return 8;
         case nvinfer1::DataType::kBOOL: return 1;
         default: return 0;
     }
@@ -152,6 +153,15 @@ inline size_t volume(const nvinfer1::Dims& d) {
 class DetectionDecoder;
 class SegmentationDecoder;
 class PoseDecoder;
+struct DetectionDecoderDeleter {
+    void operator()(DetectionDecoder* p) const;
+};
+struct SegmentationDecoderDeleter {
+    void operator()(SegmentationDecoder* p) const;
+};
+struct PoseDecoderDeleter {
+    void operator()(PoseDecoder* p) const;
+};
 
 // --- Output tensor info (supports multiple output tensors per model) ---
 struct OutputTensor {
@@ -161,10 +171,19 @@ struct OutputTensor {
     size_t tensor_index = 0;  // index into tensor_ptrs/tensor_bytes
     std::vector<float> host_output;
     std::vector<uint16_t> host_output_half;
+    std::vector<int32_t> host_output_i32;
+    std::vector<int64_t> host_output_i64;
 };
 
 // --- ModelRunner ---
 struct ModelRunner {
+    ModelRunner();
+    ~ModelRunner();
+    ModelRunner(const ModelRunner&) = delete;
+    ModelRunner& operator=(const ModelRunner&) = delete;
+    ModelRunner(ModelRunner&&) noexcept;
+    ModelRunner& operator=(ModelRunner&&) noexcept;
+
     std::string engine_path;
     std::string engine_name;
 
@@ -200,14 +219,14 @@ struct ModelRunner {
     std::vector<int> class_index_remap;
 
     // Decoder (only one is non-null)
-    std::unique_ptr<DetectionDecoder> det_decoder;
-    std::unique_ptr<SegmentationDecoder> seg_decoder;
-    std::unique_ptr<PoseDecoder> pose_decoder;
+    std::unique_ptr<DetectionDecoder, DetectionDecoderDeleter> det_decoder;
+    std::unique_ptr<SegmentationDecoder, SegmentationDecoderDeleter> seg_decoder;
+    std::unique_ptr<PoseDecoder, PoseDecoderDeleter> pose_decoder;
     int num_classes = -1;  // -1 = auto-detect; required for pose to disambiguate class scores from keypoints
 };
 
-// --- CudaInferYoloBase ---
-class CudaInferYoloBase {
+// --- CudaInferTrtBase ---
+class CudaInferTrtBase {
 protected:
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
     CUcontext cu_ctx_ = nullptr;
@@ -240,7 +259,7 @@ protected:
     AVPixelFormat hwSwFormat(const av::VideoFrame& frm) const;
 
 public:
-    virtual ~CudaInferYoloBase();
+    virtual ~CudaInferTrtBase();
 };
 
 } // namespace yolo_base

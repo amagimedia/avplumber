@@ -9,7 +9,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#include "../../../objs/src/nodes/hwaccel/draw_trail.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/draw/draw_trail.ptx.h"
 
 using namespace cuda_overlay;
 

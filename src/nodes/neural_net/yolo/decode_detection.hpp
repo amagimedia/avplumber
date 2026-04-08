@@ -1,5 +1,5 @@
 #pragma once
-#include "cuda_infer_yolo_base.hpp"
+#include "../common/infer_trt_base.hpp"
 
 namespace yolo_base {
 

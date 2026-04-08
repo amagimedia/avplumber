@@ -1,8 +1,8 @@
 #pragma once
-#include "cuda_infer_yolo_base.hpp"
+#include "../common/infer_trt_base.hpp"
 
 // PTX blob for mask assembly kernels
-#include "../../../objs/src/nodes/hwaccel/yolo_mask_assemble.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/preprocess/mask_assemble.ptx.h"
 
 namespace yolo_base {
 
@@ -26,16 +26,16 @@ public:
         max_det_ = max_det;
 
         // Ensure correct CUDA context (TensorRT engine loading may have changed it)
-        if (YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
 
         // Load PTX module
         const std::string ptx_str(avpl_yolo_mask_assemble_ptx,
             avpl_yolo_mask_assemble_ptx + avpl_yolo_mask_assemble_ptx_len);
-        if (YOLO_CHECK_CU(cuModuleLoadDataEx(&mask_module_, ptx_str.c_str(), 0, nullptr, nullptr)))
+        if (CUDA_CHECK_CU(cuModuleLoadDataEx(&mask_module_, ptx_str.c_str(), 0, nullptr, nullptr)))
             return false;
-        if (YOLO_CHECK_CU(cuModuleGetFunction(&mask_assemble_kernel_, mask_module_, "kMaskAssemble")))
+        if (CUDA_CHECK_CU(cuModuleGetFunction(&mask_assemble_kernel_, mask_module_, "kMaskAssemble")))
             return false;
-        if (YOLO_CHECK_CU(cuModuleGetFunction(&mask_downsample_kernel_, mask_module_, "kMaskDownsample")))
+        if (CUDA_CHECK_CU(cuModuleGetFunction(&mask_downsample_kernel_, mask_module_, "kMaskDownsample")))
             return false;
 
         // Get prototype dims from second output tensor
@@ -62,9 +62,9 @@ public:
         size_t mask_bytes = (size_t)max_det_ * proto_h_ * proto_w_ * sizeof(float);
         size_t coeff_bytes = (size_t)max_det_ * (size_t)num_proto_channels_ * sizeof(float);
         size_t proto_bytes = (size_t)num_proto_channels_ * proto_h_ * proto_w_ * sizeof(float);
-        if (YOLO_CHECK_CU(cuMemAlloc(&gpu_mask_scratch_, mask_bytes))) return false;
-        if (YOLO_CHECK_CU(cuMemAlloc(&gpu_coeff_buf_, coeff_bytes))) return false;
-        if (YOLO_CHECK_CU(cuMemAlloc(&gpu_proto_buf_, proto_bytes))) return false;
+        if (CUDA_CHECK_CU(cuMemAlloc(&gpu_mask_scratch_, mask_bytes))) return false;
+        if (CUDA_CHECK_CU(cuMemAlloc(&gpu_coeff_buf_, coeff_bytes))) return false;
+        if (CUDA_CHECK_CU(cuMemAlloc(&gpu_proto_buf_, proto_bytes))) return false;
 
         return true;
     }
@@ -86,13 +86,13 @@ public:
             CUcontext stream_ctx = nullptr;
             CUresult err = cuCtxGetCurrent(&current);
             if (err != CUDA_SUCCESS) {
-                YOLO_CHECK_CU(err);
+                CUDA_CHECK_CU(err);
                 return;
             }
             if (cuStreamGetCtx) {
                 CUresult stream_err = cuStreamGetCtx(stream, &stream_ctx);
                 if (stream_err != CUDA_SUCCESS) {
-                    YOLO_CHECK_CU(stream_err);
+                    CUDA_CHECK_CU(stream_err);
                 }
             }
             logstream << "cuda_infer_yolo: seg_ctx"
@@ -208,13 +208,13 @@ public:
 
         // 3. Upload coefficients and prototypes to GPU
         size_t coeff_bytes = (size_t)num_dets * (size_t)num_proto_channels_ * sizeof(float);
-        if (YOLO_CHECK_CU(cuMemcpyHtoDAsync(gpu_coeff_buf_, host_coefficients.data(), coeff_bytes, stream)))
+        if (CUDA_CHECK_CU(cuMemcpyHtoDAsync(gpu_coeff_buf_, host_coefficients.data(), coeff_bytes, stream)))
             return result;
 
         // Upload prototypes (output1 host data) to GPU
         const float* proto_host = host_outputs[1];
         size_t proto_bytes = (size_t)num_proto_channels_ * proto_h_ * proto_w_ * sizeof(float);
-        if (YOLO_CHECK_CU(cuMemcpyHtoDAsync(gpu_proto_buf_, proto_host, proto_bytes, stream)))
+        if (CUDA_CHECK_CU(cuMemcpyHtoDAsync(gpu_proto_buf_, proto_host, proto_bytes, stream)))
             return result;
 
         // 4. Launch mask assembly kernel
@@ -231,9 +231,9 @@ public:
         unsigned int gridX = ((unsigned int)proto_w + 31) / 32;
         unsigned int gridY = ((unsigned int)proto_h + 7) / 8;
         unsigned int gridZ = (unsigned int)num_dets;
-        if (YOLO_CHECK_CU(cuLaunchKernel(mask_assemble_kernel_, gridX, gridY, gridZ, 32, 8, 1, 0, stream, mask_args, nullptr)))
+        if (CUDA_CHECK_CU(cuLaunchKernel(mask_assemble_kernel_, gridX, gridY, gridZ, 32, 8, 1, 0, stream, mask_args, nullptr)))
             return result;
-        if (YOLO_CHECK_CU(cuStreamSynchronize(stream))) {
+        if (CUDA_CHECK_CU(cuStreamSynchronize(stream))) {
             log_ctx("after_mask_assemble_sync_failed");
             return result;
         }
@@ -245,13 +245,13 @@ public:
             log_ctx("before_gpu_output");
             size_t mask_bytes = (size_t)num_dets * proto_h_ * proto_w_ * sizeof(float);
             CUdeviceptr gpu_out = 0;
-            if (YOLO_CHECK_CU(cuMemAlloc(&gpu_out, mask_bytes))) {
+            if (CUDA_CHECK_CU(cuMemAlloc(&gpu_out, mask_bytes))) {
                 // continue without GPU mask
             } else {
                 log_ctx("after_gpu_out_alloc", gpu_out);
-                if (YOLO_CHECK_CU(cuMemcpyDtoDAsync(gpu_out, gpu_mask_scratch_, mask_bytes, stream))) {
+                if (CUDA_CHECK_CU(cuMemcpyDtoDAsync(gpu_out, gpu_mask_scratch_, mask_bytes, stream))) {
                     log_ctx("gpu_copy_failed", gpu_out);
-                    YOLO_CHECK_CU(cuMemFree(gpu_out));
+                    CUDA_CHECK_CU(cuMemFree(gpu_out));
                 } else {
                     // Wrap in AVBufferRef with custom free callback
                     result.gpu_mask_buf = av_buffer_create(
@@ -260,7 +260,7 @@ public:
                             cuMemFree((CUdeviceptr)(uintptr_t)data);
                         }, nullptr, 0);
                     if (!result.gpu_mask_buf) {
-                        YOLO_CHECK_CU(cuMemFree(gpu_out));
+                        CUDA_CHECK_CU(cuMemFree(gpu_out));
                     }
                 }
             }
@@ -274,7 +274,7 @@ public:
             size_t ds_bytes = ds_pixels * sizeof(float);
 
             if (!gpu_downsample_buf_) {
-                if (YOLO_CHECK_CU(cuMemAlloc(&gpu_downsample_buf_, ds_bytes))) {
+                if (CUDA_CHECK_CU(cuMemAlloc(&gpu_downsample_buf_, ds_bytes))) {
                     return result;
                 }
             }
@@ -296,29 +296,29 @@ public:
                     (void*)&ds_h,
                     (void*)&ds_w
                 };
-                if (YOLO_CHECK_CU(cuLaunchKernel(mask_downsample_kernel_, ds_gridX, ds_gridY, 1, 32, 8, 1, 0, stream, ds_args, nullptr)))
+                if (CUDA_CHECK_CU(cuLaunchKernel(mask_downsample_kernel_, ds_gridX, ds_gridY, 1, 32, 8, 1, 0, stream, ds_args, nullptr)))
                     break;
 
                 // D2H copy
                 float* host_dst = result.cpu_masks.data() + (size_t)d * ds_pixels;
-                if (YOLO_CHECK_CU(cuMemcpyDtoHAsync(host_dst, gpu_downsample_buf_, ds_bytes, stream)))
+                if (CUDA_CHECK_CU(cuMemcpyDtoHAsync(host_dst, gpu_downsample_buf_, ds_bytes, stream)))
                     break;
             }
 
             // Sync to ensure CPU masks are ready
-            YOLO_CHECK_CU(cuStreamSynchronize(stream));
+            CUDA_CHECK_CU(cuStreamSynchronize(stream));
         }
 
         return result;
     }
 
     void cleanup() {
-        if (cu_ctx_) YOLO_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
-        if (gpu_mask_scratch_) { YOLO_CHECK_CU(cuMemFree(gpu_mask_scratch_)); gpu_mask_scratch_ = 0; }
-        if (gpu_coeff_buf_) { YOLO_CHECK_CU(cuMemFree(gpu_coeff_buf_)); gpu_coeff_buf_ = 0; }
-        if (gpu_proto_buf_) { YOLO_CHECK_CU(cuMemFree(gpu_proto_buf_)); gpu_proto_buf_ = 0; }
-        if (gpu_downsample_buf_) { YOLO_CHECK_CU(cuMemFree(gpu_downsample_buf_)); gpu_downsample_buf_ = 0; }
-        if (mask_module_) { YOLO_CHECK_CU(cuModuleUnload(mask_module_)); mask_module_ = nullptr; }
+        if (cu_ctx_) CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+        if (gpu_mask_scratch_) { CUDA_CHECK_CU(cuMemFree(gpu_mask_scratch_)); gpu_mask_scratch_ = 0; }
+        if (gpu_coeff_buf_) { CUDA_CHECK_CU(cuMemFree(gpu_coeff_buf_)); gpu_coeff_buf_ = 0; }
+        if (gpu_proto_buf_) { CUDA_CHECK_CU(cuMemFree(gpu_proto_buf_)); gpu_proto_buf_ = 0; }
+        if (gpu_downsample_buf_) { CUDA_CHECK_CU(cuMemFree(gpu_downsample_buf_)); gpu_downsample_buf_ = 0; }
+        if (mask_module_) { CUDA_CHECK_CU(cuModuleUnload(mask_module_)); mask_module_ = nullptr; }
     }
 };
 
