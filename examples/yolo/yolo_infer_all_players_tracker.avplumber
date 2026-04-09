@@ -26,7 +26,7 @@ node.add { "type": "player_tracker", "src": "v_post_players", "dst": "v_tracked_
 node.add { "type": "cuda_infer_yolo", "src": "v_for_ball", "dst": "v_post_ball", "group": "in", "name": "Yolo_Ball", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.04, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_ball", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 0, "mask_cpu_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/ball_960x544.plan", "task_type": "detection", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" }] }
 
 # Model 2: court segmentation (three point line + basketball-court)
-node.add { "type": "cuda_infer_yolo", "src": "v_for_seg", "dst": "v_post_seg", "group": "in", "name": "Yolo_Seg", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_seg_det", "metadata_key_segmentation": "yolo_seg", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 1, "mask_cpu_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/court-segmentation_960x544.plan", "task_type": "segmentation", "class_names": ["three point line", "basketball-court"], "output_box_format": "end2end_xyxy", "include_in_detection_metadata": false }] }
+node.add { "type": "cuda_infer_yolo", "src": "v_for_seg", "dst": "v_post_seg", "group": "in", "name": "Yolo_Seg", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_seg_det", "metadata_key_segmentation": "yolo_seg", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 1, "mask_cpu_every_n": 1, "models": [{ "engine": "/home/fedora/tensorrt/court-segmentation_960x544.plan", "task_type": "segmentation", "class_names": ["three point line", "basketball-court"], "output_box_format": "end2end_xyxy", "include_in_detection_metadata": false }] }
 
 # Merge ball metadata onto tracked players branch (by PTS)
 node.add { "type": "join_metadata", "src": ["v_tracked_players", "v_post_ball"], "dst": "v_players_ball", "group": "in" }
@@ -34,8 +34,11 @@ node.add { "type": "join_metadata", "src": ["v_tracked_players", "v_post_ball"],
 # Merge seg metadata+side data onto combined branch (by PTS)
 node.add { "type": "join_metadata", "src": ["v_players_ball", "v_post_seg"], "dst": "v_inferred", "group": "in" }
 
+# Shot classifier: court coverage + player size heuristic to classify wide vs closeup
+node.add { "type": "shot_classifier", "src": "v_inferred", "dst": "v_classified", "group": "in", "seg_metadata_key": "yolo_seg", "player_metadata_key": "yolo_players", "player_labels": ["Player"], "court_class_indices": [1], "wide_court_threshold": 0.25, "closeup_court_threshold": 0.05, "ambiguous_min_players": 3, "high_player_override": 5, "player_height_fraction": 0.25, "player_height_tolerance": 0.45, "player_min_aspect_ratio": 0.75, "min_stable_frames": 3, "debug_log_every_n": 1 }
+
 # Ball tracker on the ball detections, passes through players metadata untouched
-node.add { "type": "ball_tracker", "src": "v_inferred", "dst": "v_tracked", "group": "in", "metadata_key": "yolo_ball", "target_label": "basketball", "coast": true, "min_conf": 0.04, "debug_log_every_n": 30 }
+node.add { "type": "ball_tracker", "src": "v_classified", "dst": "v_tracked", "group": "in", "metadata_key": "yolo_ball", "target_label": "basketball", "coast": true, "min_conf": 0.04, "debug_log_every_n": 30 }
 
 # Merge all detections onto 1080p branch by PTS
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_tracked"], "dst": "v_1080p_with_md", "group": "in" }
