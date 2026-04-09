@@ -3,6 +3,7 @@ extern "C" {
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
+#include <libavutil/pixdesc.h>
 }
 #include "../ts_equalizer.hpp"
 #include "../video_parameters.hpp"
@@ -47,6 +48,10 @@ template<> struct FilterMediaSpecific<av::VideoFrame> {
         frmctx.height = par_.height;
         frmctx.format = hw_format;
     }
+    bool inputIsHWFormat() const {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(par_.pixel_format.get());
+        return desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    }
 };
 template<> struct FilterMediaSpecific<av::AudioSamples> {
     using Parameters = AudioParameters;
@@ -73,6 +78,9 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
     void initHWAccel(AVHWFramesContext&, AVPixelFormat) {
         throw Error("hwaccel specified for audio filter");
+    }
+    bool inputIsHWFormat() const {
+        return false;
     }
 };
 
@@ -140,6 +148,9 @@ protected:
         AVFilterContext* context() {
             return ctx_;
         }
+        void invalidateFilterContext() {
+            ctx_ = nullptr;
+        }
         void initSourceFilter(const int index, AVFilterGraph *filter_graph, std::shared_ptr<HWAccelDevice> hwaccel, AVFilterInOut *dst) {
             std::string name = "in" + std::to_string(index);
             
@@ -171,7 +182,12 @@ protected:
                 av_buffer_unref(&params->hw_frames_ctx);
                 av_freep(&params);
                 // Keep our captured copy to detect future hw_frames_ctx changes reliably
-            } else if (hwaccel) {
+            } else if (hwaccel && ms_.inputIsHWFormat()) {
+                // Only set a HW hw_frames_ctx on the buffersrc when the upstream is already
+                // delivering HW frames (e.g. cuda decoder output). For software inputs
+                // (e.g. rgba from a PNG decoder), leave the buffersrc as software —
+                // filter_graph_->hw_device_ctx (set in maybeInitFilterGraph) provides the
+                // CUDA device to hwupload_cuda / hwupload filters further downstream.
                 soft_assert(ctx_ != nullptr, "source context null");
                 AVBufferSrcParameters* params = av_buffersrc_parameters_alloc();
                 params->hw_frames_ctx = av_hwframe_ctx_alloc(hwaccel->deviceContext());
@@ -219,6 +235,8 @@ protected:
             return getSinkLink()->type == media_type;
         }
         int putFrame(T &frm) {
+            if (!ctx_)
+                throw Error("graph input count does not match node sources");
             return av_buffersrc_add_frame_flags(ctx_, frm.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
         }
         int getFrame(T &frm) {
@@ -241,6 +259,10 @@ protected:
         avfilter_graph_free(&filter_graph_);
         filter_graph_ = nullptr;
         out_ctx_ = nullptr;
+        for (Port &p : sources_)
+            p.invalidateFilterContext();
+        for (Port &p : sinks_)
+            p.invalidateFilterContext();
     }
     void initPorts() {
         sources_.resize(this->source_edges_.size());
@@ -269,6 +291,18 @@ protected:
             throw Error("Couldn't parse filter graph");
         }
         
+        // Provide the hardware device to any filter in the graph that requests it
+        // (e.g. hwupload_cuda, hwupload, scale_cuda). This lets those filters
+        // allocate output HW frames even when the buffersrc is a software format.
+        if (hwaccel_) {
+            for (unsigned j = 0; j < filter_graph_->nb_filters; j++) {
+                AVFilterContext *fctx = filter_graph_->filters[j];
+                if (fctx->filter->flags & AVFILTER_FLAG_HWDEVICE) {
+                    fctx->hw_device_ctx = hwaccel_->refDeviceContext();
+                }
+            }
+        }
+        
         auto forEachInOut = [](AVFilterInOut *inout, std::function<void(AVFilterInOut*)> cb) {
             for (; inout != nullptr; inout = inout->next) {
                 cb(inout);
@@ -284,6 +318,15 @@ protected:
             sources_[i].initSourceFilter(i, filter_graph_, hwaccel_, in);
             i++;
         });
+        if (i != (int)sources_.size()) {
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+            freeFilterGraph();
+            throw Error("Filter graph exposes " + std::to_string(i) + " input pad(s) but this node has " +
+                std::to_string(sources_.size()) +
+                " source(s). For filters with a configurable input count (e.g. overlay_many_cuda), "
+                "set inputs=N in the graph string, e.g. overlay_many_cuda=inputs=3");
+        }
         i = 0;
         forEachInOut(outputs, [this, &i](AVFilterInOut* out) {
             if (i >= sinks_.size()) {
@@ -292,6 +335,13 @@ protected:
             sinks_[i].initSinkFilter(i, filter_graph_, out);
             i++;
         });
+        if (i != (int)sinks_.size()) {
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+            freeFilterGraph();
+            throw Error("Filter graph exposes " + std::to_string(i) + " output pad(s) but this node has " +
+                std::to_string(sinks_.size()) + " sink(s)");
+        }
         avfilter_inout_free(&inputs);
         avfilter_inout_free(&outputs);
         
@@ -403,10 +453,29 @@ public:
                         this->finished_ = true;
                     }
                 } else { // filter_graph_==nullptr
-                    // filter_graph_ couldn't be created
-                    // because not all input parameters are known
-                    // so wait for some more packetz
-                    this->waitForInput();
+                    // filter_graph_ couldn't be created because not all input
+                    // parameters are known yet.
+                    //
+                    // Peek at every source that still lacks in_args_ and try to
+                    // capture its parameters now.  Without this, a deadlock occurs
+                    // when the input queues fill up before all parameters are known:
+                    // waitForInput() polls eventfds that have already been drained,
+                    // no new items can be added to the full queues, so poll() blocks
+                    // forever while upstream nodes are stuck in enqueue().
+                    for (int i = 0; i < (int)this->source_edges_.size(); i++) {
+                        if (sources_[i].isSourceReadyToInit()) continue;
+                        auto &ei = this->source_edges_[i];
+                        T* fi = ei->peek();
+                        if (fi && (!fi->isNull()) && fi->isComplete() &&
+                                fi->timeBase().getNumerator() && fi->timeBase().getDenominator()) {
+                            sources_[i].checkFrame(*fi, ei);
+                            sources_[i].captureInitialHWFramesCtxFromFrame(*fi);
+                        }
+                    }
+                    maybeInitFilterGraph();
+                    if (filter_graph_ == nullptr) {
+                        this->waitForInput();
+                    }
                 }
             } else {
                 edge->pop();

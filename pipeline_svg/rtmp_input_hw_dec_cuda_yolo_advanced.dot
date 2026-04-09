@@ -1,0 +1,61 @@
+digraph rtmp_input_hw_dec_cuda_yolo_advanced {
+  graph [
+    rankdir=TB
+    bgcolor="#0b1220"
+    pad="0.3"
+    nodesep="0.6"
+    ranksep="0.9"
+    splines=ortho
+    fontname="Arial"
+  ];
+
+  node [
+    shape=box
+    style="rounded,filled"
+    fontname="Arial"
+    fontsize=14
+    fontcolor="#f3f4f6"
+    color="#a78bfa"
+    fillcolor="#111827"
+    margin="0.22,0.12"
+  ];
+
+  edge [
+    color="#94a3b8"
+    penwidth=2
+    arrowsize=0.8
+  ];
+
+  input [label="input\nrtmp source", color="#22d3ee", fillcolor="#0f172a"];
+  demux [label="demux\n?v:0 -> v_pkt"];
+  dec [label="dec_video\nCUDA HW decode"];
+  split [label="split\nv_dec_1080p | v_dec_for_yolo"];
+
+  fullres [label="v_dec_1080p\nfull-resolution branch"];
+  scale [label="filter_video\nscale_cuda 640x360"];
+  pad [label="filter_video\npad_cuda 640x384"];
+  yolo [label="cuda_infer_yolo\nmetadata_key_out=yolo_detections_v1", color="#f59e0b", fillcolor="#1f2937"];
+  join [label="join_metadata\nprimary 1080p + yolo", color="#34d399", fillcolor="#1f2937"];
+  enc [label="enc_video\nh264_nvenc", color="#f43f5e"];
+  mux [label="mux\nts_sort_wait=0"];
+  output [label="output\n/tmp/yolo_joined_1080p.ts", color="#22d3ee", fillcolor="#0f172a"];
+
+  { rank=same; fullres; scale; }
+  { rank=same; join; pad; }
+
+  input -> demux;
+  demux -> dec;
+  dec -> split;
+  split -> fullres;
+  split -> scale;
+  scale -> pad;
+  pad -> yolo;
+  fullres -> join;
+  yolo -> join;
+  join -> enc;
+  enc -> mux;
+  mux -> output;
+
+  fullres -> scale [style=invis, weight=2];
+  join -> pad [style=invis, weight=2];
+}

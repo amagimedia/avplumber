@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="520" viewBox="0 0 2200 520">
+  <defs>
+    <style>
+      .box { fill: #111827; stroke: #a78bfa; stroke-width: 2; rx: 10; ry: 10; }
+      .src { fill: #0f172a; stroke: #22d3ee; }
+      .ai { fill: #1f2937; stroke: #f59e0b; }
+      .enc { fill: #111827; stroke: #f43f5e; }
+      .txt { fill: #f3f4f6; font-family: Arial, Helvetica, sans-serif; font-size: 15px; text-anchor: middle; dominant-baseline: middle; }
+      .small { font-size: 13px; fill: #d1d5db; }
+      .arrow { stroke: #94a3b8; stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+    </marker>
+  </defs>
+
+  <rect x="20" y="70" width="120" height="56" class="box src"/>
+  <text x="80" y="98" class="txt">input</text>
+
+  <rect x="170" y="70" width="120" height="56" class="box"/>
+  <text x="230" y="98" class="txt">demux</text>
+
+  <rect x="320" y="70" width="170" height="56" class="box"/>
+  <text x="405" y="90" class="txt">dec_video</text>
+  <text x="405" y="108" class="txt small">NVDEC CUDA NV12</text>
+
+  <rect x="530" y="70" width="180" height="56" class="box ai"/>
+  <text x="620" y="90" class="txt">nvof_fruc</text>
+  <text x="620" y="108" class="txt small">optical flow 2x</text>
+
+  <rect x="750" y="70" width="160" height="56" class="box"/>
+  <text x="830" y="90" class="txt">speed_video</text>
+  <text x="830" y="108" class="txt small">speed 0.5 slowmo</text>
+
+  <rect x="950" y="70" width="150" height="56" class="box"/>
+  <text x="1025" y="90" class="txt">force_fps</text>
+  <text x="1025" y="108" class="txt small">60 fps CFR</text>
+
+  <rect x="1140" y="70" width="220" height="56" class="box"/>
+  <text x="1250" y="90" class="txt">realtime&lt;av::VideoFrame&gt;</text>
+  <text x="1250" y="108" class="txt small">RT pacing from PTS</text>
+
+  <rect x="1400" y="70" width="220" height="56" class="box"/>
+  <text x="1510" y="90" class="txt">filter_video</text>
+  <text x="1510" y="108" class="txt small">hwdownload format=yuv420p</text>
+
+  <rect x="1660" y="70" width="180" height="56" class="box"/>
+  <text x="1750" y="90" class="txt">force_keyframe</text>
+  <text x="1750" y="108" class="txt small">interval 1 sec</text>
+
+  <rect x="1880" y="70" width="170" height="56" class="box enc"/>
+  <text x="1965" y="90" class="txt">enc_video</text>
+  <text x="1965" y="108" class="txt small">libx264 6000k</text>
+
+  <rect x="2080" y="70" width="110" height="56" class="box"/>
+  <text x="2135" y="98" class="txt">mux</text>
+
+  <rect x="2080" y="160" width="120" height="56" class="box src"/>
+  <text x="2140" y="182" class="txt">output</text>
+  <text x="2140" y="200" class="txt small">flv rtmp</text>
+
+  <path d="M140 98 L170 98" class="arrow"/>
+  <path d="M290 98 L320 98" class="arrow"/>
+  <path d="M490 98 L530 98" class="arrow"/>
+  <path d="M710 98 L750 98" class="arrow"/>
+  <path d="M910 98 L950 98" class="arrow"/>
+  <path d="M1100 98 L1140 98" class="arrow"/>
+  <path d="M1360 98 L1400 98" class="arrow"/>
+  <path d="M1620 98 L1660 98" class="arrow"/>
+  <path d="M1840 98 L1880 98" class="arrow"/>
+  <path d="M2050 98 L2080 98" class="arrow"/>
+  <path d="M2135 126 L2140 160" class="arrow"/>
+</svg>
