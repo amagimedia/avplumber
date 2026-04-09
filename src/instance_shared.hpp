@@ -38,6 +38,11 @@ public:
         std::unique_lock<decltype(busy_)> lock(busy_);
         destructors_[instance].push_back(destructor);
     }
+    // Explicitly destroy global (instance_ptr == nullptr) shared objects before
+    // static teardown to avoid shutdown-order issues with external libraries.
+    static void callGlobalDestructors() {
+        callDestructors(nullptr);
+    }
 };
 
 struct SharedConstructorHelper {
