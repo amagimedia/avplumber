@@ -82,14 +82,16 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
+-   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
+-   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
 -   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
@@ -868,6 +870,23 @@ input stream changes parameters.
 
 -   `drop` (bool) - drop packets if output queue is full, disabled by default
 
+### `join_metadata`
+
+Join metadata from an auxiliary stream into a primary stream by exact timestamp match.
+
+2 inputs, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+-   `src` must contain exactly 2 queues in this order: `[primary, auxiliary]`
+-   timestamps are compared exactly (`primary.pts == auxiliary.pts`)
+-   empty queue is treated as "not ready yet" (the node waits), not as missing frame
+-   when both heads are present:
+    - if timestamps match: copy auxiliary metadata to primary (`av_dict_copy`) and emit primary
+    - if `primary.pts < auxiliary.pts`: emit primary unchanged (auxiliary missing for that primary timestamp)
+    - if `auxiliary.pts < primary.pts`: drop auxiliary frame (primary missing for that auxiliary timestamp)
+-   output timestamp/timebase remains the same as primary input
+
+Useful for running heavy processing (e.g. neural network inference) on downscaled frames and merge produced metadata back onto original-resolution frames.
+
 ### `force_keyframe`
 
 Set keyframe flag in frame to make encoder output keyframe. Unlike `-g`
@@ -1192,6 +1211,67 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+
+### `cuda_infer_yolo`
+
+Run YOLO object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
+
+This node is inference-only in v1:
+- upstream graph must handle resize/pad/crop/format preprocessing
+- model input dimensions are read from the TensorRT engine
+- detections are attached in metadata key (default `yolo_detections_v1`)
+
+Parameters:
+-   `models` (array of objects, required) - one or more model definitions. Each object has:
+    -   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+    -   `class_names` (array of strings, optional) - class-label mapping by index
+    -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
+    -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
+-   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
+-   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
+-   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
+-   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
+-   `max_det` (int, optional, default `300`) - max detections per frame after NMS
+-   `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
+-   `debug_log_metadata` (bool, optional, default `false`) - print detection metadata to logs periodically
+-   `debug_log_every_n` (int, optional, default `30`) - log period used with `debug_log_metadata`
+
+Detection coordinates in metadata are emitted in model space (`coord_space = "model"`).
+
+Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
+- `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
+
+### `cuda_infer_rtdetr`
+
+Run RT-DETR object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
+
+v1 constraints:
+- exactly one model entry in `models`
+- fixed-shape batch-1 engine
+- mandatory `output_contract: "rtdetr_e2e_v1"`
+- expects end-to-end outputs compatible with `boxes[1,N,4]`, `scores[1,N]/[N]`, `labels[1,N]/[N]`
+- `boxes_normalized=true` is not supported in v1
+
+Parameters:
+- `models` (array, required, size must be 1), model object fields:
+  - `engine` (string, required) - TensorRT engine path
+  - `output_contract` (string, required) - must be `rtdetr_e2e_v1`
+  - `class_names` (array of strings, optional) - class-label mapping by index
+  - `class_index_remap` (array of ints, optional) - remap decoded class IDs
+  - `boxes_normalized` (bool, optional, default `false`) - unsupported in v1
+- `metadata_key_detection` (string, optional, default `yolo_detections`) - output metadata key
+- `input_format` (string, optional, default `RGB`) - tensor channel order (`RGB` or `BGR`)
+- `conf_thresh` (float, optional, default `0.25`) - confidence threshold
+- `max_det` (int, optional, default `300`) - max detections per frame
+- `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
+- `debug_log_metadata` (bool, optional, default `false`) - print metadata periodically
+- `debug_log_every_n` (int, optional, default `30`) - log period when debug logging is enabled
 
 ### `drm_prime_to_egl_image`
 

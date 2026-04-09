@@ -74,10 +74,7 @@ typedef struct CUgraphicsResource_st *CUgraphicsResource; /**< CUDA graphics int
 typedef unsigned long long CUtexObject;                   /**< CUDA texture object */
 typedef unsigned long long CUsurfObject;                  /**< CUDA surface object */
 
-typedef struct CUuuid_st                                  /**< CUDA definition of UUID */
-{
-    char bytes[16];
-} CUuuid;
+typedef struct CUuuid_st CUuuid;                         /**< CUDA definition of UUID */
 
 /**
  * Context creation flags
@@ -1769,6 +1766,7 @@ typedef CUresult CUDAAPI tcuStreamAddCallback(CUstream hStream, CUstreamCallback
 typedef CUresult CUDAAPI tcuStreamQuery(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamSynchronize(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamDestroy(CUstream hStream);
+typedef CUresult CUDAAPI tcuStreamGetCtx(CUstream hStream, CUcontext *pctx);
 
 /************************************
  **
@@ -1920,6 +1918,7 @@ extern tcuStreamWaitEvent              *cuStreamWaitEvent;
 extern tcuStreamAddCallback            *cuStreamAddCallback;
 extern tcuStreamSynchronize            *cuStreamSynchronize;
 extern tcuStreamDestroy                *cuStreamDestroy;
+extern tcuStreamGetCtx                 *cuStreamGetCtx;
 extern tcuGraphicsUnregisterResource         *cuGraphicsUnregisterResource;
 extern tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArray;
 extern tcuGraphicsResourceSetMapFlags        *cuGraphicsResourceSetMapFlags;
