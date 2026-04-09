@@ -291,9 +291,11 @@ protected:
             throw Error("Couldn't parse filter graph");
         }
         
+        #ifdef AVFILTER_FLAG_HWDEVICE
         // Provide the hardware device to any filter in the graph that requests it
         // (e.g. hwupload_cuda, hwupload, scale_cuda). This lets those filters
         // allocate output HW frames even when the buffersrc is a software format.
+        // ffmpeg 6.1+ is required for this to work.
         if (hwaccel_) {
             for (unsigned j = 0; j < filter_graph_->nb_filters; j++) {
                 AVFilterContext *fctx = filter_graph_->filters[j];
@@ -302,6 +304,7 @@ protected:
                 }
             }
         }
+        #endif
         
         auto forEachInOut = [](AVFilterInOut *inout, std::function<void(AVFilterInOut*)> cb) {
             for (; inout != nullptr; inout = inout->next) {
