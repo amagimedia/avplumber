@@ -1,0 +1,24 @@
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "full_game_nba4_000_clip4_from140s_to150s.mp4", "dst": "in_v", "group": "in", "auto_restart": "group", "name": "input", "timeout": -1 }
+node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in", "auto_restart": "group" }
+
+# CUDA HW decode (CUVID)
+node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "in", "name": "Video_Dec", "auto_restart": "group", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "force_fps", "fps": "30", "group": "in", "src": "v_dec_cuda", "dst": "v_dec_30fps" }
+
+# Preprocess outside infer node:
+# 1920x1080 (16:9) -> 640x360 (matches the reframer model input)
+node.add { "type": "filter_video", "graph": "scale_cuda=w=640:h=360", "src": "v_dec_30fps", "dst": "v_pre_reframer", "group": "in", "name": "Cuda_Preprocess", "auto_restart": "group", "dst_width": 640, "dst_height": 360, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+
+# Reframer inference on the scaled stream.
+# The node emits metadata keyed by `reframer_bbox`; use debug logs to inspect output.
+node.add { "type": "reframer", "src": "v_pre_reframer", "dst": "v_post_reframer", "group": "in", "name": "Reframer_Infer", "auto_restart": "group", "hwaccel": "@gpu", "engine": "/models/reframer.plan", "full_frame_width": 1920, "full_frame_height": 1080, "input_format": "RGB", "metadata_key_out": "reframer_bbox", "debug_log_every_n": 3 }
+
+# Encode the reframer output for VOD inspection.
+node.add { "type": "enc_video", "src": "v_post_reframer", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "auto_restart": "group", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
+node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
+node.add { "type": "output", "format": "mp4", "url": "reframer.mp4", "src": "mux_v", "group": "in", "auto_restart": "panic" }
+
+detach retry group.start in
+
