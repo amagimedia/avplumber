@@ -32,8 +32,11 @@ else
 OPTIMIZATION_FLAGS = -O3 -flto
 endif
 
-override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes -Ideps/pybind11/include -Ideps/pybind11_json/include `python3-config --includes` $(OPTIMIZATION_FLAGS)
-override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib `python3-config --ldflags` $(OPTIMIZATION_FLAGS)
+override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
+override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib $(OPTIMIZATION_FLAGS)
+# Used only for objs/src/avplumber_pybind.o and linking $(PYTHON_MODULE) (not for avplumber/static_library/cpr/avcpp).
+PYTHON_MODULE_EXTRA_CXXFLAGS = -Ideps/pybind11/include -Ideps/pybind11_json/include $(shell python3-config --includes)
+PYTHON_MODULE_EXTRA_LFLAGS = $(shell python3-config --ldflags)
 PKG_CONFIG_PATH := /apps/ffmpeg/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
 BUILD_DATE_FILE = builddate.h
@@ -66,7 +69,7 @@ endif
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
-# Python is linked via python3-config in LFLAGS (-lpython3 is not a valid soname on many distros).
+# Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
 
 ifeq ($(HAVE_SCTE35),1)
@@ -188,8 +191,8 @@ CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 # Python extension translation units (not linked into the avplumber binary/static library).
 CPPSRC_PYTHON = src/avplumber_pybind.cpp
-CPPSRC_COMPILE := $(CPPSRC_EXE) $(CPPSRC_PYTHON)
-CPPSRC_ALL = $(CPPSRC_COMPILE)
+CPPSRC_COMPILE := $(CPPSRC_EXE)
+CPPSRC_ALL = $(CPPSRC_COMPILE) $(CPPSRC_PYTHON)
 
 PYTHON_EXT_SUFFIX := $(shell python3-config --extension-suffix 2>/dev/null)
 # Must match PYBIND11_MODULE name in src/avplumber_pybind.cpp (avplumber.py imports _avplumber).
@@ -213,6 +216,11 @@ builddate:
 
 
 $(BUILD_DATE_FILE): builddate
+
+$(patsubst %.cpp,objs/%.o,$(CPPSRC_PYTHON)): objs/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
+	$(POSTCOMPILE)
 
 $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 	@mkdir -p $(dir $@)
@@ -243,7 +251,7 @@ $(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version
 static_library: $(STATIC_LIBRARY)
 
 $(PYTHON_MODULE): $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(PTX_H)
-	$(CXX) $(CXXFLAGS) $(LFLAGS) -shared -o $@ $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(LIBS_FLAGS)
+	$(CXX) $(CXXFLAGS) $(LFLAGS) $(PYTHON_MODULE_EXTRA_LFLAGS) -shared -o $@ $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(LIBS_FLAGS)
 
 python_module: $(PYTHON_MODULE)
 
@@ -292,4 +300,4 @@ objs/src/rest_client.o: deps/cpr/build/lib/libcpr.a
 
 .PRECIOUS: objs/%.d
 
-include $(wildcard $(patsubst %.cpp,objs/%.d,$(CPPSRC_COMPILE)))
+include $(wildcard $(patsubst %.cpp,objs/%.d,$(CPPSRC_COMPILE) $(CPPSRC_PYTHON)))
