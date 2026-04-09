@@ -787,5 +787,3 @@ NodeWrapper::NodeWrapper(std::shared_ptr< NodeManager > manager, const Parameter
         createNode();
     }
 }
-
-
