@@ -14,7 +14,10 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace cuda_overlay {
 
@@ -91,6 +94,57 @@ inline bool tryParseNamedColor(const std::string& color_name, DrawColor& color_o
     }
     return false;
 }
+
+enum class GlyphPreset {
+    k5x7 = 0,
+    k10x14 = 1,
+};
+
+bool tryParseGlyphPreset(const std::string& preset_name, GlyphPreset& preset_out);
+int glyphBaseWidth(GlyphPreset preset);
+int glyphBaseHeight(GlyphPreset preset);
+int glyphAdvance(GlyphPreset preset);
+
+struct YoloParseConfig {
+    int frame_width = 0;
+    int frame_height = 0;
+    double min_conf = 0.0;
+    const std::unordered_set<int>* allowed_classes = nullptr;
+    const std::unordered_set<std::string>* allowed_labels = nullptr;
+    double model_content_width = 0.0;
+    double model_content_height = 0.0;
+    double model_content_offset_x = 0.0;
+    double model_content_offset_y = 0.0;
+};
+
+struct ParsedYoloDetection {
+    int x1 = 0;
+    int y1 = 0;
+    int x2 = 0;
+    int y2 = 0;
+    int cls = -1;
+    bool has_cls = false;
+    std::string label;
+    bool has_label = false;
+    double conf = 0.0;
+    int model_index = -1;
+    bool has_model_index = false;
+    int track_id = -1;
+    bool has_track_id = false;
+    bool predicted = false;
+    bool has_predicted = false;
+    bool has_velocity = false;
+    double velocity_x = 0.0;
+    double velocity_y = 0.0;
+};
+
+bool scaleAndClampBBox(double x1, double y1, double x2, double y2, int frame_width, int frame_height,
+                       int& out_x1, int& out_y1, int& out_x2, int& out_y2);
+bool remapModelCoord(const YoloParseConfig& cfg, double x, double y,
+                     double model_w, double model_h, double& out_x, double& out_y);
+bool yoloDetectionAllowed(const Parameters& det, const YoloParseConfig& cfg);
+void parseYoloDetections(const Parameters& md, const YoloParseConfig& cfg,
+                         std::vector<ParsedYoloDetection>& detections_out);
 
 } // namespace cuda_overlay
 

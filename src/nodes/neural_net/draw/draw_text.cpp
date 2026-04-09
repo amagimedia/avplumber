@@ -11,16 +11,18 @@ using cuda_overlay::DrawColor;
 namespace {
 
 constexpr int kMaxOverlayChars = 96;
-
 struct OverlayText {
     std::array<char, kMaxOverlayChars> line1{};
     std::array<char, kMaxOverlayChars> line2{};
+    std::array<char, kMaxOverlayChars> line3{};
     int line1_len = 0;
     int line2_len = 0;
+    int line3_len = 0;
     int origin_x = 48;
     int origin_y = 48;
-    int font_scale = 5;
-    int line_spacing = 16;
+    int font_scale = 2;
+    int line_spacing = 12;
+    int glyph_preset = (int)cuda_overlay::GlyphPreset::k10x14;
     int bg_x = 0;
     int bg_y = 0;
     int bg_w = 0;
@@ -35,16 +37,19 @@ static int boundedStringLength(const std::array<char, kMaxOverlayChars>& text) {
     return len;
 }
 
-static OverlayText makeDefaultOverlay(int origin_x, int origin_y, int font_scale, int line_spacing) {
+static OverlayText makeDefaultOverlay(int origin_x, int origin_y, int font_scale, int line_spacing, int glyph_preset) {
     OverlayText overlay;
     overlay.origin_x = origin_x;
     overlay.origin_y = origin_y;
     overlay.font_scale = font_scale;
     overlay.line_spacing = line_spacing;
+    overlay.glyph_preset = glyph_preset;
     std::snprintf(overlay.line1.data(), overlay.line1.size(), "SHOTS: 0");
     overlay.line2[0] = '\0';
+    overlay.line3[0] = '\0';
     overlay.line1_len = boundedStringLength(overlay.line1);
     overlay.line2_len = boundedStringLength(overlay.line2);
+    overlay.line3_len = boundedStringLength(overlay.line3);
     return overlay;
 }
 
@@ -56,15 +61,18 @@ private:
     std::string analysis_object_key_ = "basketball_analysis";
     int origin_x_ = 48;
     int origin_y_ = 48;
-    int font_scale_ = 5;
-    int line_spacing_ = 16;
+    int font_scale_ = 2;
+    int line_spacing_ = 12;
+    cuda_overlay::GlyphPreset glyph_preset_ = cuda_overlay::GlyphPreset::k10x14;
     int debug_log_every_n_ = 0;
     DrawColor text_color_{235, 128, 128};
     DrawColor background_color_{16, 128, 128};
     bool draw_background_ = true;
+    float background_opacity_ = 1.0f;
 
     CUdeviceptr line1_symbol_ = 0;
     CUdeviceptr line2_symbol_ = 0;
+    CUdeviceptr line3_symbol_ = 0;
     size_t line_symbol_size_ = 0;
 
     const char* nodeName() const override { return "draw_text"; }
@@ -72,6 +80,7 @@ private:
     void onKernelsUnloaded() override {
         line1_symbol_ = 0;
         line2_symbol_ = 0;
+        line3_symbol_ = 0;
         line_symbol_size_ = 0;
     }
 
@@ -80,10 +89,11 @@ private:
                          "kDrawTextNV12Luma", "kDrawTextNV12Chroma")) {
             return false;
         }
-        if (line1_symbol_ && line2_symbol_) return true;
+        if (line1_symbol_ && line2_symbol_ && line3_symbol_) return true;
 
         size_t line1_bytes = 0;
         size_t line2_bytes = 0;
+        size_t line3_bytes = 0;
         if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line1_symbol_, &line1_bytes, draw_module_, "gDrawTextLine1"))) {
             logstream << "draw_text: failed to get line1 symbol";
             return false;
@@ -92,11 +102,15 @@ private:
             logstream << "draw_text: failed to get line2 symbol";
             return false;
         }
-        if (line1_bytes < kMaxOverlayChars || line2_bytes < kMaxOverlayChars) {
+        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line3_symbol_, &line3_bytes, draw_module_, "gDrawTextLine3"))) {
+            logstream << "draw_text: failed to get line3 symbol";
+            return false;
+        }
+        if (line1_bytes < kMaxOverlayChars || line2_bytes < kMaxOverlayChars || line3_bytes < kMaxOverlayChars) {
             logstream << "draw_text: PTX line buffers are too small";
             return false;
         }
-        line_symbol_size_ = std::min(line1_bytes, line2_bytes);
+        line_symbol_size_ = std::min(line1_bytes, std::min(line2_bytes, line3_bytes));
         return true;
     }
 
@@ -118,12 +132,16 @@ private:
     void finalizeOverlayLayout(OverlayText& overlay) const {
         overlay.line1_len = boundedStringLength(overlay.line1);
         overlay.line2_len = boundedStringLength(overlay.line2);
+        overlay.line3_len = boundedStringLength(overlay.line3);
 
-        const int char_advance = std::max(1, 6 * overlay.font_scale);
-        const int line_height = std::max(1, 7 * overlay.font_scale);
-        const int text_w = std::max(overlay.line1_len, overlay.line2_len) * char_advance;
-        const int text_h = line_height * (overlay.line2_len > 0 ? 2 : 1)
-                         + (overlay.line2_len > 0 ? overlay.line_spacing : 0);
+        const int glyph_w = std::max(1, cuda_overlay::glyphBaseWidth((cuda_overlay::GlyphPreset)overlay.glyph_preset));
+        const int glyph_h = std::max(1, cuda_overlay::glyphBaseHeight((cuda_overlay::GlyphPreset)overlay.glyph_preset));
+        const int char_advance = std::max(1, cuda_overlay::glyphAdvance((cuda_overlay::GlyphPreset)overlay.glyph_preset) * overlay.font_scale);
+        const int line_height = std::max(1, glyph_h * overlay.font_scale);
+        const int max_line_len = std::max(overlay.line1_len, std::max(overlay.line2_len, overlay.line3_len));
+        const int line_count = 1 + (overlay.line2_len > 0 ? 1 : 0) + (overlay.line3_len > 0 ? 1 : 0);
+        const int text_w = max_line_len * char_advance;
+        const int text_h = line_height * line_count + (line_count > 1 ? overlay.line_spacing * (line_count - 1) : 0);
         const int pad_x = std::max(10, overlay.font_scale * 2);
         const int pad_y = std::max(8, overlay.font_scale);
 
@@ -134,7 +152,7 @@ private:
     }
 
     OverlayText buildOverlayText(const av::VideoFrame& frm) const {
-        OverlayText overlay = makeDefaultOverlay(origin_x_, origin_y_, font_scale_, line_spacing_);
+        OverlayText overlay = makeDefaultOverlay(origin_x_, origin_y_, font_scale_, line_spacing_, (int)glyph_preset_);
 
         const AVFrame* raw = frm.raw();
         if (!raw || !raw->metadata) {
@@ -159,6 +177,7 @@ private:
             std::snprintf(overlay.line1.data(), overlay.line1.size(),
                           "SHOTS: %d", shots);
             overlay.line2[0] = '\0';
+            overlay.line3[0] = '\0';
         } catch (const std::exception&) {
         }
 
@@ -167,7 +186,7 @@ private:
     }
 
     bool copyOverlayTextToGpu(const OverlayText& overlay) const {
-        if (!line1_symbol_ || !line2_symbol_ || line_symbol_size_ < kMaxOverlayChars) {
+        if (!line1_symbol_ || !line2_symbol_ || !line3_symbol_ || line_symbol_size_ < kMaxOverlayChars) {
             return false;
         }
         if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line1_symbol_, overlay.line1.data(),
@@ -180,6 +199,12 @@ private:
                                        std::min(line_symbol_size_, overlay.line2.size()),
                                        cuda_dev_ctx_->stream))) {
             logstream << "draw_text: failed copying line2 text";
+            return false;
+        }
+        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line3_symbol_, overlay.line3.data(),
+                                       std::min(line_symbol_size_, overlay.line3.size()),
+                                       cuda_dev_ctx_->stream))) {
+            logstream << "draw_text: failed copying line3 text";
             return false;
         }
         return true;
@@ -206,13 +231,16 @@ private:
         int origin_y = overlay.origin_y;
         int font_scale = overlay.font_scale;
         int line_spacing = overlay.line_spacing;
+        int glyph_preset = overlay.glyph_preset;
         int line1_len = overlay.line1_len;
         int line2_len = overlay.line2_len;
+        int line3_len = overlay.line3_len;
         int bg_x = overlay.bg_x;
         int bg_y = overlay.bg_y;
         int bg_w = overlay.bg_w;
         int bg_h = overlay.bg_h;
         int draw_background = draw_background_ ? 1 : 0;
+        float background_opacity = background_opacity_;
         int text_y = text_color_.y;
         int text_u = text_color_.u;
         int text_v = text_color_.v;
@@ -225,9 +253,11 @@ private:
             (void*)&width, (void*)&height,
             (void*)&origin_x, (void*)&origin_y,
             (void*)&font_scale, (void*)&line_spacing,
-            (void*)&line1_len, (void*)&line2_len,
+            (void*)&glyph_preset,
+            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
             (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
             (void*)&draw_background,
+            (void*)&background_opacity,
             (void*)&text_y, (void*)&bg_y_color
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
@@ -243,9 +273,11 @@ private:
             (void*)&width, (void*)&height,
             (void*)&origin_x, (void*)&origin_y,
             (void*)&font_scale, (void*)&line_spacing,
-            (void*)&line1_len, (void*)&line2_len,
+            (void*)&glyph_preset,
+            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
             (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
             (void*)&draw_background,
+            (void*)&background_opacity,
             (void*)&text_u, (void*)&text_v,
             (void*)&bg_u, (void*)&bg_v
         };
@@ -289,15 +321,17 @@ private:
 public:
     DrawText(std::unique_ptr<Source<av::VideoFrame>>&& source,
              std::unique_ptr<Sink<av::VideoFrame>>&& sink,
-             std::string metadata_key,
-             std::string analysis_object_key,
-             int origin_x,
-             int origin_y,
-             int font_scale,
-             int line_spacing,
+            std::string metadata_key,
+            std::string analysis_object_key,
+            int origin_x,
+            int origin_y,
+            int font_scale,
+            int line_spacing,
+             cuda_overlay::GlyphPreset glyph_preset,
              DrawColor text_color,
              DrawColor background_color,
              bool draw_background,
+             float background_opacity,
              VideoParameters input_params,
              av::Rational frame_rate,
              av::Rational timebase,
@@ -309,10 +343,12 @@ public:
           origin_y_(origin_y),
           font_scale_(font_scale),
           line_spacing_(line_spacing),
+          glyph_preset_(glyph_preset),
           debug_log_every_n_(debug_log_every_n),
           text_color_(text_color),
           background_color_(background_color),
-          draw_background_(draw_background) {
+          draw_background_(draw_background),
+          background_opacity_(background_opacity) {
         input_params_ = input_params;
         frame_rate_ = frame_rate;
         timebase_ = timebase;
@@ -344,9 +380,14 @@ public:
         const std::string analysis_object_key = params.value("analysis_object_key", std::string("basketball_analysis"));
         const int origin_x = params.value("origin_x", 48);
         const int origin_y = params.value("origin_y", 48);
-        const int font_scale = params.value("font_scale", 5);
-        const int line_spacing = params.value("line_spacing", 16);
+        const int font_scale = params.value("font_scale", 2);
+        const int line_spacing = params.value("line_spacing", 12);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
+        const std::string glyph_preset_name = params.value("glyph_preset", std::string("10x14"));
+        cuda_overlay::GlyphPreset glyph_preset = cuda_overlay::GlyphPreset::k10x14;
+        if (!cuda_overlay::tryParseGlyphPreset(glyph_preset_name, glyph_preset)) {
+            throw Error("draw_text: glyph_preset must be one of: 5x7, 10x14");
+        }
 
         DrawColor text_color{235, 128, 128};
         if (params.count("text_color")) {
@@ -357,6 +398,7 @@ public:
 
         DrawColor background_color{16, 128, 128};
         bool draw_background = true;
+        float background_opacity = 1.0f;
         if (params.count("background_color")) {
             if (!params["background_color"].is_string()) {
                 throw Error("draw_text: background_color must be a string color name or \"none\"");
@@ -368,10 +410,16 @@ public:
                 throw Error("draw_text: background_color must be one of: white, black, red, green, yellow, light_blue, none");
             }
         }
+        if (params.count("background_opacity")) {
+            background_opacity = params["background_opacity"];
+            if (background_opacity < 0.0f || background_opacity > 1.0f) {
+                throw Error("draw_text: background_opacity must be in [0,1]");
+            }
+        }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawText>(
             edges, params, metadata_key, analysis_object_key, origin_x, origin_y,
-            font_scale, line_spacing, text_color, background_color, draw_background,
+            font_scale, line_spacing, glyph_preset, text_color, background_color, draw_background, background_opacity,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }
 };

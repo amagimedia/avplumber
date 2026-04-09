@@ -52,11 +52,14 @@ Example lookup flow:
 - `origin_y`
   Top-left text origin in pixels. Defaults: `48`, `48`.
 
+- `glyph_preset`
+  Built-in glyph set. One of: `5x7`, `10x14`. Default: `10x14`.
+
 - `font_scale`
-  Integer bitmap-font scale factor. Default: `5`.
+  Integer bitmap-font scale factor. Default: `2`.
 
 - `line_spacing`
-  Extra pixel spacing between the two text lines. Default: `16`.
+  Extra pixel spacing between text lines. Default: `12`.
 
 - `text_color`
   Named text color. Supported values: `white`, `black`, `red`, `green`, `yellow`, `light_blue`.
@@ -65,6 +68,9 @@ Example lookup flow:
 - `background_color`
   Named background block color. Same supported values as `text_color`, plus `none` to disable the block.
   Default: `black`.
+
+- `background_opacity`
+  Background alpha in `[0,1]`. Default: `1.0`.
 
 - `width`
 - `height`
@@ -86,10 +92,12 @@ node.add {
   "analysis_object_key": "basketball_analysis",
   "origin_x": 48,
   "origin_y": 48,
-  "font_scale": 5,
-  "line_spacing": 16,
+  "glyph_preset": "10x14",
+  "font_scale": 2,
+  "line_spacing": 12,
   "text_color": "white",
   "background_color": "black",
+  "background_opacity": 1.0,
   "width": 1920,
   "height": 1080,
   "pixel_format": "cuda",
