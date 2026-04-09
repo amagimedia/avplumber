@@ -54,16 +54,15 @@ private:
         return std::max(lo, std::min(hi, value));
     }
 
-    DrawColor resolveModelColor(const Parameters& det) const {
-        if (!label_colors_.empty() && det.contains("label") && det["label"].is_string()) {
-            const auto it = label_colors_.find(det["label"].get<std::string>());
+    DrawColor resolveModelColor(const cuda_overlay::ParsedYoloDetection& det) const {
+        if (!label_colors_.empty() && det.has_label) {
+            const auto it = label_colors_.find(det.label);
             if (it != label_colors_.end()) {
                 return it->second;
             }
         }
-        if (det.contains("model_index")) {
-            const int model_index = det["model_index"].get<int>();
-            const auto it = model_colors_.find(model_index);
+        if (det.has_model_index) {
+            const auto it = model_colors_.find(det.model_index);
             if (it != model_colors_.end()) {
                 return it->second;
             }
@@ -254,43 +253,6 @@ private:
         return scaleAndClampBBox(x1, y1, x2, y2, bbox_out);
     }
 
-    bool yoloDetectionAllowed(const Parameters& det) const {
-        const double conf = det.value("conf", 0.0);
-        if (conf < min_conf_) return false;
-
-        if (allowed_classes_.empty() && allowed_labels_.empty()) {
-            return true;
-        }
-
-        bool class_match = false;
-        bool label_match = false;
-        if (!allowed_classes_.empty() && det.contains("cls")) {
-            class_match = allowed_classes_.count(det["cls"].get<int>()) > 0;
-        }
-        if (!allowed_labels_.empty() && det.contains("label") && det["label"].is_string()) {
-            label_match = allowed_labels_.count(det["label"].get<std::string>()) > 0;
-        }
-        return class_match || label_match;
-    }
-
-    bool remapModelCoord(double x, double y,
-                         double model_w, double model_h,
-                         double& out_x, double& out_y) const {
-        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
-            const double content_x = std::max(0.0, std::min(x - model_content_offset_x_, model_content_width_));
-            const double content_y = std::max(0.0, std::min(y - model_content_offset_y_, model_content_height_));
-            out_x = content_x * ((double)input_params_.width / model_content_width_);
-            out_y = content_y * ((double)input_params_.height / model_content_height_);
-            return true;
-        }
-
-        const double sx = model_w > 0.0 ? (double)input_params_.width / model_w : 1.0;
-        const double sy = model_h > 0.0 ? (double)input_params_.height / model_h : 1.0;
-        out_x = x * sx;
-        out_y = y * sy;
-        return true;
-    }
-
     // Appends to boxes_out. Returns true if at least one bbox was added from this JSON blob.
     bool parseMetadataBlob(const Parameters& md, std::vector<BBox>& boxes_out) const {
         BBox single_bbox;
@@ -304,33 +266,30 @@ private:
     }
 
     void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
-        if (!md.contains("detections") || !md["detections"].is_array()) return;
+        cuda_overlay::YoloParseConfig cfg;
+        cfg.frame_width = input_params_.width;
+        cfg.frame_height = input_params_.height;
+        cfg.min_conf = min_conf_;
+        cfg.allowed_classes = &allowed_classes_;
+        cfg.allowed_labels = &allowed_labels_;
+        cfg.model_content_width = model_content_width_;
+        cfg.model_content_height = model_content_height_;
+        cfg.model_content_offset_x = model_content_offset_x_;
+        cfg.model_content_offset_y = model_content_offset_y_;
 
-        const std::string coord_space = md.value("coord_space", std::string("model"));
-        const double model_w = md.value("model_width", (double)input_params_.width);
-        const double model_h = md.value("model_height", (double)input_params_.height);
-
-        for (const auto& det : md["detections"]) {
-            if (!det.is_object()) continue;
-            if (!yoloDetectionAllowed(det)) continue;
-            if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
-            const auto& xyxy = det["xyxy"];
-            double x1 = xyxy[0].get<double>();
-            double y1 = xyxy[1].get<double>();
-            double x2 = xyxy[2].get<double>();
-            double y2 = xyxy[3].get<double>();
-            if (coord_space == "model") {
-                if (!remapModelCoord(x1, y1, model_w, model_h, x1, y1)) continue;
-                if (!remapModelCoord(x2, y2, model_w, model_h, x2, y2)) continue;
-            }
+        std::vector<cuda_overlay::ParsedYoloDetection> detections;
+        cuda_overlay::parseYoloDetections(md, cfg, detections);
+        for (const auto& det : detections) {
             BBox bbox;
-            if (scaleAndClampBBox(x1, y1, x2, y2, bbox)) {
-                const DrawColor color = resolveModelColor(det);
-                bbox.y_color = color.y;
-                bbox.u_color = color.u;
-                bbox.v_color = color.v;
-                boxes_out.push_back(bbox);
-            }
+            bbox.x1 = det.x1;
+            bbox.y1 = det.y1;
+            bbox.x2 = det.x2;
+            bbox.y2 = det.y2;
+            const DrawColor color = resolveModelColor(det);
+            bbox.y_color = color.y;
+            bbox.u_color = color.u;
+            bbox.v_color = color.v;
+            boxes_out.push_back(bbox);
         }
     }
 

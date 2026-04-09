@@ -43,6 +43,8 @@ SRCDIR = src
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 ifeq ($(NEURAL_NET_SPECIFIC),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
+BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
+override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 endif
 ifeq ($(NEURAL_NET_COMMON),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/smooth_crop_viewport.cpp
@@ -109,13 +111,15 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu,avpl_yuv
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
@@ -183,7 +187,7 @@ endif
 
 EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
-CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
+CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC) $(BYTETRACK_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 CPPSRC_ALL = $(CPPSRC_EXE)
 
