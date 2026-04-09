@@ -1,0 +1,15 @@
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/cbcdemo", "dst": "in_v", "group": "g", "auto_restart": "group", "name": "input", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_v", "routing": { "?v:0": "v_pkt" }, "group": "g", "auto_restart": "group" }
+
+node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "g", "name": "Video_Dec", "auto_restart": "group", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+
+node.add { "type": "filter_video", "graph": "scale_cuda=w=640:h=360", "src": "v_dec_cuda", "dst": "v_filtered", "group": "g", "name": "Cuda_Scale", "auto_restart": "group", "dst_width": 640, "dst_height": 360, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+
+node.add { "type": "force_keyframe", "group": "g", "src": "v_filtered", "dst": "v_pre_enc", "interval_sec": 2 }
+node.add { "type": "enc_video", "group": "g", "src": "v_pre_enc", "dst": "v_encoded", "codec": "nvenc_h264", "options": { "b": "800k", "rc": "vbr_hq", "preset": "slow", "level": "4.1", "profile": "high" }, "hwaccel":"@gpu" }
+node.add { "type": "mux", "group": "g", "src": "v_encoded", "dst": "v_muxed" }
+node.add { "type": "output", "group": "g", "src": "v_muxed", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output" }
+
+detach retry group.start g
