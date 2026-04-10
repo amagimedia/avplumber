@@ -19,8 +19,8 @@ node.add { "type": "split", "src": "v_pre_yolo", "dst": ["v_for_players", "v_for
 # Model 0: 9-class players model (Ball class suppressed)
 node.add { "type": "cuda_infer_yolo", "src": "v_for_players", "dst": "v_post_players", "group": "in", "name": "Yolo_Players", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 40, "infer_every_n": 1, "metadata_key_detection": "yolo_players", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 0, "mask_cpu_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/basketball-players-full/basketball-players-full_960x544.plan", "task_type": "detection", "class_names": ["_suppress", "Hoop", "Period", "Player", "Ref", "Shot Clock", "Team Name", "Team Points", "Time Remaining"], "output_box_format": "end2end_xyxy" }] }
 
-# Model 1: dedicated ball-only detector (low conf for tracker)
-node.add { "type": "cuda_infer_yolo", "src": "v_for_ball", "dst": "v_post_ball", "group": "in", "name": "Yolo_Ball", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.04, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_ball", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 0, "mask_cpu_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/ball_960x544.plan", "task_type": "detection", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" }] }
+# Model 1: RT-DETR dedicated ball-only detector (low conf for tracker)
+node.add { "type": "cuda_infer_rtdetr", "src": "v_for_ball", "dst": "v_post_ball", "group": "in", "name": "RTDETR_Ball", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.04, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_ball", "debug_log_metadata": true, "debug_log_every_n": 30, "models": [{ "engine": "/home/fedora/tensorrt/nba-ball-coco/rtdetrv2_r18vd_ball_best_960x544.plan", "output_contract": "rtdetr_e2e_v1", "class_names": ["basketball"] }] }
 
 # Model 2: court segmentation (three point line + basketball-court)
 node.add { "type": "cuda_infer_yolo", "src": "v_for_seg", "dst": "v_post_seg", "group": "in", "name": "Yolo_Seg", "auto_restart": "group", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 10, "infer_every_n": 1, "metadata_key_detection": "yolo_seg_det", "metadata_key_segmentation": "yolo_seg", "debug_log_metadata": true, "debug_log_every_n": 30, "mask_gpu_every_n": 1, "mask_cpu_every_n": 1, "models": [{ "engine": "/home/fedora/tensorrt/court-segmentation_960x544.plan", "task_type": "segmentation", "class_names": ["three point line", "basketball-court"], "output_box_format": "end2end_xyxy", "include_in_detection_metadata": false }] }
@@ -36,7 +36,7 @@ node.add { "type": "shot_classifier", "src": "v_inferred", "dst": "v_classified"
 node.add { "type": "player_tracker", "src": "v_classified", "dst": "v_tracked_players", "group": "in", "metadata_key": "yolo_players", "target_labels": ["Player"], "frame_rate": 30, "track_buffer": 90, "predict_on_empty": true, "track_thresh": 0.2, "high_thresh": 0.85, "shot_metadata_key": "shot_info", "debug_log_every_n": 30 }
 
 # Ball tracker on the ball detections, suppresses during closeup shots
-node.add { "type": "ball_tracker", "src": "v_tracked_players", "dst": "v_ball_tracked", "group": "in", "metadata_key": "yolo_ball", "target_label": "basketball", "coast": true, "min_conf": 0.04, "shot_metadata_key": "shot_info", "debug_log_every_n": 1, "dump_file": "yolo_infer_all_players_tracker_ball.csv" }
+node.add { "type": "ball_tracker", "src": "v_tracked_players", "dst": "v_ball_tracked", "group": "in", "metadata_key": "yolo_ball", "target_label": "basketball", "coast": true, "min_conf": 0.04, "shot_metadata_key": "shot_info", "debug_log_every_n": 30 }
 
 # Ball handler: tag the player nearest to the ball as BallHandler
 node.add { "type": "ball_handler", "src": "v_ball_tracked", "dst": "v_tracked", "group": "in", "ball_metadata_key": "yolo_ball", "player_metadata_key": "yolo_players", "output_metadata_key": "ball_handler", "ball_label": "basketball", "player_labels": ["Player"], "max_distance_px": 35, "hysteresis_frames": 12, "shot_metadata_key": "shot_info", "debug_log_every_n": 30 }
@@ -74,6 +74,6 @@ node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "6000k", "maxrate": "6000k", "bufsize": "12000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
 
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
-node.add { "type": "output", "format": "mpegts", "url": "yolo_infer_all_players_tracker.ts", "src": "mux_v", "group": "in", "auto_restart": "panic" }
+node.add { "type": "output", "format": "mpegts", "url": "yolo_infer_all_players_tracker_rtdetr_ball.ts", "src": "mux_v", "group": "in", "auto_restart": "panic" }
 
 group.start in
