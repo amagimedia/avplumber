@@ -46,6 +46,9 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
     bool label_case_sensitive_ = false;
     double min_conf_ = 0.01;
     int frame_rate_ = 30;
+
+    // Shot-aware reset
+    std::string shot_metadata_key_;  // empty = disabled
     int track_buffer_ = 30;
     float track_thresh_ = 0.5f;
     float high_thresh_ = 0.6f;
@@ -57,6 +60,16 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
 
     std::unique_ptr<bytetrack::BYTETracker> tracker_;
     uint64_t frame_counter_ = 0;
+
+    // Statistics
+    uint64_t stat_total_frames_ = 0;
+    uint64_t stat_resets_ = 0;              // shot transition resets
+    uint64_t stat_total_target_dets_ = 0;   // raw model detections matching target labels
+    uint64_t stat_matched_ = 0;             // detections matched to a track (direct or IoU)
+    uint64_t stat_unmatched_ = 0;           // detections with track_id=-1
+    uint64_t stat_predicted_ = 0;           // predicted boxes (no detection, predict_on_empty)
+    uint64_t stat_lost_emitted_ = 0;        // lost tracks emitted
+    int stat_max_track_id_ = 0;             // highest track_id assigned
 
     void initTracker() {
         tracker_ = std::make_unique<bytetrack::BYTETracker>(frame_rate_, track_buffer_);
@@ -142,6 +155,28 @@ public:
 
     void resetInput() override { resetState(); }
 
+    ~PlayerTracker() {
+        uint64_t total_output = stat_matched_ + stat_unmatched_ + stat_predicted_ + stat_lost_emitted_;
+        if (stat_total_frames_ == 0) return;
+
+        logstream << "player_tracker: === tracking summary ===";
+        logstream << "  total frames:        " << stat_total_frames_;
+        logstream << "  shot resets:         " << stat_resets_;
+        logstream << "  raw target dets:     " << stat_total_target_dets_;
+        if (stat_total_frames_ > 0) {
+            logstream << "  avg dets/frame:      " << (double)stat_total_target_dets_ / stat_total_frames_;
+        }
+        logstream << "  matched to tracks:   " << stat_matched_;
+        logstream << "  unmatched (id=-1):   " << stat_unmatched_;
+        logstream << "  predicted (no det):  " << stat_predicted_;
+        logstream << "  lost emitted:        " << stat_lost_emitted_;
+        logstream << "  total output dets:   " << total_output;
+        logstream << "  max track_id:        " << stat_max_track_id_;
+        if (stat_total_target_dets_ > 0) {
+            logstream << "  match rate:          " << (100.0 * stat_matched_ / stat_total_target_dets_) << "%";
+        }
+    }
+
     void process() override {
         av::VideoFrame frm = this->source_->get();
         if (!frm) return;
@@ -153,6 +188,28 @@ public:
         }
 
         ++frame_counter_;
+
+        // Shot-aware reset: reset tracker on any shot transition so IDs restart from 1
+        if (!shot_metadata_key_.empty()) {
+            const AVFrame* raw_shot = frm.raw();
+            if (raw_shot && raw_shot->metadata) {
+                AVDictionaryEntry* shot_entry = av_dict_get(raw_shot->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+                if (shot_entry && shot_entry->value) {
+                    try {
+                        Parameters shot_md = Parameters::parse(shot_entry->value);
+                        bool transition = shot_md.value("shot_transition", false);
+                        if (transition) {
+                            resetState();
+                            stat_resets_++;
+                            if (debug_log_every_n_ > 0) {
+                                logstream << "player_tracker: frame=" << frame_counter_
+                                          << " reset (shot transition to " << shot_md.value("shot_type", std::string("?")) << ")";
+                            }
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
 
         if (!tracker_) initTracker();
 
@@ -222,6 +279,9 @@ public:
         // Build output detections
         Parameters out_dets = passthrough_dets;
 
+        stat_total_frames_++;
+        stat_total_target_dets_ += target_dets.size();
+
         if (!target_dets.empty()) {
             // Map output tracks back to source detections via detection_index
             std::vector<bool> matched(target_dets.size(), false);
@@ -237,6 +297,8 @@ public:
                     }
                     out_dets.push_back(det_out);
                     matched[det_idx] = true;
+                    stat_matched_++;
+                    if (track.track_id > stat_max_track_id_) stat_max_track_id_ = track.track_id;
                 } else {
                     // Fallback: IoU match if index not available
                     float best_iou = 0.0f;
@@ -261,6 +323,8 @@ public:
                         }
                         out_dets.push_back(det_out);
                         matched[best_j] = true;
+                        stat_matched_++;
+                        if (track.track_id > stat_max_track_id_) stat_max_track_id_ = track.track_id;
                     }
                 }
             }
@@ -272,6 +336,7 @@ public:
                     det_out["track_id"] = -1;
                     det_out["predicted"] = false;
                     out_dets.push_back(det_out);
+                    stat_unmatched_++;
                 }
             }
 
@@ -279,6 +344,7 @@ public:
             if (emit_lost_tracks_) {
                 for (const auto& lost : tracker_->get_lost_stracks()) {
                     out_dets.push_back(buildPredictedDetection(lost));
+                    stat_lost_emitted_++;
                 }
             }
         } else if (predict_on_empty_) {
@@ -286,11 +352,13 @@ public:
             for (const auto& track : tracker_->get_tracked_stracks()) {
                 if (track.is_activated) {
                     out_dets.push_back(buildPredictedDetection(track));
+                    stat_predicted_++;
                 }
             }
             if (emit_lost_tracks_) {
                 for (const auto& lost : tracker_->get_lost_stracks()) {
                     out_dets.push_back(buildPredictedDetection(lost));
+                    stat_lost_emitted_++;
                 }
             }
         } else if (!has_metadata) {
@@ -327,6 +395,7 @@ public:
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<PlayerTracker>(edges, params);
 
+        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_labels")) {
             if (!params["target_labels"].is_array()) throw Error("player_tracker: target_labels must be a string array");

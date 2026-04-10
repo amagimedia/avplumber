@@ -94,12 +94,33 @@ static void addTrailPoint(std::deque<TrailPoint>& trail, int x, int y, uint64_t 
 
 class BallTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
 private:
+    struct GateDecision {
+        bool hard_cap_ok = true;
+        bool distance_ok = true;
+        bool prediction_ok = false;
+        bool iou_ok = true;
+        bool speed_ok = true;
+        bool continuity_ok = true;
+        bool accept = true;
+        double dist_prev = 0.0;
+        double dist_real = 0.0;
+        double d_pred = 0.0;
+        double hard_cap = 0.0;
+        double base_gate = 0.0;
+        double speed_gate = 0.0;
+        uint64_t real_gap_frames = 0;
+    };
+
     // Target filtering
     std::string metadata_key_ = "yolo_detections";
     std::string target_label_ = "basketball";
     std::vector<std::string> target_labels_;
     int target_class_ = -1;
     double min_conf_ = 0.04;
+
+    // Shot-aware suppression
+    std::string shot_metadata_key_;  // empty = disabled
+    bool suppressed_ = false;
 
     // Best ball selection
     double target_ball_size_rel_ = 0.036;
@@ -120,6 +141,7 @@ private:
     double override_conf_ = 0.28;
     int override_after_ = 2;
     int reacquire_frames_ = 6;
+    double override_max_jump_rel_ = 0.12;
 
     // Coasting
     bool coast_ = true;
@@ -148,6 +170,9 @@ private:
     bool have_last_emitted_ = false;
     DetectionBox last_detected_template_; // for carrying forward model_index etc on coast
     bool have_detected_template_ = false;
+    DetectionBox last_real_detected_box_;
+    bool have_last_real_detected_ = false;
+    uint64_t last_real_detected_frame_ = 0;
     double recent_speed_ = -1.0;
     int coast_streak_ = 0;
     int det_reject_streak_ = 0;
@@ -206,9 +231,12 @@ private:
         trail_.clear();
         have_last_emitted_ = false;
         have_detected_template_ = false;
+        have_last_real_detected_ = false;
+        last_real_detected_frame_ = 0;
         recent_speed_ = -1.0;
         coast_streak_ = 0;
         det_reject_streak_ = 0;
+        suppressed_ = false;
     }
 
     bool matchesTarget(const DetectionBox& det) const {
@@ -298,49 +326,81 @@ private:
         return best_idx;
     }
 
-    // gate_accept: 5-stage gating
-    bool gateAccept(const DetectionBox& cand, double model_w, double model_h) const {
+    double computeBallScore(const DetectionBox& cand, double model_w, double model_h) const {
+        const double cx = centerX(cand);
+        const double cy = centerY(cand);
+        const double bw = boxWidth(cand);
+        const double bh = boxHeight(cand);
+        const double norm = 0.5 * (model_w + model_h);
+        double dist_pen = 0.0;
+        if (kalman_initialized_ && norm > 0.0) {
+            dist_pen = hypot2(cx - kx_.pos(), cy - ky_.pos()) / norm;
+        }
+        return w_conf_ * cand.conf
+             - w_dist_ * dist_pen
+             - w_size_ * sizePenalty(bw, bh, model_w, model_h, target_ball_size_rel_)
+             - w_round_ * roundnessPenalty(bw, bh);
+    }
+
+    GateDecision evaluateGate(const DetectionBox& cand, double model_w, double model_h) const {
+        GateDecision gd;
         const double cx = centerX(cand);
         const double cy = centerY(cand);
         const double min_dim = std::min(model_w, model_h);
-        const double hard_cap = max_jump_rel_ * min_dim;
-        const double base_gate = std::max(gate_min_px_, gate_rel_ * min_dim);
+        gd.hard_cap = max_jump_rel_ * min_dim;
+        gd.base_gate = std::max(gate_min_px_, gate_rel_ * min_dim);
 
-        // Distance to last trail point
-        double dist_prev = 0.0;
+        // Distance to the current tracked path
         if (!trail_.empty()) {
             const auto& last = trail_.back();
-            dist_prev = hypot2(cx - last.x, cy - last.y);
+            gd.dist_prev = hypot2(cx - last.x, cy - last.y);
         }
 
-        // Stage 1: Hard cap
-        if (!trail_.empty() && dist_prev > hard_cap) {
-            return false;
+        // Distance to the last real gated detection. This is the jump we care about
+        // most when trying to suppress one-frame detector glitches.
+        if (have_last_real_detected_ && last_real_detected_frame_ > 0) {
+            gd.dist_real = hypot2(cx - centerX(last_real_detected_box_),
+                                  cy - centerY(last_real_detected_box_));
+            gd.real_gap_frames = frame_counter_ - last_real_detected_frame_;
+        }
+
+        // Stage 1: Hard cap against actual detector jumps. Scale by the number of
+        // frames since the last real detection so reacquisition after coasting is allowed.
+        if (have_last_real_detected_ && gd.real_gap_frames > 0
+            && gd.dist_real > gd.hard_cap * std::max<uint64_t>(1, gd.real_gap_frames)) {
+            gd.hard_cap_ok = false;
         }
 
         // Stage 2: Distance gate
-        bool distance_ok = trail_.empty() || (dist_prev <= base_gate);
+        gd.distance_ok = trail_.empty() || (gd.dist_prev <= gd.base_gate);
 
         // Stage 3: Prediction gate (OR)
-        bool prediction_ok = false;
         if (gate_use_pred_ && kalman_initialized_) {
-            double d_pred = hypot2(cx - kx_.pos(), cy - ky_.pos());
-            prediction_ok = d_pred <= base_gate * 1.25;
+            gd.d_pred = hypot2(cx - kx_.pos(), cy - ky_.pos());
+            gd.prediction_ok = gd.d_pred <= gd.base_gate * 1.25;
         }
 
         // Stage 4: IoU continuity
-        bool iou_ok = true;
         if (have_last_emitted_) {
-            iou_ok = iou(cand, last_emitted_box_) >= min_iou_;
+            gd.iou_ok = iou(cand, last_emitted_box_) >= min_iou_;
         }
 
         // Stage 5: Speed constraint
-        bool speed_ok = true;
         if (recent_speed_ > 0.0 && !trail_.empty()) {
-            speed_ok = dist_prev <= speed_mult_ * (recent_speed_ + 1e-6);
+            gd.speed_gate = std::max(gd.base_gate, speed_mult_ * (recent_speed_ + 1e-6));
+            gd.speed_ok = gd.dist_prev <= gd.speed_gate;
         }
 
-        return (distance_ok && iou_ok && speed_ok) || prediction_ok;
+        gd.continuity_ok = gd.distance_ok || gd.prediction_ok || gd.iou_ok;
+        gd.accept = gd.hard_cap_ok
+                 && gd.continuity_ok
+                 && (gd.speed_ok || gd.prediction_ok || gd.iou_ok);
+        return gd;
+    }
+
+    // gate_accept: 5-stage gating
+    bool gateAccept(const DetectionBox& cand, double model_w, double model_h) const {
+        return evaluateGate(cand, model_w, model_h).accept;
     }
 
     // detection_override: force accept after gap/streak
@@ -349,12 +409,17 @@ private:
 
         const double min_dim = std::min(model_w, model_h);
         const double base_gate = std::max(gate_min_px_, gate_rel_ * min_dim);
+        const double override_hard_cap = override_max_jump_rel_ * min_dim;
 
         uint64_t gap_frames = 9999;
         double dist_prev = 0.0;
         if (!trail_.empty()) {
             gap_frames = frame_counter_ - trail_.back().frame;
             dist_prev = hypot2(centerX(cand) - trail_.back().x, centerY(cand) - trail_.back().y);
+            // Keep override from reviving immediate huge jumps that gate already rejected.
+            if (gap_frames <= 1 && dist_prev > override_hard_cap) {
+                return false;
+            }
         }
 
         if (det_reject_streak_ >= override_after_
@@ -428,6 +493,11 @@ private:
         have_last_emitted_ = true;
         last_detected_template_ = det;
         have_detected_template_ = true;
+        if (source == "detected") {
+            last_real_detected_box_ = det;
+            have_last_real_detected_ = true;
+            last_real_detected_frame_ = frame_counter_;
+        }
         last_accepted_conf_ = det.conf;
         coast_streak_ = 0;
         det_reject_streak_ = 0;
@@ -516,6 +586,54 @@ public:
 
         ++frame_counter_;
 
+        // Shot-aware suppression: skip ball tracking during closeups
+        if (!shot_metadata_key_.empty()) {
+            const AVFrame* raw_shot = frm.raw();
+            if (raw_shot && raw_shot->metadata) {
+                AVDictionaryEntry* shot_entry = av_dict_get(raw_shot->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+                if (shot_entry && shot_entry->value) {
+                    try {
+                        Parameters shot_md = Parameters::parse(shot_entry->value);
+                        std::string shot_type = shot_md.value("shot_type", std::string());
+                        if (shot_type == "closeup") {
+                            if (!suppressed_) {
+                                resetState();
+                                suppressed_ = true;
+                            }
+                            stat_no_ball_++;
+                            dumpFrame("", 0.0, 0.0, 0.0);
+                            // Strip ball detections from output metadata so nothing is drawn
+                            AVDictionaryEntry* ball_entry = av_dict_get(raw_shot->metadata, metadata_key_.c_str(), nullptr, 0);
+                            if (ball_entry && ball_entry->value) {
+                                try {
+                                    Parameters ball_md = Parameters::parse(ball_entry->value);
+                                    Parameters other_dets = Parameters::array();
+                                    if (ball_md.contains("detections") && ball_md["detections"].is_array()) {
+                                        for (const auto& item : ball_md["detections"]) {
+                                            DetectionBox det = parseOneDetection(item);
+                                            if (!matchesTarget(det)) {
+                                                other_dets.push_back(item);
+                                            }
+                                        }
+                                    }
+                                    ball_md["detections"] = other_dets;
+                                    ball_md["trail"] = Parameters::array();
+                                    av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), ball_md.dump().c_str(), 0);
+                                } catch (...) {}
+                            }
+                            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                                logstream << "ball_tracker: frame=" << frame_counter_ << " suppressed (closeup)";
+                            }
+                            this->sink_->put(frm);
+                            return;
+                        } else {
+                            suppressed_ = false;
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+
         // Parse metadata
         const AVFrame* raw = frm.raw();
         if (!raw || !raw->metadata) {
@@ -577,45 +695,81 @@ public:
             ky_.predict(1.0);
         }
 
-        // Select best ball candidate
-        int best_idx = selectBestBall(ball_dets, model_w, model_h);
+        // Prefer the best continuity-valid candidate for normal tracking. Keep the
+        // raw best-scoring candidate only for override/reacquire logic.
+        int best_idx = -1;
+        int best_gated_idx = -1;
+        double best_score = -1e18;
+        double best_gated_score = -1e18;
+        std::vector<double> cand_scores(ball_dets.size(), -1e18);
+        std::vector<GateDecision> cand_gates(ball_dets.size());
+
+        for (int i = 0; i < (int)ball_dets.size(); ++i) {
+            const auto& cand = ball_dets[(size_t)i];
+            const double score = computeBallScore(cand, model_w, model_h);
+            cand_scores[(size_t)i] = score;
+            cand_gates[(size_t)i] = evaluateGate(cand, model_w, model_h);
+            if (score > best_score) {
+                best_score = score;
+                best_idx = i;
+            }
+            if (cand_gates[(size_t)i].accept && score > best_gated_score) {
+                best_gated_score = score;
+                best_gated_idx = i;
+            }
+        }
 
         std::string source;
         bool accepted = false;
         double ball_score = 0.0;
         DetectionBox tracked_det;
 
-        if (best_idx >= 0) {
+        if (best_gated_idx >= 0) {
+            const auto& cand = ball_dets[(size_t)best_gated_idx];
+            ball_score = cand_scores[(size_t)best_gated_idx];
+            accepted = true;
+            source = "detected";
+            tracked_det = cand;
+        } else if (best_idx >= 0) {
             const auto& cand = ball_dets[(size_t)best_idx];
 
             // Compute ball_score for metadata
-            {
-                double cx = centerX(cand), cy = centerY(cand);
-                double bw = boxWidth(cand), bh = boxHeight(cand);
-                double norm = 0.5 * (model_w + model_h);
-                double dist_pen = 0.0;
-                if (kalman_initialized_ && norm > 0.0) {
-                    dist_pen = hypot2(cx - kx_.pos(), cy - ky_.pos()) / norm;
-                }
-                ball_score = w_conf_ * cand.conf
-                           - w_dist_ * dist_pen
-                           - w_size_ * sizePenalty(bw, bh, model_w, model_h, target_ball_size_rel_)
-                           - w_round_ * roundnessPenalty(bw, bh);
-            }
+            ball_score = cand_scores[(size_t)best_idx];
 
-            if (gateAccept(cand, model_w, model_h)) {
+            // Try detection override only when no continuity-valid candidate exists.
+            det_reject_streak_++;
+            stat_dropped_by_gate_++;
+            if (detectionOverride(cand, model_w, model_h)) {
                 accepted = true;
-                source = "detected";
+                source = "override";
                 tracked_det = cand;
-            } else {
-                // Try detection override
-                det_reject_streak_++;
-                stat_dropped_by_gate_++;
-                if (detectionOverride(cand, model_w, model_h)) {
-                    accepted = true;
-                    source = "override";
-                    tracked_det = cand;
-                }
+            }
+        }
+
+        if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+            for (int i = 0; i < (int)ball_dets.size(); ++i) {
+                const auto& cand = ball_dets[(size_t)i];
+                const auto& gd = cand_gates[(size_t)i];
+                logstream << "ball_tracker: frame=" << frame_counter_
+                          << " cand[" << i << "]"
+                          << " selected=" << (i == best_idx ? 1 : 0)
+                          << " selected_gated=" << (i == best_gated_idx ? 1 : 0)
+                          << " cx=" << centerX(cand)
+                          << " cy=" << centerY(cand)
+                          << " conf=" << cand.conf
+                          << " score=" << cand_scores[(size_t)i]
+                          << " gate_accept=" << gd.accept
+                          << " hard_cap_ok=" << gd.hard_cap_ok
+                          << " distance_ok=" << gd.distance_ok
+                          << " prediction_ok=" << gd.prediction_ok
+                          << " iou_ok=" << gd.iou_ok
+                          << " speed_ok=" << gd.speed_ok
+                          << " dist_prev=" << gd.dist_prev
+                          << " dist_real=" << gd.dist_real
+                          << " d_pred=" << gd.d_pred
+                          << " base_gate=" << gd.base_gate
+                          << " hard_cap=" << gd.hard_cap
+                          << " real_gap_frames=" << gd.real_gap_frames;
             }
         }
 
@@ -733,6 +887,9 @@ public:
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<BallTracker>(edges, params);
 
+        // Shot-aware suppression
+        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+
         // Target filtering
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_label")) r->target_label_ = params["target_label"].get<std::string>();
@@ -763,6 +920,7 @@ public:
         if (params.count("override_conf")) r->override_conf_ = params["override_conf"];
         if (params.count("override_after")) r->override_after_ = params["override_after"];
         if (params.count("reacquire_frames")) r->reacquire_frames_ = params["reacquire_frames"];
+        if (params.count("override_max_jump_rel")) r->override_max_jump_rel_ = params["override_max_jump_rel"];
 
         // Coasting
         if (params.count("coast")) r->coast_ = params["coast"];
