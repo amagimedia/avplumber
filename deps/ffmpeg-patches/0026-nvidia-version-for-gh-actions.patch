@@ -1,0 +1,61 @@
+From f4b9197409ec2ab3213ceeed9ce468f264150785 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 12:07:54 +0100
+Subject: [PATCH 26/40] nvidia version for gh actions
+
+---
+ .github/workflows/ubuntu-25.04-deb.yml | 31 +++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-25.04-deb.yml b/.github/workflows/ubuntu-25.04-deb.yml
+index 588719f418..5675c87597 100644
+--- a/.github/workflows/ubuntu-25.04-deb.yml
++++ b/.github/workflows/ubuntu-25.04-deb.yml
+@@ -546,8 +546,8 @@ jobs:
+   build-nvidia-deb:
+     name: Build Ubuntu 25.04 NVIDIA .deb
+     if: ${{ inputs.build_nvidia_package }}
+-    # This workflow is intended for a self-hosted Ubuntu 25.04 x86_64 runner
+-    # with CUDA 13.0 already installed at /usr/local/cuda-13.0.
++    # This workflow targets a self-hosted Ubuntu 25.04 x86_64 runner.
++    # It can bootstrap CUDA Toolkit 13.0 if nvcc is not already present.
+     runs-on: [self-hosted, linux, x64, ubuntu-25.04, cuda]
+ 
+     env:
+@@ -571,7 +571,32 @@ jobs:
+             libgnutls28-dev \
+             libwebp-dev \
+             nasm \
+-            pkg-config
++            pkg-config \
++            wget
++
++      - name: Install CUDA Toolkit 13.0 if needed
++        shell: bash
++        run: |
++          set -euxo pipefail
++          if [[ ! -x "${CUDA_PREFIX}/bin/nvcc" ]]; then
++            if [[ "$(dpkg --print-architecture)" != "amd64" ]]; then
++              echo "CUDA toolkit bootstrap currently supports amd64 only" >&2
++              exit 1
++            fi
++
++            SUDO=""
++            if command -v sudo >/dev/null 2>&1; then
++              SUDO="sudo"
++            fi
++
++            tmpdir="$(mktemp -d)"
++            wget -O "${tmpdir}/cuda-keyring.deb" \
++              https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
++            ${SUDO} dpkg -i "${tmpdir}/cuda-keyring.deb"
++            ${SUDO} apt-get update
++            ${SUDO} DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cuda-toolkit-13-0
++            rm -rf "${tmpdir}"
++          fi
+ 
+       - name: Validate CUDA toolchain
+         shell: bash
+-- 
+2.53.0
+

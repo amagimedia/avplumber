@@ -1,0 +1,33 @@
+From 8ea0d76b7ff3f51dc2fc18373670b63e43fe0f5b Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 09:47:46 +0100
+Subject: [PATCH 21/40] keep nv headers for regular build for now
+
+---
+ .github/workflows/ubuntu-25.04-deb.yml | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/.github/workflows/ubuntu-25.04-deb.yml b/.github/workflows/ubuntu-25.04-deb.yml
+index 12d9d3e0e9..c868e3c589 100644
+--- a/.github/workflows/ubuntu-25.04-deb.yml
++++ b/.github/workflows/ubuntu-25.04-deb.yml
+@@ -68,6 +68,16 @@ jobs:
+             nasm \
+             pkg-config
+ 
++      - name: Install nv-codec-headers compatibility headers
++        shell: bash
++        run: |
++          set -euxo pipefail
++          if ! pkg-config --exists ffnvcodec; then
++            git clone --depth=1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
++            make -C /tmp/nv-codec-headers -j"$(nproc)"
++            make -C /tmp/nv-codec-headers install PREFIX=/usr/local
++          fi
++
+       - name: Configure and build
+         shell: bash
+         run: |
+-- 
+2.53.0
+

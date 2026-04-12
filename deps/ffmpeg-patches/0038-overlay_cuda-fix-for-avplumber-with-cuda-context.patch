@@ -1,0 +1,24 @@
+From 03c02d65bc98d1bfc35b8c3b44f6b165d8e07ec4 Mon Sep 17 00:00:00 2001
+From: Teodor Wozniak <teodor.wozniak@amagi.com>
+Date: Thu, 2 Apr 2026 16:58:59 +0200
+Subject: [PATCH 38/40] overlay_cuda: fix for avplumber with cuda context
+
+---
+ libavfilter/vf_overlay_cuda.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libavfilter/vf_overlay_cuda.c b/libavfilter/vf_overlay_cuda.c
+index a35f6eda6e..ac5a789630 100644
+--- a/libavfilter/vf_overlay_cuda.c
++++ b/libavfilter/vf_overlay_cuda.c
+@@ -495,6 +495,7 @@ static int overlay_cuda_config_output(AVFilterLink *outlink)
+     ctx->hwctx = ((AVHWDeviceContext*)ctx->hw_device_ctx->data)->hwctx;
+ 
+     cuda_ctx = ctx->hwctx->cuda_ctx;
++    ctx->cu_ctx = cuda_ctx;
+     ctx->fs.time_base = inlink->time_base;
+ 
+     ctx->cu_stream = ctx->hwctx->stream;
+-- 
+2.53.0
+

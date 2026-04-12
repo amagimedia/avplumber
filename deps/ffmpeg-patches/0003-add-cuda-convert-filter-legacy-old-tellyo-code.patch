@@ -1,0 +1,38 @@
+From 1ab462a65fa2965c79bf69cc082a259b674a718c Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:14:00 +0100
+Subject: [PATCH 03/40] add cuda convert filter (legacy old tellyo code)
+
+---
+ libavfilter/Makefile     | 2 ++
+ libavfilter/allfilters.c | 1 +
+ 2 files changed, 3 insertions(+)
+
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index db4b2f9a96..e922c3e840 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -247,6 +247,8 @@ OBJS-$(CONFIG_COLORSPACE_CUDA_FILTER)        += vf_colorspace_cuda.o \
+                                                 vf_colorspace_cuda.ptx.o \
+                                                 cuda/load_helper.o
+ OBJS-$(CONFIG_COLORTEMPERATURE_FILTER)       += vf_colortemperature.o
++OBJS-$(CONFIG_CONVERT_CUDA_FILTER)           += vf_convert_cuda.o vf_convert_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_CONVOLUTION_FILTER)            += vf_convolution.o
+ OBJS-$(CONFIG_CONVOLUTION_OPENCL_FILTER)     += vf_convolution_opencl.o opencl.o \
+                                                 opencl/convolution.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index ca423661f0..2af617f3c4 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -226,6 +226,7 @@ extern const AVFilter ff_vf_colormatrix;
+ extern const AVFilter ff_vf_colorspace;
+ extern const AVFilter ff_vf_colorspace_cuda;
+ extern const AVFilter ff_vf_colortemperature;
++extern const AVFilter ff_vf_convert_cuda;
+ extern const AVFilter ff_vf_convolution;
+ extern const AVFilter ff_vf_convolution_opencl;
+ extern const AVFilter ff_vf_convolve;
+-- 
+2.53.0
+

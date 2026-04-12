@@ -1,0 +1,50 @@
+From 6ee5dfa8de4d747fc3d3e8dd1846712586e0aeff Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 10:44:04 +0100
+Subject: [PATCH 23/40] fix deb yaml
+
+---
+ .github/workflows/ubuntu-25.04-deb.yml | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-25.04-deb.yml b/.github/workflows/ubuntu-25.04-deb.yml
+index c868e3c589..f1658d03de 100644
+--- a/.github/workflows/ubuntu-25.04-deb.yml
++++ b/.github/workflows/ubuntu-25.04-deb.yml
+@@ -50,6 +50,7 @@ jobs:
+     env:
+       DEBIAN_FRONTEND: noninteractive
+       FFMPEG_PREFIX: /usr/local
++      SOURCE_COMMIT: ${{ github.sha }}
+ 
+     steps:
+       - name: Check out sources
+@@ -215,7 +216,7 @@ jobs:
+           raw_pkg_name="${{ inputs.regular_package_name }}"
+           pkg_name="$(printf '%s' "${raw_pkg_name}" | tr '[:upper:]_' '[:lower:]-' | sed 's/[^a-z0-9.+-]/-/g; s/^-*//; s/-*$//')"
+           version="$(tr -d '\n' < RELEASE)"
+-          commit="$(git rev-parse --short HEAD)"
++          commit="${SOURCE_COMMIT:0:7}"
+           arch="$(dpkg --print-architecture)"
+           pkg_version="${version}+git${commit}-1"
+           stage_dir="${GITHUB_WORKSPACE}/out/package-root"
+@@ -300,6 +301,7 @@ jobs:
+       DEBIAN_FRONTEND: noninteractive
+       FFMPEG_PREFIX: /usr/local
+       CUDA_PREFIX: /usr/local/cuda-13.0
++      SOURCE_COMMIT: ${{ github.sha }}
+ 
+     steps:
+       - name: Check out sources
+@@ -451,7 +453,7 @@ jobs:
+           raw_pkg_name="${{ inputs.nvidia_package_name }}"
+           pkg_name="$(printf '%s' "${raw_pkg_name}" | tr '[:upper:]_' '[:lower:]-' | sed 's/[^a-z0-9.+-]/-/g; s/^-*//; s/-*$//')"
+           version="$(tr -d '\n' < RELEASE)"
+-          commit="$(git rev-parse --short HEAD)"
++          commit="${SOURCE_COMMIT:0:7}"
+           arch="$(dpkg --print-architecture)"
+           pkg_version="${version}+git${commit}-1"
+           stage_dir="${GITHUB_WORKSPACE}/out/package-root"
+-- 
+2.53.0
+

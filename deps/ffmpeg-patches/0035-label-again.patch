@@ -1,0 +1,22 @@
+From 82eacc2e71d3e9f6f985446caf7452d0721577e6 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 13:38:58 +0100
+Subject: [PATCH 35/40] label again
+
+---
+ .github/workflows/ubuntu-nvidia-deb.yml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/ubuntu-nvidia-deb.yml b/.github/workflows/ubuntu-nvidia-deb.yml
+index df3ec6eafc..77d2f02f6c 100644
+--- a/.github/workflows/ubuntu-nvidia-deb.yml
++++ b/.github/workflows/ubuntu-nvidia-deb.yml
+@@ -1,4 +1,4 @@
+-name: Ubuntu NVIDIA Packages
++name: Ubuntu Nvidia deb packages
+ 
+ on:
+   workflow_dispatch:
+-- 
+2.53.0
+

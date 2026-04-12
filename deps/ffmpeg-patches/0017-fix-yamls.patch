@@ -1,0 +1,108 @@
+From 4465eb3882df7038d562cb4473346f3d0b69eca4 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 09:24:17 +0100
+Subject: [PATCH 17/40] fix yamls?
+
+---
+ .github/workflows/ubuntu-25.04-deb.yml | 64 +++++++++++++-------------
+ 1 file changed, 32 insertions(+), 32 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-25.04-deb.yml b/.github/workflows/ubuntu-25.04-deb.yml
+index 4a72ce0644..4ec0765ac6 100644
+--- a/.github/workflows/ubuntu-25.04-deb.yml
++++ b/.github/workflows/ubuntu-25.04-deb.yml
+@@ -193,10 +193,10 @@ jobs:
+           mkdir -p "${stage_dir}/DEBIAN" "${stage_dir}/usr/bin"
+           for tool in ffmpeg ffprobe ffplay; do
+             if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/${tool}" ]]; then
+-              cat > "${stage_dir}/usr/bin/${tool}" <<EOF
+-#!/bin/sh
+-exec ${FFMPEG_PREFIX}/bin/${tool} "\$@"
+-EOF
++              printf '%s\n' \
++                '#!/bin/sh' \
++                "exec ${FFMPEG_PREFIX}/bin/${tool} \"\$@\"" \
++                > "${stage_dir}/usr/bin/${tool}"
+               chmod 0755 "${stage_dir}/usr/bin/${tool}"
+             fi
+           done
+@@ -204,18 +204,18 @@ EOF
+           installed_size="$(du -sk "${stage_dir}" | cut -f1)"
+           maintainer="${GITHUB_REPOSITORY_OWNER} <noreply@github.com>"
+ 
+-          cat > "${stage_dir}/DEBIAN/control" <<EOF
+-Package: ${pkg_name}
+-Version: ${pkg_version}
+-Section: video
+-Priority: optional
+-Architecture: ${arch}
+-Maintainer: ${maintainer}
+-Installed-Size: ${installed_size}
+-Description: FFmpeg build from ${GITHUB_REPOSITORY}
+- Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 25.04.
+- Installed under ${FFMPEG_PREFIX} with launcher scripts in /usr/bin.
+-EOF
++          printf '%s\n' \
++            "Package: ${pkg_name}" \
++            "Version: ${pkg_version}" \
++            'Section: video' \
++            'Priority: optional' \
++            "Architecture: ${arch}" \
++            "Maintainer: ${maintainer}" \
++            "Installed-Size: ${installed_size}" \
++            "Description: FFmpeg build from ${GITHUB_REPOSITORY}" \
++            ' Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 25.04.' \
++            " Installed under ${FFMPEG_PREFIX} with launcher scripts in /usr/bin." \
++            > "${stage_dir}/DEBIAN/control"
+ 
+           dpkg-deb --build --root-owner-group "${stage_dir}" "${package_file}"
+ 
+@@ -428,10 +428,10 @@ EOF
+           mkdir -p "${stage_dir}/DEBIAN" "${stage_dir}/usr/bin"
+           for tool in ffmpeg ffprobe ffplay; do
+             if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/${tool}" ]]; then
+-              cat > "${stage_dir}/usr/bin/${tool}" <<EOF
+-#!/bin/sh
+-exec ${FFMPEG_PREFIX}/bin/${tool} "\$@"
+-EOF
++              printf '%s\n' \
++                '#!/bin/sh' \
++                "exec ${FFMPEG_PREFIX}/bin/${tool} \"\$@\"" \
++                > "${stage_dir}/usr/bin/${tool}"
+               chmod 0755 "${stage_dir}/usr/bin/${tool}"
+             fi
+           done
+@@ -439,18 +439,18 @@ EOF
+           installed_size="$(du -sk "${stage_dir}" | cut -f1)"
+           maintainer="${GITHUB_REPOSITORY_OWNER} <noreply@github.com>"
+ 
+-          cat > "${stage_dir}/DEBIAN/control" <<EOF
+-Package: ${pkg_name}
+-Version: ${pkg_version}
+-Section: video
+-Priority: optional
+-Architecture: ${arch}
+-Maintainer: ${maintainer}
+-Installed-Size: ${installed_size}
+-Description: FFmpeg build from ${GITHUB_REPOSITORY}
+- Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 25.04.
+- Installed under ${FFMPEG_PREFIX} with launcher scripts in /usr/bin.
+-EOF
++          printf '%s\n' \
++            "Package: ${pkg_name}" \
++            "Version: ${pkg_version}" \
++            'Section: video' \
++            'Priority: optional' \
++            "Architecture: ${arch}" \
++            "Maintainer: ${maintainer}" \
++            "Installed-Size: ${installed_size}" \
++            "Description: FFmpeg build from ${GITHUB_REPOSITORY}" \
++            ' Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 25.04.' \
++            " Installed under ${FFMPEG_PREFIX} with launcher scripts in /usr/bin." \
++            > "${stage_dir}/DEBIAN/control"
+ 
+           dpkg-deb --build --root-owner-group "${stage_dir}" "${package_file}"
+ 
+-- 
+2.53.0
+
