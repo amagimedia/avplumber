@@ -1,0 +1,90 @@
+From 6137fc2b110e49eff72b70326f84a5aeb2f2dfec Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:17:46 +0100
+Subject: [PATCH 07/40] add rtp streaming teo fix for 420p (legacy old tellyo
+ code)
+
+---
+ libavformat/rtpdec_rfc4175.c | 44 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 38 insertions(+), 6 deletions(-)
+
+diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
+index b49fc55d2d..53ea616f84 100644
+--- a/libavformat/rtpdec_rfc4175.c
++++ b/libavformat/rtpdec_rfc4175.c
+@@ -43,6 +43,7 @@ struct PayloadContext {
+     unsigned int frame_size;
+     unsigned int pgroup; /* size of the pixel group in bytes */
+     unsigned int xinc;
++    int is_yuv420;
+ 
+     uint32_t timestamp;
+ };
+@@ -53,6 +54,7 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     int tag;
+     const AVPixFmtDescriptor *desc;
+ 
++    data->is_yuv420 = 0;
+     if (!strncmp(data->sampling, "YCbCr-4:2:2", 11)) {
+         tag = MKTAG('U', 'Y', 'V', 'Y');
+         data->xinc = 2;
+@@ -71,6 +73,7 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     } else if (!strncmp(data->sampling, "YCbCr-4:2:0", 11)) {
+         tag = MKTAG('I', '4', '2', '0');
+         data->xinc = 4;
++        data->is_yuv420 = 1;
+ 
+         if (data->depth == 8) {
+             data->pgroup = 6;
+@@ -310,13 +313,42 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+         if (line >= data->height)
+             return AVERROR_INVALIDDATA;
+ 
+-        /* prevent ill-formed packets to write after buffer's end */
+-        copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
+-        if (copy_offset + length > data->frame_size || !data->frame)
+-            return AVERROR_INVALIDDATA;
++        if (data->is_yuv420) {
++            uint8_t *yd1p, *yd2p, *up, *vp, *udp, *vdp;
++            const uint8_t *p;
++            int uvoff, i;
++
++            /* libavformat stores YUV420 planar frames, depacketized payload is interleaved */
++            if (line % 2 != 0 || !data->frame || (offset % 2) != 0 || (length % 6) != 0)
++                return AVERROR_INVALIDDATA;
++
++            yd1p = data->frame + line * data->width + offset;
++            yd2p = yd1p + data->width;
++            up = data->frame + data->width * data->height;
++            vp = up + data->width / 2 * data->height / 2;
++            uvoff = line / 2 * data->width / 2 + offset / 2;
++            udp = up + uvoff;
++            vdp = vp + uvoff;
++            p = payload;
++
++            for (i = 0; i < length; i += 6) {
++                *yd1p++ = p[0];
++                *yd1p++ = p[1];
++                *yd2p++ = p[2];
++                *yd2p++ = p[3];
++                *udp++ = p[4];
++                *vdp++ = p[5];
++                p += 6;
++            }
++        } else {
++            /* prevent ill-formed packets to write after buffer's end */
++            copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
++            if (copy_offset + length > data->frame_size || !data->frame)
++                return AVERROR_INVALIDDATA;
+ 
+-        dest = data->frame + copy_offset;
+-        memcpy(dest, payload, length);
++            dest = data->frame + copy_offset;
++            memcpy(dest, payload, length);
++        }
+ 
+         payload += length;
+         payload_len -= length;
+-- 
+2.53.0
+

@@ -1,0 +1,36 @@
+From d8c6d5411d6e217e309b86e6a70f73d12b518a78 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 13:19:53 +0100
+Subject: [PATCH 31/40] cleanup nvidia npp
+
+---
+ .github/workflows/ubuntu-deb.yml | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-deb.yml b/.github/workflows/ubuntu-deb.yml
+index d207d9737c..03d8a951f9 100644
+--- a/.github/workflows/ubuntu-deb.yml
++++ b/.github/workflows/ubuntu-deb.yml
+@@ -758,9 +758,6 @@ jobs:
+             grep -q ' thumbnail_cuda ' "${filter_output}"
+             grep -q ' yadif_cuda ' "${filter_output}"
+             grep -q ' hwupload_cuda ' "${filter_output}"
+-            grep -q ' scale_npp ' "${filter_output}"
+-            grep -q ' transpose_npp ' "${filter_output}"
+-            grep -q ' sharpen_npp ' "${filter_output}"
+             grep -q ' pad_cuda ' "${filter_output}"
+             grep -q ' convert_cuda ' "${filter_output}"
+             grep -q ' transition_cuda ' "${filter_output}"
+@@ -1049,9 +1046,6 @@ jobs:
+             grep -q ' thumbnail_cuda ' "${filter_output}"
+             grep -q ' yadif_cuda ' "${filter_output}"
+             grep -q ' hwupload_cuda ' "${filter_output}"
+-            grep -q ' scale_npp ' "${filter_output}"
+-            grep -q ' transpose_npp ' "${filter_output}"
+-            grep -q ' sharpen_npp ' "${filter_output}"
+             grep -q ' pad_cuda ' "${filter_output}"
+             grep -q ' convert_cuda ' "${filter_output}"
+             grep -q ' transition_cuda ' "${filter_output}"
+-- 
+2.53.0
+

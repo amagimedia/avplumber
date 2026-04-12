@@ -1,0 +1,90 @@
+From c3c657d6eeb8a86b0c0e792969ca232e568bea60 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 13:35:28 +0100
+Subject: [PATCH 33/40] fix encoder checks
+
+---
+ .github/workflows/ubuntu-nvidia-deb.yml | 22 +++++++++++-----------
+ 1 file changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-nvidia-deb.yml b/.github/workflows/ubuntu-nvidia-deb.yml
+index 80837a7ac7..20f72cd44a 100644
+--- a/.github/workflows/ubuntu-nvidia-deb.yml
++++ b/.github/workflows/ubuntu-nvidia-deb.yml
+@@ -19,7 +19,7 @@ on:
+         default: true
+         type: boolean
+ 
+-permissions:
++permissions:nv
+   contents: read
+ 
+ jobs:
+@@ -243,11 +243,11 @@ jobs:
+ 
+           if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
+             filter_output="${artifact_dir}/nvidia-filters.txt"
+-            codec_output="${artifact_dir}/nvidia-codecs.txt"
++            encoder_output="${artifact_dir}/nvidia-encoders.txt"
+             LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+               "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -filters > "${filter_output}"
+             LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+-              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -codecs > "${codec_output}"
++              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -encoders > "${encoder_output}"
+ 
+             grep -q ' crop_cuda ' "${filter_output}"
+             grep -q ' scale_cuda ' "${filter_output}"
+@@ -259,8 +259,8 @@ jobs:
+             grep -q ' convert_cuda ' "${filter_output}"
+             grep -q ' transition_cuda ' "${filter_output}"
+             grep -q ' overlay_many_cuda ' "${filter_output}"
+-            grep -q ' DEV.LS h264_nvenc ' "${codec_output}"
+-            grep -q ' DEV.L. hevc_nvenc ' "${codec_output}"
++            grep -q ' h264_nvenc ' "${encoder_output}"
++            grep -q ' hevc_nvenc ' "${encoder_output}"
+           fi
+ 
+           if [[ "${{ inputs.strip_binaries }}" == "true" ]]; then
+@@ -308,7 +308,7 @@ jobs:
+           path: |
+             ${{ steps.stage.outputs.package_file }}
+             out/artifacts/nvidia-filters.txt
+-            out/artifacts/nvidia-codecs.txt
++            out/artifacts/nvidia-encoders.txt
+ 
+   build-nvidia-deb-2204:
+     name: Build Ubuntu 22.04 NVIDIA .deb
+@@ -530,11 +530,11 @@ jobs:
+ 
+           if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
+             filter_output="${artifact_dir}/nvidia2204-filters.txt"
+-            codec_output="${artifact_dir}/nvidia2204-codecs.txt"
++            encoder_output="${artifact_dir}/nvidia2204-encoders.txt"
+             LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+               "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -filters > "${filter_output}"
+             LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+-              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -codecs > "${codec_output}"
++              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -encoders > "${encoder_output}"
+ 
+             grep -q ' crop_cuda ' "${filter_output}"
+             grep -q ' scale_cuda ' "${filter_output}"
+@@ -546,8 +546,8 @@ jobs:
+             grep -q ' convert_cuda ' "${filter_output}"
+             grep -q ' transition_cuda ' "${filter_output}"
+             grep -q ' overlay_many_cuda ' "${filter_output}"
+-            grep -q ' DEV.LS h264_nvenc ' "${codec_output}"
+-            grep -q ' DEV.L. hevc_nvenc ' "${codec_output}"
++            grep -q ' h264_nvenc ' "${encoder_output}"
++            grep -q ' hevc_nvenc ' "${encoder_output}"
+           fi
+ 
+           if [[ "${{ inputs.strip_binaries }}" == "true" ]]; then
+@@ -595,4 +595,4 @@ jobs:
+           path: |
+             ${{ steps.stage.outputs.package_file }}
+             out/artifacts/nvidia2204-filters.txt
+-            out/artifacts/nvidia2204-codecs.txt
++            out/artifacts/nvidia2204-encoders.txt
+-- 
+2.53.0
+

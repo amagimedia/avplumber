@@ -1,0 +1,79 @@
+From c7a5b8bab14df4ba91fd54dc16cdef7e3a0fb9ac Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 09:55:09 +0100
+Subject: [PATCH 22/40] ci yaml magic again
+
+---
+ .github/workflows/ci.yml | 45 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index eb24c9363f..e84a3387b9 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,7 +14,7 @@ concurrency:
+ 
+ jobs:
+   build:
+-    name: Ubuntu minimal build
++    name: Ubuntu non-NVIDIA build
+     runs-on: ubuntu-24.04
+ 
+     steps:
+@@ -26,11 +26,52 @@ jobs:
+           sudo apt-get update
+           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+             build-essential \
++            git \
+             nasm \
+             pkg-config
+ 
++      - name: Install nv-codec-headers compatibility headers
++        shell: bash
++        run: |
++          set -euxo pipefail
++          if ! pkg-config --exists ffnvcodec; then
++            git clone --depth=1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
++            make -C /tmp/nv-codec-headers -j"$(nproc)"
++            sudo make -C /tmp/nv-codec-headers install PREFIX=/usr/local
++          fi
++
+       - name: Configure
+-        run: ./configure --disable-debug --disable-doc --disable-autodetect
++        run: |
++          ./configure \
++            --disable-debug \
++            --disable-doc \
++            --disable-autodetect \
++            --disable-cuda \
++            --disable-cuda-nvcc \
++            --disable-cuda-llvm \
++            --disable-cuvid \
++            --disable-ffnvcodec \
++            --disable-nvdec \
++            --disable-nvenc \
++            --disable-filter=bilateral_cuda \
++            --disable-filter=bwdif_cuda \
++            --disable-filter=chromakey_cuda \
++            --disable-filter=colorspace_cuda \
++            --disable-filter=convert_cuda \
++            --disable-filter=crop_cuda \
++            --disable-filter=hwupload_cuda \
++            --disable-filter=libvmaf_cuda \
++            --disable-filter=overlay_cuda \
++            --disable-filter=overlay_many_cuda \
++            --disable-filter=pad_cuda \
++            --disable-filter=scale_cuda \
++            --disable-filter=scale_npp \
++            --disable-filter=scale2ref_npp \
++            --disable-filter=sharpen_npp \
++            --disable-filter=thumbnail_cuda \
++            --disable-filter=transition_cuda \
++            --disable-filter=transpose_npp \
++            --disable-filter=yadif_cuda
+ 
+       - name: Build
+         run: make -j"$(nproc)"
+-- 
+2.53.0
+

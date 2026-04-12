@@ -1,0 +1,81 @@
+From 8e3b8b4b073321a4b46328499c15e0b349ce7283 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 18 Mar 2026 12:24:32 +0100
+Subject: [PATCH 27/40] nvidia gh action build contd
+
+---
+ .github/workflows/ubuntu-25.04-deb.yml | 25 +++++++++----------------
+ 1 file changed, 9 insertions(+), 16 deletions(-)
+
+diff --git a/.github/workflows/ubuntu-25.04-deb.yml b/.github/workflows/ubuntu-25.04-deb.yml
+index 5675c87597..cfff078d28 100644
+--- a/.github/workflows/ubuntu-25.04-deb.yml
++++ b/.github/workflows/ubuntu-25.04-deb.yml
+@@ -14,9 +14,9 @@ on:
+         default: ffmpeg-nvidia
+         type: string
+       build_nvidia_package:
+-        description: Also build the NVIDIA/CUDA package on a self-hosted runner
++        description: Also build the NVIDIA/CUDA package for Ubuntu 24.04 x86_64
+         required: true
+-        default: false
++        default: true
+         type: boolean
+       regular_extra_configure_flags:
+         description: Additional flags appended to the regular non-NVIDIA configure command
+@@ -544,11 +544,9 @@ jobs:
+           path: ${{ steps.stage.outputs.package_file }}
+ 
+   build-nvidia-deb:
+-    name: Build Ubuntu 25.04 NVIDIA .deb
++    name: Build Ubuntu 24.04 NVIDIA .deb
+     if: ${{ inputs.build_nvidia_package }}
+-    # This workflow targets a self-hosted Ubuntu 25.04 x86_64 runner.
+-    # It can bootstrap CUDA Toolkit 13.0 if nvcc is not already present.
+-    runs-on: [self-hosted, linux, x64, ubuntu-25.04, cuda]
++    runs-on: ubuntu-24.04
+ 
+     env:
+       DEBIAN_FRONTEND: noninteractive
+@@ -584,17 +582,12 @@ jobs:
+               exit 1
+             fi
+ 
+-            SUDO=""
+-            if command -v sudo >/dev/null 2>&1; then
+-              SUDO="sudo"
+-            fi
+-
+             tmpdir="$(mktemp -d)"
+             wget -O "${tmpdir}/cuda-keyring.deb" \
+               https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+-            ${SUDO} dpkg -i "${tmpdir}/cuda-keyring.deb"
+-            ${SUDO} apt-get update
+-            ${SUDO} DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cuda-toolkit-13-0
++            dpkg -i "${tmpdir}/cuda-keyring.deb"
++            apt-get update
++            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cuda-toolkit-13-0
+             rm -rf "${tmpdir}"
+           fi
+ 
+@@ -736,7 +729,7 @@ jobs:
+           pkg_version="${version}+git${commit}-1"
+           stage_dir="${GITHUB_WORKSPACE}/out/package-root"
+           artifact_dir="${GITHUB_WORKSPACE}/out/artifacts"
+-          package_file="${artifact_dir}/${pkg_name}_${pkg_version}_ubuntu2504_${arch}.deb"
++          package_file="${artifact_dir}/${pkg_name}_${pkg_version}_ubuntu2404_${arch}.deb"
+ 
+           if [[ -z "${pkg_name}" ]]; then
+             echo "nvidia_package_name must resolve to a valid Debian package name" >&2
+@@ -782,7 +775,7 @@ jobs:
+             "Maintainer: ${maintainer}" \
+             "Installed-Size: ${installed_size}" \
+             "Description: FFmpeg build from ${GITHUB_REPOSITORY}" \
+-            ' Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 25.04.' \
++            ' Self-contained FFmpeg build produced by GitHub Actions for Ubuntu 24.04.' \
+             " Installed under ${FFMPEG_PREFIX} with launcher scripts in /usr/bin." \
+             > "${stage_dir}/DEBIAN/control"
+ 
+-- 
+2.53.0
+

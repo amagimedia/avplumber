@@ -1,0 +1,38 @@
+From 31a12ef477f16db9f4ea84b0490c53821a66ad8c Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:15:26 +0100
+Subject: [PATCH 05/40] add transition cuda filter (legacy old tellyo code)
+
+---
+ libavfilter/Makefile     | 2 ++
+ libavfilter/allfilters.c | 1 +
+ 2 files changed, 3 insertions(+)
+
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index e922c3e840..d18c31507e 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -531,6 +531,8 @@ OBJS-$(CONFIG_TONEMAP_OPENCL_FILTER)         += vf_tonemap_opencl.o opencl.o \
+                                                 opencl/tonemap.o opencl/colorspace_common.o
+ OBJS-$(CONFIG_TONEMAP_VAAPI_FILTER)          += vf_tonemap_vaapi.o vaapi_vpp.o
+ OBJS-$(CONFIG_TPAD_FILTER)                   += vf_tpad.o
++OBJS-$(CONFIG_TRANSITION_CUDA_FILTER)        += vf_transition_cuda.o framesync.o vf_transition_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_TRANSPOSE_FILTER)              += vf_transpose.o
+ OBJS-$(CONFIG_TRANSPOSE_NPP_FILTER)          += vf_transpose_npp.o
+ OBJS-$(CONFIG_TRANSPOSE_OPENCL_FILTER)       += vf_transpose_opencl.o opencl.o opencl/transpose.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 2af617f3c4..acf0168239 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -499,6 +499,7 @@ extern const AVFilter ff_vf_tonemap;
+ extern const AVFilter ff_vf_tonemap_opencl;
+ extern const AVFilter ff_vf_tonemap_vaapi;
+ extern const AVFilter ff_vf_tpad;
++extern const AVFilter ff_vf_transition_cuda;
+ extern const AVFilter ff_vf_transpose;
+ extern const AVFilter ff_vf_transpose_npp;
+ extern const AVFilter ff_vf_transpose_opencl;
+-- 
+2.53.0
+

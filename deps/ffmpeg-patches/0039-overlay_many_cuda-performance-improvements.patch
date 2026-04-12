@@ -1,0 +1,552 @@
+From 7fe525ee9ecd3044a72f2c37cd435c7aa1b4d463 Mon Sep 17 00:00:00 2001
+From: Teodor Wozniak <teodor.wozniak@amagi.com>
+Date: Thu, 2 Apr 2026 17:02:05 +0200
+Subject: [PATCH 39/40] overlay_many_cuda: performance improvements
+
+---
+ libavfilter/vf_overlay_many_cuda.c           | 151 +++++++++---
+ libavfilter/vf_overlay_many_cuda_generator.c | 241 +++++++++++++++++--
+ 2 files changed, 339 insertions(+), 53 deletions(-)
+
+diff --git a/libavfilter/vf_overlay_many_cuda.c b/libavfilter/vf_overlay_many_cuda.c
+index 8f8ec04ca4..63dab62a7b 100644
+--- a/libavfilter/vf_overlay_many_cuda.c
++++ b/libavfilter/vf_overlay_many_cuda.c
+@@ -13,6 +13,8 @@
+ #include "libavutil/avstring.h"
+ 
+ #include "avfilter.h"
++#include "filters.h"
++#include "video.h"
+ #include "framesync.h"
+ #include "avfilter_internal.h"
+ 
+@@ -61,6 +63,8 @@ typedef struct OverlayManyCUDAContext {
+     CUmodule cu_module;
+     CUfunction cu_func_standard;
+     CUfunction cu_func_420and444;
++    CUfunction cu_func_420to420_chroma;
++    CUfunction cu_func_combined;
+     CUstream cu_stream;
+ 
+     FFFrameSync fs;
+@@ -111,7 +115,8 @@ static int overlay_many_cuda_blend(FFFrameSync *fs)
+     CUcontext dummy, cuda_ctx = ctx->hwctx->cuda_ctx;
+ 
+     AVFrame *input_frames[MAX_INPUT_COUNT] = {0};
+-    void* kernel_args[4 + (4*MAX_OVERLAY_COUNT)];
++    AVFrame *output = NULL;
++    void* kernel_args[12 + (8*MAX_OVERLAY_COUNT)];
+ 
+     ctx->cu_ctx = cuda_ctx;
+ 
+@@ -135,59 +140,99 @@ static int overlay_many_cuda_blend(FFFrameSync *fs)
+     if (avctx->is_disabled)
+         return ff_filter_frame(outlink, input_frames[0]);
+ 
+-    ret = av_frame_make_writable(input_frames[0]);
+-    if (ret < 0) {
++    output = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!output) {
+         av_frame_free(&input_frames[0]);
+-        return ret;
++        return AVERROR(ENOMEM);
+     }
++    av_frame_copy_props(output, input_frames[0]);
+ 
+     // push cuda context
+     ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
+     if (ret < 0) {
+         av_frame_free(&input_frames[0]);
++        av_frame_free(&output);
+         return ret;
+     }
+ 
+-    // prepare kernel arguments and launch it for every plane (YUV)
+-    for (int plane_index = 0; plane_index < 3; plane_index++) {
+-        uint8_t main_log2_chroma_w = (plane_index == 0 ? 0 : ctx->main_log2_chroma_w);
+-        uint8_t main_log2_chroma_h = (plane_index == 0 ? 0 : ctx->main_log2_chroma_h);
+-
+-        int grid_dim_x = DIV_UP(input_frames[0]->width  >> main_log2_chroma_w, BLOCK_X);
+-        int grid_dim_y = DIV_UP(input_frames[0]->height >> main_log2_chroma_h, BLOCK_Y);
+-        int alpha_adjust_x = (1 << main_log2_chroma_w);
+-        int alpha_adjust_y = (1 << main_log2_chroma_h);
+-
+-        CUfunction cu_func = ctx->cu_func_standard;
+-        int header_arg_count = 4;
+-
+-        kernel_args[0] = &input_frames[0]->data[plane_index];
+-        kernel_args[1] = &input_frames[0]->linesize[plane_index];
+-        
+-        if (plane_index > 0 && ctx->cu_func_420and444) {
+-            cu_func = ctx->cu_func_420and444;
+-            header_arg_count = 2;
+-        } else {
+-            kernel_args[2] = &alpha_adjust_x;
+-            kernel_args[3] = &alpha_adjust_y;
++    if (ctx->cu_func_combined) {
++        // Single launch: combined Y+U+V kernel (YUV420P+YUVA420P or YUV444P+YUVA444P)
++        // arg layout: y_dst, y_dst_pitch, y_src, y_src_pitch,
++        //             u_dst, u_dst_pitch, u_src, u_src_pitch,
++        //             v_dst, v_dst_pitch, v_src, v_src_pitch,
++        //             [ov_y, ov_y_pitch, ov_u, ov_u_pitch, ov_v, ov_v_pitch, ov_alpha, ov_alpha_pitch] * N
++        int grid_dim_x = DIV_UP(input_frames[0]->width,  BLOCK_X);
++        int grid_dim_y = DIV_UP(input_frames[0]->height, BLOCK_Y);
++        int p, input_index, base;
++        for (p = 0; p < 3; p++) {
++            kernel_args[p*4 + 0] = &output->data[p];
++            kernel_args[p*4 + 1] = &output->linesize[p];
++            kernel_args[p*4 + 2] = &input_frames[0]->data[p];
++            kernel_args[p*4 + 3] = &input_frames[0]->linesize[p];
+         }
+-
+-        for (int input_index = 1; input_index < ctx->nb_inputs; input_index++) {
+-            int start_index = (input_index-1)*4 + header_arg_count;
+-            kernel_args[start_index + 0] = &input_frames[input_index]->data[plane_index];
+-            kernel_args[start_index + 1] = &input_frames[input_index]->linesize[plane_index];
+-            kernel_args[start_index + 2] = &input_frames[input_index]->data[3];
+-            kernel_args[start_index + 3] = &input_frames[input_index]->linesize[3];
++        for (input_index = 1; input_index < ctx->nb_inputs; input_index++) {
++            base = 12 + (input_index-1)*8;
++            kernel_args[base + 0] = &input_frames[input_index]->data[0];
++            kernel_args[base + 1] = &input_frames[input_index]->linesize[0];
++            kernel_args[base + 2] = &input_frames[input_index]->data[1];
++            kernel_args[base + 3] = &input_frames[input_index]->linesize[1];
++            kernel_args[base + 4] = &input_frames[input_index]->data[2];
++            kernel_args[base + 5] = &input_frames[input_index]->linesize[2];
++            kernel_args[base + 6] = &input_frames[input_index]->data[3];
++            kernel_args[base + 7] = &input_frames[input_index]->linesize[3];
+         }
+-
+-        CHECK_CU(cu->cuLaunchKernel(cu_func, grid_dim_x, grid_dim_y, 1,
++        CHECK_CU(cu->cuLaunchKernel(ctx->cu_func_combined, grid_dim_x, grid_dim_y, 1,
+                  BLOCK_X, BLOCK_Y, 1,
+                  0, ctx->cu_stream, kernel_args, NULL));
+-    }
++    } else {
++        // Fallback: separate kernel launch per plane (YUV420P+YUVA444P and any unhandled combos)
++        // arg layout: dst_ptr, dst_pitch, src_ptr, src_pitch, [alpha_adj_x, alpha_adj_y,] ov0..ovN
++        for (int plane_index = 0; plane_index < 3; plane_index++) {
++            uint8_t main_log2_chroma_w = (plane_index == 0 ? 0 : ctx->main_log2_chroma_w);
++            uint8_t main_log2_chroma_h = (plane_index == 0 ? 0 : ctx->main_log2_chroma_h);
++
++            int grid_dim_x = DIV_UP(input_frames[0]->width  >> main_log2_chroma_w, BLOCK_X);
++            int grid_dim_y = DIV_UP(input_frames[0]->height >> main_log2_chroma_h, BLOCK_Y);
++            int alpha_adjust_x = (1 << main_log2_chroma_w);
++            int alpha_adjust_y = (1 << main_log2_chroma_h);
++
++            CUfunction cu_func = ctx->cu_func_standard;
++            int header_arg_count;
++
++            kernel_args[0] = &output->data[plane_index];
++            kernel_args[1] = &output->linesize[plane_index];
++            kernel_args[2] = &input_frames[0]->data[plane_index];
++            kernel_args[3] = &input_frames[0]->linesize[plane_index];
++
++            if (plane_index > 0 && ctx->cu_func_420and444) {
++                cu_func = ctx->cu_func_420and444;
++                header_arg_count = 4;
++            } else if (plane_index > 0 && ctx->cu_func_420to420_chroma) {
++                cu_func = ctx->cu_func_420to420_chroma;
++                header_arg_count = 4;
++            } else {
++                kernel_args[4] = &alpha_adjust_x;
++                kernel_args[5] = &alpha_adjust_y;
++                header_arg_count = 6;
++            }
+ 
++            for (int input_index = 1; input_index < ctx->nb_inputs; input_index++) {
++                int start_index = (input_index-1)*4 + header_arg_count;
++                kernel_args[start_index + 0] = &input_frames[input_index]->data[plane_index];
++                kernel_args[start_index + 1] = &input_frames[input_index]->linesize[plane_index];
++                kernel_args[start_index + 2] = &input_frames[input_index]->data[3];
++                kernel_args[start_index + 3] = &input_frames[input_index]->linesize[3];
++            }
++
++            CHECK_CU(cu->cuLaunchKernel(cu_func, grid_dim_x, grid_dim_y, 1,
++                     BLOCK_X, BLOCK_Y, 1,
++                     0, ctx->cu_stream, kernel_args, NULL));
++        }
++    }
+ 
+     CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+-    return ff_filter_frame(outlink, input_frames[0]);
++    av_frame_free(&input_frames[0]);
++    return ff_filter_frame(outlink, output);
+ }
+ 
+ static int config_input_overlay(AVFilterLink *inlink)
+@@ -391,6 +436,38 @@ static int overlay_many_cuda_config_output(AVFilterLink *outlink)
+             }
+         }
+ 
++        if (ctx->format_main == AV_PIX_FMT_YUV420P &&
++            ctx->format_overlay == AV_PIX_FMT_YUVA420P)
++        {
++            snprintf(buf, sizeof(buf), "AlignedOverlay420to420Chroma__%d", ctx->nb_inputs);
++            err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func_420to420_chroma, ctx->cu_module, buf));
++            if (err < 0) {
++                av_log(ctx, AV_LOG_FATAL, "CUDA function %s wasn't implemented\n", buf);
++                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                return err;
++            }
++
++            snprintf(buf, sizeof(buf), "AlignedOverlayCombined420__%d", ctx->nb_inputs);
++            err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func_combined, ctx->cu_module, buf));
++            if (err < 0) {
++                av_log(ctx, AV_LOG_FATAL, "CUDA function %s wasn't implemented\n", buf);
++                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                return err;
++            }
++        }
++
++        if (ctx->format_main == AV_PIX_FMT_YUV444P &&
++            ctx->format_overlay == AV_PIX_FMT_YUVA444P)
++        {
++            snprintf(buf, sizeof(buf), "AlignedOverlayCombined444__%d", ctx->nb_inputs);
++            err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func_combined, ctx->cu_module, buf));
++            if (err < 0) {
++                av_log(ctx, AV_LOG_FATAL, "CUDA function %s wasn't implemented\n", buf);
++                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                return err;
++            }
++        }
++
+         CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+     }
+ 
+diff --git a/libavfilter/vf_overlay_many_cuda_generator.c b/libavfilter/vf_overlay_many_cuda_generator.c
+index d7b175d9c7..ed4d0f67b6 100644
+--- a/libavfilter/vf_overlay_many_cuda_generator.c
++++ b/libavfilter/vf_overlay_many_cuda_generator.c
+@@ -8,7 +8,8 @@ static void write_standard_function(FILE *file, int input_count)
+     fprintf(file, R"RAW_STR(
+ 
+ __global__ void AlignedOverlay__%d(
+-    unsigned char *main, int main_pitch,
++    unsigned char *main_dst, int main_dst_pitch,
++    const unsigned char * __restrict__ main_src, int main_src_pitch,
+     int alpha_adj_x, int alpha_adj_y,)RAW_STR",
+             input_count);
+ 
+@@ -17,8 +18,8 @@ __global__ void AlignedOverlay__%d(
+         char comma_or_paren = (ov_index+1 == ov_count ? ')' : ',');
+ 
+         fprintf(file, R"RAW_STR(
+-    unsigned char *ov%d, int ov%d_pitch,
+-    unsigned char *ov%dalpha, int ov%dalpha_pitch%c)RAW_STR",
++    const unsigned char * __restrict__ ov%d, int ov%d_pitch,
++    const unsigned char * __restrict__ ov%dalpha, int ov%dalpha_pitch%c)RAW_STR",
+                 ov_index, ov_index, ov_index, ov_index, comma_or_paren);
+     }
+ 
+@@ -33,19 +34,19 @@ __global__ void AlignedOverlay__%d(
+ 
+     for (int ov_index = 0; ov_index < ov_count; ov_index++)
+     {
+-        fprintf(file, "    float alpha%d = ov%dalpha[alpha_x + alpha_y * ov%dalpha_pitch] / 255.f;\n",
++        fprintf(file, "    unsigned int alpha%d = ov%dalpha[alpha_x + alpha_y * ov%dalpha_pitch];\n",
+                 ov_index, ov_index, ov_index);
+     }
+ 
+-    fprintf(file, "\n    unsigned char m = main[x + y*main_pitch];\n");
++    fprintf(file, "\n    unsigned int m = main_src[x + y*main_src_pitch];\n");
+ 
+     for (int ov_index = 0; ov_index < ov_count; ov_index++)
+     {
+-        fprintf(file, "    m = alpha%d * ov%d[x + y*ov%d_pitch] + (1.f - alpha%d) * m;\n",
++        fprintf(file, "    m = (alpha%d * (unsigned int)ov%d[x + y*ov%d_pitch] + (255u - alpha%d) * m + 127u) >> 8;\n",
+                 ov_index, ov_index, ov_index, ov_index);
+     }
+ 
+-    fprintf(file, "    main[x + y*main_pitch] = m;\n}\n"); 
++    fprintf(file, "    main_dst[x + y*main_dst_pitch] = (unsigned char)m;\n}\n"); 
+ }
+ 
+ static void write_420_plus_444_function(FILE *file, int input_count)
+@@ -55,7 +56,8 @@ static void write_420_plus_444_function(FILE *file, int input_count)
+     fprintf(file, R"RAW_STR(
+ 
+ __global__ void AlignedOverlay420and444to420__%d(
+-    unsigned char *main, int main_pitch,)RAW_STR",
++    unsigned char *main_dst, int main_dst_pitch,
++    const unsigned char * __restrict__ main_src, int main_src_pitch,)RAW_STR",
+             input_count);
+ 
+     for (int ov_index = 0; ov_index < ov_count; ov_index++)
+@@ -63,8 +65,8 @@ __global__ void AlignedOverlay420and444to420__%d(
+         char comma_or_paren = (ov_index+1 == ov_count ? ')' : ',');
+ 
+         fprintf(file, R"RAW_STR(
+-    unsigned char *ov%d, int ov%d_pitch,
+-    unsigned char *ov%dalpha, int ov%dalpha_pitch%c)RAW_STR",
++    const unsigned char * __restrict__ ov%d, int ov%d_pitch,
++    const unsigned char * __restrict__ ov%dalpha, int ov%dalpha_pitch%c)RAW_STR",
+                 ov_index, ov_index, ov_index, ov_index, comma_or_paren);
+     }
+ 
+@@ -83,7 +85,7 @@ __global__ void AlignedOverlay420and444to420__%d(
+         {
+             int bit_x = i & 1;
+             int bit_y = i >> 1;
+-            fprintf(file, "    float ov%d_alpha%d%d = ov%dalpha[(y2 + %d) * ov%dalpha_pitch + (x2 + %d)] / 255.f;\n",
++            fprintf(file, "    unsigned int ov%d_alpha%d%d = ov%dalpha[(y2 + %d) * ov%dalpha_pitch + (x2 + %d)];\n",
+                     ov_index, bit_y, bit_x,
+                     ov_index, bit_y, ov_index, bit_x);
+         }
+@@ -96,14 +98,15 @@ __global__ void AlignedOverlay420and444to420__%d(
+         {
+             int bit_x = i & 1;
+             int bit_y = i >> 1;
+-            fprintf(file, "    float ov%d_%d%d = ov%d[(y2 + %d) * ov%d_pitch + (x2 + %d)];\n",
++            fprintf(file, "    unsigned int ov%d_%d%d = ov%d[(y2 + %d) * ov%d_pitch + (x2 + %d)];\n",
+                     ov_index, bit_y, bit_x,
+                     ov_index, bit_y, ov_index, bit_x);
+         }
+     }
+ 
+-    fprintf(file, "\n    float m00, m10, m01, m11;\n"
+-            "    m00 = m10 = m01 = m11 = main[x + y*main_pitch];\n");
++    fprintf(file, "\n    unsigned int m_base = main_src[x + y*main_src_pitch];\n"
++            "    unsigned int m00, m10, m01, m11;\n"
++            "    m00 = m10 = m01 = m11 = m_base;\n");
+     
+     for (int ov_index = 0; ov_index < ov_count; ov_index++)
+     {
+@@ -111,7 +114,7 @@ __global__ void AlignedOverlay420and444to420__%d(
+         {
+             int bit_x = i & 1;
+             int bit_y = i >> 1;
+-            fprintf(file, "    m%d%d = ov%d_alpha%d%d * ov%d_%d%d + (1.f - ov%d_alpha%d%d) * m%d%d;\n",
++            fprintf(file, "    m%d%d = (ov%d_alpha%d%d * ov%d_%d%d + (255u - ov%d_alpha%d%d) * m%d%d + 127u) >> 8;\n",
+                     bit_y, bit_x,
+                     ov_index, bit_y, bit_x,
+                     ov_index, bit_y, bit_x,
+@@ -120,10 +123,207 @@ __global__ void AlignedOverlay420and444to420__%d(
+         }
+     }    
+     
+-    fprintf(file, "    main[x + y*main_pitch] = (m00 + m10 + m01 + m11) / 4.f;\n}\n");
++    fprintf(file, "    main_dst[x + y*main_dst_pitch] = (unsigned char)((m00 + m10 + m01 + m11 + 2u) >> 2);\n}\n");
+ }
+ 
+ 
++static void write_420_to_420_chroma_function(FILE *file, int input_count)
++{
++    int ov_count = input_count - 1;
++
++    fprintf(file, R"RAW_STR(
++
++__global__ void AlignedOverlay420to420Chroma__%d(
++    unsigned char *main_dst, int main_dst_pitch,
++    const unsigned char * __restrict__ main_src, int main_src_pitch,)RAW_STR",
++            input_count);
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        char comma_or_paren = (ov_index+1 == ov_count ? ')' : ',');
++
++        fprintf(file, R"RAW_STR(
++    const unsigned char * __restrict__ ov%d, int ov%d_pitch,
++    const unsigned char * __restrict__ ov%dalpha, int ov%dalpha_pitch%c)RAW_STR",
++                ov_index, ov_index, ov_index, ov_index, comma_or_paren);
++    }
++
++    fprintf(file, R"RAW_STR(
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    int x2 = x * 2;
++    int y2 = y * 2;
++
++)RAW_STR");
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file,
++            "    unsigned int ov%d_alpha = (ov%dalpha[y2 * ov%dalpha_pitch + x2] +\n"
++            "        ov%dalpha[y2 * ov%dalpha_pitch + x2 + 1] +\n"
++            "        ov%dalpha[(y2 + 1) * ov%dalpha_pitch + x2] +\n"
++            "        ov%dalpha[(y2 + 1) * ov%dalpha_pitch + x2 + 1] + 2u) >> 2;\n",
++            ov_index,
++            ov_index, ov_index,
++            ov_index, ov_index,
++            ov_index, ov_index,
++            ov_index, ov_index);
++    }
++
++    fprintf(file, "\n    unsigned int m = main_src[x + y*main_src_pitch];\n");
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    m = (ov%d_alpha * (unsigned int)ov%d[x + y*ov%d_pitch] + (255u - ov%d_alpha) * m + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++
++    fprintf(file, "    main_dst[x + y*main_dst_pitch] = (unsigned char)m;\n}\n");
++}
++
++static void write_combined_420_420_function(FILE *file, int input_count)
++{
++    int ov_count = input_count - 1;
++
++    fprintf(file, "\n\n__global__ void AlignedOverlayCombined420__%d(\n"
++            "    unsigned char *y_dst, int y_dst_pitch,\n"
++            "    const unsigned char * __restrict__ y_src, int y_src_pitch,\n"
++            "    unsigned char *u_dst, int u_dst_pitch,\n"
++            "    const unsigned char * __restrict__ u_src, int u_src_pitch,\n"
++            "    unsigned char *v_dst, int v_dst_pitch,\n"
++            "    const unsigned char * __restrict__ v_src, int v_src_pitch",
++            input_count);
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        int is_last = (ov_index+1 == ov_count);
++        fprintf(file,
++                ",\n"
++                "    const unsigned char * __restrict__ ov%d_y, int ov%d_y_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_u, int ov%d_u_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_v, int ov%d_v_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_alpha, int ov%d_alpha_pitch%s",
++                ov_index, ov_index, ov_index, ov_index,
++                ov_index, ov_index, ov_index, ov_index,
++                is_last ? ")" : "");
++    }
++
++    fprintf(file, "\n{\n"
++            "    int x = blockIdx.x * blockDim.x + threadIdx.x;\n"
++            "    int y = blockIdx.y * blockDim.y + threadIdx.y;\n\n");
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    unsigned int y_alpha%d = ov%d_alpha[x + y * ov%d_alpha_pitch];\n",
++                ov_index, ov_index, ov_index);
++    }
++
++    fprintf(file, "\n    unsigned int my = y_src[x + y * y_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    my = (y_alpha%d * (unsigned int)ov%d_y[x + y*ov%d_y_pitch] + (255u - y_alpha%d) * my + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "    y_dst[x + y*y_dst_pitch] = (unsigned char)my;\n\n");
++
++    fprintf(file, "    if ((x & 1) == 0 && (y & 1) == 0) {\n"
++            "        int cx = x >> 1;\n"
++            "        int cy = y >> 1;\n\n");
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file,
++                "        unsigned int uv_alpha%d = (ov%d_alpha[y * ov%d_alpha_pitch + x] +\n"
++                "            ov%d_alpha[y * ov%d_alpha_pitch + x + 1] +\n"
++                "            ov%d_alpha[(y + 1) * ov%d_alpha_pitch + x] +\n"
++                "            ov%d_alpha[(y + 1) * ov%d_alpha_pitch + x + 1] + 2u) >> 2;\n",
++                ov_index, ov_index, ov_index,
++                ov_index, ov_index,
++                ov_index, ov_index,
++                ov_index, ov_index);
++    }
++
++    fprintf(file, "\n        unsigned int mu = u_src[cx + cy * u_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "        mu = (uv_alpha%d * (unsigned int)ov%d_u[cx + cy*ov%d_u_pitch] + (255u - uv_alpha%d) * mu + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "        u_dst[cx + cy*u_dst_pitch] = (unsigned char)mu;\n\n");
++
++    fprintf(file, "        unsigned int mv = v_src[cx + cy * v_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "        mv = (uv_alpha%d * (unsigned int)ov%d_v[cx + cy*ov%d_v_pitch] + (255u - uv_alpha%d) * mv + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "        v_dst[cx + cy*v_dst_pitch] = (unsigned char)mv;\n"
++            "    }\n}\n");
++}
++
++static void write_combined_444_444_function(FILE *file, int input_count)
++{
++    int ov_count = input_count - 1;
++
++    fprintf(file, "\n\n__global__ void AlignedOverlayCombined444__%d(\n"
++            "    unsigned char *y_dst, int y_dst_pitch,\n"
++            "    const unsigned char * __restrict__ y_src, int y_src_pitch,\n"
++            "    unsigned char *u_dst, int u_dst_pitch,\n"
++            "    const unsigned char * __restrict__ u_src, int u_src_pitch,\n"
++            "    unsigned char *v_dst, int v_dst_pitch,\n"
++            "    const unsigned char * __restrict__ v_src, int v_src_pitch",
++            input_count);
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        int is_last = (ov_index+1 == ov_count);
++        fprintf(file,
++                ",\n"
++                "    const unsigned char * __restrict__ ov%d_y, int ov%d_y_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_u, int ov%d_u_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_v, int ov%d_v_pitch,\n"
++                "    const unsigned char * __restrict__ ov%d_alpha, int ov%d_alpha_pitch%s",
++                ov_index, ov_index, ov_index, ov_index,
++                ov_index, ov_index, ov_index, ov_index,
++                is_last ? ")" : "");
++    }
++
++    fprintf(file, "\n{\n"
++            "    int x = blockIdx.x * blockDim.x + threadIdx.x;\n"
++            "    int y = blockIdx.y * blockDim.y + threadIdx.y;\n\n");
++
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    unsigned int alpha%d = ov%d_alpha[x + y * ov%d_alpha_pitch];\n",
++                ov_index, ov_index, ov_index);
++    }
++
++    fprintf(file, "\n    unsigned int my = y_src[x + y * y_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    my = (alpha%d * (unsigned int)ov%d_y[x + y*ov%d_y_pitch] + (255u - alpha%d) * my + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "    y_dst[x + y*y_dst_pitch] = (unsigned char)my;\n\n");
++
++    fprintf(file, "    unsigned int mu = u_src[x + y * u_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    mu = (alpha%d * (unsigned int)ov%d_u[x + y*ov%d_u_pitch] + (255u - alpha%d) * mu + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "    u_dst[x + y*u_dst_pitch] = (unsigned char)mu;\n\n");
++
++    fprintf(file, "    unsigned int mv = v_src[x + y * v_src_pitch];\n");
++    for (int ov_index = 0; ov_index < ov_count; ov_index++)
++    {
++        fprintf(file, "    mv = (alpha%d * (unsigned int)ov%d_v[x + y*ov%d_v_pitch] + (255u - alpha%d) * mv + 127u) >> 8;\n",
++                ov_index, ov_index, ov_index, ov_index);
++    }
++    fprintf(file, "    v_dst[x + y*v_dst_pitch] = (unsigned char)mv;\n}\n");
++}
++
+ int main()
+ {
+     char *filename = "vf_overlay_many_cuda.cu";
+@@ -141,6 +341,15 @@ int main()
+         for (int input_count = 2; input_count <= MAX_INPUT_COUNT; input_count++)
+             write_420_plus_444_function(file, input_count);
+ 
++        for (int input_count = 2; input_count <= MAX_INPUT_COUNT; input_count++)
++            write_420_to_420_chroma_function(file, input_count);
++
++        for (int input_count = 2; input_count <= MAX_INPUT_COUNT; input_count++)
++            write_combined_420_420_function(file, input_count);
++
++        for (int input_count = 2; input_count <= MAX_INPUT_COUNT; input_count++)
++            write_combined_444_444_function(file, input_count);
++
+         fprintf(file, "\n} // extern \"C\"\n");
+         fclose(file);
+     }
+-- 
+2.53.0
+
