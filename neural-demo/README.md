@@ -66,7 +66,20 @@ The helper prints the final `docker run` command before it executes it.
 
 ## VOD Examples
 
+Default public VOD input used when `--input` is omitted:
+
+- `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4`
+
 Tracker:
+
+```bash
+neural-demo/run-neural-demo.sh \
+  --example tracker \
+  --mode vod \
+  --output /path/to/output/tracker.ts
+```
+
+Tracker with a custom local input file:
 
 ```bash
 neural-demo/run-neural-demo.sh \
@@ -82,7 +95,6 @@ Tracker cropped:
 neural-demo/run-neural-demo.sh \
   --example tracker-cropped \
   --mode vod \
-  --input /path/to/input.mp4 \
   --output /path/to/output/tracker-cropped.ts
 ```
 
@@ -114,25 +126,25 @@ Override the model archive URL when needed:
 neural-demo/run-neural-demo.sh \
   --example tracker \
   --mode vod \
-  --input /path/to/input.mp4 \
   --output /path/to/output/tracker.ts \
   --models-tar-url https://example.com/other-models.tgz
 ```
 
 ## Raw Docker Example
 
-VOD tracker example without the helper:
+VOD tracker example without the helper, using the default public demo MP4:
 
 ```bash
 docker run --rm --gpus all \
-  -v /absolute/path/input.mp4:/run/avp/input/input.mp4:ro \
   -v /absolute/path/output:/run/avp/output \
   -e AVP_EXAMPLE=tracker \
   -e AVP_MODE=vod \
-  -e AVP_INPUT=/run/avp/input/input.mp4 \
   -e AVP_OUTPUT=/run/avp/output/tracker.ts \
   avplumber-neural-demo:latest
 ```
+
+To use a custom local VOD file in raw `docker run`, mount it and set `AVP_INPUT`
+explicitly.
 
 ## Notes
 
