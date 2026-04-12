@@ -1,7 +1,7 @@
-From 1ab462a65fa2965c79bf69cc082a259b674a718c Mon Sep 17 00:00:00 2001
+From 1a54abb0cad9fd5992166ae23649bda9e9b14753 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:14:00 +0100
-Subject: [PATCH 03/40] add cuda convert filter (legacy old tellyo code)
+Subject: [PATCH 03/20] add cuda convert filter (legacy old tellyo code)
 
 ---
  libavfilter/Makefile     | 2 ++
@@ -9,7 +9,7 @@ Subject: [PATCH 03/40] add cuda convert filter (legacy old tellyo code)
  2 files changed, 3 insertions(+)
 
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index db4b2f9a96..e922c3e840 100644
+index db4b2f9..e922c3e 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -247,6 +247,8 @@ OBJS-$(CONFIG_COLORSPACE_CUDA_FILTER)        += vf_colorspace_cuda.o \
@@ -22,7 +22,7 @@ index db4b2f9a96..e922c3e840 100644
  OBJS-$(CONFIG_CONVOLUTION_OPENCL_FILTER)     += vf_convolution_opencl.o opencl.o \
                                                  opencl/convolution.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index ca423661f0..2af617f3c4 100644
+index ca42366..2af617f 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -226,6 +226,7 @@ extern const AVFilter ff_vf_colormatrix;

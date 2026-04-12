@@ -1,7 +1,7 @@
-From be9defedab55e335eb6bd9992bae6df09706949f Mon Sep 17 00:00:00 2001
+From 364d9773b677feedc39ed4a3e30a15e95878b811 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:19:35 +0100
-Subject: [PATCH 08/40] add rtp frame skip teo patch for rtp streaming (legacy
+Subject: [PATCH 08/20] add rtp frame skip teo patch for rtp streaming (legacy
  old tellyo code)
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 08/40] add rtp frame skip teo patch for rtp streaming (legacy
  1 file changed, 42 insertions(+), 2 deletions(-)
 
 diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
-index 53ea616f84..2f0dff0bf0 100644
+index 53ea616..2f0dff0 100644
 --- a/libavformat/rtpdec_rfc4175.c
 +++ b/libavformat/rtpdec_rfc4175.c
 @@ -44,6 +44,8 @@ struct PayloadContext {

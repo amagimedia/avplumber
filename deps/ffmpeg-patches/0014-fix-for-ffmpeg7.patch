@@ -1,14 +1,14 @@
-From 328f2f122fe4a1ee5d49d64eb7dba6adf49ea6ff Mon Sep 17 00:00:00 2001
+From 58a00475094535b234aa2a5b360fd8460b72fb86 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 12 Mar 2026 18:06:48 +0530
-Subject: [PATCH 14/40] fix for ffmpeg7
+Subject: [PATCH 14/20] fix for ffmpeg7
 
 ---
  libavfilter/vf_crop_cuda.c | 23 ++++++++++++++---------
  1 file changed, 14 insertions(+), 9 deletions(-)
 
 diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
-index a7e649fd5e..d08dc38916 100644
+index a7e649f..d08dc38 100644
 --- a/libavfilter/vf_crop_cuda.c
 +++ b/libavfilter/vf_crop_cuda.c
 @@ -22,7 +22,6 @@

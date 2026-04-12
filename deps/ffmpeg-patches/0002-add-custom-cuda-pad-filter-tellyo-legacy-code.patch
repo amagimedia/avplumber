@@ -1,7 +1,7 @@
-From de1c119a2284f2d0e5b82e95cdcbc1985a545fa7 Mon Sep 17 00:00:00 2001
+From 3f0a41055cfc542662ce7ad68b131dbda2ed0bc4 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:12:54 +0100
-Subject: [PATCH 02/40] add custom cuda pad filter (tellyo legacy code)
+Subject: [PATCH 02/20] add custom cuda pad filter (tellyo legacy code)
 
 ---
  libavfilter/Makefile       |   1 +
@@ -13,7 +13,7 @@ Subject: [PATCH 02/40] add custom cuda pad filter (tellyo legacy code)
  create mode 100644 libavfilter/vf_pad_cuda.cu
 
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 91487afb21..db4b2f9a96 100644
+index 91487af..db4b2f9 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -417,6 +417,7 @@ OBJS-$(CONFIG_OVERLAY_VAAPI_FILTER)          += vf_overlay_vaapi.o framesync.o v
@@ -25,7 +25,7 @@ index 91487afb21..db4b2f9a96 100644
  OBJS-$(CONFIG_PALETTEGEN_FILTER)             += vf_palettegen.o palette.o
  OBJS-$(CONFIG_PALETTEUSE_FILTER)             += vf_paletteuse.o framesync.o palette.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index 9819f0f95b..ca423661f0 100644
+index 9819f0f..ca42366 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -392,6 +392,7 @@ extern const AVFilter ff_vf_overlay_vulkan;
@@ -38,7 +38,7 @@ index 9819f0f95b..ca423661f0 100644
  extern const AVFilter ff_vf_paletteuse;
 diff --git a/libavfilter/vf_pad_cuda.c b/libavfilter/vf_pad_cuda.c
 new file mode 100644
-index 0000000000..7daa2275aa
+index 0000000..7daa227
 --- /dev/null
 +++ b/libavfilter/vf_pad_cuda.c
 @@ -0,0 +1,538 @@
@@ -582,7 +582,7 @@ index 0000000000..7daa2275aa
 +};
 diff --git a/libavfilter/vf_pad_cuda.cu b/libavfilter/vf_pad_cuda.cu
 new file mode 100644
-index 0000000000..62f7988de5
+index 0000000..62f7988
 --- /dev/null
 +++ b/libavfilter/vf_pad_cuda.cu
 @@ -0,0 +1,37 @@

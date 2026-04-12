@@ -1,20 +1,110 @@
-From e171a9d6b965da6571f6997273692d62e3dff063 Mon Sep 17 00:00:00 2001
-From: Jan Pietek <jan.pietek@gmail.com>
-Date: Wed, 18 Mar 2026 12:59:10 +0100
-Subject: [PATCH 30/40] missing file
+From b83139934fde8c0d1efeaf805ac7dbd52fdc6484 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@amagi.com>
+Date: Sun, 12 Apr 2026 12:38:51 +0000
+Subject: [PATCH 16/20] github-actions
 
 ---
- .github/workflows/ubuntu-deb.yml | 1108 ++++++++++++++++++++++++++++++
- 1 file changed, 1108 insertions(+)
- create mode 100644 .github/workflows/ubuntu-deb.yml
+ .github/workflows/ci.yml                |  80 ++++
+ .github/workflows/ubuntu-cpu-deb.yml    | 507 ++++++++++++++++++++
+ .github/workflows/ubuntu-nvidia-deb.yml | 598 ++++++++++++++++++++++++
+ 3 files changed, 1185 insertions(+)
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 .github/workflows/ubuntu-cpu-deb.yml
+ create mode 100644 .github/workflows/ubuntu-nvidia-deb.yml
 
-diff --git a/.github/workflows/ubuntu-deb.yml b/.github/workflows/ubuntu-deb.yml
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 new file mode 100644
-index 0000000000..d207d9737c
+index 0000000..a9fd934
 --- /dev/null
-+++ b/.github/workflows/ubuntu-deb.yml
-@@ -0,0 +1,1108 @@
-+name: Ubuntu deb packages
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,80 @@
++name: CI
++
++on:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++concurrency:
++  group: ci-${{ github.workflow }}-${{ github.ref }}
++  cancel-in-progress: true
++
++jobs:
++  build:
++    name: Ubuntu non-NVIDIA build
++    runs-on: ubuntu-24.04
++
++    steps:
++      - name: Check out sources
++        uses: actions/checkout@v4
++
++      - name: Install build dependencies
++        run: |
++          sudo apt-get update
++          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++            build-essential \
++            git \
++            nasm \
++            pkg-config
++
++      - name: Install nv-codec-headers compatibility headers
++        shell: bash
++        run: |
++          set -euxo pipefail
++          if ! pkg-config --exists ffnvcodec; then
++            git clone --depth=1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
++            make -C /tmp/nv-codec-headers -j"$(nproc)"
++            sudo make -C /tmp/nv-codec-headers install PREFIX=/usr/local
++          fi
++
++      - name: Configure
++        run: |
++          ./configure \
++            --disable-debug \
++            --disable-doc \
++            --disable-autodetect \
++            --disable-cuda \
++            --disable-cuda-nvcc \
++            --disable-cuda-llvm \
++            --disable-cuvid \
++            --disable-ffnvcodec \
++            --disable-nvdec \
++            --disable-nvenc \
++            --disable-filter=bilateral_cuda \
++            --disable-filter=bwdif_cuda \
++            --disable-filter=chromakey_cuda \
++            --disable-filter=colorspace_cuda \
++            --disable-filter=convert_cuda \
++            --disable-filter=crop_cuda \
++            --disable-filter=hwupload_cuda \
++            --disable-filter=libvmaf_cuda \
++            --disable-filter=overlay_cuda \
++            --disable-filter=overlay_many_cuda \
++            --disable-filter=pad_cuda \
++            --disable-filter=scale_cuda \
++            --disable-filter=scale_npp \
++            --disable-filter=scale2ref_npp \
++            --disable-filter=sharpen_npp \
++            --disable-filter=thumbnail_cuda \
++            --disable-filter=transition_cuda \
++            --disable-filter=transpose_npp \
++            --disable-filter=yadif_cuda
++
++      - name: Build
++        run: make -j"$(nproc)"
++
++      - name: Smoke test binaries
++        run: |
++          ./ffmpeg -version
++          ./ffprobe -version
+diff --git a/.github/workflows/ubuntu-cpu-deb.yml b/.github/workflows/ubuntu-cpu-deb.yml
+new file mode 100644
+index 0000000..f9f7f9c
+--- /dev/null
++++ b/.github/workflows/ubuntu-cpu-deb.yml
+@@ -0,0 +1,507 @@
++name: Ubuntu CPU deb packages
 +
 +on:
 +  workflow_dispatch:
@@ -24,23 +114,8 @@ index 0000000000..d207d9737c
 +        required: true
 +        default: ffmpeg
 +        type: string
-+      nvidia_package_name:
-+        description: Debian package basename for the NVIDIA build
-+        required: true
-+        default: ffmpeg-nvidia
-+        type: string
-+      build_nvidia_package:
-+        description: Also build the NVIDIA/CUDA package for Ubuntu 24.04 x86_64
-+        required: true
-+        default: true
-+        type: boolean
 +      regular_extra_configure_flags:
 +        description: Additional flags appended to the regular non-NVIDIA configure command
-+        required: false
-+        default: ""
-+        type: string
-+      nvidia_extra_configure_flags:
-+        description: Additional flags appended to the NVIDIA/CUDA configure command
 +        required: false
 +        default: ""
 +        type: string
@@ -55,11 +130,9 @@ index 0000000000..d207d9737c
 +
 +jobs:
 +  build-regular-deb:
-+    name: Build Ubuntu 25.04 regular .deb
++    name: Build Ubuntu 25.04 CPU .deb
 +    runs-on: ubuntu-24.04
 +
-+    # GitHub-hosted runners do not currently expose an ubuntu-25.04 label,
-+    # so the regular package build runs inside a 25.04 container.
 +    container:
 +      image: ubuntu:25.04
 +
@@ -299,11 +372,9 @@ index 0000000000..d207d9737c
 +          path: ${{ steps.stage.outputs.package_file }}
 +
 +  build-regular-deb-arm64:
-+    name: Build Ubuntu 25.04 regular arm64 .deb
++    name: Build Ubuntu 25.04 CPU arm64 .deb
 +    runs-on: ubuntu-24.04-arm
 +
-+    # GitHub-hosted runners do not currently expose an ubuntu-25.04 label,
-+    # so the regular package build runs inside a 25.04 container.
 +    container:
 +      image: ubuntu:25.04
 +
@@ -540,10 +611,39 @@ index 0000000000..d207d9737c
 +        with:
 +          name: ${{ steps.stage.outputs.package_name }}
 +          path: ${{ steps.stage.outputs.package_file }}
+diff --git a/.github/workflows/ubuntu-nvidia-deb.yml b/.github/workflows/ubuntu-nvidia-deb.yml
+new file mode 100644
+index 0000000..bda809f
+--- /dev/null
++++ b/.github/workflows/ubuntu-nvidia-deb.yml
+@@ -0,0 +1,598 @@
++name: Ubuntu Nvidia deb packages
 +
++on:
++  workflow_dispatch:
++    inputs:
++      nvidia_package_name:
++        description: Debian package basename for the NVIDIA build
++        required: true
++        default: ffmpeg-nvidia
++        type: string
++      nvidia_extra_configure_flags:
++        description: Additional flags appended to the NVIDIA/CUDA configure command
++        required: false
++        default: ""
++        type: string
++      strip_binaries:
++        description: Strip installed binaries and shared libraries
++        required: true
++        default: true
++        type: boolean
++
++permissions:
++  contents: read
++
++jobs:
 +  build-nvidia-deb:
 +    name: Build Ubuntu 24.04 NVIDIA .deb
-+    if: ${{ inputs.build_nvidia_package }}
 +    runs-on: ubuntu-24.04
 +
 +    env:
@@ -762,11 +862,11 @@ index 0000000000..d207d9737c
 +
 +          if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
 +            filter_output="${artifact_dir}/nvidia-filters.txt"
-+            codec_output="${artifact_dir}/nvidia-codecs.txt"
++            encoder_output="${artifact_dir}/nvidia-encoders.txt"
 +            LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
 +              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -filters > "${filter_output}"
 +            LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-+              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -codecs > "${codec_output}"
++              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -encoders > "${encoder_output}"
 +
 +            grep -q ' crop_cuda ' "${filter_output}"
 +            grep -q ' scale_cuda ' "${filter_output}"
@@ -774,15 +874,12 @@ index 0000000000..d207d9737c
 +            grep -q ' thumbnail_cuda ' "${filter_output}"
 +            grep -q ' yadif_cuda ' "${filter_output}"
 +            grep -q ' hwupload_cuda ' "${filter_output}"
-+            grep -q ' scale_npp ' "${filter_output}"
-+            grep -q ' transpose_npp ' "${filter_output}"
-+            grep -q ' sharpen_npp ' "${filter_output}"
 +            grep -q ' pad_cuda ' "${filter_output}"
 +            grep -q ' convert_cuda ' "${filter_output}"
 +            grep -q ' transition_cuda ' "${filter_output}"
 +            grep -q ' overlay_many_cuda ' "${filter_output}"
-+            grep -q ' DEV.LS h264_nvenc ' "${codec_output}"
-+            grep -q ' DEV.L. hevc_nvenc ' "${codec_output}"
++            grep -q ' h264_nvenc ' "${encoder_output}"
++            grep -q ' hevc_nvenc ' "${encoder_output}"
 +          fi
 +
 +          if [[ "${{ inputs.strip_binaries }}" == "true" ]]; then
@@ -830,11 +927,10 @@ index 0000000000..d207d9737c
 +          path: |
 +            ${{ steps.stage.outputs.package_file }}
 +            out/artifacts/nvidia-filters.txt
-+            out/artifacts/nvidia-codecs.txt
++            out/artifacts/nvidia-encoders.txt
 +
 +  build-nvidia-deb-2204:
 +    name: Build Ubuntu 22.04 NVIDIA .deb
-+    if: ${{ inputs.build_nvidia_package }}
 +    runs-on: ubuntu-22.04
 +
 +    env:
@@ -1053,11 +1149,11 @@ index 0000000000..d207d9737c
 +
 +          if [[ -x "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
 +            filter_output="${artifact_dir}/nvidia2204-filters.txt"
-+            codec_output="${artifact_dir}/nvidia2204-codecs.txt"
++            encoder_output="${artifact_dir}/nvidia2204-encoders.txt"
 +            LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
 +              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -filters > "${filter_output}"
 +            LD_LIBRARY_PATH="${stage_dir}${FFMPEG_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-+              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -codecs > "${codec_output}"
++              "${stage_dir}${FFMPEG_PREFIX}/bin/ffmpeg" -hide_banner -encoders > "${encoder_output}"
 +
 +            grep -q ' crop_cuda ' "${filter_output}"
 +            grep -q ' scale_cuda ' "${filter_output}"
@@ -1065,15 +1161,12 @@ index 0000000000..d207d9737c
 +            grep -q ' thumbnail_cuda ' "${filter_output}"
 +            grep -q ' yadif_cuda ' "${filter_output}"
 +            grep -q ' hwupload_cuda ' "${filter_output}"
-+            grep -q ' scale_npp ' "${filter_output}"
-+            grep -q ' transpose_npp ' "${filter_output}"
-+            grep -q ' sharpen_npp ' "${filter_output}"
 +            grep -q ' pad_cuda ' "${filter_output}"
 +            grep -q ' convert_cuda ' "${filter_output}"
 +            grep -q ' transition_cuda ' "${filter_output}"
 +            grep -q ' overlay_many_cuda ' "${filter_output}"
-+            grep -q ' DEV.LS h264_nvenc ' "${codec_output}"
-+            grep -q ' DEV.L. hevc_nvenc ' "${codec_output}"
++            grep -q ' h264_nvenc ' "${encoder_output}"
++            grep -q ' hevc_nvenc ' "${encoder_output}"
 +          fi
 +
 +          if [[ "${{ inputs.strip_binaries }}" == "true" ]]; then
@@ -1121,7 +1214,7 @@ index 0000000000..d207d9737c
 +          path: |
 +            ${{ steps.stage.outputs.package_file }}
 +            out/artifacts/nvidia2204-filters.txt
-+            out/artifacts/nvidia2204-codecs.txt
++            out/artifacts/nvidia2204-encoders.txt
 -- 
 2.53.0
 

@@ -1,14 +1,14 @@
-From 0282db555c3cf3fb2e47d2f696f1adbdad14f4cd Mon Sep 17 00:00:00 2001
+From 4bb0479af64eab3994fecbbda2911609db892f22 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:14:47 +0100
-Subject: [PATCH 04/40] nvdec intra patch (legacy old tellyo code)
+Subject: [PATCH 04/20] nvdec intra patch (legacy old tellyo code)
 
 ---
  libavcodec/cuviddec.c | 7 +++++++
  1 file changed, 7 insertions(+)
 
 diff --git a/libavcodec/cuviddec.c b/libavcodec/cuviddec.c
-index 3fae9c12eb..7ad59f1740 100644
+index 3fae9c1..7ad59f1 100644
 --- a/libavcodec/cuviddec.c
 +++ b/libavcodec/cuviddec.c
 @@ -342,6 +342,13 @@ static int CUDAAPI cuvid_handle_video_sequence(void *opaque, CUVIDEOFORMAT* form

@@ -1,7 +1,7 @@
-From a5cb6a554632ea9cf7c4a2c315aa061df7194640 Mon Sep 17 00:00:00 2001
+From 534042a4c5b297fe7baca2adf9c231acb171ee12 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:16:38 +0100
-Subject: [PATCH 06/40] missing files for cuda filters
+Subject: [PATCH 06/20] missing files for cuda filters
 
 ---
  libavfilter/Makefile                         |    2 +
@@ -23,7 +23,7 @@ Subject: [PATCH 06/40] missing files for cuda filters
  create mode 100644 libavfilter/vf_transition_cuda.cu
 
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index d18c31507e..49d8227db2 100644
+index d18c315..49d8227 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -412,6 +412,8 @@ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
@@ -36,7 +36,7 @@ index d18c31507e..49d8227db2 100644
                                                  opencl/overlay.o framesync.o
  OBJS-$(CONFIG_OVERLAY_QSV_FILTER)            += vf_overlay_qsv.o framesync.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index acf0168239..8a2f873eac 100644
+index acf0168..8a2f873 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -391,6 +391,7 @@ extern const AVFilter ff_vf_overlay_qsv;
@@ -49,7 +49,7 @@ index acf0168239..8a2f873eac 100644
  extern const AVFilter ff_vf_pad_cuda;
 diff --git a/libavfilter/vf_convert_cuda.c b/libavfilter/vf_convert_cuda.c
 new file mode 100644
-index 0000000000..5231ad3ca3
+index 0000000..5231ad3
 --- /dev/null
 +++ b/libavfilter/vf_convert_cuda.c
 @@ -0,0 +1,453 @@
@@ -508,7 +508,7 @@ index 0000000000..5231ad3ca3
 +};
 diff --git a/libavfilter/vf_convert_cuda.cu b/libavfilter/vf_convert_cuda.cu
 new file mode 100644
-index 0000000000..6ea76379d6
+index 0000000..6ea7637
 --- /dev/null
 +++ b/libavfilter/vf_convert_cuda.cu
 @@ -0,0 +1,231 @@
@@ -745,7 +745,7 @@ index 0000000000..6ea76379d6
 +}
 diff --git a/libavfilter/vf_overlay_many_cuda.c b/libavfilter/vf_overlay_many_cuda.c
 new file mode 100644
-index 0000000000..8f8ec04ca4
+index 0000000..8f8ec04
 --- /dev/null
 +++ b/libavfilter/vf_overlay_many_cuda.c
 @@ -0,0 +1,459 @@
@@ -1210,7 +1210,7 @@ index 0000000000..8f8ec04ca4
 +};
 diff --git a/libavfilter/vf_overlay_many_cuda.cu b/libavfilter/vf_overlay_many_cuda.cu
 new file mode 100644
-index 0000000000..e513e4f1fb
+index 0000000..e513e4f
 --- /dev/null
 +++ b/libavfilter/vf_overlay_many_cuda.cu
 @@ -0,0 +1,2630 @@
@@ -3846,7 +3846,7 @@ index 0000000000..e513e4f1fb
 +} // extern "C"
 diff --git a/libavfilter/vf_overlay_many_cuda_generator.c b/libavfilter/vf_overlay_many_cuda_generator.c
 new file mode 100644
-index 0000000000..d7b175d9c7
+index 0000000..d7b175d
 --- /dev/null
 +++ b/libavfilter/vf_overlay_many_cuda_generator.c
 @@ -0,0 +1,151 @@
@@ -4003,7 +4003,7 @@ index 0000000000..d7b175d9c7
 +}
 diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
 new file mode 100644
-index 0000000000..542e4a6568
+index 0000000..542e4a6
 --- /dev/null
 +++ b/libavfilter/vf_transition_cuda.c
 @@ -0,0 +1,561 @@
@@ -4570,7 +4570,7 @@ index 0000000000..542e4a6568
 +};
 diff --git a/libavfilter/vf_transition_cuda.cu b/libavfilter/vf_transition_cuda.cu
 new file mode 100644
-index 0000000000..bbe8d6c89e
+index 0000000..bbe8d6c
 --- /dev/null
 +++ b/libavfilter/vf_transition_cuda.cu
 @@ -0,0 +1,48 @@

@@ -1,7 +1,7 @@
-From 6137fc2b110e49eff72b70326f84a5aeb2f2dfec Mon Sep 17 00:00:00 2001
+From e4b4dbdccaa82b007bf3f320d7fd761f1cbd9a14 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 10:17:46 +0100
-Subject: [PATCH 07/40] add rtp streaming teo fix for 420p (legacy old tellyo
+Subject: [PATCH 07/20] add rtp streaming teo fix for 420p (legacy old tellyo
  code)
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 07/40] add rtp streaming teo fix for 420p (legacy old tellyo
  1 file changed, 38 insertions(+), 6 deletions(-)
 
 diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
-index b49fc55d2d..53ea616f84 100644
+index b49fc55..53ea616 100644
 --- a/libavformat/rtpdec_rfc4175.c
 +++ b/libavformat/rtpdec_rfc4175.c
 @@ -43,6 +43,7 @@ struct PayloadContext {

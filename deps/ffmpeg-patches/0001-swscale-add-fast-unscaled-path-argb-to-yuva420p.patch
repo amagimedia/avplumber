@@ -1,7 +1,7 @@
-From 9e3991adbfdbe80d6b64ee09dd809d64645ea229 Mon Sep 17 00:00:00 2001
+From 3708bfab707a6eeb151829fd5c92807470c0f6d8 Mon Sep 17 00:00:00 2001
 From: Teodor Wozniak <teodor.wozniak@amagi.com>
 Date: Tue, 24 Feb 2026 18:15:04 +0100
-Subject: [PATCH 01/40] swscale: add fast unscaled path argb to yuva420p
+Subject: [PATCH 01/20] swscale: add fast unscaled path argb to yuva420p
 
 ---
  libswscale/aarch64/input.S                 |  36 ++++
@@ -11,7 +11,7 @@ Subject: [PATCH 01/40] swscale: add fast unscaled path argb to yuva420p
  4 files changed, 367 insertions(+)
 
 diff --git a/libswscale/aarch64/input.S b/libswscale/aarch64/input.S
-index 5cb18711fb..bab27005e9 100644
+index 5cb1871..bab2700 100644
 --- a/libswscale/aarch64/input.S
 +++ b/libswscale/aarch64/input.S
 @@ -313,3 +313,39 @@ rgbToUV_neon bgr24, rgb24, element=3
@@ -55,7 +55,7 @@ index 5cb18711fb..bab27005e9 100644
 +        ret
 +endfunc
 diff --git a/libswscale/aarch64/swscale.c b/libswscale/aarch64/swscale.c
-index eb907284e7..a2abfe5c38 100644
+index eb90728..a2abfe5 100644
 --- a/libswscale/aarch64/swscale.c
 +++ b/libswscale/aarch64/swscale.c
 @@ -217,6 +217,8 @@ NEON_INPUT(bgr24);
@@ -86,7 +86,7 @@ index eb907284e7..a2abfe5c38 100644
          case AV_PIX_FMT_BGR24:
              c->lumToYV12 = ff_bgr24ToY_neon;
 diff --git a/libswscale/aarch64/swscale_unscaled.c b/libswscale/aarch64/swscale_unscaled.c
-index 9dfccc0fdb..9626dd3dcb 100644
+index 9dfccc0..9626dd3 100644
 --- a/libswscale/aarch64/swscale_unscaled.c
 +++ b/libswscale/aarch64/swscale_unscaled.c
 @@ -21,6 +21,13 @@
@@ -236,7 +236,7 @@ index 9dfccc0fdb..9626dd3dcb 100644
  
  void ff_get_unscaled_swscale_aarch64(SwsContext *c)
 diff --git a/libswscale/aarch64/swscale_unscaled_neon.S b/libswscale/aarch64/swscale_unscaled_neon.S
-index a074b187e5..0c961ad4af 100644
+index a074b18..0c961ad 100644
 --- a/libswscale/aarch64/swscale_unscaled_neon.S
 +++ b/libswscale/aarch64/swscale_unscaled_neon.S
 @@ -20,6 +20,206 @@
