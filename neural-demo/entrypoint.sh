@@ -5,6 +5,7 @@ readonly MODEL_ROOT="/home/tensorrt"
 readonly TEMPLATE_ROOT="/opt/avp-neural-demo/templates"
 readonly RENDER_DIR="/tmp/avp-rendered"
 readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
+readonly DEFAULT_LIVE_OUTPUT_URL="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
 
 die() {
     echo "error: $*" >&2
@@ -18,7 +19,6 @@ require_env() {
 
 require_env AVP_EXAMPLE
 require_env AVP_MODE
-require_env AVP_OUTPUT
 require_env AVP_MODELS_TAR_URL
 
 case "${AVP_EXAMPLE}" in
@@ -33,8 +33,10 @@ esac
 
 if [[ "${AVP_MODE}" == "vod" ]]; then
     AVP_INPUT="${AVP_INPUT:-${DEFAULT_VOD_INPUT_URL}}"
+    require_env AVP_OUTPUT
 else
-    require_env AVP_INPUT
+    AVP_INPUT="${AVP_INPUT:-${DEFAULT_VOD_INPUT_URL}}"
+    AVP_OUTPUT="${AVP_OUTPUT:-${DEFAULT_LIVE_OUTPUT_URL}}"
 fi
 
 if [[ ! -e /dev/nvidiactl ]]; then
