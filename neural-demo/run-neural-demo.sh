@@ -8,6 +8,7 @@ input=""
 output=""
 models_tar_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz"
 default_vod_input_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
+default_live_output_url="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
 dry_run=0
 docker_extra=()
 
@@ -22,7 +23,7 @@ Usage:
   neural-demo/run-neural-demo.sh \
     --example tracker|tracker-cropped \
     --mode vod|live \
-    --output ... \
+    [--output ...] \
     [--input ...] \
     [--models-tar-url ...] \
     [--image IMAGE] \
@@ -86,7 +87,6 @@ done
 
 [[ -n "${example}" ]] || die "--example is required"
 [[ -n "${mode}" ]] || die "--mode is required"
-[[ -n "${output}" ]] || die "--output is required"
 case "${example}" in
     tracker|tracker-cropped) ;;
     *) die "--example must be tracker or tracker-cropped" ;;
@@ -101,6 +101,7 @@ docker_cmd=(docker run --rm --gpus all)
 docker_cmd+=("${docker_extra[@]}")
 
 if [[ "${mode}" == "vod" ]]; then
+    [[ -n "${output}" ]] || die "--output is required for vod mode"
     output_host="$(abspath "${output}")"
     output_dir="$(dirname "${output_host}")"
     mkdir -p "${output_dir}"
@@ -121,18 +122,37 @@ if [[ "${mode}" == "vod" ]]; then
 
     docker_cmd+=(-e "AVP_OUTPUT=${output_container}")
 else
-    [[ -n "${input}" ]] || die "--input is required for live mode"
-    case "${input}" in
-        rtmp://*|rtmps://*|srt://*) ;;
-        *) die "live --input must be an rtmp://, rtmps://, or srt:// URL" ;;
-    esac
+    if [[ -n "${input}" ]]; then
+        case "${input}" in
+            rtmp://*|rtmps://*|srt://*)
+                die "live --input must be a looped VOD source, not an RTMP/SRT URL"
+                ;;
+            http://*|https://*)
+                docker_cmd+=(-e "AVP_INPUT=${input}")
+                ;;
+            *)
+                input_host="$(abspath "${input}")"
+                [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
+                input_container="/run/avp/input/$(basename "${input_host}")"
+                docker_cmd+=(
+                    -v "${input_host}:${input_container}:ro"
+                    -e "AVP_INPUT=${input_container}"
+                )
+                ;;
+        esac
+    else
+        docker_cmd+=(-e "AVP_INPUT=${default_vod_input_url}")
+    fi
+
+    if [[ -z "${output}" ]]; then
+        output="${default_live_output_url}"
+    fi
     case "${output}" in
         rtmp://*|rtmps://*|srt://*) ;;
         *) die "live --output must be an rtmp://, rtmps://, or srt:// URL" ;;
     esac
 
     docker_cmd+=(
-        -e "AVP_INPUT=${input}"
         -e "AVP_OUTPUT=${output}"
     )
 fi

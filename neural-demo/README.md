@@ -1,76 +1,50 @@
 # Neural Demo
 
-This directory contains a public Fedora 42 Docker flow for the neural avplumber
-demo.
+Requires a Linux host with an NVIDIA GPU, NVIDIA driver `r580+`, NVIDIA
+Container Toolkit, and `docker --gpus all`.
 
-The image is built from:
+## Quick Start
 
-- public upstream FFmpeg tag `n7.1.3`
-- local patch stack from `deps/ffmpeg-patches/`
-- avplumber built against that patched FFmpeg in `/usr/local`
-
-The image does not install NVIDIA drivers. The host must provide the driver and
-GPU runtime integration.
-
-TensorRT for this image is pulled from a minimal public archive containing only
-the headers and runtime libraries needed by this demo:
-
-- `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/tensorrt-minimal-10.15.1.29.tar.gz`
-
-## Host Prerequisites
-
-- Linux host with NVIDIA GPU
-- NVIDIA driver branch `r580+`
-- NVIDIA Container Toolkit or equivalent OCI GPU integration
-- `docker` with `--gpus all` support
-
-Validated reference host:
-
-- Fedora 42
-- NVIDIA driver `580.126.18`
-- `nvidia-smi` reports `CUDA Version: 13.0`
-
-## Required Model Plans
-
-The runtime downloads a model tarball and normalizes it into `/home/tensorrt`.
-It requires these three plan files:
-
-- `ball_960x544.plan`, about `20.3 MiB`
-- `court-segmentation_960x544.plan`, about `22.2 MiB`
-- `basketball-players-full_960x544.plan`, about `20.2 MiB`
-
-Total size is about `62.7 MiB`.
-
-Default model tarball URL used by the helper and image:
-
-- `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz`
-
-You can override it with `--models-tar-url` or by setting `AVP_MODELS_TAR_URL`
-directly in a raw `docker run` command.
-
-## Build
+Build the image:
 
 ```bash
 docker build -f neural-demo/Dockerfile -t avplumber-neural-demo:latest .
 ```
 
-## Helper Script
-
-The recommended interface is:
+Run the default live demo:
 
 ```bash
-neural-demo/run-neural-demo.sh --help
+neural-demo/run-neural-demo.sh \
+  --example tracker \
+  --mode live
 ```
 
-The helper prints the final `docker run` command before it executes it.
+Use `tracker` when you want to see the inference overlays and understand what
+the underlying models are detecting and tracking.
 
-## VOD Examples
+Use `tracker-cropped` when you want the alternative reframed output:
 
-Default public VOD input used when `--input` is omitted:
+```bash
+neural-demo/run-neural-demo.sh \
+  --example tracker-cropped \
+  --mode live
+```
 
-- `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4`
+If you do not provide custom input or output, the demo uses:
 
-Tracker:
+- looped input MP4:
+  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4`
+- default model archive:
+  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz`
+- default live RTMP output:
+  `rtmp://ingest-1.tellyo.com/external/nabai2026920514b2`
+
+That default `nba.mp4` is the preselected demo source and works well with the
+bundled inference model set.
+
+## Most Useful Commands
+
+VOD in, VOD out:
 
 ```bash
 neural-demo/run-neural-demo.sh \
@@ -79,48 +53,51 @@ neural-demo/run-neural-demo.sh \
   --output /path/to/output/tracker.ts
 ```
 
-Tracker with a custom local input file:
+VOD in, live out with a custom local MP4:
 
 ```bash
 neural-demo/run-neural-demo.sh \
   --example tracker \
-  --mode vod \
+  --mode live \
   --input /path/to/input.mp4 \
-  --output /path/to/output/tracker.ts
+  --output rtmp://your-server/app/stream
 ```
 
-Tracker cropped:
-
-```bash
-neural-demo/run-neural-demo.sh \
-  --example tracker-cropped \
-  --mode vod \
-  --output /path/to/output/tracker-cropped.ts
-```
-
-## Live Examples
-
-RTMP:
-
-```bash
-neural-demo/run-neural-demo.sh \
-  --example tracker \
-  --mode live \
-  --input rtmp://source.example/live/in \
-  --output rtmp://dest.example/live/out
-```
-
-SRT:
+VOD in, live out with SRT:
 
 ```bash
 neural-demo/run-neural-demo.sh \
   --example tracker-cropped \
   --mode live \
-  --input srt://source.example:9000?mode=caller \
+  --input /path/to/input.mp4 \
   --output srt://dest.example:9001?mode=caller
 ```
 
-Override the model archive URL when needed:
+## Defaults And Options
+
+- `--example tracker` draws the inference overlays so you can understand how
+  the models behave.
+- `--example tracker-cropped` uses the same model stack but outputs the cropped
+  reframed version instead.
+- `--mode live` means looped MP4 input plus live RTMP or SRT output.
+- `--mode vod` means finite VOD input plus file output.
+- In `live` mode, if `--input` is omitted, the demo loops the public `nba.mp4`.
+- In `live` mode, if `--output` is omitted, the demo streams to the default
+  public RTMP endpoint above.
+- In `vod` mode, `--output` is required.
+- The helper prints the final `docker run` command before executing it.
+- The helper supports `--dry-run`.
+
+## Models
+
+The runtime downloads a model tarball and normalizes it into `/home/tensorrt`.
+It requires these three plan files:
+
+- `ball_960x544.plan`
+- `court-segmentation_960x544.plan`
+- `basketball-players-full_960x544.plan`
+
+Use a different model archive if needed:
 
 ```bash
 neural-demo/run-neural-demo.sh \
@@ -130,9 +107,18 @@ neural-demo/run-neural-demo.sh \
   --models-tar-url https://example.com/other-models.tgz
 ```
 
-## Raw Docker Example
+## Raw Docker
 
-VOD tracker example without the helper, using the default public demo MP4:
+Default live demo without the helper:
+
+```bash
+docker run --rm --gpus all \
+  -e AVP_EXAMPLE=tracker \
+  -e AVP_MODE=live \
+  avplumber-neural-demo:latest
+```
+
+VOD output without the helper:
 
 ```bash
 docker run --rm --gpus all \
@@ -143,17 +129,10 @@ docker run --rm --gpus all \
   avplumber-neural-demo:latest
 ```
 
-To use a custom local VOD file in raw `docker run`, mount it and set `AVP_INPUT`
-explicitly.
-
 ## Notes
 
-- The helper supports `--dry-run`.
-- VOD input files are mounted read-only.
-- VOD outputs and sidecar debug files are written into the host output
-  directory you pass.
-- Live mode picks protocol handling from the URL schemes you provide.
-- For live troubleshooting, you can add Docker flags with repeated
-  `--docker-extra ...` options.
-- Docker bridge networking is the default. Use host networking only if your
-  environment needs it.
+- The image builds public upstream FFmpeg `n7.1.3` plus
+  `deps/ffmpeg-patches/`.
+- TensorRT comes from the minimal public archive used by this demo:
+  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/tensorrt-minimal-10.15.1.29.tar.gz`
+- The image does not install NVIDIA drivers. The host must provide them.
