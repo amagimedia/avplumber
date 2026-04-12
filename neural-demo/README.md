@@ -41,6 +41,8 @@ If you do not provide custom input or output, the demo uses:
 
 That default `nba.mp4` is the preselected demo source and works well with the
 bundled inference model set.
+It is a public ~62 second snippet of NBA match footage sourced from YouTube.
+Those demo models are open source and were borrowed from Roboflow.
 
 ## Most Useful Commands
 
@@ -91,6 +93,7 @@ neural-demo/run-neural-demo.sh \
 ## Models
 
 The runtime downloads a model tarball and normalizes it into `/home/tensorrt`.
+The demo model tarball is open source and borrowed from Roboflow.
 It requires these three plan files:
 
 - `ball_960x544.plan`
