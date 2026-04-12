@@ -1,7 +1,7 @@
-From b6c398b4d85dbb876489c58c9b929930e7bc0d79 Mon Sep 17 00:00:00 2001
+From 438d42b2fc18fde608d8fa52b01ed3603b598df9 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Fri, 6 Mar 2026 13:00:35 +0100
-Subject: [PATCH 12/40] port whisper STT from ffmpeg8
+Subject: [PATCH 12/20] port whisper STT from ffmpeg8
 
 ---
  configure                |   4 +
@@ -12,7 +12,7 @@ Subject: [PATCH 12/40] port whisper STT from ffmpeg8
  create mode 100644 libavfilter/af_whisper.c
 
 diff --git a/configure b/configure
-index f2c61546fc..a62639f97e 100755
+index f2c6154..a62639f 100755
 --- a/configure
 +++ b/configure
 @@ -329,6 +329,7 @@ External library support:
@@ -48,7 +48,7 @@ index f2c61546fc..a62639f97e 100755
                                 require_pkg_config rockchip_mpp "rockchip_mpp >= 1.3.7" rockchip/rk_mpi.h mpp_create &&
                                 { enabled libdrm ||
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 49d8227db2..4f55e99437 100644
+index 49d8227..4f55e99 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -108,6 +108,7 @@ OBJS-$(CONFIG_ASPECTRALSTATS_FILTER)         += af_aspectralstats.o
@@ -61,7 +61,7 @@ index 49d8227db2..4f55e99437 100644
  OBJS-$(CONFIG_ASUBCUT_FILTER)                += af_asupercut.o
 diff --git a/libavfilter/af_whisper.c b/libavfilter/af_whisper.c
 new file mode 100644
-index 0000000000..7c2238cc5c
+index 0000000..7c2238c
 --- /dev/null
 +++ b/libavfilter/af_whisper.c
 @@ -0,0 +1,498 @@
@@ -564,7 +564,7 @@ index 0000000000..7c2238cc5c
 +    FILTER_QUERY_FUNC2(query_formats),
 +};
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index 8a2f873eac..0b48c5bdfa 100644
+index 8a2f873..0b48c5b 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -161,6 +161,7 @@ extern const AVFilter ff_af_vibrato;

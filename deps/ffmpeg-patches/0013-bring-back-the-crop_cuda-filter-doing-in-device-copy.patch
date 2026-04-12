@@ -1,7 +1,7 @@
-From 80161951e55878c833ca35491efad11268d985be Mon Sep 17 00:00:00 2001
+From 8a109d1d41400391ea3c3ac9ee6faeb925c402be Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 12 Mar 2026 17:30:00 +0530
-Subject: [PATCH 13/40] bring back the crop_cuda filter doing in device copy
+Subject: [PATCH 13/20] bring back the crop_cuda filter doing in device copy
 
 ---
  configure                  |   1 +
@@ -12,7 +12,7 @@ Subject: [PATCH 13/40] bring back the crop_cuda filter doing in device copy
  create mode 100644 libavfilter/vf_crop_cuda.c
 
 diff --git a/configure b/configure
-index a62639f97e..a2e3e43d3e 100755
+index a62639f..a2e3e43 100755
 --- a/configure
 +++ b/configure
 @@ -3313,6 +3313,7 @@ chromakey_cuda_filter_deps="ffnvcodec"
@@ -24,7 +24,7 @@ index a62639f97e..a2e3e43d3e 100755
  scale_npp_filter_deps="ffnvcodec libnpp"
  scale2ref_npp_filter_deps="ffnvcodec libnpp"
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index 4f55e99437..f18b1492b2 100644
+index 4f55e99..f18b149 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -259,6 +259,7 @@ OBJS-$(CONFIG_COREIMAGE_FILTER)              += vf_coreimage.o
@@ -36,7 +36,7 @@ index 4f55e99437..f18b1492b2 100644
  OBJS-$(CONFIG_CUE_FILTER)                    += f_cue.o
  OBJS-$(CONFIG_CURVES_FILTER)                 += vf_curves.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index 0b48c5bdfa..d2723233ec 100644
+index 0b48c5b..d272323 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -236,6 +236,7 @@ extern const AVFilter ff_vf_coreimage;
@@ -49,7 +49,7 @@ index 0b48c5bdfa..d2723233ec 100644
  extern const AVFilter ff_vf_curves;
 diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
 new file mode 100644
-index 0000000000..a7e649fd5e
+index 0000000..a7e649f
 --- /dev/null
 +++ b/libavfilter/vf_crop_cuda.c
 @@ -0,0 +1,556 @@

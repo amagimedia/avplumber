@@ -1,7 +1,7 @@
-From 8b9eb15f227959b9ba3e45a9812b3a49fa17bc52 Mon Sep 17 00:00:00 2001
+From 6f4d2c58f2f6dd88e0612621ede61d51bc12980c Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 12:28:56 +0100
-Subject: [PATCH 11/40] ndi libav input with v5 support + missing
+Subject: [PATCH 11/20] ndi libav input with v5 support + missing
  make/configure changes
 
 ---
@@ -13,7 +13,7 @@ Subject: [PATCH 11/40] ndi libav input with v5 support + missing
  5 files changed, 123 insertions(+)
 
 diff --git a/configure b/configure
-index 6b98b5f4de..f2c61546fc 100755
+index 6b98b5f..f2c6154 100755
 --- a/configure
 +++ b/configure
 @@ -316,6 +316,7 @@ External library support:
@@ -52,7 +52,7 @@ index 6b98b5f4de..f2c61546fc 100755
  enabled gmp               && require gmp gmp.h mpz_export -lgmp
  enabled gnutls            && require_pkg_config gnutls gnutls gnutls/gnutls.h gnutls_global_init
 diff --git a/doc/indevs.texi b/doc/indevs.texi
-index cdf44a6638..30679b0ccc 100644
+index cdf44a6..30679b0 100644
 --- a/doc/indevs.texi
 +++ b/doc/indevs.texi
 @@ -1156,6 +1156,71 @@ Set the video size given as a string such as @code{640x480} or @code{hd720}.
@@ -128,7 +128,7 @@ index cdf44a6638..30679b0ccc 100644
  
  The OpenAL input device provides audio capture on all systems with a
 diff --git a/doc/outdevs.texi b/doc/outdevs.texi
-index 9ee857528e..71f467d588 100644
+index 9ee8575..71f467d 100644
 --- a/doc/outdevs.texi
 +++ b/doc/outdevs.texi
 @@ -301,6 +301,51 @@ ffmpeg -re -i INPUT -c:v rawvideo -pix_fmt bgra -f fbdev /dev/fb0
@@ -184,7 +184,7 @@ index 9ee857528e..71f467d588 100644
  OpenGL output device. Deprecated and will be removed.
  
 diff --git a/libavdevice/Makefile b/libavdevice/Makefile
-index c30449201d..290ae8be69 100644
+index c304492..290ae8b 100644
 --- a/libavdevice/Makefile
 +++ b/libavdevice/Makefile
 @@ -22,6 +22,8 @@ OBJS-$(CONFIG_BKTR_INDEV)                += bktr.o
@@ -206,7 +206,7 @@ index c30449201d..290ae8be69 100644
  SKIPHEADERS-$(CONFIG_FBDEV_INDEV)        += fbdev_common.h
  SKIPHEADERS-$(CONFIG_FBDEV_OUTDEV)       += fbdev_common.h
 diff --git a/libavdevice/alldevices.c b/libavdevice/alldevices.c
-index 9b9a9146c7..ac942ec4d4 100644
+index 9b9a914..ac942ec 100644
 --- a/libavdevice/alldevices.c
 +++ b/libavdevice/alldevices.c
 @@ -36,6 +36,8 @@ extern const FFInputFormat  ff_bktr_demuxer;

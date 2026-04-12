@@ -1,14 +1,14 @@
-From 1f2fc26e2fdcb13b8ed026bc559a10fd966e68b5 Mon Sep 17 00:00:00 2001
+From 961ec93cbc352178ae5572c8d7f03f508edc3147 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Thu, 5 Mar 2026 12:25:44 +0100
-Subject: [PATCH 10/40] v4l2 patch (legacy old tellyo code)
+Subject: [PATCH 10/20] v4l2 patch (legacy old tellyo code)
 
 ---
  libavdevice/v4l2.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/libavdevice/v4l2.c b/libavdevice/v4l2.c
-index 0ae6872338..644752fdfc 100644
+index 0ae6872..644752f 100644
 --- a/libavdevice/v4l2.c
 +++ b/libavdevice/v4l2.c
 @@ -584,7 +584,7 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)

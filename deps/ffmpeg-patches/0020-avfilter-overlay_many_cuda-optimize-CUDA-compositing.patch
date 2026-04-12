@@ -1,7 +1,7 @@
-From d4c023cfbe579eeefdc54b019cd00f34daf5ae26 Mon Sep 17 00:00:00 2001
+From 2205b40ec1e690f2644f54750df166f4f6c9b2d7 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@amagi.com>
 Date: Sun, 12 Apr 2026 11:36:51 +0000
-Subject: [PATCH 40/40] avfilter/overlay_many_cuda: optimize CUDA compositing
+Subject: [PATCH 20/20] avfilter/overlay_many_cuda: optimize CUDA compositing
 
 Switch overlay_many_cuda to read from source frames and write into a separate output buffer, replace float alpha blending with integer math, and add combined kernels for the 420 and 444 fast paths to cut per-plane launch overhead.
 
@@ -11,7 +11,7 @@ Keep the kernel generator and generated CUDA source in sync with the new combine
  1 file changed, 6598 insertions(+), 2308 deletions(-)
 
 diff --git a/libavfilter/vf_overlay_many_cuda.cu b/libavfilter/vf_overlay_many_cuda.cu
-index e513e4f1fb..ae4136ff99 100644
+index e513e4f..ae4136f 100644
 --- a/libavfilter/vf_overlay_many_cuda.cu
 +++ b/libavfilter/vf_overlay_many_cuda.cu
 @@ -4,2627 +4,6917 @@ extern "C" {

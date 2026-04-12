@@ -1,7 +1,7 @@
-From 071ed07d840fd8ff9c716d30a25102a005348fbf Mon Sep 17 00:00:00 2001
+From 2105ce91bf8f27d423d2ed55f49be0b4cf3557b4 Mon Sep 17 00:00:00 2001
 From: Teodor Wozniak <teodor.wozniak@amagi.com>
 Date: Thu, 2 Apr 2026 16:56:34 +0200
-Subject: [PATCH 37/40] convert_cuda: allow nv12-yuv420 conversions, faster
+Subject: [PATCH 17/20] convert_cuda: allow nv12-yuv420 conversions, faster
  than scale_cuda
 
 ---
@@ -10,7 +10,7 @@ Subject: [PATCH 37/40] convert_cuda: allow nv12-yuv420 conversions, faster
  2 files changed, 100 insertions(+)
 
 diff --git a/libavfilter/vf_convert_cuda.c b/libavfilter/vf_convert_cuda.c
-index 5231ad3ca3..12f92991d9 100644
+index 5231ad3..12f9299 100644
 --- a/libavfilter/vf_convert_cuda.c
 +++ b/libavfilter/vf_convert_cuda.c
 @@ -16,10 +16,12 @@
@@ -102,7 +102,7 @@ index 5231ad3ca3..12f92991d9 100644
              av_log(ctx, AV_LOG_ERROR, "Unexpected lack of support for pixel format %s\n",
                     av_get_pix_fmt_name(ctx->format_in));
 diff --git a/libavfilter/vf_convert_cuda.cu b/libavfilter/vf_convert_cuda.cu
-index 6ea76379d6..beabc0cd91 100644
+index 6ea7637..beabc0c 100644
 --- a/libavfilter/vf_convert_cuda.cu
 +++ b/libavfilter/vf_convert_cuda.cu
 @@ -209,6 +209,48 @@ __global__ void Convert_YUVA444P12LE_uv_to_YUVA444P(

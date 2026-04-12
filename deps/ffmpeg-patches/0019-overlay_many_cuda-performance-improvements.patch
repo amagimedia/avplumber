@@ -1,7 +1,7 @@
-From 7fe525ee9ecd3044a72f2c37cd435c7aa1b4d463 Mon Sep 17 00:00:00 2001
+From de4071c2a3ad2da744f9b24bc575238de361af81 Mon Sep 17 00:00:00 2001
 From: Teodor Wozniak <teodor.wozniak@amagi.com>
 Date: Thu, 2 Apr 2026 17:02:05 +0200
-Subject: [PATCH 39/40] overlay_many_cuda: performance improvements
+Subject: [PATCH 19/20] overlay_many_cuda: performance improvements
 
 ---
  libavfilter/vf_overlay_many_cuda.c           | 151 +++++++++---
@@ -9,7 +9,7 @@ Subject: [PATCH 39/40] overlay_many_cuda: performance improvements
  2 files changed, 339 insertions(+), 53 deletions(-)
 
 diff --git a/libavfilter/vf_overlay_many_cuda.c b/libavfilter/vf_overlay_many_cuda.c
-index 8f8ec04ca4..63dab62a7b 100644
+index 8f8ec04..63dab62 100644
 --- a/libavfilter/vf_overlay_many_cuda.c
 +++ b/libavfilter/vf_overlay_many_cuda.c
 @@ -13,6 +13,8 @@
@@ -216,7 +216,7 @@ index 8f8ec04ca4..63dab62a7b 100644
      }
  
 diff --git a/libavfilter/vf_overlay_many_cuda_generator.c b/libavfilter/vf_overlay_many_cuda_generator.c
-index d7b175d9c7..ed4d0f67b6 100644
+index d7b175d..ed4d0f6 100644
 --- a/libavfilter/vf_overlay_many_cuda_generator.c
 +++ b/libavfilter/vf_overlay_many_cuda_generator.c
 @@ -8,7 +8,8 @@ static void write_standard_function(FILE *file, int input_count)
