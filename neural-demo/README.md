@@ -43,6 +43,10 @@ That default `nba.mp4` is the preselected demo source and works well with the
 bundled inference model set.
 It is a public ~62 second snippet of NBA match footage sourced from YouTube.
 Those demo models are open source and were borrowed from Roboflow.
+An NVIDIA GPU is mandatory for this demo. This setup was tested on an AWS
+`g4dn.2xlarge` instance with a Tesla T4 70W, which is a minimum sensible
+option for this workflow, running about `30 fps` in live mode and about
+`78 fps` in VOD mode.
 
 ## Most Useful Commands
 
