@@ -1,3 +1,14 @@
 README.md
 avplumber
 objs
+.claude/
+.codex
+.specify/
+.vscode/
+ffmpeg/
+*.log
+*.csv
+*.ts
+deps/cuda_loader/cuda_drvapi_dynlink.o
+join_*_pts.csv
+crop_offsets_debug.log
