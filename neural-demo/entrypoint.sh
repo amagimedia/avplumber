@@ -4,6 +4,7 @@ set -euo pipefail
 readonly MODEL_ROOT="/home/tensorrt"
 readonly TEMPLATE_ROOT="/opt/avp-neural-demo/templates"
 readonly RENDER_DIR="/tmp/avp-rendered"
+readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
 
 die() {
     echo "error: $*" >&2
@@ -17,7 +18,6 @@ require_env() {
 
 require_env AVP_EXAMPLE
 require_env AVP_MODE
-require_env AVP_INPUT
 require_env AVP_OUTPUT
 require_env AVP_MODELS_TAR_URL
 
@@ -30,6 +30,12 @@ case "${AVP_MODE}" in
     vod|live) ;;
     *) die "unsupported AVP_MODE=${AVP_MODE}; expected vod or live" ;;
 esac
+
+if [[ "${AVP_MODE}" == "vod" ]]; then
+    AVP_INPUT="${AVP_INPUT:-${DEFAULT_VOD_INPUT_URL}}"
+else
+    require_env AVP_INPUT
+fi
 
 if [[ ! -e /dev/nvidiactl ]]; then
     die "GPU device /dev/nvidiactl is missing; run with NVIDIA container runtime and --gpus all"

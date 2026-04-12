@@ -7,6 +7,7 @@ mode=""
 input=""
 output=""
 models_tar_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz"
+default_vod_input_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
 dry_run=0
 docker_extra=()
 
@@ -21,8 +22,8 @@ Usage:
   neural-demo/run-neural-demo.sh \
     --example tracker|tracker-cropped \
     --mode vod|live \
-    --input ... \
     --output ... \
+    [--input ...] \
     [--models-tar-url ...] \
     [--image IMAGE] \
     [--docker-extra ARG] \
@@ -85,7 +86,6 @@ done
 
 [[ -n "${example}" ]] || die "--example is required"
 [[ -n "${mode}" ]] || die "--mode is required"
-[[ -n "${input}" ]] || die "--input is required"
 [[ -n "${output}" ]] || die "--output is required"
 case "${example}" in
     tracker|tracker-cropped) ;;
@@ -101,22 +101,27 @@ docker_cmd=(docker run --rm --gpus all)
 docker_cmd+=("${docker_extra[@]}")
 
 if [[ "${mode}" == "vod" ]]; then
-    input_host="$(abspath "${input}")"
     output_host="$(abspath "${output}")"
-    [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
     output_dir="$(dirname "${output_host}")"
     mkdir -p "${output_dir}"
-
-    input_container="/run/avp/input/$(basename "${input_host}")"
     output_container="/run/avp/output/$(basename "${output_host}")"
+    docker_cmd+=(-v "${output_dir}:/run/avp/output")
 
-    docker_cmd+=(
-        -v "${input_host}:${input_container}:ro"
-        -v "${output_dir}:/run/avp/output"
-        -e "AVP_INPUT=${input_container}"
-        -e "AVP_OUTPUT=${output_container}"
-    )
+    if [[ -n "${input}" ]]; then
+        input_host="$(abspath "${input}")"
+        [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
+        input_container="/run/avp/input/$(basename "${input_host}")"
+        docker_cmd+=(
+            -v "${input_host}:${input_container}:ro"
+            -e "AVP_INPUT=${input_container}"
+        )
+    else
+        docker_cmd+=(-e "AVP_INPUT=${default_vod_input_url}")
+    fi
+
+    docker_cmd+=(-e "AVP_OUTPUT=${output_container}")
 else
+    [[ -n "${input}" ]] || die "--input is required for live mode"
     case "${input}" in
         rtmp://*|rtmps://*|srt://*) ;;
         *) die "live --input must be an rtmp://, rtmps://, or srt:// URL" ;;
