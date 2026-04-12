@@ -1,9 +1,11 @@
 #include "../../node_common.hpp"
 #include "../../../kalman1d.hpp"
+#include "../common/yolo_side_data.hpp"
 #include "ball_tracker_utils.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>
+#include <libavutil/frame.h>
 }
 
 #include <algorithm>
@@ -12,6 +14,7 @@ extern "C" {
 #include <deque>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using ball_tracker_detail::DetectionBox;
@@ -59,6 +62,14 @@ private:
     double min_iou_ = 0.20;
     double speed_mult_ = 3.0;
 
+    // Override-only off-court veto for stale far reacquires
+    bool override_off_court_veto_enabled_ = false;
+    std::string override_off_court_seg_metadata_key_ = "yolo_seg";
+    std::unordered_set<int> override_off_court_class_indices_ = {1};
+    double override_off_court_mask_threshold_ = 0.5;
+    double override_off_court_min_support_ = 0.15;
+    int override_off_court_sample_radius_px_ = 2;
+
     // Detection override
     double override_conf_ = 0.28;
     int override_after_ = 2;
@@ -69,6 +80,10 @@ private:
     double override_far_match_mult_ = 1.5;
     int override_far_moving_confirm_frames_ = 4;
     double override_far_motion_rel_ = 0.035;
+    bool coast_edge_jump_veto_enabled_ = false;
+    double coast_edge_zone_rel_ = 0.14;
+    double coast_edge_jump_rel_ = 0.18;
+    int coast_edge_confirm_frames_ = 9;
 
     // Coasting
     bool coast_ = true;
@@ -343,7 +358,129 @@ private:
                 }
             }
         }
+        if (override_off_court_veto_enabled_) {
+            populateCourtMaskData(raw, parsed);
+        }
         return true;
+    }
+
+    void populateCourtMaskData(const AVFrame* raw, ParsedFrameMetadata& parsed) const {
+        if (!raw || !raw->metadata) return;
+
+        AVDictionaryEntry* seg_entry = av_dict_get(raw->metadata, override_off_court_seg_metadata_key_.c_str(), nullptr, 0);
+        if (!seg_entry || !seg_entry->value) return;
+
+        try {
+            Parameters seg_md = Parameters::parse(seg_entry->value);
+            if (seg_md.contains("detections") && seg_md["detections"].is_array()) {
+                int idx = 0;
+                for (const auto& det : seg_md["detections"]) {
+                    if (det.contains("cls")) {
+                        int cls = det["cls"].get<int>();
+                        if (override_off_court_class_indices_.count(cls)) {
+                            parsed.court_mask_indices.push_back(idx);
+                        }
+                    }
+                    ++idx;
+                }
+            }
+        } catch (...) {
+            parsed.court_mask_indices.clear();
+            return;
+        }
+
+        if (parsed.court_mask_indices.empty()) return;
+
+        const AVFrameSideData* sd = av_frame_get_side_data(raw, AV_FRAME_DATA_YOLO_SEG_MASKS);
+        if (!sd || sd->size < 16) return;
+
+        const uint32_t* header = reinterpret_cast<const uint32_t*>(sd->data);
+        const uint32_t num_masks = header[0];
+        const uint32_t mask_w = header[1];
+        const uint32_t mask_h = header[2];
+        if (num_masks == 0 || mask_w == 0 || mask_h == 0) return;
+
+        const size_t pixels_per_mask = (size_t)mask_w * (size_t)mask_h;
+        const size_t required_size = 16 + num_masks * pixels_per_mask * sizeof(float);
+        if ((size_t)sd->size < required_size) return;
+
+        parsed.have_court_mask_data = true;
+        parsed.court_num_masks = num_masks;
+        parsed.court_mask_w = mask_w;
+        parsed.court_mask_h = mask_h;
+        parsed.court_mask_data = reinterpret_cast<const float*>(sd->data + 16);
+    }
+
+    double sampleCourtSupport(const ParsedFrameMetadata& parsed, double cx, double cy) const {
+        if (!parsed.have_court_mask_data || !parsed.court_mask_data
+            || parsed.model_w <= 0.0 || parsed.model_h <= 0.0
+            || parsed.court_mask_w == 0 || parsed.court_mask_h == 0) {
+            return -1.0;
+        }
+
+        const double mx = (cx / parsed.model_w) * (double)parsed.court_mask_w;
+        const double my = (cy / parsed.model_h) * (double)parsed.court_mask_h;
+        if (!std::isfinite(mx) || !std::isfinite(my)) return -1.0;
+
+        const int center_x = (int)std::lround(mx);
+        const int center_y = (int)std::lround(my);
+        const size_t pixels_per_mask = (size_t)parsed.court_mask_w * (size_t)parsed.court_mask_h;
+
+        int hits = 0;
+        int total = 0;
+        for (int dy = -override_off_court_sample_radius_px_; dy <= override_off_court_sample_radius_px_; ++dy) {
+            int y = center_y + dy;
+            if (y < 0 || y >= (int)parsed.court_mask_h) continue;
+            for (int dx = -override_off_court_sample_radius_px_; dx <= override_off_court_sample_radius_px_; ++dx) {
+                int x = center_x + dx;
+                if (x < 0 || x >= (int)parsed.court_mask_w) continue;
+                const size_t pix = (size_t)y * parsed.court_mask_w + (size_t)x;
+                bool on_court = false;
+                for (int mi : parsed.court_mask_indices) {
+                    if (mi < 0 || (uint32_t)mi >= parsed.court_num_masks) continue;
+                    const float* mask = parsed.court_mask_data + (size_t)mi * pixels_per_mask;
+                    if (mask[pix] >= (float)override_off_court_mask_threshold_) {
+                        on_court = true;
+                        break;
+                    }
+                }
+                hits += on_court ? 1 : 0;
+                total++;
+            }
+        }
+
+        if (total == 0) return -1.0;
+        return (double)hits / (double)total;
+    }
+
+    bool farReacquireLooksOffCourt(const DetectionBox& cand, const ParsedFrameMetadata& parsed) const {
+        if (!override_off_court_veto_enabled_ || !parsed.have_court_mask_data) return false;
+        const double support = sampleCourtSupport(parsed, centerX(cand), centerY(cand));
+        if (shouldDebugLog()) {
+            logstream << "ball_tracker: frame=" << frame_counter_
+                      << " override_court_check cx=" << centerX(cand)
+                      << " cy=" << centerY(cand)
+                      << " support=" << support
+                      << " veto=" << (support >= 0.0 && support < override_off_court_min_support_);
+        }
+        return support >= 0.0 && support < override_off_court_min_support_;
+    }
+
+    bool coastEdgeJumpVetoApplies(const DetectionBox& cand,
+                                  double model_w, double model_h,
+                                  bool stale, double dist_prev,
+                                  bool& edge_zone_hit) const {
+        edge_zone_hit = false;
+        if (!coast_edge_jump_veto_enabled_ || model_w <= 0.0 || model_h <= 0.0) return false;
+        if (!(stale || coast_streak_ > 0) || trail_.empty()) return false;
+
+        const double min_dim = std::min(model_w, model_h);
+        if (dist_prev < coast_edge_jump_rel_ * min_dim) return false;
+
+        const double cx = centerX(cand);
+        const double edge_zone = coast_edge_zone_rel_ * model_w;
+        edge_zone_hit = (cx <= edge_zone) || (cx >= (model_w - edge_zone));
+        return edge_zone_hit;
     }
 
     double computeBallScore(const DetectionBox& cand, double model_w, double model_h) const {
@@ -419,7 +556,8 @@ private:
     }
 
     // detection_override: force accept after gap/streak
-    bool detectionOverride(const DetectionBox& cand, double model_w, double model_h) {
+    bool detectionOverride(const DetectionBox& cand, double model_w, double model_h,
+                           const ParsedFrameMetadata& parsed) {
         if (cand.conf < override_conf_) return false;
 
         const double min_dim = std::min(model_w, model_h);
@@ -460,8 +598,16 @@ private:
         // When the tracker is stale, treat large jumps from the recent coasted path
         // as provisional reacquires even if they happen to land near an older real hit.
         const bool far_reacquire = stale && (far_from_prev || far_from_real || far_from_pred);
+        bool edge_zone_hit = false;
+        const bool edge_jump_veto =
+            coastEdgeJumpVetoApplies(cand, model_w, model_h, stale, dist_prev, edge_zone_hit);
+        const bool provisional_reacquire = far_reacquire || edge_jump_veto;
 
-        if (far_reacquire) {
+        if (provisional_reacquire) {
+            if (farReacquireLooksOffCourt(cand, parsed)) {
+                clearPendingOverride();
+                return false;
+            }
             const bool pending_fresh = have_pending_override_
                                     && pending_override_last_frame_ + 1 >= frame_counter_;
             const bool pending_matches = pending_fresh
@@ -482,11 +628,23 @@ private:
             pending_override_last_frame_ = frame_counter_;
             const double pending_motion = hypot2(centerX(cand) - centerX(pending_override_start_box_),
                                                  centerY(cand) - centerY(pending_override_start_box_));
-            if (pending_override_hits_ >= override_far_moving_confirm_frames_
+            if (!edge_jump_veto
+                && pending_override_hits_ >= override_far_moving_confirm_frames_
                 && pending_motion >= moving_pending_gate) {
                 return true;
             }
-            if (pending_override_hits_ < override_far_confirm_frames_) {
+            const int required_confirm_frames =
+                edge_jump_veto ? std::max(override_far_confirm_frames_, coast_edge_confirm_frames_)
+                               : override_far_confirm_frames_;
+            if (shouldDebugLog() && edge_jump_veto) {
+                logstream << "ball_tracker: frame=" << frame_counter_
+                          << " edge_jump_veto cx=" << centerX(cand)
+                          << " dist_prev=" << dist_prev
+                          << " edge_zone_hit=" << edge_zone_hit
+                          << " pending_hits=" << pending_override_hits_
+                          << " required_hits=" << required_confirm_frames;
+            }
+            if (pending_override_hits_ < required_confirm_frames) {
                 return false;
             }
         } else {
@@ -496,7 +654,7 @@ private:
         // Keep override from reviving immediate huge jumps that gate already rejected.
         // Once a stale far candidate is under provisional confirmation, allow it to
         // accumulate hits instead of failing here every frame.
-        if (!far_reacquire && gap_frames <= 1 && dist_prev > override_hard_cap) {
+        if (!provisional_reacquire && gap_frames <= 1 && dist_prev > override_hard_cap) {
             return false;
         }
 
@@ -533,7 +691,8 @@ private:
 
     TrackingDecision chooseDetection(const std::vector<DetectionBox>& ball_dets,
                                      const CandidateSelection& selection,
-                                     double model_w, double model_h) {
+                                     double model_w, double model_h,
+                                     const ParsedFrameMetadata& parsed) {
         TrackingDecision decision;
 
         if (selection.best_gated_idx >= 0) {
@@ -552,7 +711,7 @@ private:
         decision.ball_score = selection.scores[(size_t)selection.best_idx];
         det_reject_streak_++;
         stat_dropped_by_gate_++;
-        if (detectionOverride(cand, model_w, model_h)) {
+        if (detectionOverride(cand, model_w, model_h, parsed)) {
             decision.accepted = true;
             decision.source = "override";
             decision.tracked_det = cand;
@@ -851,7 +1010,7 @@ public:
         predictKalman();
 
         const CandidateSelection selection = evaluateCandidates(parsed.ball_dets, parsed.model_w, parsed.model_h);
-        TrackingDecision decision = chooseDetection(parsed.ball_dets, selection, parsed.model_w, parsed.model_h);
+        TrackingDecision decision = chooseDetection(parsed.ball_dets, selection, parsed.model_w, parsed.model_h, parsed);
 
         logCandidateDetails(parsed.ball_dets, selection);
 
@@ -922,6 +1081,18 @@ public:
         if (params.count("min_iou")) r->min_iou_ = params["min_iou"];
         if (params.count("speed_mult")) r->speed_mult_ = params["speed_mult"];
 
+        if (params.count("override_off_court_veto_enabled")) r->override_off_court_veto_enabled_ = params["override_off_court_veto_enabled"];
+        if (params.count("override_off_court_seg_metadata_key")) r->override_off_court_seg_metadata_key_ = params["override_off_court_seg_metadata_key"].get<std::string>();
+        if (params.count("override_off_court_class_indices")) {
+            r->override_off_court_class_indices_.clear();
+            for (const auto& item : params["override_off_court_class_indices"]) {
+                r->override_off_court_class_indices_.insert(item.get<int>());
+            }
+        }
+        if (params.count("override_off_court_mask_threshold")) r->override_off_court_mask_threshold_ = params["override_off_court_mask_threshold"];
+        if (params.count("override_off_court_min_support")) r->override_off_court_min_support_ = params["override_off_court_min_support"];
+        if (params.count("override_off_court_sample_radius_px")) r->override_off_court_sample_radius_px_ = params["override_off_court_sample_radius_px"];
+
         // Detection override
         if (params.count("override_conf")) r->override_conf_ = params["override_conf"];
         if (params.count("override_after")) r->override_after_ = params["override_after"];
@@ -932,6 +1103,10 @@ public:
         if (params.count("override_far_match_mult")) r->override_far_match_mult_ = params["override_far_match_mult"];
         if (params.count("override_far_moving_confirm_frames")) r->override_far_moving_confirm_frames_ = params["override_far_moving_confirm_frames"];
         if (params.count("override_far_motion_rel")) r->override_far_motion_rel_ = params["override_far_motion_rel"];
+        if (params.count("coast_edge_jump_veto_enabled")) r->coast_edge_jump_veto_enabled_ = params["coast_edge_jump_veto_enabled"];
+        if (params.count("coast_edge_zone_rel")) r->coast_edge_zone_rel_ = params["coast_edge_zone_rel"];
+        if (params.count("coast_edge_jump_rel")) r->coast_edge_jump_rel_ = params["coast_edge_jump_rel"];
+        if (params.count("coast_edge_confirm_frames")) r->coast_edge_confirm_frames_ = params["coast_edge_confirm_frames"];
 
         // Coasting
         if (params.count("coast")) r->coast_ = params["coast"];

@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace ball_tracker_detail {
@@ -49,6 +51,12 @@ struct ParsedFrameMetadata {
     std::vector<DetectionBox> ball_dets;
     double model_w = 0.0;
     double model_h = 0.0;
+    bool have_court_mask_data = false;
+    std::vector<int> court_mask_indices;
+    const float* court_mask_data = nullptr;
+    uint32_t court_num_masks = 0;
+    uint32_t court_mask_w = 0;
+    uint32_t court_mask_h = 0;
 };
 
 struct CandidateSelection {
