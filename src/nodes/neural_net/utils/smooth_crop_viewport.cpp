@@ -418,6 +418,10 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int last_w_ = 0, last_h_ = 0;
     uint64_t frame_counter_ = 0;
     int debug_log_every_n_ = 0;
+    int effective_viewport_dst_width_ = 0;
+    int effective_viewport_dst_height_ = 0;
+    int last_logged_effective_viewport_width_ = -1;
+    int last_logged_effective_viewport_height_ = -1;
 
     void resetPipelineState() {
         if (lowpass_)
@@ -431,6 +435,18 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         buffer_.clear();
         slew_x_.reset(0);
         slew_y_.reset(0);
+    }
+
+    int effectiveViewportWidth(int frame_width) const {
+        if (frame_width <= 0)
+            return viewport_dst_width_;
+        return std::max(1, std::min(viewport_dst_width_, frame_width));
+    }
+
+    int effectiveViewportHeight(int frame_height) const {
+        if (frame_height <= 0)
+            return viewport_dst_height_;
+        return std::max(1, std::min(viewport_dst_height_, frame_height));
     }
 
     bool remapModelCoord(double x, double y, double model_w, double model_h, int fw, int fh, double &out_x,
@@ -650,8 +666,8 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         y2 = std::max(0.0, std::min((double)fh, y2));
         if (!(x2 > x1 && y2 > y1))
             return false;
-        const double half_w = viewport_dst_width_ * 0.5;
-        const double half_h = viewport_dst_height_ * 0.5;
+        const double half_w = effectiveViewportWidth(fw) * 0.5;
+        const double half_h = effectiveViewportHeight(fh) * 0.5;
         centerForFixedViewportContain(x1, y1, x2, y2, fw, fh, half_w, half_h, meas.mx, meas.my);
         meas.ux1 = x1;
         meas.uy1 = y1;
@@ -757,8 +773,8 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         my = raw.my;
         if (!raw.has_union)
             return;
-        const double half_w = viewport_dst_width_ * 0.5;
-        const double half_h = viewport_dst_height_ * 0.5;
+        const double half_w = effectiveViewportWidth(fw) * 0.5;
+        const double half_h = effectiveViewportHeight(fh) * 0.5;
         mx = softenAxisTarget(mx, prev_output_x_, raw.ux1, raw.ux2, (double)fw, half_w, soft_edge_margin_x_px_, dbg.x);
         my = softenAxisTarget(my, prev_output_y_, raw.uy1, raw.uy2, (double)fh, half_h, soft_edge_margin_y_px_, dbg.y);
     }
@@ -867,14 +883,14 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         return {sx / cnt, sy / cnt};
     }
 
-    void writeViewportMetadata(av::VideoFrame &frm, double cx, double cy) {
+    void writeViewportMetadata(av::VideoFrame &frm, double cx, double cy, int viewport_w, int viewport_h) {
         Parameters j;
         const double h = std::max(1.0, viewport_marker_half_extent_);
         j["viewport_bbox"] = {cx - h, cy - h, cx + h, cy + h};
         j["full_frame_width"] = frm.width();
         j["full_frame_height"] = frm.height();
-        j["viewport_dst_width"] = viewport_dst_width_;
-        j["viewport_dst_height"] = viewport_dst_height_;
+        j["viewport_dst_width"] = viewport_w;
+        j["viewport_dst_height"] = viewport_h;
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), j.dump().c_str(), 0);
     }
 
@@ -891,8 +907,19 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             slew_x_.reset(fw * 0.5);
             slew_y_.reset(fh * 0.5);
         }
-        if (viewport_dst_width_ > fw || viewport_dst_height_ > fh) {
-            throw Error("smooth_crop_viewport: viewport_dst_width/height exceed frame dimensions");
+        effective_viewport_dst_width_ = effectiveViewportWidth(fw);
+        effective_viewport_dst_height_ = effectiveViewportHeight(fh);
+        if (effective_viewport_dst_width_ != last_logged_effective_viewport_width_ ||
+            effective_viewport_dst_height_ != last_logged_effective_viewport_height_) {
+            if (effective_viewport_dst_width_ != viewport_dst_width_ ||
+                effective_viewport_dst_height_ != viewport_dst_height_) {
+                logstream << "smooth_crop_viewport: clamped viewport from "
+                          << viewport_dst_width_ << "x" << viewport_dst_height_
+                          << " to " << effective_viewport_dst_width_ << "x" << effective_viewport_dst_height_
+                          << " for frame " << fw << "x" << fh;
+            }
+            last_logged_effective_viewport_width_ = effective_viewport_dst_width_;
+            last_logged_effective_viewport_height_ = effective_viewport_dst_height_;
         }
 
         std::vector<DetectionBox> dets;
@@ -933,13 +960,13 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, edge_pressure, dt, out_x, out_y);
 
         {
-            const double half_w = viewport_dst_width_ * 0.5;
-            const double half_h = viewport_dst_height_ * 0.5;
+            const double half_w = effective_viewport_dst_width_ * 0.5;
+            const double half_h = effective_viewport_dst_height_ * 0.5;
             out_x = std::max(half_w, std::min((double)fw - half_w, out_x));
             out_y = std::max(half_h, std::min((double)fh - half_h, out_y));
         }
 
-        writeViewportMetadata(frm, out_x, out_y);
+        writeViewportMetadata(frm, out_x, out_y, effective_viewport_dst_width_, effective_viewport_dst_height_);
         prev_output_x_ = out_x;
         prev_output_y_ = out_y;
         have_prev_output_ = true;
