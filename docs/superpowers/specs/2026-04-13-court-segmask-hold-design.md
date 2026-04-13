@@ -12,6 +12,7 @@ This design adds a small, local hold mechanism to `draw_segmask` so it can reuse
 - Keep the change local to `draw_segmask`.
 - Preserve existing inference, metadata, and graph behavior.
 - Make the hold window configurable, with a default of `6` frames.
+- Draw the court mask only during wide shots.
 
 ## Non-Goals
 
@@ -31,6 +32,8 @@ Add a new `draw_segmask` parameter:
 - GPU mask buffer reference (`AVBufferRef`)
 - `GpuMaskSideDataHeader`
 - parsed detection list used for drawing
+
+`draw_segmask` will also read `shot_info` metadata and only render the court mask when `shot_type == "wide"`.
 
 ### Valid Update
 
@@ -59,13 +62,26 @@ This includes explicit segmentation frames where YOLO returns `0` detections. Th
 
 Once the consecutive miss count reaches `hold_last_frames`, `draw_segmask` stops drawing the cached mask and waits for a new valid segmentation update to repopulate the cache.
 
+### Wide-Shot Gating
+
+The court mask overlay must be suppressed unless the frame metadata contains:
+
+- `shot_info`, and
+- `shot_info.shot_type == "wide"`
+
+If `shot_info` is missing, malformed, or reports any non-wide shot type such as `closeup`, `draw_segmask` must not draw either the current segmentation result or the cached one.
+
+To avoid leaking a stale wide-shot court mask across camera-angle changes, entering a non-wide or unknown shot state clears the held mask cache immediately.
+
 ## Data Flow
 
 1. `draw_segmask` receives a CUDA frame.
-2. It tries to read current-frame segmentation side data and segmentation metadata.
-3. If the current frame contains a valid drawable segmentation result, the cache is refreshed and drawn.
-4. Otherwise, if cached data exists and is still within the configured hold window, cached data is drawn instead.
-5. Otherwise, the frame passes through without segmentation overlay.
+2. It checks `shot_info.shot_type`.
+3. If the shot type is not present or is not `wide`, the cache is cleared and the frame passes through without segmentation overlay.
+4. Otherwise, it tries to read current-frame segmentation side data and segmentation metadata.
+5. If the current frame contains a valid drawable segmentation result, the cache is refreshed and drawn.
+6. Otherwise, if cached data exists and is still within the configured hold window, cached data is drawn instead.
+7. Otherwise, the frame passes through without segmentation overlay.
 
 ## Error Handling
 
@@ -80,6 +96,8 @@ Once the consecutive miss count reaches `hold_last_frames`, `draw_segmask` stops
 - Run the neural demo with the court segmentation overlay enabled.
 - Verify that short segmentation gaps no longer make the court mask disappear immediately.
 - Verify that long runs of missing segmentation eventually remove the overlay after `hold_last_frames`.
+- Verify that frames classified as `closeup` do not draw the court mask.
+- Verify that missing `shot_info` also suppresses the court mask.
 
 ### Configuration
 
@@ -91,3 +109,4 @@ Once the consecutive miss count reaches `hold_last_frames`, `draw_segmask` stops
 
 - Verify no changes to `shot_classifier`, `ball_tracker`, or other consumers of segmentation metadata.
 - Verify the live and VOD pipelines still build and run without template changes.
+- Verify that cached wide-shot masks are not drawn after a transition to `closeup`.
