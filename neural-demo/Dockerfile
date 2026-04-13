@@ -1,4 +1,4 @@
-FROM fedora:42 AS builder
+FROM fedora:42 AS base
 
 ARG FFMPEG_TAG=n7.1.3
 ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
@@ -59,11 +59,9 @@ RUN curl -L "${TENSORRT_URL}" -o /tmp/tensorrt.tar.gz \
 
 WORKDIR /build
 
-COPY deps /build/deps
-COPY src /build/src
-COPY Makefile /build/Makefile
-COPY generate_node_list /build/generate_node_list
-COPY .git /build/.git
+FROM base AS ffmpeg-builder
+
+COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
 
 RUN git clone --branch "${FFMPEG_TAG}" --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
 RUN cd /tmp/ffmpeg \
@@ -181,7 +179,25 @@ RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' 
     && /usr/local/bin/ffmpeg -hide_banner -protocols | grep -q '^  srt$' \
     && ldd /usr/local/bin/ffmpeg | grep -q '/usr/local/lib/libavfilter'
 
-RUN make -C /build -j"$(nproc)" deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/cuda_loader/cuda_drvapi_dynlink.o
+FROM ffmpeg-builder AS deps-builder
+
+COPY deps /build/deps
+COPY Makefile /build/Makefile
+
+RUN make -C /build -j"$(nproc)" \
+        deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/cuda_loader/cuda_drvapi_dynlink.o \
+        PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+        CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' \
+        LFLAGS+=' -Wl,--disable-new-dtags -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib'
+RUN mkdir -p /build/deps/include/bytetrack \
+    && cp /build/deps/bytetrack/include/*.h /build/deps/include/bytetrack/
+
+FROM deps-builder AS builder
+
+COPY src /build/src
+COPY generate_node_list /build/generate_node_list
+COPY .git /build/.git
+
 RUN make -C /build -j"$(nproc)" \
         HAVE_CUDA=1 \
         HAVE_NVCC=1 \
