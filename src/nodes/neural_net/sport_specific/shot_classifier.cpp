@@ -18,7 +18,7 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     // Seg mask config
     std::string seg_metadata_key_ = "yolo_seg";
     float seg_mask_threshold_ = 0.5f;
-    std::unordered_set<int> court_class_indices_ = {1}; // "basketball-court"
+    std::unordered_set<int> court_class_indices_ = {0, 1}; // "three point line" + "basketball-court"
 
     // Player detection config
     std::string player_metadata_key_ = "yolo_players";

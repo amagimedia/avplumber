@@ -23,6 +23,8 @@ using ball_tracker_detail::GateDecision;
 using ball_tracker_detail::ParsedFrameMetadata;
 using ball_tracker_detail::CandidateSelection;
 using ball_tracker_detail::TrackingDecision;
+using ball_tracker_detail::CourtBoundsCheckConfig;
+using ball_tracker_detail::CourtBoundsCheckResult;
 using ball_tracker_detail::boxWidth;
 using ball_tracker_detail::boxHeight;
 using ball_tracker_detail::centerX;
@@ -33,6 +35,7 @@ using ball_tracker_detail::hypot2;
 using ball_tracker_detail::sizePenalty;
 using ball_tracker_detail::roundnessPenalty;
 using ball_tracker_detail::addTrailPoint;
+using ball_tracker_detail::checkCourtBoundsHorizontalOverlap;
 
 class BallTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
 private:
@@ -62,13 +65,17 @@ private:
     double min_iou_ = 0.20;
     double speed_mult_ = 3.0;
 
-    // Override-only off-court veto for stale far reacquires
-    bool override_off_court_veto_enabled_ = false;
-    std::string override_off_court_seg_metadata_key_ = "yolo_seg";
-    std::unordered_set<int> override_off_court_class_indices_ = {1};
-    double override_off_court_mask_threshold_ = 0.5;
-    double override_off_court_min_support_ = 0.15;
-    int override_off_court_sample_radius_px_ = 2;
+    // CPU court-bounds veto for reacquires
+    bool court_bounds_veto_enabled_ = true;
+    std::string court_bounds_seg_metadata_key_ = "yolo_seg";
+    std::string court_bounds_shot_metadata_key_ = "shot_info";
+    std::unordered_set<int> court_bounds_class_indices_ = {0, 1};
+    bool court_bounds_require_wide_shot_ = true;
+    double court_bounds_min_court_coverage_ = 0.1;
+    double court_bounds_mask_threshold_ = 0.5;
+    int court_bounds_sample_rows_ = 3;
+    double court_bounds_min_horizontal_overlap_ratio_ = 0.35;
+    double court_bounds_max_horizontal_outside_px_ = 2.0;
 
     // Detection override
     double override_conf_ = 0.28;
@@ -358,16 +365,35 @@ private:
                 }
             }
         }
-        if (override_off_court_veto_enabled_) {
+        if (court_bounds_veto_enabled_) {
+            populateShotInfo(raw, parsed);
             populateCourtMaskData(raw, parsed);
         }
         return true;
     }
 
+    void populateShotInfo(const AVFrame* raw, ParsedFrameMetadata& parsed) const {
+        if (!raw || !raw->metadata || court_bounds_shot_metadata_key_.empty()) return;
+
+        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, court_bounds_shot_metadata_key_.c_str(), nullptr, 0);
+        if (!shot_entry || !shot_entry->value) return;
+
+        try {
+            Parameters shot_md = Parameters::parse(shot_entry->value);
+            parsed.have_shot_info = true;
+            parsed.shot_type = shot_md.value("shot_type", std::string());
+            parsed.court_coverage = shot_md.value("court_coverage", 0.0);
+        } catch (...) {
+            parsed.have_shot_info = false;
+            parsed.shot_type.clear();
+            parsed.court_coverage = 0.0;
+        }
+    }
+
     void populateCourtMaskData(const AVFrame* raw, ParsedFrameMetadata& parsed) const {
         if (!raw || !raw->metadata) return;
 
-        AVDictionaryEntry* seg_entry = av_dict_get(raw->metadata, override_off_court_seg_metadata_key_.c_str(), nullptr, 0);
+        AVDictionaryEntry* seg_entry = av_dict_get(raw->metadata, court_bounds_seg_metadata_key_.c_str(), nullptr, 0);
         if (!seg_entry || !seg_entry->value) return;
 
         try {
@@ -377,7 +403,7 @@ private:
                 for (const auto& det : seg_md["detections"]) {
                     if (det.contains("cls")) {
                         int cls = det["cls"].get<int>();
-                        if (override_off_court_class_indices_.count(cls)) {
+                        if (court_bounds_class_indices_.count(cls)) {
                             parsed.court_mask_indices.push_back(idx);
                         }
                     }
@@ -411,59 +437,37 @@ private:
         parsed.court_mask_data = reinterpret_cast<const float*>(sd->data + 16);
     }
 
-    double sampleCourtSupport(const ParsedFrameMetadata& parsed, double cx, double cy) const {
-        if (!parsed.have_court_mask_data || !parsed.court_mask_data
-            || parsed.model_w <= 0.0 || parsed.model_h <= 0.0
-            || parsed.court_mask_w == 0 || parsed.court_mask_h == 0) {
-            return -1.0;
-        }
-
-        const double mx = (cx / parsed.model_w) * (double)parsed.court_mask_w;
-        const double my = (cy / parsed.model_h) * (double)parsed.court_mask_h;
-        if (!std::isfinite(mx) || !std::isfinite(my)) return -1.0;
-
-        const int center_x = (int)std::lround(mx);
-        const int center_y = (int)std::lround(my);
-        const size_t pixels_per_mask = (size_t)parsed.court_mask_w * (size_t)parsed.court_mask_h;
-
-        int hits = 0;
-        int total = 0;
-        for (int dy = -override_off_court_sample_radius_px_; dy <= override_off_court_sample_radius_px_; ++dy) {
-            int y = center_y + dy;
-            if (y < 0 || y >= (int)parsed.court_mask_h) continue;
-            for (int dx = -override_off_court_sample_radius_px_; dx <= override_off_court_sample_radius_px_; ++dx) {
-                int x = center_x + dx;
-                if (x < 0 || x >= (int)parsed.court_mask_w) continue;
-                const size_t pix = (size_t)y * parsed.court_mask_w + (size_t)x;
-                bool on_court = false;
-                for (int mi : parsed.court_mask_indices) {
-                    if (mi < 0 || (uint32_t)mi >= parsed.court_num_masks) continue;
-                    const float* mask = parsed.court_mask_data + (size_t)mi * pixels_per_mask;
-                    if (mask[pix] >= (float)override_off_court_mask_threshold_) {
-                        on_court = true;
-                        break;
-                    }
-                }
-                hits += on_court ? 1 : 0;
-                total++;
-            }
-        }
-
-        if (total == 0) return -1.0;
-        return (double)hits / (double)total;
+    CourtBoundsCheckConfig buildCourtBoundsCheckConfig() const {
+        CourtBoundsCheckConfig cfg;
+        cfg.enabled = court_bounds_veto_enabled_;
+        cfg.require_wide_shot = court_bounds_require_wide_shot_;
+        cfg.min_court_coverage = court_bounds_min_court_coverage_;
+        cfg.mask_threshold = court_bounds_mask_threshold_;
+        cfg.sample_rows = court_bounds_sample_rows_;
+        cfg.min_horizontal_overlap_ratio = court_bounds_min_horizontal_overlap_ratio_;
+        cfg.max_horizontal_outside_px = court_bounds_max_horizontal_outside_px_;
+        return cfg;
     }
 
-    bool farReacquireLooksOffCourt(const DetectionBox& cand, const ParsedFrameMetadata& parsed) const {
-        if (!override_off_court_veto_enabled_ || !parsed.have_court_mask_data) return false;
-        const double support = sampleCourtSupport(parsed, centerX(cand), centerY(cand));
+    CourtBoundsCheckResult evaluateCourtBounds(const DetectionBox& cand,
+                                               const ParsedFrameMetadata& parsed) const {
+        const auto result = checkCourtBoundsHorizontalOverlap(cand, parsed, buildCourtBoundsCheckConfig());
         if (shouldDebugLog()) {
             logstream << "ball_tracker: frame=" << frame_counter_
-                      << " override_court_check cx=" << centerX(cand)
+                      << " court_bounds_check cx=" << centerX(cand)
                       << " cy=" << centerY(cand)
-                      << " support=" << support
-                      << " veto=" << (support >= 0.0 && support < override_off_court_min_support_);
+                      << " rows=" << result.sample_rows_used
+                      << " shot=" << (parsed.have_shot_info ? parsed.shot_type : std::string("missing"))
+                      << " court_cov=" << parsed.court_coverage
+                      << " best_overlap=" << result.best_overlap_ratio
+                      << " worst_overlap=" << result.worst_overlap_ratio
+                      << " left_out=" << result.max_left_out_px
+                      << " right_out=" << result.max_right_out_px
+                      << " usable=" << result.usable
+                      << " veto=" << result.veto
+                      << " reason=" << result.reason;
         }
-        return support >= 0.0 && support < override_off_court_min_support_;
+        return result;
     }
 
     bool coastEdgeJumpVetoApplies(const DetectionBox& cand,
@@ -595,6 +599,14 @@ private:
         const bool stale = det_reject_streak_ >= override_after_
                         || (int)gap_frames >= reacquire_frames_
                         || (int)real_gap_frames >= reacquire_frames_;
+        if (stale) {
+            const auto court_bounds = evaluateCourtBounds(cand, parsed);
+            if (court_bounds.veto) {
+                clearPendingOverride();
+                return false;
+            }
+        }
+
         // When the tracker is stale, treat large jumps from the recent coasted path
         // as provisional reacquires even if they happen to land near an older real hit.
         const bool far_reacquire = stale && (far_from_prev || far_from_real || far_from_pred);
@@ -604,10 +616,6 @@ private:
         const bool provisional_reacquire = far_reacquire || edge_jump_veto;
 
         if (provisional_reacquire) {
-            if (farReacquireLooksOffCourt(cand, parsed)) {
-                clearPendingOverride();
-                return false;
-            }
             const bool pending_fresh = have_pending_override_
                                     && pending_override_last_frame_ + 1 >= frame_counter_;
             const bool pending_matches = pending_fresh
@@ -1081,17 +1089,30 @@ public:
         if (params.count("min_iou")) r->min_iou_ = params["min_iou"];
         if (params.count("speed_mult")) r->speed_mult_ = params["speed_mult"];
 
-        if (params.count("override_off_court_veto_enabled")) r->override_off_court_veto_enabled_ = params["override_off_court_veto_enabled"];
-        if (params.count("override_off_court_seg_metadata_key")) r->override_off_court_seg_metadata_key_ = params["override_off_court_seg_metadata_key"].get<std::string>();
-        if (params.count("override_off_court_class_indices")) {
-            r->override_off_court_class_indices_.clear();
-            for (const auto& item : params["override_off_court_class_indices"]) {
-                r->override_off_court_class_indices_.insert(item.get<int>());
+        if (params.count("court_bounds_veto_enabled")) r->court_bounds_veto_enabled_ = params["court_bounds_veto_enabled"];
+        if (params.count("override_off_court_veto_enabled")) r->court_bounds_veto_enabled_ = params["override_off_court_veto_enabled"];
+        if (params.count("court_bounds_seg_metadata_key")) r->court_bounds_seg_metadata_key_ = params["court_bounds_seg_metadata_key"].get<std::string>();
+        if (params.count("override_off_court_seg_metadata_key")) r->court_bounds_seg_metadata_key_ = params["override_off_court_seg_metadata_key"].get<std::string>();
+        if (params.count("court_bounds_shot_metadata_key")) r->court_bounds_shot_metadata_key_ = params["court_bounds_shot_metadata_key"].get<std::string>();
+        if (params.count("court_bounds_require_wide_shot")) r->court_bounds_require_wide_shot_ = params["court_bounds_require_wide_shot"];
+        if (params.count("court_bounds_min_court_coverage")) r->court_bounds_min_court_coverage_ = params["court_bounds_min_court_coverage"];
+        if (params.count("court_bounds_class_indices")) {
+            r->court_bounds_class_indices_.clear();
+            for (const auto& item : params["court_bounds_class_indices"]) {
+                r->court_bounds_class_indices_.insert(item.get<int>());
             }
         }
-        if (params.count("override_off_court_mask_threshold")) r->override_off_court_mask_threshold_ = params["override_off_court_mask_threshold"];
-        if (params.count("override_off_court_min_support")) r->override_off_court_min_support_ = params["override_off_court_min_support"];
-        if (params.count("override_off_court_sample_radius_px")) r->override_off_court_sample_radius_px_ = params["override_off_court_sample_radius_px"];
+        if (params.count("override_off_court_class_indices")) {
+            r->court_bounds_class_indices_.clear();
+            for (const auto& item : params["override_off_court_class_indices"]) {
+                r->court_bounds_class_indices_.insert(item.get<int>());
+            }
+        }
+        if (params.count("court_bounds_mask_threshold")) r->court_bounds_mask_threshold_ = params["court_bounds_mask_threshold"];
+        if (params.count("override_off_court_mask_threshold")) r->court_bounds_mask_threshold_ = params["override_off_court_mask_threshold"];
+        if (params.count("court_bounds_sample_rows")) r->court_bounds_sample_rows_ = params["court_bounds_sample_rows"];
+        if (params.count("court_bounds_min_horizontal_overlap_ratio")) r->court_bounds_min_horizontal_overlap_ratio_ = params["court_bounds_min_horizontal_overlap_ratio"];
+        if (params.count("court_bounds_max_horizontal_outside_px")) r->court_bounds_max_horizontal_outside_px_ = params["court_bounds_max_horizontal_outside_px"];
 
         // Detection override
         if (params.count("override_conf")) r->override_conf_ = params["override_conf"];
