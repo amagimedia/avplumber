@@ -32,12 +32,12 @@ else
 OPTIMIZATION_FLAGS = -O3 -flto
 endif
 
-override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
-override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib $(OPTIMIZATION_FLAGS)
+override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/local/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
+override LFLAGS += -L/usr/local/lib -Wl,-rpath,/usr/local/lib $(OPTIMIZATION_FLAGS)
 # Used only for objs/src/avplumber_pybind.o and linking $(PYTHON_MODULE) (not for avplumber/static_library/cpr/avcpp).
 PYTHON_MODULE_EXTRA_CXXFLAGS = -Ideps/pybind11/include -Ideps/pybind11_json/include $(shell python3-config --includes)
 PYTHON_MODULE_EXTRA_LFLAGS = $(shell python3-config --ldflags)
-PKG_CONFIG_PATH := /apps/ffmpeg/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
+PKG_CONFIG_PATH := /usr/local/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
 BUILD_DATE_FILE = builddate.h
 #SRCDIR = $(dir $(firstword $(MAKEFILE_LIST)))src

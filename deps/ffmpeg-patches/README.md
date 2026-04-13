@@ -53,4 +53,4 @@ Validation is expected to use the exact host configure line captured in:
 
 The goal is parity with the current custom FFmpeg install at:
 
-- `/apps/ffmpeg`
+- `/usr/local`
