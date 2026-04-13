@@ -46,9 +46,9 @@ private:
     int target_class_ = -1;
     double min_conf_ = 0.04;
 
-    // Shot-aware suppression
+    // Shot-aware mode handling
     std::string shot_metadata_key_;  // empty = disabled
-    bool suppressed_ = false;
+    int closeup_rearm_frames_ = 3;
 
     // Best ball selection
     double target_ball_size_rel_ = 0.036;
@@ -59,8 +59,8 @@ private:
 
     // Gating
     double max_jump_rel_ = 0.12;
-    double gate_rel_ = 0.06;
-    double gate_min_px_ = 12.0;
+    double gate_rel_ = 0.08;
+    double gate_min_px_ = 16.0;
     bool gate_use_pred_ = true;
     double min_iou_ = 0.20;
     double speed_mult_ = 3.0;
@@ -133,6 +133,10 @@ private:
     uint64_t frame_counter_ = 0;
     int track_id_ = 1;
     double last_accepted_conf_ = 0.0;
+    std::string last_shot_type_;
+    bool have_last_shot_type_ = false;
+    bool closeup_tracking_armed_ = true;
+    int closeup_rearm_hits_ = 0;
 
     // --- Statistics ---
     uint64_t stat_detected_ = 0;
@@ -180,7 +184,7 @@ private:
         kalman_initialized_ = true;
     }
 
-    void resetState() {
+    void resetTrackingState() {
         kalman_initialized_ = false;
         trail_.clear();
         have_last_emitted_ = false;
@@ -191,7 +195,14 @@ private:
         recent_speed_ = -1.0;
         coast_streak_ = 0;
         det_reject_streak_ = 0;
-        suppressed_ = false;
+    }
+
+    void resetState() {
+        resetTrackingState();
+        last_shot_type_.clear();
+        have_last_shot_type_ = false;
+        closeup_tracking_armed_ = true;
+        closeup_rearm_hits_ = 0;
     }
 
     void clearPendingOverride() {
@@ -290,39 +301,74 @@ private:
         }
     }
 
-    bool handleShotSuppression(av::VideoFrame& frm) {
-        if (shot_metadata_key_.empty()) return false;
-
-        const AVFrame* raw = frm.raw();
-        if (!raw || !raw->metadata) return false;
+    std::string getShotType(const AVFrame* raw) const {
+        if (shot_metadata_key_.empty()) return std::string();
+        if (!raw || !raw->metadata) return std::string();
 
         AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
-        if (!shot_entry || !shot_entry->value) return false;
+        if (!shot_entry || !shot_entry->value) return std::string();
 
         try {
             Parameters shot_md = Parameters::parse(shot_entry->value);
-            std::string shot_type = shot_md.value("shot_type", std::string());
-            if (shot_type != "closeup") {
-                suppressed_ = false;
-                return false;
-            }
-
-            if (!suppressed_) {
-                resetState();
-                suppressed_ = true;
-            }
-
-            stat_no_ball_++;
-            dumpFrame("", 0.0, 0.0, 0.0);
-            stripBallDetectionsFromMetadata(frm);
-            if (shouldDebugLog()) {
-                logstream << "ball_tracker: frame=" << frame_counter_ << " suppressed (closeup)";
-            }
-            this->sink_->put(frm);
-            return true;
+            return shot_md.value("shot_type", std::string());
         } catch (...) {
+            return std::string();
+        }
+    }
+
+    void updateShotMode(const std::string& shot_type) {
+        const bool is_closeup = (shot_type == "closeup");
+        const bool was_closeup = have_last_shot_type_ && last_shot_type_ == "closeup";
+
+        if (!have_last_shot_type_) {
+            closeup_tracking_armed_ = !is_closeup;
+            closeup_rearm_hits_ = 0;
+        } else if (was_closeup != is_closeup) {
+            resetTrackingState();
+            closeup_tracking_armed_ = !is_closeup;
+            closeup_rearm_hits_ = 0;
+            if (shouldDebugLog()) {
+                logstream << "ball_tracker: frame=" << frame_counter_
+                          << " shot_transition from=" << (was_closeup ? "closeup" : "wide")
+                          << " to=" << (is_closeup ? "closeup" : "wide")
+                          << " armed=" << closeup_tracking_armed_;
+            }
+        }
+
+        last_shot_type_ = shot_type;
+        have_last_shot_type_ = true;
+    }
+
+    bool handleCloseupRearm(av::VideoFrame& frm, const std::string& shot_type,
+                            const ParsedFrameMetadata& parsed) {
+        if (shot_type != "closeup" || closeup_tracking_armed_) return false;
+
+        if (!parsed.ball_dets.empty()) {
+            closeup_rearm_hits_++;
+        } else {
+            closeup_rearm_hits_ = 0;
+        }
+
+        if (closeup_rearm_hits_ >= closeup_rearm_frames_) {
+            closeup_tracking_armed_ = true;
+            if (shouldDebugLog()) {
+                logstream << "ball_tracker: frame=" << frame_counter_
+                          << " closeup_rearmed hits=" << closeup_rearm_hits_;
+            }
             return false;
         }
+
+        stat_no_ball_++;
+        writeOutputMetadata(frm, parsed, false, DetectionBox{}, "", 0.0);
+        dumpFrame("", 0.0, 0.0, 0.0);
+        if (shouldDebugLog()) {
+            logstream << "ball_tracker: frame=" << frame_counter_
+                      << " closeup_unarmed hits=" << closeup_rearm_hits_
+                      << "/" << closeup_rearm_frames_
+                      << " raw_candidates=" << parsed.ball_dets.size();
+        }
+        this->sink_->put(frm);
+        return true;
     }
 
     bool parseFrameMetadata(av::VideoFrame& frm, ParsedFrameMetadata& parsed) {
@@ -1009,11 +1055,12 @@ public:
         }
 
         ++frame_counter_;
-
-        if (handleShotSuppression(frm)) return;
+        const std::string shot_type = getShotType(frm.raw());
+        updateShotMode(shot_type);
 
         ParsedFrameMetadata parsed;
         if (!parseFrameMetadata(frm, parsed)) return;
+        if (handleCloseupRearm(frm, shot_type, parsed)) return;
 
         predictKalman();
 
@@ -1060,8 +1107,9 @@ public:
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<BallTracker>(edges, params);
 
-        // Shot-aware suppression
+        // Shot-aware mode handling
         if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("closeup_rearm_frames")) r->closeup_rearm_frames_ = params["closeup_rearm_frames"];
 
         // Target filtering
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
