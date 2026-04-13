@@ -15,7 +15,14 @@ using cuda_overlay::DrawColor;
 
 class DrawSegMask : public CudaOverlayBase {
 private:
+    struct MaskDetection {
+        int bbox_x1, bbox_y1, bbox_x2, bbox_y2;
+        int mask_index;
+        int cls = -1;
+    };
+
     std::string metadata_key_;
+    std::string shot_metadata_key_ = "shot_info";
     DrawColor mask_color_{};
     float opacity_ = 0.5f;
     float threshold_ = 0.5f;
@@ -24,6 +31,7 @@ private:
     double model_content_offset_x_ = 0.0;
     double model_content_offset_y_ = 0.0;
     int debug_log_every_n_ = 0;
+    bool require_wide_shot_ = false;
     double min_conf_ = 0.0;
     std::unordered_map<int, DrawColor> class_colors_;
 
@@ -50,16 +58,127 @@ private:
         return true;
     }
 
-    struct MaskDetection {
-        int bbox_x1, bbox_y1, bbox_x2, bbox_y2;
-        int mask_index;
-        int cls = -1;
-    };
-
     DrawColor resolveColor(int cls) const {
         auto it = class_colors_.find(cls);
         if (it != class_colors_.end()) return it->second;
         return mask_color_;
+    }
+
+    std::string readShotType(const av::VideoFrame& frm) const {
+        const AVFrame* raw = frm.raw();
+        if (!raw || !raw->metadata) return {};
+
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        if (!entry || !entry->value) return {};
+
+        try {
+            Parameters md = Parameters::parse(entry->value);
+            return md.value("shot_type", std::string());
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
+    void renderMasks(av::VideoFrame& output,
+                     CUdeviceptr gpu_masks,
+                     const GpuMaskSideDataHeader& header,
+                     const std::vector<MaskDetection>& detections) {
+        const int num_masks = (int)header.num_masks;
+        const int proto_w = (int)header.proto_w;
+        const int proto_h = (int)header.proto_h;
+        const int model_w = (int)header.model_w;
+        const int model_h = (int)header.model_h;
+
+        if (num_masks <= 0 || proto_w <= 0 || proto_h <= 0 || !gpu_masks || detections.empty()) return;
+
+        // Compute frame->model coordinate mapping
+        // frame_x * scale_x + offset_x = model_x
+        float scale_x, scale_y, offset_x, offset_y;
+        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
+            scale_x = (float)(model_content_width_ / (double)input_params_.width);
+            scale_y = (float)(model_content_height_ / (double)input_params_.height);
+            offset_x = (float)model_content_offset_x_;
+            offset_y = (float)model_content_offset_y_;
+        } else {
+            scale_x = (float)model_w / (float)input_params_.width;
+            scale_y = (float)model_h / (float)input_params_.height;
+            offset_x = 0.0f;
+            offset_y = 0.0f;
+        }
+
+        const unsigned int block_x = 32;
+        const unsigned int block_y = 8;
+
+        CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)output.raw()->data[0];
+        size_t pitch_y = (size_t)output.raw()->linesize[0];
+        CUdeviceptr uv_plane = (CUdeviceptr)(uintptr_t)output.raw()->data[1];
+        size_t pitch_uv = (size_t)output.raw()->linesize[1];
+        int frame_w = output.width();
+        int frame_h = output.height();
+        float op = opacity_;
+        float thresh = threshold_;
+
+        for (const auto& det : detections) {
+            if (det.mask_index >= num_masks) continue;
+
+            const DrawColor color = resolveColor(det.cls);
+            int y_color = color.y;
+            int u_color = color.u;
+            int v_color = color.v;
+
+            CUdeviceptr mask_ptr = gpu_masks + (size_t)det.mask_index * proto_h * proto_w * sizeof(float);
+
+            int bx1 = det.bbox_x1, by1 = det.bbox_y1;
+            int bx2 = det.bbox_x2, by2 = det.bbox_y2;
+            int bbox_w = bx2 - bx1;
+            int bbox_h = by2 - by1;
+
+            unsigned int grid_x = ((unsigned int)bbox_w + block_x - 1) / block_x;
+            unsigned int grid_y = ((unsigned int)bbox_h + block_y - 1) / block_y;
+
+            void* y_args[] = {
+                (void*)&y_plane, (void*)&pitch_y,
+                (void*)&mask_ptr,
+                (void*)&proto_w, (void*)&proto_h,
+                (void*)&model_w, (void*)&model_h,
+                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
+                (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
+                (void*)&frame_w, (void*)&frame_h,
+                (void*)&y_color, (void*)&op, (void*)&thresh
+            };
+            if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
+                                        grid_x, grid_y, 1,
+                                        block_x, block_y, 1,
+                                        0, cuda_dev_ctx_->stream, y_args, nullptr))) {
+                logstream << "draw_segmask: failed launching luma kernel";
+                return;
+            }
+
+            int uv_bbox_w = ((bx2 + 1) >> 1) - (bx1 >> 1);
+            int uv_bbox_h = ((by2 + 1) >> 1) - (by1 >> 1);
+            unsigned int uv_grid_x = ((unsigned int)uv_bbox_w + block_x - 1) / block_x;
+            unsigned int uv_grid_y = ((unsigned int)uv_bbox_h + block_y - 1) / block_y;
+
+            void* uv_args[] = {
+                (void*)&uv_plane, (void*)&pitch_uv,
+                (void*)&mask_ptr,
+                (void*)&proto_w, (void*)&proto_h,
+                (void*)&model_w, (void*)&model_h,
+                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
+                (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
+                (void*)&frame_w, (void*)&frame_h,
+                (void*)&u_color, (void*)&v_color, (void*)&op, (void*)&thresh
+            };
+            if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
+                                        uv_grid_x, uv_grid_y, 1,
+                                        block_x, block_y, 1,
+                                        0, cuda_dev_ctx_->stream, uv_args, nullptr))) {
+                logstream << "draw_segmask: failed launching chroma kernel";
+                return;
+            }
+        }
+
+        CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
     }
 
     std::vector<MaskDetection> parseDetections(const av::VideoFrame& frm, int model_w, int model_h) const {
@@ -123,8 +242,16 @@ private:
             throw Error("draw_segmask: failed to initialize CUDA kernels");
         }
 
-        // Find GPU mask side data
         const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU);
+        const std::string shot_type = readShotType(input);
+        if (require_wide_shot_ && shot_type != "wide") {
+            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "draw_segmask: frame=" << frame_counter_
+                          << " suppressed shot_type=" << (shot_type.empty() ? "<missing>" : shot_type);
+            }
+            return;
+        }
+
         if (!sd || !sd->buf || sd->buf->size < (int)sizeof(GpuMaskSideDataHeader)) {
             if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                 logstream << "draw_segmask: frame=" << frame_counter_ << " no GPU mask side data";
@@ -150,107 +277,18 @@ private:
                       << " proto=" << proto_w << "x" << proto_h
                       << " detections=" << detections.size();
         }
-
-        // Compute frame->model coordinate mapping
-        // frame_x * scale_x + offset_x = model_x
-        float scale_x, scale_y, offset_x, offset_y;
-        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
-            scale_x = (float)(model_content_width_ / (double)input_params_.width);
-            scale_y = (float)(model_content_height_ / (double)input_params_.height);
-            offset_x = (float)model_content_offset_x_;
-            offset_y = (float)model_content_offset_y_;
-        } else {
-            scale_x = (float)model_w / (float)input_params_.width;
-            scale_y = (float)model_h / (float)input_params_.height;
-            offset_x = 0.0f;
-            offset_y = 0.0f;
-        }
-
-        const unsigned int block_x = 32;
-        const unsigned int block_y = 8;
-
-        CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)output.raw()->data[0];
-        size_t pitch_y = (size_t)output.raw()->linesize[0];
-        CUdeviceptr uv_plane = (CUdeviceptr)(uintptr_t)output.raw()->data[1];
-        size_t pitch_uv = (size_t)output.raw()->linesize[1];
-        int frame_w = output.width();
-        int frame_h = output.height();
-        float op = opacity_;
-        float thresh = threshold_;
-
-        for (const auto& det : detections) {
-            if (det.mask_index >= num_masks) continue;
-
-            const DrawColor color = resolveColor(det.cls);
-            int y_color = color.y;
-            int u_color = color.u;
-            int v_color = color.v;
-
-            // Pointer to this detection's mask in GPU memory
-            CUdeviceptr mask_ptr = gpu_masks + (size_t)det.mask_index * proto_h * proto_w * sizeof(float);
-
-            int bx1 = det.bbox_x1, by1 = det.bbox_y1;
-            int bx2 = det.bbox_x2, by2 = det.bbox_y2;
-            int bbox_w = bx2 - bx1;
-            int bbox_h = by2 - by1;
-
-            unsigned int grid_x = ((unsigned int)bbox_w + block_x - 1) / block_x;
-            unsigned int grid_y = ((unsigned int)bbox_h + block_y - 1) / block_y;
-
-            // Luma kernel
-            void* y_args[] = {
-                (void*)&y_plane, (void*)&pitch_y,
-                (void*)&mask_ptr,
-                (void*)&proto_w, (void*)&proto_h,
-                (void*)&model_w, (void*)&model_h,
-                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
-                (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
-                (void*)&frame_w, (void*)&frame_h,
-                (void*)&y_color, (void*)&op, (void*)&thresh
-            };
-            if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
-                                        grid_x, grid_y, 1,
-                                        block_x, block_y, 1,
-                                        0, cuda_dev_ctx_->stream, y_args, nullptr))) {
-                logstream << "draw_segmask: failed launching luma kernel";
-                return;
-            }
-
-            // Chroma kernel
-            int uv_bbox_w = ((bx2 + 1) >> 1) - (bx1 >> 1);
-            int uv_bbox_h = ((by2 + 1) >> 1) - (by1 >> 1);
-            unsigned int uv_grid_x = ((unsigned int)uv_bbox_w + block_x - 1) / block_x;
-            unsigned int uv_grid_y = ((unsigned int)uv_bbox_h + block_y - 1) / block_y;
-
-            void* uv_args[] = {
-                (void*)&uv_plane, (void*)&pitch_uv,
-                (void*)&mask_ptr,
-                (void*)&proto_w, (void*)&proto_h,
-                (void*)&model_w, (void*)&model_h,
-                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
-                (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
-                (void*)&frame_w, (void*)&frame_h,
-                (void*)&u_color, (void*)&v_color, (void*)&op, (void*)&thresh
-            };
-            if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
-                                        uv_grid_x, uv_grid_y, 1,
-                                        block_x, block_y, 1,
-                                        0, cuda_dev_ctx_->stream, uv_args, nullptr))) {
-                logstream << "draw_segmask: failed launching chroma kernel";
-                return;
-            }
-        }
-
-        CUDA_OVERLAY_CHECK_CU(cuStreamSynchronize(cuda_dev_ctx_->stream));
+        renderMasks(output, gpu_masks, *header, detections);
     }
 
 public:
     DrawSegMask(std::unique_ptr<Source<av::VideoFrame>> &&source,
                 std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                 std::string metadata_key,
+                std::string shot_metadata_key,
                 DrawColor mask_color,
                 float opacity,
                 float threshold,
+                bool require_wide_shot,
                 double min_conf,
                 std::unordered_map<int, DrawColor> class_colors,
                 double model_content_width,
@@ -263,9 +301,11 @@ public:
                 int debug_log_every_n)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
+          shot_metadata_key_(std::move(shot_metadata_key)),
           mask_color_(mask_color),
           opacity_(opacity),
           threshold_(threshold),
+          require_wide_shot_(require_wide_shot),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -286,8 +326,10 @@ public:
         const auto upstream = resolveUpstreamInfo(src_edge, params);
 
         const std::string metadata_key = params.value("metadata_key", std::string("yolo_detections"));
+        const std::string shot_metadata_key = params.value("shot_metadata_key", std::string("shot_info"));
         const float opacity = params.value("opacity", 0.5f);
         const float threshold = params.value("threshold", 0.5f);
+        const bool require_wide_shot = params.value("require_wide_shot", false);
         const double min_conf = params.value("min_conf", 0.0);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double model_content_width = params.value("model_content_width", 0.0);
@@ -313,7 +355,8 @@ public:
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawSegMask>(
-            edges, params, metadata_key, mask_color, opacity, threshold, min_conf,
+            edges, params, metadata_key, shot_metadata_key, mask_color, opacity, threshold,
+            require_wide_shot, min_conf,
             std::move(class_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
