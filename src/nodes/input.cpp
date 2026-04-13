@@ -9,7 +9,17 @@ protected:
     AVTS wait_start_;
     AVTS wait_max_ = AV_NOPTS_VALUE;
     av::Timestamp shift_ = NOTS;
+    bool eof_mode_drain_ = false;
+    bool eof_sent_ = false;
+    av::Timestamp stop_delay_ = NOTS;
+    av::Timestamp node_stop_ts_ = NOTS;
     Parameters streams_object_, programs_object_;
+    void sendEofOnce() {
+        if (!eof_sent_) {
+            this->sink_->put(createEofPacket());
+            eof_sent_ = true;
+        }
+    }
     void closeInput(bool warn = true) {
         try {
             ictx_.close();
@@ -58,11 +68,31 @@ public:
         ictx_.stream(index).raw()->discard = AVDISCARD_DEFAULT;
     }
     virtual void process() {
+        if (node_stop_ts_.isValid()) {
+            if (wallclock.absolute_ts() >= node_stop_ts_) {
+                logstream << "stop_delay elapsed, finishing input";
+                this->finished_ = true;
+            } else {
+                wallclock.sleepms(10);
+            }
+            return;
+        }
         wait_start_ = wallclock.pts();
         av::Packet pkt = ictx_.readPacket();
         if (pkt.isNull()) {
-            this->finished_ = true;
             logstream << "Got null packet";
+            if (stop_delay_.isValid()) {
+                sendEofOnce();
+                node_stop_ts_ = addTS(wallclock.absolute_ts(), stop_delay_);
+                logstream << "EOF reached, delaying input finish by " << stop_delay_;
+                return;
+            }
+            if (eof_mode_drain_) {
+                sendEofOnce();
+                this->finished_ = true;
+                return;
+            }
+            this->finished_ = true;
             //closeInput(true);
             // do not close input right now, otherwise segfaults happen because decoder tries to use demuxer data which is freed
             // TODO: check whether creating stream-independent decoder will help
@@ -153,6 +183,17 @@ public:
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
         edge->setProducer(this->shared_from_this());
         setTimeout(timeout);
+        if (params.count("eof_mode") > 0) {
+            std::string eof_mode = params["eof_mode"];
+            if (eof_mode == "drain") {
+                eof_mode_drain_ = true;
+            } else {
+                throw Error("Unknown eof_mode " + eof_mode);
+            }
+        }
+        if (params.count("stop_delay") > 0) {
+            stop_delay_ = av::Timestamp(params["stop_delay"].get<int64_t>(), {1, 1000});
+        }
 
         for (size_t i=0; i<ictx_.streamsCount(); i++) {
             Parameters obj;
