@@ -1,24 +1,91 @@
 #include "node_common.hpp"
 
-template <typename T> class JoinMetadata: public NodeMultiInput<T>, public NodeSingleOutput<T> {
+template <typename T> class JoinMetadata: public NodeMultiInput<T>, public NodeSingleOutput<T>, public ReportsFinishByFlag {
 private:
     static constexpr int primary_index_ = 0;
     static constexpr int auxiliary_index_ = 1;
+    bool primary_eof_ = false;
+    bool auxiliary_eof_ = false;
 
     static bool isUsable(const T& data) {
         return (!data.isNull()) && data.isComplete() && data.pts().isValid();
+    }
+
+    void consumeEofMarkers() {
+        if (!primary_eof_) {
+            T* primary = this->source_edges_[primary_index_]->peek();
+            if (primary && isEofMarker(*primary)) {
+                this->source_edges_[primary_index_]->pop();
+                primary_eof_ = true;
+            }
+        }
+        if (!auxiliary_eof_) {
+            T* auxiliary = this->source_edges_[auxiliary_index_]->peek();
+            if (auxiliary && isEofMarker(*auxiliary)) {
+                this->source_edges_[auxiliary_index_]->pop();
+                auxiliary_eof_ = true;
+            }
+        }
     }
 
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
 
     virtual void process() override {
+        consumeEofMarkers();
+
+        if (this->stopping_) {
+            this->finished_ = true;
+            return;
+        }
+
+        if (primary_eof_ && auxiliary_eof_) {
+            this->sink_->put(T());
+            this->finished_ = true;
+            return;
+        }
+
         T* primary = this->source_edges_[primary_index_]->peek();
         T* auxiliary = this->source_edges_[auxiliary_index_]->peek();
 
-        // Keep synchronization mux-like: do not infer "missing" from empty queues.
+        if (auxiliary_eof_) {
+            if (primary == nullptr) {
+                this->waitForInput();
+                return;
+            }
+            if (isEofMarker(*primary)) {
+                this->source_edges_[primary_index_]->pop();
+                primary_eof_ = true;
+                return;
+            }
+            this->sink_->put(*primary);
+            this->source_edges_[primary_index_]->pop();
+            return;
+        }
+
+        if (primary_eof_) {
+            if (auxiliary == nullptr) {
+                this->waitForInput();
+                return;
+            }
+            if (isEofMarker(*auxiliary)) {
+                this->source_edges_[auxiliary_index_]->pop();
+                auxiliary_eof_ = true;
+                return;
+            }
+            this->source_edges_[auxiliary_index_]->pop();
+            return;
+        }
+
+        // Keep synchronization mux-like: do not infer "missing" from empty queues
+        // while both sides are still live.
         if (primary == nullptr || auxiliary == nullptr) {
             this->waitForInput();
+            return;
+        }
+
+        if (isEofMarker(*primary) || isEofMarker(*auxiliary)) {
+            consumeEofMarkers();
             return;
         }
 
