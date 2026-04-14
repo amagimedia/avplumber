@@ -1,6 +1,7 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
 #include "../../video_parameters.hpp"
+#include "../../SharedTimeline.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -13,6 +14,7 @@ extern "C" {
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -61,11 +63,11 @@ static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     // No crop object → crop_x/y/w/h all stay 0 (full source frame from origin).
 }
 
-static std::vector<LayerSpec> parseLayersParam(const Parameters &params) {
+static std::vector<LayerSpec> parseLayersArray(const Parameters &arr) {
     std::vector<LayerSpec> layers;
-    if (!params.contains("layers") || !params["layers"].is_array())
-        throw Error("cuda_rect_overlay: layers array required (one entry per input in src order)");
-    for (const auto &item : params["layers"]) {
+    if (!arr.is_array())
+        throw Error("cuda_rect_overlay: layers must be an array");
+    for (const auto &item : arr) {
         if (!item.is_object())
             throw Error("cuda_rect_overlay: layers entries must be objects");
         LayerSpec s;
@@ -73,6 +75,12 @@ static std::vector<LayerSpec> parseLayersParam(const Parameters &params) {
         layers.push_back(s);
     }
     return layers;
+}
+
+static std::vector<LayerSpec> parseLayersParam(const Parameters &params) {
+    if (!params.contains("layers") || !params["layers"].is_array())
+        throw Error("cuda_rect_overlay: layers array required (one entry per input in src order)");
+    return parseLayersArray(params["layers"]);
 }
 
 static int chromaXAlign(AVPixelFormat sw_fmt) {
@@ -262,7 +270,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         public NodeSingleOutput<av::VideoFrame>,
                         public IVideoFormatSource,
                         public IFrameRateSource,
-                        public ITimeBaseSource {
+                        public ITimeBaseSource,
+                        public TimelineReader,
+                        public IInputsObjects {
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef *out_frames_ref_ = nullptr;
 
@@ -271,6 +281,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     AVPixelFormat sw_fmt_ = AV_PIX_FMT_NONE;
 
     std::vector<LayerSpec> default_layers_;
+    mutable std::mutex layers_mutex_;
     std::string metadata_key_;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
@@ -283,6 +294,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
+    std::atomic<uint32_t> active_inputs_{~0u};
 
     void freeHwContexts() {
         av_buffer_unref(&out_frames_ref_);
@@ -302,7 +314,11 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     }
 
     std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source) {
-        std::vector<LayerSpec> layers = default_layers_;
+        std::vector<LayerSpec> layers;
+        {
+            std::lock_guard<std::mutex> lock(layers_mutex_);
+            layers = default_layers_;
+        }
         if (!metadata_source || !metadata_source->raw() || !metadata_source->raw()->metadata)
             return layers;
         AVDictionaryEntry *e = av_dict_get(metadata_source->raw()->metadata, metadata_key_.c_str(), nullptr, 0);
@@ -470,9 +486,24 @@ public:
         if (n == 0)
             return;
 
+        // Read active_inputs bitmask: get a representative PTS from any peeked frame
+        uint32_t active_mask = active_inputs_.load(std::memory_order_relaxed);
+        if (hasTimeline()) {
+            for (size_t i = 0; i < n; ++i) {
+                auto* p = this->source_edges_[i]->peek();
+                if (p && !isEofMarker(*p) && frameUsable(*p)) {
+                    auto opt = tlGetRaw("active_inputs", p->pts());
+                    if (opt) active_mask = parseBitmask(*opt);
+                    break;
+                }
+            }
+        }
+        auto isActive = [active_mask](size_t i) { return (active_mask & (1u << i)) != 0; };
+
         if (input_eof_.size() == n) {
             bool all_exhausted = true;
             for (size_t i = 0; i < n; ++i) {
+                if (!isActive(i)) continue;
                 if (!input_eof_[i]) {
                     all_exhausted = false;
                     break;
@@ -489,6 +520,7 @@ public:
 
         bool any_data = false;
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             if (this->source_edges_[i]->peek() != nullptr) {
                 any_data = true;
                 break;
@@ -501,12 +533,14 @@ public:
 
         bool all_peek_eof = true;
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             av::VideoFrame *p = this->source_edges_[i]->peek();
             if (p == nullptr || !isEofMarker(*p))
                 all_peek_eof = false;
         }
         if (all_peek_eof) {
             for (size_t i = 0; i < n; ++i) {
+                if (!isActive(i)) continue;
                 this->source_edges_[i]->pop();
                 if (i < input_eof_.size())
                     input_eof_[i] = true;
@@ -520,6 +554,7 @@ public:
 
         av::Timestamp min_ts = NOTS;
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             if (input_eof_[i])
                 continue;
             av::VideoFrame *p = this->source_edges_[i]->peek();
@@ -536,6 +571,7 @@ public:
         }
 
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             if (input_eof_[i])
                 continue;
             while (true) {
@@ -561,6 +597,7 @@ public:
         bool need_wait = false;
 
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             if (input_eof_[i]) {
                 if (!held_[i].isNull())
                     src_for_layer[i] = &held_[i];
@@ -591,6 +628,7 @@ public:
         }
 
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             av::VideoFrame *p = this->source_edges_[i]->peek();
             if (p && !input_eof_[i] && frameUsable(*p) && p->pts() == min_ts)
                 meta_src = p;
@@ -605,6 +643,7 @@ public:
         }
 
         for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i)) continue;
             av::VideoFrame *p = this->source_edges_[i]->peek();
             if (!p || input_eof_[i] || !frameUsable(*p) || p->pts() != min_ts)
                 continue;
@@ -619,6 +658,16 @@ public:
         }
 
         processComposite(min_ts, src_for_layer, meta_src);
+    }
+
+    void setObject(const std::string key, const Parameters& value) override {
+        if (key == "active_inputs") {
+            active_inputs_.store(parseBitmask(value), std::memory_order_relaxed);
+        } else if (key == "layers") {
+            auto new_layers = parseLayersArray(value);
+            std::lock_guard<std::mutex> lock(layers_mutex_);
+            default_layers_ = std::move(new_layers);
+        }
     }
 
     int width() override { return canvas_w_; }
@@ -671,6 +720,9 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         fr, tb, dbg);
     node->createSourcesFromParameters(edges, params);
     out_edge->setProducer(node);
+    node->initTimeline(nci);
+    if (params.count("active_inputs"))
+        node->active_inputs_.store(parseBitmask(params["active_inputs"]), std::memory_order_relaxed);
     return node;
 }
 
