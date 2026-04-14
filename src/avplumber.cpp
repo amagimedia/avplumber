@@ -1142,6 +1142,14 @@ void AVPlumber::setLogFile(const std::string path) {
     }
 }
 
+void AVPlumber::setLogCallback(std::function<void(const std::string &)> callback) {
+    if (callback) {
+        current_thread.logger = std::make_shared<CallbackLogger>(callback);
+    } else {
+        current_thread.logger = default_logger;
+    }
+}
+
 void AVPlumber::setReady() {
     logstream << APP_VERSION << " READY." << std::endl;
     impl_->setReady();
@@ -1149,6 +1157,10 @@ void AVPlumber::setReady() {
 
 void AVPlumber::shutdown() {
     impl_->shutdown();
+}
+
+std::shared_ptr<NodeManager> AVPlumber::manager() {
+    return impl_->manager();
 }
 
 void AVPlumber::mainLoop() {
@@ -1168,3 +1180,4 @@ void AVPlumber::stopMainLoop() {
 void AVPlumber::heartbeat() {
     impl_->printAllQueues();
 }
+
