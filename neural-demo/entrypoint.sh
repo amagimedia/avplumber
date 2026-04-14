@@ -4,7 +4,7 @@ set -euo pipefail
 readonly MODEL_ROOT="/home/tensorrt"
 readonly TEMPLATE_ROOT="/opt/avp-neural-demo/templates"
 readonly RENDER_DIR="/tmp/avp-rendered"
-readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
+readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4"
 readonly DEFAULT_LIVE_OUTPUT_URL="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
 
 die() {
