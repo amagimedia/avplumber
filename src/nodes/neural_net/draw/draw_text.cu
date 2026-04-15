@@ -1,10 +1,8 @@
-// Draw top-left text onto an NV12 CUDA frame.
+// Draw batched text labels onto an NV12 CUDA frame.
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-extern "C" __device__ __constant__ char gDrawTextLine1[96] = {};
-extern "C" __device__ __constant__ char gDrawTextLine2[96] = {};
-extern "C" __device__ __constant__ char gDrawTextLine3[96] = {};
+#include "draw_batch_shared.hpp"
 
 namespace {
 
@@ -78,7 +76,6 @@ __device__ __forceinline__ void glyphDims(int glyph_preset, int& glyph_w, int& g
 
 __device__ __forceinline__ bool glyphBit(char c, int row, int col, int glyph_preset) {
     if (glyph_preset == 1) {
-        // 10x14 preset is a denser 2x sampling of the legacy 5x7 glyphs.
         return glyphBit5x7(c, row >> 1, col >> 1);
     }
     return glyphBit5x7(c, row, col);
@@ -88,6 +85,7 @@ __device__ __forceinline__ bool isGlyphPixel(const char* text, int len,
                                              int x, int y,
                                              int start_x, int start_y,
                                              int font_scale, int glyph_preset) {
+    if (!text || len <= 0) return false;
     const int rel_x = x - start_x;
     const int rel_y = y - start_y;
     if (rel_x < 0 || rel_y < 0) return false;
@@ -109,7 +107,8 @@ __device__ __forceinline__ bool isGlyphPixel(const char* text, int len,
     return glyphBit(text[char_idx], glyph_y, glyph_x, glyph_preset);
 }
 
-__device__ __forceinline__ bool isTextPixel(int x, int y,
+__device__ __forceinline__ bool isTextPixel(const char* line1, const char* line2, const char* line3,
+                                            int x, int y,
                                             int origin_x, int origin_y,
                                             int font_scale, int line_spacing,
                                             int glyph_preset,
@@ -117,15 +116,15 @@ __device__ __forceinline__ bool isTextPixel(int x, int y,
     int glyph_w = 5;
     int glyph_h = 7;
     glyphDims(glyph_preset, glyph_w, glyph_h);
-    if (isGlyphPixel(gDrawTextLine1, line1_len, x, y, origin_x, origin_y, font_scale, glyph_preset)) {
+    if (isGlyphPixel(line1, line1_len, x, y, origin_x, origin_y, font_scale, glyph_preset)) {
         return true;
     }
     const int line2_y = origin_y + glyph_h * font_scale + line_spacing;
-    if (isGlyphPixel(gDrawTextLine2, line2_len, x, y, origin_x, line2_y, font_scale, glyph_preset)) {
+    if (isGlyphPixel(line2, line2_len, x, y, origin_x, line2_y, font_scale, glyph_preset)) {
         return true;
     }
     const int line3_y = line2_y + glyph_h * font_scale + line_spacing;
-    return isGlyphPixel(gDrawTextLine3, line3_len, x, y, origin_x, line3_y, font_scale, glyph_preset);
+    return isGlyphPixel(line3, line3_len, x, y, origin_x, line3_y, font_scale, glyph_preset);
 }
 
 } // namespace
@@ -133,94 +132,94 @@ __device__ __forceinline__ bool isTextPixel(int x, int y,
 extern "C" __global__ void kDrawTextNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
     int frame_width, int frame_height,
-    int origin_x, int origin_y,
-    int font_scale, int line_spacing,
-    int glyph_preset,
-    int line1_len, int line2_len, int line3_len,
-    int bg_x, int bg_y, int bg_w, int bg_h,
-    int draw_background,
-    float bg_opacity,
-    int text_y, int bg_y_color)
+    const cuda_overlay::BatchedTextLabel* __restrict__ labels,
+    int num_labels,
+    const char* __restrict__ text_blob)
 {
-    const int local_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    const int local_y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
-    if (local_x >= bg_w || local_y >= bg_h) return;
-
-    const int x = bg_x + local_x;
-    const int y = bg_y + local_y;
+    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (x < 0 || y < 0 || x >= frame_width || y >= frame_height) return;
 
-    const bool in_bg = draw_background != 0;
-    const bool in_text = isTextPixel(x, y, origin_x, origin_y, font_scale,
-                                     line_spacing, glyph_preset, line1_len, line2_len, line3_len);
-
     uint8_t* y_px = &y_plane[(size_t)y * pitch_y + (size_t)x];
-    if (in_bg) {
-        const float a = bg_opacity < 0.f ? 0.f : (bg_opacity > 1.f ? 1.f : bg_opacity);
-        const float out = (1.0f - a) * (float)(*y_px) + a * (float)bg_y_color;
-        *y_px = (uint8_t)(out + 0.5f);
-    }
-    if (in_text) {
-        *y_px = (uint8_t)text_y;
+    for (int i = 0; i < num_labels; ++i) {
+        const cuda_overlay::BatchedTextLabel label = labels[i];
+        if (x < label.bg_x || x >= (label.bg_x + label.bg_w) ||
+            y < label.bg_y || y >= (label.bg_y + label.bg_h)) {
+            continue;
+        }
+
+        if (label.draw_background) {
+            const float a = label.background_opacity < 0.f ? 0.f : (label.background_opacity > 1.f ? 1.f : label.background_opacity);
+            const float out = (1.0f - a) * (float)(*y_px) + a * (float)label.bg_y_color;
+            *y_px = (uint8_t)(out + 0.5f);
+        }
+
+        const char* line1 = label.line1_len > 0 ? (text_blob + label.line1_offset) : nullptr;
+        const char* line2 = label.line2_len > 0 ? (text_blob + label.line2_offset) : nullptr;
+        const char* line3 = label.line3_len > 0 ? (text_blob + label.line3_offset) : nullptr;
+        if (isTextPixel(line1, line2, line3,
+                        x, y, label.origin_x, label.origin_y,
+                        label.font_scale, label.line_spacing, label.glyph_preset,
+                        label.line1_len, label.line2_len, label.line3_len)) {
+            *y_px = (uint8_t)label.text_y;
+        }
     }
 }
 
 extern "C" __global__ void kDrawTextNV12Chroma(
     uint8_t* __restrict__ uv_plane, size_t pitch_uv,
     int frame_width, int frame_height,
-    int origin_x, int origin_y,
-    int font_scale, int line_spacing,
-    int glyph_preset,
-    int line1_len, int line2_len, int line3_len,
-    int bg_x, int bg_y, int bg_w, int bg_h,
-    int draw_background,
-    float bg_opacity,
-    int text_u, int text_v,
-    int bg_u, int bg_v)
+    const cuda_overlay::BatchedTextLabel* __restrict__ labels,
+    int num_labels,
+    const char* __restrict__ text_blob)
 {
     const int uv_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int uv_y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
-    const int uv_w = (bg_w + 1) >> 1;
-    const int uv_h = (bg_h + 1) >> 1;
+    const int uv_w = (frame_width + 1) >> 1;
+    const int uv_h = (frame_height + 1) >> 1;
     if (uv_x >= uv_w || uv_y >= uv_h) return;
 
-    const int x0 = bg_x + (uv_x << 1);
-    const int y0 = bg_y + (uv_y << 1);
+    const int x0 = uv_x << 1;
+    const int y0 = uv_y << 1;
     const int x1 = x0 + 1;
     const int y1 = y0 + 1;
 
-    bool in_bg = false;
-    bool in_text = false;
-    const int px[4] = {x0, x1, x0, x1};
-    const int py[4] = {y0, y0, y1, y1};
-    for (int i = 0; i < 4; ++i) {
-        if (px[i] < 0 || py[i] < 0 || px[i] >= frame_width || py[i] >= frame_height) continue;
-        if (draw_background != 0) in_bg = true;
-        if (isTextPixel(px[i], py[i], origin_x, origin_y, font_scale,
-                        line_spacing, glyph_preset, line1_len, line2_len, line3_len)) {
-            in_text = true;
+    uint8_t* row = uv_plane + (size_t)uv_y * pitch_uv;
+    const size_t idx = (size_t)(uv_x << 1);
+    for (int i = 0; i < num_labels; ++i) {
+        const cuda_overlay::BatchedTextLabel label = labels[i];
+        const int px[4] = {x0, x1, x0, x1};
+        const int py[4] = {y0, y0, y1, y1};
+        bool in_bg = false;
+        bool in_text = false;
+        const char* line1 = label.line1_len > 0 ? (text_blob + label.line1_offset) : nullptr;
+        const char* line2 = label.line2_len > 0 ? (text_blob + label.line2_offset) : nullptr;
+        const char* line3 = label.line3_len > 0 ? (text_blob + label.line3_offset) : nullptr;
+        for (int p = 0; p < 4; ++p) {
+            if (px[p] < label.bg_x || px[p] >= (label.bg_x + label.bg_w) ||
+                py[p] < label.bg_y || py[p] >= (label.bg_y + label.bg_h) ||
+                px[p] < 0 || py[p] < 0 || px[p] >= frame_width || py[p] >= frame_height) {
+                continue;
+            }
+            if (label.draw_background) in_bg = true;
+            if (isTextPixel(line1, line2, line3,
+                            px[p], py[p], label.origin_x, label.origin_y,
+                            label.font_scale, label.line_spacing, label.glyph_preset,
+                            label.line1_len, label.line2_len, label.line3_len)) {
+                in_text = true;
+            }
         }
-    }
 
-    if (!in_bg && !in_text) return;
-
-    const int uv_plane_w = (frame_width + 1) >> 1;
-    const int uv_plane_h = (frame_height + 1) >> 1;
-    const int dst_uv_x = x0 >> 1;
-    const int dst_uv_y = y0 >> 1;
-    if (dst_uv_x < 0 || dst_uv_y < 0 || dst_uv_x >= uv_plane_w || dst_uv_y >= uv_plane_h) return;
-
-    uint8_t* row = uv_plane + (size_t)dst_uv_y * pitch_uv;
-    if (in_bg) {
-        const float a = bg_opacity < 0.f ? 0.f : (bg_opacity > 1.f ? 1.f : bg_opacity);
-        const size_t idx = (size_t)(dst_uv_x << 1);
-        const float out_u = (1.0f - a) * (float)row[idx + 0] + a * (float)bg_u;
-        const float out_v = (1.0f - a) * (float)row[idx + 1] + a * (float)bg_v;
-        row[idx + 0] = (uint8_t)(out_u + 0.5f);
-        row[idx + 1] = (uint8_t)(out_v + 0.5f);
-    }
-    if (in_text) {
-        row[(size_t)(dst_uv_x << 1) + 0] = (uint8_t)text_u;
-        row[(size_t)(dst_uv_x << 1) + 1] = (uint8_t)text_v;
+        if (in_bg) {
+            const float a = label.background_opacity < 0.f ? 0.f : (label.background_opacity > 1.f ? 1.f : label.background_opacity);
+            const float out_u = (1.0f - a) * (float)row[idx + 0] + a * (float)label.bg_u;
+            const float out_v = (1.0f - a) * (float)row[idx + 1] + a * (float)label.bg_v;
+            row[idx + 0] = (uint8_t)(out_u + 0.5f);
+            row[idx + 1] = (uint8_t)(out_v + 0.5f);
+        }
+        if (in_text) {
+            row[idx + 0] = (uint8_t)label.text_u;
+            row[idx + 1] = (uint8_t)label.text_v;
+        }
     }
 }
