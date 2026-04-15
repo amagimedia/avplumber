@@ -22,8 +22,8 @@ require_env AVP_MODE
 require_env AVP_MODELS_TAR_URL
 
 case "${AVP_EXAMPLE}" in
-    tracker|tracker-cropped) ;;
-    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker or tracker-cropped" ;;
+    tracker|tracker-cropped|tracker_compositor) ;;
+    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${AVP_MODE}" in

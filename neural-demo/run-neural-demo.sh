@@ -21,7 +21,7 @@ usage() {
     cat <<'EOF'
 Usage:
   neural-demo/run-neural-demo.sh \
-    --example tracker|tracker-cropped \
+    --example tracker|tracker-cropped|tracker_compositor \
     --mode vod|live \
     [--output ...] \
     [--input ...] \
@@ -88,8 +88,8 @@ done
 [[ -n "${example}" ]] || die "--example is required"
 [[ -n "${mode}" ]] || die "--mode is required"
 case "${example}" in
-    tracker|tracker-cropped) ;;
-    *) die "--example must be tracker or tracker-cropped" ;;
+    tracker|tracker-cropped|tracker_compositor) ;;
+    *) die "--example must be tracker, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${mode}" in
