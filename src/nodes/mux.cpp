@@ -108,6 +108,7 @@ public:
         av::Timestamp least_ts = NOTS;
         StreamInfo* least_ts_si = nullptr;
         unsigned candidates = 0;
+        bool dropped_nopts = false;
         for (StreamInfo &s: streams_) {
             s.idle = true;
             av::Packet *pkt = s.edge->peek();
@@ -122,10 +123,13 @@ public:
                     pkt_ts = pkt->dts();
                     if (pkt_ts.isNoPts()) pkt_ts = pkt->pts();
                     if (pkt_ts.isNoPts()) {
-                        // packet without PTS
-                        // drop as invalid
+                        // packet without PTS/DTS: drop as invalid and retry immediately
+                        // (do NOT wait: a real EOF marker may already be behind this packet
+                        // in the queue, and the event signal for it may have already been consumed)
+                        logstream << "dropping NOPTS packet on stream " << s.stream_index;
                         s.edge->pop();
                         has_packet = false;
+                        dropped_nopts = true;
                     }
                 }
             }
@@ -146,6 +150,12 @@ public:
         bool have_all = (candidates == streams_.size());
         bool should_emit = false;
         if (least_ts_si==nullptr) {
+            if (dropped_nopts) {
+                // Dropped at least one NOPTS packet: the next item may already be in the queue
+                // (e.g. the real EOF marker). Return and retry immediately instead of sleeping,
+                // because the eventfd signal for that item was already consumed.
+                return;
+            }
             // no packet available in queue, wait for it
             should_emit = false;
             event_wait_->wait();

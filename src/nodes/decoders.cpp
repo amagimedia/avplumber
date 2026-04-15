@@ -291,10 +291,14 @@ public:
                 // this is flush packet
                 // so flush decoder
                 flush();
-                // pass eof packet to next node
+                // pass eof marker to next node after all codec-drained frames.
+                // Must do this AFTER flush() because flush() may have set finished_=true
+                // when all codec frames fit in the sink; resetting here ensures the EOF
+                // marker is actually sent before the decoder thread exits.
                 if (isEofMarker(pkt)) {
+                    finished_ = false;
+                    finish_after_flush_ = true;
                     this->flush_frames_.push_back(OutputFrame());
-                    //this->sink_->put(OutputFrame());
                 }
                 this->source_->pop();
             }
