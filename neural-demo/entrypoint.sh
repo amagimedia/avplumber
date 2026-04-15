@@ -4,7 +4,7 @@ set -euo pipefail
 readonly MODEL_ROOT="/home/tensorrt"
 readonly TEMPLATE_ROOT="/opt/avp-neural-demo/templates"
 readonly RENDER_DIR="/tmp/avp-rendered"
-readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
+readonly DEFAULT_VOD_INPUT_URL="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4"
 readonly DEFAULT_LIVE_OUTPUT_URL="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
 
 die() {
@@ -22,8 +22,8 @@ require_env AVP_MODE
 require_env AVP_MODELS_TAR_URL
 
 case "${AVP_EXAMPLE}" in
-    tracker|tracker-cropped) ;;
-    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker or tracker-cropped" ;;
+    tracker|tracker-cropped|tracker_compositor) ;;
+    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${AVP_MODE}" in
@@ -108,7 +108,11 @@ mkdir -p "${RENDER_DIR}"
 
 if [[ "${AVP_MODE}" == "vod" ]]; then
     artifact_dir="$(dirname "${AVP_OUTPUT}")"
-    output_format="mpegts"
+    case "${AVP_OUTPUT}" in
+        *.mp4) output_format="mp4" ;;
+        *.ts|*.mpegts) output_format="mpegts" ;;
+        *) die "unsupported vod output extension for AVP_OUTPUT=${AVP_OUTPUT}; expected .mp4 or .ts" ;;
+    esac
 else
     artifact_dir="/tmp/avp-sidecars"
     mkdir -p "${artifact_dir}"

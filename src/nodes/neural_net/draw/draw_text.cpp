@@ -1,4 +1,5 @@
 #include "cuda_overlay_base.hpp"
+#include "draw_batch_shared.hpp"
 
 #include <array>
 #include <cstdio>
@@ -70,48 +71,19 @@ private:
     bool draw_background_ = true;
     float background_opacity_ = 1.0f;
 
-    CUdeviceptr line1_symbol_ = 0;
-    CUdeviceptr line2_symbol_ = 0;
-    CUdeviceptr line3_symbol_ = 0;
-    size_t line_symbol_size_ = 0;
+    cuda_overlay::DeviceBuffer<cuda_overlay::BatchedTextLabel> d_labels_;
+    cuda_overlay::DeviceBuffer<char> d_text_blob_;
 
     const char* nodeName() const override { return "draw_text"; }
 
     void onKernelsUnloaded() override {
-        line1_symbol_ = 0;
-        line2_symbol_ = 0;
-        line3_symbol_ = 0;
-        line_symbol_size_ = 0;
+        d_labels_.release(cu_ctx_);
+        d_text_blob_.release(cu_ctx_);
     }
 
     bool loadTextKernels() {
-        if (!loadKernels(avpl_draw_text_ptx, avpl_draw_text_ptx_len,
-                         "kDrawTextNV12Luma", "kDrawTextNV12Chroma")) {
-            return false;
-        }
-        if (line1_symbol_ && line2_symbol_ && line3_symbol_) return true;
-
-        size_t line1_bytes = 0;
-        size_t line2_bytes = 0;
-        size_t line3_bytes = 0;
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line1_symbol_, &line1_bytes, draw_module_, "gDrawTextLine1"))) {
-            logstream << "draw_text: failed to get line1 symbol";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line2_symbol_, &line2_bytes, draw_module_, "gDrawTextLine2"))) {
-            logstream << "draw_text: failed to get line2 symbol";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line3_symbol_, &line3_bytes, draw_module_, "gDrawTextLine3"))) {
-            logstream << "draw_text: failed to get line3 symbol";
-            return false;
-        }
-        if (line1_bytes < kMaxOverlayChars || line2_bytes < kMaxOverlayChars || line3_bytes < kMaxOverlayChars) {
-            logstream << "draw_text: PTX line buffers are too small";
-            return false;
-        }
-        line_symbol_size_ = std::min(line1_bytes, std::min(line2_bytes, line3_bytes));
-        return true;
+        return loadKernels(avpl_draw_text_ptx, avpl_draw_text_ptx_len,
+                           "kDrawTextNV12Luma", "kDrawTextNV12Chroma");
     }
 
     static const Parameters* findObjectChild(const Parameters* parent, const char* key) {
@@ -185,41 +157,13 @@ private:
         return overlay;
     }
 
-    bool copyOverlayTextToGpu(const OverlayText& overlay) const {
-        if (!line1_symbol_ || !line2_symbol_ || !line3_symbol_ || line_symbol_size_ < kMaxOverlayChars) {
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line1_symbol_, overlay.line1.data(),
-                                       std::min(line_symbol_size_, overlay.line1.size()),
-                                       cuda_dev_ctx_->stream))) {
-            logstream << "draw_text: failed copying line1 text";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line2_symbol_, overlay.line2.data(),
-                                       std::min(line_symbol_size_, overlay.line2.size()),
-                                       cuda_dev_ctx_->stream))) {
-            logstream << "draw_text: failed copying line2 text";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line3_symbol_, overlay.line3.data(),
-                                       std::min(line_symbol_size_, overlay.line3.size()),
-                                       cuda_dev_ctx_->stream))) {
-            logstream << "draw_text: failed copying line3 text";
-            return false;
-        }
-        return true;
-    }
-
     bool drawTextOnFrame(av::VideoFrame& frm, const OverlayText& overlay) {
         const unsigned int block_x = 32;
         const unsigned int block_y = 8;
-
-        const int launch_w = std::max(1, overlay.bg_w);
-        const int launch_h = std::max(1, overlay.bg_h);
-        const unsigned int grid_x = (unsigned int)(launch_w + (int)block_x - 1) / block_x;
-        const unsigned int grid_y = (unsigned int)(launch_h + (int)block_y - 1) / block_y;
-        const unsigned int uv_grid_x = (unsigned int)(((launch_w + 1) / 2) + (int)block_x - 1) / block_x;
-        const unsigned int uv_grid_y = (unsigned int)(((launch_h + 1) / 2) + (int)block_y - 1) / block_y;
+        const unsigned int grid_x = (unsigned int)(frm.width() + (int)block_x - 1) / block_x;
+        const unsigned int grid_y = (unsigned int)(frm.height() + (int)block_y - 1) / block_y;
+        const unsigned int uv_grid_x = (unsigned int)(((frm.width() + 1) / 2) + (int)block_x - 1) / block_x;
+        const unsigned int uv_grid_y = (unsigned int)(((frm.height() + 1) / 2) + (int)block_y - 1) / block_y;
 
         CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
         size_t pitch_y = (size_t)frm.raw()->linesize[0];
@@ -227,38 +171,52 @@ private:
         size_t pitch_uv = (size_t)frm.raw()->linesize[1];
         int width = frm.width();
         int height = frm.height();
-        int origin_x = overlay.origin_x;
-        int origin_y = overlay.origin_y;
-        int font_scale = overlay.font_scale;
-        int line_spacing = overlay.line_spacing;
-        int glyph_preset = overlay.glyph_preset;
-        int line1_len = overlay.line1_len;
-        int line2_len = overlay.line2_len;
-        int line3_len = overlay.line3_len;
-        int bg_x = overlay.bg_x;
-        int bg_y = overlay.bg_y;
-        int bg_w = overlay.bg_w;
-        int bg_h = overlay.bg_h;
-        int draw_background = draw_background_ ? 1 : 0;
-        float background_opacity = background_opacity_;
-        int text_y = text_color_.y;
-        int text_u = text_color_.u;
-        int text_v = text_color_.v;
-        int bg_y_color = background_color_.y;
-        int bg_u = background_color_.u;
-        int bg_v = background_color_.v;
+        std::vector<cuda_overlay::BatchedTextLabel> batched_labels;
+        std::vector<char> text_blob;
+        batched_labels.reserve(1);
+        cuda_overlay::BatchedTextLabel label;
+        label.line1_len = overlay.line1_len;
+        label.line2_len = overlay.line2_len;
+        label.line3_len = overlay.line3_len;
+        label.origin_x = overlay.origin_x;
+        label.origin_y = overlay.origin_y;
+        label.font_scale = overlay.font_scale;
+        label.line_spacing = overlay.line_spacing;
+        label.glyph_preset = overlay.glyph_preset;
+        label.bg_x = overlay.bg_x;
+        label.bg_y = overlay.bg_y;
+        label.bg_w = overlay.bg_w;
+        label.bg_h = overlay.bg_h;
+        label.draw_background = draw_background_ ? 1 : 0;
+        label.background_opacity = background_opacity_;
+        label.text_y = text_color_.y;
+        label.text_u = text_color_.u;
+        label.text_v = text_color_.v;
+        label.bg_y_color = background_color_.y;
+        label.bg_u = background_color_.u;
+        label.bg_v = background_color_.v;
+        label.line1_offset = cuda_overlay::appendTextBlob(text_blob, overlay.line1.data(), overlay.line1_len);
+        label.line2_offset = cuda_overlay::appendTextBlob(text_blob, overlay.line2.data(), overlay.line2_len);
+        label.line3_offset = cuda_overlay::appendTextBlob(text_blob, overlay.line3.data(), overlay.line3_len);
+        batched_labels.push_back(label);
+
+        if (!d_labels_.upload(batched_labels, cu_ctx_, cuda_dev_ctx_->stream)) {
+            logstream << "draw_text: failed uploading label descriptors";
+            return false;
+        }
+        if (!d_text_blob_.uploadBytes(text_blob.data(), text_blob.size(), cu_ctx_, cuda_dev_ctx_->stream)) {
+            logstream << "draw_text: failed uploading text blob";
+            return false;
+        }
+        CUdeviceptr labels_ptr = d_labels_.ptr();
+        int num_labels = (int)batched_labels.size();
+        CUdeviceptr text_blob_ptr = d_text_blob_.ptr();
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
-            (void*)&origin_x, (void*)&origin_y,
-            (void*)&font_scale, (void*)&line_spacing,
-            (void*)&glyph_preset,
-            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
-            (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
-            (void*)&draw_background,
-            (void*)&background_opacity,
-            (void*)&text_y, (void*)&bg_y_color
+            (void*)&labels_ptr, (void*)&num_labels,
+            (void*)&text_blob_ptr
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                     grid_x, grid_y, 1,
@@ -271,15 +229,8 @@ private:
         void* uv_args[] = {
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
-            (void*)&origin_x, (void*)&origin_y,
-            (void*)&font_scale, (void*)&line_spacing,
-            (void*)&glyph_preset,
-            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
-            (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
-            (void*)&draw_background,
-            (void*)&background_opacity,
-            (void*)&text_u, (void*)&text_v,
-            (void*)&bg_u, (void*)&bg_v
+            (void*)&labels_ptr, (void*)&num_labels,
+            (void*)&text_blob_ptr
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                     uv_grid_x, uv_grid_y, 1,
@@ -308,10 +259,6 @@ private:
         }
 
         const OverlayText overlay = buildOverlayText(input);
-
-        if (!copyOverlayTextToGpu(overlay)) {
-            throw Error("draw_text: failed to upload overlay text");
-        }
         if (!drawTextOnFrame(output, overlay)) {
             throw Error("draw_text: failed drawing text");
         }

@@ -30,18 +30,30 @@ neural-demo/run-neural-demo.sh \
   --mode live
 ```
 
+Use `tracker_compositor` when you want the regular drawn tracker output plus a
+looped picture-in-picture `nba.mp4` feed in the upper-left corner:
+
+```bash
+neural-demo/run-neural-demo.sh \
+  --example tracker_compositor \
+  --mode live
+```
+
 If you do not provide custom input or output, the demo uses:
 
 - looped input MP4:
+  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4`
+- backup input MP4:
   `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4`
 - default model archive:
   `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz`
 - default live RTMP output:
   `rtmp://ingest-1.tellyo.com/external/nabai2026920514b2`
 
-That default `nba.mp4` is the preselected demo source and works well with the
+That default `bbl.mp4` is the preselected demo source and works well with the
 bundled inference model set.
-It is a public ~62 second snippet of NBA match footage sourced from YouTube.
+Keep `nba.mp4` as a public fallback input URL if you want the previous demo
+source.
 Those demo models are open source and were borrowed from Roboflow.
 An NVIDIA GPU is mandatory for this demo. This setup was tested on an AWS
 `g4dn.2xlarge` instance with a Tesla T4 70W, which is a minimum sensible
@@ -85,9 +97,13 @@ neural-demo/run-neural-demo.sh \
   the models behave.
 - `--example tracker-cropped` uses the same model stack but outputs the cropped
   reframed version instead.
+- `--example tracker_compositor` uses the drawn tracker output as the main
+  canvas and adds a looped `nba.mp4` picture-in-picture feed in the upper-left
+  with padding. This example is intended for `live` mode.
 - `--mode live` means looped MP4 input plus live RTMP or SRT output.
 - `--mode vod` means finite VOD input plus file output.
-- In `live` mode, if `--input` is omitted, the demo loops the public `nba.mp4`.
+- In `live` mode, if `--input` is omitted, the demo loops the public `bbl.mp4`.
+- `nba.mp4` remains available as the documented fallback URL.
 - In `live` mode, if `--output` is omitted, the demo streams to the default
   public RTMP endpoint above.
 - In `vod` mode, `--output` is required.

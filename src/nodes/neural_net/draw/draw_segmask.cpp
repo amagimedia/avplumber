@@ -8,6 +8,7 @@
 #include "../../../../objs/src/nodes/neural_net/draw/draw_segmask.ptx.h"
 
 extern "C" {
+#include <libavutil/buffer.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -34,6 +35,11 @@ private:
     bool require_wide_shot_ = false;
     double min_conf_ = 0.0;
     std::unordered_map<int, DrawColor> class_colors_;
+    int overlay_hold_frames_ = 0;
+    int overlay_fade_frames_ = 0;
+    AVBufferRef* cached_mask_buf_ = nullptr;
+    std::vector<MaskDetection> cached_detections_;
+    uint64_t cached_age_frames_ = 0;
 
     const char* nodeName() const override { return "draw_segmask"; }
 
@@ -64,6 +70,42 @@ private:
         return mask_color_;
     }
 
+    void clearCachedOverlay() {
+        if (cached_mask_buf_) {
+            av_buffer_unref(&cached_mask_buf_);
+        }
+        cached_detections_.clear();
+        cached_age_frames_ = 0;
+    }
+
+    bool hasCachedOverlay() const {
+        return cached_mask_buf_ && !cached_detections_.empty();
+    }
+
+    void updateCachedOverlay(const AVFrameSideData* sd, std::vector<MaskDetection> detections) {
+        AVBufferRef* new_ref = av_buffer_ref(sd ? sd->buf : nullptr);
+        if (!new_ref) {
+            clearCachedOverlay();
+            return;
+        }
+        if (cached_mask_buf_) {
+            av_buffer_unref(&cached_mask_buf_);
+        }
+        cached_mask_buf_ = new_ref;
+        cached_detections_ = std::move(detections);
+        cached_age_frames_ = 0;
+    }
+
+    float heldOpacityScale() const {
+        if (overlay_hold_frames_ <= 0) return 0.0f;
+        if (overlay_fade_frames_ <= 0) return 1.0f;
+        if ((int)cached_age_frames_ <= overlay_hold_frames_ - overlay_fade_frames_) return 1.0f;
+
+        const int fade_progress = (int)cached_age_frames_ - (overlay_hold_frames_ - overlay_fade_frames_);
+        const float remaining = 1.0f - (float)fade_progress / (float)std::max(1, overlay_fade_frames_);
+        return std::max(0.0f, std::min(1.0f, remaining));
+    }
+
     std::string readShotType(const av::VideoFrame& frm) const {
         const AVFrame* raw = frm.raw();
         if (!raw || !raw->metadata) return {};
@@ -82,7 +124,8 @@ private:
     void renderMasks(av::VideoFrame& output,
                      CUdeviceptr gpu_masks,
                      const GpuMaskSideDataHeader& header,
-                     const std::vector<MaskDetection>& detections) {
+                     const std::vector<MaskDetection>& detections,
+                     float opacity_scale = 1.0f) {
         const int num_masks = (int)header.num_masks;
         const int proto_w = (int)header.proto_w;
         const int proto_h = (int)header.proto_h;
@@ -115,7 +158,7 @@ private:
         size_t pitch_uv = (size_t)output.raw()->linesize[1];
         int frame_w = output.width();
         int frame_h = output.height();
-        float op = opacity_;
+        float op = opacity_ * opacity_scale;
         float thresh = threshold_;
 
         for (const auto& det : detections) {
@@ -242,42 +285,76 @@ private:
             throw Error("draw_segmask: failed to initialize CUDA kernels");
         }
 
-        const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU);
         const std::string shot_type = readShotType(input);
-        if (require_wide_shot_ && shot_type != "wide") {
+        const bool suppressed_by_shot = require_wide_shot_ && shot_type != "wide";
+        const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU);
+
+        bool have_current_masks = false;
+        int num_masks = 0;
+        int proto_w = 0;
+        int proto_h = 0;
+        std::vector<MaskDetection> detections;
+        const GpuMaskSideDataHeader* header = nullptr;
+        CUdeviceptr gpu_masks = 0;
+
+        if (sd && sd->buf && sd->buf->size >= (int)sizeof(GpuMaskSideDataHeader)) {
+            header = (const GpuMaskSideDataHeader*)sd->buf->data;
+            gpu_masks = (CUdeviceptr)header->gpu_ptr;
+            num_masks = (int)header->num_masks;
+            proto_w = (int)header->proto_w;
+            proto_h = (int)header->proto_h;
+            if (num_masks > 0 && proto_w > 0 && proto_h > 0 && gpu_masks && !suppressed_by_shot) {
+                detections = parseDetections(input, (int)header->model_w, (int)header->model_h);
+                have_current_masks = !detections.empty();
+            }
+        }
+
+        if (have_current_masks) {
             if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                 logstream << "draw_segmask: frame=" << frame_counter_
-                          << " suppressed shot_type=" << (shot_type.empty() ? "<missing>" : shot_type);
+                          << " masks=" << num_masks
+                          << " proto=" << proto_w << "x" << proto_h
+                          << " detections=" << detections.size()
+                          << " mode=current";
+            }
+            renderMasks(output, gpu_masks, *header, detections, 1.0f);
+            if (overlay_hold_frames_ > 0) {
+                updateCachedOverlay(sd, detections);
             }
             return;
         }
 
-        if (!sd || !sd->buf || sd->buf->size < (int)sizeof(GpuMaskSideDataHeader)) {
-            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-                logstream << "draw_segmask: frame=" << frame_counter_ << " no GPU mask side data";
+        if (overlay_hold_frames_ > 0 && hasCachedOverlay() && (int)cached_age_frames_ < overlay_hold_frames_) {
+            ++cached_age_frames_;
+            const auto* cached_header = (const GpuMaskSideDataHeader*)cached_mask_buf_->data;
+            const float opacity_scale = heldOpacityScale();
+            if (opacity_scale > 0.0f) {
+                if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                    logstream << "draw_segmask: frame=" << frame_counter_
+                              << " held age=" << cached_age_frames_
+                              << " opacity_scale=" << opacity_scale
+                              << " mode=hold"
+                              << (suppressed_by_shot ? " shot_suppressed" : "");
+                }
+                renderMasks(output, (CUdeviceptr)cached_header->gpu_ptr, *cached_header, cached_detections_, opacity_scale);
+                return;
             }
-            return;
         }
 
-        const auto* header = (const GpuMaskSideDataHeader*)sd->buf->data;
-        const CUdeviceptr gpu_masks = (CUdeviceptr)header->gpu_ptr;
-        const int num_masks = (int)header->num_masks;
-        const int proto_w = (int)header->proto_w;
-        const int proto_h = (int)header->proto_h;
-        const int model_w = (int)header->model_w;
-        const int model_h = (int)header->model_h;
-
-        if (num_masks <= 0 || proto_w <= 0 || proto_h <= 0 || !gpu_masks) return;
-
-        auto detections = parseDetections(input, model_w, model_h);
+        clearCachedOverlay();
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            logstream << "draw_segmask: frame=" << frame_counter_
-                      << " masks=" << num_masks
-                      << " proto=" << proto_w << "x" << proto_h
-                      << " detections=" << detections.size();
+            logstream << "draw_segmask: frame=" << frame_counter_;
+            if (suppressed_by_shot) {
+                logstream << " suppressed shot_type=" << (shot_type.empty() ? "<missing>" : shot_type);
+            } else if (!sd || !sd->buf || sd->buf->size < (int)sizeof(GpuMaskSideDataHeader)) {
+                logstream << " no GPU mask side data";
+            } else if (num_masks <= 0 || proto_w <= 0 || proto_h <= 0 || !gpu_masks) {
+                logstream << " invalid GPU mask side data";
+            } else {
+                logstream << " detections=0";
+            }
         }
-        renderMasks(output, gpu_masks, *header, detections);
     }
 
 public:
@@ -291,6 +368,8 @@ public:
                 bool require_wide_shot,
                 double min_conf,
                 std::unordered_map<int, DrawColor> class_colors,
+                int overlay_hold_frames,
+                int overlay_fade_frames,
                 double model_content_width,
                 double model_content_height,
                 double model_content_offset_x,
@@ -306,6 +385,8 @@ public:
           opacity_(opacity),
           threshold_(threshold),
           require_wide_shot_(require_wide_shot),
+          overlay_hold_frames_(std::max(0, overlay_hold_frames)),
+          overlay_fade_frames_(std::max(0, std::min(overlay_fade_frames, overlay_hold_frames))),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -316,6 +397,10 @@ public:
         input_params_ = input_params;
         frame_rate_ = frame_rate;
         timebase_ = timebase;
+    }
+
+    ~DrawSegMask() override {
+        clearCachedOverlay();
     }
 
     static std::shared_ptr<DrawSegMask> create(NodeCreationInfo &nci) {
@@ -331,6 +416,8 @@ public:
         const float threshold = params.value("threshold", 0.5f);
         const bool require_wide_shot = params.value("require_wide_shot", false);
         const double min_conf = params.value("min_conf", 0.0);
+        const int overlay_hold_frames = params.value("overlay_hold_frames", 0);
+        const int overlay_fade_frames = params.value("overlay_fade_frames", 0);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double model_content_width = params.value("model_content_width", 0.0);
         const double model_content_height = params.value("model_content_height", 0.0);
@@ -358,6 +445,7 @@ public:
             edges, params, metadata_key, shot_metadata_key, mask_color, opacity, threshold,
             require_wide_shot, min_conf,
             std::move(class_colors),
+            overlay_hold_frames, overlay_fade_frames,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }

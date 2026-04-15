@@ -7,7 +7,7 @@ mode=""
 input=""
 output=""
 models_tar_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz"
-default_vod_input_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4"
+default_vod_input_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4"
 default_live_output_url="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
 dry_run=0
 docker_extra=()
@@ -21,7 +21,7 @@ usage() {
     cat <<'EOF'
 Usage:
   neural-demo/run-neural-demo.sh \
-    --example tracker|tracker-cropped \
+    --example tracker|tracker-cropped|tracker_compositor \
     --mode vod|live \
     [--output ...] \
     [--input ...] \
@@ -88,8 +88,8 @@ done
 [[ -n "${example}" ]] || die "--example is required"
 [[ -n "${mode}" ]] || die "--mode is required"
 case "${example}" in
-    tracker|tracker-cropped) ;;
-    *) die "--example must be tracker or tracker-cropped" ;;
+    tracker|tracker-cropped|tracker_compositor) ;;
+    *) die "--example must be tracker, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${mode}" in
