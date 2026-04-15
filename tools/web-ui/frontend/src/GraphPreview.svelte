@@ -1,12 +1,13 @@
 <script>
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
 
   import { NodeEditor, ClassicPreset } from 'rete';
   import { AreaPlugin, AreaExtensions } from 'rete-area-plugin';
   import { AutoArrangePlugin, Presets as ArrangePresets } from 'rete-auto-arrange-plugin';
   import { SveltePlugin, Presets as SveltePresets } from 'rete-svelte-plugin/svelte';
   import GraphConnection from './GraphConnection.svelte';
-  import { queueStatsByName } from './graphStores';
+  import { graphHoveredQueueName, queueStatsByName, selectedQueueName } from './graphStores';
 
   export let nodes = [];
   export let queues = [];
@@ -39,6 +40,9 @@
   /** @type {Map<any, { el: HTMLElement, handler: any }>} */
   const nodeDomHandlers = new Map();
 
+  /** @type {{ el: HTMLElement; onClick: (ev: Event) => void; onEnter: () => void; onLeave: () => void }[]} */
+  const queuePortDomHandlers = [];
+
   function clearNodeDomHandlers() {
     for (const { el, handler } of nodeDomHandlers.values()) {
       try {
@@ -48,6 +52,40 @@
       }
     }
     nodeDomHandlers.clear();
+    for (const rec of queuePortDomHandlers) {
+      try {
+        rec.el.removeEventListener('click', rec.onClick);
+        rec.el.removeEventListener('mouseenter', rec.onEnter);
+        rec.el.removeEventListener('mouseleave', rec.onLeave);
+      } catch (_) {
+        // ignore
+      }
+    }
+    queuePortDomHandlers.length = 0;
+  }
+
+  function queueNameFromPortTestId(tid) {
+    if (!tid || typeof tid !== 'string') return '';
+    if (tid.startsWith('output-')) return tid.slice(7);
+    if (tid.startsWith('input-')) return tid.slice(6);
+    return '';
+  }
+
+  function syncSelectedQueuePortsHighlight(sel) {
+    if (!editor || !area) return;
+    const want = typeof sel === 'string' && sel ? sel : '';
+    for (const n of editor.getNodes()) {
+      const view = area.nodeViews && area.nodeViews.get ? area.nodeViews.get(n.id) : null;
+      const el = view && view.element ? view.element : null;
+      if (!el) continue;
+      const ports = el.querySelectorAll('[data-testid^="output-"], [data-testid^="input-"]');
+      for (const portEl of ports) {
+        if (!(portEl instanceof HTMLElement)) continue;
+        const qn = queueNameFromPortTestId(portEl.getAttribute('data-testid') || '');
+        if (want && qn === want) portEl.classList.add('avp-queue-port-selected');
+        else portEl.classList.remove('avp-queue-port-selected');
+      }
+    }
   }
 
   function syncSelectedNodeHighlight() {
@@ -81,7 +119,36 @@
       el.addEventListener('click', handler);
       nodeDomHandlers.set(n.id, { el, handler });
     }
+
+    // Queue src/sink rows (entire input/output row = queue for UX)
+    for (const n of editor.getNodes()) {
+      const view = area.nodeViews && area.nodeViews.get ? area.nodeViews.get(n.id) : null;
+      const el = view && view.element ? view.element : null;
+      if (!el) continue;
+      const ports = el.querySelectorAll('[data-testid^="output-"], [data-testid^="input-"]');
+      for (const portEl of ports) {
+        if (!(portEl instanceof HTMLElement)) continue;
+        const qn = queueNameFromPortTestId(portEl.getAttribute('data-testid') || '');
+        if (!qn) continue;
+        const onClick = (ev) => {
+          ev.stopPropagation();
+          selectedQueueName.update((s) => (s === qn ? '' : qn));
+        };
+        const onEnter = () => {
+          graphHoveredQueueName.set(qn);
+        };
+        const onLeave = () => {
+          graphHoveredQueueName.set('');
+        };
+        portEl.addEventListener('click', onClick);
+        portEl.addEventListener('mouseenter', onEnter);
+        portEl.addEventListener('mouseleave', onLeave);
+        queuePortDomHandlers.push({ el: portEl, onClick, onEnter, onLeave });
+      }
+    }
+
     syncSelectedNodeHighlight();
+    syncSelectedQueuePortsHighlight(get(selectedQueueName));
   }
 
   function nextFrame() {
@@ -487,6 +554,8 @@
             : qName || '';
         area.update('connection', c.id).catch(() => {});
       }
+      // Node re-render can replace port elements; re-bind queue port handlers.
+      await attachNodeClickHandlers();
     }
   }
 
@@ -563,6 +632,11 @@
     syncSelectedNodeHighlight();
   }
 
+  // Highlight queue ports on graph when selection comes from queues table (or graph)
+  $: {
+    syncSelectedQueuePortsHighlight($selectedQueueName);
+  }
+
   // Always publish queue stats to the store (even before Rete `area` is ready),
   // so the custom connection component can render reactively.
   $: {
@@ -576,7 +650,13 @@
   {/if}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="rete-container" bind:this={container} on:click={() => dispatch('selectNode', { name: '' })} />
+  <div
+    class="rete-container"
+    bind:this={container}
+    on:click={() => {
+      dispatch('selectNode', { name: '' });
+    }}
+  />
 </div>
 
 <style>
@@ -616,6 +696,20 @@
     outline: 2px solid rgba(59, 130, 246, 0.95);
     outline-offset: 1px;
     box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.75);
+  }
+
+  /* Queue ports behave as queue targets (not node body). */
+  .rete-wrap :global(.node .input),
+  .rete-wrap :global(.node .output) {
+    cursor: pointer;
+  }
+
+  .rete-wrap :global(.node .input.avp-queue-port-selected),
+  .rete-wrap :global(.node .output.avp-queue-port-selected) {
+    outline: 2px solid rgba(59, 130, 246, 0.9);
+    outline-offset: 2px;
+    border-radius: 4px;
+    background: rgba(59, 130, 246, 0.12);
   }
 </style>
 
