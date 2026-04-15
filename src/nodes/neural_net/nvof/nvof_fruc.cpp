@@ -585,6 +585,7 @@ public:
 		auto src = edges.find<av::VideoFrame>(params["src"]);
 		auto dst = edges.find<av::VideoFrame>(params["dst"]);
 		auto r = std::make_shared<NvOFFruc>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<av::VideoFrame>>(dst));
+		r->auto_eof_ = false;
 		if (!params.count("hwaccel")) {
 			throw Error("nvof_fruc requires hwaccel parameter (CUDA device)");
 		}

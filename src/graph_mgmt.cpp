@@ -251,7 +251,9 @@ void NodeWrapper::threadFunction() {
                     return;
                 }
                 if (dowork_) {
-                    processNode(node);
+                    if (!node->consumeEofIfPresent()) {
+                        processNode(node);
+                    }
                 } else if (node_flushable) {
                     // told to finish work
                     // and Node is IFlushable
@@ -272,6 +274,10 @@ void NodeWrapper::threadFunction() {
                 if (node_==nullptr) {
                     logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
                     return;
+                }
+                if (node->consumeEofIfPresent()) {
+                    logstream << "Node " << name_ << " consumed EOF marker.";
+                    break;
                 }
                 processNode(node);
             }

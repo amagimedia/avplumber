@@ -239,6 +239,10 @@ protected:
                 throw Error("graph input count does not match node sources");
             return av_buffersrc_add_frame_flags(ctx_, frm.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
         }
+        int closeInput(int64_t pts) {
+            if (!ctx_) return 0;
+            return av_buffersrc_close(ctx_, pts, 0);
+        }
         int getFrame(T &frm) {
             frm.setTimeBase(getSinkLink()->time_base);
             return av_buffersink_get_frame(ctx_, frm.raw());
@@ -253,6 +257,7 @@ protected:
     std::string graph_desc_;
     bool do_shift_ = true;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+    std::vector<bool> input_eof_;
     
     void freeFilterGraph() {
         if (filter_graph_ == nullptr) return;
@@ -267,6 +272,7 @@ protected:
     void initPorts() {
         sources_.resize(this->source_edges_.size());
         sinks_.resize(this->sink_edges_.size());
+        input_eof_.resize(this->source_edges_.size(), false);
     }
     bool maybeInitFilterGraph() {
         if (filter_graph_ != nullptr) {
@@ -385,29 +391,126 @@ protected:
         }
         maybeInitFilterGraph();
     }
+    bool allInputsEof() const {
+        for (bool e : input_eof_) {
+            if (!e) return false;
+        }
+        return !input_eof_.empty();
+    }
+    void drainAndFinish() {
+        if (filter_graph_ == nullptr) {
+            forwardEofToSinks();
+            this->finished_ = true;
+            return;
+        }
+        for (int sink_index = 0; sink_index < (int)sinks_.size(); sink_index++) {
+            Port& sink_port = sinks_[sink_index];
+            while (true) {
+                T frmout;
+                int ret = sink_port.getFrame(frmout);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    break;
+                }
+                if (ret < 0) {
+                    throw Error("Filtering error while draining: " + std::to_string(ret));
+                }
+                if (!(frmout.isNull() || frmout.pts().isNoPts())) {
+                    frmout.setComplete(true);
+                    if (do_shift_) {
+                        eq_.out(frmout);
+                    }
+                    if (!this->sink_edges_[sink_index]->enqueue(frmout)) {
+                        this->finished_ = true;
+                        return;
+                    }
+                }
+            }
+        }
+        forwardEofToSinks();
+        this->finished_ = true;
+    }
+    void forwardEofToSinks() {
+        for (int i = 0; i < (int)this->sink_edges_.size(); i++) {
+            this->sink_edges_[i]->enqueue(createEofMarker<T>());
+        }
+    }
+    bool pullSinkFrames() {
+        int finished_sinks = 0;
+        for (int sink_index = 0; sink_index < (int)sinks_.size(); sink_index++) {
+            Port& sink_port = sinks_[sink_index];
+            while (true) {
+                T frmout;
+                int ret = sink_port.getFrame(frmout);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    if (ret == AVERROR_EOF) {
+                        finished_sinks++;
+                    }
+                    break;
+                }
+                if (ret < 0) {
+                    throw Error("Filtering error: " + std::to_string(ret));
+                }
+                if (!(frmout.isNull() || frmout.pts().isNoPts())) {
+                    frmout.setComplete(true);
+                    if (do_shift_) {
+                        eq_.out(frmout);
+                    }
+                    if (!this->sink_edges_[sink_index]->enqueue(frmout)) {
+                        this->finished_ = true;
+                        return true;
+                    }
+                } else {
+                    logstream << "WARNING: Invalid frame received from filter graph";
+                }
+            }
+        }
+        if (finished_sinks == (int)sinks_.size()) {
+            forwardEofToSinks();
+            this->finished_ = true;
+            return true;
+        }
+        return false;
+    }
 public:
     FilterNode(const std::string &graph_desc, const bool do_shift):
         graph_desc_(graph_desc), do_shift_(do_shift) {
+        this->auto_eof_ = false;
     }
     virtual ~FilterNode() {
         freeFilterGraph();
     }
     virtual void process() {
+        // Check for EOF markers on all inputs before normal processing
+        for (int i = 0; i < (int)this->source_edges_.size(); i++) {
+            if (input_eof_[i]) continue;
+            T* p = this->source_edges_[i]->peek();
+            if (p && isEofMarker(*p)) {
+                this->source_edges_[i]->pop();
+                input_eof_[i] = true;
+                logstream << "EOF on filter input " << i;
+                if (filter_graph_ != nullptr) {
+                    sources_[i].closeInput(AV_NOPTS_VALUE);
+                }
+            }
+        }
+        if (allInputsEof()) {
+            drainAndFinish();
+            return;
+        }
+
         T* frmin = nullptr;
         int source_index = this->findSourceWithData();
-        // verify that some data is waiting for us:
-        if (source_index>=0) {
+        if (source_index >= 0) {
             std::shared_ptr<Edge<T>> edge = this->source_edges_[source_index];
             frmin = edge->peek();
             if (frmin && (!frmin->isNull()) && frmin->isComplete() && frmin->timeBase().getNumerator() && frmin->timeBase().getDenominator()) {
-                Port &source_port = sources_[source_index];;
+                Port &source_port = sources_[source_index];
                 if (!source_port.checkFrame(*frmin, edge)) {
                     if (filter_graph_!=nullptr) {
                         logstream << "Input parameters changed. Restarting filter.";
                     }
                     freeFilterGraph();
                 }
-                // Capture hw_frames_ctx from the very first received frame to reuse in buffersrc
                 source_port.captureInitialHWFramesCtxFromFrame(*frmin);
                 if (filter_graph_==nullptr) {
                     maybeInitFilterGraph();
@@ -420,51 +523,10 @@ public:
                     if (ret < 0 && ret != AVERROR(EAGAIN)) {
                         throw Error("Error feeding filter graph: " + av::error2string(ret));
                     } else if (ret >= 0) {
-                        edge->pop(); // no need to retry, pop this frame
+                        edge->pop();
                     }
-                    int finished_sinks = 0;
-                    for (int sink_index=0; sink_index<sinks_.size(); sink_index++) {
-                        Port& sink_port = sinks_[sink_index];
-                        while(true) {
-                            T frmout;
-                            
-                            ret = sink_port.getFrame(frmout);
-                            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                                if (ret==AVERROR_EOF) {
-                                    finished_sinks++;
-                                }
-                                break;
-                            }
-                            if (ret < 0) {
-                                throw Error("Filtering error: " + std::to_string(ret));
-                            }
-                            if (!(frmout.isNull() || frmout.pts().isNoPts())) {
-                                frmout.setComplete(true);
-                                if (do_shift_) {
-                                    eq_.out(frmout);
-                                }
-                                if (!this->sink_edges_[sink_index]->enqueue(frmout)) {
-                                    this->finished_ = true;
-                                    return;
-                                }
-                            } else {
-                                logstream << "WARNING: Invalid frame received from filter graph";
-                            }
-                        }
-                    }
-                    if (finished_sinks==sinks_.size()) {
-                        this->finished_ = true;
-                    }
-                } else { // filter_graph_==nullptr
-                    // filter_graph_ couldn't be created because not all input
-                    // parameters are known yet.
-                    //
-                    // Peek at every source that still lacks in_args_ and try to
-                    // capture its parameters now.  Without this, a deadlock occurs
-                    // when the input queues fill up before all parameters are known:
-                    // waitForInput() polls eventfds that have already been drained,
-                    // no new items can be added to the full queues, so poll() blocks
-                    // forever while upstream nodes are stuck in enqueue().
+                    if (pullSinkFrames()) return;
+                } else {
                     for (int i = 0; i < (int)this->source_edges_.size(); i++) {
                         if (sources_[i].isSourceReadyToInit()) continue;
                         auto &ei = this->source_edges_[i];
@@ -484,9 +546,11 @@ public:
                 edge->pop();
                 logstream << "filter got null / incomplete / invalid frame (timebase " << frmin->timeBase() << ")";
                 logstream << "filter finishing because got null or incomplete frame";
+                forwardEofToSinks();
                 this->finished_ = true;
             }
         } else if (this->stopping_) {
+            forwardEofToSinks();
             this->finished_ = true;
         }
     }

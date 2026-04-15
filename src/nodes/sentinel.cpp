@@ -852,10 +852,11 @@ public:
                     wallclock.sleepms(ms);
                 }
             } else {
-                // empty or invalid frame
-                // it usually means EOF / switching inputs
-                // TODO: force PTS correction within next frame
-                // (if it is really needed . . .)
+                // empty or invalid frame (EOF marker or switching inputs)
+                if (!this->source_->pop()) {
+                    throw Error("pop() failed on invalid frame! (should never happen)");
+                }
+                last_success_ = false;
             }
         }
         if (pfrm==nullptr) {
@@ -914,6 +915,8 @@ public:
         max_stalled_sec_(max_stalled_sec),
         max_freeze_sec_(max_freeze_sec),
         max_streams_diff_(max_streams_diff) {
+        
+        this->auto_eof_ = false; // Sentinel is our guard against broken input streams
         std::shared_ptr<ITimeBaseSource> tbmd = this->template findNodeUp<ITimeBaseSource>();
         if (tbmd) {
             timebase_ = tbmd->timeBase();

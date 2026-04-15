@@ -1401,6 +1401,7 @@ public:
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::
                      template createCommon<BasketballAnalysis>(edges, params);
+        r->auto_eof_ = false;
         if (params.count("metadata_key_in"))
             r->metadata_key_in_ = params["metadata_key_in"].get<std::string>();
         if (params.count("metadata_key_out"))

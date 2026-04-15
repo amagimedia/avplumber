@@ -52,6 +52,7 @@ public:
         dec_(stream, codec_),
         hwaccel_(hwaccel)
     {
+        this->auto_eof_ = false;
         if (!pixel_format.empty()) {
             pixel_format_optional_ = pixel_format[0]=='?';
             pixel_format_ = av::PixelFormat(pixel_format_optional_ ? pixel_format.substr(1) : pixel_format);

@@ -59,6 +59,7 @@ public:
         const Parameters &params = nci.params;
         auto in_edge = edges.find<av::Packet>(params["src"]);
         auto r = std::make_shared<StreamDemuxer>(make_unique<EdgeSource<av::Packet>>(in_edge));
+        r->auto_eof_ = false;
         in_edge->setConsumer(r);
         if (params.count("wait_for_keyframe")) {
             r->waiting_for_keyframe_ = params["wait_for_keyframe"];
