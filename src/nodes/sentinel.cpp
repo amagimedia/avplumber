@@ -496,7 +496,7 @@ public:
     }
 };
 
-template <typename T> class PTSCorrectorNode: public NodeSISO<T, T>, public ISentinel, public IPreferredFormatReceiver {
+template <typename T> class PTSCorrectorNode: public NodeSISO<T, T>, public ISentinel, public IPreferredFormatReceiver, public ReportsFinishByFlag {
 protected:
     std::shared_ptr<PTSCorrectorCommon> corr_;
     av::Rational timebase_;
@@ -527,6 +527,8 @@ protected:
     float wallclock_drift_grace_period_ = 3;
     av::Timestamp wallclock_offset_drifted_since_ = NOTS;
     av::Timestamp wallclock_offset_ = NOTS;
+    /// When true, an upstream EOF marker is forwarded to the sink and this node finishes (VOD / file end).
+    bool eof_passthrough_ = false;
 
     enum class FrameSource: int {
         None = -1,
@@ -695,7 +697,7 @@ public:
                 bool suspend_output = false;
                 av::Timestamp duration_filled = { 0, {1, 1000} };
                 { // begin lock
-                    auto lock = corr_->getLock();
+                    std::unique_lock<std::recursive_mutex> corr_lock = corr_->getLock();
 
                     if (corr_->hasTimeshift()) {
                         // timeshift is known
@@ -788,7 +790,10 @@ public:
                                         T bup = getBackup(buplen, bupts);
                                         logstream << "Generating backup frame to fill at " << bupts << " " << bup.pts();
                                         setFrameTimestamps(bup, frm.pts(), bupts, frame_wallclock);
-                                        if (outputFrame(bup, bupts, true)) {
+                                        corr_lock.unlock();
+                                        bool out_ok = outputFrame(bup, bupts, true);
+                                        corr_lock.lock();
+                                        if (out_ok) {
                                             duration_filled = addTS(duration_filled, mspec_.getDelta(bup));
                                         } else {
                                             // output overflow, stop emitting
@@ -853,6 +858,15 @@ public:
                 }
             } else {
                 // empty or invalid frame (EOF marker or switching inputs)
+                if (eof_passthrough_ && isEofMarker(frm)) {
+                    logstream << "sentinel: eof_passthrough, forwarding EOF and finishing";
+                    if (!this->source_->pop()) {
+                        throw Error("pop() failed on eof marker! (should never happen)");
+                    }
+                    this->sink_->put(createEofMarker<T>());
+                    this->finished_ = true;
+                    return;
+                }
                 if (!this->source_->pop()) {
                     throw Error("pop() failed on invalid frame! (should never happen)");
                 }
@@ -862,15 +876,22 @@ public:
         if (pfrm==nullptr) {
             // timeout getting frame
             setFrameSource(FrameSource::Backup);
-            auto lock = corr_->getLock();
-            av::Timestamp rtc = corr_->rtcTS();
-            if (!next_ts_.isValid()) {
-                next_ts_ = corr_->startTS(timebase_);
-                logstream << "Notice: setting next_ts_ from start TS = " << next_ts_ << std::endl;
+            av::Timestamp rtc;
+            bool should_emit_backups = false;
+            {
+                auto lock = corr_->getLock();
+                rtc = corr_->rtcTS();
+                if (!next_ts_.isValid()) {
+                    next_ts_ = corr_->startTS(timebase_);
+                    logstream << "Notice: setting next_ts_ from start TS = " << next_ts_ << std::endl;
+                }
+                double stalled_sec = addTS(rtc, negateTS(next_ts_)).seconds();
+                //logstream << "Stalled for " << stalled_sec << " = " << rtc << " - " << next_ts_ << ", max " << max_stalled_sec_;
+                should_emit_backups = (!last_success_) || (stalled_sec > max_stalled_sec_);
             }
-            double stalled_sec = addTS(rtc, negateTS(next_ts_)).seconds();
-            //logstream << "Stalled for " << stalled_sec << " = " << rtc << " - " << next_ts_ << ", max " << max_stalled_sec_;
-            if ( (!last_success_) || (stalled_sec>max_stalled_sec_) ) {
+            // Never hold corr_->getLock() across sink output: another sentinel (audio) may need the
+            // mutex while we block on a full downstream queue, which deadlocks shutdown and live graphs.
+            if (should_emit_backups) {
                 sink_full_ = false;
                 //logstream << "TIMEOUT ";
                 // timeout exceeded
@@ -1081,6 +1102,9 @@ public:
         }
         if (params.count("history_report_interval")) {
             corr->setReportingInterval(av::Timestamp(params["history_report_interval"].get<int64_t>(), {1, 1}));
+        }
+        if (params.count("eof_passthrough")) {
+            r->eof_passthrough_ = params["eof_passthrough"].get<bool>();
         }
         return r;
     }

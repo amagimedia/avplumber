@@ -85,6 +85,25 @@ public:
         stop_event_.signal();
     }
     virtual void process() {
+        // All inputs at EOF: merge into one EOF packet downstream and finish.
+        if (!streams_.empty()) {
+            bool all_eof = true;
+            for (StreamInfo &s: streams_) {
+                av::Packet *pkt = s.edge->peek();
+                if (!pkt || !isEofMarker(*pkt)) {
+                    all_eof = false;
+                    break;
+                }
+            }
+            if (all_eof) {
+                for (StreamInfo &s: streams_) {
+                    s.edge->pop();
+                }
+                sink_->put(createEofPacket());
+                this->finished_ = true;
+                return;
+            }
+        }
         // find earliest packet (least DTS) in streams:
         av::Timestamp least_ts = NOTS;
         StreamInfo* least_ts_si = nullptr;
@@ -95,13 +114,19 @@ public:
             bool has_packet = pkt != nullptr;
             av::Timestamp pkt_ts = NOTS;
             if (has_packet) {
-                pkt_ts = pkt->dts();
-                if (pkt_ts.isNoPts()) pkt_ts = pkt->pts();
-                if (pkt_ts.isNoPts()) {
-                    // packet without PTS
-                    // drop as invalid
-                    s.edge->pop();
+                if (isEofMarker(*pkt)) {
+                    // EOF on this stream: wait until all streams have EOF (handled above), do not drop.
                     has_packet = false;
+                    s.known_to_be_broken = true;
+                } else {
+                    pkt_ts = pkt->dts();
+                    if (pkt_ts.isNoPts()) pkt_ts = pkt->pts();
+                    if (pkt_ts.isNoPts()) {
+                        // packet without PTS
+                        // drop as invalid
+                        s.edge->pop();
+                        has_packet = false;
+                    }
                 }
             }
             if (has_packet) {
