@@ -108,7 +108,11 @@ mkdir -p "${RENDER_DIR}"
 
 if [[ "${AVP_MODE}" == "vod" ]]; then
     artifact_dir="$(dirname "${AVP_OUTPUT}")"
-    output_format="mpegts"
+    case "${AVP_OUTPUT}" in
+        *.mp4) output_format="mp4" ;;
+        *.ts|*.mpegts) output_format="mpegts" ;;
+        *) die "unsupported vod output extension for AVP_OUTPUT=${AVP_OUTPUT}; expected .mp4 or .ts" ;;
+    esac
 else
     artifact_dir="/tmp/avp-sidecars"
     mkdir -p "${artifact_dir}"
