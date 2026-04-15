@@ -412,7 +412,7 @@ public:
 
         const std::string metadata_key = params.value("metadata_key", std::string("yolo_detections"));
         const std::string shot_metadata_key = params.value("shot_metadata_key", std::string("shot_info"));
-        const float opacity = params.value("opacity", 0.5f);
+        const float opacity = params.value("opacity", 0.25f);
         const float threshold = params.value("threshold", 0.5f);
         const bool require_wide_shot = params.value("require_wide_shot", false);
         const double min_conf = params.value("min_conf", 0.0);

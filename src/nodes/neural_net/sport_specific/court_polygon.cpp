@@ -1,14 +1,14 @@
 #include "../../node_common.hpp"
 #include "../common/yolo_side_data.hpp"
+#include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
+#include <libavutil/buffer.h>
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 }
-
-#include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 #include <algorithm>
 #include <cmath>
@@ -33,12 +33,17 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     float min_keypoint_conf_ = 0.3f;
     int min_visible_keypoints_ = 6;
     float min_court_area_ = 0.05f;
+    int expected_num_keypoints_ = 12;
+    float expand_ratio_ = 1.0f;
+    float expand_px_ = 0.0f;
+    float snap_left_px_ = 0.0f;
+    float snap_right_px_ = 0.0f;
+    float snap_top_px_ = 0.0f;
+    float snap_bottom_px_ = 0.0f;
     std::vector<int> winding_order_ = {0, 3, 5, 7, 9, 10, 11, 8, 6, 4, 2, 1};
     int debug_log_every_n_ = 0;
 
     CUcontext cu_ctx_ = nullptr;
-    CUdeviceptr gpu_mask_buf_ = 0;
-    size_t gpu_mask_buf_size_ = 0;
     uint64_t frame_counter_ = 0;
 
     std::vector<float> cpu_mask_;
@@ -47,6 +52,10 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         float x = 0.0f;
         float y = 0.0f;
     };
+
+    static float cross(const PolygonVertex& o, const PolygonVertex& a, const PolygonVertex& b) {
+        return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    }
 
     bool shouldDebugLog() const {
         return debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0;
@@ -98,7 +107,10 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             const auto& kpts_array = (*best_pose)["keypoints"];
 
             // Flat array, stride 3: x, y, conf
+            if ((kpts_array.size() % 3) != 0) return false;
             size_t num_kpts = kpts_array.size() / 3;
+            if (md.value("num_keypoints", -1) != expected_num_keypoints_) return false;
+            if ((int)num_kpts != expected_num_keypoints_) return false;
             keypoints_out.resize(num_kpts);
             for (size_t i = 0; i < num_kpts; i++) {
                 CourtKeypoint kp;
@@ -116,16 +128,53 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
     bool buildPolygon(const std::vector<CourtKeypoint>& keypoints,
                       std::vector<PolygonVertex>& polygon_out) {
-        polygon_out.clear();
+        std::vector<PolygonVertex> points;
         for (int idx : winding_order_) {
             if (idx < 0 || idx >= (int)keypoints.size()) continue;
             if (!keypoints[idx].visible) continue;
             PolygonVertex v;
             v.x = keypoints[idx].x;
             v.y = keypoints[idx].y;
-            polygon_out.push_back(v);
+            points.push_back(v);
         }
-        return (int)polygon_out.size() >= min_visible_keypoints_;
+        if ((int)points.size() < min_visible_keypoints_) return false;
+
+        std::sort(points.begin(), points.end(),
+                  [](const PolygonVertex& a, const PolygonVertex& b) {
+                      if (a.x != b.x) return a.x < b.x;
+                      return a.y < b.y;
+                  });
+        points.erase(std::unique(points.begin(), points.end(),
+                                 [](const PolygonVertex& a, const PolygonVertex& b) {
+                                     return std::abs(a.x - b.x) < 1e-3f && std::abs(a.y - b.y) < 1e-3f;
+                                 }),
+                     points.end());
+        if ((int)points.size() < min_visible_keypoints_) return false;
+
+        std::vector<PolygonVertex> hull;
+        hull.reserve(points.size() * 2);
+
+        for (const auto& p : points) {
+            while (hull.size() >= 2 &&
+                   cross(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0f) {
+                hull.pop_back();
+            }
+            hull.push_back(p);
+        }
+
+        size_t lower_size = hull.size();
+        for (int i = (int)points.size() - 2; i >= 0; --i) {
+            const auto& p = points[(size_t)i];
+            while (hull.size() > lower_size &&
+                   cross(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0f) {
+                hull.pop_back();
+            }
+            hull.push_back(p);
+        }
+
+        if (!hull.empty()) hull.pop_back();
+        polygon_out = std::move(hull);
+        return (int)polygon_out.size() >= 3;
     }
 
     static bool isConvex(const std::vector<PolygonVertex>& poly) {
@@ -146,6 +195,61 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             }
         }
         return sign != 0;
+    }
+
+    void expandPolygon(std::vector<PolygonVertex>& poly, float model_w, float model_h) const {
+        if (poly.size() < 3) return;
+        if (expand_ratio_ <= 1.0f && expand_px_ <= 0.0f) return;
+
+        float cx = 0.0f;
+        float cy = 0.0f;
+        for (const auto& v : poly) {
+            cx += v.x;
+            cy += v.y;
+        }
+        cx /= (float)poly.size();
+        cy /= (float)poly.size();
+
+        for (auto& v : poly) {
+            float dx = v.x - cx;
+            float dy = v.y - cy;
+            float len = std::sqrt(dx * dx + dy * dy);
+            float scale = expand_ratio_;
+            if (len > 1e-4f && expand_px_ > 0.0f) {
+                scale += expand_px_ / len;
+            }
+            v.x = cx + dx * scale;
+            v.y = cy + dy * scale;
+            v.x = std::max(0.0f, std::min(v.x, model_w - 1.0f));
+            v.y = std::max(0.0f, std::min(v.y, model_h - 1.0f));
+        }
+    }
+
+    void snapPolygonToBorders(std::vector<PolygonVertex>& poly, float model_w, float model_h) const {
+        if (poly.size() < 3) return;
+
+        float min_x = poly[0].x, max_x = poly[0].x;
+        float min_y = poly[0].y, max_y = poly[0].y;
+        for (const auto& v : poly) {
+            min_x = std::min(min_x, v.x);
+            max_x = std::max(max_x, v.x);
+            min_y = std::min(min_y, v.y);
+            max_y = std::max(max_y, v.y);
+        }
+
+        const bool snap_left = snap_left_px_ > 0.0f && min_x <= snap_left_px_;
+        const bool snap_right = snap_right_px_ > 0.0f && max_x >= (model_w - 1.0f - snap_right_px_);
+        const bool snap_top = snap_top_px_ > 0.0f && min_y <= snap_top_px_;
+        const bool snap_bottom = snap_bottom_px_ > 0.0f && max_y >= (model_h - 1.0f - snap_bottom_px_);
+
+        const float edge_eps_x = 12.0f;
+        const float edge_eps_y = 12.0f;
+        for (auto& v : poly) {
+            if (snap_left && v.x <= min_x + edge_eps_x) v.x = 0.0f;
+            if (snap_right && v.x >= max_x - edge_eps_x) v.x = model_w - 1.0f;
+            if (snap_top && v.y <= min_y + edge_eps_y) v.y = 0.0f;
+            if (snap_bottom && v.y >= max_y - edge_eps_y) v.y = model_h - 1.0f;
+        }
     }
 
     float rasterizePolygon(const std::vector<PolygonVertex>& poly,
@@ -216,36 +320,48 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         }
 
         size_t mask_bytes = cpu_mask_.size() * sizeof(float);
-        if (gpu_mask_buf_ == 0 || gpu_mask_buf_size_ < mask_bytes) {
-            if (gpu_mask_buf_ != 0) {
-                cuMemFree(gpu_mask_buf_);
-                gpu_mask_buf_ = 0;
-            }
-            if (cuMemAlloc(&gpu_mask_buf_, mask_bytes) != CUDA_SUCCESS) {
-                gpu_mask_buf_ = 0;
-                return;
-            }
-            gpu_mask_buf_size_ = mask_bytes;
+        CUdeviceptr gpu_mask_buf = 0;
+        if (cuMemAlloc(&gpu_mask_buf, mask_bytes) != CUDA_SUCCESS) return;
+        if (cuMemcpyHtoD(gpu_mask_buf, cpu_mask_.data(), mask_bytes) != CUDA_SUCCESS) {
+            cuMemFree(gpu_mask_buf);
+            return;
         }
 
-        if (cuMemcpyHtoD(gpu_mask_buf_, cpu_mask_.data(), mask_bytes) != CUDA_SUCCESS) return;
+        AVBufferRef* gpu_ref = av_buffer_create(
+            (uint8_t*)(uintptr_t)gpu_mask_buf, (int)mask_bytes,
+            [](void* opaque, uint8_t* data) {
+                CUcontext ctx = (CUcontext)opaque;
+                if (ctx) cuCtxSetCurrent(ctx);
+                cuMemFree((CUdeviceptr)(uintptr_t)data);
+            },
+            cu_ctx_, 0);
+        if (!gpu_ref) {
+            cuMemFree(gpu_mask_buf);
+            return;
+        }
 
         auto* hdr = (GpuMaskSideDataHeader*)av_malloc(sizeof(GpuMaskSideDataHeader));
-        if (!hdr) return;
+        if (!hdr) {
+            av_buffer_unref(&gpu_ref);
+            return;
+        }
 
-        hdr->gpu_ptr = (uint64_t)gpu_mask_buf_;
+        hdr->gpu_ptr = (uint64_t)gpu_mask_buf;
         hdr->num_masks = 1;
         hdr->proto_w = (uint32_t)mask_w_;
         hdr->proto_h = (uint32_t)mask_h_;
         hdr->model_w = (uint32_t)model_w;
         hdr->model_h = (uint32_t)model_h;
 
-        // Free callback only frees the header; GPU buffer is owned and reused by this node
         AVBufferRef* sd_buf = av_buffer_create(
             (uint8_t*)hdr, sizeof(GpuMaskSideDataHeader),
-            [](void* /*opaque*/, uint8_t* data) { av_free(data); },
-            nullptr, 0);
+            [](void* opaque, uint8_t* data) {
+                av_buffer_unref((AVBufferRef**)&opaque);
+                av_free(data);
+            },
+            gpu_ref, 0);
         if (!sd_buf) {
+            av_buffer_unref(&gpu_ref);
             av_free(hdr);
             return;
         }
@@ -270,14 +386,6 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
 
-    ~CourtPolygon() {
-        if (gpu_mask_buf_ && cu_ctx_) {
-            cuCtxSetCurrent(cu_ctx_);
-            cuMemFree(gpu_mask_buf_);
-            gpu_mask_buf_ = 0;
-        }
-    }
-
     void process() override {
         av::VideoFrame frm = this->source_->get();
         if (!frm) return;
@@ -294,6 +402,11 @@ public:
         std::vector<CourtKeypoint> keypoints;
         float model_w = 960.0f, model_h = 544.0f, det_conf = 0.0f;
         if (!parsePoseKeypoints(frm, keypoints, model_w, model_h, det_conf)) {
+            if (shouldDebugLog()) {
+                logstream << "court_polygon: frame=" << frame_counter_
+                          << " skipped - invalid pose metadata or keypoint count (expected "
+                          << expected_num_keypoints_ << ")";
+            }
             this->sink_->put(frm);
             return;
         }
@@ -320,10 +433,14 @@ public:
             return;
         }
 
-        // 4. Rasterize polygon
+        // 4. Expand polygon to better cover the court before rasterization.
+        expandPolygon(polygon, model_w, model_h);
+        snapPolygonToBorders(polygon, model_w, model_h);
+
+        // 5. Rasterize polygon
         float area_ratio = rasterizePolygon(polygon, model_w, model_h);
 
-        // 5. Check area
+        // 6. Check area
         if (area_ratio < min_court_area_) {
             if (shouldDebugLog()) {
                 logstream << "court_polygon: frame=" << frame_counter_
@@ -334,15 +451,15 @@ public:
             return;
         }
 
-        // 6. Attach CPU side data
+        // 7. Attach CPU side data
         attachCpuSideData(frm);
 
-        // 7. Attach GPU side data (only for CUDA frames)
+        // 8. Attach GPU side data (only for CUDA frames)
         if (frm.raw() && frm.raw()->hw_frames_ctx) {
             attachGpuSideData(frm, model_w, model_h);
         }
 
-        // 8. Write seg metadata
+        // 9. Write seg metadata
         writeSegMetadata(frm, model_w, model_h, det_conf);
 
         if (shouldDebugLog()) {
@@ -368,6 +485,13 @@ public:
         if (params.count("min_keypoint_conf")) r->min_keypoint_conf_ = params["min_keypoint_conf"].get<float>();
         if (params.count("min_visible_keypoints")) r->min_visible_keypoints_ = params["min_visible_keypoints"].get<int>();
         if (params.count("min_court_area")) r->min_court_area_ = params["min_court_area"].get<float>();
+        if (params.count("expected_num_keypoints")) r->expected_num_keypoints_ = params["expected_num_keypoints"].get<int>();
+        if (params.count("expand_ratio")) r->expand_ratio_ = params["expand_ratio"].get<float>();
+        if (params.count("expand_px")) r->expand_px_ = params["expand_px"].get<float>();
+        if (params.count("snap_left_px")) r->snap_left_px_ = params["snap_left_px"].get<float>();
+        if (params.count("snap_right_px")) r->snap_right_px_ = params["snap_right_px"].get<float>();
+        if (params.count("snap_top_px")) r->snap_top_px_ = params["snap_top_px"].get<float>();
+        if (params.count("snap_bottom_px")) r->snap_bottom_px_ = params["snap_bottom_px"].get<float>();
         if (params.count("winding_order")) {
             r->winding_order_.clear();
             for (const auto& item : params["winding_order"]) {
