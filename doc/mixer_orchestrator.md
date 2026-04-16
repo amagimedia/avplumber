@@ -38,7 +38,7 @@ Nodes labeled "dynamic" are created and destroyed by the orchestrator. Everythin
 
 ### GPU-saving mechanisms
 
-1. **`one_to_many` output bitmask** (per camera): in steady state only the PGM slot bit is set. Cameras not used by a scene have that bit cleared -- their crop/scale chain receives no frames, no GPU cycles.
+1. **`one_to_many` output bitmask** (per camera): in steady state only the PGM slot bit is set. Cameras not used by a scene have that bit cleared -- their crop/scale chain receives no frames, no GPU cycles. After each PVW slot load, `MixerOrchestrator` rewrites **all** cameras' bitmasks for that slot so `outputs` never routes a source into a compositor input that `active_inputs` would skip (avoids queue growth and needless `scale_cuda` work).
 
 2. **`cuda_rect_overlay` `active_inputs` bitmask** (per compositor): tells the compositor which inputs to wait for. Inactive inputs are skipped in the sync loop entirely (no peek, no wait, no blit).
 
@@ -129,7 +129,7 @@ Each `process()` call iterates all inputs once: for each input that has a frame,
 
 The compositor gained two new capabilities:
 
-- `active_inputs` (string or uint32, default `0xFFFFFFFF`) -- bitmask of which inputs to wait for. Accepts the same two formats as `one_to_many`'s `outputs` (string in src-list order like `"110"`, or integer). Bit N corresponds to src[N]. Inactive inputs are skipped in every loop (EOF check, min_ts scan, frame discard, frame matching, consume). `processComposite` already handles `nullptr` entries. Readable from timeline key `"active_inputs"`.
+- `active_inputs` (string or uint32, default `0xFFFFFFFF`) -- bitmask of which inputs to wait for. Accepts the same two formats as `one_to_many`'s `outputs` (string in src-list order like `"110"`, or integer). Bit N corresponds to src[N]. Inactive inputs are skipped in every loop (EOF check, min_ts scan, frame discard, frame matching, consume). `processComposite` already handles `nullptr` entries.
 
 - `layers` can be updated at runtime via `node.object.set comp_a layers [...]`. The new layers array is parsed and swapped under a mutex.
 
@@ -155,6 +155,20 @@ The orchestrator (`src/mixer_orchestrator.cpp`) does not process media. It manag
 
 It is constructed per-command (not long-lived): each control command creates a temporary `MixerOrchestrator` with references to `NodeManager`, `MixerState`, and `SharedTimeline`, calls the relevant method, then discards it.
 
+### Timeline `clearKey` on camera OTMs and compositors
+
+When loading a PVW scene, the orchestrator calls `SharedTimeline::clearKey` for **`outputs` only** on each registered camera `one_to_many` channel, and for **`active_inputs` only** on that slot’s compositor. Other timeline keys on those channels (if any) are left alone; unrelated channels (`out_sel`, `otm_scene_*`, …) are untouched.
+
+That wipe is intentional: any older scheduled `outputs` / `active_inputs` rows for those keys—including not-yet-fired `T_cleanup` from a **previous** transition—would otherwise keep winning over `node.object.set` while frames advance. New `T_cleanup` rows for the **current** cut or fade are always written **after** `loadSceneIntoSlot` returns, so they are not removed by that clear.
+
+Do not rely on independent `timeline.set` on a camera’s `outputs` to survive a later `mixer.cut` / `mixer.fade` / wipe midpoint load: the next PVW load replaces the schedule for that key.
+
+### Immediate `node.object.set` vs `SharedTimeline`
+
+Anything that must line up with decoded **frame PTS** (program path, camera fan-out, post-scene `one_to_many` during a crossfade, wipe routing, `source_switcher` selection) is written as **timeline** entries on the mixer timeline so nodes resolve keys from `SharedTimeline` per frame.
+
+**Immediate** `node.object.set` (and `node.param.set` / `node.auto_restart`) is reserved for work where frame-perfect alignment with transport time is unnecessary. The main case is **preparing the broadcast-inactive PVW slot** before it is shown: crop/scale `graph`, compositor `layers` / `active_inputs`, and the orchestrator's full rewrite of camera `outputs` for that slot. Those updates are safe while no PGM-visible frame should depend on them yet.
+
 ### Hard cut flow
 
 `mixer.cut mixer scene_name`
@@ -164,13 +178,12 @@ All graph mutations and timeline writes happen synchronously in the calling thre
 1. `ensureIdle()` -- reject if transition already in progress
 2. Set `transition_mode = Cut`
 3. `loadSceneIntoSlot(pvw_slot, scene_name)`:
-   - For each camera in scene: `node.param.set` crop/scale chain graph + `node.auto_restart` (safe: no frames flowing to PVW slot)
-   - `node.object.set` compositor layers
-   - `node.object.set` compositor `active_inputs` bitmask
-4. `setCameraOutputBits(scene, pvw_bit, true)` -- immediately enable PVW bit on camera `one_to_many` nodes (reads current mask, ORs in PVW bit)
-5. Write timeline at `T_cut = wallclock + 200ms`: source_switcher `active` = PVW direct index
-6. Write timeline at `T_cleanup = T_cut + 100ms`: camera otm `outputs` converge to PVW-only; old compositor `active_inputs` = 0
-7. Spawn detached thread: sleep `T_cleanup - now + 300ms`, then flip `pgm_is_slot_a`, set `pgm_scene_name`, clear `pvw_scene_name`, set `transition_mode = Idle`
+   - For each camera in scene: `node.param.set` crop/scale chain graph + `node.auto_restart` (PVW slot prep; not frame-critical to PGM air)
+   - `node.object.set` compositor layers and `active_inputs`
+   - Publish compositor `active_inputs` and **every** camera `one_to_many` `outputs` for the PVW slot bit to both the node atomics and the mixer timeline: clear prior `outputs` / `active_inputs` entries for those channels (so old `T_cleanup` values cannot win over `node.object.set`), then write current wallclock entries. Nodes that use `TimelineReader` for these keys would otherwise keep applying stale scheduled masks after a previous transition.
+4. Write timeline at `T_cut = wallclock + 200ms`: source_switcher `active` = PVW direct index
+5. Write timeline at `T_cleanup = T_cut + 100ms`: camera otm `outputs` converge to PVW-only; old compositor `active_inputs` = 0
+6. Spawn detached thread: sleep `T_cleanup - now + 300ms`, then flip `pgm_is_slot_a`, set `pgm_scene_name`, clear `pvw_scene_name`, set `transition_mode = Idle`
 
 The 200ms margin ensures all timeline entries are written before any node processes a frame at `T_cut`. The deferred cleanup thread exists because node deletion and internal bookkeeping flip cannot be expressed as timeline entries.
 
@@ -178,9 +191,9 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
 `mixer.fade mixer scene_name duration_sec`
 
-1-4. Same as cut: load PVW slot, enable camera bits.
+1-3. Same as cut through `loadSceneIntoSlot` (including camera `outputs` rewrite for the PVW slot).
 
-5. Create `transition_cuda` dynamically:
+4. Create `transition_cuda` dynamically:
    ```
    filter_video name=mixer_transition src=["scA_trans","scB_trans"] dst=trans_out
      graph="transition_cuda=alpha='clip(n/FRAMES,0,1)':eval=frame"
@@ -189,24 +202,24 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
    When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always `["scA_trans","scB_trans"]`; only the alpha expression direction changes.
 
-6. Set both post-scene otm outputs to `0b11` (direct + trans) immediately.
+5. Write timeline at `T_prep = wallclock` (same command time): both post-scene otm `outputs` = `0b11` (direct + trans) to prime queues.
 
-7. Write timeline at `T_start = wallclock + 200ms`:
+6. Write timeline at `T_start = wallclock + 200ms`:
    - source_switcher `active` = 2 (transition output)
    - both post-scene otm `outputs` = `0b10` (trans only, stop wasting frames on direct)
 
-8. Write timeline at `T_end = T_start + duration_ms`:
+7. Write timeline at `T_end = T_start + duration_ms`:
    - source_switcher `active` = new PGM direct index
    - new PGM post-scene otm `outputs` = `0b01` (direct only)
    - old slot post-scene otm `outputs` = `0b00` (idle)
 
-9. Write timeline at `T_cleanup = T_end + 100ms`:
+8. Write timeline at `T_cleanup = T_end + 100ms`:
    - All camera otm `outputs` converge to new-PGM-only bitmask
    - Old compositor `active_inputs` = 0
 
-10. Spawn detached thread: sleep, delete `mixer_transition` node, flip internal state.
+9. Spawn detached thread: sleep, delete `mixer_transition` node, flip internal state.
 
-Between steps 6 and `T_start`, `transition_cuda` warms up but `source_switcher` still reads `active=0` (old PGM direct). The first visible blend frame has alpha near 0, visually indistinguishable from the outgoing scene.
+Between `T_prep` and `T_start`, `transition_cuda` warms up but `source_switcher` still reads `active=0` (old PGM direct). The first visible blend frame has alpha near 0, visually indistinguishable from the outgoing scene.
 
 ### Media wipe flow
 
@@ -225,11 +238,11 @@ The output path uses two static nodes (`otm_final` and `wipe_sel`) that exist in
 
 2. Create overlay node: `filter_video` with `graph=overlay_many_cuda`, `src=["final_wipe_in","wipe_rt_out"]`, `dst=wipe_overlay_out`
 
-3. Route output through wipe: `otm_final` outputs=3 (both), `wipe_sel` active=1 (overlay)
+3. Route output through wipe: timeline entries at current wallclock — `otm_final` `outputs` = 3 (both), `wipe_sel` `active` = 1 (overlay)
 
 4. Spawn background thread with two phases:
-   - **Midpoint** (duration/2): load target scene into PVW slot, enable camera bits, immediately switch `source_switcher` active to PVW direct. This is invisible because the wipe fully covers the screen.
-   - **End** (duration + 500ms buffer): switch `otm_final` back to direct, `wipe_sel` back to direct, converge camera bitmasks, disable old compositor, delete all 6 wipe chain nodes, flip internal state.
+   - **Midpoint** (duration/2): load target scene into PVW slot (immediate prep + camera `outputs` rewrite as in a cut), then timeline `source_switcher` `active` = PVW direct at current wallclock. Invisible because the wipe fully covers the screen.
+   - **End** (duration + 500ms buffer): timeline `otm_final` / `wipe_sel` / camera otms / old compositor `active_inputs`, then delete all 6 wipe chain nodes, flip internal state.
 
 ## Timestamp flow
 

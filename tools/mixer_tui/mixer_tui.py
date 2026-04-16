@@ -9,12 +9,14 @@ Usage:
 Keyboard shortcuts:
     1-9        Select scene N on Preview bus
     F1-F9      Direct CUT to scene N (skips preview step)
-    Space      CUT  (take preview to program, hard cut)
-    Enter      AUTO (crossfade preview to program at set duration)
+    c          CUT  (take preview to program, hard cut)
+    x          X-FADE (crossfade preview to program at set duration)
     w          WIPE (prompt for wipe file path, then execute)
     d          Focus the duration input field
     s          Force an immediate mixer.status refresh
     q / ctrl+c Quit
+
+The Textual keys / shortcuts panel opens on startup.
 """
 
 import argparse
@@ -423,13 +425,14 @@ Screen {
 #dur_label {
     width: auto;
     content-align: left middle;
+    margin-left: 1;
     margin-right: 1;
     color: $text-muted;
 }
 
 #dur_input {
     width: 8;
-    margin-right: 2;
+    margin-right: 1;
 }
 
 #btn_cut {
@@ -464,8 +467,8 @@ class MixerTUI(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
-        Binding("space", "cut", "CUT", show=False),
-        Binding("enter", "auto_transition", "AUTO", show=False),
+        Binding("c", "cut", "CUT", show=False),
+        Binding("x", "auto_transition", "X-FADE", show=False),
         Binding("w", "wipe", "WIPE", show=False),
         Binding("d", "focus_duration", "Duration", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
@@ -514,10 +517,10 @@ class MixerTUI(App):
 
         with Horizontal(id="transition_bar"):
             yield Static("Mode: idle", id="trans_mode_label")
+            yield Button("✂ CUT", id="btn_cut", variant="error")
+            yield Button("⟿ X-FADE", id="btn_auto", variant="success")
             yield Static("Duration:", id="dur_label")
             yield Input("2.0", id="dur_input")
-            yield Button("✂ CUT", id="btn_cut", variant="error")
-            yield Button("⟿ AUTO", id="btn_auto", variant="success")
             yield Button("▶ WIPE", id="btn_wipe", variant="primary")
 
         yield Footer()
@@ -529,10 +532,14 @@ class MixerTUI(App):
             self.pvw_selected = 0
         self._start_connection_loop()
         self._poll_status()
+        self.call_later(self.action_show_help_panel)
 
     # ── Connection & polling workers ────────────────────────────────────────
 
-    @work(exclusive=True, thread=False)
+    # Use a dedicated worker group so this is not cancelled when `_poll_status`
+    # starts (both used exclusive=True on the default group, which only allows
+    # one worker — the poll worker was killing the connection loop on startup).
+    @work(exclusive=True, thread=False, group="mixer_avp_connect")
     async def _start_connection_loop(self) -> None:
         """Keep trying to connect; on success hand off to polling."""
         while True:
@@ -547,7 +554,7 @@ class MixerTUI(App):
             else:
                 await asyncio.sleep(0.5)
 
-    @work(exclusive=True, thread=False)
+    @work(exclusive=True, thread=False, group="mixer_avp_poll")
     async def _poll_status(self) -> None:
         """Poll mixer.status every 500 ms and update reactive state."""
         while True:
@@ -589,12 +596,6 @@ class MixerTUI(App):
         pvw = self.query_one("#pvw_panel")
         pgm.set_class(busy, "transitioning")
         pvw.set_class(busy, "transitioning")
-        # Disable action buttons during transition
-        for btn_id in ("#btn_cut", "#btn_auto", "#btn_wipe"):
-            try:
-                self.query_one(btn_id, Button).disabled = busy
-            except NoMatches:
-                pass
 
     def watch_connected(self, value: bool) -> None:
         if value:
@@ -633,9 +634,47 @@ class MixerTUI(App):
         except (ValueError, NoMatches):
             return 2.0
 
+    def _scene_index(self, scene_name: str) -> int:
+        if not scene_name:
+            return -1
+        try:
+            return self.scenes.index(scene_name)
+        except ValueError:
+            return -1
+
+    def _apply_pgm_pvw_swap(self, old_pgm: str) -> None:
+        """After a take, show the former program on preview (bus swap)."""
+        idx = self._scene_index(old_pgm)
+        if idx >= 0:
+            self.pvw_selected = idx
+
+    async def _wait_transition_idle(self, max_wait: float) -> None:
+        """Poll mixer.status until transition is idle or max_wait elapses."""
+        interval = 0.12
+        waited = 0.0
+        while waited < max_wait:
+            await self._refresh_once()
+            if self.transition_mode == "idle":
+                return
+            await asyncio.sleep(interval)
+            waited += interval
+        await self._refresh_once()
+
+    def _idle_wait_budget(self, cmd: str) -> float:
+        if cmd.startswith("mixer.cut"):
+            return 4.0
+        if cmd.startswith("mixer.fade"):
+            return max(6.0, self._duration() + 5.0)
+        if cmd.startswith("mixer.wipe"):
+            return 120.0
+        return 8.0
+
     def _select_pvw(self, index: int) -> None:
         if 0 <= index < len(self.scenes):
             self.pvw_selected = index
+
+    def _mixer_take_in_progress(self) -> bool:
+        return self.transition_mode != "idle"
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -651,6 +690,8 @@ class MixerTUI(App):
             self._do_command(f"mixer.fade {self.mixer_name} {scene} {dur}")
 
     def action_wipe(self) -> None:
+        if self._mixer_take_in_progress():
+            return
         scene = self._pvw_scene_name()
         if scene:
             self.push_screen(WipeModal(), callback=lambda path: self._do_wipe(scene, path))
@@ -670,15 +711,22 @@ class MixerTUI(App):
 
     @work(thread=False)
     async def _do_command(self, cmd: str) -> None:
+        is_take = cmd.startswith(("mixer.cut", "mixer.fade", "mixer.wipe"))
+        if is_take and self._mixer_take_in_progress():
+            return
+        old_pgm = self.pgm_scene
         resp = await self._conn.command(cmd, raise_for_status=False)
         if resp is None:
             self.notify("Connection lost", severity="error")
         elif resp.code >= 400:
             self.notify(f"Error {resp.code}: {resp.status}", severity="error")
         else:
-            # After a cut/fade/wipe, immediately refresh status
-            await asyncio.sleep(0.3)
-            await self._refresh_once()
+            if cmd.startswith(("mixer.cut", "mixer.fade", "mixer.wipe")):
+                await self._wait_transition_idle(self._idle_wait_budget(cmd))
+                self._apply_pgm_pvw_swap(old_pgm)
+            else:
+                await asyncio.sleep(0.3)
+                await self._refresh_once()
 
     async def _refresh_once(self) -> None:
         resp = await self._conn.command(f"mixer.status {self.mixer_name}", raise_for_status=False)

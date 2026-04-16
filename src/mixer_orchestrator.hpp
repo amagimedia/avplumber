@@ -12,13 +12,19 @@ class MixerOrchestrator {
     std::shared_ptr<SharedTimeline> timeline_;
 
     void setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value);
+
+    /// Camera `one_to_many` uses `timeline` + `tlGetRaw`: stale `outputs` entries would override
+    /// `node.object.set`. Clear prior `outputs` schedule, update atomically, then publish at current wallclock.
+    void publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask);
     void setNodeParam(const std::string& node_name, const std::string& param, const std::string& value);
     void autoRestartNode(const std::string& node_name);
     void createAndStartNode(const Parameters& params);
     void deleteNodeIfExists(const std::string& name);
 
-    void setCameraOutputBits(const SceneDefinition& scene, uint32_t slot_bit, bool set);
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name);
+
+    /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
+    void rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene);
 
     void ensureIdle() const;
 

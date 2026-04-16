@@ -15,6 +15,17 @@ void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::s
     node->setObject(key, value);
 }
 
+void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask) {
+    // `one_to_many` with `timeline` uses tlGetRaw("outputs") whenever any entry matches; stale
+    // rows (e.g. an old T_cleanup) would override setObject. We drop only the "outputs" key on
+    // this OTM channel — not post-scene otms, not source_switcher, not other keys here.
+    // cut/fade append new `outputs` rows at T_cleanup *after* loadSceneIntoSlot returns, so
+    // those are not cleared by this call. Overlapping mixer commands are rejected by ensureIdle().
+    timeline_->clearKey(otm_name, "outputs");
+    setNodeObject(otm_name, "outputs", Parameters(mask));
+    timeline_->set(otm_name, "outputs", wallclock.pts(), Parameters(mask));
+}
+
 void MixerOrchestrator::setNodeParam(const std::string& node_name, const std::string& param, const std::string& value) {
     auto node = nodes_->node(node_name);
     auto& params = node->parameters();
@@ -60,19 +71,17 @@ void MixerOrchestrator::defineScene(const std::string& name, const SceneDefiniti
     state_->scenes[name] = def;
 }
 
-void MixerOrchestrator::setCameraOutputBits(const SceneDefinition& scene, uint32_t slot_bit, bool set) {
-    for (const auto& [src_name, layout] : scene.sources) {
-        auto it = state_->sources.find(src_name);
-        if (it == state_->sources.end()) continue;
-        const auto& info = it->second;
+void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
+    uint32_t active = state_->computeActiveInputsMask(scene);
+    for (const auto& [src_name, info] : state_->sources) {
         Parameters current_val;
-        bool got = nodes_->node(info.otm_node_name)->getObjectTry("outputs", current_val);
-        uint32_t mask = got ? current_val.get<uint32_t>() : 0u;
-        if (set)
+        uint32_t mask = nodes_->node(info.otm_node_name)->getObjectTry("outputs", current_val)
+                            ? current_val.get<uint32_t>()
+                            : 0u;
+        mask &= ~slot_bit;
+        if (scene.sources.count(src_name) && (active & (1u << (unsigned)info.input_index)))
             mask |= slot_bit;
-        else
-            mask &= ~slot_bit;
-        setNodeObject(info.otm_node_name, "outputs", Parameters(mask));
+        publishCameraOtmOutputs(info.otm_node_name, mask);
     }
 }
 
@@ -92,9 +101,18 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     setNodeObject(slot.compositor_name, "layers", scene.layers);
 
     uint32_t active_mask = state_->computeActiveInputsMask(scene);
+    // Same pattern as camera otms: cuda_rect_overlay reads "active_inputs" from timeline only.
+    // clearKey does not touch "layers" or other keys on this compositor channel.
+    timeline_->clearKey(slot.compositor_name, "active_inputs");
     setNodeObject(slot.compositor_name, "active_inputs", Parameters(active_mask));
+    timeline_->set(slot.compositor_name, "active_inputs", wallclock.pts(), Parameters(active_mask));
 
     state_->pvw_scene_name = scene_name;
+
+    // Drop slot bit for every camera, then enable only sources in scene with active_inputs set.
+    // Keeps `outputs` consistent with compositor consumption (no frames into unused inputs).
+    const uint32_t slot_bit = is_slot_a ? 1u : 2u;
+    rewriteCameraOutputsForSlot(slot_bit, scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -110,9 +128,23 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
 
     auto& scene = state_->scenes.at(scene_name);
     uint32_t pvw_bit = state_->pvwOutputBit();
-    setCameraOutputBits(scene, pvw_bit, true);
 
     int64_t T_cut = wallclock.pts() + margin_ms_;
+    const auto& new_slot = state_->pvwSlot();
+    const auto& old_slot = state_->pgmSlot();
+
+    // Post-scene OTMs: must flip at the same PTS as `out_sel`. If the old slot's OTM keeps
+    // forwarding to sc{AB}_direct for ~margin_ms after `out_sel` has switched, that edge is
+    // unread (capacity 3) and backs up through norm → scene_out → comp — looks like clogging
+    // "before" the compositor from the camera side.
+    timeline_->clearKey(old_slot.post_otm_name, "outputs");
+    setNodeObject(old_slot.post_otm_name, "outputs", Parameters(0u));
+    timeline_->set(old_slot.post_otm_name, "outputs", T_cut, Parameters(0u));
+
+    timeline_->clearKey(new_slot.post_otm_name, "outputs");
+    setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
+    timeline_->set(new_slot.post_otm_name, "outputs", T_cut, Parameters(1u));
+
     timeline_->set(state_->source_switcher_name, "active", T_cut,
                    Parameters(state_->pvwSourceSwitcherIndex()));
 
@@ -127,7 +159,6 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
             uint32_t new_mask = scene.sources.count(src_name) ? pvw_bit : 0u;
             timeline_->set(it->second.otm_node_name, "outputs", T_cleanup, Parameters(new_mask));
         }
-        const auto& old_slot = state_->pgmSlot();
         timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
     }
 
@@ -228,14 +259,13 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec)
     trans_params["group"] = "mixer_trans";
     createAndStartNode(trans_params);
 
-    // 3. Enable camera outputs for PVW slot (shared cameras get both bits)
-    setCameraOutputBits(target_scene, pvw_bit, true);
+    // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
-    // 4. Enable post-scene otm to split mode (direct + trans)
-    setNodeObject(state_->slot_a.post_otm_name, "outputs", Parameters(3u)); // 0b11
-    setNodeObject(state_->slot_b.post_otm_name, "outputs", Parameters(3u)); // 0b11
+    // 4–5. Timeline: priming post-scene otms (direct+trans) then visible-path switches
+    int64_t T_prep = wallclock.pts();
+    timeline_->set(state_->slot_a.post_otm_name, "outputs", T_prep, Parameters(3u)); // 0b11 warmup
+    timeline_->set(state_->slot_b.post_otm_name, "outputs", T_prep, Parameters(3u));
 
-    // 5. Timeline writes (all values from pre-flip state)
     int64_t T_start = wallclock.pts() + margin_ms_;
     int64_t T_end = T_start + (int64_t)(duration_sec * 1000);
 
@@ -268,8 +298,8 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec)
 
 // ---------------------------------------------------------------------------
 // wipeThread: runs on a detached thread.
-// Phase 1 (midpoint): immediate scene switch hidden behind the opaque wipe.
-// Phase 2 (end): tear down wipe chain, flip state.
+// Phase 1 (midpoint): PVW slot prep + timeline source_switcher (hidden under opaque wipe).
+// Phase 2 (end): timeline routing cleanup, tear down wipe chain, flip state.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::wipeThread(
         std::shared_ptr<NodeManager> nodes,
@@ -289,14 +319,9 @@ void MixerOrchestrator::wipeThread(
         // Reconfigure PVW slot for the target scene
         orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
 
-        // Enable cameras for the PVW slot
-        auto& scene = state->scenes.at(scene_name);
-        uint32_t pvw_bit = state->pvwOutputBit();
-        orch.setCameraOutputBits(scene, pvw_bit, true);
-
-        // Immediately switch source_switcher (invisible behind wipe overlay)
-        orch.setNodeObject(state->source_switcher_name, "active",
-                           Parameters(state->pvwSourceSwitcherIndex()));
+        // Switch source_switcher (invisible behind wipe overlay); timeline for consistency with other switches
+        int64_t Tw = wallclock.pts();
+        timeline->set(state->source_switcher_name, "active", Tw, Parameters(state->pvwSourceSwitcherIndex()));
     } catch (const std::exception& e) {
         logstream << "mixer: wipe midpoint error: " << e.what();
     }
@@ -310,24 +335,21 @@ void MixerOrchestrator::wipeThread(
         std::lock_guard<std::mutex> lock(state->mutex);
         MixerOrchestrator orch(nodes, state, timeline);
 
-        // Switch wipe output path back to direct
+        int64_t Tw = wallclock.pts();
         if (!state->wipe_otm_name.empty())
-            orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(1u));
+            timeline->set(state->wipe_otm_name, "outputs", Tw, Parameters(1u));
         if (!state->wipe_selector_name.empty())
-            orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
+            timeline->set(state->wipe_selector_name, "active", Tw, Parameters(0));
 
-        // Converge camera bitmasks to new PGM only
-        // (pvwOutputBit() still returns pre-flip PVW bit = post-flip PGM bit)
         uint32_t new_pgm_bit = state->pvwOutputBit();
         auto& scene = state->scenes.at(scene_name);
         for (const auto& [src_name, info] : state->sources) {
             uint32_t mask = scene.sources.count(src_name) ? new_pgm_bit : 0u;
-            orch.setNodeObject(info.otm_node_name, "outputs", Parameters(mask));
+            timeline->set(info.otm_node_name, "outputs", Tw, Parameters(mask));
         }
 
-        // Disable old compositor
         const auto& old_slot = state->pgmSlot();
-        orch.setNodeObject(old_slot.compositor_name, "active_inputs", Parameters(0u));
+        timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
 
         // Delete wipe chain
         for (const auto& name : {"wipe_overlay", "wipe_rt", "wipe_fmt", "wipe_dec", "wipe_demux", "wipe_input"})
@@ -416,9 +438,10 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     wipe_overlay["group"] = "mixer_wipe";
     createAndStartNode(wipe_overlay);
 
-    // Phase 3: route output through wipe overlay
-    setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));  // 0b11 both direct + wipe_in
-    setNodeObject(state_->wipe_selector_name, "active", Parameters(1)); // wipe_overlay_out
+    // Phase 3: route output through wipe overlay (timeline so it tracks frame PTS like other mixer nodes)
+    int64_t Tw = wallclock.pts();
+    timeline_->set(state_->wipe_otm_name, "outputs", Tw, Parameters(3u));   // 0b11 both direct + wipe_in
+    timeline_->set(state_->wipe_selector_name, "active", Tw, Parameters(1)); // wipe_overlay_out
 
     // Phase 4: launch background thread for midpoint cut + cleanup
     int64_t total_ms = (int64_t)(duration_sec * 1000);
