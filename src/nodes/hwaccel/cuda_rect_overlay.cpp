@@ -49,6 +49,7 @@ static bool frameUsable(const av::VideoFrame &f) {
     return !f.isNull() && f.isComplete() && f.raw() && f.pts().isValid();
 }
 
+
 static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_x = obj.value("dst_x", 0);
     out.dst_y = obj.value("dst_y", 0);
@@ -269,8 +270,6 @@ static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
 class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         public NodeSingleOutput<av::VideoFrame>,
                         public IVideoFormatSource,
-                        public IFrameRateSource,
-                        public ITimeBaseSource,
                         public TimelineReader,
                         public IInputsObjects {
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -285,9 +284,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::string metadata_key_;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
-
-    av::Rational frame_rate_{0, 0};
-    av::Rational timebase_{0, 0};
 
     AVCUDADeviceContext *cuda_dev_ = nullptr;
     bool sent_eof_ = false;
@@ -376,7 +372,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         outf.raw()->width = canvas_w_;
         outf.raw()->height = canvas_h_;
         outf.setComplete(true);
-        outf.setTimeBase(timebase_);
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
 
@@ -424,8 +419,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 throw Error(std::string("cuda_rect_overlay: av_frame_copy_props failed: ") + av::error2string(cpy));
         }
         outf.setPts(pts);
-        if (timebase_.getNumerator() > 0 && timebase_.getDenominator() > 0)
-            outf.setTimeBase(timebase_);
 
         if (CHECK_CU(cuStreamSynchronize(stream)))
             throw Error("cuda_rect_overlay: cuStreamSynchronize failed");
@@ -441,8 +434,7 @@ public:
     using NodeSingleOutput<av::VideoFrame>::NodeSingleOutput;
 
     CudaRectOverlay(std::unique_ptr<Sink<av::VideoFrame>> &&sink, std::shared_ptr<HWAccelDevice> hw, int cw, int ch,
-                    AVPixelFormat sw_fmt, std::vector<LayerSpec> layers, std::string metadata_key,
-                    av::Rational fr, av::Rational tb, int dbg_n)
+                    AVPixelFormat sw_fmt, std::vector<LayerSpec> layers, std::string metadata_key, int dbg_n)
         : NodeSingleOutput<av::VideoFrame>(std::move(sink)),
           hwaccel_(std::move(hw)),
           canvas_w_(cw),
@@ -450,9 +442,7 @@ public:
           sw_fmt_(sw_fmt),
           default_layers_(std::move(layers)),
           metadata_key_(std::move(metadata_key)),
-          debug_log_every_n_(dbg_n),
-          frame_rate_(fr),
-          timebase_(tb) {
+          debug_log_every_n_(dbg_n) {
         out_frames_ref_ = av_hwframe_ctx_alloc(hwaccel_->deviceContext());
         if (!out_frames_ref_)
             throw Error("cuda_rect_overlay: av_hwframe_ctx_alloc failed");
@@ -478,6 +468,18 @@ public:
         NodeSingleOutput<av::VideoFrame>::init(edges, params);
     }
 
+    std::weak_ptr<Node> sourceNode() override {
+        if (source_edges_.empty())
+            return {};
+        return source_edges_[0]->producer();
+    }
+
+    std::shared_ptr<EdgeBase> sourceEdge() override {
+        if (source_edges_.empty())
+            return {};
+        return source_edges_[0];
+    }
+
     void process() override {
         if (sent_eof_)
             return;
@@ -500,20 +502,40 @@ public:
         }
         auto isActive = [active_mask](size_t i) { return (active_mask & (1u << i)) != 0; };
 
+        // "All active inputs exhausted" == EOF only if there is at least one active
+        // input. With active_mask == 0 the compositor is idle (e.g. unused PVW slot):
+        // falling into the EOF branch here would vacuously set sent_eof_ on the very
+        // first process() call and kill the node forever.
         if (input_eof_.size() == n) {
+            bool any_active = false;
             bool all_exhausted = true;
             for (size_t i = 0; i < n; ++i) {
                 if (!isActive(i)) continue;
+                any_active = true;
                 if (!input_eof_[i]) {
                     all_exhausted = false;
                     break;
                 }
             }
-            if (all_exhausted) {
+            if (any_active && all_exhausted) {
                 av::VideoFrame eof_out;
                 eof_out.setPts(NOTS);
                 sent_eof_ = true;
                 this->sink_->put(std::move(eof_out));
+                return;
+            }
+        }
+
+        // No active inputs: nothing to wait for and nothing to produce. Park the
+        // thread on any source edge so setObject("active_inputs", >0) can wake it
+        // once frames start flowing again.
+        {
+            bool any_active = false;
+            for (size_t i = 0; i < n; ++i) {
+                if (isActive(i)) { any_active = true; break; }
+            }
+            if (!any_active) {
+                this->waitForInput();
                 return;
             }
         }
@@ -674,8 +696,6 @@ public:
     int height() override { return canvas_h_; }
     av::PixelFormat pixelFormat() override { return av::PixelFormat(AV_PIX_FMT_CUDA); }
     av::PixelFormat realPixelFormat() override { return av::PixelFormat(sw_fmt_); }
-    av::Rational frameRate() override { return frame_rate_; }
-    av::Rational timeBase() override { return timebase_; }
 
     static std::shared_ptr<CudaRectOverlay> create(NodeCreationInfo &nci);
 };
@@ -706,18 +726,13 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         throw Error("cuda_rect_overlay: unknown sw_format");
 
     auto out_edge = edges.find<av::VideoFrame>(params["dst"]);
-    auto src_edge0 = edges.find<av::VideoFrame>(src_names.front());
-    auto fr_src = src_edge0->findNodeUp<IFrameRateSource>();
-    auto tb_src = src_edge0->findNodeUp<ITimeBaseSource>();
-    av::Rational fr = fr_src ? fr_src->frameRate() : av::Rational{0, 0};
-    av::Rational tb = tb_src ? tb_src->timeBase() : av::Rational{0, 0};
 
     const std::string mdkey = params.value("metadata_key", std::string("rect_overlay_v1"));
     const int dbg = params.value("debug_log_every_n", 0);
 
     auto node = std::make_shared<CudaRectOverlay>(
         make_unique<EdgeSink<av::VideoFrame>>(out_edge), std::move(hw), cw, ch, sw_fmt, std::move(layers), mdkey,
-        fr, tb, dbg);
+        dbg);
     node->createSourcesFromParameters(edges, params);
     out_edge->setProducer(node);
     node->initTimeline(nci);

@@ -8,6 +8,7 @@ class OneToMany : public NodeSingleInput<T>, public NodeMultiOutput<T>,
                   public TimelineReader, public IInputsObjects, public IReturnsObjects {
     std::atomic<uint32_t> outputs_mask_{1};
     bool drop_ = false;
+    bool drop_dynamic_ = false;
 
 public:
     using NodeSingleInput<T>::NodeSingleInput;
@@ -22,9 +23,10 @@ public:
             if (opt) mask = parseOutputsMask(*opt);
         }
 
+        bool drop = drop_ || drop_dynamic_;
         for (size_t i = 0; i < this->sink_edges_.size(); i++) {
             if (mask & (1u << i))
-                EdgeSink<T>(this->sink_edges_[i]).put(*data, drop_);
+                EdgeSink<T>(this->sink_edges_[i]).put(*data, drop);
         }
         this->source_->pop();
     }
@@ -56,6 +58,11 @@ public:
             r->outputs_mask_.store(parseOutputsMask(params["outputs"]), std::memory_order_relaxed);
         if (params.count("drop"))
             r->drop_ = params["drop"].get<bool>();
+        // When outputs change dynamically via timeline, a blocking put on a
+        // full queue whose consumer is inactive would stall the entire node
+        // (preventing mask re-evaluation and starving all other outputs).
+        if (r->hasTimeline())
+            r->drop_dynamic_ = true;
         return r;
     }
 };

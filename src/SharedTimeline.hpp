@@ -87,6 +87,23 @@ public:
         data_.erase(channel);
     }
 
+    /// Remove every scheduled entry for `key` on `channel`. Other keys on the same channel are
+    /// untouched; other channels are untouched.
+    ///
+    /// Callers that still need future PTS events for this key must re-`set()` them afterwards
+    /// (same thread / same critical section is fine). MixerOrchestrator uses this only for keys
+    /// that nodes resolve exclusively via `TimelineReader` (`outputs` on camera `one_to_many`,
+    /// `active_inputs` on `cuda_rect_overlay`), immediately before publishing a fresh "now" entry
+    /// and before appending new transition rows in the same command.
+    void clearKey(const std::string& channel, const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto ch_it = data_.find(channel);
+        if (ch_it == data_.end()) return;
+        ch_it->second.erase(key);
+        if (ch_it->second.empty())
+            data_.erase(ch_it);
+    }
+
     void clearAll() {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.clear();
