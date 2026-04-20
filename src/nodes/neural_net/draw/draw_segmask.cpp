@@ -37,8 +37,11 @@ private:
     std::unordered_map<int, DrawColor> class_colors_;
     int overlay_hold_frames_ = 0;
     int overlay_fade_frames_ = 0;
+    float coverage_drop_keep_prev_ratio_ = 0.0f;
+    float coverage_drop_min_prev_ = 0.0f;
     AVBufferRef* cached_mask_buf_ = nullptr;
     std::vector<MaskDetection> cached_detections_;
+    float cached_bbox_coverage_ = 0.0f;
     uint64_t cached_age_frames_ = 0;
 
     const char* nodeName() const override { return "draw_segmask"; }
@@ -75,6 +78,7 @@ private:
             av_buffer_unref(&cached_mask_buf_);
         }
         cached_detections_.clear();
+        cached_bbox_coverage_ = 0.0f;
         cached_age_frames_ = 0;
     }
 
@@ -82,7 +86,7 @@ private:
         return cached_mask_buf_ && !cached_detections_.empty();
     }
 
-    void updateCachedOverlay(const AVFrameSideData* sd, std::vector<MaskDetection> detections) {
+    void updateCachedOverlay(const AVFrameSideData* sd, std::vector<MaskDetection> detections, float bbox_coverage) {
         AVBufferRef* new_ref = av_buffer_ref(sd ? sd->buf : nullptr);
         if (!new_ref) {
             clearCachedOverlay();
@@ -93,6 +97,7 @@ private:
         }
         cached_mask_buf_ = new_ref;
         cached_detections_ = std::move(detections);
+        cached_bbox_coverage_ = std::max(0.0f, std::min(1.0f, bbox_coverage));
         cached_age_frames_ = 0;
     }
 
@@ -119,6 +124,23 @@ private:
         } catch (const std::exception&) {
             return {};
         }
+    }
+
+    float computeDetectionCoverage(const std::vector<MaskDetection>& detections) const {
+        if (detections.empty() || input_params_.width <= 0 || input_params_.height <= 0) return 0.0f;
+
+        const double frame_area = (double)input_params_.width * (double)input_params_.height;
+        if (frame_area <= 0.0) return 0.0f;
+
+        double covered = 0.0;
+        for (const auto& det : detections) {
+            const int w = std::max(0, det.bbox_x2 - det.bbox_x1);
+            const int h = std::max(0, det.bbox_y2 - det.bbox_y1);
+            covered += (double)w * (double)h;
+        }
+
+        const double ratio = covered / frame_area;
+        return (float)std::max(0.0, std::min(1.0, ratio));
     }
 
     void renderMasks(av::VideoFrame& output,
@@ -310,16 +332,47 @@ private:
         }
 
         if (have_current_masks) {
+            const float current_coverage = computeDetectionCoverage(detections);
+
+            const bool coverage_drop_detected =
+                overlay_hold_frames_ > 0 &&
+                coverage_drop_keep_prev_ratio_ > 0.0f &&
+                hasCachedOverlay() &&
+                cached_bbox_coverage_ >= coverage_drop_min_prev_ &&
+                (int)cached_age_frames_ < overlay_hold_frames_ &&
+                current_coverage < (cached_bbox_coverage_ * coverage_drop_keep_prev_ratio_);
+
+            if (coverage_drop_detected) {
+                ++cached_age_frames_;
+                const auto* cached_header = (const GpuMaskSideDataHeader*)cached_mask_buf_->data;
+                const float opacity_scale = heldOpacityScale();
+                if (opacity_scale > 0.0f) {
+                    if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                        logstream << "draw_segmask: frame=" << frame_counter_
+                                  << " mode=hold_coverage_drop"
+                                  << " current_coverage=" << current_coverage
+                                  << " cached_coverage=" << cached_bbox_coverage_
+                                  << " keep_prev_ratio=" << coverage_drop_keep_prev_ratio_
+                                  << " held_age=" << cached_age_frames_
+                                  << " opacity_scale=" << opacity_scale;
+                    }
+                    renderMasks(output, (CUdeviceptr)cached_header->gpu_ptr, *cached_header, cached_detections_, opacity_scale);
+                    return;
+                }
+                clearCachedOverlay();
+            }
+
             if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                 logstream << "draw_segmask: frame=" << frame_counter_
                           << " masks=" << num_masks
                           << " proto=" << proto_w << "x" << proto_h
                           << " detections=" << detections.size()
+                          << " coverage=" << current_coverage
                           << " mode=current";
             }
             renderMasks(output, gpu_masks, *header, detections, 1.0f);
             if (overlay_hold_frames_ > 0) {
-                updateCachedOverlay(sd, detections);
+                updateCachedOverlay(sd, detections, current_coverage);
             }
             return;
         }
@@ -370,6 +423,8 @@ public:
                 std::unordered_map<int, DrawColor> class_colors,
                 int overlay_hold_frames,
                 int overlay_fade_frames,
+                float coverage_drop_keep_prev_ratio,
+                float coverage_drop_min_prev,
                 double model_content_width,
                 double model_content_height,
                 double model_content_offset_x,
@@ -387,6 +442,8 @@ public:
           require_wide_shot_(require_wide_shot),
           overlay_hold_frames_(std::max(0, overlay_hold_frames)),
           overlay_fade_frames_(std::max(0, std::min(overlay_fade_frames, overlay_hold_frames))),
+          coverage_drop_keep_prev_ratio_(std::max(0.0f, std::min(1.0f, coverage_drop_keep_prev_ratio))),
+          coverage_drop_min_prev_(std::max(0.0f, std::min(1.0f, coverage_drop_min_prev))),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -418,6 +475,8 @@ public:
         const double min_conf = params.value("min_conf", 0.0);
         const int overlay_hold_frames = params.value("overlay_hold_frames", 0);
         const int overlay_fade_frames = params.value("overlay_fade_frames", 0);
+        const float coverage_drop_keep_prev_ratio = params.value("coverage_drop_keep_prev_ratio", 0.0f);
+        const float coverage_drop_min_prev = params.value("coverage_drop_min_prev", 0.0f);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double model_content_width = params.value("model_content_width", 0.0);
         const double model_content_height = params.value("model_content_height", 0.0);
@@ -446,6 +505,7 @@ public:
             require_wide_shot, min_conf,
             std::move(class_colors),
             overlay_hold_frames, overlay_fade_frames,
+            coverage_drop_keep_prev_ratio, coverage_drop_min_prev,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }

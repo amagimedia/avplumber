@@ -232,8 +232,13 @@ public:
                     all_dets.insert(all_dets.end(), pr.detections.begin(), pr.detections.end());
                 }
 
-                // Build pose metadata
-                if (!pr.detections.empty()) {
+                // Build pose metadata.
+                // Keep pose metadata consistent with node-level max_det to avoid rendering low-confidence duplicates.
+                size_t pose_emit_count = pr.detections.size();
+                if (max_det_ > 0 && pose_emit_count > (size_t)max_det_) {
+                    pose_emit_count = (size_t)max_det_;
+                }
+                if (pose_emit_count > 0) {
                     Parameters pose_md;
                     pose_md["coord_space"] = "model";
                     pose_md["model_width"] = input_w_;
@@ -242,7 +247,7 @@ public:
                     pose_md["poses"] = Parameters::array();
 
                     int kpt_stride = pr.num_keypoints * 3;
-                    for (size_t di = 0; di < pr.detections.size(); ++di) {
+                    for (size_t di = 0; di < pose_emit_count; ++di) {
                         const Detection& d = pr.detections[di];
                         Parameters item;
                         item["cls"] = d.cls;
@@ -271,7 +276,8 @@ public:
                 if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
                     (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                     logstream << "cuda_infer_yolo: pose model=" << model.engine_name
-                              << " detections=" << pr.detections.size()
+                              << " detections_raw=" << pr.detections.size()
+                              << " detections_emitted=" << pose_emit_count
                               << " keypoints_per_det=" << pr.num_keypoints;
                 }
             }
