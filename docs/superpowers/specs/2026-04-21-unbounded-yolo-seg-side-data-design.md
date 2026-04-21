@@ -177,6 +177,9 @@ File:
 Changes:
 - same lookup migration as `jersey_color_extract`
 - cached overlay logic continues to hold an `AVBufferRef` to the selected slot payload
+- drawing logic must continue to support variable `num_masks` from the selected slot payload and must handle player-style batches such as 10 masks on the same frame without any hardcoded low mask-count assumption
+- implementation should move toward batching the selected detections for a slot in a single launch flow per plane rather than assuming per-mask launch overhead is negligible
+- the node contract is: if the selected slot payload declares `num_masks = N`, and metadata maps `N` mask indices to detections, the node must be able to render that full batch correctly for `N > 1`
 
 ## `join_metadata`
 
@@ -253,6 +256,9 @@ Out of scope:
 - changing detection metadata format
 - adding non-segmentation slot namespaces
 
+Related but in scope for correctness:
+- `draw_segmask` may need internal kernel-launch restructuring if that is required to reliably render larger mask batches such as player overlays
+
 ## Risks
 
 1. GPU lifetime bugs if the new container mishandles `AVBufferRef` ownership.
@@ -271,4 +277,5 @@ Mitigations:
 3. Court and player segmentation can coexist without side-data collision.
 4. Existing slot `0/1` graphs still run.
 5. Different slots can carry different `num_masks` values simultaneously without hardcoded assumptions in readers or writers.
-6. The RTMP example runs without CUDA illegal-address failures attributable to mask side-data handling.
+6. `draw_segmask` correctly renders multi-mask batches for player segmentation workloads, including cases around 10 masks per frame.
+7. The RTMP example runs without CUDA illegal-address failures attributable to mask side-data handling.
