@@ -36,6 +36,7 @@ That fallback is incorrect for generalized multi-stream use.
 3. Existing graphs that use slot `0` or `1` must keep working.
 4. `join_metadata` should remain simple and should not need slot-aware merge logic.
 5. The new representation must support both CPU and GPU mask side data.
+6. The number of masks in a slot is model-driven and variable per producer. It must never be hardcoded by model family or graph role.
 
 ## Recommended Design
 
@@ -90,6 +91,12 @@ For GPU masks, each slot entry contains the existing `GpuMaskSideDataHeader` fie
 
 The container must support appending or replacing a single slot without disturbing other slots already attached to the frame.
 
+Important:
+- `num_masks` is part of each slot payload, not part of global slot configuration.
+- Different slots may carry different mask counts at the same time.
+- Example: a court model may emit `2` masks while a player model emits `10`, and the readers must consume the exact `num_masks` declared by the selected slot payload.
+- No reader or writer may assume fixed counts such as `1`, `2`, `10`, or `max_det`; only the payload header is authoritative.
+
 ## Ownership Model
 
 ### CPU masks
@@ -127,6 +134,8 @@ Behavior:
 - readers fall back to legacy slot `0`/`1` side data if needed
 
 This preserves compatibility while converging the codebase on one representation.
+
+The helper API must expose the parsed payload header back to callers so downstream code continues using per-slot `num_masks`, `proto_w`, `proto_h`, `model_w`, and `model_h` from the selected payload rather than reconstructing them from graph assumptions.
 
 ## Writer Changes
 
@@ -261,4 +270,5 @@ Mitigations:
 2. Slot `2+` no longer aliases to slot `0`.
 3. Court and player segmentation can coexist without side-data collision.
 4. Existing slot `0/1` graphs still run.
-5. The RTMP example runs without CUDA illegal-address failures attributable to mask side-data handling.
+5. Different slots can carry different `num_masks` values simultaneously without hardcoded assumptions in readers or writers.
+6. The RTMP example runs without CUDA illegal-address failures attributable to mask side-data handling.
