@@ -803,13 +803,21 @@ public:
             def.name = scene_name;
             if (jdef.contains("width")) def.width = jdef["width"].get<int>();
             if (jdef.contains("height")) def.height = jdef["height"].get<int>();
-            if (jdef.contains("layers")) def.layers = jdef["layers"];
-            if (jdef.contains("sources") && jdef["sources"].is_object()) {
-                for (auto it = jdef["sources"].begin(); it != jdef["sources"].end(); ++it) {
-                    SourceLayout sl;
-                    sl.crop_scale_graph = it.value().value("graph", std::string(""));
-                    def.sources[it.key()] = std::move(sl);
+            if (!jdef.contains("sources") || !jdef["sources"].is_object())
+                throw Error("mixer.scene: sources object required (logical source name -> { graph, dst_x, dst_y, ... })");
+            for (auto it = jdef["sources"].begin(); it != jdef["sources"].end(); ++it) {
+                SourceLayout sl;
+                const json& inj = it.value();
+                sl.crop_scale_graph = inj.value("graph", std::string(""));
+                Parameters layer = json::object();
+                for (auto jt = inj.begin(); jt != inj.end(); ++jt) {
+                    if (jt.key() != "graph")
+                        layer[jt.key()] = jt.value();
                 }
+                if (layer.empty())
+                    layer = {{"dst_x", 0}, {"dst_y", 0}};
+                sl.layer = std::move(layer);
+                def.sources[it.key()] = std::move(sl);
             }
 
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
@@ -911,6 +919,8 @@ public:
             }
             if (cfg.contains("wipe_otm")) state->wipe_otm_name = cfg["wipe_otm"].get<std::string>();
             if (cfg.contains("wipe_selector")) state->wipe_selector_name = cfg["wipe_selector"].get<std::string>();
+            if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
+            if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
         };
 
         #ifdef EMBED_IN_OBS

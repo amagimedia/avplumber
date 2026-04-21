@@ -9,12 +9,14 @@
 
 struct SourceLayout {
     std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
+    /// Layer fields for cuda_rect_overlay (dst_x, dst_y, …) — not including `graph`.
+    Parameters layer;
 };
 
 struct SceneDefinition {
     std::string name;
+    /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
     std::unordered_map<std::string, SourceLayout> sources;
-    Parameters layers; // cuda_rect_overlay layers array
     int width = 1920;
     int height = 1080;
 
@@ -60,6 +62,10 @@ struct MixerState : public InstanceShared<MixerState> {
     // Static nodes for wipe output path (otm splits mixer_out, selector chooses direct vs overlay)
     std::string wipe_otm_name;         // "otm_final"
     std::string wipe_selector_name;    // "wipe_sel"
+
+    // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
+    std::string wipe_group_name;       // "mixer_wipe"
+    std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
 
     const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
     const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }
