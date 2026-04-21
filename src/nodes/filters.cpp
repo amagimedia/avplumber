@@ -421,14 +421,52 @@ public:
                         throw Error("Error feeding filter graph: " + av::error2string(ret));
                     } else if (ret >= 0) {
                         edge->pop(); // no need to retry, pop this frame
+                    } else {
+                        // AVERROR(EAGAIN): this buffersrc is not accepting yet.  findSourceWithData()
+                        // always prefers the smallest PTS among inputs; when timebases are not comparable
+                        // (e.g. program 1/30 vs wallclock ms on a wipe), only that pad is ever fed and
+                        // multi-input filters (overlay, framesync) never advance.
+                        for (int j = 0; j < (int)this->source_edges_.size(); j++) {
+                            if (j == source_index) continue;
+                            std::shared_ptr<Edge<T>> e2 = this->source_edges_[j];
+                            T* f2 = e2->peek();
+                            if (!f2 || f2->isNull() || !f2->isComplete() ||
+                                !f2->timeBase().getNumerator() || !f2->timeBase().getDenominator())
+                                continue;
+                            Port& p2 = sources_[j];
+                            if (!p2.checkFrame(*f2, e2)) {
+                                if (filter_graph_!=nullptr) {
+                                    logstream << "Input parameters changed. Restarting filter.";
+                                }
+                                freeFilterGraph();
+                            }
+                            p2.captureInitialHWFramesCtxFromFrame(*f2);
+                            if (filter_graph_==nullptr) {
+                                maybeInitFilterGraph();
+                            }
+                            if (filter_graph_==nullptr)
+                                continue;
+                            if (do_shift_) {
+                                eq_.in(*f2);
+                            }
+                            int ret2 = p2.putFrame(*f2);
+                            if (ret2 < 0 && ret2 != AVERROR(EAGAIN)) {
+                                throw Error("Error feeding filter graph: " + av::error2string(ret2));
+                            }
+                            if (ret2 >= 0) {
+                                e2->pop();
+                                break;
+                            }
+                        }
                     }
+                }
+                if (filter_graph_!=nullptr) {
                     int finished_sinks = 0;
                     for (int sink_index=0; sink_index<sinks_.size(); sink_index++) {
                         Port& sink_port = sinks_[sink_index];
                         while(true) {
                             T frmout;
-                            
-                            ret = sink_port.getFrame(frmout);
+                            int ret = sink_port.getFrame(frmout);
                             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                                 if (ret==AVERROR_EOF) {
                                     finished_sinks++;

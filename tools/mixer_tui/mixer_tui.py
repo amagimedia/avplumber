@@ -2,6 +2,11 @@
 """
 Avplumber Mixer TUI -- live production video switcher.
 
+Scene composition (graphs, PiP positions) is defined on the avplumber side with
+``mixer.scene`` JSON using a ``sources`` map: logical camera name -> ``graph``
+plus ``dst_x`` / ``dst_y`` (see doc/mixer_orchestrator.md). This UI only refers
+to scenes by name.
+
 Usage:
     python tools/mixer_tui.py --host localhost --port 5555 --mixer mixer \\
         fullcam1 pip sidebyside
@@ -790,7 +795,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="avplumber host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
-    parser.add_argument("scenes", nargs="+", metavar="SCENE", help="Scene names to display")
+    parser.add_argument(
+        "scenes",
+        nargs="+",
+        metavar="SCENE",
+        help="Scene names (must match mixer.scene definitions on the server)",
+    )
     args = parser.parse_args()
 
     if len(args.scenes) > 9:

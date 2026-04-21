@@ -31,10 +31,10 @@ Scene Rendering Layer (fixed 2 slots)
 Output Layer (static)
   source_switcher -> one_to_many(final) -> [direct] \
                                                      > source_switcher(wipe_sel) -> force_fps -> enc -> mux -> output
-  [wipe_in] + wipe_chain -> overlay_many_cuda ------'
+  [wipe_pre] -> force_fps(wipe_base_fps) -> [wipe_in] + wipe_chain (mixer_wipe) -> overlay_many_cuda ------'
 ```
 
-Nodes labeled "dynamic" are created and destroyed by the orchestrator. Everything else is static.
+Nodes labeled "dynamic" are created and destroyed by the orchestrator during crossfade. The wipe subgraph (`mixer_wipe` group) is pre-created but not started; it is started/stopped around each wipe transition. Everything else is static.
 
 ### GPU-saving mechanisms
 
@@ -52,6 +52,7 @@ Nodes labeled "dynamic" are created and destroyed by the orchestrator. Everythin
 - 1 compositor kernel
 - 0 transition filter
 - PVW compositor, its crop/scale chains, and `transition_cuda` are all idle (no frames flowing, no GPU work)
+- Wipe subgraph (`mixer_wipe` group) is stopped: no threads running, no GPU work, `final_wipe_pre` / `final_wipe_in` stay empty because `otm_final` outputs=1 (direct only). `force_fps` on the wipe tap supplies `IFrameRateSource` for `wipe_overlay`’s buffersrc (unlike `one_to_many` alone).
 
 ## SharedTimeline
 
@@ -140,7 +141,7 @@ Both are controllable via `node.object.set` (immediate) or `SharedTimeline` (PTS
 `MixerState` (`src/MixerState.hpp`) is an instance-shared object holding all bookkeeping:
 
 - **Source registry**: maps logical camera name to `{otm_node_name, input_index, cs_node_a, cs_node_b}`
-- **Scene registry**: maps scene name to `SceneDefinition {sources, layers, width, height}`
+- **Scene registry**: maps scene name to `SceneDefinition {sources, width, height}`
 - **Slot tracking**: `pgm_is_slot_a`, `pgm_scene_name`, `pvw_scene_name`
 - **Transition state**: atomic `TransitionMode` enum: `Idle`, `Cut`, `Crossfade`, `Wipe`
 - **Node name registry**: slot A/B compositor, norm, post-otm names; source_switcher name; wipe path names
@@ -231,18 +232,22 @@ If `duration_sec` is omitted, the command probes the wipe file with `avformat_op
 
 The output path uses two static nodes (`otm_final` and `wipe_sel`) that exist in the graph but are normally bypassed (`otm_final` outputs=1 direct only, `wipe_sel` active=0 direct).
 
-1. Create wipe playback chain (all dynamically):
-   ```
-   input_rec(url=wipe_file, loop=false) -> demux(v:0) -> dec_video(?cuda) -> filter_video(format=yuva420p,hwupload_cuda) -> realtime(set_pts=true)
-   ```
+The wipe subgraph (`mixer_wipe` group) is pre-created at startup but not started. It contains:
+```
+input_rec(url="", loop=false) -> demux(v:0) -> dec_video(?cuda) -> filter_video(format=yuva420p,hwupload_cuda) -> realtime(set_pts=true) -> [wipe_rt_out]
+otm_final -> final_wipe_pre -> force_fps(wipe_base_fps) -> final_wipe_in -> filter_video(overlay_many_cuda) <- wipe_rt_out
+```
+The `url` is empty in steady state; `final_wipe_pre` receives no frames because `otm_final` outputs=1. The `force_fps` node on the wipe tap exists so `wipe_overlay` can walk upstream to an `IFrameRateSource` for buffersrc metadata (`one_to_many` does not provide one).
 
-2. Create overlay node: `filter_video` with `graph=overlay_many_cuda`, `src=["final_wipe_in","wipe_rt_out"]`, `dst=wipe_overlay_out`
+1. Destroy the pre-created `wipe_input` node object (via `stop()` while not running) so that `createNode()` will pick up the updated `url` when the group starts. On subsequent wipes the node is already destroyed by the previous `stopGroup()`, so the `stop()` call is a no-op.
+
+2. Set `wipe_input` `url` parameter to `wipe_file`, then start the `mixer_wipe` group. All 6 wipe nodes run; `wipe_input` opens the file with the new URL.
 
 3. Route output through wipe: timeline entries at current wallclock — `otm_final` `outputs` = 3 (both), `wipe_sel` `active` = 1 (overlay)
 
 4. Spawn background thread with two phases:
    - **Midpoint** (duration/2): load target scene into PVW slot (immediate prep + camera `outputs` rewrite as in a cut), then timeline `source_switcher` `active` = PVW direct at current wallclock. Invisible because the wipe fully covers the screen.
-   - **End** (duration + 500ms buffer): timeline `otm_final` / `wipe_sel` / camera otms / old compositor `active_inputs`, then delete all 6 wipe chain nodes, flip internal state.
+   - **End** (duration + 500ms buffer): timeline `otm_final` / `wipe_sel` / camera otms / old compositor `active_inputs`, then stop the `mixer_wipe` group (nodes are not deleted; they are reused on the next wipe), flip internal state.
 
 ## Timestamp flow
 
@@ -299,6 +304,8 @@ Config fields:
 - `initial_pvw_scene` (string, optional)
 - `wipe_otm` (string) -- otm_final node name (for wipe output path)
 - `wipe_selector` (string) -- wipe_sel node name
+- `wipe_group` (string) -- name of the pre-created wipe subgraph group (started/stopped per wipe)
+- `wipe_input_node` (string) -- name of the `input_rec` node inside the wipe group (its `url` is set before each wipe start)
 - `slot_a` -- `{"compositor":"comp_a", "norm_ts":"norm_a", "post_otm":"otm_scene_a"}`
 - `slot_b` -- same structure for slot B
 
@@ -309,11 +316,12 @@ Register a camera source. `input_index` is the camera's position in the composit
 ```mixer.scene <mixer_name> <scene_name> <json_definition>```
 
 Define a scene composition. Definition fields:
-- `sources` (object) -- camera_name -> `{"graph":"crop=...,scale_cuda=..."}` (the `graph` parameter for the crop/scale filter_video)
-- `layers` (array) -- `cuda_rect_overlay` layers array (one per compositor input, in src order)
+- `sources` (object) -- logical source name (same strings as `mixer.source`) -> object containing:
+  - `graph` (string) -- FFmpeg filter chain for that camera's crop/scale `filter_video` (`node.param.set` / `auto_restart`).
+  - Any other keys (`dst_x`, `dst_y`, …) -- passed as that compositor source's `cuda_rect_overlay` layer entry (same names as in `node.object.set comp_* layers`).
 - `width`, `height` (int, optional) -- canvas dimensions (not currently used by orchestrator, reserved)
 
-Cameras not listed in `sources` have their compositor input bit cleared. The `layers` array must have one entry per compositor input (matching the compositor's `src` array length), even for inactive inputs -- those entries are ignored by the compositor when the input is inactive.
+Sources not listed in `sources` are off this scene: their `one_to_many` slot bit is cleared and the orchestrator fills their layer slot with `{"dst_x":0,"dst_y":0}` when building the compositor `layers` array. The array length matches registered `mixer.source` input indices (one layer per compositor `src` order); inactive compositor inputs ignore their layer at runtime.
 
 ```mixer.cut <mixer_name> <scene_name>```
 
@@ -357,4 +365,5 @@ timeline.dump mixer_tl
 - **One transition at a time.** All transition commands (`cut`, `fade`, `wipe`) reject with an error if a transition is already in progress.
 - **Fixed 2-slot architecture.** You cannot have more than 2 compositors. More scenes can be defined, but only 2 render simultaneously (PGM + PVW during transition).
 - **Wipe timing is sleep-based.** The wipe midpoint cut and cleanup are driven by `std::this_thread::sleep_for`, not PTS-synchronized timeline entries. This is acceptable because the wipe video fully covers the screen at the midpoint, hiding any timing imprecision.
-- **Deferred cleanup uses detached threads.** The internal state flip and node deletion after transitions happen on detached threads. If avplumber shuts down during a transition, these threads are abandoned.
+- **Deferred cleanup uses detached threads.** The internal state flip and group stop after transitions happen on detached threads. If avplumber shuts down during a transition, these threads are abandoned.
+- **Wipe subgraph must be pre-created.** The `mixer_wipe` group with its 6 nodes must be declared in the avplumber config; `mixer.wipe` will not create nodes dynamically. The group must not be started by the config — the orchestrator manages its lifecycle.

@@ -1,8 +1,43 @@
 #include "mixer_orchestrator.hpp"
 #include "avutils.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <chrono>
+
+namespace {
+
+/// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
+Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
+    static const Parameters kUnusedLayer = Parameters({{"dst_x", 0}, {"dst_y", 0}});
+
+    int max_idx = -1;
+    for (const auto& [_, info] : st.sources)
+        max_idx = std::max(max_idx, info.input_index);
+
+    Parameters arr = Parameters::array();
+    for (int i = 0; i <= max_idx; ++i) {
+        std::string name_at;
+        for (const auto& [name, info] : st.sources) {
+            if (info.input_index == i) {
+                name_at = name;
+                break;
+            }
+        }
+        if (name_at.empty()) {
+            arr.push_back(kUnusedLayer);
+            continue;
+        }
+        auto it = scene.sources.find(name_at);
+        if (it == scene.sources.end())
+            arr.push_back(kUnusedLayer);
+        else
+            arr.push_back(it->second.layer);
+    }
+    return arr;
+}
+
+} // namespace
 
 MixerOrchestrator::MixerOrchestrator(
     std::shared_ptr<NodeManager> nodes,
@@ -47,6 +82,14 @@ void MixerOrchestrator::deleteNodeIfExists(const std::string& name) {
     if (node) {
         nodes_->deleteNode(name);
     }
+}
+
+void MixerOrchestrator::startGroup(const std::string& group_name) {
+    nodes_->group(group_name)->startNodes();
+}
+
+void MixerOrchestrator::stopGroup(const std::string& group_name) {
+    nodes_->group(group_name)->stopNodes();
 }
 
 void MixerOrchestrator::ensureIdle() const {
@@ -98,7 +141,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
         autoRestartNode(cs_node);
     }
 
-    setNodeObject(slot.compositor_name, "layers", scene.layers);
+    setNodeObject(slot.compositor_name, "layers", compositorLayersFromScene(*state_, scene));
 
     uint32_t active_mask = state_->computeActiveInputsMask(scene);
     // Same pattern as camera otms: cuda_rect_overlay reads "active_inputs" from timeline only.
@@ -319,8 +362,20 @@ void MixerOrchestrator::wipeThread(
         // Reconfigure PVW slot for the target scene
         orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
 
-        // Switch source_switcher (invisible behind wipe overlay); timeline for consistency with other switches
+        // Same post-scene OTM flip as cutInternal: out_sel will read PVW `sc*_direct`, so that slot's
+        // `one_to_many` must have outputs=1. If it stays 0 (idle default), frames are popped from
+        // norm_* with nowhere to go and the wipe path freezes. Stop the old PGM branch to avoid backup.
         int64_t Tw = wallclock.pts();
+        const auto& new_slot = state->pvwSlot();
+        const auto& old_slot = state->pgmSlot();
+        timeline->clearKey(old_slot.post_otm_name, "outputs");
+        orch.setNodeObject(old_slot.post_otm_name, "outputs", Parameters(0u));
+        timeline->set(old_slot.post_otm_name, "outputs", Tw, Parameters(0u));
+        timeline->clearKey(new_slot.post_otm_name, "outputs");
+        orch.setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
+        timeline->set(new_slot.post_otm_name, "outputs", Tw, Parameters(1u));
+
+        // Switch source_switcher (invisible behind wipe overlay); timeline for consistency with other switches
         timeline->set(state->source_switcher_name, "active", Tw, Parameters(state->pvwSourceSwitcherIndex()));
     } catch (const std::exception& e) {
         logstream << "mixer: wipe midpoint error: " << e.what();
@@ -351,9 +406,9 @@ void MixerOrchestrator::wipeThread(
         const auto& old_slot = state->pgmSlot();
         timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
 
-        // Delete wipe chain
-        for (const auto& name : {"wipe_overlay", "wipe_rt", "wipe_fmt", "wipe_dec", "wipe_demux", "wipe_input"})
-            orch.deleteNodeIfExists(name);
+        // Stop the pre-created wipe subgraph; nodes are re-used on the next wipe
+        if (!state->wipe_group_name.empty())
+            orch.stopGroup(state->wipe_group_name);
 
         // Flip state
         state->pgm_is_slot_a = new_pgm_is_slot_a;
@@ -369,6 +424,8 @@ void MixerOrchestrator::wipeThread(
 // ---------------------------------------------------------------------------
 // wipe: media wipe transition.  Uses the static wipe_otm + wipe_selector
 // nodes to route through the overlay without edge rewiring.
+// The wipe subgraph (group wipe_group_name) is pre-created but not running
+// in steady state; it is started here and stopped at the end of the wipe.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec) {
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -376,74 +433,28 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
 
     if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty())
         throw Error("mixer: wipe requires wipe_otm and wipe_selector nodes (see mixer.init)");
+    if (state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
+        throw Error("mixer: wipe requires wipe_group and wipe_input_node (see mixer.init)");
 
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    // Phase 1: create wipe playback chain
-    Parameters wipe_input;
-    wipe_input["type"] = "input_rec";
-    wipe_input["name"] = "wipe_input";
-    wipe_input["url"] = wipe_file;
-    wipe_input["loop"] = false;
-    wipe_input["dst"] = "wipe_raw_pkt";
-    wipe_input["group"] = "mixer_wipe";
-    createAndStartNode(wipe_input);
+    // Reset the input node so it is re-created with the new URL when the group starts.
+    // On the first wipe the node_ was pre-created with an empty URL; stopping it (while
+    // not running) destroys the pre-created node_ object so createNode() will pick up
+    // the updated params on the next start().  On subsequent wipes node_ is already null
+    // (destroyed when the group was stopped at the end of the previous wipe), so this
+    // stop() call is a no-op.
+    nodes_->node(state_->wipe_input_node_name)->stop(true);
+    setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
+    startGroup(state_->wipe_group_name);
 
-    Parameters wipe_demux;
-    wipe_demux["type"] = "demux";
-    wipe_demux["name"] = "wipe_demux";
-    wipe_demux["src"] = "wipe_raw_pkt";
-    wipe_demux["routing"] = Parameters({{"v:0", "wipe_v_pkt"}});
-    wipe_demux["group"] = "mixer_wipe";
-    createAndStartNode(wipe_demux);
-
-    Parameters wipe_dec;
-    wipe_dec["type"] = "dec_video";
-    wipe_dec["name"] = "wipe_dec";
-    wipe_dec["src"] = "wipe_v_pkt";
-    wipe_dec["dst"] = "wipe_dec_out";
-    wipe_dec["pixel_format"] = "?cuda";
-    wipe_dec["hwaccel"] = state_->hwaccel_name;
-    wipe_dec["group"] = "mixer_wipe";
-    createAndStartNode(wipe_dec);
-
-    Parameters wipe_fmt;
-    wipe_fmt["type"] = "filter_video";
-    wipe_fmt["name"] = "wipe_fmt";
-    wipe_fmt["src"] = "wipe_dec_out";
-    wipe_fmt["dst"] = "wipe_fmt_out";
-    wipe_fmt["graph"] = "format=yuva420p,hwupload_cuda";
-    wipe_fmt["hwaccel"] = state_->hwaccel_name;
-    wipe_fmt["group"] = "mixer_wipe";
-    createAndStartNode(wipe_fmt);
-
-    Parameters wipe_rt;
-    wipe_rt["type"] = "realtime";
-    wipe_rt["name"] = "wipe_rt";
-    wipe_rt["src"] = "wipe_fmt_out";
-    wipe_rt["dst"] = "wipe_rt_out";
-    wipe_rt["set_pts"] = true;
-    wipe_rt["group"] = "mixer_wipe";
-    createAndStartNode(wipe_rt);
-
-    // Phase 2: create overlay node writing to the wipe_selector's second input
-    Parameters wipe_overlay;
-    wipe_overlay["type"] = "filter_video";
-    wipe_overlay["name"] = "wipe_overlay";
-    wipe_overlay["src"] = Parameters::array({"final_wipe_in", "wipe_rt_out"});
-    wipe_overlay["dst"] = "wipe_overlay_out";
-    wipe_overlay["graph"] = "overlay_many_cuda";
-    wipe_overlay["hwaccel"] = state_->hwaccel_name;
-    wipe_overlay["group"] = "mixer_wipe";
-    createAndStartNode(wipe_overlay);
-
-    // Phase 3: route output through wipe overlay (timeline so it tracks frame PTS like other mixer nodes)
+    // Route output through wipe overlay (timeline so it tracks frame PTS like other mixer nodes)
     int64_t Tw = wallclock.pts();
     timeline_->set(state_->wipe_otm_name, "outputs", Tw, Parameters(3u));   // 0b11 both direct + wipe_in
     timeline_->set(state_->wipe_selector_name, "active", Tw, Parameters(1)); // wipe_overlay_out
 
-    // Phase 4: launch background thread for midpoint cut + cleanup
+    // Launch background thread for midpoint cut + cleanup
     int64_t total_ms = (int64_t)(duration_sec * 1000);
     int64_t midpoint_ms = total_ms / 2;
     std::thread(wipeThread, nodes_, state_, timeline_,

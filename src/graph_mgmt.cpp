@@ -233,61 +233,66 @@ static void processNode(std::shared_ptr<Node> node)
 }
 
 void NodeWrapper::threadFunction() {
-    decltype(node_) node = node_;
-    if (node==nullptr) {
+    if (node_==nullptr) {
         logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!!";
         return;
     }
-    IReportsFinish *node_finishable = dynamic_cast<IReportsFinish*>(node.get());
-    IFlushable *node_flushable = dynamic_cast<IFlushable*>(node.get());
-    try {
-        logstream << "Node " << name_ << " started." << std::endl;
-        node->start();
-        if (node_finishable) {
-            // Node signals that it finished work
-            while (!node_finishable->finished()) {
-                if (node_==nullptr) {
-                    logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (node_finishable loop)";
-                    return;
+    // Hold the implementation only while this block runs.  When it ends, the last
+    // strong ref to the Node is dropped before on_finished (e.g. auto_restart=start),
+    // so Edge consumer weak_ptr expires and createNode can call setConsumer safely.
+    {
+        decltype(node_) node = node_;
+        IReportsFinish *node_finishable = dynamic_cast<IReportsFinish*>(node.get());
+        IFlushable *node_flushable = dynamic_cast<IFlushable*>(node.get());
+        try {
+            logstream << "Node " << name_ << " started." << std::endl;
+            node->start();
+            if (node_finishable) {
+                // Node signals that it finished work
+                while (!node_finishable->finished()) {
+                    if (node_==nullptr) {
+                        logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (node_finishable loop)";
+                        return;
+                    }
+                    if (dowork_) {
+                        processNode(node);
+                    } else if (node_flushable) {
+                        // told to finish work
+                        // and Node is IFlushable
+                        // so flush it
+                        node_flushable->flush();
+                    } else {
+                        // node should finish work
+                        // but doesn't have flushing interface
+                        // so to give it a chance to finish,
+                        // call process()...
+                        processNode(node);
+                    }
                 }
-                if (dowork_) {
+                logstream << "Node " << name_ << " reported that it finished processing.";
+            } else {
+                // dumb Node
+                while (dowork_) {
+                    if (node_==nullptr) {
+                        logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
+                        return;
+                    }
                     processNode(node);
-                } else if (node_flushable) {
-                    // told to finish work
-                    // and Node is IFlushable
-                    // so flush it
+                }
+                if (node_flushable) {
                     node_flushable->flush();
-                } else {
-                    // node should finish work
-                    // but doesn't have flushing interface
-                    // so to give it a chance to finish,
-                    // call process()...
-                    processNode(node);
                 }
+                logstream << "Node " << name_ << " stopped processing because it was told to do so.";
             }
-            logstream << "Node " << name_ << " reported that it finished processing.";
-        } else {
-            // dumb Node
-            while (dowork_) {
-                if (node_==nullptr) {
-                    logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
-                    return;
-                }
-                processNode(node);
-            }
-            if (node_flushable) {
-                node_flushable->flush();
-            }
-            logstream << "Node " << name_ << " stopped processing because it was told to do so.";
+        } catch (std::exception &e) {
+            logstream << "Node " << name_ << " failed: " << e.what();
+            last_error_ = e.what();
         }
-    } catch (std::exception &e) {
-        logstream << "Node " << name_ << " failed: " << e.what();
-        last_error_ = e.what();
-    }
-    try {
-        node_ = nullptr;
-    } catch (std::exception &e) {
-        logstream << "Destroying node " << name_ << " failed: " << e.what();
+        try {
+            node_ = nullptr;
+        } catch (std::exception &e) {
+            logstream << "Destroying node " << name_ << " failed: " << e.what();
+        }
     }
 
     finished_ = true;

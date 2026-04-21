@@ -20,6 +20,8 @@ class MixerOrchestrator {
     void autoRestartNode(const std::string& node_name);
     void createAndStartNode(const Parameters& params);
     void deleteNodeIfExists(const std::string& name);
+    void startGroup(const std::string& group_name);
+    void stopGroup(const std::string& group_name);
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name);
 
