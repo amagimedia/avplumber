@@ -147,6 +147,10 @@ class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     CUdeviceptr d_out_cloth_count_ = 0;
     CUdeviceptr d_out_skin_count_ = 0;
     CUdeviceptr d_out_confidence_ = 0;
+    CUdeviceptr d_out_uv_hist_ = 0;
+    CUdeviceptr d_out_l_hist_ = 0;
+    static constexpr int kUVHistSize = 256;
+    static constexpr int kLHistSize = 16;
     int capacity_ = 0;
     uint64_t frame_counter_ = 0;
 
@@ -177,6 +181,8 @@ class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         if (d_out_cloth_count_) { JERSEY_CHECK_CU(cuMemFree(d_out_cloth_count_)); d_out_cloth_count_ = 0; }
         if (d_out_skin_count_) { JERSEY_CHECK_CU(cuMemFree(d_out_skin_count_)); d_out_skin_count_ = 0; }
         if (d_out_confidence_) { JERSEY_CHECK_CU(cuMemFree(d_out_confidence_)); d_out_confidence_ = 0; }
+        if (d_out_uv_hist_) { JERSEY_CHECK_CU(cuMemFree(d_out_uv_hist_)); d_out_uv_hist_ = 0; }
+        if (d_out_l_hist_) { JERSEY_CHECK_CU(cuMemFree(d_out_l_hist_)); d_out_l_hist_ = 0; }
         capacity_ = 0;
     }
 
@@ -215,6 +221,8 @@ class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         if (JERSEY_CHECK_CU(cuMemAlloc(&d_out_cloth_count_, (size_t)next * sizeof(int)))) return false;
         if (JERSEY_CHECK_CU(cuMemAlloc(&d_out_skin_count_, (size_t)next * sizeof(int)))) return false;
         if (JERSEY_CHECK_CU(cuMemAlloc(&d_out_confidence_, (size_t)next * sizeof(float)))) return false;
+        if (JERSEY_CHECK_CU(cuMemAlloc(&d_out_uv_hist_, (size_t)next * kUVHistSize * sizeof(float)))) return false;
+        if (JERSEY_CHECK_CU(cuMemAlloc(&d_out_l_hist_, (size_t)next * kLHistSize * sizeof(float)))) return false;
         capacity_ = next;
         return true;
     }
@@ -445,7 +453,9 @@ public:
             (void*)&d_out_best_count_,
             (void*)&d_out_cloth_count_,
             (void*)&d_out_skin_count_,
-            (void*)&d_out_confidence_
+            (void*)&d_out_confidence_,
+            (void*)&d_out_uv_hist_,
+            (void*)&d_out_l_hist_
         };
 
         if (JERSEY_CHECK_CU(cuLaunchKernel(kernel_,
@@ -492,6 +502,18 @@ public:
             this->sink_->put(frm);
             return;
         }
+        std::vector<float> host_uv_hist(packed.size() * kUVHistSize, 0.0f);
+        std::vector<float> host_l_hist(packed.size() * kLHistSize, 0.0f);
+        if (JERSEY_CHECK_CU(cuMemcpyDtoH(host_uv_hist.data(), d_out_uv_hist_, host_uv_hist.size() * sizeof(float)))) {
+            if (d_debug_masks) JERSEY_CHECK_CU(cuMemFree(d_debug_masks));
+            this->sink_->put(frm);
+            return;
+        }
+        if (JERSEY_CHECK_CU(cuMemcpyDtoH(host_l_hist.data(), d_out_l_hist_, host_l_hist.size() * sizeof(float)))) {
+            if (d_debug_masks) JERSEY_CHECK_CU(cuMemFree(d_debug_masks));
+            this->sink_->put(frm);
+            return;
+        }
 
         int with_color = 0;
         Parameters debug_md;
@@ -509,11 +531,17 @@ public:
                                            ? (double)host_best_count[i] / (double)host_cloth_count[i]
                                            : 0.0;
             if (host_cloth_count[i] >= min_pixels_ && host_best_count[i] > 0) {
-                Parameters uv = Parameters::array();
-                uv.push_back(host_best_yuv[i * 3u + 1u]);
-                uv.push_back(host_best_yuv[i * 3u + 2u]);
-                det["jersey_uv"] = uv;
-                det["jersey_y"] = host_best_yuv[i * 3u];
+                Parameters uv_hist_arr = Parameters::array();
+                for (int b = 0; b < kUVHistSize; ++b) {
+                    uv_hist_arr.push_back(host_uv_hist[i * kUVHistSize + b]);
+                }
+                det["jersey_uv_hist"] = uv_hist_arr;
+
+                Parameters l_hist_arr = Parameters::array();
+                for (int b = 0; b < kLHistSize; ++b) {
+                    l_hist_arr.push_back(host_l_hist[i * kLHistSize + b]);
+                }
+                det["jersey_l_hist"] = l_hist_arr;
                 ++with_color;
             }
             if (emit_debug_masks) {
