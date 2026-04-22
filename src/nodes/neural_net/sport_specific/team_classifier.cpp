@@ -7,6 +7,7 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,9 @@ extern "C" {
 #include <vector>
 
 namespace {
+
+constexpr int kUVHistBins = 256;
+constexpr int kLHistBins = 16;
 
 bool iequals(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) return false;
@@ -47,10 +51,41 @@ float centerDistance(float ax1, float ay1, float ax2, float ay2,
     return std::sqrt(dx * dx + dy * dy);
 }
 
+float chiSquareDistance(const float* a, const float* b, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        const float d = a[i] - b[i];
+        const float s = a[i] + b[i];
+        if (s > 1e-7f) sum += (d * d) / s;
+    }
+    return sum;
+}
+
+void normalizeHistogram(float* hist, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) sum += hist[i];
+    if (sum > 1e-7f) {
+        const float inv = 1.0f / sum;
+        for (int i = 0; i < n; ++i) hist[i] *= inv;
+    }
+}
+
+void emaUpdateHistogram(float* ema, const float* sample, int n, float alpha) {
+    for (int i = 0; i < n; ++i) {
+        ema[i] = (1.0f - alpha) * ema[i] + alpha * sample[i];
+    }
+    normalizeHistogram(ema, n);
+}
+
+bool isZeroHistogram(const float* hist, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) sum += hist[i];
+    return sum < 1e-7f;
+}
+
 struct TrackColor {
-    float y_ema = 0.0f;
-    float u_ema = 0.0f;
-    float v_ema = 0.0f;
+    float uv_hist_ema[kUVHistBins] = {};
+    float l_hist_ema[kLHistBins] = {};
     float last_confidence = 0.0f;
     int assigned_team = -1;
     int initial_candidate_team = -1;
@@ -68,29 +103,24 @@ struct ParsedTracked {
 struct ParsedSeg {
     int det_index = -1;
     float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-    float y = 0;
-    float u = 0, v = 0;
+    float uv_hist[kUVHistBins] = {};
+    float l_hist[kLHistBins] = {};
     int pixels = 0;
     float confidence = 0.0f;
 };
 
 struct CurrentEvidence {
     bool has_sample = false;
-    float y = 0.0f;
-    float u = 0.0f;
-    float v = 0.0f;
+    float uv_hist[kUVHistBins] = {};
+    float l_hist[kLHistBins] = {};
     float confidence = 0.0f;
     int pixels = 0;
 };
 
 struct RecentAppearance {
-    float x1 = 0.0f;
-    float y1 = 0.0f;
-    float x2 = 0.0f;
-    float y2 = 0.0f;
-    float y = 0.0f;
-    float u = 0.0f;
-    float v = 0.0f;
+    float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
+    float uv_hist[kUVHistBins] = {};
+    float l_hist[kLHistBins] = {};
     float confidence = 0.0f;
     int team = -1;
     uint64_t frame = 0;
@@ -100,7 +130,7 @@ struct HandoffMatch {
     bool found = false;
     int team = -1;
     float center_rel = 0.0f;
-    float color_distance = 0.0f;
+    float hist_distance = 0.0f;
     uint64_t age = 0;
 };
 
@@ -117,12 +147,13 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     float fallback_center_distance_px_ = 30.0f;
     float ema_alpha_track_ = 0.2f;
     float ema_alpha_centroid_ = 0.05f;
-    float luma_weight_ = 0.35f;
+    float uv_weight_ = 1.0f;
+    float l_weight_ = 0.5f;
     float min_jersey_confidence_ = 0.15f;
-    float soft_assignment_margin_ = 2.0f;
-    float initial_assignment_margin_ = 4.0f;
-    float assignment_margin_ = 8.0f;
-    float bootstrap_axis_min_separation_ = 6.0f;
+    float soft_assignment_margin_ = 0.02f;
+    float initial_assignment_margin_ = 0.05f;
+    float assignment_margin_ = 0.08f;
+    float bootstrap_min_prototype_distance_ = 0.1f;
     int initial_assignment_min_hits_ = 3;
     int initial_assignment_confirm_frames_ = 3;
     uint64_t bootstrap_frames_ = 60;
@@ -131,7 +162,7 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     uint64_t handoff_max_age_frames_ = 3;
     float handoff_max_center_distance_rel_ = 0.85f;
     float handoff_min_size_ratio_ = 0.45f;
-    float handoff_max_color_distance_ = 18.0f;
+    float handoff_max_hist_distance_ = 0.15f;
     int min_jersey_pixels_ = 32;
     std::string output_field_ = "team";
     std::string output_team_color_field_;
@@ -143,30 +174,29 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int debug_log_every_n_ = 0;
 
     std::unordered_map<int, TrackColor> tracks_;
-    float centroids_[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
-    float identity_axis_[3] = {0.0f, 0.0f, 0.0f};
-    float identity_midpoint_[3] = {0.0f, 0.0f, 0.0f};
-    float identity_axis_separation_ = 0.0f;
+    float proto_uv_[2][kUVHistBins] = {};
+    float proto_l_[2][kLHistBins] = {};
     bool bootstrapped_ = false;
     uint64_t frame_counter_ = 0;
     std::vector<RecentAppearance> recent_appearances_;
 
     void resetState() {
         tracks_.clear();
-        centroids_[0][0] = centroids_[0][1] = centroids_[0][2] = 0.0f;
-        centroids_[1][0] = centroids_[1][1] = centroids_[1][2] = 0.0f;
-        identity_axis_[0] = identity_axis_[1] = identity_axis_[2] = 0.0f;
-        identity_midpoint_[0] = identity_midpoint_[1] = identity_midpoint_[2] = 0.0f;
-        identity_axis_separation_ = 0.0f;
+        std::memset(proto_uv_, 0, sizeof(proto_uv_));
+        std::memset(proto_l_, 0, sizeof(proto_l_));
         bootstrapped_ = false;
         frame_counter_ = 0;
         recent_appearances_.clear();
     }
 
-    void toWeightedColor(float y, float u, float v, float (&out)[3]) const {
-        out[0] = y * luma_weight_;
-        out[1] = u;
-        out[2] = v;
+    float combinedHistDistance(const float* uv_a, const float* l_a,
+                               const float* uv_b, const float* l_b) const {
+        return uv_weight_ * chiSquareDistance(uv_a, uv_b, kUVHistBins) +
+               l_weight_ * chiSquareDistance(l_a, l_b, kLHistBins);
+    }
+
+    float teamDistance(const float* uv_hist, const float* l_hist, int team) const {
+        return combinedHistDistance(uv_hist, l_hist, proto_uv_[team], proto_l_[team]);
     }
 
     bool matchesLabel(const Parameters& det, const std::vector<std::string>& labels) const {
@@ -188,36 +218,21 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         return x2 > x1 && y2 > y1;
     }
 
-    static bool parseJerseyColor(const Parameters& det, float& y, float& u, float& v, float& confidence) {
-        if (!det.contains("jersey_y")) return false;
-        if (!det.contains("jersey_uv") || !det["jersey_uv"].is_array() || det["jersey_uv"].size() < 2) return false;
-        y = det["jersey_y"].get<float>();
-        u = det["jersey_uv"][0].get<float>();
-        v = det["jersey_uv"][1].get<float>();
+    static bool parseJerseyHistogram(const Parameters& det,
+                                      float* uv_hist, float* l_hist,
+                                      float& confidence) {
+        if (!det.contains("jersey_uv_hist") || !det["jersey_uv_hist"].is_array() ||
+            (int)det["jersey_uv_hist"].size() < kUVHistBins) return false;
+        if (!det.contains("jersey_l_hist") || !det["jersey_l_hist"].is_array() ||
+            (int)det["jersey_l_hist"].size() < kLHistBins) return false;
+        for (int i = 0; i < kUVHistBins; ++i) {
+            uv_hist[i] = det["jersey_uv_hist"][i].get<float>();
+        }
+        for (int i = 0; i < kLHistBins; ++i) {
+            l_hist[i] = det["jersey_l_hist"][i].get<float>();
+        }
         confidence = det.value("jersey_confidence", 0.0f);
         return true;
-    }
-
-    float teamDistance(float y, float u, float v, int team) const {
-        const float dy = (y - centroids_[team][0]) * luma_weight_;
-        const float du = u - centroids_[team][1];
-        const float dv = v - centroids_[team][2];
-        return std::sqrt(dy * dy + du * du + dv * dv);
-    }
-
-    float axisProjection(float y, float u, float v) const {
-        float weighted[3];
-        toWeightedColor(y, u, v, weighted);
-        return (weighted[0] - identity_midpoint_[0]) * identity_axis_[0] +
-               (weighted[1] - identity_midpoint_[1]) * identity_axis_[1] +
-               (weighted[2] - identity_midpoint_[2]) * identity_axis_[2];
-    }
-
-    float weightedColorDistance(float y0, float u0, float v0, float y1, float u1, float v1) const {
-        const float dy = (y0 - y1) * luma_weight_;
-        const float du = u0 - u1;
-        const float dv = v0 - v1;
-        return std::sqrt(dy * dy + du * du + dv * dv);
     }
 
     static float bboxWidth(float x1, float x2) {
@@ -269,102 +284,83 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             const float center_rel = center_dist / std::max(tr_diag, recent_diag);
             if (center_rel > handoff_max_center_distance_rel_) continue;
 
-            const float color_distance = weightedColorDistance(sample.y, sample.u, sample.v, it->y, it->u, it->v);
-            if (color_distance > handoff_max_color_distance_) continue;
+            const float hist_dist = combinedHistDistance(sample.uv_hist, sample.l_hist, it->uv_hist, it->l_hist);
+            if (hist_dist > handoff_max_hist_distance_) continue;
 
-            const float score = center_rel * 16.0f + color_distance + (float)age * 1.5f;
+            const float score = center_rel * 16.0f + hist_dist * 100.0f + (float)age * 1.5f;
             if (score < best_score) {
                 best_score = score;
                 best.found = true;
                 best.team = it->team;
                 best.center_rel = center_rel;
-                best.color_distance = color_distance;
+                best.hist_distance = hist_dist;
                 best.age = age;
             }
         }
         return best;
     }
 
-    void bootstrapCentroids() {
+    void bootstrapPrototypes() {
         struct Sample {
-            float y = 0.0f;
-            float u = 0.0f;
-            float v = 0.0f;
+            float uv_hist[kUVHistBins];
+            float l_hist[kLHistBins];
         };
         std::vector<Sample> samples;
         samples.reserve(tracks_.size());
         for (const auto& kv : tracks_) {
             if (kv.second.hits == 0 || kv.second.last_confidence < min_jersey_confidence_) continue;
-            samples.push_back({kv.second.y_ema, kv.second.u_ema, kv.second.v_ema});
+            Sample s;
+            std::memcpy(s.uv_hist, kv.second.uv_hist_ema, sizeof(s.uv_hist));
+            std::memcpy(s.l_hist, kv.second.l_hist_ema, sizeof(s.l_hist));
+            samples.push_back(s);
         }
         if ((int)samples.size() < bootstrap_min_tracks_) return;
 
-        centroids_[0][0] = samples.front().y;
-        centroids_[0][1] = samples.front().u;
-        centroids_[0][2] = samples.front().v;
+        std::memcpy(proto_uv_[0], samples[0].uv_hist, sizeof(proto_uv_[0]));
+        std::memcpy(proto_l_[0], samples[0].l_hist, sizeof(proto_l_[0]));
 
         float best_d = -1.0f;
         size_t best_i = 0;
         for (size_t i = 0; i < samples.size(); ++i) {
-            const float d = teamDistance(samples[i].y, samples[i].u, samples[i].v, 0);
-            if (d > best_d) {
-                best_d = d;
-                best_i = i;
-            }
+            const float d = combinedHistDistance(samples[i].uv_hist, samples[i].l_hist,
+                                                 proto_uv_[0], proto_l_[0]);
+            if (d > best_d) { best_d = d; best_i = i; }
         }
-        centroids_[1][0] = samples[best_i].y;
-        centroids_[1][1] = samples[best_i].u;
-        centroids_[1][2] = samples[best_i].v;
+        std::memcpy(proto_uv_[1], samples[best_i].uv_hist, sizeof(proto_uv_[1]));
+        std::memcpy(proto_l_[1], samples[best_i].l_hist, sizeof(proto_l_[1]));
 
         for (int iter = 0; iter < 10; ++iter) {
-            float sum_y[2] = {0.0f, 0.0f};
-            float sum_u[2] = {0.0f, 0.0f};
-            float sum_v[2] = {0.0f, 0.0f};
+            float sum_uv[2][kUVHistBins] = {};
+            float sum_l[2][kLHistBins] = {};
             int count[2] = {0, 0};
             for (const auto& s : samples) {
-                const float d0 = teamDistance(s.y, s.u, s.v, 0);
-                const float d1 = teamDistance(s.y, s.u, s.v, 1);
+                const float d0 = combinedHistDistance(s.uv_hist, s.l_hist, proto_uv_[0], proto_l_[0]);
+                const float d1 = combinedHistDistance(s.uv_hist, s.l_hist, proto_uv_[1], proto_l_[1]);
                 const int k = (d0 <= d1) ? 0 : 1;
-                sum_y[k] += s.y;
-                sum_u[k] += s.u;
-                sum_v[k] += s.v;
+                for (int b = 0; b < kUVHistBins; ++b) sum_uv[k][b] += s.uv_hist[b];
+                for (int b = 0; b < kLHistBins; ++b) sum_l[k][b] += s.l_hist[b];
                 count[k] += 1;
             }
             for (int k = 0; k < 2; ++k) {
                 if (count[k] > 0) {
-                    centroids_[k][0] = sum_y[k] / (float)count[k];
-                    centroids_[k][1] = sum_u[k] / (float)count[k];
-                    centroids_[k][2] = sum_v[k] / (float)count[k];
+                    const float inv = 1.0f / (float)count[k];
+                    for (int b = 0; b < kUVHistBins; ++b) proto_uv_[k][b] = sum_uv[k][b] * inv;
+                    for (int b = 0; b < kLHistBins; ++b) proto_l_[k][b] = sum_l[k][b] * inv;
+                    normalizeHistogram(proto_uv_[k], kUVHistBins);
+                    normalizeHistogram(proto_l_[k], kLHistBins);
                 }
             }
         }
 
-        float weighted0[3];
-        float weighted1[3];
-        toWeightedColor(centroids_[0][0], centroids_[0][1], centroids_[0][2], weighted0);
-        toWeightedColor(centroids_[1][0], centroids_[1][1], centroids_[1][2], weighted1);
+        const float sep = combinedHistDistance(proto_uv_[0], proto_l_[0], proto_uv_[1], proto_l_[1]);
+        if (sep < bootstrap_min_prototype_distance_) return;
 
-        const float dx = weighted1[0] - weighted0[0];
-        const float dy = weighted1[1] - weighted0[1];
-        const float dz = weighted1[2] - weighted0[2];
-        const float sep = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (sep < bootstrap_axis_min_separation_) return;
-
-        identity_axis_[0] = dx / sep;
-        identity_axis_[1] = dy / sep;
-        identity_axis_[2] = dz / sep;
-        identity_midpoint_[0] = 0.5f * (weighted0[0] + weighted1[0]);
-        identity_midpoint_[1] = 0.5f * (weighted0[1] + weighted1[1]);
-        identity_midpoint_[2] = 0.5f * (weighted0[2] + weighted1[2]);
-        identity_axis_separation_ = sep;
         bootstrapped_ = true;
 
         logstream << "team_classifier: bootstrap"
                   << " frame=" << frame_counter_
                   << " tracks=" << samples.size()
-                  << " axis_sep=" << sep
-                  << " centroid0_yuv=[" << centroids_[0][0] << "," << centroids_[0][1] << "," << centroids_[0][2] << "]"
-                  << " centroid1_yuv=[" << centroids_[1][0] << "," << centroids_[1][1] << "," << centroids_[1][2] << "]";
+                  << " prototype_sep=" << sep;
     }
 
     void pruneTracks() {
@@ -463,7 +459,7 @@ public:
             if (!det.is_object() || !matchesLabel(det, seg_labels_)) continue;
             ParsedSeg s;
             if (!parseBBox(det, s.x1, s.y1, s.x2, s.y2)) continue;
-            if (!parseJerseyColor(det, s.y, s.u, s.v, s.confidence)) continue;
+            if (!parseJerseyHistogram(det, s.uv_hist, s.l_hist, s.confidence)) continue;
             s.pixels = det.value("jersey_cloth_pixels", det.value("jersey_pixels", 0));
             s.det_index = i;
             segs.push_back(s);
@@ -533,21 +529,19 @@ public:
             const ParsedSeg& seg = segs[(size_t)si];
             CurrentEvidence& evidence = current_evidence[ti];
             evidence.has_sample = true;
-            evidence.y = seg.y;
-            evidence.u = seg.u;
-            evidence.v = seg.v;
+            std::memcpy(evidence.uv_hist, seg.uv_hist, sizeof(evidence.uv_hist));
+            std::memcpy(evidence.l_hist, seg.l_hist, sizeof(evidence.l_hist));
             evidence.confidence = seg.confidence;
             evidence.pixels = seg.pixels;
             if (seg.pixels < min_jersey_pixels_ || seg.confidence < min_jersey_confidence_) continue;
+            if (isZeroHistogram(seg.uv_hist, kUVHistBins)) continue;
             TrackColor& tc = tracks_[tracked[ti].track_id];
             if (tc.hits == 0) {
-                tc.y_ema = seg.y;
-                tc.u_ema = seg.u;
-                tc.v_ema = seg.v;
+                std::memcpy(tc.uv_hist_ema, seg.uv_hist, sizeof(tc.uv_hist_ema));
+                std::memcpy(tc.l_hist_ema, seg.l_hist, sizeof(tc.l_hist_ema));
             } else {
-                tc.y_ema = (1.0f - ema_alpha_track_) * tc.y_ema + ema_alpha_track_ * seg.y;
-                tc.u_ema = (1.0f - ema_alpha_track_) * tc.u_ema + ema_alpha_track_ * seg.u;
-                tc.v_ema = (1.0f - ema_alpha_track_) * tc.v_ema + ema_alpha_track_ * seg.v;
+                emaUpdateHistogram(tc.uv_hist_ema, seg.uv_hist, kUVHistBins, ema_alpha_track_);
+                emaUpdateHistogram(tc.l_hist_ema, seg.l_hist, kLHistBins, ema_alpha_track_);
             }
             tc.last_confidence = seg.confidence;
             tc.hits += 1;
@@ -556,7 +550,7 @@ public:
         }
 
         if (!bootstrapped_ && frame_counter_ >= bootstrap_frames_) {
-            bootstrapCentroids();
+            bootstrapPrototypes();
         }
 
         for (auto& det : seg_md["detections"]) {
@@ -570,31 +564,31 @@ public:
         int strong_lock_count = 0;
         int weak_lock_count = 0;
         int assigned_team_count[2] = {0, 0};
-        int axis_team_count[2] = {0, 0};
-        int axis_eligible_count = 0;
         int current_sample_count = 0;
         int handoff_lock_count = 0;
         int handoff_match_count = 0;
-        for (const ParsedTracked& tr : tracked) {
+        for (size_t tri = 0; tri < tracked.size(); ++tri) {
+            const ParsedTracked& tr = tracked[tri];
             auto& det = player_md["detections"][tr.det_index];
             int team = -1;
             auto it = tracks_.find(tr.track_id);
-            const CurrentEvidence& evidence = current_evidence[(size_t)(&tr - tracked.data())];
+            const CurrentEvidence& evidence = current_evidence[tri];
             if (bootstrapped_ && it != tracks_.end() && it->second.hits > 0) {
                 TrackColor& tc = it->second;
                 const bool use_current_sample = evidence.has_sample &&
                                                 evidence.pixels >= min_jersey_pixels_ &&
-                                                evidence.confidence >= min_jersey_confidence_;
-                const float sample_y = use_current_sample ? evidence.y : tc.y_ema;
-                const float sample_u = use_current_sample ? evidence.u : tc.u_ema;
-                const float sample_v = use_current_sample ? evidence.v : tc.v_ema;
+                                                evidence.confidence >= min_jersey_confidence_ &&
+                                                !isZeroHistogram(evidence.uv_hist, kUVHistBins);
+                const float* sample_uv = use_current_sample ? evidence.uv_hist : tc.uv_hist_ema;
+                const float* sample_l = use_current_sample ? evidence.l_hist : tc.l_hist_ema;
                 const float sample_confidence = use_current_sample ? evidence.confidence : tc.last_confidence;
                 if (use_current_sample) {
                     current_sample_count += 1;
                 }
-                const float projection = axisProjection(sample_y, sample_u, sample_v);
-                const int candidate_team = (projection <= 0.0f) ? 0 : 1;
-                const float margin = std::fabs(projection);
+                const float dist0 = teamDistance(sample_uv, sample_l, 0);
+                const float dist1 = teamDistance(sample_uv, sample_l, 1);
+                const int candidate_team = (dist0 <= dist1) ? 0 : 1;
+                const float margin = std::fabs(dist0 - dist1);
                 const bool confident_now = sample_confidence >= min_jersey_confidence_;
                 const bool has_enough_hits = tc.hits >= (uint32_t)initial_assignment_min_hits_;
                 const bool can_lock_strong = confident_now &&
@@ -604,10 +598,6 @@ public:
                                            has_enough_hits &&
                                            margin >= soft_assignment_margin_;
                 const bool can_update_centroid = confident_now && margin >= assignment_margin_;
-                if (confident_now) {
-                    axis_team_count[candidate_team] += 1;
-                    axis_eligible_count += 1;
-                }
 
                 const HandoffMatch handoff = (tc.assigned_team < 0)
                                                  ? findRecentHandoff(tr, evidence, candidate_team)
@@ -628,10 +618,10 @@ public:
                                   << " track_id=" << tr.track_id
                                   << " team=" << handoff.team
                                   << " conf_pct=" << (100.0f * sample_confidence)
-                                  << " axis_margin=" << margin
+                                  << " margin=" << margin
                                   << " handoff_age=" << handoff.age
                                   << " handoff_center_rel=" << handoff.center_rel
-                                  << " handoff_color_dist=" << handoff.color_distance;
+                                  << " handoff_hist_dist=" << handoff.hist_distance;
                     } else if (can_lock_strong) {
                         tc.assigned_team = candidate_team;
                         tc.initial_candidate_team = -1;
@@ -644,7 +634,7 @@ public:
                                   << " team=" << candidate_team
                                   << " hits=" << tc.hits
                                   << " conf_pct=" << (100.0f * sample_confidence)
-                                  << " axis_margin=" << margin;
+                                  << " margin=" << margin;
                     } else if (can_lock_weak) {
                         if (tc.initial_candidate_team == candidate_team) {
                             tc.initial_candidate_frames += 1;
@@ -664,7 +654,7 @@ public:
                                       << " team=" << candidate_team
                                       << " hits=" << tc.hits
                                       << " conf_pct=" << (100.0f * sample_confidence)
-                                      << " axis_margin=" << margin;
+                                      << " margin=" << margin;
                         }
                     } else {
                         tc.initial_candidate_team = -1;
@@ -677,15 +667,8 @@ public:
                     sticky_mismatch += 1;
                 }
                 if (team >= 0 && can_update_centroid && candidate_team == team) {
-                    centroids_[team][0] = (1.0f - ema_alpha_centroid_) * centroids_[team][0] + ema_alpha_centroid_ * sample_y;
-                    centroids_[team][1] = (1.0f - ema_alpha_centroid_) * centroids_[team][1] + ema_alpha_centroid_ * sample_u;
-                    centroids_[team][2] = (1.0f - ema_alpha_centroid_) * centroids_[team][2] + ema_alpha_centroid_ * sample_v;
-                }
-                if (team >= 0 && !output_team_color_field_.empty()) {
-                    Parameters team_color = Parameters::array();
-                    team_color.push_back(centroids_[team][1]);
-                    team_color.push_back(centroids_[team][2]);
-                    det[output_team_color_field_] = team_color;
+                    emaUpdateHistogram(proto_uv_[team], sample_uv, kUVHistBins, ema_alpha_centroid_);
+                    emaUpdateHistogram(proto_l_[team], sample_l, kLHistBins, ema_alpha_centroid_);
                 }
             }
             det[output_field_] = team;
@@ -707,8 +690,8 @@ public:
             if (seg_det.contains("jersey_skin_pixels")) player_det["jersey_skin_pixels"] = seg_det["jersey_skin_pixels"];
             if (seg_det.contains("jersey_confidence")) player_det["jersey_confidence"] = seg_det["jersey_confidence"];
             if (seg_det.contains("jersey_mode_ratio")) player_det["jersey_mode_ratio"] = seg_det["jersey_mode_ratio"];
-            if (seg_det.contains("jersey_y")) player_det["jersey_y"] = seg_det["jersey_y"];
-            if (seg_det.contains("jersey_uv")) player_det["jersey_uv"] = seg_det["jersey_uv"];
+            if (seg_det.contains("jersey_uv_hist")) player_det["jersey_uv_hist"] = seg_det["jersey_uv_hist"];
+            if (seg_det.contains("jersey_l_hist")) player_det["jersey_l_hist"] = seg_det["jersey_l_hist"];
             if (write_back_to_seg_) seg_det[output_field_] = team;
             if (rewrite_seg_cls_) seg_det["cls"] = team;
             if (has_debug_seg_md) {
@@ -718,9 +701,6 @@ public:
                     debug_det["cls"] = team >= 0 ? team : 2;
                     debug_det["team"] = team;
                 }
-            }
-            if (!output_team_color_field_.empty() && player_det.contains(output_team_color_field_)) {
-                seg_det[output_team_color_field_] = player_det[output_team_color_field_];
             }
             if (rewrite_label_) {
                 if (team >= 0 && team < (int)team_label_names_.size()) {
@@ -738,14 +718,14 @@ public:
             const CurrentEvidence& evidence = current_evidence[ti];
             if (team < 0 || !evidence.has_sample) continue;
             if (evidence.pixels < min_jersey_pixels_ || evidence.confidence < min_jersey_confidence_) continue;
+            if (isZeroHistogram(evidence.uv_hist, kUVHistBins)) continue;
             RecentAppearance recent;
             recent.x1 = tracked[ti].x1;
             recent.y1 = tracked[ti].y1;
             recent.x2 = tracked[ti].x2;
             recent.y2 = tracked[ti].y2;
-            recent.y = evidence.y;
-            recent.u = evidence.u;
-            recent.v = evidence.v;
+            std::memcpy(recent.uv_hist, evidence.uv_hist, sizeof(recent.uv_hist));
+            std::memcpy(recent.l_hist, evidence.l_hist, sizeof(recent.l_hist));
             recent.confidence = evidence.confidence;
             recent.team = team;
             recent.frame = frame_counter_;
@@ -759,6 +739,9 @@ public:
         }
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+            const float proto_sep = bootstrapped_
+                ? combinedHistDistance(proto_uv_[0], proto_l_[0], proto_uv_[1], proto_l_[1])
+                : 0.0f;
             logstream << "team_classifier: frame=" << frame_counter_
                       << " tracked=" << tracked.size()
                       << " seg=" << segs.size()
@@ -767,22 +750,18 @@ public:
                       << " assigned_t0=" << assigned_team_count[0]
                       << " assigned_t1=" << assigned_team_count[1]
                       << " sticky_mismatch=" << sticky_mismatch
-                      << " axis_eligible=" << axis_eligible_count
-                      << " axis_t0=" << axis_team_count[0]
-                      << " axis_t1=" << axis_team_count[1]
                       << " current_samples=" << current_sample_count
                       << " handoff_matches=" << handoff_match_count
                       << " handoff_locks=" << handoff_lock_count
                       << " strong_locks=" << strong_lock_count
                       << " weak_locks=" << weak_lock_count
                       << " bootstrapped=" << (bootstrapped_ ? 1 : 0)
-                      << " axis_sep=" << identity_axis_separation_
+                      << " proto_sep=" << proto_sep
+                      << " uv_weight=" << uv_weight_
+                      << " l_weight=" << l_weight_
                       << " min_conf=" << min_jersey_confidence_
                       << " soft_margin=" << soft_assignment_margin_
-                      << " init_margin=" << initial_assignment_margin_
-                      << " init_hits=" << initial_assignment_min_hits_
-                      << " init_confirm=" << initial_assignment_confirm_frames_
-                      << " centroid_margin=" << assignment_margin_;
+                      << " init_margin=" << initial_assignment_margin_;
         }
 
         this->sink_->put(frm);
@@ -808,12 +787,13 @@ public:
         if (params.count("fallback_center_distance_px")) r->fallback_center_distance_px_ = params["fallback_center_distance_px"].get<float>();
         if (params.count("ema_alpha_track")) r->ema_alpha_track_ = params["ema_alpha_track"].get<float>();
         if (params.count("ema_alpha_centroid")) r->ema_alpha_centroid_ = params["ema_alpha_centroid"].get<float>();
-        if (params.count("luma_weight")) r->luma_weight_ = params["luma_weight"].get<float>();
+        if (params.count("uv_weight")) r->uv_weight_ = params["uv_weight"].get<float>();
+        if (params.count("l_weight")) r->l_weight_ = params["l_weight"].get<float>();
         if (params.count("min_jersey_confidence")) r->min_jersey_confidence_ = params["min_jersey_confidence"].get<float>();
         if (params.count("soft_assignment_margin")) r->soft_assignment_margin_ = params["soft_assignment_margin"].get<float>();
         if (params.count("initial_assignment_margin")) r->initial_assignment_margin_ = params["initial_assignment_margin"].get<float>();
         if (params.count("assignment_margin")) r->assignment_margin_ = params["assignment_margin"].get<float>();
-        if (params.count("bootstrap_axis_min_separation")) r->bootstrap_axis_min_separation_ = params["bootstrap_axis_min_separation"].get<float>();
+        if (params.count("bootstrap_min_prototype_distance")) r->bootstrap_min_prototype_distance_ = params["bootstrap_min_prototype_distance"].get<float>();
         if (params.count("initial_assignment_min_hits")) r->initial_assignment_min_hits_ = params["initial_assignment_min_hits"].get<int>();
         if (params.count("initial_assignment_confirm_frames")) r->initial_assignment_confirm_frames_ = params["initial_assignment_confirm_frames"].get<int>();
         if (params.count("bootstrap_frames")) r->bootstrap_frames_ = params["bootstrap_frames"].get<uint64_t>();
@@ -822,7 +802,7 @@ public:
         if (params.count("handoff_max_age_frames")) r->handoff_max_age_frames_ = params["handoff_max_age_frames"].get<uint64_t>();
         if (params.count("handoff_max_center_distance_rel")) r->handoff_max_center_distance_rel_ = params["handoff_max_center_distance_rel"].get<float>();
         if (params.count("handoff_min_size_ratio")) r->handoff_min_size_ratio_ = params["handoff_min_size_ratio"].get<float>();
-        if (params.count("handoff_max_color_distance")) r->handoff_max_color_distance_ = params["handoff_max_color_distance"].get<float>();
+        if (params.count("handoff_max_hist_distance")) r->handoff_max_hist_distance_ = params["handoff_max_hist_distance"].get<float>();
         if (params.count("min_jersey_pixels")) r->min_jersey_pixels_ = params["min_jersey_pixels"].get<int>();
         if (params.count("output_field")) r->output_field_ = params["output_field"].get<std::string>();
         if (params.count("output_team_color_field")) r->output_team_color_field_ = params["output_team_color_field"].get<std::string>();
