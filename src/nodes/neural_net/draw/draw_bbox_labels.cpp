@@ -19,6 +19,8 @@ constexpr int kMaxLabelLines = 3;
 
 enum class FieldToken {
     TrackId,
+    TeamAB,
+    JerseyPct,
     Conf,
     Velocity,
     Label,
@@ -78,6 +80,14 @@ static std::vector<std::string> splitLines(const std::string& text) {
 static bool parseFieldToken(const std::string& token, FieldToken& out_field) {
     if (token == "track_id") {
         out_field = FieldToken::TrackId;
+        return true;
+    }
+    if (token == "team_ab") {
+        out_field = FieldToken::TeamAB;
+        return true;
+    }
+    if (token == "jersey_pct") {
+        out_field = FieldToken::JerseyPct;
         return true;
     }
     if (token == "conf") {
@@ -223,6 +233,26 @@ private:
             if (!det.has_track_id) return false;
             if (det.track_id < 0 && !show_untracked_) return false;
             std::snprintf(buf, sizeof(buf), "%d", det.track_id);
+            out = buf;
+            return true;
+        case FieldToken::TeamAB:
+            if (!det.has_team || det.team < 0) {
+                out = "?";
+                return true;
+            }
+            if (det.team == 0) {
+                out = "A";
+                return true;
+            }
+            if (det.team == 1) {
+                out = "B";
+                return true;
+            }
+            out = "?";
+            return true;
+        case FieldToken::JerseyPct:
+            if (!det.has_jersey_mode_ratio) return false;
+            std::snprintf(buf, sizeof(buf), "%d", (int)std::lround(det.jersey_mode_ratio * 100.0));
             out = buf;
             return true;
         case FieldToken::Conf:

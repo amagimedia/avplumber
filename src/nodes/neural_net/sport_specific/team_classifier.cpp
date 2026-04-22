@@ -18,6 +18,7 @@ namespace {
 
 constexpr int kUVHistBins = 256;
 constexpr int kLHistBins = 16;
+constexpr float kResidualMassMin = 0.02f;
 
 bool iequals(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) return false;
@@ -103,6 +104,7 @@ struct ParsedTracked {
 struct ParsedSeg {
     int det_index = -1;
     float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    bool has_hist = false;
     float uv_hist[kUVHistBins] = {};
     float l_hist[kLHistBins] = {};
     int pixels = 0;
@@ -121,7 +123,6 @@ struct RecentAppearance {
     float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
     float uv_hist[kUVHistBins] = {};
     float l_hist[kLHistBins] = {};
-    float confidence = 0.0f;
     int team = -1;
     uint64_t frame = 0;
 };
@@ -174,16 +175,22 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int debug_log_every_n_ = 0;
 
     std::unordered_map<int, TrackColor> tracks_;
+    float shared_uv_[kUVHistBins] = {};
+    float shared_l_[kLHistBins] = {};
     float proto_uv_[2][kUVHistBins] = {};
     float proto_l_[2][kLHistBins] = {};
+    bool shared_ready_ = false;
     bool bootstrapped_ = false;
     uint64_t frame_counter_ = 0;
     std::vector<RecentAppearance> recent_appearances_;
 
     void resetState() {
         tracks_.clear();
+        std::memset(shared_uv_, 0, sizeof(shared_uv_));
+        std::memset(shared_l_, 0, sizeof(shared_l_));
         std::memset(proto_uv_, 0, sizeof(proto_uv_));
         std::memset(proto_l_, 0, sizeof(proto_l_));
+        shared_ready_ = false;
         bootstrapped_ = false;
         frame_counter_ = 0;
         recent_appearances_.clear();
@@ -197,6 +204,59 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
     float teamDistance(const float* uv_hist, const float* l_hist, int team) const {
         return combinedHistDistance(uv_hist, l_hist, proto_uv_[team], proto_l_[team]);
+    }
+
+    static float medianOfVector(std::vector<float>& values) {
+        if (values.empty()) return 0.0f;
+        const size_t mid = values.size() / 2u;
+        std::nth_element(values.begin(), values.begin() + mid, values.end());
+        float median = values[mid];
+        if ((values.size() % 2u) == 0u) {
+            std::nth_element(values.begin(), values.begin() + (mid - 1u), values.end());
+            median = 0.5f * (median + values[mid - 1u]);
+        }
+        return median;
+    }
+
+    template <typename SampleT>
+    static void computeSharedHistogramMedian(const std::vector<SampleT>& samples,
+                                             float* out_uv, float* out_l) {
+        std::vector<float> values;
+        values.reserve(samples.size());
+        for (int b = 0; b < kUVHistBins; ++b) {
+            values.clear();
+            for (const auto& s : samples) values.push_back(s.uv_hist[b]);
+            out_uv[b] = medianOfVector(values);
+        }
+        for (int b = 0; b < kLHistBins; ++b) {
+            values.clear();
+            for (const auto& s : samples) values.push_back(s.l_hist[b]);
+            out_l[b] = medianOfVector(values);
+        }
+        normalizeHistogram(out_uv, kUVHistBins);
+        normalizeHistogram(out_l, kLHistBins);
+    }
+
+    static bool residualizeHistogram(const float* raw_uv, const float* raw_l,
+                                     const float* shared_uv, const float* shared_l,
+                                     float* out_uv, float* out_l,
+                                     float* uv_mass_out = nullptr,
+                                     float* l_mass_out = nullptr) {
+        float uv_mass = 0.0f;
+        float l_mass = 0.0f;
+        for (int i = 0; i < kUVHistBins; ++i) {
+            out_uv[i] = std::max(0.0f, raw_uv[i] - shared_uv[i]);
+            uv_mass += out_uv[i];
+        }
+        for (int i = 0; i < kLHistBins; ++i) {
+            out_l[i] = std::max(0.0f, raw_l[i] - shared_l[i]);
+            l_mass += out_l[i];
+        }
+        if (uv_mass_out) *uv_mass_out = uv_mass;
+        if (l_mass_out) *l_mass_out = l_mass;
+        if (uv_mass > 1e-7f) normalizeHistogram(out_uv, kUVHistBins);
+        if (l_mass > 1e-7f) normalizeHistogram(out_l, kLHistBins);
+        return uv_mass >= kResidualMassMin || l_mass >= kResidualMassMin;
     }
 
     bool matchesLabel(const Parameters& det, const std::vector<std::string>& labels) const {
@@ -260,10 +320,11 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     }
 
     HandoffMatch findRecentHandoff(const ParsedTracked& tr,
-                                   const CurrentEvidence& sample,
+                                   const float* sample_uv,
+                                   const float* sample_l,
                                    int expected_team) const {
         HandoffMatch best;
-        if (!sample.has_sample || expected_team < 0) return best;
+        if (!sample_uv || !sample_l || expected_team < 0) return best;
 
         const float tr_diag = std::max(1.0f, bboxDiagonal(tr.x1, tr.y1, tr.x2, tr.y2));
         const float tr_area = bboxWidth(tr.x1, tr.x2) * bboxHeight(tr.y1, tr.y2);
@@ -284,7 +345,7 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             const float center_rel = center_dist / std::max(tr_diag, recent_diag);
             if (center_rel > handoff_max_center_distance_rel_) continue;
 
-            const float hist_dist = combinedHistDistance(sample.uv_hist, sample.l_hist, it->uv_hist, it->l_hist);
+            const float hist_dist = combinedHistDistance(sample_uv, sample_l, it->uv_hist, it->l_hist);
             if (hist_dist > handoff_max_hist_distance_) continue;
 
             const float score = center_rel * 16.0f + hist_dist * 100.0f + (float)age * 1.5f;
@@ -305,35 +366,52 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             float uv_hist[kUVHistBins];
             float l_hist[kLHistBins];
         };
-        std::vector<Sample> samples;
-        samples.reserve(tracks_.size());
+        std::vector<Sample> raw_samples;
+        raw_samples.reserve(tracks_.size());
         for (const auto& kv : tracks_) {
             if (kv.second.hits == 0 || kv.second.last_confidence < min_jersey_confidence_) continue;
             Sample s;
             std::memcpy(s.uv_hist, kv.second.uv_hist_ema, sizeof(s.uv_hist));
             std::memcpy(s.l_hist, kv.second.l_hist_ema, sizeof(s.l_hist));
-            samples.push_back(s);
+            raw_samples.push_back(s);
         }
-        if ((int)samples.size() < bootstrap_min_tracks_) return;
+        if ((int)raw_samples.size() < bootstrap_min_tracks_) return;
 
-        std::memcpy(proto_uv_[0], samples[0].uv_hist, sizeof(proto_uv_[0]));
-        std::memcpy(proto_l_[0], samples[0].l_hist, sizeof(proto_l_[0]));
+        float candidate_shared_uv[kUVHistBins] = {};
+        float candidate_shared_l[kLHistBins] = {};
+        computeSharedHistogramMedian(raw_samples, candidate_shared_uv, candidate_shared_l);
+
+        std::vector<Sample> residual_samples;
+        residual_samples.reserve(raw_samples.size());
+        for (const auto& s : raw_samples) {
+            Sample residual;
+            if (!residualizeHistogram(s.uv_hist, s.l_hist,
+                                      candidate_shared_uv, candidate_shared_l,
+                                      residual.uv_hist, residual.l_hist)) {
+                continue;
+            }
+            residual_samples.push_back(residual);
+        }
+        if ((int)residual_samples.size() < bootstrap_min_tracks_) return;
+
+        std::memcpy(proto_uv_[0], residual_samples[0].uv_hist, sizeof(proto_uv_[0]));
+        std::memcpy(proto_l_[0], residual_samples[0].l_hist, sizeof(proto_l_[0]));
 
         float best_d = -1.0f;
         size_t best_i = 0;
-        for (size_t i = 0; i < samples.size(); ++i) {
-            const float d = combinedHistDistance(samples[i].uv_hist, samples[i].l_hist,
+        for (size_t i = 0; i < residual_samples.size(); ++i) {
+            const float d = combinedHistDistance(residual_samples[i].uv_hist, residual_samples[i].l_hist,
                                                  proto_uv_[0], proto_l_[0]);
             if (d > best_d) { best_d = d; best_i = i; }
         }
-        std::memcpy(proto_uv_[1], samples[best_i].uv_hist, sizeof(proto_uv_[1]));
-        std::memcpy(proto_l_[1], samples[best_i].l_hist, sizeof(proto_l_[1]));
+        std::memcpy(proto_uv_[1], residual_samples[best_i].uv_hist, sizeof(proto_uv_[1]));
+        std::memcpy(proto_l_[1], residual_samples[best_i].l_hist, sizeof(proto_l_[1]));
 
         for (int iter = 0; iter < 10; ++iter) {
             float sum_uv[2][kUVHistBins] = {};
             float sum_l[2][kLHistBins] = {};
             int count[2] = {0, 0};
-            for (const auto& s : samples) {
+            for (const auto& s : residual_samples) {
                 const float d0 = combinedHistDistance(s.uv_hist, s.l_hist, proto_uv_[0], proto_l_[0]);
                 const float d1 = combinedHistDistance(s.uv_hist, s.l_hist, proto_uv_[1], proto_l_[1]);
                 const int k = (d0 <= d1) ? 0 : 1;
@@ -355,11 +433,15 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         const float sep = combinedHistDistance(proto_uv_[0], proto_l_[0], proto_uv_[1], proto_l_[1]);
         if (sep < bootstrap_min_prototype_distance_) return;
 
+        std::memcpy(shared_uv_, candidate_shared_uv, sizeof(shared_uv_));
+        std::memcpy(shared_l_, candidate_shared_l, sizeof(shared_l_));
+        shared_ready_ = true;
         bootstrapped_ = true;
 
         logstream << "team_classifier: bootstrap"
                   << " frame=" << frame_counter_
-                  << " tracks=" << samples.size()
+                  << " tracks=" << raw_samples.size()
+                  << " residual_tracks=" << residual_samples.size()
                   << " prototype_sep=" << sep;
     }
 
@@ -459,9 +541,9 @@ public:
             if (!det.is_object() || !matchesLabel(det, seg_labels_)) continue;
             ParsedSeg s;
             if (!parseBBox(det, s.x1, s.y1, s.x2, s.y2)) continue;
-            if (!parseJerseyHistogram(det, s.uv_hist, s.l_hist, s.confidence)) continue;
             s.pixels = det.value("jersey_cloth_pixels", det.value("jersey_pixels", 0));
             s.det_index = i;
+            s.has_hist = parseJerseyHistogram(det, s.uv_hist, s.l_hist, s.confidence);
             segs.push_back(s);
         }
 
@@ -527,7 +609,9 @@ public:
         for (size_t ti = 0; ti < tracked.size(); ++ti) {
             const int si = track_to_seg[ti];
             if (si < 0) continue;
+            matched += 1;
             const ParsedSeg& seg = segs[(size_t)si];
+            if (!seg.has_hist) continue;
             CurrentEvidence& evidence = current_evidence[ti];
             evidence.has_sample = true;
             std::memcpy(evidence.uv_hist, seg.uv_hist, sizeof(evidence.uv_hist));
@@ -548,7 +632,6 @@ public:
             tc.last_confidence = seg.confidence;
             tc.hits += 1;
             tc.last_frame = frame_counter_;
-            matched += 1;
         }
 
         if (!bootstrapped_ && frame_counter_ >= bootstrap_frames_) {
@@ -569,23 +652,53 @@ public:
         int current_sample_count = 0;
         int handoff_lock_count = 0;
         int handoff_match_count = 0;
+        int residual_weak_count = 0;
         for (size_t tri = 0; tri < tracked.size(); ++tri) {
             const ParsedTracked& tr = tracked[tri];
             auto& det = player_md["detections"][tr.det_index];
             int team = -1;
             auto it = tracks_.find(tr.track_id);
             const CurrentEvidence& evidence = current_evidence[tri];
-            if (bootstrapped_ && it != tracks_.end() && it->second.hits > 0) {
+            if (bootstrapped_ && shared_ready_ && it != tracks_.end() && it->second.hits > 0) {
                 TrackColor& tc = it->second;
-                const bool use_current_sample = evidence.has_sample &&
-                                                evidence.pixels >= min_jersey_pixels_ &&
-                                                evidence.confidence >= min_jersey_confidence_ &&
-                                                !isZeroHistogram(evidence.uv_hist, kUVHistBins);
-                const float* sample_uv = use_current_sample ? evidence.uv_hist : tc.uv_hist_ema;
-                const float* sample_l = use_current_sample ? evidence.l_hist : tc.l_hist_ema;
-                const float sample_confidence = use_current_sample ? evidence.confidence : tc.last_confidence;
-                if (use_current_sample) {
+                float current_uv[kUVHistBins] = {};
+                float current_l[kLHistBins] = {};
+                float ema_uv[kUVHistBins] = {};
+                float ema_l[kLHistBins] = {};
+                const bool has_current_hist = evidence.has_sample &&
+                                              evidence.pixels >= min_jersey_pixels_ &&
+                                              evidence.confidence >= min_jersey_confidence_ &&
+                                              !isZeroHistogram(evidence.uv_hist, kUVHistBins);
+                const bool current_residual_ok = has_current_hist &&
+                    residualizeHistogram(evidence.uv_hist, evidence.l_hist,
+                                         shared_uv_, shared_l_,
+                                         current_uv, current_l);
+                const bool ema_residual_ok =
+                    residualizeHistogram(tc.uv_hist_ema, tc.l_hist_ema,
+                                         shared_uv_, shared_l_,
+                                         ema_uv, ema_l);
+
+                const float* sample_uv = nullptr;
+                const float* sample_l = nullptr;
+                float sample_confidence = 0.0f;
+                if (current_residual_ok) {
+                    sample_uv = current_uv;
+                    sample_l = current_l;
+                    sample_confidence = evidence.confidence;
                     current_sample_count += 1;
+                } else if (ema_residual_ok) {
+                    sample_uv = ema_uv;
+                    sample_l = ema_l;
+                    sample_confidence = tc.last_confidence;
+                } else {
+                    residual_weak_count += 1;
+                    team = tc.assigned_team;
+                    det[output_field_] = team;
+                    if (team >= 0) {
+                        ++assigned_known;
+                        assigned_team_count[team] += 1;
+                    }
+                    continue;
                 }
                 const float dist0 = teamDistance(sample_uv, sample_l, 0);
                 const float dist1 = teamDistance(sample_uv, sample_l, 1);
@@ -602,7 +715,10 @@ public:
                 const bool can_update_centroid = confident_now && margin >= assignment_margin_;
 
                 const HandoffMatch handoff = (tc.assigned_team < 0)
-                                                 ? findRecentHandoff(tr, evidence, candidate_team)
+                                                 ? findRecentHandoff(tr,
+                                                                     current_residual_ok ? current_uv : nullptr,
+                                                                     current_residual_ok ? current_l : nullptr,
+                                                                     candidate_team)
                                                  : HandoffMatch();
                 if (handoff.found) {
                     handoff_match_count += 1;
@@ -721,14 +837,21 @@ public:
             if (team < 0 || !evidence.has_sample) continue;
             if (evidence.pixels < min_jersey_pixels_ || evidence.confidence < min_jersey_confidence_) continue;
             if (isZeroHistogram(evidence.uv_hist, kUVHistBins)) continue;
+            float recent_uv[kUVHistBins] = {};
+            float recent_l[kLHistBins] = {};
+            if (!shared_ready_ ||
+                !residualizeHistogram(evidence.uv_hist, evidence.l_hist,
+                                      shared_uv_, shared_l_,
+                                      recent_uv, recent_l)) {
+                continue;
+            }
             RecentAppearance recent;
             recent.x1 = tracked[ti].x1;
             recent.y1 = tracked[ti].y1;
             recent.x2 = tracked[ti].x2;
             recent.y2 = tracked[ti].y2;
-            std::memcpy(recent.uv_hist, evidence.uv_hist, sizeof(recent.uv_hist));
-            std::memcpy(recent.l_hist, evidence.l_hist, sizeof(recent.l_hist));
-            recent.confidence = evidence.confidence;
+            std::memcpy(recent.uv_hist, recent_uv, sizeof(recent.uv_hist));
+            std::memcpy(recent.l_hist, recent_l, sizeof(recent.l_hist));
             recent.team = team;
             recent.frame = frame_counter_;
             recent_appearances_.push_back(recent);
@@ -762,6 +885,7 @@ public:
                       << " strong_locks=" << strong_lock_count
                       << " weak_locks=" << weak_lock_count
                       << " bootstrapped=" << (bootstrapped_ ? 1 : 0)
+                      << " shared_ready=" << (shared_ready_ ? 1 : 0)
                       << " proto_sep=" << proto_sep
                       << " uv_weight=" << uv_weight_
                       << " l_weight=" << l_weight_
@@ -771,7 +895,8 @@ public:
                       << " tracks_w_hits=" << tracks_with_hits
                       << " dbg_pixel_skip=" << dbg_pixel_skip
                       << " dbg_zero_skip=" << dbg_zero_skip
-                      << " dbg_ema_ok=" << dbg_ema_ok;
+                      << " dbg_ema_ok=" << dbg_ema_ok
+                      << " residual_weak=" << residual_weak_count;
         }
 
         this->sink_->put(frm);

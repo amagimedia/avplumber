@@ -1,7 +1,10 @@
 #include "cuda_overlay_base.hpp"
-#include "../common/infer_trt_base.hpp"
+#include "draw_segmask_shared.hpp"
+#include "../common/yolo_side_data.hpp"
 
 #include <cstdint>
+#include <cstring>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -13,6 +16,43 @@ extern "C" {
 }
 
 using cuda_overlay::DrawColor;
+
+namespace {
+
+void appendSegPointerDebug(std::ostringstream& oss, CUcontext expected_ctx, CUdeviceptr ptr) {
+    if (!ptr) {
+        oss << " gpu_ptr=0";
+        return;
+    }
+
+    CUcontext current_ctx = nullptr;
+    if (cuCtxGetCurrent) {
+        CUresult current_res = cuCtxGetCurrent(&current_ctx);
+        if (current_res == CUDA_SUCCESS) {
+            oss << " current_ctx=" << current_ctx;
+        } else {
+            oss << " current_ctx=<error:" << (int)current_res << ">";
+        }
+    }
+    oss << " expected_ctx=" << expected_ctx
+        << " gpu_ptr=" << (const void*)(uintptr_t)ptr;
+
+    CUdeviceptr base_ptr = 0;
+    size_t base_size = 0;
+    if (cuMemGetAddressRange) {
+        CUresult range_res = cuMemGetAddressRange(&base_ptr, &base_size, ptr);
+        if (range_res == CUDA_SUCCESS) {
+            oss << " range_base=" << (const void*)(uintptr_t)base_ptr
+                << " range_bytes=" << base_size;
+        } else {
+            oss << " range_base=<error:" << (int)range_res << ">";
+        }
+    } else {
+        oss << " range_base=<unavailable>";
+    }
+}
+
+} // namespace
 
 class DrawSegMask : public CudaOverlayBase {
 private:
@@ -32,6 +72,7 @@ private:
     double model_content_offset_x_ = 0.0;
     double model_content_offset_y_ = 0.0;
     int debug_log_every_n_ = 0;
+    int side_data_slot_ = 0;
     bool require_wide_shot_ = false;
     double min_conf_ = 0.0;
     std::unordered_map<int, DrawColor> class_colors_;
@@ -43,6 +84,8 @@ private:
     std::vector<MaskDetection> cached_detections_;
     float cached_bbox_coverage_ = 0.0f;
     uint64_t cached_age_frames_ = 0;
+    CUdeviceptr gpu_draw_items_ = 0;
+    int gpu_draw_items_capacity_ = 0;
 
     const char* nodeName() const override { return "draw_segmask"; }
 
@@ -84,6 +127,40 @@ private:
 
     bool hasCachedOverlay() const {
         return cached_mask_buf_ && !cached_detections_.empty();
+    }
+
+    void freeDrawBuffers() {
+        if (!cu_ctx_) return;
+        if (CUDA_OVERLAY_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return;
+        if (gpu_draw_items_) {
+            CUDA_OVERLAY_CHECK_CU(cuMemFree(gpu_draw_items_));
+            gpu_draw_items_ = 0;
+        }
+        gpu_draw_items_capacity_ = 0;
+    }
+
+    void onKernelsUnloaded() override {
+        freeDrawBuffers();
+    }
+
+    bool ensureDrawItemCapacity(int needed) {
+        if (needed <= gpu_draw_items_capacity_) return true;
+        if (!cu_ctx_) return false;
+        if (CUDA_OVERLAY_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+
+        if (gpu_draw_items_) {
+            CUDA_OVERLAY_CHECK_CU(cuMemFree(gpu_draw_items_));
+            gpu_draw_items_ = 0;
+            gpu_draw_items_capacity_ = 0;
+        }
+
+        int next = std::max(needed, 16);
+        if (CUDA_OVERLAY_CHECK_CU(cuMemAlloc(&gpu_draw_items_, (size_t)next * sizeof(DrawSegMaskItem)))) {
+            gpu_draw_items_ = 0;
+            return false;
+        }
+        gpu_draw_items_capacity_ = next;
+        return true;
     }
 
     void updateCachedOverlay(const AVFrameSideData* sd, std::vector<MaskDetection> detections, float bbox_coverage) {
@@ -183,62 +260,94 @@ private:
         float op = opacity_ * opacity_scale;
         float thresh = threshold_;
 
+        std::vector<DrawSegMaskItem> draw_items;
+        draw_items.reserve(detections.size());
+        size_t skipped_invalid_mask_index = 0;
+
         for (const auto& det : detections) {
-            if (det.mask_index >= num_masks) continue;
+            if (det.mask_index < 0 || det.mask_index >= num_masks) {
+                ++skipped_invalid_mask_index;
+                continue;
+            }
+
+            const int bbox_w = det.bbox_x2 - det.bbox_x1;
+            const int bbox_h = det.bbox_y2 - det.bbox_y1;
+            if (bbox_w <= 0 || bbox_h <= 0) continue;
 
             const DrawColor color = resolveColor(det.cls);
-            int y_color = color.y;
-            int u_color = color.u;
-            int v_color = color.v;
+            draw_items.push_back(DrawSegMaskItem{
+                det.bbox_x1, det.bbox_y1, det.bbox_x2, det.bbox_y2,
+                det.mask_index, color.y, color.u, color.v
+            });
+        }
 
-            CUdeviceptr mask_ptr = gpu_masks + (size_t)det.mask_index * proto_h * proto_w * sizeof(float);
+        if (skipped_invalid_mask_index > 0) {
+            std::ostringstream err;
+            err << "draw_segmask: mask index out of range"
+                << " frame=" << frame_counter_
+                << " slot=" << side_data_slot_
+                << " invalid=" << skipped_invalid_mask_index
+                << " detections=" << detections.size()
+                << " num_masks=" << num_masks;
+            throw Error(err.str());
+        }
 
-            int bx1 = det.bbox_x1, by1 = det.bbox_y1;
-            int bx2 = det.bbox_x2, by2 = det.bbox_y2;
-            int bbox_w = bx2 - bx1;
-            int bbox_h = by2 - by1;
+        if (draw_items.empty()) return;
+        if (!ensureDrawItemCapacity((int)draw_items.size())) {
+            logstream << "draw_segmask: failed to allocate batched draw items";
+            return;
+        }
+        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(
+                gpu_draw_items_, draw_items.data(),
+                draw_items.size() * sizeof(DrawSegMaskItem),
+                cuda_dev_ctx_->stream))) {
+            logstream << "draw_segmask: failed uploading batched draw items";
+            return;
+        }
 
-            unsigned int grid_x = ((unsigned int)bbox_w + block_x - 1) / block_x;
-            unsigned int grid_y = ((unsigned int)bbox_h + block_y - 1) / block_y;
-
+        const int num_items = (int)draw_items.size();
+        unsigned int grid_x = ((unsigned int)frame_w + block_x - 1) / block_x;
+        unsigned int grid_y = ((unsigned int)frame_h + block_y - 1) / block_y;
+        if (grid_x > 0 && grid_y > 0) {
             void* y_args[] = {
                 (void*)&y_plane, (void*)&pitch_y,
-                (void*)&mask_ptr,
+                (void*)&gpu_masks,
+                (void*)&gpu_draw_items_, (void*)&num_items,
                 (void*)&proto_w, (void*)&proto_h,
                 (void*)&model_w, (void*)&model_h,
-                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
                 (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
                 (void*)&frame_w, (void*)&frame_h,
-                (void*)&y_color, (void*)&op, (void*)&thresh
+                (void*)&op, (void*)&thresh
             };
             if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                         grid_x, grid_y, 1,
                                         block_x, block_y, 1,
                                         0, cuda_dev_ctx_->stream, y_args, nullptr))) {
-                logstream << "draw_segmask: failed launching luma kernel";
+                logstream << "draw_segmask: failed launching batched luma kernel";
                 return;
             }
+        }
 
-            int uv_bbox_w = ((bx2 + 1) >> 1) - (bx1 >> 1);
-            int uv_bbox_h = ((by2 + 1) >> 1) - (by1 >> 1);
-            unsigned int uv_grid_x = ((unsigned int)uv_bbox_w + block_x - 1) / block_x;
-            unsigned int uv_grid_y = ((unsigned int)uv_bbox_h + block_y - 1) / block_y;
-
+        unsigned int uv_grid_x = (((unsigned int)frame_w + 1) >> 1);
+        unsigned int uv_grid_y = (((unsigned int)frame_h + 1) >> 1);
+        uv_grid_x = (uv_grid_x + block_x - 1) / block_x;
+        uv_grid_y = (uv_grid_y + block_y - 1) / block_y;
+        if (uv_grid_x > 0 && uv_grid_y > 0) {
             void* uv_args[] = {
                 (void*)&uv_plane, (void*)&pitch_uv,
-                (void*)&mask_ptr,
+                (void*)&gpu_masks,
+                (void*)&gpu_draw_items_, (void*)&num_items,
                 (void*)&proto_w, (void*)&proto_h,
                 (void*)&model_w, (void*)&model_h,
-                (void*)&bx1, (void*)&by1, (void*)&bx2, (void*)&by2,
                 (void*)&scale_x, (void*)&scale_y, (void*)&offset_x, (void*)&offset_y,
                 (void*)&frame_w, (void*)&frame_h,
-                (void*)&u_color, (void*)&v_color, (void*)&op, (void*)&thresh
+                (void*)&op, (void*)&thresh
             };
             if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                         uv_grid_x, uv_grid_y, 1,
                                         block_x, block_y, 1,
                                         0, cuda_dev_ctx_->stream, uv_args, nullptr))) {
-                logstream << "draw_segmask: failed launching chroma kernel";
+                logstream << "draw_segmask: failed launching batched chroma kernel";
                 return;
             }
         }
@@ -309,7 +418,7 @@ private:
 
         const std::string shot_type = readShotType(input);
         const bool suppressed_by_shot = require_wide_shot_ && shot_type != "wide";
-        const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU);
+        const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), yoloSegGpuSideDataType(side_data_slot_));
 
         bool have_current_masks = false;
         int num_masks = 0;
@@ -329,6 +438,22 @@ private:
                 detections = parseDetections(input, (int)header->model_w, (int)header->model_h);
                 have_current_masks = !detections.empty();
             }
+        }
+
+        if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0 &&
+            sd && sd->buf && sd->buf->size >= (int)sizeof(GpuMaskSideDataHeader) &&
+            num_masks > 0 && proto_w > 0 && proto_h > 0 && gpu_masks && !suppressed_by_shot) {
+            std::ostringstream dbg;
+            dbg << "draw_segmask: gpu side data"
+                << " frame=" << frame_counter_
+                << " slot=" << side_data_slot_
+                << " sd_type=" << (int)yoloSegGpuSideDataType(side_data_slot_)
+                << " num_masks=" << num_masks
+                << " proto=" << proto_w << "x" << proto_h
+                << " model=" << header->model_w << "x" << header->model_h
+                << " parsed_detections=" << detections.size();
+            appendSegPointerDebug(dbg, cu_ctx_, gpu_masks);
+            logstream << dbg.str();
         }
 
         if (have_current_masks) {
@@ -432,7 +557,8 @@ public:
                 VideoParameters input_params,
                 av::Rational frame_rate,
                 av::Rational timebase,
-                int debug_log_every_n)
+                int debug_log_every_n,
+                int side_data_slot)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
           shot_metadata_key_(std::move(shot_metadata_key)),
@@ -449,6 +575,7 @@ public:
           model_content_offset_x_(model_content_offset_x),
           model_content_offset_y_(model_content_offset_y),
           debug_log_every_n_(debug_log_every_n),
+          side_data_slot_(side_data_slot),
           min_conf_(min_conf),
           class_colors_(std::move(class_colors)) {
         input_params_ = input_params;
@@ -478,6 +605,10 @@ public:
         const float coverage_drop_keep_prev_ratio = params.value("coverage_drop_keep_prev_ratio", 0.0f);
         const float coverage_drop_min_prev = params.value("coverage_drop_min_prev", 0.0f);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
+        const int side_data_slot = params.value("side_data_slot", 0);
+        if (!yoloSegIsValidSlot(side_data_slot)) {
+            throw Error("draw_segmask: side_data_slot out of range [0," + std::to_string(kMaxYoloSegSlots - 1) + "]");
+        }
         const double model_content_width = params.value("model_content_width", 0.0);
         const double model_content_height = params.value("model_content_height", 0.0);
         const double model_content_offset_x = params.value("model_content_offset_x", 0.0);
@@ -507,7 +638,7 @@ public:
             overlay_hold_frames, overlay_fade_frames,
             coverage_drop_keep_prev_ratio, coverage_drop_min_prev,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
-            upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
+            upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n, side_data_slot);
     }
 };
 

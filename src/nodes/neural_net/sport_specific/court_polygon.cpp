@@ -311,7 +311,7 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         header[3] = 0;              // reserved
         memcpy(buf->data + header_size, cpu_mask_.data(), mask_data_size);
 
-        av_frame_new_side_data_from_buf(frm.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS, buf);
+        av_frame_new_side_data_from_buf(frm.raw(), yoloSegCpuSideDataType(0), buf);
     }
 
     void attachGpuSideData(av::VideoFrame& frm, float model_w, float model_h) {
@@ -366,7 +366,7 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             return;
         }
 
-        av_frame_new_side_data_from_buf(frm.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU, sd_buf);
+        av_frame_new_side_data_from_buf(frm.raw(), yoloSegGpuSideDataType(0), sd_buf);
     }
 
     void writeSegMetadata(av::VideoFrame& frm, float model_w, float model_h, float det_conf) {

@@ -17,6 +17,7 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
     // Seg mask config
     std::string seg_metadata_key_ = "yolo_seg";
+    int seg_side_data_slot_ = 0;
     float seg_mask_threshold_ = 0.5f;
     std::unordered_set<int> court_class_indices_ = {0, 1}; // "three point line" + "basketball-court"
 
@@ -144,7 +145,7 @@ public:
         }
 
         float court_coverage = 0.0f;
-        const AVFrameSideData* sd = av_frame_get_side_data(raw, AV_FRAME_DATA_YOLO_SEG_MASKS);
+        const AVFrameSideData* sd = av_frame_get_side_data(raw, yoloSegCpuSideDataType(seg_side_data_slot_));
         if (sd && sd->size >= 16 && !court_mask_indices.empty()) {
             const uint32_t* header = (const uint32_t*)sd->data;
             uint32_t num_masks = header[0];
@@ -241,6 +242,12 @@ public:
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<ShotClassifier>(edges, params);
 
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
+        if (params.count("seg_side_data_slot")) {
+            r->seg_side_data_slot_ = params["seg_side_data_slot"].get<int>();
+            if (!yoloSegIsValidSlot(r->seg_side_data_slot_)) {
+                throw Error("shot_classifier: seg_side_data_slot out of range [0," + std::to_string(kMaxYoloSegSlots - 1) + "]");
+            }
+        }
         if (params.count("player_metadata_key")) r->player_metadata_key_ = params["player_metadata_key"].get<std::string>();
         if (params.count("player_labels")) {
             r->player_labels_.clear();

@@ -3,6 +3,7 @@
 #include "../../node_common.hpp"
 #include "../../../video_parameters.hpp"
 #include "../../../hwaccel.hpp"
+#include "../common/yolo_side_data.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -122,6 +123,8 @@ struct ParsedYoloDetection {
     int y1 = 0;
     int x2 = 0;
     int y2 = 0;
+    int team = -1;
+    bool has_team = false;
     int cls = -1;
     bool has_cls = false;
     std::string label;
@@ -136,6 +139,8 @@ struct ParsedYoloDetection {
     bool has_velocity = false;
     double velocity_x = 0.0;
     double velocity_y = 0.0;
+    double jersey_mode_ratio = 0.0;
+    bool has_jersey_mode_ratio = false;
 };
 
 bool scaleAndClampBBox(double x1, double y1, double x2, double y2, int frame_width, int frame_height,
@@ -270,6 +275,29 @@ protected:
         if (ret < 0) {
             logstream << nodeName() << ": av_frame_copy_props failed: " << av::error2string(ret);
             return false;
+        }
+
+        // av_frame_copy_props clones side-data payload bytes, which is unsafe for our
+        // custom YOLO seg GPU side data because the payload contains a raw device
+        // pointer whose lifetime is carried by the side-data buffer ref itself.
+        if (frm.raw()->nb_side_data > 0) {
+            for (int i = 0; i < frm.raw()->nb_side_data; ++i) {
+                const AVFrameSideData* sd_src = frm.raw()->side_data[i];
+                if (!sd_src || !sd_src->buf) continue;
+                if (!yoloSegIsManagedSideDataType(sd_src->type)) continue;
+
+                av_frame_remove_side_data(out.raw(), sd_src->type);
+                AVBufferRef* ref = av_buffer_ref(sd_src->buf);
+                if (!ref) {
+                    logstream << nodeName() << ": av_buffer_ref failed for YOLO seg side data type " << (int)sd_src->type;
+                    return false;
+                }
+                if (!av_frame_new_side_data_from_buf(out.raw(), sd_src->type, ref)) {
+                    av_buffer_unref(&ref);
+                    logstream << nodeName() << ": av_frame_new_side_data_from_buf failed for YOLO seg side data type " << (int)sd_src->type;
+                    return false;
+                }
+            }
         }
         return true;
     }

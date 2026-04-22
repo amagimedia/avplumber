@@ -67,6 +67,7 @@ private:
     // CPU court-bounds veto for reacquires
     bool court_bounds_veto_enabled_ = true;
     std::string court_bounds_seg_metadata_key_ = "yolo_seg";
+    int court_bounds_side_data_slot_ = 0;
     std::string court_bounds_shot_metadata_key_ = "shot_info";
     std::unordered_set<int> court_bounds_class_indices_ = {0, 1};
     bool court_bounds_require_wide_shot_ = true;
@@ -443,7 +444,7 @@ private:
 
         if (parsed.court_mask_indices.empty()) return;
 
-        const AVFrameSideData* sd = av_frame_get_side_data(raw, AV_FRAME_DATA_YOLO_SEG_MASKS);
+        const AVFrameSideData* sd = av_frame_get_side_data(raw, yoloSegCpuSideDataType(court_bounds_side_data_slot_));
         if (!sd || sd->size < 16) return;
 
         const uint32_t* header = reinterpret_cast<const uint32_t*>(sd->data);
@@ -1119,6 +1120,11 @@ public:
         if (params.count("override_off_court_veto_enabled")) r->court_bounds_veto_enabled_ = params["override_off_court_veto_enabled"];
         if (params.count("court_bounds_seg_metadata_key")) r->court_bounds_seg_metadata_key_ = params["court_bounds_seg_metadata_key"].get<std::string>();
         if (params.count("override_off_court_seg_metadata_key")) r->court_bounds_seg_metadata_key_ = params["override_off_court_seg_metadata_key"].get<std::string>();
+        if (params.count("court_bounds_side_data_slot")) r->court_bounds_side_data_slot_ = params["court_bounds_side_data_slot"];
+        if (params.count("override_off_court_side_data_slot")) r->court_bounds_side_data_slot_ = params["override_off_court_side_data_slot"];
+        if (!yoloSegIsValidSlot(r->court_bounds_side_data_slot_)) {
+            throw Error("ball_tracker: court_bounds_side_data_slot out of range [0," + std::to_string(kMaxYoloSegSlots - 1) + "]");
+        }
         if (params.count("court_bounds_shot_metadata_key")) r->court_bounds_shot_metadata_key_ = params["court_bounds_shot_metadata_key"].get<std::string>();
         if (params.count("court_bounds_require_wide_shot")) r->court_bounds_require_wide_shot_ = params["court_bounds_require_wide_shot"];
         if (params.count("court_bounds_min_court_coverage")) r->court_bounds_min_court_coverage_ = params["court_bounds_min_court_coverage"];

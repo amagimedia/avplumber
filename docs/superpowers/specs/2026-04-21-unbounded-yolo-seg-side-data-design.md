@@ -1,4 +1,4 @@
-# Unbounded YOLO Segmentation Side-Data Slots
+# Generalized YOLO Segmentation Side-Data Slots
 
 ## Goal
 
@@ -40,56 +40,35 @@ That fallback is incorrect for generalized multi-stream use.
 
 ## Recommended Design
 
-Replace the current fixed slot-to-side-data-type mapping with a single side-data container format per mask kind:
-- one side-data type for CPU segmentation masks
-- one side-data type for GPU segmentation masks
+Keep the current model of one `AVFrame` side-data entry per segmentation stream, but generalize the side-data type mapping so it is derived from the slot number instead of being special-cased for slot `0` and slot `1`.
 
-Inside each side-data payload, store a slot-indexed container that can hold any number of slot entries.
-
-This makes the FFmpeg side-data type stable while moving slot selection into the payload format, which is where it belongs.
+This keeps the payload format unchanged and avoids introducing an extra container structure inside side data.
 
 ## Data Model
 
 ### Side-data types
 
-Keep one type for each storage class:
-- CPU segmentation container
-- GPU segmentation container
+Use a deterministic mapping from `slot` to side-data type:
+- CPU type for slot `k`: `base_cpu + 2*k`
+- GPU type for slot `k`: `base_gpu + 2*k`
 
-The exact enum values can reuse the current slot-0 identifiers for compatibility of the type namespace:
-- CPU container type: current `AV_FRAME_DATA_YOLO_SEG_MASKS`
-- GPU container type: current `AV_FRAME_DATA_YOLO_SEG_MASKS_GPU`
+Where the base types remain:
+- `AV_FRAME_DATA_YOLO_SEG_MASKS`
+- `AV_FRAME_DATA_YOLO_SEG_MASKS_GPU`
 
-The old slot-1-specific enum values become legacy-read compatibility only.
+This preserves the current slot `0` and slot `1` numeric values while allowing additional slots within a centrally defined range.
 
-### Container layout
+### Payload layout
 
-Each side-data payload contains:
-- a container header
-- a sequence of slot entries
+Payload layout stays exactly as it is today.
 
-Suggested header fields:
-- `version`
-- `entry_count`
-
-Suggested slot entry fields:
-- `slot_id`
-- `flags` or `kind`
-- payload dimensions
-- payload byte size
-- payload offset or inline payload header
-
-For CPU masks, the payload is inline float mask data.
-
-For GPU masks, each slot entry contains the existing `GpuMaskSideDataHeader` fields:
+For GPU masks, the payload contains the existing `GpuMaskSideDataHeader` fields:
 - `gpu_ptr`
 - `num_masks`
 - `proto_w`
 - `proto_h`
 - `model_w`
 - `model_h`
-
-The container must support appending or replacing a single slot without disturbing other slots already attached to the frame.
 
 Important:
 - `num_masks` is part of each slot payload, not part of global slot configuration.
@@ -105,13 +84,13 @@ CPU mask payloads live entirely inside the side-data buffer.
 
 ### GPU masks
 
-GPU mask payloads keep an owning `AVBufferRef` per slot so the device allocation survives:
+GPU mask payloads keep an owning `AVBufferRef` so the device allocation survives:
 - frame propagation
 - `av_frame_copy_props`
 - `join_metadata`
 - multiple readers on downstream frames
 
-The implementation should preserve the current pattern where the side-data buffer owns the `AVBufferRef` that owns the CUDA allocation.
+The implementation should preserve the current pattern where each side-data buffer owns the `AVBufferRef` that owns the CUDA allocation.
 
 Important detail:
 - GPU free callbacks must restore the correct CUDA context before `cuMemFree`, matching the safer pattern already used in `court_polygon.cpp`.
@@ -121,21 +100,14 @@ Important detail:
 `src/nodes/neural_net/common/yolo_side_data.hpp` becomes the single API surface for segmentation side-data access.
 
 Add helpers like:
-- `attachYoloSegCpuSlot(...)`
-- `attachYoloSegGpuSlot(...)`
-- `findYoloSegCpuSlot(...)`
-- `findYoloSegGpuSlot(...)`
-- `readLegacyYoloSegCpuSlot(...)`
-- `readLegacyYoloSegGpuSlot(...)`
+- `yoloSegIsValidSlot(...)`
+- `yoloSegCpuSideDataType(slot)`
+- `yoloSegGpuSideDataType(slot)`
 
 Behavior:
-- writers write only the new container format
-- readers first check the new container format
-- readers fall back to legacy slot `0`/`1` side data if needed
-
-This preserves compatibility while converging the codebase on one representation.
-
-The helper API must expose the parsed payload header back to callers so downstream code continues using per-slot `num_masks`, `proto_w`, `proto_h`, `model_w`, and `model_h` from the selected payload rather than reconstructing them from graph assumptions.
+- all readers and writers resolve side-data type through these helpers
+- no node should special-case slot `1`
+- slot limits are enforced centrally rather than scattered through the graph code
 
 ## Writer Changes
 
@@ -145,9 +117,8 @@ File:
 - `src/nodes/neural_net/yolo/infer_yolo.cpp`
 
 Changes:
-- replace direct `av_frame_new_side_data_from_buf(... yoloSeg*SideDataType(slot) ...)` usage with helper calls into `yolo_side_data.hpp`
-- write CPU and GPU mask payloads into the new slot-indexed container
-- if a frame already has a container, replace only the matching slot entry
+- replace hardcoded slot-0/slot-1 assumptions with helper calls into `yolo_side_data.hpp`
+- keep writing the existing CPU and GPU payload formats
 
 ### `court_polygon`
 
@@ -168,6 +139,7 @@ File:
 Changes:
 - replace direct `av_frame_get_side_data(... yoloSegGpuSideDataType(slot) ...)` with container lookup helper
 - preserve existing `side_data_slot` parameter semantics
+  The implementation uses the generalized side-data type mapping helper, not a container lookup.
 
 ### `draw_segmask`
 
@@ -189,23 +161,17 @@ File:
 No special slot logic is needed.
 
 Reason:
-- the merged frame will just carry one CPU container side-data ref and one GPU container side-data ref
-- `join_metadata` already copies side data by type and buffer ref
-
-This is one of the main benefits of the container design.
+- each slot remains a normal side-data entry with its own type
+- `join_metadata` already copies side data by exact type and buffer ref
 
 ## Backward Compatibility
 
-Readers must support three cases during migration:
-1. new container side data present
-2. legacy slot `0` side data present
-3. legacy slot `1` side data present
-
-Writers should emit only the new container format.
+All in-tree readers and writers are migrated together to the generalized mapping.
 
 Result:
-- newly produced frames use the generalized representation
-- older nodes or old captures remain readable during rollout
+- slot `0` and slot `1` keep their existing type ids
+- new slots derive their type ids from the same mapping
+- no extra legacy compatibility layer is required
 
 ## Failure Handling
 
@@ -222,7 +188,7 @@ If the slot payload is malformed:
 
 1. Unit-level validation by build and code inspection:
 - compile all touched nodes
-- confirm no remaining direct slot-type mapping in readers/writers except legacy fallback paths
+- confirm no remaining `slot == 1` special-casing in readers/writers
 
 2. Functional graph validation:
 - court segmentation on slot `0`
@@ -243,11 +209,10 @@ If the slot payload is malformed:
 ## Implementation Scope
 
 In scope:
-- generalized slot container format
+- generalized per-slot side-data type mapping
 - helper API in `yolo_side_data.hpp`
 - writer migration
 - reader migration
-- legacy read fallback
 - CUDA free callback cleanup where needed
 
 Out of scope:
@@ -262,8 +227,8 @@ Related but in scope for correctness:
 ## Risks
 
 1. GPU lifetime bugs if the new container mishandles `AVBufferRef` ownership.
-2. Merge-time regressions if multiple slot updates accidentally drop earlier slot entries.
-3. Compatibility regressions if legacy fallback is incomplete.
+2. Consumer races if a GPU mask buffer is published before its async copy is complete.
+3. Range/validation regressions if slot bounds are not enforced consistently.
 
 Mitigations:
 - centralize all slot read/write logic in `yolo_side_data.hpp`
@@ -272,7 +237,7 @@ Mitigations:
 
 ## Acceptance Criteria
 
-1. `side_data_slot` accepts arbitrary non-negative integers.
+1. `side_data_slot` accepts centrally validated slot values without `slot == 1` special handling.
 2. Slot `2+` no longer aliases to slot `0`.
 3. Court and player segmentation can coexist without side-data collision.
 4. Existing slot `0/1` graphs still run.
