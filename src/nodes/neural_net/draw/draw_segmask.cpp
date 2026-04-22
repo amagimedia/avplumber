@@ -76,6 +76,7 @@ private:
     bool require_wide_shot_ = false;
     double min_conf_ = 0.0;
     std::unordered_map<int, DrawColor> class_colors_;
+    std::unordered_map<int, float> class_opacities_;
     int overlay_hold_frames_ = 0;
     int overlay_fade_frames_ = 0;
     float coverage_drop_keep_prev_ratio_ = 0.0f;
@@ -114,6 +115,12 @@ private:
         auto it = class_colors_.find(cls);
         if (it != class_colors_.end()) return it->second;
         return mask_color_;
+    }
+
+    float resolveOpacity(int cls) const {
+        auto it = class_opacities_.find(cls);
+        if (it != class_opacities_.end()) return std::max(0.0f, std::min(1.0f, it->second));
+        return 1.0f;
     }
 
     void clearCachedOverlay() {
@@ -277,7 +284,7 @@ private:
             const DrawColor color = resolveColor(det.cls);
             draw_items.push_back(DrawSegMaskItem{
                 det.bbox_x1, det.bbox_y1, det.bbox_x2, det.bbox_y2,
-                det.mask_index, color.y, color.u, color.v
+                det.mask_index, color.y, color.u, color.v, resolveOpacity(det.cls)
             });
         }
 
@@ -546,6 +553,7 @@ public:
                 bool require_wide_shot,
                 double min_conf,
                 std::unordered_map<int, DrawColor> class_colors,
+                std::unordered_map<int, float> class_opacities,
                 int overlay_hold_frames,
                 int overlay_fade_frames,
                 float coverage_drop_keep_prev_ratio,
@@ -577,7 +585,8 @@ public:
           debug_log_every_n_(debug_log_every_n),
           side_data_slot_(side_data_slot),
           min_conf_(min_conf),
-          class_colors_(std::move(class_colors)) {
+          class_colors_(std::move(class_colors)),
+          class_opacities_(std::move(class_opacities)) {
         input_params_ = input_params;
         frame_rate_ = frame_rate;
         timebase_ = timebase;
@@ -631,10 +640,20 @@ public:
             }
         }
 
+        std::unordered_map<int, float> class_opacities;
+        if (params.count("class_opacities") && params["class_opacities"].is_object()) {
+            for (auto it = params["class_opacities"].begin(); it != params["class_opacities"].end(); ++it) {
+                if (!it.value().is_number()) {
+                    throw Error("draw_segmask: class_opacities values must be numeric");
+                }
+                class_opacities[std::stoi(it.key())] = std::max(0.0f, std::min(1.0f, it.value().get<float>()));
+            }
+        }
+
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawSegMask>(
             edges, params, metadata_key, shot_metadata_key, mask_color, opacity, threshold,
             require_wide_shot, min_conf,
-            std::move(class_colors),
+            std::move(class_colors), std::move(class_opacities),
             overlay_hold_frames, overlay_fade_frames,
             coverage_drop_keep_prev_ratio, coverage_drop_min_prev,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,

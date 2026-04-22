@@ -51,7 +51,7 @@ extern "C" __global__ void kDrawSegMaskNV12Luma(
                         + v01 * (1.f - fx) * fy + v11 * fx * fy;
         if (val < threshold) continue;
 
-        const float alpha = val * opacity;
+        const float alpha = val * opacity * item.opacity;
         blended = blended * (1.f - alpha) + (float)item.y_color * alpha;
         touched = true;
     }
@@ -116,7 +116,7 @@ extern "C" __global__ void kDrawSegMaskNV12Chroma(
                         + v01 * (1.f - fx) * fy + v11 * fx * fy;
         if (val < threshold) continue;
 
-        const float alpha = val * opacity;
+        const float alpha = val * opacity * item.opacity;
         blended_u = blended_u * (1.f - alpha) + (float)item.u_color * alpha;
         blended_v = blended_v * (1.f - alpha) + (float)item.v_color * alpha;
         touched = true;

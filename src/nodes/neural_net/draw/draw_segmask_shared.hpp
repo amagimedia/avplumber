@@ -11,4 +11,5 @@ struct DrawSegMaskItem {
     int32_t y_color;
     int32_t u_color;
     int32_t v_color;
+    float opacity;
 };
