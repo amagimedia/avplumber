@@ -3,6 +3,7 @@ namespace {
 constexpr int kHistBinsU = 16;
 constexpr int kHistBinsV = 16;
 constexpr int kHistBins = kHistBinsU * kHistBinsV;
+constexpr int kHistBinsL = 16;
 
 __device__ __forceinline__ bool isLikelySkinYuv(
     int y, int u, int v,
@@ -57,7 +58,9 @@ extern "C" __global__ void kJerseyUVMean(
     int* __restrict__ out_best_count,
     int* __restrict__ out_cloth_count,
     int* __restrict__ out_skin_count,
-    float* __restrict__ out_confidence
+    float* __restrict__ out_confidence,
+    float* __restrict__ out_uv_hist,
+    float* __restrict__ out_l_hist
 ) {
     const int det = blockIdx.x;
     if (det < 0) return;
@@ -66,6 +69,7 @@ extern "C" __global__ void kJerseyUVMean(
     __shared__ float s_hist_sum_y[kHistBins];
     __shared__ float s_hist_sum_u[kHistBins];
     __shared__ float s_hist_sum_v[kHistBins];
+    __shared__ int s_l_hist[kHistBinsL];
     __shared__ int s_cloth_count;
     __shared__ int s_skin_count;
 
@@ -75,6 +79,9 @@ extern "C" __global__ void kJerseyUVMean(
         s_hist_sum_y[tid] = 0.0f;
         s_hist_sum_u[tid] = 0.0f;
         s_hist_sum_v[tid] = 0.0f;
+    }
+    if (tid < kHistBinsL) {
+        s_l_hist[tid] = 0;
     }
     if (tid == 0) {
         s_cloth_count = 0;
@@ -97,6 +104,8 @@ extern "C" __global__ void kJerseyUVMean(
             out_cloth_count[det] = 0;
             out_skin_count[det] = 0;
             out_confidence[det] = 0.0f;
+            for (int i = 0; i < kHistBins; ++i) out_uv_hist[det * kHistBins + i] = 0.0f;
+            for (int i = 0; i < kHistBinsL; ++i) out_l_hist[det * kHistBinsL + i] = 0.0f;
         }
         return;
     }
@@ -127,6 +136,8 @@ extern "C" __global__ void kJerseyUVMean(
             out_cloth_count[det] = 0;
             out_skin_count[det] = 0;
             out_confidence[det] = 0.0f;
+            for (int i = 0; i < kHistBins; ++i) out_uv_hist[det * kHistBins + i] = 0.0f;
+            for (int i = 0; i < kHistBinsL; ++i) out_l_hist[det * kHistBinsL + i] = 0.0f;
         }
         return;
     }
@@ -189,6 +200,8 @@ extern "C" __global__ void kJerseyUVMean(
             atomicAdd(&s_hist_sum_y[bin], (float)y);
             atomicAdd(&s_hist_sum_u[bin], (float)u);
             atomicAdd(&s_hist_sum_v[bin], (float)v);
+            const int bl = min(kHistBinsL - 1, max(0, y * kHistBinsL / 256));
+            atomicAdd(&s_l_hist[bl], 1);
             atomicAdd(&s_cloth_count, 1);
             if (debug_mask) {
                 atomicExch((int*)&debug_mask[my * proto_w + mx], __float_as_int(1.0f));
@@ -226,6 +239,14 @@ extern "C" __global__ void kJerseyUVMean(
             out_best_yuv[det * 3] = 0.0f;
             out_best_yuv[det * 3 + 1] = 0.0f;
             out_best_yuv[det * 3 + 2] = 0.0f;
+        }
+
+        const float inv_cloth = (s_cloth_count > 0) ? (1.0f / (float)s_cloth_count) : 0.0f;
+        for (int i = 0; i < kHistBins; ++i) {
+            out_uv_hist[det * kHistBins + i] = (float)s_hist_count[i] * inv_cloth;
+        }
+        for (int i = 0; i < kHistBinsL; ++i) {
+            out_l_hist[det * kHistBinsL + i] = (float)s_l_hist[i] * inv_cloth;
         }
     }
 }
