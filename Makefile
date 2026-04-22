@@ -142,6 +142,7 @@ endif
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_SPECIFIC)$(HAVE_NVCC),111)
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_extract.cu,avpl_jersey_uv_mean_ptx,objs/src/nodes/neural_net/sport_specific/jersey_color_extract.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_mask_feature_encoder.cu,avpl_player_mask_feature_encoder_ptx,objs/src/nodes/neural_net/sport_specific/player_mask_feature_encoder.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
 ifeq ($(HAVE_CUDA),1)
