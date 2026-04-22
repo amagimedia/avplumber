@@ -523,6 +523,7 @@ public:
         }
 
         int matched = 0;
+        int dbg_pixel_skip = 0, dbg_zero_skip = 0, dbg_ema_ok = 0;
         for (size_t ti = 0; ti < tracked.size(); ++ti) {
             const int si = track_to_seg[ti];
             if (si < 0) continue;
@@ -533,8 +534,9 @@ public:
             std::memcpy(evidence.l_hist, seg.l_hist, sizeof(evidence.l_hist));
             evidence.confidence = seg.confidence;
             evidence.pixels = seg.pixels;
-            if (seg.pixels < min_jersey_pixels_ || seg.confidence < min_jersey_confidence_) continue;
-            if (isZeroHistogram(seg.uv_hist, kUVHistBins)) continue;
+            if (seg.pixels < min_jersey_pixels_ || seg.confidence < min_jersey_confidence_) { ++dbg_pixel_skip; continue; }
+            if (isZeroHistogram(seg.uv_hist, kUVHistBins)) { ++dbg_zero_skip; continue; }
+            ++dbg_ema_ok;
             TrackColor& tc = tracks_[tracked[ti].track_id];
             if (tc.hits == 0) {
                 std::memcpy(tc.uv_hist_ema, seg.uv_hist, sizeof(tc.uv_hist_ema));
@@ -738,6 +740,10 @@ public:
             av_dict_set(&frm.raw()->metadata, debug_seg_metadata_key_.c_str(), debug_seg_md.dump().c_str(), 0);
         }
 
+        int tracks_with_hits = 0;
+        for (const auto& kv : tracks_) {
+            if (kv.second.hits > 0) ++tracks_with_hits;
+        }
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             const float proto_sep = bootstrapped_
                 ? combinedHistDistance(proto_uv_[0], proto_l_[0], proto_uv_[1], proto_l_[1])
@@ -761,7 +767,11 @@ public:
                       << " l_weight=" << l_weight_
                       << " min_conf=" << min_jersey_confidence_
                       << " soft_margin=" << soft_assignment_margin_
-                      << " init_margin=" << initial_assignment_margin_;
+                      << " init_margin=" << initial_assignment_margin_
+                      << " tracks_w_hits=" << tracks_with_hits
+                      << " dbg_pixel_skip=" << dbg_pixel_skip
+                      << " dbg_zero_skip=" << dbg_zero_skip
+                      << " dbg_ema_ok=" << dbg_ema_ok;
         }
 
         this->sink_->put(frm);
