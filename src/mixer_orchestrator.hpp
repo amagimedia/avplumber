@@ -23,6 +23,10 @@ class MixerOrchestrator {
     void startGroup(const std::string& group_name);
     void stopGroup(const std::string& group_name);
 
+    // Flush all wipe pipeline edges listed in state_->wipe_flush_edges.
+    // Call before startGroup (clean slate) and after stopGroup (release memory).
+    void flushWipeEdges();
+
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name);
 
     /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
