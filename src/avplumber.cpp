@@ -918,6 +918,7 @@ public:
                 state->slot_b.post_otm_name = sb.value("post_otm", std::string(""));
             }
             if (cfg.contains("wipe_otm")) state->wipe_otm_name = cfg["wipe_otm"].get<std::string>();
+            if (cfg.contains("wipe_base_fps")) state->wipe_base_fps_name = cfg["wipe_base_fps"].get<std::string>();
             if (cfg.contains("wipe_selector")) state->wipe_selector_name = cfg["wipe_selector"].get<std::string>();
             if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
             if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
