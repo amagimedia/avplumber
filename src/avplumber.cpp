@@ -922,6 +922,7 @@ public:
             if (cfg.contains("wipe_selector")) state->wipe_selector_name = cfg["wipe_selector"].get<std::string>();
             if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
             if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
+            if (cfg.contains("wipe_tail_edge")) state->wipe_tail_edge = cfg["wipe_tail_edge"].get<std::string>();
             if (cfg.contains("wipe_flush_edges")) {
                 state->wipe_flush_edges.clear();
                 for (const auto& e : cfg["wipe_flush_edges"])

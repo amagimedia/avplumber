@@ -68,6 +68,11 @@ struct MixerState : public InstanceShared<MixerState> {
     // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
     std::string wipe_group_name;       // "mixer_wipe"
     std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
+    /// Edge feeding the overlay's wipe input (e.g. "wipe_rt_fps_out"). Polled at
+    /// wipe end to ensure the tail of the wipe has been consumed by the overlay
+    /// before `wipe_selector` flips back to the direct path; otherwise the last
+    /// ~pipeline-latency worth of wipe frames is cut off at the selector.
+    std::string wipe_tail_edge;
 
     // Edges to flush before each wipe starts and after each wipe stops.
     // Prevents frames from a previous wipe run from bleeding into the next one.
