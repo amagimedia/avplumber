@@ -219,14 +219,13 @@ public:
                 return;
             }
         }
-        // wait for packet
-        //av::Packet pkt = this->source_->get();
-        av::Packet *pktp = this->source_->peek();
-        if (pktp==nullptr) {
+        // Dequeue into a local packet so we don't keep a raw pointer into the
+        // edge queue while concurrent flush/cleanup logic is running.
+        av::Packet pkt;
+        if (!this->source_->tryGet(pkt, 0)) {
             //flush();
             return;
         }
-        av::Packet &pkt = *pktp;
         // lock us, to prevent race condition with flushing!
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -285,7 +284,6 @@ public:
                     }
                     //if (!frm) this->finished_ = true;
                 } while (flush_magic_ && waiting_for_frame_ > 0);
-                this->source_->pop();
             } else {
                 // this is flush packet
                 // so flush decoder
@@ -295,7 +293,6 @@ public:
                     this->flush_frames_.push_back(OutputFrame());
                     //this->sink_->put(OutputFrame());
                 }
-                this->source_->pop();
             }
         }
     }

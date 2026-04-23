@@ -186,7 +186,7 @@ public:
         const float print_stats_every = 10;
         if ( (now-last_printed_stats_).seconds()>print_stats_every ) {
             if (dropped_>0 || duplicated_>0) {
-                logstream << "statistics: in " << total_in_ << ", out " << total_out_ << ", duplicated " << duplicated_ << ", dropped " << dropped_ << ", est. input FPS " << (fps_.getDouble() * (double)total_in_ / (double)total_out_);
+                logstream << "force_fps[" << label_ << "] statistics: in " << total_in_ << ", out " << total_out_ << ", duplicated " << duplicated_ << ", dropped " << dropped_ << ", est. input FPS " << (fps_.getDouble() * (double)total_in_ / (double)total_out_);
                 last_printed_stats_ = now;
             }
             /*dropped_ = 0;
