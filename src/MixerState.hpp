@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <vector>
 #include <atomic>
 
 struct SourceLayout {
@@ -66,6 +67,10 @@ struct MixerState : public InstanceShared<MixerState> {
     // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
     std::string wipe_group_name;       // "mixer_wipe"
     std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
+
+    // Edges to flush before each wipe starts and after each wipe stops.
+    // Prevents frames from a previous wipe run from bleeding into the next one.
+    std::vector<std::string> wipe_flush_edges;
 
     const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
     const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }

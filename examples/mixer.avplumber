@@ -24,10 +24,11 @@ node.add { "type": "one_to_many", "name": "otm_cam2", "src": "cam2_fps", "dst": 
 # Per-input crop/scale chains (one per camera per slot)
 # ============================================================
 
-node.add { "type": "filter_video", "name": "cs_cam1_a", "src": "cam1_a", "dst": "cam1_a_scaled", "graph": "scale_cuda=1920:1080", "hwaccel": "@gpu", "group": "input_cam1", "auto_restart": "on" }
-node.add { "type": "filter_video", "name": "cs_cam2_a", "src": "cam2_a", "dst": "cam2_a_scaled", "graph": "scale_cuda=1920:1080", "hwaccel": "@gpu", "group": "input_cam2", "auto_restart": "on" }
-node.add { "type": "filter_video", "name": "cs_cam1_b", "src": "cam1_b", "dst": "cam1_b_scaled", "graph": "scale_cuda=1920:1080", "hwaccel": "@gpu", "group": "input_cam1", "auto_restart": "on" }
-node.add { "type": "filter_video", "name": "cs_cam2_b", "src": "cam2_b", "dst": "cam2_b_scaled", "graph": "scale_cuda=640:360", "hwaccel": "@gpu", "group": "input_cam2", "auto_restart": "on" }
+# scale_cuda interp_algo: bicubic (default) < lanczos (sharper, more GPU). Wipe leg cannot use scale_cuda on alpha (see wipe_fmt).
+node.add { "type": "filter_video", "name": "cs_cam1_a", "src": "cam1_a", "dst": "cam1_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_cam1", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_cam2_a", "src": "cam2_a", "dst": "cam2_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_cam2", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_cam1_b", "src": "cam1_b", "dst": "cam1_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_cam1", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_cam2_b", "src": "cam2_b", "dst": "cam2_b_scaled", "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_cam2", "auto_restart": "on" }
 
 # ============================================================
 # Scene Rendering Layer: fixed 2-slot compositors
@@ -71,23 +72,30 @@ node.add { "type": "output", "format": "flv", "url": "rtmp://test-streamer-s3dev
 node.add { "type": "input_rec", "name": "wipe_input", "url": "", "loop": false, "dst": "wipe_raw_pkt", "group": "mixer_wipe" }
 node.add { "type": "demux", "name": "wipe_demux", "src": "wipe_raw_pkt", "routing": { "v:0": "wipe_v_pkt" }, "group": "mixer_wipe" }
 node.add { "type": "dec_video", "name": "wipe_dec", "src": "wipe_v_pkt", "dst": "wipe_dec_out", "pixel_format": "?cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
-node.add { "type": "filter_video", "name": "wipe_fmt", "src": "wipe_dec_out", "dst": "wipe_fmt_out", "graph": "format=yuva420p,hwupload_cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
+# Downscale wipe to program size before hwupload. scale_cuda has no yuva420p support, so the
+# software scale→format→hwupload pipeline is correct here. overlay_many_cuda requires the
+# overlay to be >= main size, so scaling to 1920x1080 is mandatory before upload.
+node.add { "type": "filter_video", "name": "wipe_fmt", "src": "wipe_dec_out", "dst": "wipe_fmt_out", "graph": "format=yuva420p,scale=1920:1080:flags=lanczos,hwupload_cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
 node.add { "type": "realtime", "name": "wipe_rt", "src": "wipe_fmt_out", "dst": "wipe_rt_out", "set_pts": true, "group": "mixer_wipe" }
-node.add { "type": "filter_video", "name": "wipe_overlay", "src": ["final_wipe_in", "wipe_rt_out"], "dst": "wipe_overlay_out", "graph": "[in0]convert_cuda=format=yuv420p[clean]; [clean][in1]overlay_cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
+# overlay_many_cuda requires YUV420P main; scale_cuda wraps convert NV12<->YUV420P on GPU.
+# This ensures wipe_overlay_out always carries NV12 sw_format, matching assume_video_format.
+# overlay_cuda is avoided: NV12 main + YUVA420P overlay is unsupported by it, and convert_cuda
+# produces YUV420P output that is misread as NV12 by the encoder after filter restarts.
+node.add { "type": "filter_video", "name": "wipe_overlay", "src": ["final_wipe_in", "wipe_rt_out"], "dst": "wipe_overlay_out", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "mixer_wipe" }
 
 # ============================================================
 # Initialize Mixer State
 # ============================================================
 
-mixer.init mixer { "timeline": "mixer_tl", "hwaccel": "@gpu", "fps_num": 30, "fps_den": 1, "source_switcher": "out_sel", "initial_pgm_slot": "A", "initial_pgm_scene": "fullcam1", "wipe_otm": "otm_final", "wipe_selector": "wipe_sel", "wipe_group": "mixer_wipe", "wipe_input_node": "wipe_input", "slot_a": { "compositor": "comp_a", "norm_ts": "norm_a", "post_otm": "otm_scene_a" }, "slot_b": { "compositor": "comp_b", "norm_ts": "norm_b", "post_otm": "otm_scene_b" } }
+mixer.init mixer { "timeline": "mixer_tl", "hwaccel": "@gpu", "fps_num": 30, "fps_den": 1, "source_switcher": "out_sel", "initial_pgm_slot": "A", "initial_pgm_scene": "fullcam1", "wipe_otm": "otm_final", "wipe_selector": "wipe_sel", "wipe_group": "mixer_wipe", "wipe_input_node": "wipe_input", "wipe_flush_edges": ["wipe_raw_pkt", "wipe_v_pkt", "wipe_dec_out", "wipe_fmt_out", "wipe_rt_out", "final_wipe_pre", "final_wipe_in", "wipe_overlay_out"], "slot_a": { "compositor": "comp_a", "norm_ts": "norm_a", "post_otm": "otm_scene_a" }, "slot_b": { "compositor": "comp_b", "norm_ts": "norm_b", "post_otm": "otm_scene_b" } }
 
 # Register camera sources (name, otm_node, input_index, cs_node_a, cs_node_b)
 mixer.source mixer cam1 otm_cam1 0 cs_cam1_a cs_cam1_b
 mixer.source mixer cam2 otm_cam2 1 cs_cam2_a cs_cam2_b
 
 # Define scenes (`sources`: logical name -> ffmpeg graph + compositor rect; omit a camera for off-air / dummy layer slot)
-mixer.scene mixer fullcam1 { "sources": { "cam1": { "graph": "scale_cuda=1920:1080", "dst_x": 0, "dst_y": 0 } } }
-mixer.scene mixer pip { "sources": { "cam1": { "graph": "scale_cuda=1920:1080", "dst_x": 0, "dst_y": 0 }, "cam2": { "graph": "scale_cuda=640:360", "dst_x": 1280, "dst_y": 720 } } }
+mixer.scene mixer fullcam1 { "sources": { "cam1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer pip { "sources": { "cam1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 }, "cam2": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 1280, "dst_y": 720 } } }
 
 # ============================================================
 # Start all groups

@@ -92,6 +92,13 @@ void MixerOrchestrator::stopGroup(const std::string& group_name) {
     nodes_->group(group_name)->stopNodes();
 }
 
+void MixerOrchestrator::flushWipeEdges() {
+    for (const auto& name : state_->wipe_flush_edges) {
+        auto edge = nodes_->edges()->findAny(name);
+        if (edge) edge->clear();
+    }
+}
+
 void MixerOrchestrator::ensureIdle() const {
     auto mode = state_->transition_mode.load();
     if (mode != MixerState::TransitionMode::Idle)
@@ -137,8 +144,25 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
         if (src_it == state_->sources.end()) continue;
         const auto& info = src_it->second;
         const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
-        setNodeParam(cs_node, "graph", layout.crop_scale_graph);
-        autoRestartNode(cs_node);
+
+        // Only restart the crop/scale node when the graph string actually changed.
+        // An unnecessary restart allocates a new hw_frames_ctx even with identical
+        // parameters, propagating a spurious hw_frames_ctx-change event downstream.
+        // For wipe transitions this ultimately causes wipe_overlay to rebuild its
+        // filter graph mid-wipe, triggering a one-frame EXT_NULL gap (overlay
+        // disappears for one frame at the midpoint).
+        const auto& node_params = nodes_->node(cs_node)->parameters();
+        const std::string old_graph = node_params.value("graph", std::string(""));
+        if (old_graph == layout.crop_scale_graph) {
+            logstream << "loadSceneIntoSlot: " << cs_node
+                      << " graph unchanged – skipping restart to avoid spurious hw_frames_ctx change";
+        } else {
+            logstream << "loadSceneIntoSlot: " << cs_node
+                      << " graph changed (\"" << old_graph << "\" -> \""
+                      << layout.crop_scale_graph << "\") – restarting";
+            setNodeParam(cs_node, "graph", layout.crop_scale_graph);
+            autoRestartNode(cs_node);
+        }
     }
 
     setNodeObject(slot.compositor_name, "layers", compositorLayersFromScene(*state_, scene));
@@ -407,8 +431,12 @@ void MixerOrchestrator::wipeThread(
         timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
 
         // Stop the pre-created wipe subgraph; nodes are re-used on the next wipe
-        if (!state->wipe_group_name.empty())
+        if (!state->wipe_group_name.empty()) {
             orch.stopGroup(state->wipe_group_name);
+            // Release any frames still sitting in wipe pipeline edges so they
+            // don't replay at the start of the next wipe.
+            orch.flushWipeEdges();
+        }
 
         // Flip state
         state->pgm_is_slot_a = new_pgm_is_slot_a;
@@ -447,6 +475,8 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     // stop() call is a no-op.
     nodes_->node(state_->wipe_input_node_name)->stop(true);
     setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
+    // Discard any frames left over from a previous wipe run before starting fresh.
+    flushWipeEdges();
     startGroup(state_->wipe_group_name);
 
     // Route output through wipe overlay (timeline so it tracks frame PTS like other mixer nodes)
