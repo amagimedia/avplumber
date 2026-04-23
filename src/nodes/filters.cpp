@@ -112,12 +112,11 @@ protected:
             }
         }
         bool checkParameters(typename MediaSpecific::Parameters params, AVFrame *raw, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
-            // Detect hw_frames_ctx changes by comparing the SEMANTIC content of
+            // Detect hw_frames_ctx changes by comparing the semantic content of
             // the AVHWFramesContext (format, sw_format, width, height, device),
-            // not the pointer value.  NVENC and hwupload_cuda can rotate pool
-            // objects (new AVBufferRef→data) while keeping the same format and
-            // size.  Pointer comparison causes spurious rebuilds mid-wipe which
-            // reset framesync and trigger the EXT_NULL race.
+            // not the pointer value. NVENC and hwupload_cuda can rotate pool
+            // objects (new AVBufferRef->data) while keeping the same format and
+            // size, and pointer comparison would trigger unnecessary rebuilds.
             bool hw_frames_ctx_changed = false;
             if (raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
                 if (!initial_hw_frames_ctx_) {
@@ -280,20 +279,6 @@ protected:
     bool do_shift_ = true;
     std::shared_ptr<HWAccelDevice> hwaccel_;
 
-    // --- Post-rebuild peer synchronisation state ---
-    // After a rebuild, the triggering source's first frame has a smaller PTS
-    // than the peer input that was empty at rebuild time.  If we feed it to
-    // framesync, framesync advances the trigger before advancing the peer →
-    // peer.frame is still NULL (STATE_BOF) → EXT_NULL output (no overlay).
-    //
-    // Fix: skip frames from the triggering source until the peer has been fed
-    // at least once; then framesync can advance the peer first.
-    //
-    // -1 = no pending sync; >= 0 = index of the peer we are waiting for.
-    int  rebuild_pending_peer_       = -1;
-    int  rebuild_pending_skip_count_ = 0;
-    static constexpr int kMaxRebuildSkipFrames = 8;
-    
     void freeFilterGraph() {
         if (filter_graph_ == nullptr) return;
         avfilter_graph_free(&filter_graph_);
@@ -440,48 +425,7 @@ public:
             std::shared_ptr<Edge<T>> edge = this->source_edges_[source_index];
             frmin = edge->peek();
             if (frmin && (!frmin->isNull()) && frmin->isComplete() && frmin->timeBase().getNumerator() && frmin->timeBase().getDenominator()) {
-
-                // --- Post-rebuild peer sync gate ---
-                // Discard frames from the triggering source until the waiting
-                // peer input has been fed to framesync at least once, so that
-                // framesync can advance the peer before the trigger and avoid
-                // an EXT_NULL output frame.
-                if (rebuild_pending_peer_ >= 0) {
-                    if (source_index == rebuild_pending_peer_) {
-                        // Peer has arrived.  Clear the gate and fall through to
-                        // normal processing below.
-                        logstream << "post-rebuild peer sync: peer in["
-                                  << rebuild_pending_peer_ << "] arrived (pts "
-                                  << frmin->pts()
-                                  << "); resuming normal feed after "
-                                  << rebuild_pending_skip_count_ << " skipped trigger frames";
-                        rebuild_pending_peer_       = -1;
-                        rebuild_pending_skip_count_ = 0;
-                        // fall through – feed this peer frame normally
-                    } else {
-                        // Still the triggering source.  Skip it.
-                        if (rebuild_pending_skip_count_ < kMaxRebuildSkipFrames) {
-                            ++rebuild_pending_skip_count_;
-                            logstream << "post-rebuild peer sync: skipping in["
-                                      << source_index << "] pts=" << frmin->pts()
-                                      << " (skip " << rebuild_pending_skip_count_
-                                      << "/" << kMaxRebuildSkipFrames
-                                      << ", waiting for in[" << rebuild_pending_peer_ << "])";
-                            edge->pop();
-                            return;
-                        } else {
-                            // Safety: give up waiting; proceed normally.
-                            logstream << "post-rebuild peer sync: timeout waiting for in["
-                                      << rebuild_pending_peer_ << "] after "
-                                      << rebuild_pending_skip_count_
-                                      << " skipped frames; giving up";
-                            rebuild_pending_peer_       = -1;
-                            rebuild_pending_skip_count_ = 0;
-                        }
-                    }
-                }
-
-                Port &source_port = sources_[source_index];;
+                Port &source_port = sources_[source_index];
                 if (!source_port.checkFrame(*frmin, edge)) {
                     if (filter_graph_!=nullptr) {
                         logstream << "Input parameters changed. Restarting filter.";
@@ -489,196 +433,10 @@ public:
                     freeFilterGraph();
                 }
                 source_port.captureInitialHWFramesCtxFromFrame(*frmin);
-
-                // Before rebuilding, pre-capture hw_frames_ctx for every peer
-                // input that already has a frame in its edge.  This lets
-                // maybeInitFilterGraph() initialise each peer's buffersrc with
-                // the real upstream pool instead of falling back to a
-                // device-allocated one in initSourceFilter(); it also refreshes
-                // any ref left over from a previous run.  With the semantic
-                // hw_frames_ctx compare in Port::checkParameters() this is no
-                // longer required for correctness — the later checkFrame() on
-                // the real peer frame will accept a semantically-equal pool
-                // without a rebuild — but skipping it here avoids one extra
-                // hwframe context allocation and is effectively free.
-                if (filter_graph_ == nullptr && this->source_edges_.size() > 1) {
-                    for (int j = 0; j < (int)this->source_edges_.size(); j++) {
-                        if (j == source_index) continue;
-                        auto ej = this->source_edges_[j];
-                        T* fj = ej->peek();
-                        if (fj && !fj->isNull() && fj->isComplete() &&
-                            fj->timeBase().getNumerator() && fj->timeBase().getDenominator()) {
-                            sources_[j].checkFrame(*fj, ej);
-                            sources_[j].captureInitialHWFramesCtxFromFrame(*fj);
-                        }
-                    }
-                }
-
-                bool was_rebuilt = false;
                 if (filter_graph_==nullptr) {
-                    // Any rebuild_pending_peer_ state refers to the previous
-                    // filter graph's framesync; with a fresh graph it is
-                    // meaningless.  Clearing it here prevents cross-wipe state
-                    // leakage (e.g. the gate being armed at the end of wipe N
-                    // and still blocking trigger frames at the start of wipe
-                    // N+1).
-                    if (rebuild_pending_peer_ >= 0) {
-                        logstream << "clearing stale rebuild_pending_peer_=" << rebuild_pending_peer_
-                                  << " (skip=" << rebuild_pending_skip_count_
-                                  << ") before rebuild";
-                    }
-                    rebuild_pending_peer_       = -1;
-                    rebuild_pending_skip_count_ = 0;
-                    was_rebuilt = maybeInitFilterGraph();
-                }
-                // After a rebuild, framesync resets to STATE_BOF for all inputs.
-                // Downstream filters that follow the overlay convention
-                // (EXT_NULL on slave inputs — see ff_framesync_init_dualinput)
-                // do NOT wait for slaves to leave STATE_BOF before emitting
-                // output: as soon as the master is in STATE_RUN, framesync
-                // blends with a NULL slave (framesync.c ~line 230-232).  After
-                // a rebuild this manifests as one camera-only frame (missing
-                // overlay) whenever the trigger reaches framesync before the
-                // peer does.
-                //
-                // Primary defence: the semantic hw_frames_ctx check prevents
-                // pool-rotation rebuilds mid-wipe, so this post-rebuild path
-                // is normally entered only once (at wipe-start).
-                //
-                // Strategy, by peer state at rebuild time:
-                //   earlier peer (j < source_index):
-                //     drop stale frames so the first peer frame framesync sees
-                //     is at/after the trigger PTS.
-                //   later peer (j > source_index):
-                //     AHEAD or EMPTY: skip the trigger and arm
-                //       rebuild_pending_peer_ so that subsequent trigger frames
-                //       are also dropped until the peer has been fed.  After
-                //       that, framesync advances the peer first → no EXT_NULL.
-                //     BEHIND trigger: feed peer frames to buffersrc[j] until
-                //       it's close to trigger, then fall through to normal
-                //       feed.
-
-                // Set to true when a peer is already ahead: skip feeding the trigger.
-                bool skip_trigger = false;
-                // Set to the index of a peer that was empty at rebuild time, so we
-                // can arm rebuild_pending_peer_ if we end up skipping the trigger.
-                int  skip_trigger_pending_peer = -1;
-
-                if (was_rebuilt && this->source_edges_.size() > 1) {
-                    static const av::Rational kUsTimebase{1, 1000000};
-                    static constexpr int64_t kOneFrame30fps_us = 33334; // ≈ 1/30 s in µs
-                    int64_t trigger_us = frmin->pts().timestamp(kUsTimebase);
-
-                    logstream << "Post-rebuild: source_index=" << source_index
-                              << " trigger_pts=" << frmin->pts()
-                              << " (us=" << trigger_us << ")";
-
-                    for (int j = 0; j < (int)this->source_edges_.size(); j++) {
-                        if (j == source_index) continue;
-                        if (filter_graph_ == nullptr) break;
-                        std::shared_ptr<Edge<T>> ej = this->source_edges_[j];
-                        Port &pj = sources_[j];
-                        T* fj = ej->peek();
-
-                        // Log peer state regardless of branch taken.
-                        if (fj && !fj->isNull() && fj->isComplete() &&
-                            fj->timeBase().getNumerator() && fj->timeBase().getDenominator()) {
-                            logstream << "  peer in[" << j << "] pts=" << fj->pts()
-                                      << " (us=" << fj->pts().timestamp(kUsTimebase) << ")"
-                                      << (fj->pts().timestamp(kUsTimebase) > trigger_us ? " AHEAD" :
-                                         (fj->pts().timestamp(kUsTimebase) == trigger_us ? " EQUAL" : " BEHIND"));
-                        } else {
-                            logstream << "  peer in[" << j << "] EMPTY";
-                        }
-
-                        if (j < source_index) {
-                            // j is an "earlier" input: drop stale frames so the
-                            // first frame framesync sees is contemporaneous with
-                            // the trigger (prevents premature in[j] advancement
-                            // causing EXT_NULL for the trigger input).
-                            int n_dropped = 0;
-                            while (true) {
-                                fj = ej->peek();
-                                if (!fj || fj->isNull() || !fj->isComplete() ||
-                                    !fj->timeBase().getNumerator() || !fj->timeBase().getDenominator())
-                                    break;
-                                if (fj->pts().timestamp(kUsTimebase) >= trigger_us) break;
-                                ej->pop();
-                                n_dropped++;
-                            }
-                            if (n_dropped > 0) {
-                                logstream << "  dropped " << n_dropped
-                                          << " stale in[" << j << "] frames";
-                            }
-                        } else {
-                            // j is a "later" input (e.g. wipe animation in[1]).
-                            const bool peer_valid =
-                                fj && !fj->isNull() && fj->isComplete() &&
-                                fj->timeBase().getNumerator() && fj->timeBase().getDenominator();
-                            const bool peer_ahead =
-                                peer_valid && fj->pts().timestamp(kUsTimebase) > trigger_us;
-                            if (!peer_valid || peer_ahead) {
-                                // Peer is EMPTY or AHEAD of the trigger.  In both
-                                // cases feeding the trigger now would make
-                                // framesync advance it first and emit EXT_NULL
-                                // until the peer catches up.  Skip the trigger
-                                // and arm the pending-peer gate so subsequent
-                                // trigger frames are also dropped until a peer
-                                // frame is processed.
-                                //
-                                // With force_fps normalisation on both inputs
-                                // and the semantic hw_frames_ctx check that
-                                // suppresses pool-rotation rebuilds, this only
-                                // fires at genuine wipe start (peer edge empty).
-                                skip_trigger = true;
-                                skip_trigger_pending_peer = j;
-                                logstream << "  -> skip_trigger + pending peer (in[" << j
-                                          << (peer_valid
-                                              ? "] AHEAD)"
-                                              : "] empty)");
-                            } else {
-                                // Peer LAGS the trigger: prime it so framesync has
-                                // it close to the trigger PTS.
-                                int n_fed = 0;
-                                while (filter_graph_ != nullptr) {
-                                    fj = ej->peek();
-                                    if (!fj || fj->isNull() || !fj->isComplete() ||
-                                        !fj->timeBase().getNumerator() || !fj->timeBase().getDenominator())
-                                        break;
-                                    if (!pj.checkFrame(*fj, ej)) {
-                                        logstream << "  input parameters changed during post-rebuild priming; restarting filter";
-                                        freeFilterGraph();
-                                        break;
-                                    }
-                                    pj.captureInitialHWFramesCtxFromFrame(*fj);
-                                    if (filter_graph_ == nullptr) break;
-                                    if (do_shift_) eq_.in(*fj);
-                                    int rj = pj.putFrame(*fj);
-                                    if (rj < 0) break;
-                                    ej->pop();
-                                    n_fed++;
-                                    int64_t fj_us = fj->pts().timestamp(kUsTimebase);
-                                    if (fj_us + kOneFrame30fps_us >= trigger_us) break;
-                                }
-                                logstream << "  -> primed " << n_fed << " in[" << j << "] frames";
-                            }
-                        }
-                    }
+                    maybeInitFilterGraph();
                 }
                 if (filter_graph_!=nullptr) {
-                    if (skip_trigger) {
-                        // Drop the trigger frame without feeding it to framesync.
-                        // frmin must not be used after this pop.
-                        edge->pop();
-                        if (skip_trigger_pending_peer >= 0) {
-                            // Arm the gate to also skip subsequent trigger frames
-                            // until the peer has been fed.
-                            rebuild_pending_peer_       = skip_trigger_pending_peer;
-                            rebuild_pending_skip_count_ = 0;
-                            logstream << "Post-rebuild peer sync armed: waiting for in["
-                                      << rebuild_pending_peer_ << "]";
-                        }
-                    } else {
                     if (do_shift_) {
                         eq_.in(*frmin);
                     }
@@ -688,10 +446,9 @@ public:
                     } else if (ret >= 0) {
                         edge->pop(); // no need to retry, pop this frame
                     } else {
-                        // AVERROR(EAGAIN): this buffersrc is not accepting yet.  findSourceWithData()
-                        // always prefers the smallest PTS among inputs; when timebases are not comparable
-                        // (e.g. program 1/30 vs wallclock ms on a wipe), only that pad is ever fed and
-                        // multi-input filters (overlay, framesync) never advance.
+                        // AVERROR(EAGAIN): this buffersrc is not accepting yet. findSourceWithData()
+                        // always prefers the smallest PTS among inputs; when timebases are not comparable,
+                        // only that pad is ever fed and multi-input filters may never advance.
                         for (int j = 0; j < (int)this->source_edges_.size(); j++) {
                             if (j == source_index) continue;
                             std::shared_ptr<Edge<T>> e2 = this->source_edges_[j];
@@ -725,7 +482,6 @@ public:
                             }
                         }
                     }
-                    } // end else (skip_trigger)
                 }
                 if (filter_graph_!=nullptr) {
                     int finished_sinks = 0;
