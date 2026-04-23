@@ -112,15 +112,41 @@ protected:
             }
         }
         bool checkParameters(typename MediaSpecific::Parameters params, AVFrame *raw, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
-            bool hw_frames_ctx_changed = raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data &&
-                ((!initial_hw_frames_ctx_) || (raw->hw_frames_ctx->data != initial_hw_frames_ctx_->data));
-            if (hw_frames_ctx_changed) {
-                if (initial_hw_frames_ctx_) {
-                    av_buffer_unref(&initial_hw_frames_ctx_);
-                    initial_hw_frames_ctx_ = nullptr;
-                    logstream << "hw frames ctx changed";
-                } else {
+            // Detect hw_frames_ctx changes by comparing the SEMANTIC content of
+            // the AVHWFramesContext (format, sw_format, width, height, device),
+            // not the pointer value.  NVENC and hwupload_cuda can rotate pool
+            // objects (new AVBufferRef→data) while keeping the same format and
+            // size.  Pointer comparison causes spurious rebuilds mid-wipe which
+            // reset framesync and trigger the EXT_NULL race.
+            bool hw_frames_ctx_changed = false;
+            if (raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
+                if (!initial_hw_frames_ctx_) {
+                    // First time we see a hw_frames_ctx: not a "change" per se
+                    // (initial state was null), but we must update in_args_ and
+                    // rebuild because the buffersrc was created without it.
+                    hw_frames_ctx_changed = true;
                     logstream << "hw frames ctx appeared, was null";
+                } else {
+                    const AVHWFramesContext *prev = (const AVHWFramesContext *)initial_hw_frames_ctx_->data;
+                    const AVHWFramesContext *cur  = (const AVHWFramesContext *)raw->hw_frames_ctx->data;
+                    bool semantically_equal =
+                        (cur->format    == prev->format) &&
+                        (cur->sw_format == prev->sw_format) &&
+                        (cur->width     == prev->width) &&
+                        (cur->height    == prev->height) &&
+                        (cur->device_ref && prev->device_ref &&
+                         cur->device_ref->data == prev->device_ref->data);
+                    if (!semantically_equal) {
+                        hw_frames_ctx_changed = true;
+                        logstream << "hw frames ctx changed (semantic mismatch:"
+                                  << " fmt " << prev->format << "->" << cur->format
+                                  << " sw_fmt " << prev->sw_format << "->" << cur->sw_format
+                                  << " size " << prev->width << "x" << prev->height
+                                  << "->" << cur->width << "x" << cur->height << ")";
+                        av_buffer_unref(&initial_hw_frames_ctx_);
+                        initial_hw_frames_ctx_ = nullptr;
+                    }
+                    // else: pool rotation with same semantics — transparent, no rebuild
                 }
             }
             bool result = (timebase==prev_tb_) && (!hw_frames_ctx_changed) && ms_.checkParameters(params);
@@ -519,19 +545,19 @@ public:
                 // overlay) whenever the trigger reaches framesync before the
                 // peer does.
                 //
+                // Primary defence: the semantic hw_frames_ctx check prevents
+                // pool-rotation rebuilds mid-wipe, so this post-rebuild path
+                // is normally entered only once (at wipe-start).
+                //
                 // Strategy, by peer state at rebuild time:
                 //   earlier peer (j < source_index):
                 //     drop stale frames so the first peer frame framesync sees
                 //     is at/after the trigger PTS.
                 //   later peer (j > source_index):
-                //     AHEAD of trigger: inject a reference clone of the peer's
-                //       earliest frame with pts = trigger_pts into
-                //       buffersrc[j], so framesync advances both inputs in one
-                //       iteration.  Works with EXT_NULL filters.
-                //     EMPTY at rebuild time: skip the trigger and arm
+                //     AHEAD or EMPTY: skip the trigger and arm
                 //       rebuild_pending_peer_ so that subsequent trigger frames
-                //       are dropped until the peer arrives.  We cannot clone
-                //       what does not exist yet.
+                //       are also dropped until the peer has been fed.  After
+                //       that, framesync advances the peer first → no EXT_NULL.
                 //     BEHIND trigger: feed peer frames to buffersrc[j] until
                 //       it's close to trigger, then fall through to normal
                 //       feed.
@@ -593,69 +619,24 @@ public:
                             if (fj && !fj->isNull() && fj->isComplete() &&
                                 fj->timeBase().getNumerator() && fj->timeBase().getDenominator() &&
                                 fj->pts().timestamp(kUsTimebase) > trigger_us) {
-                                // Peer is AHEAD.  Just skipping the trigger is
-                                // insufficient: framesync's advance() picks the
-                                // input with the SMALLEST pts_next first
-                                // (framesync.c ~line 198-210).  Slave filters
-                                // like overlay_many_cuda and vf_overlay use
-                                // EXT_NULL for non-master inputs (the overlay
-                                // convention — see
-                                // ff_framesync_init_dualinput), which means a
-                                // STATE_BOF slave does NOT clear frame_ready
-                                // (framesync.c ~line 230-232) → one blended
-                                // frame is emitted WITHOUT the slave's overlay.
+                                // Peer is AHEAD of the trigger.  Skip the trigger
+                                // and arm the pending-peer gate so subsequent
+                                // trigger frames are also dropped until the peer
+                                // has been fed once.  At that point framesync can
+                                // advance the peer first, leaving the master in
+                                // STATE_BOF → no EXT_NULL frame.
                                 //
-                                // Fix: av_buffersrc_add_frame a REFERENCE clone
-                                // of the slave's earliest frame with its PTS
-                                // rewritten to match the trigger.  Framesync
-                                // then sees both inputs at the same PTS and
-                                // advances them TOGETHER in one iteration → the
-                                // first blended output is correct.  The real
-                                // slave frame remains in the edge and is
-                                // consumed via the normal findSourceWithData
-                                // path on a subsequent process() iteration.
-                                //
-                                // This fix is filter-agnostic: it works with
-                                // EXT_NULL slaves (overlay_many_cuda,
-                                // overlay_cuda, software overlay, etc.), so
-                                // swapping the downstream filter does not break
-                                // anything.
-                                av::Rational peer_tb = fj->timeBase();
-                                av::Timestamp clone_ts(
-                                    frmin->pts().timestamp(peer_tb), peer_tb);
-                                T clone(*fj);
-                                clone.setPts(clone_ts);
-                                clone.setComplete(true);
-                                // Log BEFORE putFrame: with flags=0,
-                                // av_buffersrc_add_frame_flags steals the
-                                // frame's data (including resetting its pts to
-                                // AV_NOPTS_VALUE), so logging after would
-                                // always show NO_PTS.
-                                logstream << "  -> injecting clone of in[" << j
-                                          << "] real_pts=" << fj->pts()
-                                          << " clone_pts=" << clone.pts()
-                                          << " (trigger_pts=" << frmin->pts() << ")";
-                                if (!pj.checkFrame(clone, ej)) {
-                                    logstream << "  clone of in[" << j
-                                              << "] rejected by checkFrame; falling back to skip_trigger + pending peer";
-                                    skip_trigger = true;
-                                    skip_trigger_pending_peer = j;
-                                    break;
-                                }
-                                int rj = pj.putFrame(clone);
-                                if (rj < 0) {
-                                    logstream << "  clone injection to buffersrc[" << j
-                                              << "] failed rj=" << rj
-                                              << " (" << av::error2string(rj)
-                                              << "); falling back to skip_trigger + pending peer";
-                                    skip_trigger = true;
-                                    skip_trigger_pending_peer = j;
-                                    break;
-                                }
-                                // Do NOT feed the clone to eq_ — it is a
-                                // synthetic frame, not a real upstream event.
-                                // Real fj stays in edge; the normal path below
-                                // feeds the trigger to buffersrc[source_index].
+                                // With force_fps normalisation on both inputs this
+                                // case should be rare at wipe-start (both grids
+                                // are 30fps/tb 1/30), and eliminated mid-wipe once
+                                // the semantic hw_frames_ctx check prevents pool-
+                                // rotation rebuilds.
+                                skip_trigger = true;
+                                skip_trigger_pending_peer = j;
+                                logstream << "  -> peer in[" << j
+                                          << "] AHEAD (us=" << fj->pts().timestamp(kUsTimebase)
+                                          << " vs trigger=" << trigger_us
+                                          << "); skip_trigger + pending peer";
                             } else if (!fj || fj->isNull() || !fj->isComplete() ||
                                        !fj->timeBase().getNumerator() || !fj->timeBase().getDenominator()) {
                                 // Peer is EMPTY: feeding the trigger now would
