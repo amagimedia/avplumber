@@ -146,11 +146,12 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
         const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
 
         // Only restart the crop/scale node when the graph string actually changed.
-        // An unnecessary restart allocates a new hw_frames_ctx even with identical
-        // parameters, propagating a spurious hw_frames_ctx-change event downstream.
-        // For wipe transitions this ultimately causes wipe_overlay to rebuild its
-        // filter graph mid-wipe, triggering a one-frame EXT_NULL gap (overlay
-        // disappears for one frame at the midpoint).
+        // Restarting a filter_video node tears down and rebuilds its FFmpeg filter
+        // graph, which briefly stops producing frames and allocates a new
+        // hw_frames_ctx pool.  Downstream filter_video nodes now absorb pool
+        // rotations via a semantic hw_frames_ctx comparison so this no longer
+        // causes a mid-wipe EXT_NULL gap, but the restart is still a wasted
+        // stall and a frame-timing hiccup when the graph string is unchanged.
         const auto& node_params = nodes_->node(cs_node)->parameters();
         const std::string old_graph = node_params.value("graph", std::string(""));
         if (old_graph == layout.crop_scale_graph) {

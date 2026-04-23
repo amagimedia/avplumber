@@ -291,7 +291,6 @@ protected:
     //
     // -1 = no pending sync; >= 0 = index of the peer we are waiting for.
     int  rebuild_pending_peer_       = -1;
-    int  rebuild_pending_src_        = -1;  // source that triggered the rebuild
     int  rebuild_pending_skip_count_ = 0;
     static constexpr int kMaxRebuildSkipFrames = 8;
     
@@ -457,7 +456,6 @@ public:
                                   << "); resuming normal feed after "
                                   << rebuild_pending_skip_count_ << " skipped trigger frames";
                         rebuild_pending_peer_       = -1;
-                        rebuild_pending_src_        = -1;
                         rebuild_pending_skip_count_ = 0;
                         // fall through – feed this peer frame normally
                     } else {
@@ -478,7 +476,6 @@ public:
                                       << rebuild_pending_skip_count_
                                       << " skipped frames; giving up";
                             rebuild_pending_peer_       = -1;
-                            rebuild_pending_src_        = -1;
                             rebuild_pending_skip_count_ = 0;
                         }
                     }
@@ -493,17 +490,17 @@ public:
                 }
                 source_port.captureInitialHWFramesCtxFromFrame(*frmin);
 
-                // Before rebuilding, also pre-capture hw_frames_ctx for every
-                // peer input that has a frame in its edge.  Without this,
-                // maybeInitFilterGraph() initialises each peer's buffersrc with
-                // whatever initial_hw_frames_ctx_ is currently stored (possibly
-                // null, or stale from a previous wipe).  When the peer frame is
-                // later fed via the normal path, checkFrame() detects the
-                // mismatch and forces an immediate second rebuild.  Worse, it
-                // causes clone-injection below to fail (checkFrame(clone)
-                // rejects the clone because its ctx differs from the peer Port's
-                // stored one), leaving us to fall back to skip_trigger which
-                // has worse behaviour at wipe start.
+                // Before rebuilding, pre-capture hw_frames_ctx for every peer
+                // input that already has a frame in its edge.  This lets
+                // maybeInitFilterGraph() initialise each peer's buffersrc with
+                // the real upstream pool instead of falling back to a
+                // device-allocated one in initSourceFilter(); it also refreshes
+                // any ref left over from a previous run.  With the semantic
+                // hw_frames_ctx compare in Port::checkParameters() this is no
+                // longer required for correctness — the later checkFrame() on
+                // the real peer frame will accept a semantically-equal pool
+                // without a rebuild — but skipping it here avoids one extra
+                // hwframe context allocation and is effectively free.
                 if (filter_graph_ == nullptr && this->source_edges_.size() > 1) {
                     for (int j = 0; j < (int)this->source_edges_.size(); j++) {
                         if (j == source_index) continue;
@@ -527,11 +524,10 @@ public:
                     // N+1).
                     if (rebuild_pending_peer_ >= 0) {
                         logstream << "clearing stale rebuild_pending_peer_=" << rebuild_pending_peer_
-                                  << " (src=" << rebuild_pending_src_
-                                  << ", skip=" << rebuild_pending_skip_count_ << ") before rebuild";
+                                  << " (skip=" << rebuild_pending_skip_count_
+                                  << ") before rebuild";
                     }
                     rebuild_pending_peer_       = -1;
-                    rebuild_pending_src_        = -1;
                     rebuild_pending_skip_count_ = 0;
                     was_rebuilt = maybeInitFilterGraph();
                 }
@@ -616,37 +612,30 @@ public:
                             }
                         } else {
                             // j is a "later" input (e.g. wipe animation in[1]).
-                            if (fj && !fj->isNull() && fj->isComplete() &&
-                                fj->timeBase().getNumerator() && fj->timeBase().getDenominator() &&
-                                fj->pts().timestamp(kUsTimebase) > trigger_us) {
-                                // Peer is AHEAD of the trigger.  Skip the trigger
+                            const bool peer_valid =
+                                fj && !fj->isNull() && fj->isComplete() &&
+                                fj->timeBase().getNumerator() && fj->timeBase().getDenominator();
+                            const bool peer_ahead =
+                                peer_valid && fj->pts().timestamp(kUsTimebase) > trigger_us;
+                            if (!peer_valid || peer_ahead) {
+                                // Peer is EMPTY or AHEAD of the trigger.  In both
+                                // cases feeding the trigger now would make
+                                // framesync advance it first and emit EXT_NULL
+                                // until the peer catches up.  Skip the trigger
                                 // and arm the pending-peer gate so subsequent
-                                // trigger frames are also dropped until the peer
-                                // has been fed once.  At that point framesync can
-                                // advance the peer first, leaving the master in
-                                // STATE_BOF → no EXT_NULL frame.
+                                // trigger frames are also dropped until a peer
+                                // frame is processed.
                                 //
-                                // With force_fps normalisation on both inputs this
-                                // case should be rare at wipe-start (both grids
-                                // are 30fps/tb 1/30), and eliminated mid-wipe once
-                                // the semantic hw_frames_ctx check prevents pool-
-                                // rotation rebuilds.
+                                // With force_fps normalisation on both inputs
+                                // and the semantic hw_frames_ctx check that
+                                // suppresses pool-rotation rebuilds, this only
+                                // fires at genuine wipe start (peer edge empty).
                                 skip_trigger = true;
                                 skip_trigger_pending_peer = j;
-                                logstream << "  -> peer in[" << j
-                                          << "] AHEAD (us=" << fj->pts().timestamp(kUsTimebase)
-                                          << " vs trigger=" << trigger_us
-                                          << "); skip_trigger + pending peer";
-                            } else if (!fj || fj->isNull() || !fj->isComplete() ||
-                                       !fj->timeBase().getNumerator() || !fj->timeBase().getDenominator()) {
-                                // Peer is EMPTY: feeding the trigger now would
-                                // advance it before the peer → EXT_NULL once the
-                                // peer arrives.  Skip trigger AND arm the pending
-                                // peer gate so subsequent trigger frames are also
-                                // dropped until the peer is processed.
-                                skip_trigger = true;
-                                skip_trigger_pending_peer = j;
-                                logstream << "  -> skip_trigger + pending peer (peer empty)";
+                                logstream << "  -> skip_trigger + pending peer (in[" << j
+                                          << (peer_valid
+                                              ? "] AHEAD)"
+                                              : "] empty)");
                             } else {
                                 // Peer LAGS the trigger: prime it so framesync has
                                 // it close to the trigger PTS.
@@ -685,7 +674,6 @@ public:
                             // Arm the gate to also skip subsequent trigger frames
                             // until the peer has been fed.
                             rebuild_pending_peer_       = skip_trigger_pending_peer;
-                            rebuild_pending_src_        = source_index;
                             rebuild_pending_skip_count_ = 0;
                             logstream << "Post-rebuild peer sync armed: waiting for in["
                                       << rebuild_pending_peer_ << "]";
