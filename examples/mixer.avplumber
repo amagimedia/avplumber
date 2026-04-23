@@ -77,17 +77,21 @@ node.add { "type": "dec_video", "name": "wipe_dec", "src": "wipe_v_pkt", "dst": 
 # overlay to be >= main size, so scaling to 1920x1080 is mandatory before upload.
 node.add { "type": "filter_video", "name": "wipe_fmt", "src": "wipe_dec_out", "dst": "wipe_fmt_out", "graph": "format=yuva420p,scale=1920:1080:flags=lanczos,hwupload_cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
 node.add { "type": "realtime", "name": "wipe_rt", "src": "wipe_fmt_out", "dst": "wipe_rt_out", "set_pts": true, "group": "mixer_wipe" }
+# Normalize wipe overlay to 30fps/tb 1/30 so both wipe_overlay inputs share the same
+# integer PTS grid as final_wipe_in (also 30fps via wipe_base_fps).  Matching grids let
+# framesync advance both inputs simultaneously on first advance, preventing EXT_NULL.
+node.add { "type": "force_fps", "name": "wipe_rt_fps", "fps": "30/1", "src": "wipe_rt_out", "dst": "wipe_rt_fps_out", "group": "mixer_wipe" }
 # overlay_many_cuda requires YUV420P main; scale_cuda wraps convert NV12<->YUV420P on GPU.
 # This ensures wipe_overlay_out always carries NV12 sw_format, matching assume_video_format.
 # overlay_cuda is avoided: NV12 main + YUVA420P overlay is unsupported by it, and convert_cuda
 # produces YUV420P output that is misread as NV12 by the encoder after filter restarts.
-node.add { "type": "filter_video", "name": "wipe_overlay", "src": ["final_wipe_in", "wipe_rt_out"], "dst": "wipe_overlay_out", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "mixer_wipe" }
+node.add { "type": "filter_video", "name": "wipe_overlay", "src": ["final_wipe_in", "wipe_rt_fps_out"], "dst": "wipe_overlay_out", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "mixer_wipe" }
 
 # ============================================================
 # Initialize Mixer State
 # ============================================================
 
-mixer.init mixer { "timeline": "mixer_tl", "hwaccel": "@gpu", "fps_num": 30, "fps_den": 1, "source_switcher": "out_sel", "initial_pgm_slot": "A", "initial_pgm_scene": "fullcam1", "wipe_otm": "otm_final", "wipe_selector": "wipe_sel", "wipe_group": "mixer_wipe", "wipe_input_node": "wipe_input", "wipe_flush_edges": ["wipe_raw_pkt", "wipe_v_pkt", "wipe_dec_out", "wipe_fmt_out", "wipe_rt_out", "final_wipe_pre", "final_wipe_in", "wipe_overlay_out"], "slot_a": { "compositor": "comp_a", "norm_ts": "norm_a", "post_otm": "otm_scene_a" }, "slot_b": { "compositor": "comp_b", "norm_ts": "norm_b", "post_otm": "otm_scene_b" } }
+mixer.init mixer { "timeline": "mixer_tl", "hwaccel": "@gpu", "fps_num": 30, "fps_den": 1, "source_switcher": "out_sel", "initial_pgm_slot": "A", "initial_pgm_scene": "fullcam1", "wipe_otm": "otm_final", "wipe_selector": "wipe_sel", "wipe_group": "mixer_wipe", "wipe_input_node": "wipe_input", "wipe_flush_edges": ["wipe_raw_pkt", "wipe_v_pkt", "wipe_dec_out", "wipe_fmt_out", "wipe_rt_out", "wipe_rt_fps_out", "final_wipe_pre", "final_wipe_in", "wipe_overlay_out"], "slot_a": { "compositor": "comp_a", "norm_ts": "norm_a", "post_otm": "otm_scene_a" }, "slot_b": { "compositor": "comp_b", "norm_ts": "norm_b", "post_otm": "otm_scene_b" } }
 
 # Register camera sources (name, otm_node, input_index, cs_node_a, cs_node_b)
 mixer.source mixer cam1 otm_cam1 0 cs_cam1_a cs_cam1_b
