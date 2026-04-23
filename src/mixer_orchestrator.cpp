@@ -38,6 +38,13 @@ bool nodeWorkingIfExists(std::shared_ptr<NodeManager> nodes, const std::string& 
     return w && w->isWorking();
 }
 
+int edgeOccupiedIfExists(std::shared_ptr<NodeManager> nodes, const std::string& name) {
+    if (name.empty())
+        return 0;
+    auto e = nodes->edges()->findAny(name);
+    return e ? e->occupied() : 0;
+}
+
 
 /// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
 Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
@@ -450,7 +457,9 @@ void MixerOrchestrator::wipeThread(
     }
 
     // --- Phase 2: wipe end – tear down and flip ---
+    // Stage 2a: wait for the wipe source to EOF (or until the planned duration elapses).
     int64_t remaining = total_delay_ms - midpoint_delay_ms;
+    bool hit_input_eof = false;
     if (remaining > 0) {
         int64_t waited_ms = 0;
         constexpr int64_t kPollMs = 10;
@@ -458,12 +467,35 @@ void MixerOrchestrator::wipeThread(
             if (!nodeWorkingIfExists(nodes, state->wipe_input_node_name)) {
                 logstream << "mixer wipe: cleanup pulled to wipe EOF after " << waited_ms
                           << "ms of remaining tail";
+                hit_input_eof = true;
                 break;
             }
             int64_t step_ms = std::min<int64_t>(kPollMs, remaining - waited_ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
             waited_ms += step_ms;
         }
+    }
+
+    // Stage 2b: after source EOF, the tail of the wipe is still propagating through
+    // wipe_demux → wipe_dec → wipe_fmt → wipe_rt → wipe_rt_fps → wipe_overlay (six
+    // queues + filter internal buffering). Flipping `wipe_sel` now would cut those
+    // tail frames. Wait until the last pre-overlay edge (`wipe_tail_edge`) has been
+    // drained by the overlay, then give the overlay a short grace to emit the final
+    // blended frames through `wipe_overlay_out` to `wipe_sel`.
+    if (hit_input_eof && !state->wipe_tail_edge.empty()) {
+        constexpr int64_t kWipeDrainTimeoutMs = 1000;
+        constexpr int64_t kWipeDrainPollMs = 10;
+        constexpr int64_t kWipeOverlayTailMs = 120; // ~3-4 frames @30fps
+        int64_t waited = 0;
+        while (waited < kWipeDrainTimeoutMs) {
+            if (edgeOccupiedIfExists(nodes, state->wipe_tail_edge) == 0)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kWipeDrainPollMs));
+            waited += kWipeDrainPollMs;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kWipeOverlayTailMs));
+        logstream << "mixer wipe: drained " << state->wipe_tail_edge << " in " << waited
+                  << "ms + " << kWipeOverlayTailMs << "ms overlay tail";
     }
 
     try {
