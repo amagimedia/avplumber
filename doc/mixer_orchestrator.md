@@ -303,6 +303,7 @@ Config fields:
 - `initial_pgm_scene` (string) -- scene name initially on PGM
 - `initial_pvw_scene` (string, optional)
 - `wipe_otm` (string) -- otm_final node name (for wipe output path)
+- `wipe_base_fps` (string, optional) -- name of the `force_fps` node that feeds the wipe main input (e.g. `wipe_base_fps`). The orchestrator resets it at wipe start so the wipe path does not replay a stale PTS grid after being idle.
 - `wipe_selector` (string) -- wipe_sel node name
 - `wipe_group` (string) -- name of the pre-created wipe subgraph group (started/stopped per wipe)
 - `wipe_input_node` (string) -- name of the `input_rec` node inside the wipe group (its `url` is set before each wipe start)

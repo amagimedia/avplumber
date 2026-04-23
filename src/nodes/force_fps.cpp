@@ -6,6 +6,7 @@ private:
     av::Timestamp frame_delta_;
     av::Timestamp last_ts_ = NOTS;
     av::Timestamp next_ts_ = NOTS;
+    std::string label_;
     T last_frame_;
     av::Rational timebase_;
     bool last_unused_ = false;
@@ -24,7 +25,9 @@ private:
         last_unused_ = unused;
     }
 public:
-    ForceFPS(std::unique_ptr<Source<T>> &&source, std::unique_ptr<Sink<T>> &&sink, const av::Rational fps, const av::Rational timebase): NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), timebase_(timebase) {
+    ForceFPS(std::unique_ptr<Source<T>> &&source, std::unique_ptr<Sink<T>> &&sink,
+             const av::Rational fps, const av::Rational timebase, std::string label):
+            NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), label_(std::move(label)), timebase_(timebase) {
         if (timebase_.getDenominator()==0 || timebase_.getNumerator()==0) {
             timebase_ = av::Rational(fps_.getDenominator(), fps_.getNumerator());
             frame_delta_ = av::Timestamp(1, timebase_);
@@ -83,7 +86,7 @@ public:
                 av::Timestamp delta_from_last = in_ts - last_ts_;
                 bool discontinuity = (delta_from_last.seconds() > 0.5) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
-                    logstream << "Discontinuity " << last_ts_ << " -> " << in_ts;
+                    logstream << "force_fps[" << label_ << "]: Discontinuity " << last_ts_ << " -> " << in_ts;
                 }
                 /*if (delta_from_last == frame_delta_) {
                     logstream << "Frame PTS = " << in_ts << " perfectly aligned";
@@ -93,10 +96,11 @@ public:
                     // or discontinuity occured
                     // because we don't want to duplicate or drop frames then
                     if (in_ts > next_ts_) {
-                        // PTS too big
-                        // input frame rate too low
-                        // duplicate previous frame
+                        // PTS too big — input fell behind the output time grid; emit duplicate(s) to catch up.
+                        av::Timestamp gap_start = next_ts_;
+                        size_t dup_burst = 0;
                         while (in_ts > next_ts_) {
+                            dup_burst++;
                             if (!last_unused_) {
                                 // if used more than once, remove side data to prevent CC duplication
                                 av_frame_remove_side_data(last_frame_.raw(), AV_FRAME_DATA_A53_CC);
@@ -119,6 +123,9 @@ public:
                             }
                             next_ts_ = addTS(next_ts_, frame_delta_);
                         }
+                        if (dup_burst > 1)
+                            logstream << "force_fps[" << label_ << "]: filled PTS gap with " << dup_burst << " duplicate(s); "
+                                      << "grid " << gap_start << " ..< " << in_ts;
                         // now in_ts <= next_ts_
                         //  if in_ts == next_ts, all OK
                         //  if in_ts < next_ts_, it means that in_ts is too small and unaligned
@@ -203,10 +210,17 @@ public:
         const Parameters &params = nci.params;
         av::Rational fps = parseRatio(params.at("fps"));
         av::Rational timebase = {0, 0};
+        std::string label;
+        if (params.count("name") == 1)
+            label = params["name"].get<std::string>();
+        else if (params.count("dst") == 1)
+            label = params["dst"].get<std::string>();
+        else
+            label = "<unnamed>";
         if (params.count("timebase")==1) {
             timebase = parseRatio(params["timebase"]);
         }
-        return NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase);
+        return NodeSISO<T, T>::template createCommon<ForceFPS<T>>(edges, params, fps, timebase, label);
     }
 };
 

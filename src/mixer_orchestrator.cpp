@@ -1,11 +1,36 @@
 #include "mixer_orchestrator.hpp"
 #include "avutils.hpp"
+#include "graph_interfaces.hpp"
 #include <algorithm>
 #include <cmath>
 #include <thread>
 #include <chrono>
 
 namespace {
+
+constexpr int64_t kWipeSwitchGraceMs = 250;
+
+void resetInputIf(std::shared_ptr<NodeManager> nodes, const std::string& name) {
+    if (name.empty())
+        return;
+    auto w = nodes->node_if_exists(name);
+    if (!w || !w->node())
+        return;
+    if (auto r = std::dynamic_pointer_cast<IInputReset>(w->node()))
+        r->resetInput();
+}
+
+/// After a PGM path change, slot compositors may have been idle (`active_inputs=0`) while cameras
+/// advanced in PTS; `force_fps` on `norm_*` would otherwise compare the next real frame to a stale
+/// grid and produce a big `Discontinuity` jump with a duplicate burst across the cut.
+///
+/// Deliberately NOT resetting the final post-`out_sel` `force_fps` (e.g. `mixer_norm_fps`): it is
+/// the last VFR guard before the encoder and resetting it would drop that guarantee.
+void resetSlotNormFps(std::shared_ptr<NodeManager> nodes, const MixerState& st) {
+    resetInputIf(nodes, st.slot_a.norm_ts_name);
+    resetInputIf(nodes, st.slot_b.norm_ts_name);
+}
+
 
 /// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
 Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
@@ -197,26 +222,28 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
     auto& scene = state_->scenes.at(scene_name);
     uint32_t pvw_bit = state_->pvwOutputBit();
 
-    int64_t T_cut = wallclock.pts() + margin_ms_;
+    int64_t T_prep = wallclock.pts();
+    int64_t T_cut = T_prep + margin_ms_;
     const auto& new_slot = state_->pvwSlot();
     const auto& old_slot = state_->pgmSlot();
 
-    // Post-scene OTMs: must flip at the same PTS as `out_sel`. If the old slot's OTM keeps
-    // forwarding to sc{AB}_direct for ~margin_ms after `out_sel` has switched, that edge is
-    // unread (capacity 3) and backs up through norm → scene_out → comp — looks like clogging
-    // "before" the compositor from the camera side.
-    timeline_->clearKey(old_slot.post_otm_name, "outputs");
-    setNodeObject(old_slot.post_otm_name, "outputs", Parameters(0u));
-    timeline_->set(old_slot.post_otm_name, "outputs", T_cut, Parameters(0u));
-
+    // Pre-warm the hidden direct branch before the visible `out_sel` switch. Without this,
+    // enabling `post_otm` and switching `out_sel` at the same PTS leaves the newly selected
+    // path one pipeline-latency late, so the final encoder-side force_fps repeats the last
+    // visible frame for a few ticks across the cut. `one_to_many` with timeline runs in
+    // drop_dynamic_ mode, so feeding an inactive direct branch here is safe: `source_switcher`
+    // drains and drops those pre-roll frames instead of back-pressuring the slot.
     timeline_->clearKey(new_slot.post_otm_name, "outputs");
     setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
-    timeline_->set(new_slot.post_otm_name, "outputs", T_cut, Parameters(1u));
+    timeline_->set(new_slot.post_otm_name, "outputs", T_prep, Parameters(1u));
 
-    timeline_->set(state_->source_switcher_name, "active", T_cut,
-                   Parameters(state_->pvwSourceSwitcherIndex()));
+    int pvw_sw = state_->pvwSourceSwitcherIndex();
+    timeline_->set(state_->source_switcher_name, "active", T_cut, Parameters(pvw_sw));
 
     int64_t T_cleanup = T_cut + 100;
+    logstream << "mixer cut: scene=" << scene_name << " T_cut=" << T_cut << " T_cleanup=" << T_cleanup
+              << " out_sel.active=" << pvw_sw << " post_otm prep " << new_slot.post_otm_name << "->1 old="
+              << old_slot.post_otm_name << " cleanup->0";
 
     // Disable old PGM cameras at T_cleanup
     if (!state_->pgm_scene_name.empty()) {
@@ -228,6 +255,7 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
             timeline_->set(it->second.otm_node_name, "outputs", T_cleanup, Parameters(new_mask));
         }
         timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
+        timeline_->set(old_slot.post_otm_name, "outputs", T_cleanup, Parameters(0u));
     }
 
     // Ensure new-scene cameras converge to pvw_bit at T_cleanup
@@ -236,6 +264,9 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
         if (it == state_->sources.end()) continue;
         timeline_->set(it->second.otm_node_name, "outputs", T_cleanup, Parameters(pvw_bit));
     }
+    timeline_->set(new_slot.post_otm_name, "outputs", T_cleanup, Parameters(1u));
+
+    resetSlotNormFps(nodes_, *state_);
 
     return T_cleanup;
 }
@@ -401,7 +432,12 @@ void MixerOrchestrator::wipeThread(
         timeline->set(new_slot.post_otm_name, "outputs", Tw, Parameters(1u));
 
         // Switch source_switcher (invisible behind wipe overlay); timeline for consistency with other switches
-        timeline->set(state->source_switcher_name, "active", Tw, Parameters(state->pvwSourceSwitcherIndex()));
+        int sw = state->pvwSourceSwitcherIndex();
+        timeline->set(state->source_switcher_name, "active", Tw, Parameters(sw));
+        logstream << "mixer wipe midpoint: Tw=" << Tw << " scene=" << scene_name << " out_sel.active=" << sw
+                  << " new_slot post_otm=" << new_slot.post_otm_name << " old_slot post_otm="
+                  << old_slot.post_otm_name;
+        resetSlotNormFps(nodes, *state);
     } catch (const std::exception& e) {
         logstream << "mixer: wipe midpoint error: " << e.what();
     }
@@ -420,6 +456,8 @@ void MixerOrchestrator::wipeThread(
             timeline->set(state->wipe_otm_name, "outputs", Tw, Parameters(1u));
         if (!state->wipe_selector_name.empty())
             timeline->set(state->wipe_selector_name, "active", Tw, Parameters(0));
+        logstream << "mixer wipe cleanup: Tw=" << Tw << " otm_final.outputs=1 wipe_sel.active=0"
+                  << " stop_wipe_group_in_ms=" << kWipeSwitchGraceMs;
 
         uint32_t new_pgm_bit = state->pvwOutputBit();
         auto& scene = state->scenes.at(scene_name);
@@ -430,8 +468,22 @@ void MixerOrchestrator::wipeThread(
 
         const auto& old_slot = state->pgmSlot();
         timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
+    } catch (const std::exception& e) {
+        logstream << "mixer: wipe cleanup error: " << e.what();
+        state->transition_mode = MixerState::TransitionMode::Idle;
+        return;
+    }
 
-        // Stop the pre-created wipe subgraph; nodes are re-used on the next wipe
+    std::this_thread::sleep_for(std::chrono::milliseconds(kWipeSwitchGraceMs));
+
+    try {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        MixerOrchestrator orch(nodes, state, timeline);
+
+        // Stop the pre-created wipe subgraph only after the direct-path switch
+        // has had time to land on the frame timeline. Tearing it down at the
+        // same wallclock instant as the switch starves wipe_sel/final_out for a
+        // few ticks and the encoder-side force_fps visibly repeats the last wipe frame.
         if (!state->wipe_group_name.empty()) {
             orch.stopGroup(state->wipe_group_name);
             // Release any frames still sitting in wipe pipeline edges so they
@@ -439,13 +491,12 @@ void MixerOrchestrator::wipeThread(
             orch.flushWipeEdges();
         }
 
-        // Flip state
         state->pgm_is_slot_a = new_pgm_is_slot_a;
         state->pgm_scene_name = scene_name;
         state->pvw_scene_name = "";
         state->transition_mode = MixerState::TransitionMode::Idle;
     } catch (const std::exception& e) {
-        logstream << "mixer: wipe cleanup error: " << e.what();
+        logstream << "mixer: wipe teardown error: " << e.what();
         state->transition_mode = MixerState::TransitionMode::Idle;
     }
 }
@@ -478,18 +529,25 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
     // Discard any frames left over from a previous wipe run before starting fresh.
     flushWipeEdges();
+    resetInputIf(nodes_, state_->wipe_base_fps_name);
     startGroup(state_->wipe_group_name);
 
-    // Route output through wipe overlay (timeline so it tracks frame PTS like other mixer nodes)
-    int64_t Tw = wallclock.pts();
-    timeline_->set(state_->wipe_otm_name, "outputs", Tw, Parameters(3u));   // 0b11 both direct + wipe_in
-    timeline_->set(state_->wipe_selector_name, "active", Tw, Parameters(1)); // wipe_overlay_out
+    // Pre-roll the wipe branch before making it visible. Switching `wipe_sel`
+    // immediately after `startGroup()` can expose the startup latency of the
+    // wipe decode/filter chain as a freeze on the last direct frame.
+    int64_t T_prep = wallclock.pts();
+    int64_t T_start = T_prep + margin_ms_;
+    timeline_->set(state_->wipe_otm_name, "outputs", T_prep, Parameters(3u));    // 0b11 both direct + wipe_in
+    timeline_->set(state_->wipe_selector_name, "active", T_start, Parameters(1)); // wipe_overlay_out
 
     // Launch background thread for midpoint cut + cleanup
     int64_t total_ms = (int64_t)(duration_sec * 1000);
     int64_t midpoint_ms = total_ms / 2;
+    logstream << "mixer wipe: scene=" << scene_name << " file=" << wipe_file << " T_prep=" << T_prep
+              << " T_start=" << T_start << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
+              << " new_pgm_slot_" << (pvw_is_slot_a ? 'A' : 'B');
     std::thread(wipeThread, nodes_, state_, timeline_,
-                scene_name, pvw_is_slot_a, midpoint_ms, total_ms).detach();
+                scene_name, pvw_is_slot_a, midpoint_ms + margin_ms_, total_ms + margin_ms_).detach();
 }
 
 Parameters MixerOrchestrator::status() const {

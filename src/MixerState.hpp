@@ -62,6 +62,7 @@ struct MixerState : public InstanceShared<MixerState> {
 
     // Static nodes for wipe output path (otm splits mixer_out, selector chooses direct vs overlay)
     std::string wipe_otm_name;         // "otm_final"
+    std::string wipe_base_fps_name;    // "wipe_base_fps"
     std::string wipe_selector_name;    // "wipe_sel"
 
     // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
