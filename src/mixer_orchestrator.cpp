@@ -31,6 +31,13 @@ void resetSlotNormFps(std::shared_ptr<NodeManager> nodes, const MixerState& st) 
     resetInputIf(nodes, st.slot_b.norm_ts_name);
 }
 
+bool nodeWorkingIfExists(std::shared_ptr<NodeManager> nodes, const std::string& name) {
+    if (name.empty())
+        return false;
+    auto w = nodes->node_if_exists(name);
+    return w && w->isWorking();
+}
+
 
 /// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
 Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
@@ -444,18 +451,36 @@ void MixerOrchestrator::wipeThread(
 
     // --- Phase 2: wipe end – tear down and flip ---
     int64_t remaining = total_delay_ms - midpoint_delay_ms;
-    if (remaining > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(remaining + 500));
+    if (remaining > 0) {
+        int64_t waited_ms = 0;
+        constexpr int64_t kPollMs = 10;
+        while (waited_ms < remaining) {
+            if (!nodeWorkingIfExists(nodes, state->wipe_input_node_name)) {
+                logstream << "mixer wipe: cleanup pulled to wipe EOF after " << waited_ms
+                          << "ms of remaining tail";
+                break;
+            }
+            int64_t step_ms = std::min<int64_t>(kPollMs, remaining - waited_ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
+            waited_ms += step_ms;
+        }
+    }
 
     try {
         std::lock_guard<std::mutex> lock(state->mutex);
         MixerOrchestrator orch(nodes, state, timeline);
 
         int64_t Tw = wallclock.pts();
-        if (!state->wipe_otm_name.empty())
+        if (!state->wipe_otm_name.empty()) {
+            timeline->clearKey(state->wipe_otm_name, "outputs");
+            orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(1u));
             timeline->set(state->wipe_otm_name, "outputs", Tw, Parameters(1u));
-        if (!state->wipe_selector_name.empty())
+        }
+        if (!state->wipe_selector_name.empty()) {
+            timeline->clearKey(state->wipe_selector_name, "active");
+            orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
             timeline->set(state->wipe_selector_name, "active", Tw, Parameters(0));
+        }
         logstream << "mixer wipe cleanup: Tw=" << Tw << " otm_final.outputs=1 wipe_sel.active=0"
                   << " stop_wipe_group_in_ms=" << kWipeSwitchGraceMs;
 
