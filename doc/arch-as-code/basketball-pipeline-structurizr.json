@@ -1,0 +1,696 @@
+{
+  "name": "AVPlumber Basketball Analysis Pipeline",
+  "description": "Structurizr workspace for examples/yolo/yolo_infer_all_players_tracker_live_teams_siglip_nba.avplumber.",
+  "version": "1.0",
+  "properties": {
+    "source_graph": "examples/yolo/yolo_infer_all_players_tracker_live_teams_siglip_nba.avplumber",
+    "design_spec": "docs/arch-as-code/2026-04-23-basketball-pipeline-structurizr-design.md"
+  },
+  "model": {
+    "softwareSystems": [
+      {
+        "id": "ss_avpl_pipeline",
+        "name": "AVPlumber Basketball Analysis Pipeline",
+        "description": "A single avplumber runtime that ingests recorded basketball video, performs GPU-backed analysis, annotates frames, exports metadata, and publishes annotated output.",
+        "location": "Internal",
+        "tags": "Element,Software System",
+        "containers": [
+          {
+            "id": "c_avpl_runtime",
+            "name": "AVPlumber Runtime",
+            "description": "Runs the basketball analysis graph end to end: ingest, decode, inference, metadata enrichment, visualization, export, encode, and delivery.",
+            "technology": "avplumber graph runtime",
+            "tags": "Element,Container",
+            "relationships": [
+              {
+                "id": "r01",
+                "sourceId": "c_avpl_runtime",
+                "destinationId": "c_input_recording",
+                "description": "Reads recorded basketball video",
+                "technology": "input_rec / demux",
+                "interactionStyle": "Synchronous"
+              },
+              {
+                "id": "r02",
+                "sourceId": "c_avpl_runtime",
+                "destinationId": "c_cuda_video_accel",
+                "description": "Offloads decode, scaling, overlay, and encode work",
+                "technology": "CUDA / NVDEC / NVENC",
+                "interactionStyle": "Synchronous"
+              },
+              {
+                "id": "r03",
+                "sourceId": "c_avpl_runtime",
+                "destinationId": "c_tensorrt_runtime",
+                "description": "Runs optimized inference workloads",
+                "technology": "TensorRT",
+                "interactionStyle": "Synchronous"
+              },
+              {
+                "id": "r05",
+                "sourceId": "c_avpl_runtime",
+                "destinationId": "c_metadata_dump_file",
+                "description": "Writes frame-level metadata exports",
+                "technology": "JSON file output",
+                "interactionStyle": "Synchronous"
+              },
+              {
+                "id": "r06",
+                "sourceId": "c_avpl_runtime",
+                "destinationId": "c_rtmp_publish_endpoint",
+                "description": "Publishes annotated video stream",
+                "technology": "FLV / RTMP",
+                "interactionStyle": "Asynchronous"
+              }
+            ],
+            "components": [
+              {
+                "id": "cmp_ingest",
+                "name": "Ingest",
+                "description": "Reads the input recording and demuxes the video stream into packets for downstream decode.",
+                "technology": "input_rec + demux nodes",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r11",
+                    "sourceId": "cmp_ingest",
+                    "destinationId": "cmp_decode_timing",
+                    "description": "Supplies compressed video packets and source timing",
+                    "technology": "video packets",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r26",
+                    "sourceId": "cmp_ingest",
+                    "destinationId": "c_input_recording",
+                    "description": "Reads the looping basketball recording",
+                    "technology": "MP4 file access",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_decode_timing",
+                "name": "Decode And Timing",
+                "description": "Hardware-decodes the video, normalizes playback timing, and fixes output cadence at 25 fps.",
+                "technology": "dec_video + realtime + force_fps",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r12",
+                    "sourceId": "cmp_decode_timing",
+                    "destinationId": "cmp_frame_fanout",
+                    "description": "Produces normalized decoded frame streams",
+                    "technology": "CUDA video frames",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r20",
+                    "sourceId": "cmp_decode_timing",
+                    "destinationId": "cmp_scoreboard_ocr",
+                    "description": "Provides full-resolution frames for scoreboard reading",
+                    "technology": "1080p CUDA frames",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r27",
+                    "sourceId": "cmp_decode_timing",
+                    "destinationId": "c_cuda_video_accel",
+                    "description": "Uses NVDEC and CUDA video transforms",
+                    "technology": "CUDA / NVDEC",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_frame_fanout",
+                "name": "Frame Fanout",
+                "description": "Splits decoded video into 1080p and model-resolution branches for parallel analysis stages.",
+                "technology": "split + filter_video",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r13",
+                    "sourceId": "cmp_frame_fanout",
+                    "destinationId": "cmp_detection_inference",
+                    "description": "Feeds player and ball detection branches",
+                    "technology": "960x544 CUDA frames",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r14",
+                    "sourceId": "cmp_frame_fanout",
+                    "destinationId": "cmp_segmentation_inference",
+                    "description": "Feeds court and player segmentation branches",
+                    "technology": "960x544 CUDA frames",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_detection_inference",
+                "name": "Detection Inference",
+                "description": "Runs detection models for players, referees, ball, and scoreboard regions.",
+                "technology": "cuda_infer_yolo",
+                "tags": "Element,Component,ML",
+                "relationships": [
+                  {
+                    "id": "r15",
+                    "sourceId": "cmp_detection_inference",
+                    "destinationId": "cmp_scene_event_understanding",
+                    "description": "Publishes detection metadata for scene reasoning",
+                    "technology": "yolo_players + yolo_ball metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r29",
+                    "sourceId": "cmp_detection_inference",
+                    "destinationId": "c_tensorrt_runtime",
+                    "description": "Executes player and ball detection engines",
+                    "technology": "TensorRT plans",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_segmentation_inference",
+                "name": "Segmentation Inference",
+                "description": "Runs court and player segmentation models and attaches segmentation side data for downstream stages.",
+                "technology": "cuda_infer_yolo segmentation",
+                "tags": "Element,Component,ML",
+                "relationships": [
+                  {
+                    "id": "r16",
+                    "sourceId": "cmp_segmentation_inference",
+                    "destinationId": "cmp_scene_event_understanding",
+                    "description": "Publishes court segmentation context",
+                    "technology": "yolo_seg metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r19",
+                    "sourceId": "cmp_segmentation_inference",
+                    "destinationId": "cmp_team_classification",
+                    "description": "Supplies player masks for feature extraction",
+                    "technology": "yolo_players_seg metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r30",
+                    "sourceId": "cmp_segmentation_inference",
+                    "destinationId": "c_tensorrt_runtime",
+                    "description": "Executes court and player segmentation engines",
+                    "technology": "TensorRT plans",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_scene_event_understanding",
+                "name": "Scene And Event Understanding",
+                "description": "Combines detection and segmentation outputs to infer shot context and produce scene metadata.",
+                "technology": "join_metadata + shot_classifier",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r17",
+                    "sourceId": "cmp_scene_event_understanding",
+                    "destinationId": "cmp_tracking_possession",
+                    "description": "Provides scene-aware metadata for tracking",
+                    "technology": "shot_info + joined metadata",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_tracking_possession",
+                "name": "Tracking And Ball Possession",
+                "description": "Tracks players and ball over time and infers the current ball handler.",
+                "technology": "player_tracker + ball_tracker + ball_handler",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r18",
+                    "sourceId": "cmp_tracking_possession",
+                    "destinationId": "cmp_team_classification",
+                    "description": "Supplies tracked player identities for team assignment",
+                    "technology": "tracked yolo_players metadata",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_team_classification",
+                "name": "Team Classification",
+                "description": "Extracts player appearance features and assigns team labels back into player metadata.",
+                "technology": "player_mask_feature_encoder + team_feature_classifier",
+                "tags": "Element,Component,ML",
+                "relationships": [
+                  {
+                    "id": "r21",
+                    "sourceId": "cmp_team_classification",
+                    "destinationId": "cmp_scoreboard_ocr",
+                    "description": "Adds team-aware metadata to the OCR branch",
+                    "technology": "joined scoreboard metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r23",
+                    "sourceId": "cmp_team_classification",
+                    "destinationId": "cmp_visualization_reframing",
+                    "description": "Provides classified player metadata for overlays",
+                    "technology": "team-enriched yolo_players metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r31",
+                    "sourceId": "cmp_team_classification",
+                    "destinationId": "c_tensorrt_runtime",
+                    "description": "Uses SigLIP feature embedding runtime",
+                    "technology": "TensorRT vision embedding engine",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_scoreboard_ocr",
+                "name": "Scoreboard OCR",
+                "description": "Finds scoreboard text regions and converts them into structured clock, period, team, and score metadata.",
+                "technology": "scoreboard_ocr",
+                "tags": "Element,Component,ML",
+                "relationships": [
+                  {
+                    "id": "r22",
+                    "sourceId": "cmp_scoreboard_ocr",
+                    "destinationId": "cmp_visualization_reframing",
+                    "description": "Publishes scoreboard metadata for annotation and export",
+                    "technology": "scoreboard metadata",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r32",
+                    "sourceId": "cmp_scoreboard_ocr",
+                    "destinationId": "c_tensorrt_runtime",
+                    "description": "Executes OCR recognition inference",
+                    "technology": "TensorRT OCR engine",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_visualization_reframing",
+                "name": "Visualization And Reframing",
+                "description": "Draws segmentation overlays, labels, ball trails, and viewport guidance on annotated frames.",
+                "technology": "draw_* + smooth_crop_viewport",
+                "tags": "Element,Component",
+                "relationships": [
+                  {
+                    "id": "r24",
+                    "sourceId": "cmp_visualization_reframing",
+                    "destinationId": "cmp_metadata_export",
+                    "description": "Provides final annotated frames for metadata dumping",
+                    "technology": "annotated CUDA frames",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r25",
+                    "sourceId": "cmp_visualization_reframing",
+                    "destinationId": "cmp_encoding_delivery",
+                    "description": "Provides final annotated frames for output delivery",
+                    "technology": "annotated CUDA frames",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_metadata_export",
+                "name": "Metadata Export",
+                "description": "Compacts frame metadata into a JSON dump for downstream analysis and inspection.",
+                "technology": "metadata_dump",
+                "tags": "Element,Component,Metadata",
+                "relationships": [
+                  {
+                    "id": "r34",
+                    "sourceId": "cmp_metadata_export",
+                    "destinationId": "c_metadata_dump_file",
+                    "description": "Writes compact per-frame metadata snapshots",
+                    "technology": "JSON file output",
+                    "interactionStyle": "Synchronous"
+                  }
+                ]
+              },
+              {
+                "id": "cmp_encoding_delivery",
+                "name": "Encoding And Delivery",
+                "description": "Rescales, encodes, muxes, and publishes the annotated basketball stream.",
+                "technology": "force_fps + filter_video + enc_video + mux + output",
+                "tags": "Element,Component,Stream",
+                "relationships": [
+                  {
+                    "id": "r28",
+                    "sourceId": "cmp_encoding_delivery",
+                    "destinationId": "c_cuda_video_accel",
+                    "description": "Uses GPU scaling and NVENC encoding",
+                    "technology": "CUDA / NVENC",
+                    "interactionStyle": "Synchronous"
+                  },
+                  {
+                    "id": "r35",
+                    "sourceId": "cmp_encoding_delivery",
+                    "destinationId": "c_rtmp_publish_endpoint",
+                    "description": "Publishes the annotated live stream",
+                    "technology": "FLV / RTMP",
+                    "interactionStyle": "Asynchronous"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ss_input_source",
+        "name": "Recorded Video Source",
+        "description": "Provides the basketball recording that is replayed into the avplumber graph.",
+        "location": "External",
+        "tags": "Element,Software System,External",
+        "containers": [
+          {
+            "id": "c_input_recording",
+            "name": "Input Recording",
+            "description": "A recorded MP4 input asset consumed by the graph's input_rec node.",
+            "technology": "MP4 file",
+            "tags": "Element,Container,External,File"
+          }
+        ]
+      },
+      {
+        "id": "ss_gpu_runtime",
+        "name": "GPU And Model Runtime",
+        "description": "External acceleration and inference services relied upon by the graph.",
+        "location": "External",
+        "tags": "Element,Software System,External",
+        "containers": [
+          {
+            "id": "c_cuda_video_accel",
+            "name": "CUDA Video Acceleration",
+            "description": "GPU-backed decode, transform, overlay, and encode capabilities used by the pipeline.",
+            "technology": "CUDA / NVDEC / NVENC",
+            "tags": "Element,Container,External,GPU"
+          },
+          {
+            "id": "c_tensorrt_runtime",
+            "name": "TensorRT Inference Runtime",
+            "description": "Executes optimized neural inference workloads for detection, segmentation, OCR, and feature embedding.",
+            "technology": "TensorRT",
+            "tags": "Element,Container,External,ML",
+            "relationships": [
+              {
+                "id": "r04",
+                "sourceId": "c_tensorrt_runtime",
+                "destinationId": "c_model_engines",
+                "description": "Loads optimized model engines",
+                "technology": "TensorRT plan files",
+                "interactionStyle": "Synchronous"
+              }
+            ]
+          },
+          {
+            "id": "c_model_engines",
+            "name": "Model Engine Set",
+            "description": "Optimized TensorRT plan engines for detection, segmentation, OCR, and player feature extraction.",
+            "technology": "TensorRT plan files",
+            "tags": "Element,Container,External,ML,File"
+          }
+        ]
+      },
+      {
+        "id": "ss_metadata_archive",
+        "name": "Metadata Archive",
+        "description": "Stores the JSON metadata dump emitted by the pipeline.",
+        "location": "External",
+        "tags": "Element,Software System,External",
+        "containers": [
+          {
+            "id": "c_metadata_dump_file",
+            "name": "Metadata Dump File",
+            "description": "The compact JSON file written by the metadata_dump node.",
+            "technology": "JSON file",
+            "tags": "Element,Container,External,File,Metadata"
+          }
+        ]
+      },
+      {
+        "id": "ss_streaming_platform",
+        "name": "RTMP Distribution Platform",
+        "description": "Receives the encoded annotated basketball stream.",
+        "location": "External",
+        "tags": "Element,Software System,External",
+        "containers": [
+          {
+            "id": "c_rtmp_publish_endpoint",
+            "name": "RTMP Publish Endpoint",
+            "description": "The FLV/RTMP ingest endpoint configured by the graph output node.",
+            "technology": "RTMP ingest",
+            "tags": "Element,Container,External,Stream"
+          }
+        ]
+      }
+    ]
+  },
+  "views": {
+    "containerViews": [
+      {
+        "key": "basketball_pipeline_container",
+        "order": 1,
+        "title": "Basketball Pipeline - Container Overview",
+        "description": "High-level container view for the avplumber basketball analysis graph.",
+        "softwareSystemId": "ss_avpl_pipeline",
+        "paperSize": "Slide_16_9",
+        "automaticLayout": {
+          "implementation": "Dagre",
+          "rankDirection": "LeftRight",
+          "rankSeparation": 300,
+          "nodeSeparation": 220,
+          "edgeSeparation": 120,
+          "vertices": false
+        },
+        "externalSoftwareSystemBoundariesVisible": true,
+        "elements": [
+          { "id": "c_avpl_runtime" },
+          { "id": "c_input_recording" },
+          { "id": "c_cuda_video_accel" },
+          { "id": "c_tensorrt_runtime" },
+          { "id": "c_model_engines" },
+          { "id": "c_metadata_dump_file" },
+          { "id": "c_rtmp_publish_endpoint" }
+        ],
+        "relationships": [
+          { "id": "r01" },
+          { "id": "r02" },
+          { "id": "r03" },
+          { "id": "r04" },
+          { "id": "r05" },
+          { "id": "r06" }
+        ]
+      }
+    ],
+    "componentViews": [
+      {
+        "key": "basketball_pipeline_components_internal",
+        "order": 2,
+        "title": "Basketball Pipeline - Internal Components",
+        "description": "Internal-only low-level view of the major processing responsibilities inside the avplumber runtime.",
+        "containerId": "c_avpl_runtime",
+        "paperSize": "Slide_16_9",
+        "automaticLayout": {
+          "implementation": "Dagre",
+          "rankDirection": "LeftRight",
+          "rankSeparation": 260,
+          "nodeSeparation": 180,
+          "edgeSeparation": 100,
+          "vertices": false
+        },
+        "elements": [
+          { "id": "cmp_ingest" },
+          { "id": "cmp_decode_timing" },
+          { "id": "cmp_frame_fanout" },
+          { "id": "cmp_detection_inference" },
+          { "id": "cmp_segmentation_inference" },
+          { "id": "cmp_scene_event_understanding" },
+          { "id": "cmp_tracking_possession" },
+          { "id": "cmp_team_classification" },
+          { "id": "cmp_scoreboard_ocr" },
+          { "id": "cmp_visualization_reframing" },
+          { "id": "cmp_metadata_export" },
+          { "id": "cmp_encoding_delivery" }
+        ],
+        "relationships": [
+          { "id": "r11" },
+          { "id": "r12" },
+          { "id": "r13" },
+          { "id": "r14" },
+          { "id": "r15" },
+          { "id": "r16" },
+          { "id": "r17" },
+          { "id": "r18" },
+          { "id": "r19" },
+          { "id": "r20" },
+          { "id": "r21" },
+          { "id": "r22" },
+          { "id": "r23" },
+          { "id": "r24" },
+          { "id": "r25" }
+        ]
+      },
+      {
+        "key": "basketball_pipeline_components_external",
+        "order": 3,
+        "title": "Basketball Pipeline - Components With External Dependencies",
+        "description": "Low-level view of the avplumber runtime components plus the external files, GPU services, inference runtime, and publish endpoint they depend on.",
+        "containerId": "c_avpl_runtime",
+        "paperSize": "Slide_16_9",
+        "automaticLayout": {
+          "implementation": "Dagre",
+          "rankDirection": "LeftRight",
+          "rankSeparation": 260,
+          "nodeSeparation": 180,
+          "edgeSeparation": 100,
+          "vertices": false
+        },
+        "externalContainerBoundariesVisible": true,
+        "elements": [
+          { "id": "cmp_ingest" },
+          { "id": "cmp_decode_timing" },
+          { "id": "cmp_frame_fanout" },
+          { "id": "cmp_detection_inference" },
+          { "id": "cmp_segmentation_inference" },
+          { "id": "cmp_scene_event_understanding" },
+          { "id": "cmp_tracking_possession" },
+          { "id": "cmp_team_classification" },
+          { "id": "cmp_scoreboard_ocr" },
+          { "id": "cmp_visualization_reframing" },
+          { "id": "cmp_metadata_export" },
+          { "id": "cmp_encoding_delivery" },
+          { "id": "c_input_recording" },
+          { "id": "c_cuda_video_accel" },
+          { "id": "c_tensorrt_runtime" },
+          { "id": "c_model_engines" },
+          { "id": "c_metadata_dump_file" },
+          { "id": "c_rtmp_publish_endpoint" }
+        ],
+        "relationships": [
+          { "id": "r11" },
+          { "id": "r12" },
+          { "id": "r13" },
+          { "id": "r14" },
+          { "id": "r15" },
+          { "id": "r16" },
+          { "id": "r17" },
+          { "id": "r18" },
+          { "id": "r19" },
+          { "id": "r20" },
+          { "id": "r21" },
+          { "id": "r22" },
+          { "id": "r23" },
+          { "id": "r24" },
+          { "id": "r25" },
+          { "id": "r26" },
+          { "id": "r27" },
+          { "id": "r28" },
+          { "id": "r29" },
+          { "id": "r30" },
+          { "id": "r31" },
+          { "id": "r32" },
+          { "id": "r04" },
+          { "id": "r34" },
+          { "id": "r35" }
+        ]
+      }
+    ],
+    "configuration": {
+      "defaultView": "basketball_pipeline_container",
+      "lastSavedView": "basketball_pipeline_components_external",
+      "metadataSymbols": "SquareBrackets",
+      "styles": {
+        "elements": [
+          {
+            "tag": "Element",
+            "background": "#1168bd",
+            "color": "#ffffff",
+            "shape": "RoundedBox",
+            "metadata": true,
+            "description": true
+          },
+          {
+            "tag": "Software System",
+            "background": "#1168bd",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "Container",
+            "background": "#438dd5",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "Component",
+            "background": "#85bbf0",
+            "color": "#083b66",
+            "shape": "Component"
+          },
+          {
+            "tag": "External",
+            "background": "#999999",
+            "color": "#ffffff",
+            "border": "Dashed"
+          },
+          {
+            "tag": "File",
+            "shape": "Folder",
+            "background": "#5b7c99",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "Metadata",
+            "background": "#2f855a",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "Stream",
+            "shape": "Pipe",
+            "background": "#b35c1e",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "GPU",
+            "background": "#d97706",
+            "color": "#ffffff"
+          },
+          {
+            "tag": "ML",
+            "background": "#2f855a",
+            "color": "#ffffff"
+          }
+        ],
+        "relationships": [
+          {
+            "tag": "Relationship",
+            "thickness": 2,
+            "color": "#5b7c99",
+            "routing": "Orthogonal",
+            "fontSize": 20,
+            "width": 240
+          },
+          {
+            "tag": "Asynchronous",
+            "style": "Dashed",
+            "color": "#b35c1e"
+          }
+        ]
+      },
+      "properties": {
+        "generated_by": "OpenAI Codex"
+      }
+    }
+  }
+}
