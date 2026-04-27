@@ -69,15 +69,3 @@ Reads GPU mask side data (`AV_FRAME_DATA_YOLO_SEG_MASKS_GPU`). Bilinear samples 
 **Kernels:** `kDrawSegMaskNV12Luma`, `kDrawSegMaskNV12Chroma`
 
 ---
-
-## Node: `draw_text`
-Render analysis text overlay (basketball stats).
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `metadata_key` | "basketball_analysis_v1" | Analysis source |
-| `origin_x` / `origin_y` | 48 | Text position |
-| `font_scale` | 5 | Font size |
-| `draw_background` | true | Draw background box |
-
-**Kernels:** `kDrawTextNV12Luma`, `kDrawTextNV12Chroma`

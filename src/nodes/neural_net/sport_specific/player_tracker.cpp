@@ -48,7 +48,7 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
     int frame_rate_ = 30;
 
     // Shot-aware reset
-    std::string shot_metadata_key_;  // empty = disabled
+    std::string camera_shot_metadata_key_;  // empty = disabled
     int track_buffer_ = 30;
     float track_thresh_ = 0.5f;
     float high_thresh_ = 0.6f;
@@ -190,20 +190,20 @@ public:
         ++frame_counter_;
 
         // Shot-aware reset: reset tracker on any shot transition so IDs restart from 1
-        if (!shot_metadata_key_.empty()) {
+        if (!camera_shot_metadata_key_.empty()) {
             const AVFrame* raw_shot = frm.raw();
             if (raw_shot && raw_shot->metadata) {
-                AVDictionaryEntry* shot_entry = av_dict_get(raw_shot->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+                AVDictionaryEntry* shot_entry = av_dict_get(raw_shot->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
                 if (shot_entry && shot_entry->value) {
                     try {
                         Parameters shot_md = Parameters::parse(shot_entry->value);
-                        bool transition = shot_md.value("shot_transition", false);
+                        bool transition = shot_md.value("camera_shot_transition", false);
                         if (transition) {
                             resetState();
                             stat_resets_++;
                             if (debug_log_every_n_ > 0) {
                                 logstream << "player_tracker: frame=" << frame_counter_
-                                          << " reset (shot transition to " << shot_md.value("shot_type", std::string("?")) << ")";
+                                          << " reset (shot transition to " << shot_md.value("camera_shot_type", std::string("?")) << ")";
                             }
                         }
                     } catch (...) {}
@@ -395,7 +395,7 @@ public:
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<PlayerTracker>(edges, params);
 
-        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_labels")) {
             if (!params["target_labels"].is_array()) throw Error("player_tracker: target_labels must be a string array");

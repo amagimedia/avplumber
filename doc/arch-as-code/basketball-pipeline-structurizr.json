@@ -217,7 +217,7 @@
                     "sourceId": "cmp_scene_event_understanding",
                     "destinationId": "cmp_tracking_possession",
                     "description": "Provides scene-aware metadata for tracking",
-                    "technology": "shot_info + joined metadata",
+                    "technology": "camera_shot_info + joined metadata",
                     "interactionStyle": "Synchronous"
                   }
                 ]

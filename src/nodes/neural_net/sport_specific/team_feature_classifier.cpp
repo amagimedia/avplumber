@@ -127,6 +127,7 @@ struct TrackState {
     int assigned_team = -1;
     float last_margin = 0.0f;
     uint64_t last_frame = 0;
+    uint32_t lock_age = 0;
 };
 
 } // namespace
@@ -134,7 +135,7 @@ struct TrackState {
 class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     std::string player_metadata_key_ = "yolo_players";
     std::string seg_metadata_key_ = "yolo_players_seg";
-    std::string shot_metadata_key_ = "shot_info";
+    std::string camera_shot_metadata_key_ = "camera_shot_info";
     std::vector<std::string> player_labels_ = {"Player"};
     std::vector<std::string> seg_labels_ = {"player"};
     float iou_match_threshold_ = 0.15f;
@@ -149,6 +150,7 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int bootstrap_min_cluster_size_ = 2;
     float bootstrap_max_ratio_ = 2.0f;
     uint64_t bootstrap_frames_ = 60;
+    uint64_t bootstrap_track_recent_frames_ = 150;
     uint64_t track_idle_frames_ = 300;
     int centroid_update_min_tracks_per_team_ = 2;
     float centroid_update_max_ratio_ = 2.5f;
@@ -175,6 +177,10 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         tracks_.clear();
         proto_[0].clear();
         proto_[1].clear();
+    }
+
+    void clearTracks() {
+        tracks_.clear();
     }
 
     void pruneTracks() {
@@ -216,15 +222,16 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     }
 
     bool isWideShot(const AVFrame* raw) {
-        if (!raw || !raw->metadata || shot_metadata_key_.empty()) return true;
-        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        if (!raw || !raw->metadata || camera_shot_metadata_key_.empty()) return true;
+        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
         if (!shot_entry || !shot_entry->value) return true;
         try {
             Parameters shot_md = Parameters::parse(shot_entry->value);
-            if (shot_md.value("shot_transition", false)) {
-                resetState();
+            if (shot_md.value("camera_shot_transition", false)) {
+                if (bootstrapped_) clearTracks();
+                else resetState();
             }
-            return iequals(shot_md.value("shot_type", std::string("wide")), "wide");
+            return iequals(shot_md.value("camera_shot_type", std::string("wide")), "wide");
         } catch (...) {
             return true;
         }
@@ -276,30 +283,58 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         }
     }
 
-    bool bootstrapPrototypes(bool wide_only, const std::vector<ParsedTracked>& tracked) {
-        if (bootstrapped_ || frame_counter_ < bootstrap_frames_ || !wide_only) return bootstrapped_;
+    void logBootstrapReject(const char* reason,
+                            size_t sample_count,
+                            int count0 = 0,
+                            int count1 = 0,
+                            float sep = -1.0f) const {
+        if (debug_log_every_n_ <= 0) return;
+        if ((frame_counter_ % (uint64_t)debug_log_every_n_) != 0) return;
+        logstream << "team_feature_classifier: bootstrap_reject"
+                  << " frame=" << frame_counter_
+                  << " reason=" << reason
+                  << " samples=" << sample_count
+                  << " min_tracks=" << bootstrap_min_tracks_
+                  << " min_hits=" << bootstrap_min_hits_
+                  << " c0=" << count0
+                  << " c1=" << count1;
+        if (sep >= 0.0f) {
+            logstream << " proto_sep=" << sep
+                      << " min_proto_sep=" << bootstrap_min_prototype_distance_;
+        }
+    }
+
+    bool bootstrapPrototypes(bool wide, const std::vector<ParsedTracked>& tracked) {
+        if (bootstrapped_ || frame_counter_ < bootstrap_frames_ || !wide) return bootstrapped_;
+        (void)tracked;
         std::vector<const TrackState*> samples;
-        samples.reserve(tracked.size());
-        for (const auto& tr : tracked) {
-            auto it = tracks_.find(tr.track_id);
-            if (it == tracks_.end()) continue;
-            const TrackState& st = it->second;
+        samples.reserve(tracks_.size());
+        for (const auto& kv : tracks_) {
+            const TrackState& st = kv.second;
             if (!st.has_embed || st.hits < bootstrap_min_hits_) continue;
+            if (frame_counter_ - st.last_frame > bootstrap_track_recent_frames_) continue;
             samples.push_back(&st);
         }
-        if ((int)samples.size() < bootstrap_min_tracks_) return false;
+        if ((int)samples.size() < bootstrap_min_tracks_) {
+            logBootstrapReject("not_enough_samples", samples.size());
+            return false;
+        }
 
-        proto_[0] = samples.front()->embed_ema;
-        float best_d = -1.0f;
-        size_t best_i = 0;
+        size_t seed0 = 0;
+        size_t seed1 = 1;
+        float best_seed_d = -1.0f;
         for (size_t i = 0; i < samples.size(); ++i) {
-            const float d = cosineDistance(samples[i]->embed_ema.data(), proto_[0].data(), embed_dim_);
-            if (d > best_d) {
-                best_d = d;
-                best_i = i;
+            for (size_t j = i + 1; j < samples.size(); ++j) {
+                const float d = cosineDistance(samples[i]->embed_ema.data(), samples[j]->embed_ema.data(), embed_dim_);
+                if (d > best_seed_d) {
+                    best_seed_d = d;
+                    seed0 = i;
+                    seed1 = j;
+                }
             }
         }
-        proto_[1] = samples[best_i]->embed_ema;
+        proto_[0] = samples[seed0]->embed_ema;
+        proto_[1] = samples[seed1]->embed_ema;
 
         int final_count0 = 0;
         int final_count1 = 0;
@@ -329,11 +364,20 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         }
 
         const float sep = cosineDistance(proto_[0].data(), proto_[1].data(), embed_dim_);
-        if (final_count0 < bootstrap_min_cluster_size_ || final_count1 < bootstrap_min_cluster_size_) return false;
+        if (final_count0 < bootstrap_min_cluster_size_ || final_count1 < bootstrap_min_cluster_size_) {
+            logBootstrapReject("small_cluster", samples.size(), final_count0, final_count1, sep);
+            return false;
+        }
         const float min_count = (float)std::min(final_count0, final_count1);
         const float max_count = (float)std::max(final_count0, final_count1);
-        if (min_count <= 0.0f || max_count / min_count > bootstrap_max_ratio_) return false;
-        if (sep < bootstrap_min_prototype_distance_) return false;
+        if (min_count <= 0.0f || max_count / min_count > bootstrap_max_ratio_) {
+            logBootstrapReject("cluster_ratio", samples.size(), final_count0, final_count1, sep);
+            return false;
+        }
+        if (sep < bootstrap_min_prototype_distance_) {
+            logBootstrapReject("prototype_distance", samples.size(), final_count0, final_count1, sep);
+            return false;
+        }
         bootstrapped_ = true;
         logstream << "team_feature_classifier: bootstrap"
                   << " frame=" << frame_counter_
@@ -360,7 +404,11 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             const float d1 = cosineDistance(st.embed_ema.data(), proto_[1].data(), embed_dim_);
             const int best = (d0 <= d1) ? 0 : 1;
             const float margin = std::fabs(d0 - d1);
-            if (margin >= assignment_margin_ || (st.assigned_team == best && margin >= soft_assignment_margin_)) {
+            const int prev_team = st.assigned_team;
+            if (margin >= assignment_margin_ ||
+                (st.assigned_team == best && margin >= soft_assignment_margin_) ||
+                (st.assigned_team < 0 && margin >= soft_assignment_margin_)) {
+                if (st.assigned_team != best) st.lock_age = 0;
                 st.assigned_team = best;
                 st.last_margin = margin;
             }
@@ -369,6 +417,7 @@ class TeamFeatureClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             det[output_field_] = team;
             det[output_ab_field_] = (team >= 0 && team < (int)team_ab_.size()) ? team_ab_[(size_t)team] : "?";
             if (team >= 0) {
+                det["team_lock_age"] = st.lock_age++;
                 det["team_conf"] = margin;
                 if (rewrite_label_ && team < (int)team_label_names_.size()) {
                     det["label"] = team_label_names_[(size_t)team];
@@ -563,7 +612,7 @@ public:
         auto r = std::make_shared<TeamFeatureClassifier>(src->makeSource(), dst->makeSink());
         if (params.count("player_metadata_key")) r->player_metadata_key_ = params["player_metadata_key"].get<std::string>();
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
-        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         if (params.count("player_labels")) {
             auto labels = jsonToStringList(params["player_labels"]);
             r->player_labels_.assign(labels.begin(), labels.end());
@@ -584,6 +633,7 @@ public:
         if (params.count("bootstrap_min_cluster_size")) r->bootstrap_min_cluster_size_ = params["bootstrap_min_cluster_size"].get<int>();
         if (params.count("bootstrap_max_ratio")) r->bootstrap_max_ratio_ = params["bootstrap_max_ratio"].get<float>();
         if (params.count("bootstrap_frames")) r->bootstrap_frames_ = params["bootstrap_frames"].get<uint64_t>();
+        if (params.count("bootstrap_track_recent_frames")) r->bootstrap_track_recent_frames_ = params["bootstrap_track_recent_frames"].get<uint64_t>();
         if (params.count("track_idle_frames")) r->track_idle_frames_ = params["track_idle_frames"].get<uint64_t>();
         if (params.count("centroid_update_min_tracks_per_team")) r->centroid_update_min_tracks_per_team_ = params["centroid_update_min_tracks_per_team"].get<int>();
         if (params.count("centroid_update_max_ratio")) r->centroid_update_max_ratio_ = params["centroid_update_max_ratio"].get<float>();

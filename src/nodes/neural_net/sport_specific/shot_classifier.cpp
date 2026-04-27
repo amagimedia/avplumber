@@ -39,7 +39,7 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int min_stable_frames_ = 6;
 
     // Output
-    std::string metadata_key_out_ = "shot_info";
+    std::string metadata_key_out_ = "camera_shot_info";
     int debug_log_every_n_ = 1;
 
     // State
@@ -217,8 +217,8 @@ public:
 
         // === Step 5: Write metadata ===
         Parameters out_md;
-        out_md["shot_type"] = shot_type;
-        out_md["shot_transition"] = transition;
+        out_md["camera_shot_type"] = shot_type;
+        out_md["camera_shot_transition"] = transition;
         out_md["court_coverage"] = court_coverage;
 
         std::string serialized = out_md.dump();
@@ -229,7 +229,7 @@ public:
                       << " court=" << (int)(court_coverage * 100) << "%"
                       << " players=" << valid_players
                       << " raw=" << raw_type
-                      << " shot=" << shot_type
+                      << " camera_shot=" << shot_type
                       << (transition ? " TRANSITION" : "");
         }
 

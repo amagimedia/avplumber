@@ -188,6 +188,7 @@ class PlayerMaskFeatureEncoder : public NodeSISO<av::VideoFrame, av::VideoFrame>
     float iou_match_threshold_ = 0.15f;
     float fallback_center_distance_px_ = 60.0f;
     float mask_threshold_ = 0.5f;
+    float bg_value_ = 0.5f;  // background fill: 0=black, 0.5=gray (SigLIP neutral)
     int body_region_mode_ = 0; // 0 = full, 1 = torso
     float torso_x_margin_rel_ = 0.14f;
     float torso_y_start_rel_ = 0.18f;
@@ -479,6 +480,7 @@ class PlayerMaskFeatureEncoder : public NodeSISO<av::VideoFrame, av::VideoFrame>
         const int out_w = runner_.input_w;
         const int out_h = runner_.input_h;
         const float mask_threshold = mask_threshold_;
+        const float bg_value = bg_value_;
         void* out = reinterpret_cast<void*>(runner_.d_input);
 
         void* args[] = {
@@ -502,6 +504,7 @@ class PlayerMaskFeatureEncoder : public NodeSISO<av::VideoFrame, av::VideoFrame>
             (void*)&out_w,
             (void*)&out_h,
             (void*)&mask_threshold,
+            (void*)&bg_value,
             (void*)&out
         };
         const unsigned int blockX = 16;
@@ -680,6 +683,7 @@ public:
         if (params.count("iou_match_threshold")) r->iou_match_threshold_ = params["iou_match_threshold"].get<float>();
         if (params.count("fallback_center_distance_px")) r->fallback_center_distance_px_ = params["fallback_center_distance_px"].get<float>();
         if (params.count("mask_threshold")) r->mask_threshold_ = params["mask_threshold"].get<float>();
+        if (params.count("bg_value")) r->bg_value_ = params["bg_value"].get<float>();
         if (params.count("body_region")) {
             const std::string body = params["body_region"].get<std::string>();
             r->body_region_mode_ = iequals(body, "torso") ? 1 : 0;

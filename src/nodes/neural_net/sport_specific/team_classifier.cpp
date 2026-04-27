@@ -93,6 +93,7 @@ struct TrackColor {
     int initial_candidate_frames = 0;
     uint32_t hits = 0;
     uint64_t last_frame = 0;
+    uint32_t lock_age = 0;
 };
 
 struct ParsedTracked {
@@ -140,7 +141,7 @@ struct HandoffMatch {
 class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     std::string player_metadata_key_ = "yolo_players";
     std::string seg_metadata_key_ = "yolo_players_seg";
-    std::string shot_metadata_key_;
+    std::string camera_shot_metadata_key_;
     std::vector<std::string> player_labels_ = {"Player"};
     std::vector<std::string> seg_labels_ = {"player"};
     std::string debug_seg_metadata_key_;
@@ -166,7 +167,9 @@ class TeamClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     float handoff_max_hist_distance_ = 0.15f;
     int min_jersey_pixels_ = 32;
     std::string output_field_ = "team";
+    std::string output_ab_field_ = "team_ab";
     std::string output_team_color_field_;
+    std::vector<std::string> team_ab_ = {"A", "B"};
     bool write_back_to_seg_ = true;
     bool rewrite_seg_cls_ = true;
     bool rewrite_label_ = false;
@@ -469,13 +472,13 @@ public:
 
         ++frame_counter_;
         const AVFrame* raw = frm.raw();
-        if (!shot_metadata_key_.empty() && raw && raw->metadata) {
-            AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        if (!camera_shot_metadata_key_.empty() && raw && raw->metadata) {
+            AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
             if (shot_entry && shot_entry->value) {
                 try {
                     Parameters shot_md = Parameters::parse(shot_entry->value);
-                    if (shot_md.value("shot_transition", false)) {
-                        const std::string shot_type = shot_md.value("shot_type", std::string("?"));
+                    if (shot_md.value("camera_shot_transition", false)) {
+                        const std::string shot_type = shot_md.value("camera_shot_type", std::string("?"));
                         resetState();
                         ++frame_counter_;
                         if (debug_log_every_n_ > 0) {
@@ -642,6 +645,7 @@ public:
             if (!det.is_object() || !matchesLabel(det, seg_labels_)) continue;
             if (rewrite_seg_cls_) det["cls"] = -1;
             if (write_back_to_seg_) det[output_field_] = -1;
+            if (write_back_to_seg_) det[output_ab_field_] = "?";
         }
 
         int assigned_known = 0;
@@ -694,7 +698,9 @@ public:
                     residual_weak_count += 1;
                     team = tc.assigned_team;
                     det[output_field_] = team;
+                    det[output_ab_field_] = (team >= 0 && team < (int)team_ab_.size()) ? team_ab_[(size_t)team] : "?";
                     if (team >= 0) {
+                        det["team_lock_age"] = tc.lock_age++;
                         ++assigned_known;
                         assigned_team_count[team] += 1;
                     }
@@ -729,6 +735,7 @@ public:
                         tc.assigned_team = handoff.team;
                         tc.initial_candidate_team = -1;
                         tc.initial_candidate_frames = 0;
+                        tc.lock_age = 0;
                         handoff_lock_count += 1;
                         logstream << "team_classifier: lock"
                                   << " mode=handoff"
@@ -744,6 +751,7 @@ public:
                         tc.assigned_team = candidate_team;
                         tc.initial_candidate_team = -1;
                         tc.initial_candidate_frames = 0;
+                        tc.lock_age = 0;
                         strong_lock_count += 1;
                         logstream << "team_classifier: lock"
                                   << " mode=strong"
@@ -764,6 +772,7 @@ public:
                             tc.assigned_team = candidate_team;
                             tc.initial_candidate_team = -1;
                             tc.initial_candidate_frames = 0;
+                            tc.lock_age = 0;
                             weak_lock_count += 1;
                             logstream << "team_classifier: lock"
                                       << " mode=weak"
@@ -790,7 +799,10 @@ public:
                 }
             }
             det[output_field_] = team;
+            det[output_ab_field_] = (team >= 0 && team < (int)team_ab_.size()) ? team_ab_[(size_t)team] : "?";
             if (team >= 0) {
+                auto it2 = tracks_.find(tracked[tri].track_id);
+                if (it2 != tracks_.end()) det["team_lock_age"] = it2->second.lock_age++;
                 ++assigned_known;
                 assigned_team_count[team] += 1;
             }
@@ -811,6 +823,7 @@ public:
             if (seg_det.contains("jersey_uv_hist")) player_det["jersey_uv_hist"] = seg_det["jersey_uv_hist"];
             if (seg_det.contains("jersey_l_hist")) player_det["jersey_l_hist"] = seg_det["jersey_l_hist"];
             if (write_back_to_seg_) seg_det[output_field_] = team;
+            if (write_back_to_seg_) seg_det[output_ab_field_] = player_det.value(output_ab_field_, std::string("?"));
             if (rewrite_seg_cls_) seg_det["cls"] = team;
             if (has_debug_seg_md) {
                 auto dbg_it = debug_det_by_source_index.find(segs[(size_t)si].det_index);
@@ -909,7 +922,7 @@ public:
         if (params.count("player_metadata_key")) r->player_metadata_key_ = params["player_metadata_key"].get<std::string>();
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
         if (params.count("debug_seg_metadata_key")) r->debug_seg_metadata_key_ = params["debug_seg_metadata_key"].get<std::string>();
-        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         if (params.count("player_labels")) {
             r->player_labels_.clear();
             for (const auto& item : params["player_labels"]) r->player_labels_.push_back(item.get<std::string>());
@@ -940,6 +953,11 @@ public:
         if (params.count("handoff_max_hist_distance")) r->handoff_max_hist_distance_ = params["handoff_max_hist_distance"].get<float>();
         if (params.count("min_jersey_pixels")) r->min_jersey_pixels_ = params["min_jersey_pixels"].get<int>();
         if (params.count("output_field")) r->output_field_ = params["output_field"].get<std::string>();
+        if (params.count("output_ab_field")) r->output_ab_field_ = params["output_ab_field"].get<std::string>();
+        if (params.count("team_ab")) {
+            r->team_ab_.clear();
+            for (const auto& item : params["team_ab"]) r->team_ab_.push_back(item.get<std::string>());
+        }
         if (params.count("output_team_color_field")) r->output_team_color_field_ = params["output_team_color_field"].get<std::string>();
         if (params.count("write_back_to_seg")) r->write_back_to_seg_ = params["write_back_to_seg"].get<bool>();
         if (params.count("rewrite_seg_cls")) r->rewrite_seg_cls_ = params["rewrite_seg_cls"].get<bool>();

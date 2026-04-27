@@ -10,7 +10,7 @@ using cuda_overlay::DrawColor;
 class DrawKeypoints : public CudaOverlayBase {
 private:
     std::string metadata_key_;
-    std::string shot_metadata_key_ = "shot_info";
+    std::string camera_shot_metadata_key_ = "camera_shot_info";
     DrawColor color_{};
     int radius_ = 3;
     double min_conf_ = 0.0;
@@ -50,11 +50,11 @@ private:
 
     std::string parseShotType(const AVFrame* raw) const {
         if (!raw || !raw->metadata) return "";
-        AVDictionaryEntry* entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
         if (!entry || !entry->value) return "";
         try {
             Parameters md = Parameters::parse(entry->value);
-            return md.value("shot_type", std::string());
+            return md.value("camera_shot_type", std::string());
         } catch (const std::exception&) {
             return "";
         }
@@ -186,7 +186,7 @@ public:
     DrawKeypoints(std::unique_ptr<Source<av::VideoFrame>> &&source,
                   std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                   std::string metadata_key,
-                  std::string shot_metadata_key,
+                  std::string camera_shot_metadata_key,
                   DrawColor color,
                   int radius,
                   double min_conf,
@@ -201,7 +201,7 @@ public:
                   int debug_log_every_n)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
-          shot_metadata_key_(std::move(shot_metadata_key)),
+          camera_shot_metadata_key_(std::move(camera_shot_metadata_key)),
           color_(color),
           radius_(radius),
           min_conf_(min_conf),
@@ -231,7 +231,7 @@ public:
         const auto upstream = resolveUpstreamInfo(src_edge, params);
 
         const std::string metadata_key = params.value("metadata_key", std::string("yolo_pose"));
-        const std::string shot_metadata_key = params.value("shot_metadata_key", std::string("shot_info"));
+        const std::string camera_shot_metadata_key = params.value("camera_shot_metadata_key", std::string("camera_shot_info"));
         const int radius = params.value("radius", 3);
         const double min_conf = params.value("min_conf", 0.0);
         const bool require_wide_shot = params.value("require_wide_shot", false);
@@ -248,7 +248,7 @@ public:
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawKeypoints>(
-            edges, params, metadata_key, shot_metadata_key, color, radius, min_conf, require_wide_shot,
+            edges, params, metadata_key, camera_shot_metadata_key, color, radius, min_conf, require_wide_shot,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }

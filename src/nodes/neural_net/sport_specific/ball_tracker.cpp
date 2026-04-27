@@ -47,7 +47,7 @@ private:
     double min_conf_ = 0.04;
 
     // Shot-aware mode handling
-    std::string shot_metadata_key_;  // empty = disabled
+    std::string camera_shot_metadata_key_;  // empty = disabled
 
     // Best ball selection
     double target_ball_size_rel_ = 0.036;
@@ -68,7 +68,7 @@ private:
     bool court_bounds_veto_enabled_ = true;
     std::string court_bounds_seg_metadata_key_ = "yolo_seg";
     int court_bounds_side_data_slot_ = 0;
-    std::string court_bounds_shot_metadata_key_ = "shot_info";
+    std::string court_bounds_camera_shot_metadata_key_ = "camera_shot_info";
     std::unordered_set<int> court_bounds_class_indices_ = {0, 1};
     bool court_bounds_require_wide_shot_ = true;
     double court_bounds_min_court_coverage_ = 0.1;
@@ -300,15 +300,15 @@ private:
     }
 
     std::string getShotType(const AVFrame* raw) const {
-        if (shot_metadata_key_.empty()) return std::string();
+        if (camera_shot_metadata_key_.empty()) return std::string();
         if (!raw || !raw->metadata) return std::string();
 
-        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
         if (!shot_entry || !shot_entry->value) return std::string();
 
         try {
             Parameters shot_md = Parameters::parse(shot_entry->value);
-            return shot_md.value("shot_type", std::string());
+            return shot_md.value("camera_shot_type", std::string());
         } catch (...) {
             return std::string();
         }
@@ -400,18 +400,18 @@ private:
     }
 
     void populateShotInfo(const AVFrame* raw, ParsedFrameMetadata& parsed) const {
-        if (!raw || !raw->metadata || court_bounds_shot_metadata_key_.empty()) return;
+        if (!raw || !raw->metadata || court_bounds_camera_shot_metadata_key_.empty()) return;
 
-        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, court_bounds_shot_metadata_key_.c_str(), nullptr, 0);
+        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, court_bounds_camera_shot_metadata_key_.c_str(), nullptr, 0);
         if (!shot_entry || !shot_entry->value) return;
 
         try {
             Parameters shot_md = Parameters::parse(shot_entry->value);
-            parsed.have_shot_info = true;
-            parsed.shot_type = shot_md.value("shot_type", std::string());
+            parsed.have_camera_shot_info = true;
+            parsed.shot_type = shot_md.value("camera_shot_type", std::string());
             parsed.court_coverage = shot_md.value("court_coverage", 0.0);
         } catch (...) {
-            parsed.have_shot_info = false;
+            parsed.have_camera_shot_info = false;
             parsed.shot_type.clear();
             parsed.court_coverage = 0.0;
         }
@@ -484,7 +484,7 @@ private:
                       << " court_bounds_check cx=" << centerX(cand)
                       << " cy=" << centerY(cand)
                       << " rows=" << result.sample_rows_used
-                      << " shot=" << (parsed.have_shot_info ? parsed.shot_type : std::string("missing"))
+                      << " camera_shot=" << (parsed.have_camera_shot_info ? parsed.shot_type : std::string("missing"))
                       << " court_cov=" << parsed.court_coverage
                       << " best_overlap=" << result.best_overlap_ratio
                       << " worst_overlap=" << result.worst_overlap_ratio
@@ -1089,7 +1089,7 @@ public:
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<BallTracker>(edges, params);
 
         // Shot-aware mode handling
-        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         // Target filtering
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_label")) r->target_label_ = params["target_label"].get<std::string>();
@@ -1125,7 +1125,7 @@ public:
         if (!yoloSegIsValidSlot(r->court_bounds_side_data_slot_)) {
             throw Error("ball_tracker: court_bounds_side_data_slot out of range [0," + std::to_string(kMaxYoloSegSlots - 1) + "]");
         }
-        if (params.count("court_bounds_shot_metadata_key")) r->court_bounds_shot_metadata_key_ = params["court_bounds_shot_metadata_key"].get<std::string>();
+        if (params.count("court_bounds_camera_shot_metadata_key")) r->court_bounds_camera_shot_metadata_key_ = params["court_bounds_camera_shot_metadata_key"].get<std::string>();
         if (params.count("court_bounds_require_wide_shot")) r->court_bounds_require_wide_shot_ = params["court_bounds_require_wide_shot"];
         if (params.count("court_bounds_min_court_coverage")) r->court_bounds_min_court_coverage_ = params["court_bounds_min_court_coverage"];
         if (params.count("court_bounds_class_indices")) {

@@ -1104,7 +1104,7 @@ public:
                 metadata_keys_in.push_back(v.get<std::string>());
         }
         if (metadata_keys_in.empty())
-            metadata_keys_in.push_back(params.value("metadata_key_in", std::string("basketball_analysis_v1")));
+            metadata_keys_in.push_back(params.value("metadata_key_in", std::string("yolo_detections")));
         const std::string metadata_key_out = params.value("metadata_key_out", std::string("smoothed_crop_viewport_v1"));
         const double mcw = params.value("model_content_width", 0.0);
         const double mch = params.value("model_content_height", 0.0);

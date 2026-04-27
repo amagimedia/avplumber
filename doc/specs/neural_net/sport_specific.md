@@ -33,26 +33,24 @@ Replaces detection metadata with single tracked ball. Appends `trail` array of [
 
 ---
 
-## Node: `basketball_analysis`
-Shot detection and game event analysis from detection metadata.
+## Node: `shot_classifier`
+Camera shot classification from court segmentation and player detections.
 
 ### Parameters
 | Param | Default | Description |
 |-------|---------|-------------|
-| `metadata_key_in` | "yolo_detections_v1" | Detection source |
-| `metadata_key_out` | "basketball_analysis_v1" | Analysis output key |
-| `ball_label` / `player_label` | "basketball"/"player" | Class labels |
-| `min_speed_px_per_frame` | 5.0 | Ball speed threshold |
-| `arm_frames` | 2 | Consecutive near-player frames to arm |
-| `confirm_frames` | 3 | Frames to confirm shot |
-| `shot_make_min_travel_px` | 70.0 | Minimum ball travel for shot |
-| `shot_hoop_memory_frames` | 24 | Hoop detection lookback window |
+| `seg_metadata_key` | "yolo_seg" | Court segmentation metadata |
+| `player_metadata_key` | "yolo_players" | Player detection metadata |
+| `metadata_key_out` | "camera_shot_info" | Output metadata key |
+| `wide_court_threshold` | 0.25 | Court coverage above this is wide |
+| `closeup_court_threshold` | 0.05 | Court coverage below this is closeup |
+| `ambiguous_min_players` | 3 | Minimum players required to keep wide |
+| `high_player_override` | 5 | High player count forces wide |
+| `min_stable_frames` | 6 | Hysteresis before switching camera shot |
 
 ### Pipeline
-1. Match ball detections across frames
-2. Track ball proximity to player foot bboxes
-3. Arm shot state when ball near player for `arm_frames`
-4. Detect release event (ball speed exceeds threshold)
-5. Fit quadratic trajectory to confirm shot arc
-6. Check hoop proximity within memory window
-7. Output shot events with type and confidence
+1. Measure visible court coverage from segmentation masks
+2. Count valid player detections sized like wide-shot players
+3. Classify the frame as `wide` or `closeup`
+4. Apply hysteresis before switching the reported camera shot
+5. Output `camera_shot_type`, `camera_shot_transition`, and `court_coverage`

@@ -51,7 +51,7 @@ struct ParsedFrameMetadata {
     std::vector<DetectionBox> ball_dets;
     double model_w = 0.0;
     double model_h = 0.0;
-    bool have_shot_info = false;
+    bool have_camera_shot_info = false;
     std::string shot_type;
     double court_coverage = 0.0;
     bool have_court_mask_data = false;
@@ -231,8 +231,8 @@ inline CourtBoundsCheckResult checkCourtBoundsHorizontalOverlap(const DetectionB
         return result;
     }
     if (cfg.require_wide_shot) {
-        if (!parsed.have_shot_info) {
-            result.reason = "no_shot_info";
+        if (!parsed.have_camera_shot_info) {
+            result.reason = "no_camera_shot_info";
             return result;
         }
         if (parsed.shot_type != "wide") {

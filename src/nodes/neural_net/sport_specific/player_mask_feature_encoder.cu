@@ -92,6 +92,7 @@ __device__ __forceinline__ void runPlayerMaskToNCHW(
     int out_w,
     int out_h,
     float mask_threshold,
+    float bg_value,
     T* __restrict__ out_nchw)
 {
     const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -102,7 +103,7 @@ __device__ __forceinline__ void runPlayerMaskToNCHW(
     const int* bbox = bboxes_xyxy + sample * 4;
     const int plane_index = plane_indices[sample];
     if (plane_index < 0) {
-        store_pixel(out_nchw, out_w, out_h, sample, x, y, 0.0f, 0.0f, 0.0f);
+        store_pixel(out_nchw, out_w, out_h, sample, x, y, bg_value, bg_value, bg_value);
         return;
     }
 
@@ -139,7 +140,7 @@ __device__ __forceinline__ void runPlayerMaskToNCHW(
     const float src_y = crop_y0 + ((float)y + 0.5f) * side / (float)out_h;
 
     if (src_x < 0.0f || src_y < 0.0f || src_x >= (float)frame_w || src_y >= (float)frame_h) {
-        store_pixel(out_nchw, out_w, out_h, sample, x, y, 0.0f, 0.0f, 0.0f);
+        store_pixel(out_nchw, out_w, out_h, sample, x, y, bg_value, bg_value, bg_value);
         return;
     }
 
@@ -147,7 +148,7 @@ __device__ __forceinline__ void runPlayerMaskToNCHW(
     const int my = min(proto_h - 1, max(0, (int)(src_y * (float)proto_h / (float)model_h)));
     const float mask_value = masks[(size_t)plane_index * (size_t)proto_w * (size_t)proto_h + (size_t)my * (size_t)proto_w + (size_t)mx];
     if (mask_value < mask_threshold) {
-        store_pixel(out_nchw, out_w, out_h, sample, x, y, 0.0f, 0.0f, 0.0f);
+        store_pixel(out_nchw, out_w, out_h, sample, x, y, bg_value, bg_value, bg_value);
         return;
     }
 
@@ -188,13 +189,14 @@ extern "C" __global__ void kPlayerMaskToNCHW_fp32(
     int out_w,
     int out_h,
     float mask_threshold,
+    float bg_value,
     float* out_nchw)
 {
     runPlayerMaskToNCHW<float>(
         y_plane, pitch_y, uv_plane, pitch_uv,
         frame_w, frame_h, masks, proto_w, proto_h, model_w, model_h,
         body_region_mode, torso_x_margin_rel, torso_y_start_rel, torso_y_end_rel,
-        bboxes_xyxy, plane_indices, out_w, out_h, mask_threshold, out_nchw);
+        bboxes_xyxy, plane_indices, out_w, out_h, mask_threshold, bg_value, out_nchw);
 }
 
 extern "C" __global__ void kPlayerMaskToNCHW_fp16(
@@ -218,11 +220,12 @@ extern "C" __global__ void kPlayerMaskToNCHW_fp16(
     int out_w,
     int out_h,
     float mask_threshold,
+    float bg_value,
     __half* out_nchw)
 {
     runPlayerMaskToNCHW<__half>(
         y_plane, pitch_y, uv_plane, pitch_uv,
         frame_w, frame_h, masks, proto_w, proto_h, model_w, model_h,
         body_region_mode, torso_x_margin_rel, torso_y_start_rel, torso_y_end_rel,
-        bboxes_xyxy, plane_indices, out_w, out_h, mask_threshold, out_nchw);
+        bboxes_xyxy, plane_indices, out_w, out_h, mask_threshold, bg_value, out_nchw);
 }

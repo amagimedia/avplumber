@@ -63,7 +63,7 @@ private:
     };
 
     std::string metadata_key_;
-    std::string shot_metadata_key_ = "shot_info";
+    std::string camera_shot_metadata_key_ = "camera_shot_info";
     DrawColor mask_color_{};
     float opacity_ = 0.5f;
     float threshold_ = 0.5f;
@@ -199,12 +199,12 @@ private:
         const AVFrame* raw = frm.raw();
         if (!raw || !raw->metadata) return {};
 
-        AVDictionaryEntry* entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
         if (!entry || !entry->value) return {};
 
         try {
             Parameters md = Parameters::parse(entry->value);
-            return md.value("shot_type", std::string());
+            return md.value("camera_shot_type", std::string());
         } catch (const std::exception&) {
             return {};
         }
@@ -546,7 +546,7 @@ public:
     DrawSegMask(std::unique_ptr<Source<av::VideoFrame>> &&source,
                 std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                 std::string metadata_key,
-                std::string shot_metadata_key,
+                std::string camera_shot_metadata_key,
                 DrawColor mask_color,
                 float opacity,
                 float threshold,
@@ -569,7 +569,7 @@ public:
                 int side_data_slot)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
-          shot_metadata_key_(std::move(shot_metadata_key)),
+          camera_shot_metadata_key_(std::move(camera_shot_metadata_key)),
           mask_color_(mask_color),
           opacity_(opacity),
           threshold_(threshold),
@@ -604,7 +604,7 @@ public:
         const auto upstream = resolveUpstreamInfo(src_edge, params);
 
         const std::string metadata_key = params.value("metadata_key", std::string("yolo_detections"));
-        const std::string shot_metadata_key = params.value("shot_metadata_key", std::string("shot_info"));
+        const std::string camera_shot_metadata_key = params.value("camera_shot_metadata_key", std::string("camera_shot_info"));
         const float opacity = params.value("opacity", 0.25f);
         const float threshold = params.value("threshold", 0.5f);
         const bool require_wide_shot = params.value("require_wide_shot", false);
@@ -651,7 +651,7 @@ public:
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawSegMask>(
-            edges, params, metadata_key, shot_metadata_key, mask_color, opacity, threshold,
+            edges, params, metadata_key, camera_shot_metadata_key, mask_color, opacity, threshold,
             require_wide_shot, min_conf,
             std::move(class_colors), std::move(class_opacities),
             overlay_hold_frames, overlay_fade_frames,

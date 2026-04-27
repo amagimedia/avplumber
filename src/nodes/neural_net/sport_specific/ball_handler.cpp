@@ -19,7 +19,7 @@ class BallHandler : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     float max_distance_px_ = 35.0f;       // max ball-to-player edge distance in model space (~1 ball width)
     float player_min_conf_ = 0.25f;
     int hysteresis_frames_ = 12;          // hold handler tag for N frames (~400ms) — survives dribble bounce
-    std::string shot_metadata_key_;       // optional: read shot_info for stats
+    std::string camera_shot_metadata_key_;       // optional: read camera_shot_info for stats
     int debug_log_every_n_ = 0;
 
     // State
@@ -105,12 +105,12 @@ public:
 
         // Read shot type for stats
         bool is_wide = true;
-        if (!shot_metadata_key_.empty()) {
-            AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, shot_metadata_key_.c_str(), nullptr, 0);
+        if (!camera_shot_metadata_key_.empty()) {
+            AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
             if (shot_entry && shot_entry->value) {
                 try {
                     Parameters shot_md = Parameters::parse(shot_entry->value);
-                    is_wide = shot_md.value("shot_type", std::string()) == "wide";
+                    is_wide = shot_md.value("camera_shot_type", std::string()) == "wide";
                 } catch (...) {}
             }
         }
@@ -291,7 +291,7 @@ public:
         if (params.count("max_distance_px")) r->max_distance_px_ = params["max_distance_px"];
         if (params.count("player_min_conf")) r->player_min_conf_ = params["player_min_conf"];
         if (params.count("hysteresis_frames")) r->hysteresis_frames_ = params["hysteresis_frames"];
-        if (params.count("shot_metadata_key")) r->shot_metadata_key_ = params["shot_metadata_key"].get<std::string>();
+        if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
 
         return r;
