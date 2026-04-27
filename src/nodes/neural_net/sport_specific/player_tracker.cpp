@@ -4,7 +4,7 @@ extern "C" {
 #include <libavutil/dict.h>
 }
 
-#include <bytetrack/BYTETracker.h>
+#include <BYTETracker.h>
 
 #include <algorithm>
 #include <cctype>
