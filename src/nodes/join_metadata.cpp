@@ -142,6 +142,7 @@ public:
 
         std::shared_ptr<Edge<T>> out_edge = edges.find<T>(params["dst"]);
         auto result = std::make_shared<JoinMetadata>(make_unique<EdgeSink<T>>(out_edge));
+        result->auto_eof_ = false;
         result->createSourcesFromParameters(edges, params);
         out_edge->setProducer(result);
         return result;

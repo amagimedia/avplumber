@@ -253,21 +253,12 @@ public:
                     log_ctx("gpu_copy_failed", gpu_out);
                     CUDA_CHECK_CU(cuMemFree(gpu_out));
                 } else {
-                    if (CUDA_CHECK_CU(cuStreamSynchronize(stream))) {
-                        log_ctx("gpu_copy_sync_failed", gpu_out);
-                        CUDA_CHECK_CU(cuMemFree(gpu_out));
-                        gpu_out = 0;
-                    }
-                }
-                if (gpu_out) {
                     // Wrap in AVBufferRef with custom free callback
                     result.gpu_mask_buf = av_buffer_create(
                         (uint8_t*)(uintptr_t)gpu_out, (size_t)mask_bytes,
-                        [](void* opaque, uint8_t* data) {
-                            CUcontext ctx = (CUcontext)opaque;
-                            if (ctx) cuCtxSetCurrent(ctx);
+                        [](void*, uint8_t* data) {
                             cuMemFree((CUdeviceptr)(uintptr_t)data);
-                        }, cu_ctx_, 0);
+                        }, nullptr, 0);
                     if (!result.gpu_mask_buf) {
                         CUDA_CHECK_CU(cuMemFree(gpu_out));
                     }

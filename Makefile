@@ -118,6 +118,7 @@ ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
@@ -136,12 +137,6 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu,avpl_reframer_ptx,objs/src/nodes/neural_net/utils/amagi_reframer.o))
-endif
-
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_SPECIFIC)$(HAVE_NVCC),111)
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_extract.cu,avpl_jersey_uv_mean_ptx,objs/src/nodes/neural_net/sport_specific/jersey_color_extract.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_mask_feature_encoder.cu,avpl_player_mask_feature_encoder_ptx,objs/src/nodes/neural_net/sport_specific/player_mask_feature_encoder.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
 ifeq ($(HAVE_CUDA),1)

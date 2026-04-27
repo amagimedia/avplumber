@@ -249,6 +249,24 @@ pre {
   border-bottom-color: rgba(59, 130, 246, 0.35);
 }
 
+.node-table tr.queue-graph-hover:not(.selected) {
+  background: rgba(251, 191, 36, 0.14);
+}
+
+.node-table tr.queue-graph-hover:not(.selected) td {
+  border-bottom-color: rgba(251, 191, 36, 0.28);
+}
+
+.node-table td.pts-delta-cell {
+  color: #fcd34d;
+}
+
+.node-table td .pts-delta {
+  color: #fbbf24;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+}
+
 .node-badge {
   border-radius: 999px;
   padding: 0.05rem 0.35rem;

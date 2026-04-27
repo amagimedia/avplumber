@@ -1087,6 +1087,7 @@ public:
         EdgeManager& edges = nci.edges;
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<BallTracker>(edges, params);
+        r->auto_eof_ = false;
 
         // Shot-aware mode handling
         if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();

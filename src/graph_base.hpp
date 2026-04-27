@@ -14,6 +14,7 @@ public:
     using SourceType = Source<InputType>;
 protected:
     std::unique_ptr<SourceType> source_;
+    bool auto_eof_ = true;
     void executeUpstream(std::function<void(EdgeBase&, std::shared_ptr<Node>)> cb) {
         std::shared_ptr<EdgeBase> edge = sourceEdge();
         while (edge) {
@@ -153,6 +154,20 @@ public:
         });
         resumeProcessing();
     }
+    virtual void onEofConsumed() {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+    }
+    virtual bool consumeEofIfPresent() override {
+        if (!auto_eof_) return false;
+        InputType* ptr = source_->peek(0);
+        if (ptr == nullptr || !isEofMarker(*ptr)) return false;
+        source_->pop();
+        onEofConsumed();
+        return true;
+    }
     virtual ~NodeSingleInput() {
     }
 };
@@ -172,6 +187,7 @@ protected:
     Event stop_event_;
     std::unique_ptr<MultiEventWait> event_wait_;
     std::atomic_bool stopping_{false};
+    bool auto_eof_ = true;
     void createSourcesFromParameters(EdgeManager &edges, const Parameters &params) {
         std::list<std::string> edge_names = jsonToStringList(params["src"]);
         size_t count = edge_names.size();
@@ -220,6 +236,24 @@ public:
     virtual void stop() {
         stopping_ = true;
         stop_event_.signal();
+    }
+    virtual void onEofConsumed() {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+    }
+    virtual bool consumeEofIfPresent() override {
+        if (!auto_eof_) return false;
+        for (auto& edge : source_edges_) {
+            auto* ptr = edge->peek();
+            if (!ptr || !isEofMarker(*ptr)) return false;
+        }
+        for (auto& edge : source_edges_) {
+            edge->pop();
+        }
+        onEofConsumed();
+        return true;
     }
 
     virtual ~NodeMultiInput() {
@@ -338,6 +372,13 @@ public:
     virtual void init(EdgeManager &edges, const Parameters &params) {
         NodeSingleInput<InputType>::init(edges, params);
         NodeSingleOutput<OutputType>::init(edges, params);
+    }
+    virtual void onEofConsumed() override {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+        this->sink_->put(createEofMarker<OutputType>());
     }
     virtual ~NodeSISO() {
     }

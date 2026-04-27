@@ -10,6 +10,7 @@
   import LogsPanel from './panels/LogsPanel.svelte';
   import ConsolePanel from './panels/ConsolePanel.svelte';
   import InstanceSharedObjectsPanel from './panels/InstanceSharedObjectsPanel.svelte';
+  import { graphHoveredQueueName, selectedQueueName } from './graphStores';
 
   let ws;
   let wsConnected = false;
@@ -461,6 +462,8 @@
       lastInstanceSeen = currentInstanceId;
       // give WS a tick in case selection happens during reconnect
       setTimeout(() => {
+        selectedQueueName.set('');
+        graphHoveredQueueName.set('');
         refreshNodes();
         refreshQueues();
         clearNodeObjects();

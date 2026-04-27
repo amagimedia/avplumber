@@ -1,5 +1,4 @@
 #include "cuda_overlay_base.hpp"
-#include "draw_batch_shared.hpp"
 
 #include <cstdint>
 #include <unordered_map>
@@ -48,13 +47,8 @@ private:
     double model_content_height_ = 0.0;
     double model_content_offset_x_ = 0.0;
     double model_content_offset_y_ = 0.0;
-    cuda_overlay::DeviceBuffer<cuda_overlay::BatchedBBox> d_boxes_;
 
     const char* nodeName() const override { return "draw_bbox"; }
-
-    void onKernelsUnloaded() override {
-        d_boxes_.release(cu_ctx_);
-    }
 
     static int clampInt(int value, int lo, int hi) {
         return std::max(lo, std::min(hi, value));
@@ -321,8 +315,8 @@ private:
         return any && !boxes_out.empty();
     }
 
-    bool drawBBoxesOnFrame(av::VideoFrame &frm, const std::vector<BBox> &boxes) {
-        if (bbox_thickness_ <= 0 || boxes.empty()) return true;
+    bool drawBBoxOnFrame(av::VideoFrame &frm, const BBox &bbox) {
+        if (bbox_thickness_ <= 0) return true;
 
         const unsigned int block_x = 32;
         const unsigned int block_y = 8;
@@ -339,31 +333,20 @@ private:
         size_t pitch_uv = (size_t)frm.raw()->linesize[1];
         int width = frm.width();
         int height = frm.height();
-        std::vector<cuda_overlay::BatchedBBox> batch;
-        batch.reserve(boxes.size());
-        for (const BBox& bbox : boxes) {
-            cuda_overlay::BatchedBBox entry;
-            entry.x1 = bbox.x1;
-            entry.y1 = bbox.y1;
-            entry.x2 = bbox.x2;
-            entry.y2 = bbox.y2;
-            entry.thickness = bbox_thickness_;
-            entry.y_color = bbox.y_color;
-            entry.u_color = bbox.u_color;
-            entry.v_color = bbox.v_color;
-            batch.push_back(entry);
-        }
-        if (!d_boxes_.upload(batch, cu_ctx_, cuda_dev_ctx_->stream)) {
-            logstream << "draw_bbox: failed uploading bbox batch";
-            return false;
-        }
-        CUdeviceptr boxes_ptr = d_boxes_.ptr();
-        int num_boxes = (int)batch.size();
+        int x1 = bbox.x1;
+        int y1 = bbox.y1;
+        int x2 = bbox.x2;
+        int y2 = bbox.y2;
+        int thickness = bbox_thickness_;
+        int y_color = bbox.y_color;
+        int u_color = bbox.u_color;
+        int v_color = bbox.v_color;
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
-            (void*)&boxes_ptr, (void*)&num_boxes
+            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
+            (void*)&thickness, (void*)&y_color
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                     grid_x, grid_y, 1,
@@ -376,7 +359,8 @@ private:
         void* uv_args[] = {
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
-            (void*)&boxes_ptr, (void*)&num_boxes
+            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
+            (void*)&thickness, (void*)&u_color, (void*)&v_color
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                     uv_grid_x, uv_grid_y, 1,
@@ -409,8 +393,6 @@ private:
             throw Error("draw_bbox: failed to initialize CUDA kernels");
         }
 
-        std::vector<BBox> all_boxes;
-
         int vdw = 0;
         int vdh = 0;
         if (tryReadViewportDstDims(input, vdw, vdh)) {
@@ -440,7 +422,9 @@ private:
             viewport.u_color = white.u;
             viewport.v_color = white.v;
             if (viewport.x2 > viewport.x1 && viewport.y2 > viewport.y1) {
-                all_boxes.push_back(viewport);
+                if (!drawBBoxOnFrame(output, viewport)) {
+                    throw Error("draw_bbox: failed drawing viewport bbox");
+                }
                 if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                     logstream << "draw_bbox: frame=" << frame_counter_
                               << " viewport=[" << viewport.x1 << "," << viewport.y1
@@ -456,11 +440,10 @@ private:
         std::vector<BBox> boxes;
         const bool have_bbox = parseBBoxes(input, boxes);
         if (have_bbox) {
-            all_boxes.insert(all_boxes.end(), boxes.begin(), boxes.end());
-        }
-        if (!all_boxes.empty()) {
-            if (!drawBBoxesOnFrame(output, all_boxes)) {
-                throw Error("draw_bbox: failed drawing bbox batch");
+            for (const BBox& bbox : boxes) {
+                if (!drawBBoxOnFrame(output, bbox)) {
+                    throw Error("draw_bbox: failed drawing bbox");
+                }
             }
         }
         maybeLogFrame(boxes);

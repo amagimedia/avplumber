@@ -11,7 +11,7 @@ A web UI made in Node & Svelte, for viewing:
 ## How to use
 
 ```
-cd frontend
+npm i
 npm run build
 npm start
 ```

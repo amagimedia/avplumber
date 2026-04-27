@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Position } from 'rete-area-plugin';
-  import { queueStatsByName } from './graphStores';
+  import { get } from 'svelte/store';
+  import { graphHoveredQueueName, queueStatsByName, selectedQueueName } from './graphStores';
 
   // Rete classic connection fields are spread into this component.
   // We use sourceOutput (queue name) to look up live stats in a store.
@@ -112,8 +113,27 @@
     return rgbToHex(c.r, c.g, c.b);
   }
 
+  $: graphHoverHl = Boolean(queueName && $graphHoveredQueueName === queueName);
+  $: graphSelectedHl = Boolean(queueName && $selectedQueueName === queueName);
   $: stroke = pct === null ? (queueName ? '#a78bfa' : '#60a5fa') : colorFor(pct);
-  $: width = hovered ? 7 : 5;
+  $: width = hovered || graphHoverHl || graphSelectedHl ? 7 : 5;
+
+  function onConnClick(ev: MouseEvent) {
+    ev.stopPropagation();
+    if (!queueName) return;
+    const cur = get(selectedQueueName);
+    selectedQueueName.set(cur === queueName ? '' : queueName);
+  }
+
+  function onConnEnter() {
+    hovered = true;
+    if (queueName) graphHoveredQueueName.set(queueName);
+  }
+
+  function onConnLeave() {
+    hovered = false;
+    graphHoveredQueueName.set('');
+  }
   $: mid = {
     x: (start.x + end.x) / 2,
     y: (start.y + end.y) / 2
@@ -123,14 +143,18 @@
 <svg data-testid="connection">
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <!-- svelte-ignore a11y-mouse-events-have-key-events -->
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-noninteractive-element-to-interactive-role -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <path
     d={path}
     stroke={stroke}
     stroke-width={width}
-    on:mouseenter={() => (hovered = true)}
-    on:mouseleave={() => (hovered = false)}
+    class:avp-conn-hover={graphHoverHl}
+    class:avp-conn-selected={graphSelectedHl}
+    on:click={onConnClick}
+    on:mouseenter={onConnEnter}
+    on:mouseleave={onConnLeave}
   >
     {#if label}
       <title>{label}</title>
@@ -183,7 +207,15 @@
   svg path {
     fill: none;
     pointer-events: auto;
-    cursor: default;
+    cursor: pointer;
+  }
+
+  svg path.avp-conn-selected {
+    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.94));
+  }
+
+  svg path.avp-conn-hover {
+    filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.75));
   }
 
   .flow {

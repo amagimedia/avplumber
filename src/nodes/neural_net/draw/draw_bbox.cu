@@ -2,8 +2,6 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-#include "draw_batch_shared.hpp"
-
 namespace {
 __device__ __forceinline__ bool inside_bbox_border(int x, int y,
                                                    int x1, int y1,
@@ -18,27 +16,25 @@ __device__ __forceinline__ bool inside_bbox_border(int x, int y,
 extern "C" __global__ void kDrawBBoxNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
     int width, int height,
-    const cuda_overlay::BatchedBBox* __restrict__ boxes,
-    int num_boxes)
+    int x1, int y1, int x2, int y2,
+    int thickness,
+    int y_color)
 {
     const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (x >= width || y >= height) return;
 
-    uint8_t* y_px = &y_plane[(size_t)y * pitch_y + (size_t)x];
-    for (int i = 0; i < num_boxes; ++i) {
-        const cuda_overlay::BatchedBBox box = boxes[i];
-        if (inside_bbox_border(x, y, box.x1, box.y1, box.x2, box.y2, box.thickness)) {
-            *y_px = (uint8_t)box.y_color;
-        }
+    if (inside_bbox_border(x, y, x1, y1, x2, y2, thickness)) {
+        y_plane[(size_t)y * pitch_y + (size_t)x] = (uint8_t)y_color;
     }
 }
 
 extern "C" __global__ void kDrawBBoxNV12Chroma(
     uint8_t* __restrict__ uv_plane, size_t pitch_uv,
     int width, int height,
-    const cuda_overlay::BatchedBBox* __restrict__ boxes,
-    int num_boxes)
+    int x1, int y1, int x2, int y2,
+    int thickness,
+    int u_color, int v_color)
 {
     const int uv_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int uv_y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -51,19 +47,15 @@ extern "C" __global__ void kDrawBBoxNV12Chroma(
     const int px1 = px0 + 1;
     const int py1 = py0 + 1;
 
-    uint8_t* row = uv_plane + (size_t)uv_y * pitch_uv;
-    const size_t uv_idx = (size_t)(uv_x << 1);
-    for (int i = 0; i < num_boxes; ++i) {
-        const cuda_overlay::BatchedBBox box = boxes[i];
-        const bool draw =
-            inside_bbox_border(px0, py0, box.x1, box.y1, box.x2, box.y2, box.thickness) ||
-            (px1 < width && inside_bbox_border(px1, py0, box.x1, box.y1, box.x2, box.y2, box.thickness)) ||
-            (py1 < height && inside_bbox_border(px0, py1, box.x1, box.y1, box.x2, box.y2, box.thickness)) ||
-            (px1 < width && py1 < height && inside_bbox_border(px1, py1, box.x1, box.y1, box.x2, box.y2, box.thickness));
+    const bool draw =
+        inside_bbox_border(px0, py0, x1, y1, x2, y2, thickness) ||
+        (px1 < width && inside_bbox_border(px1, py0, x1, y1, x2, y2, thickness)) ||
+        (py1 < height && inside_bbox_border(px0, py1, x1, y1, x2, y2, thickness)) ||
+        (px1 < width && py1 < height && inside_bbox_border(px1, py1, x1, y1, x2, y2, thickness));
 
-        if (draw) {
-            row[uv_idx + 0] = (uint8_t)box.u_color;
-            row[uv_idx + 1] = (uint8_t)box.v_color;
-        }
+    if (draw) {
+        uint8_t* row = uv_plane + (size_t)uv_y * pitch_uv;
+        row[(size_t)(uv_x << 1) + 0] = (uint8_t)u_color;
+        row[(size_t)(uv_x << 1) + 1] = (uint8_t)v_color;
     }
 }

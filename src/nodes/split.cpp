@@ -5,6 +5,12 @@ protected:
     bool drop_ = false;
 public:
     using NodeSingleInput<T>::NodeSingleInput;
+    virtual void onEofConsumed() override {
+        T eof = createEofMarker<T>();
+        for (auto &edge: this->sink_edges_) {
+            edge->enqueue(eof);
+        }
+    }
     virtual void process() {
         T* data = this->source_->peek();
         if (data==nullptr) {

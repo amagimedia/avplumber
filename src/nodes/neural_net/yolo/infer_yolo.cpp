@@ -1,49 +1,11 @@
 #include <array>
 #include <map>
-#include <sstream>
 #include "../common/infer_trt_base.hpp"
 #include "decode_detection.hpp"
 #include "decode_segmentation.hpp"
 #include "decode_pose.hpp"
 
 using namespace yolo_base;
-
-namespace {
-
-void appendSegPointerDebug(std::ostringstream& oss, CUcontext expected_ctx, CUdeviceptr ptr) {
-    if (!ptr) {
-        oss << " gpu_ptr=0";
-        return;
-    }
-
-    CUcontext current_ctx = nullptr;
-    if (cuCtxGetCurrent) {
-        CUresult current_res = cuCtxGetCurrent(&current_ctx);
-        if (current_res == CUDA_SUCCESS) {
-            oss << " current_ctx=" << current_ctx;
-        } else {
-            oss << " current_ctx=<error:" << (int)current_res << ">";
-        }
-    }
-    oss << " expected_ctx=" << expected_ctx
-        << " gpu_ptr=" << (const void*)(uintptr_t)ptr;
-
-    CUdeviceptr base_ptr = 0;
-    size_t base_size = 0;
-    if (cuMemGetAddressRange) {
-        CUresult range_res = cuMemGetAddressRange(&base_ptr, &base_size, ptr);
-        if (range_res == CUDA_SUCCESS) {
-            oss << " range_base=" << (const void*)(uintptr_t)base_ptr
-                << " range_bytes=" << base_size;
-        } else {
-            oss << " range_base=<error:" << (int)range_res << ">";
-        }
-    } else {
-        oss << " range_base=<unavailable>";
-    }
-}
-
-} // namespace
 
 class CudaInferYolo : public NodeSingleInput<av::VideoFrame>, public CudaInferTrtBase {
 protected:
@@ -61,7 +23,6 @@ protected:
     int mask_gpu_every_n_ = 1;
     int mask_cpu_every_n_ = 2;
     int mask_cpu_resolution_ = 120;
-    int side_data_slot_ = 0;
     uint64_t frame_counter_ = 0;
     uint64_t infer_counter_ = 0;
     std::map<int, uint64_t> detection_count_histogram_;
@@ -219,7 +180,7 @@ public:
                         header[2] = (uint32_t)sr.cpu_mask_h;
                         header[3] = 0; // reserved
                         memcpy(buf->data + header_size, sr.cpu_masks.data(), mask_data_size);
-                        av_frame_new_side_data_from_buf(frm.raw(), yoloSegCpuSideDataType(side_data_slot_), buf);
+                        av_frame_new_side_data_from_buf(frm.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS, buf);
                     }
                 }
 
@@ -245,33 +206,6 @@ public:
                         header->proto_h = (uint32_t)sr.mask_proto_h;
                         header->model_w = (uint32_t)input_w_;
                         header->model_h = (uint32_t)input_h_;
-                        const CUdeviceptr gpu_masks = (CUdeviceptr)(uintptr_t)header->gpu_ptr;
-                        if (!gpu_masks) {
-                            throw Error("cuda_infer_yolo: segmentation GPU mask buffer is null before side-data attach");
-                        }
-                        if (header->num_masks == 0 || header->proto_w == 0 || header->proto_h == 0) {
-                            std::ostringstream err;
-                            err << "cuda_infer_yolo: invalid segmentation GPU side data header"
-                                << " slot=" << side_data_slot_
-                                << " num_masks=" << header->num_masks
-                                << " proto=" << header->proto_w << "x" << header->proto_h
-                                << " model=" << header->model_w << "x" << header->model_h;
-                            throw Error(err.str());
-                        }
-                        if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
-                            (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-                            std::ostringstream dbg;
-                            dbg << "cuda_infer_yolo: seg attach"
-                                << " frame=" << frame_counter_
-                                << " model=" << model.engine_name
-                                << " slot=" << side_data_slot_
-                                << " sd_type=" << (int)yoloSegGpuSideDataType(side_data_slot_)
-                                << " num_masks=" << header->num_masks
-                                << " proto=" << header->proto_w << "x" << header->proto_h
-                                << " model_dims=" << header->model_w << "x" << header->model_h;
-                            appendSegPointerDebug(dbg, cu_ctx_, gpu_masks);
-                            logstream << dbg.str();
-                        }
                         // Transfer ownership of GPU buffer to the side data
                         AVBufferRef* gpu_ref = sr.gpu_mask_buf;
                         sr.gpu_mask_buf = nullptr;
@@ -282,7 +216,7 @@ public:
                                 av_free(data);
                             }, gpu_ref, 0);
                         if (sd_buf) {
-                            av_frame_new_side_data_from_buf(frm.raw(), yoloSegGpuSideDataType(side_data_slot_), sd_buf);
+                            av_frame_new_side_data_from_buf(frm.raw(), AV_FRAME_DATA_YOLO_SEG_MASKS_GPU, sd_buf);
                         } else {
                             av_buffer_unref(&gpu_ref);
                             av_free(header);
@@ -298,13 +232,8 @@ public:
                     all_dets.insert(all_dets.end(), pr.detections.begin(), pr.detections.end());
                 }
 
-                // Build pose metadata.
-                // Keep pose metadata consistent with node-level max_det to avoid rendering low-confidence duplicates.
-                size_t pose_emit_count = pr.detections.size();
-                if (max_det_ > 0 && pose_emit_count > (size_t)max_det_) {
-                    pose_emit_count = (size_t)max_det_;
-                }
-                if (pose_emit_count > 0) {
+                // Build pose metadata
+                if (!pr.detections.empty()) {
                     Parameters pose_md;
                     pose_md["coord_space"] = "model";
                     pose_md["model_width"] = input_w_;
@@ -313,7 +242,7 @@ public:
                     pose_md["poses"] = Parameters::array();
 
                     int kpt_stride = pr.num_keypoints * 3;
-                    for (size_t di = 0; di < pose_emit_count; ++di) {
+                    for (size_t di = 0; di < pr.detections.size(); ++di) {
                         const Detection& d = pr.detections[di];
                         Parameters item;
                         item["cls"] = d.cls;
@@ -342,8 +271,7 @@ public:
                 if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
                     (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                     logstream << "cuda_infer_yolo: pose model=" << model.engine_name
-                              << " detections_raw=" << pr.detections.size()
-                              << " detections_emitted=" << pose_emit_count
+                              << " detections=" << pr.detections.size()
                               << " keypoints_per_det=" << pr.num_keypoints;
                 }
             }
@@ -442,12 +370,6 @@ public:
         if (params.count("mask_gpu_every_n")) r->mask_gpu_every_n_ = params["mask_gpu_every_n"];
         if (params.count("mask_cpu_every_n")) r->mask_cpu_every_n_ = params["mask_cpu_every_n"];
         if (params.count("mask_cpu_resolution")) r->mask_cpu_resolution_ = params["mask_cpu_resolution"];
-        if (params.count("side_data_slot")) {
-            r->side_data_slot_ = params["side_data_slot"].get<int>();
-            if (!yoloSegIsValidSlot(r->side_data_slot_)) {
-                throw Error("cuda_infer_yolo: side_data_slot out of range [0," + std::to_string(kMaxYoloSegSlots - 1) + "]");
-            }
-        }
         if (params.count("input_format")) {
             std::string ifmt = params["input_format"].get<std::string>();
             r->input_bgr_order_ = (ifmt == "BGR" || ifmt == "bgr");

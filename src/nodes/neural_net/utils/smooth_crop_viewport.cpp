@@ -1048,6 +1048,7 @@ public:
           viewport_marker_half_extent_(viewport_marker_half_extent),
           viewport_dst_width_(viewport_dst_width), viewport_dst_height_(viewport_dst_height),
           debug_log_every_n_(debug_log_every_n) {
+        this->auto_eof_ = false;
         for (const auto &s : label_priority_)
             label_priority_set_.insert(s);
     }

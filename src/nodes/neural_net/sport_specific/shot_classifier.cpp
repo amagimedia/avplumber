@@ -240,6 +240,7 @@ public:
         EdgeManager& edges = nci.edges;
         const Parameters& params = nci.params;
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<ShotClassifier>(edges, params);
+        r->auto_eof_ = false;
 
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
         if (params.count("seg_side_data_slot")) {

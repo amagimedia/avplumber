@@ -183,12 +183,16 @@ public:
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["dst"]);
         edge->setProducer(this->shared_from_this());
         setTimeout(timeout);
+        // Default drain: on EOF/null packet, enqueue an EOF marker so downstream can flush (VOD / file).
+        eof_mode_drain_ = true;
         if (params.count("eof_mode") > 0) {
             std::string eof_mode = params["eof_mode"];
             if (eof_mode == "drain") {
                 eof_mode_drain_ = true;
+            } else if (eof_mode == "none") {
+                eof_mode_drain_ = false;
             } else {
-                throw Error("Unknown eof_mode " + eof_mode);
+                throw Error("Unknown eof_mode " + eof_mode + " (expected drain or none)");
             }
         }
         if (params.count("stop_delay") > 0) {
