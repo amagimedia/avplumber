@@ -37,3 +37,13 @@ inline bool yoloSegIsManagedSideDataType(AVFrameSideDataType type) {
     return value >= first && value < last_exclusive;
 }
 
+// Header for GPU mask side data (lives in CPU memory, gpu_ptr is a CUdeviceptr)
+struct GpuMaskSideDataHeader {
+    uint64_t gpu_ptr;
+    uint32_t num_masks;
+    uint32_t proto_w;
+    uint32_t proto_h;
+    uint32_t model_w;
+    uint32_t model_h;
+};
+

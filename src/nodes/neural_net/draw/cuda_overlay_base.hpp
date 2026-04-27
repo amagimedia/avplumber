@@ -136,6 +136,8 @@ struct ParsedYoloDetection {
     bool has_velocity = false;
     double velocity_x = 0.0;
     double velocity_y = 0.0;
+    std::string team_ab;
+    bool has_team_ab = false;
 };
 
 bool scaleAndClampBBox(double x1, double y1, double x2, double y2, int frame_width, int frame_height,

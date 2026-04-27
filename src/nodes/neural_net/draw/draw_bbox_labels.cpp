@@ -22,6 +22,7 @@ enum class FieldToken {
     Velocity,
     Label,
     Cls,
+    TeamAb,
 };
 
 struct TemplateToken {
@@ -93,6 +94,10 @@ static bool parseFieldToken(const std::string& token, FieldToken& out_field) {
     }
     if (token == "cls") {
         out_field = FieldToken::Cls;
+        return true;
+    }
+    if (token == "team_ab") {
+        out_field = FieldToken::TeamAb;
         return true;
     }
     return false;
@@ -271,6 +276,10 @@ private:
             if (!det.has_cls) return false;
             std::snprintf(buf, sizeof(buf), "%d", det.cls);
             out = buf;
+            return true;
+        case FieldToken::TeamAb:
+            if (!det.has_team_ab) return false;
+            out = det.team_ab;
             return true;
         default:
             return false;

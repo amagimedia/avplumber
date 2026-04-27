@@ -143,6 +143,10 @@ void parseYoloDetections(const Parameters& md, const YoloParseConfig& cfg,
             parsed.velocity_y = det["velocity_y"].get<double>();
             parsed.has_velocity = true;
         }
+        if (det.contains("team_ab") && det["team_ab"].is_string()) {
+            parsed.team_ab = det["team_ab"].get<std::string>();
+            parsed.has_team_ab = true;
+        }
         detections_out.push_back(std::move(parsed));
     }
 }

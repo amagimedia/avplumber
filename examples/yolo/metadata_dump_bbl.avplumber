@@ -48,6 +48,6 @@ node.add { "type": "force_fps", "fps": "25/1", "group": "in", "src": "v_dumped",
 node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_dumped_fps", "dst": "v_preenc" }
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "12000k", "maxrate": "12000k", "bufsize": "12000k", "rc": "cbr", "g": 75, "bf": 0, "preset": "p7", "profile": "high" } }
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
-node.add { "type": "output", "format": "mp4", "url": "metadata_dump_bbl.mp4", "src": "mux_v", "group": "in", "auto_restart": "panic" }
+node.add { "type": "output", "format": "mp4", "url": "metadata_dump_bbl.mp4", "src": "mux_v", "group": "in", "auto_restart": "exit" }
 
 group.start in
