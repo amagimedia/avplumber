@@ -2,7 +2,7 @@ queue.plan_capacity * 7
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "input_rec", "url": "/home/fedora/bbl_alt.mp4", "dst": "in_mux0", "group": "in", "name": "input", "initial_timeout": 20, "timeout": 10, "loop": false, "stop_delay": 10000 }
+node.add { "type": "input_rec", "url": "/home/fedora/bbl_alt.mp4", "dst": "in_mux0", "group": "in", "name": "input", "initial_timeout": 20, "timeout": 10, "loop": false, "auto_restart": "panic", "stop_delay": 5000 }
 node.add { "type": "demux", "src": "in_mux0", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in" }
 
 node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "in", "name": "Video_Dec", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
@@ -50,4 +50,4 @@ node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
 node.add { "type": "output", "format": "mp4", "url": "metadata_dump_bbl.mp4", "src": "mux_v", "group": "in", "auto_restart": "panic" }
 
-detach retry group.start in
+group.start in
