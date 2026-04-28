@@ -4,6 +4,9 @@
 #include <limits>
 #include <fstream>
 #include <iostream>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/streambuf.hpp>
@@ -24,6 +27,8 @@
 #include "SpeedControlTeam.hpp"
 #include "PauseControlTeam.hpp"
 #include "InputSeekTeam.hpp"
+#include "PTSCorrectorCommon.hpp"
+#include "rest_client.hpp"
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -436,6 +441,65 @@ public:
         commands_["queues.stats"] = [this](ClientStream &cs, std::string&) {
             manager_->edges()->printEdgesStats(cs);
         };
+        // Machine-readable JSON statistics for all queues.
+        // Returns an array of objects:
+        // [
+        //   { "name": "videoin", "capacity": 256, "occupied": 12, "free": 244, "last_ts_seconds": 0.123 },
+        //   ...
+        // ]
+        commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
+            json j = manager_->edges()->edgesStatsJson();
+            cs << j << "\n";
+        };
+        // Reset per-queue occupancy statistics used by queues.json (frames_in_queue.* fields).
+        commands_["queues.stats.reset"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            manager_->edges()->resetEdgesOccupancyStats();
+        };
+        // Get statistics for all sync groups (RealTimeTeam instance-shared objects)
+        commands_["sync_groups.json"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            json jgroups = json::array();
+            auto teams = InstanceSharedObjects<RealTimeTeam>::enumerate(manager_->instanceData());
+            for (const auto &entry : teams) {
+                const std::string &name = entry.first;
+                std::shared_ptr<RealTimeTeam> team = entry.second;
+                if (!team) continue;
+                json jgroup;
+                jgroup["name"] = name;
+                AVTS offset = team->getOffset();
+                jgroup["offset"] = (offset == AV_NOPTS_VALUE) ? json(nullptr) : json(offset);
+                AVRational tb = team->getTimebase();
+                jgroup["timebase_num"] = tb.num;
+                jgroup["timebase_den"] = tb.den;
+                jgroup["flushing"] = team->isFlushing();
+                jgroup["first"] = team->isFirst();
+                jgroup["seek_targets_count"] = team->getSeekTargetsCount();
+                auto linked_teams = team->getLinkedTeams();
+                json jlinked = json::array();
+                for (const auto &linked : linked_teams) {
+                    // We can't easily get the name of linked teams, so we'll just count them
+                }
+                jgroup["linked_teams_count"] = linked_teams.size();
+                jgroups.push_back(std::move(jgroup));
+            }
+            cs << jgroups << "\n";
+        };
+        // Get statistics for all sentinel correction groups (PTSCorrectorCommon instance-shared objects)
+        commands_["correction_groups.json"] = [this](ClientStream &cs, std::string&) {
+            (void)cs;
+            json jgroups = json::array();
+            auto correctors = InstanceSharedObjects<PTSCorrectorCommon>::enumerate(manager_->instanceData());
+            for (const auto &entry : correctors) {
+                const std::string &name = entry.first;
+                std::shared_ptr<PTSCorrectorCommon> corr = entry.second;
+                if (!corr) continue;
+                json jgroup = corr->getStats();
+                jgroup["name"] = name;
+                jgroups.push_back(std::move(jgroup));
+            }
+            cs << jgroups << "\n";
+        };
         commands_["group.restart"] = [this](ClientStream &cs, std::string &arg) {
             manager_->group(arg)->restartNodes();
         };
@@ -452,6 +516,26 @@ public:
         commands_["stats.subscribe"] = [this](ClientStream &cs, std::string &arg) {
             json jargs = json::parse(arg);
             auto ssthr = std::make_shared<StatsSenderThread>(jargs, manager_);
+        };
+        // Dump current graph (all nodes with their parameters) as JSON array.
+        // Each entry has: name, type, working (bool), params (full JSON object).
+        commands_["nodes.json"] = [this](ClientStream &cs, std::string &arg) {
+            (void)arg;
+            json jnodes = json::array();
+            for (auto &entry: manager_->allNodes()) {
+                const std::string &name = entry.first;
+                std::shared_ptr<NodeWrapper> node = entry.second;
+                if (!node) {
+                    continue;
+                }
+                json jn;
+                jn["name"] = name;
+                jn["type"] = node->type();
+                jn["working"] = node->isWorking();
+                jn["params"] = node->parameters();
+                jnodes.push_back(std::move(jn));
+            }
+            cs << jnodes << "\n";
         };
         auto seek = [this](std::string team_node_name, StreamTarget target) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_node_name);
@@ -585,6 +669,14 @@ public:
         commands_["realtime.team.reset"] = [this](ClientStream &cs, std::string &arg) {
             std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), arg);
             team->reset();
+        };
+        commands_["realtime.team.set_delay"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string team_name;
+            float delay_sec;
+            ss >> team_name >> delay_sec;
+            std::shared_ptr<RealTimeTeam> team = InstanceSharedObjects<RealTimeTeam>::get(manager_->instanceData(), team_name);
+            team->setUserDelay(delay_sec);
         };
         commands_["speed.set"] = [this](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
@@ -749,9 +841,16 @@ AVPlumber::AVPlumber() {
     av::set_logging_level(AV_LOG_VERBOSE);
     std::shared_ptr<NodeManager> nm = std::make_shared<NodeManager>();
     impl_ = new ControlImpl(nm);
+    control_port_ = 0;
+    webui_heartbeat_stop_ = false;
 }
 
 AVPlumber::~AVPlumber() {
+    // Stop heartbeat thread
+    webui_heartbeat_stop_ = true;
+    if (webui_heartbeat_thread_.joinable()) {
+        webui_heartbeat_thread_.join();
+    }
     delete impl_;
     impl_ = nullptr;
 }
@@ -887,6 +986,16 @@ int64_t AVPlumber::obs_get_duration() {
         return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
+<<<<<<< HEAD
+=======
+        auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
+        if (!n_rec) {
+            // this is simple input, not recording input
+            // so stream-limits are not supported
+            // prevent polluting the log with exception
+            return -1;
+        }
+>>>>>>> develop
         try {
             Parameters duration;
             if (!node->getObjectTry("stream-limits", duration)) {
@@ -939,10 +1048,79 @@ bool AVPlumber::obs_is_eof() {
 #endif
 
 void AVPlumber::enableControlServer(const uint16_t tcp_port) {
+    control_port_ = tcp_port;
     if (tcp_port) {
         logstream << "Enabling control server on TCP port " << tcp_port;
         impl_->createServer<TcpControlServer>(*impl_, tcp_port);
     } // if port==0, then NOOP
+}
+
+void AVPlumber::registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name, const std::string& log_file) {
+    if (webui_api_url.empty() || control_port_ == 0) {
+        return; // No web UI URL provided or control server not enabled
+    }
+    
+    // Stop existing heartbeat thread if any
+    webui_heartbeat_stop_ = true;
+    if (webui_heartbeat_thread_.joinable()) {
+        webui_heartbeat_thread_.join();
+    }
+    
+    // Store webui configuration
+    webui_api_url_ = webui_api_url;
+    instance_name_ = instance_name;
+    log_file_ = log_file;
+    
+    // Start heartbeat thread
+    webui_heartbeat_stop_ = false;
+    webui_heartbeat_thread_ = start_thread("webui heartbeat", [this]() {
+        this->webuiHeartbeatThread();
+    });
+    
+    logstream << "Started web UI heartbeat to " << webui_api_url;
+}
+
+void AVPlumber::webuiHeartbeatThread() {
+    int heartbeat_interval_seconds = 25;
+    const char* heartbeat_interval_seconds_str = getenv("AVPLUMBER_UI_HEARTBEAT_INTERVAL");
+    if (heartbeat_interval_seconds_str && heartbeat_interval_seconds_str[0] != '\0') {
+        heartbeat_interval_seconds = atoi(heartbeat_interval_seconds_str);
+    }
+    
+    try {
+        RESTEndpoint endpoint(webui_api_url_);
+        
+        // Build the instance heartbeat JSON
+        json instance_data;
+        instance_data["port"] = control_port_;
+        instance_data["host"] = "127.0.0.1"; // Default to localhost
+        if (!instance_name_.empty()) {
+            instance_data["name"] = instance_name_;
+        }
+        if (!log_file_.empty()) {
+            instance_data["logFile"] = log_file_;
+        }
+        
+        std::string json_str = instance_data.dump();
+        
+        // Send initial heartbeat immediately
+        endpoint.send("/api/instances/heartbeat", json_str);
+        
+        // Then send heartbeats every 25 seconds
+        while (!webui_heartbeat_stop_) {
+            std::this_thread::sleep_for(std::chrono::seconds(heartbeat_interval_seconds));
+            if (webui_heartbeat_stop_) {
+                break;
+            }
+            try {
+                endpoint.send("/api/instances/heartbeat", json_str);
+            } catch (std::exception &e) {
+                logstream << "Failed to send web UI heartbeat: " << e.what();
+            }
+        }
+    } catch (std::exception &e) {
+        logstream << "Web UI heartbeat thread error: " << e.what();
+    }
 }
 
 void AVPlumber::executeCommandsFromFile(const std::string path) {
@@ -967,6 +1145,14 @@ void AVPlumber::setLogFile(const std::string path) {
     }
 }
 
+void AVPlumber::setLogCallback(std::function<void(const std::string &)> callback) {
+    if (callback) {
+        current_thread.logger = std::make_shared<CallbackLogger>(callback);
+    } else {
+        current_thread.logger = default_logger;
+    }
+}
+
 void AVPlumber::setReady() {
     logstream << APP_VERSION << " READY." << std::endl;
     impl_->setReady();
@@ -974,6 +1160,10 @@ void AVPlumber::setReady() {
 
 void AVPlumber::shutdown() {
     impl_->shutdown();
+}
+
+std::shared_ptr<NodeManager> AVPlumber::manager() {
+    return impl_->manager();
 }
 
 void AVPlumber::mainLoop() {
@@ -993,3 +1183,4 @@ void AVPlumber::stopMainLoop() {
 void AVPlumber::heartbeat() {
     impl_->printAllQueues();
 }
+

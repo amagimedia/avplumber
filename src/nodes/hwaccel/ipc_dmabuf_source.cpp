@@ -279,8 +279,8 @@ public:
         vfrm.raw()->format = AV_PIX_FMT_DRM_PRIME;
         vfrm.raw()->width = ti.width;
         vfrm.raw()->height = ti.height;
-        vfrm.setTimeBase({1, 1000});
-        vfrm.raw()->pts = ti.timestamp;
+        vfrm.setTimeBase({1, 1000000});
+        vfrm.raw()->pts = ti.timestamp / 1000;
 
         if (hw_frames_ctx_) {
             vfrm.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);

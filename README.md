@@ -82,14 +82,18 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
+-   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA PTX for GPU color conversion used by `cuda_to_egl_image`. Requires `nvcc` and OpenGL/EGL at build time.
+-   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
+-   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
+-   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
+-   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
 
 ### Using as a library
@@ -742,6 +746,24 @@ Duplicate and drop frames to achieve requested FPS
 
 -   `fps` (string of rational) - target FPS as a string, e.g. `25` or `30000/1001`
 
+### `smooth_timestamps`
+
+Overwrite timestamps with a smoothed monotonic timeline (previous + duration), while keeping A/V sync by resyncing to input timestamps when averaged drift grows too large.
+
+This node is non-blocking.
+
+1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+For video:
+- `duration` (string of rational, seconds) - frame duration, typically `1/FPS` (e.g. `1/25`, `1001/30000`), **or**
+- `fps` (string of rational) - frames per second (alternative to `duration`)
+
+For both video and audio:
+- `resync_threshold` (float seconds, default `0.02`) - resync output timeline to input PTS when averaged drift exceeds this
+- `drift_window` (int, default `300`) - drift averaging window size (samples); larger = smoother, smaller = more reactive
+- `min_samples_before_resync` (int, default `150`) - ignore drift until this many frames/samples have been observed
+- `discontinuity_threshold` (float seconds, default `2.0`) - hard reset (resync) when input PTS jump exceeds this
+
 ### `assume_video_format` / `assume_audio_format`
 
 Set initial metadata to allow nodes that rely on them to start
@@ -847,6 +869,23 @@ input stream changes parameters.
 1 input, multi outputs: anything
 
 -   `drop` (bool) - drop packets if output queue is full, disabled by default
+
+### `join_metadata`
+
+Join metadata from an auxiliary stream into a primary stream by exact timestamp match.
+
+2 inputs, 1 output: `av::VideoFrame` or `av::AudioSamples`
+
+-   `src` must contain exactly 2 queues in this order: `[primary, auxiliary]`
+-   timestamps are compared exactly (`primary.pts == auxiliary.pts`)
+-   empty queue is treated as "not ready yet" (the node waits), not as missing frame
+-   when both heads are present:
+    - if timestamps match: copy auxiliary metadata to primary (`av_dict_copy`) and emit primary
+    - if `primary.pts < auxiliary.pts`: emit primary unchanged (auxiliary missing for that primary timestamp)
+    - if `auxiliary.pts < primary.pts`: drop auxiliary frame (primary missing for that auxiliary timestamp)
+-   output timestamp/timebase remains the same as primary input
+
+Useful for running heavy processing (e.g. neural network inference) on downscaled frames and merge produced metadata back onto original-resolution frames.
 
 ### `force_keyframe`
 
@@ -1026,6 +1065,69 @@ Discards incoming packets just like `/dev/null`.
 
 no parameters
 
+
+### `write_audio_envelope`
+
+Writes audio envelope data for waveform display (no images; data only). One binary file per granularity level (like mipmaps for different zoom), plus an `index.json` describing layout. Files are appended incrementally; recording length need not be known in advance. To align envelope samples to video frames, use the video frame duration as one of the granularities (e.g. `"1/25"` for 25 fps).
+
+1 input: `av::AudioSamples`
+
+-   `path` (string) - directory (or base path) for output files; must be a filesystem path
+-   `granularities` (list of strings) - segment duration per envelope sample, as rationals in seconds (e.g. `["1/25", "1/2", "1"]`). One file per entry
+
+The node writes `index.json` (version, sample_rate, channels, **levels** map keyed by duration_sec with file name per level, **metrics** map keyed by id with offset_bytes and stride_bytes).
+
+#### Binary layout
+
+Each sample is stored as interleaved records with channel data, currently containing: positive peak, negative peak, RMS. To read one metric across channels, use `offset_bytes` and `stride_bytes` from `index.json`. For forward compatibility, do not assume that each channel's record will always contain 3 bytes.
+
+Example for 2 channels (one envelope sample = currently 6 bytes):
+
+```
+  byte index:   0     1     2   |  3     4     5   |  6   ...
+                ^     ^     ^   |  ^     ^     ^   |  ^
+  metric:      pos   neg   rms  | pos   neg   rms  | pos
+  channel:     ch0   ch0   ch0  | ch1   ch1   ch1  | ch0
+  time range:  \________________________________/    \____...
+                               0..1                     1...   (unit: segment duration)
+
+  positive_peak: offset_bytes=0, stride_bytes=3  -->  read at 0, 3
+  negative_peak: offset_bytes=1, stride_bytes=3  -->  read at 1, 4
+  rms:           offset_bytes=2, stride_bytes=3  -->  read at 2, 5
+```
+
+Each envelope sample is 1 byte per value, 0.5 dB resolution, -127..0 dB range: 0 = -127dB or less, 254 = -0.5..=0dB, 255 = clip
+
+#### Example `index.json`
+```
+{
+  "channels": 2,
+  "levels": {
+    "1": { "file": "level_2.bin" },
+    "1/60": { "file": "level_0.bin" },
+    "1/8": { "file": "level_1.bin" }
+  },
+  "metrics": {
+    "negative_peak": { "offset_bytes": 1, "stride_bytes": 3 },
+    "positive_peak": { "offset_bytes": 0, "stride_bytes": 3 },
+    "rms": { "offset_bytes": 2, "stride_bytes": 3 }
+  },
+  "sample_rate": 48000,
+  "version": 1
+}
+```
+
+#### Rendering envelope image recommendations
+
+The renderer needs to:
+1. read `index.json`
+2. open binary file corresponding to the needed time resolution (recommended: greater or equal to waveform image resolution), specified in `levels` map
+3. for each needed metric, initially jump to the `offset_bytes` and then jump by `stride_bytes` to read subsequent interleaved samples (so the actual stride for a single channel is `stride_bytes*channels`)
+4. if waveform is to be rectified, compute `max(positive_peak, negative_peak)`
+5. if mono waveform is to be displayed, compute maximum (for peaks) or RMS (for RMS) of all channels
+6. if the read time resolution was greater than resolution of the waveform to be displayed, compute maximum or RMS of waveform values that correspond to the same “pixel” on the resulting image
+
+
 ### `ipc_cuda_source`
 
 Get video frames from CUDA IPC memory. Frame pointer and parameters are read from named pipe. See `src/nodes/cuda/ipc_cuda_source.cpp` for structure.
@@ -1109,6 +1211,84 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+
+### `cuda_infer_yolo`
+
+Run YOLO object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
+
+This node is inference-only in v1:
+- upstream graph must handle resize/pad/crop/format preprocessing
+- model input dimensions are read from the TensorRT engine
+- detections are attached in metadata key (default `yolo_detections_v1`)
+
+Parameters:
+-   `models` (array of objects, required) - one or more model definitions. Each object has:
+    -   `engine` (string, required) - path to TensorRT serialized engine (`.plan`/`.engine`)
+    -   `class_names` (array of strings, optional) - class-label mapping by index
+    -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
+    -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
+-   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
+-   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
+-   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
+-   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
+-   `max_det` (int, optional, default `300`) - max detections per frame after NMS
+-   `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
+-   `debug_log_metadata` (bool, optional, default `false`) - print detection metadata to logs periodically
+-   `debug_log_every_n` (int, optional, default `30`) - log period used with `debug_log_metadata`
+
+Detection coordinates in metadata are emitted in model space (`coord_space = "model"`).
+
+Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
+- `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
+
+### `cuda_infer_rtdetr`
+
+Run RT-DETR object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
+
+1 input: `av::VideoFrame` (expects CUDA frame, currently NV12 sw_format), 1 output: `av::VideoFrame` (same frame, with detection metadata attached)
+
+v1 constraints:
+- exactly one model entry in `models`
+- fixed-shape batch-1 engine
+- mandatory `output_contract: "rtdetr_e2e_v1"`
+- expects end-to-end outputs compatible with `boxes[1,N,4]`, `scores[1,N]/[N]`, `labels[1,N]/[N]`
+- `boxes_normalized=true` is not supported in v1
+
+Parameters:
+- `models` (array, required, size must be 1), model object fields:
+  - `engine` (string, required) - TensorRT engine path
+  - `output_contract` (string, required) - must be `rtdetr_e2e_v1`
+  - `class_names` (array of strings, optional) - class-label mapping by index
+  - `class_index_remap` (array of ints, optional) - remap decoded class IDs
+  - `boxes_normalized` (bool, optional, default `false`) - unsupported in v1
+- `metadata_key_detection` (string, optional, default `yolo_detections`) - output metadata key
+- `input_format` (string, optional, default `RGB`) - tensor channel order (`RGB` or `BGR`)
+- `conf_thresh` (float, optional, default `0.25`) - confidence threshold
+- `max_det` (int, optional, default `300`) - max detections per frame
+- `infer_every_n` (int, optional, default `1`) - run inference every Nth frame, pass through others unchanged
+- `debug_log_metadata` (bool, optional, default `false`) - print metadata periodically
+- `debug_log_every_n` (int, optional, default `30`) - log period when debug logging is enabled
+
+### `drm_prime_to_egl_image`
+
+Import DRM PRIME (DMA-BUF) frames into an `EGLImageKHR` via `EGL_EXT_image_dma_buf_import` and output them as `EglImageFrame` (no CUDA processing).
+
+1 input: `av::VideoFrame` (expects `DRM_PRIME` hardware "pixel format"; non-DRM PRIME frames are dropped), 1 output: `EglImageFrame`
+
+Supported DRM formats (layer0/plane0 only):
+- `DRM_FORMAT_ABGR8888`
+- `DRM_FORMAT_ARGB8888`
+
+Cache behavior:
+- Maintains an internal cache keyed by the incoming DMA-BUF FD number.
+- Cache entries are evicted when an FD is not seen for `ttl` seconds, and the whole cache is purged when resolution changes.
+
+Parameters:
+- `ttl` (float seconds, optional, default `5.0`) - cache entry time-to-live
 
 ### `jittergen`
 

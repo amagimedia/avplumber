@@ -67,6 +67,8 @@ protected:
     ETimestampSource timestamp_source_ = ETimestampSource::ts_None;
     bool loop_ = false;
     std::atomic_bool notify_eof_ = false;
+    std::atomic_bool eof_sent_ = false;
+    bool send_eof_ = true;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -119,6 +121,11 @@ private:
 
         if (seek_table_.empty()) {
             // no seek table available, only seeks by time
+            if (st.isFrameAbsolute() && st.frame_number == 0) {
+                // Can't resolve frame-based target without seek table; fall back to seeking start of stream
+                st.ts = first_video_ts_.isValid() ? first_video_ts_ : av::Timestamp(0, {1, 1});
+                st.type = StreamTarget::ETargetType::tt_Timestamp;
+            }
             return;
         }
 
@@ -373,6 +380,8 @@ private:
             if (frame_index < seek_table_.size()) {
                 av_dict_set(&frame->metadata, "frame_ts", std::to_string(seek_table_[frame_index].timestamp_ms).c_str(), 0);
             }
+        } else {
+            av_dict_set(&frame->metadata, "frame_ts", std::to_string(frm.pts().timestamp({1, 1000})).c_str(), 0);
         }
     }
 public:
@@ -401,10 +410,10 @@ public:
         av_dict_set(&frame.raw()->metadata, "sample_rate", std::to_string(frame.raw()->sample_rate).c_str(), 0);
     }
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) override {
-        av::Timestamp video_ts;
-        av::Timestamp input_ts;
-        av::Timestamp output_ts;
-        av::Timestamp wallclock_ts;
+        av::Timestamp video_ts = frame.pts();
+        av::Timestamp input_ts = video_ts;
+        av::Timestamp output_ts = video_ts;
+        av::Timestamp wallclock_ts = video_ts;
 
         {
             // get timestamps offset
@@ -612,6 +621,7 @@ public:
             this->sink_->put(createEofPacket(video_stream_));
             doStop();
             notify_eof_ = false;
+            eof_sent_ = false;
             return;
         }
 
@@ -723,8 +733,12 @@ public:
             return;
         }
         if (pkt.isNull()) {
-            // we are at the end os recording
-            //logstream << "end of video reached";
+            if (!eof_sent_) {
+                // we are at the end os recording
+                logstream << "end of video reached";
+                notify_eof_ = send_eof_;
+                eof_sent_ = true;
+            }
             std::this_thread::sleep_for(5ms);
             return;
         } else {
@@ -771,7 +785,7 @@ public:
                 }
             }
 
-            if (first_video_ts_.timestamp() != 0) {
+            if (first_video_ts_.isValid() && (first_video_ts_.timestamp() != 0)) {
                 pkt.setDts(addTS(pkt.dts(), negateTS(first_video_ts_)));
                 pkt.setPts(addTS(pkt.pts(), negateTS(first_video_ts_)));
             }
@@ -1088,6 +1102,9 @@ public:
         }
         if (params.count("loop") > 0) {
             loop_ = params["loop"];
+        }
+        if (params.count("send_eof") > 0) {
+            send_eof_ = params["send_eof"];
         }
         if (params.count("timestamp_source") > 0) {
             std::string ts_source = params["timestamp_source"];

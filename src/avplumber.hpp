@@ -1,14 +1,18 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <memory>
 
 class ControlImpl;
+class NodeManager;
 
 #ifdef EMBED_IN_OBS
 struct obs_source;
 typedef struct obs_source obs_source_t;
 #endif
-
 
 /*
  * Usage #1: (as in standalone application)
@@ -29,6 +33,13 @@ typedef struct obs_source obs_source_t;
 class AVPlumber {
 private:
     ControlImpl* impl_;
+    uint16_t control_port_;
+    std::string webui_api_url_;
+    std::string instance_name_;
+    std::string log_file_;
+    std::thread webui_heartbeat_thread_;
+    std::atomic<bool> webui_heartbeat_stop_;
+    void webuiHeartbeatThread();
 #ifdef EMBED_IN_OBS
     std::string PAUSE_TEAM_;
     std::string REALTIME_TEAM_;
@@ -40,6 +51,9 @@ public:
     AVPlumber();
     ~AVPlumber();
     void enableControlServer(const uint16_t tcp_port);
+    void registerWithWebUI(const std::string& webui_api_url, const std::string& instance_name = "", const std::string& log_file = "");
+    ControlImpl* controlImpl() { return impl_; }
+    std::shared_ptr<NodeManager> manager();
 #ifdef EMBED_IN_OBS
     void setObsSource(obs_source_t* obssrc);
     void unsetObsSourceAndWait();
@@ -60,6 +74,7 @@ public:
     void executeCommandsFromFile(const std::string path);
     void executeCommandsFromString(const std::string script);
     void setLogFile(const std::string path);
+    void setLogCallback(std::function<void(const std::string &)> callback);
     void setReady();
     void shutdown();
     void mainLoop();

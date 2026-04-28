@@ -57,6 +57,44 @@ template<> struct MediaSpecific<av::VideoFrame> {
 		std::map<int,int> plane_map; // dst_plane -> src_plane
 		bool hw_frames = false;
 	};
+	struct Cache {
+		AVBufferRef* cloned_hw_frames_ctx = nullptr;
+		AVPixelFormat hw_format = AV_PIX_FMT_NONE;
+		AVPixelFormat src_sw_format = AV_PIX_FMT_NONE;
+		AVPixelFormat desired_sw_format = AV_PIX_FMT_NONE;
+		int width = 0;
+		int height = 0;
+		void* device_identity = nullptr; // device_ref->data identity
+
+		~Cache() {
+			if (cloned_hw_frames_ctx) {
+				av_buffer_unref(&cloned_hw_frames_ctx);
+				cloned_hw_frames_ctx = nullptr;
+			}
+		}
+		void reset() {
+			if (cloned_hw_frames_ctx) {
+				av_buffer_unref(&cloned_hw_frames_ctx);
+				cloned_hw_frames_ctx = nullptr;
+			}
+			hw_format = AV_PIX_FMT_NONE;
+			src_sw_format = AV_PIX_FMT_NONE;
+			desired_sw_format = AV_PIX_FMT_NONE;
+			width = 0;
+			height = 0;
+			device_identity = nullptr;
+		}
+		bool matches(const AVHWFramesContext* src_fctx, const AVBufferRef* device_ref, enum AVPixelFormat desired) const {
+			void* dev_id = (device_ref && device_ref->data) ? device_ref->data : nullptr;
+			return cloned_hw_frames_ctx &&
+			       hw_format == (AVPixelFormat)src_fctx->format &&
+			       src_sw_format == (AVPixelFormat)src_fctx->sw_format &&
+			       desired_sw_format == desired &&
+			       width == src_fctx->width &&
+			       height == src_fctx->height &&
+			       device_identity == dev_id;
+		}
+	};
 
 	static Params parseParams(const Parameters &params) {
 		Params p;
@@ -139,7 +177,7 @@ template<> struct MediaSpecific<av::VideoFrame> {
 		}
 	}
 
-	static void setOrCloneHWFramesCtx(const AVFrame *src, AVFrame *dst, enum AVPixelFormat desired_sw_format) {
+	static void setOrCloneHWFramesCtx(const AVFrame *src, AVFrame *dst, enum AVPixelFormat desired_sw_format, Cache* cache) {
 		if (!src->hw_frames_ctx) {
 			throw Error("Expected hw_frames_ctx on hardware frame");
 		}
@@ -159,6 +197,18 @@ template<> struct MediaSpecific<av::VideoFrame> {
 			// Older APIs may not expose device_ref, but we must have a device AVBufferRef
 			throw Error("Cannot access device_ref from hw_frames_ctx");
 		}
+
+		// Common case in some pipelines: only sw_format differs (e.g. yuva420p -> yuv420p).
+		// Creating and initializing a brand new hw_frames_ctx per frame is expensive and
+		// also causes downstream nodes to think the input hw context "changed" each frame.
+		if (cache && cache->matches(src_fctx, device_ref, desired_sw_format)) {
+			dst->hw_frames_ctx = av_buffer_ref(cache->cloned_hw_frames_ctx);
+			if (!dst->hw_frames_ctx) {
+				throw Error("av_buffer_ref failed for cached hw_frames_ctx");
+			}
+			return;
+		}
+
 		AVBufferRef *new_frames = av_hwframe_ctx_alloc(device_ref);
 		if (!new_frames) {
 			throw Error("av_hwframe_ctx_alloc failed");
@@ -174,10 +224,26 @@ template<> struct MediaSpecific<av::VideoFrame> {
 			av_buffer_unref(&new_frames);
 			throw Error("av_hwframe_ctx_init failed: " + av::error2string(ir));
 		}
-		dst->hw_frames_ctx = new_frames;
+		if (cache) {
+			cache->reset();
+			cache->cloned_hw_frames_ctx = new_frames; // cache keeps one ref
+			cache->hw_format = (AVPixelFormat)src_fctx->format;
+			cache->src_sw_format = (AVPixelFormat)src_fctx->sw_format;
+			cache->desired_sw_format = desired_sw_format;
+			cache->width = src_fctx->width;
+			cache->height = src_fctx->height;
+			cache->device_identity = (device_ref && device_ref->data) ? device_ref->data : nullptr;
+
+			dst->hw_frames_ctx = av_buffer_ref(new_frames);
+			if (!dst->hw_frames_ctx) {
+				throw Error("av_buffer_ref failed for newly created hw_frames_ctx");
+			}
+		} else {
+			dst->hw_frames_ctx = new_frames;
+		}
 	}
 
-	static av::VideoFrame build(const av::VideoFrame &in_frame, const Params &p) {
+	static av::VideoFrame build(const av::VideoFrame &in_frame, const Params &p, Cache* cache) {
         const AVFrame *src = in_frame.raw();
         enum AVPixelFormat src_fmt = (enum AVPixelFormat)src->format;
         // Determine logical source format for plane math (use sw_format for HW frames)
@@ -256,7 +322,7 @@ template<> struct MediaSpecific<av::VideoFrame> {
 		dst->extended_data = dst->data;
 
 		if (p.hw_frames) {
-			setOrCloneHWFramesCtx(src, dst, p.dst_pix_fmt);
+			setOrCloneHWFramesCtx(src, dst, p.dst_pix_fmt, cache);
 		}
 		return out;
 	}
@@ -268,6 +334,7 @@ template<> struct MediaSpecific<av::AudioSamples> {
 		AVSampleFormat dst_sample_fmt = AV_SAMPLE_FMT_NONE;
 		std::map<int,int> plane_map; // dst_plane/channel -> src_plane/channel
 	};
+	struct Cache {};
 
 	static Params parseParams(const Parameters &params) {
 		Params p;
@@ -283,7 +350,7 @@ template<> struct MediaSpecific<av::AudioSamples> {
 		return p;
 	}
 
-	static av::AudioSamples build(const av::AudioSamples &in, const Params &p) {
+	static av::AudioSamples build(const av::AudioSamples &in, const Params &p, Cache*) {
 		const AVFrame *src = in.raw();
 		AVSampleFormat src_fmt = (AVSampleFormat)src->format;
 		bool src_planar = av_sample_fmt_is_planar(src_fmt) != 0;
@@ -360,12 +427,13 @@ template<typename T> class ReinterpretPlanes: public NodeSISO<T, T>, public Node
 protected:
 	using MS = MediaSpecific<T>;
 	typename MS::Params params_;
+	typename MS::Cache cache_;
 public:
 	using NodeSISO<T, T>::NodeSISO;
 	virtual void process() {
 		T in = this->source_->get();
 		if (isEofMarker(in)) { this->sink_->put(in); return; }
-		T out = MS::build(in, params_);
+		T out = MS::build(in, params_, &cache_);
         out.setTimeBase(in.timeBase());
 		out.setPts(in.pts());
         out.setComplete(in.isComplete());
