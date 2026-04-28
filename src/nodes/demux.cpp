@@ -4,7 +4,7 @@ extern "C" {
 #include <unordered_set>
 #include "node_common.hpp"
 
-class StreamDemuxer: public NodeSingleInput<av::Packet>, public NodeWithOutputs<av::Packet> {
+class StreamDemuxer: public NodeSingleInput<av::Packet>, public NodeWithOutputs<av::Packet>, public ReportsFinishByFlag {
 protected:
     std::unordered_map<int, std::shared_ptr<Edge<av::Packet>> > map_;
     std::unordered_set<int> video_streams_;
@@ -12,6 +12,9 @@ protected:
     bool waiting_for_keyframe_ = false;
 public:
     using NodeSingleInput::NodeSingleInput;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
     void addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge, bool is_video) {
         if (map_.count(stream_index)!=0) {
             throw Error("Adding stream requested but this stream_index already exists.");
@@ -29,6 +32,7 @@ public:
             for (auto& m: map_) {
                 m.second->enqueue(createEofPacket(m.first));
             }
+            finished_ = true;
         } else {
             auto iter = map_.find(pkt.streamIndex());
             if (iter != map_.end()) {

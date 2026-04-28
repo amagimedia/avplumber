@@ -425,6 +425,15 @@ private:
 
         const std::string shot_type = readShotType(input);
         const bool suppressed_by_shot = require_wide_shot_ && shot_type != "wide";
+        if (suppressed_by_shot) {
+            clearCachedOverlay();
+            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "draw_segmask: frame=" << frame_counter_
+                          << " suppressed shot_type=" << (shot_type.empty() ? "<missing>" : shot_type);
+            }
+            return;
+        }
+
         const AVFrameSideData* sd = av_frame_get_side_data(input.raw(), yoloSegGpuSideDataType(side_data_slot_));
 
         bool have_current_masks = false;

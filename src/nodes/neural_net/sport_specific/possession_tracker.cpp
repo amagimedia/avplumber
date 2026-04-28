@@ -8,7 +8,7 @@ extern "C" {
 #include <string>
 #include <unordered_map>
 
-class PossessionTracker : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class PossessionTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string handler_metadata_key_ = "ball_handler";
     std::string player_metadata_key_ = "yolo_players";
     std::string ball_metadata_key_ = "yolo_ball";
@@ -112,16 +112,20 @@ class PossessionTracker : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             resetState();
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 

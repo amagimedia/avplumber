@@ -13,7 +13,7 @@ extern "C" {
 #include <unordered_set>
 #include <vector>
 
-class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
 
     // Seg mask config
     std::string seg_metadata_key_ = "yolo_seg";
@@ -97,10 +97,12 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             prev_shot_type_.clear();
@@ -108,8 +110,10 @@ public:
             candidate_count_ = 0;
             frame_counter_ = 0;
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 

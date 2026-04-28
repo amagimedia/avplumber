@@ -14,12 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Debug build (default) — REMOTE ONLY
 make -j$(nproc)
 
-# Debug build with neural_net + CUDA + NVOF — REMOTE ONLY
+# Debug build with neural_net + CUDA for basketball examples — REMOTE ONLY
 make -j$(nproc) \
   NEURAL_NET_COMMON=1 \
   NEURAL_NET_SPECIFIC=1 \
   HAVE_CUDA=1 \
-  HAVE_NVOF_FRUC=1 \
+  HAVE_NVOF_FRUC=0 \
   HAVE_NVCC=1
 
 # Release build — REMOTE ONLY
@@ -47,13 +47,16 @@ rsync -avz --relative -e "ssh -i /home/jp/work-misc-stuff/awsdev.pem" \
   /home/jp/git/avplumber/./<files> \
   fedora@172.17.36.132:/home/fedora/avplumber/
 
-# Clean and rebuild on remote (always use this exact routine)
+# Clean and rebuild on remote.
+# Canonical working neural/CUDA build line: use `/opt/tensorrt` and the CUDA 13.0
+# include/lib paths shown here. Basketball examples do not use FRUC; keep
+# `HAVE_NVOF_FRUC=0` for normal example work unless specifically testing frame interpolation.
 make clean
 make -j8 \
   NEURAL_NET_COMMON=1 \
   NEURAL_NET_SPECIFIC=1 \
   HAVE_CUDA=1 \
-  HAVE_NVOF_FRUC=1 \
+  HAVE_NVOF_FRUC=0 \
   HAVE_NVCC=1 \
   NVCC=/usr/local/cuda-13.0/bin/nvcc \
   TENSORRT_ROOT=/opt/tensorrt \
@@ -67,6 +70,12 @@ LD_LIBRARY_PATH=/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/targets/x8
 ```
 
 Remote avplumber path: `/home/fedora/avplumber`
+
+### Zero-copy CUDA graph rule
+
+For CUDA/neural example graphs, do not introduce `hwdownload`, `hwupload`, or `hwupload_cuda` as a workaround between CUDA decode, CUDA preprocessing, inference, CUDA draw nodes, and NVENC. Keep those pipelines zero-copy with GPU-native filters such as `scale_cuda` and `pad_cuda`, CUDA nodes, and CUDA/NVENC frames all the way through.
+
+If `scale_cuda` or `pad_cuda` fails in avplumber while `ffmpeg -filters` shows it exists, fix the remote runtime/library selection first. Verify `ldd /home/fedora/avplumber/avplumber` resolves FFmpeg libraries from `/usr/local/lib`, and run with the required `LD_LIBRARY_PATH` or rpath. Do not "fix" CUDA graph failures by adding CPU round-trips. Only use `hwupload`/`hwdownload` in examples whose explicit purpose is CPU/GPU or DMA-BUF interop, and make that purpose clear in the graph name or comments.
 
 ### Build flags
 | Flag | Effect |

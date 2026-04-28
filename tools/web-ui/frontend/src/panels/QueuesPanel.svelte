@@ -1,7 +1,4 @@
 <script>
-  import { tick } from 'svelte';
-  import { graphHoveredQueueName, selectedQueueName } from '../graphStores';
-
   export let ctx; // store
   export let dock;
   export let state;
@@ -9,45 +6,11 @@
   $: c = $ctx;
   $: dock;
   $: state;
-
-  let lastScrolledSel = '';
-
-  function parsePts(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function formatDelta(seconds) {
-    if (!Number.isFinite(seconds)) return '';
-    const s = seconds.toFixed(6).replace(/\.?0+$/, '');
-    const sign = seconds > 0 ? '+' : '';
-    return `${sign}${s}`;
-  }
-
-  $: refPts =
-    $selectedQueueName && c.queues
-      ? parsePts(c.queues.find((x) => x && x.name === $selectedQueueName)?.last_ts_seconds)
-      : null;
-
-  $: {
-    const sel = $selectedQueueName;
-    if (sel && sel !== lastScrolledSel && typeof document !== 'undefined') {
-      lastScrolledSel = sel;
-      tick().then(() => {
-        const el = document.getElementById(`queue-row-${encodeURIComponent(sel)}`);
-        el?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-      });
-    }
-    if (!sel) lastScrolledSel = '';
-  }
 </script>
 
 <div class="panel avp-panel">
   <div class="toolbar">
     <button on:click={() => c.refreshQueues?.()}>Refresh queues</button>
-    <button type="button" class="btn-small" on:click={() => selectedQueueName.set('')} disabled={!$selectedQueueName}>
-      Clear queue selection
-    </button>
   </div>
 
   <div class="scrollable small-text">
@@ -68,14 +31,8 @@
           </tr>
         </thead>
         <tbody>
-          {#each c.queues as q (q.name)}
-            <tr
-              id={`queue-row-${encodeURIComponent(q.name)}`}
-              class="click-row"
-              class:selected={$selectedQueueName === q.name}
-              class:queue-graph-hover={$graphHoveredQueueName === q.name}
-              on:click={() => selectedQueueName.update((s) => (s === q.name ? '' : q.name))}
-            >
+          {#each c.queues as q}
+            <tr>
               <td>{q.name}</td>
               <td>{q.type || ''}</td>
               <td>{q.occupied}</td>
@@ -105,23 +62,7 @@
                   -
                 {/if}
               </td>
-              <td
-                class:pts-delta-cell={$selectedQueueName &&
-                  q.name !== $selectedQueueName &&
-                  refPts != null &&
-                  parsePts(q.last_ts_seconds) != null}
-              >
-                {#if $selectedQueueName && q.name !== $selectedQueueName && refPts != null}
-                  {@const dq = parsePts(q.last_ts_seconds)}
-                  {#if dq != null}
-                    <span class="pts-delta">Δ = {formatDelta(dq - refPts)}</span>
-                  {:else}
-                    {q.last_ts_seconds}
-                  {/if}
-                {:else}
-                  {q.last_ts_seconds}
-                {/if}
-              </td>
+              <td>{q.last_ts_seconds}</td>
               <td>{q.timebase_num}/{q.timebase_den}</td>
               <td>{typeof q.pps === 'number' ? q.pps.toFixed(1) : ''}</td>
               <td>
@@ -136,3 +77,5 @@
     {/if}
   </div>
 </div>
+
+

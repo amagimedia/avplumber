@@ -1,10 +1,20 @@
 #include "node_common.hpp"
 
-template <typename T> class Split: public NodeSingleInput<T>, public NodeMultiOutput<T> {
+template <typename T> class Split: public NodeSingleInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag {
 protected:
     bool drop_ = false;
 public:
     using NodeSingleInput<T>::NodeSingleInput;
+    virtual bool consumeEofIfPresent() override {
+        T* data = this->source_->peek(0);
+        if (data == nullptr || !isEofMarker(*data)) {
+            return false;
+        }
+        this->source_->pop();
+        onEofConsumed();
+        this->finished_ = true;
+        return true;
+    }
     virtual void onEofConsumed() override {
         T eof = createEofMarker<T>();
         for (auto &edge: this->sink_edges_) {
@@ -14,6 +24,12 @@ public:
     virtual void process() {
         T* data = this->source_->peek();
         if (data==nullptr) {
+            return;
+        }
+        if (isEofMarker(*data)) {
+            this->source_->pop();
+            onEofConsumed();
+            this->finished_ = true;
             return;
         }
         for (auto &edge: this->sink_edges_) {

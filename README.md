@@ -448,14 +448,11 @@ Each node is described by a JSON object consisting of the following fields:
   * if unspecified, the string `type@memory_address` will be generated and used
 * `type` (string) - mandatory
 * `group` (string) - used for grouping together nearby nodes. Example: transcoder that will have separate input and output groups so that when input URL is changed, only demuxer and decoders will be restarted, not encoders and muxer.
-* `auto_restart` (string) - optional, action when node finishes without being explicitly stopped:
+* `auto_restart` (string) - optional:
   * `off` (default) - let the node stop without restarting
   * `on` - restart single node when it finishes/crashes
   * `group` - restart the whole group to which the node belongs
-  * `panic` - when the node finishes/crashes, shut down the whole instance (logged as a critical error, then `NodeManager::shutdown()`)
-  * `exit` - same shutdown as `panic` (`NodeManager::shutdown()`), but without the critical-error log; use on the final sink for a clean VOD/EOF stop so logs distinguish normal completion from failure-driven `panic`
-  When `on_error` is also specified, `auto_restart` applies **only** to clean (no-exception) finishes and `on_error` applies only to error finishes. When `on_error` is not specified, `auto_restart` applies to both (backward compatible).
-* `on_error` (string) - optional, action when node finishes **because of an unhandled exception**. Same values as `auto_restart`. When set, separates the error path from the clean-finish path. Typical VOD usage: pipeline nodes use `"auto_restart":"off", "on_error":"panic"` so EOF does not trigger shutdown, while the final `output` node uses `"auto_restart":"exit", "on_error":"panic"` so a successful EOF/trailer stops the instance without a critical-error log, but a real failure still goes through `panic`.
+  * `panic` - when the node finishes/crashes, shutdown the whole avplumber instance
 * `src` (string for single-input nodes, list of strings for multi-input nodes) - source edge
 * `dst` (string for single-output nodes, list of strings for multi-output nodes) - sink edge
 * `optional` (bool) - optional: when creating the node fails:
@@ -496,7 +493,6 @@ The tick source has its own event loop (or may even bypass it and call the node 
 -   `options` (dictionary) - options for libavformat
 -   `timeout` (float, seconds) - packet read timeout
 -   `initial_timeout` (float, seconds) - URL open timeout
--   `eof_mode` (string, optional) - behavior when the input returns end-of-file (null packet). Default is `drain`: enqueue one EOF marker packet (`createEofPacket`) then finish the node, so downstream demux/decoders can flush. Use `none` to restore the previous behavior (finish without emitting an EOF marker).
 
 ### `input_rec`
 
@@ -799,7 +795,6 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
 
 1 input, 1 output: `av::VideoFrame`/`av::AudioSamples`
 
--   `eof_passthrough` (bool, default `false`) - when `true`, if the upstream sends an EOF marker frame, the sentinel forwards it to the output and finishes. Use for file/VOD transcoding so the graph can shut down cleanly; leave `false` for live paths where missing input should trigger slate/backup behavior.
 -   `timeout` (float, seconds) - default 1, seconds to wait for input frame before
     inserting frozen or backup frame
 -   `correction_group` (string, name of instance-shared object) -
@@ -939,8 +934,6 @@ no parameters
 
 multiple inputs, 1 output: `av::Packet`
 
-When every input queue has an EOF marker at its head, the muxer pops them all, emits a single EOF packet on its output, and finishes (so the `output` node can write the trailer and exit).
-
 -   `fix_timestamps` (bool) - shift PTSes and DTSes so
     that DTSes are always increasing and (PTS &gt;= DTS). Disabled by default.
 -   `ts_sort_wait` (float, seconds) - default `2.5`, maximum time to wait
@@ -952,8 +945,6 @@ When every input queue has an EOF marker at its head, the muxer pops them all, e
 ### `output`
 
 1 input: `av::Packet`
-
-On receiving an EOF marker packet, the node flushes the muxer trailer (`writeTrailer`), closes the format context, and finishes.
 
 -   `format` (string) - mandatory
 -   `url` (string of URL) - mandatory

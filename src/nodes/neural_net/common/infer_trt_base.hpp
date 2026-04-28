@@ -2,6 +2,7 @@
 
 #include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
+#include "yolo_side_data.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -24,8 +25,6 @@ extern "C" {
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include "yolo_side_data.hpp"
 
 namespace yolo_base {
 

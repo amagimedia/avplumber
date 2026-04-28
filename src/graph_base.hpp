@@ -9,6 +9,20 @@
 
 using namespace std::chrono_literals;
 
+class ReportsFinishByFlag: public IReportsFinish {
+protected:
+    bool finished_ = false;
+public:
+    virtual bool finished() {
+        return finished_;
+    }
+    void markFinished() {
+        finished_ = true;
+    }
+    virtual ~ReportsFinishByFlag() {
+    }
+};
+
 template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate, public IFlushAndSeek {
 public:
     using SourceType = Source<InputType>;
@@ -166,6 +180,10 @@ public:
         if (ptr == nullptr || !isEofMarker(*ptr)) return false;
         source_->pop();
         onEofConsumed();
+        ReportsFinishByFlag* finishable = dynamic_cast<ReportsFinishByFlag*>(this);
+        if (finishable) {
+            finishable->markFinished();
+        }
         return true;
     }
     virtual ~NodeSingleInput() {
@@ -253,6 +271,10 @@ public:
             edge->pop();
         }
         onEofConsumed();
+        ReportsFinishByFlag* finishable = dynamic_cast<ReportsFinishByFlag*>(this);
+        if (finishable) {
+            finishable->markFinished();
+        }
         return true;
     }
 
@@ -396,17 +418,6 @@ public:
         }
     }
     virtual ~TransparentNode() {
-    }
-};
-
-class ReportsFinishByFlag: public IReportsFinish {
-protected:
-    bool finished_ = false;
-public:
-    virtual bool finished() {
-        return finished_;
-    }
-    virtual ~ReportsFinishByFlag() {
     }
 };
 

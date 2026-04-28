@@ -147,7 +147,7 @@ struct ViewportBBox {
 };
 }
 
-class Reframer : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
+class Reframer : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
@@ -864,6 +864,9 @@ protected:
 
 public:
     using NodeSISO::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     ~Reframer() override {
         for (CUdeviceptr p : tensor_ptrs_) {
@@ -890,6 +893,7 @@ public:
         av::VideoFrame frm = this->source_->get();
         if (isEofMarker(frm)) {
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
         if (!frm) return;

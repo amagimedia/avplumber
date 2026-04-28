@@ -1,4 +1,5 @@
 #include "cuda_overlay_base.hpp"
+#include "draw_batch_shared.hpp"
 
 #include <array>
 #include <cstdio>
@@ -18,11 +19,12 @@ constexpr int kMaxLabelLines = 3;
 
 enum class FieldToken {
     TrackId,
+    TeamAB,
+    JerseyPct,
     Conf,
     Velocity,
     Label,
     Cls,
-    TeamAb,
 };
 
 struct TemplateToken {
@@ -80,6 +82,14 @@ static bool parseFieldToken(const std::string& token, FieldToken& out_field) {
         out_field = FieldToken::TrackId;
         return true;
     }
+    if (token == "team_ab") {
+        out_field = FieldToken::TeamAB;
+        return true;
+    }
+    if (token == "jersey_pct") {
+        out_field = FieldToken::JerseyPct;
+        return true;
+    }
     if (token == "conf") {
         out_field = FieldToken::Conf;
         return true;
@@ -94,10 +104,6 @@ static bool parseFieldToken(const std::string& token, FieldToken& out_field) {
     }
     if (token == "cls") {
         out_field = FieldToken::Cls;
-        return true;
-    }
-    if (token == "team_ab") {
-        out_field = FieldToken::TeamAb;
         return true;
     }
     return false;
@@ -151,6 +157,7 @@ static bool compileTemplateLine(const std::string& line, TemplateLine& out_line,
 class DrawBBoxLabels : public CudaOverlayBase {
 private:
     std::vector<std::string> metadata_keys_;
+    std::string camera_shot_metadata_key_ = "camera_shot_info";
     double min_conf_ = 0.0;
     std::unordered_set<int> allowed_classes_;
     std::unordered_set<std::string> allowed_labels_;
@@ -165,6 +172,7 @@ private:
     int velocity_precision_ = 1;
     bool show_predicted_labels_ = false;
     bool show_untracked_ = false;
+    bool require_wide_shot_ = false;
 
     int font_scale_ = 2;
     int line_spacing_ = 8;
@@ -177,48 +185,34 @@ private:
     bool draw_background_ = true;
     float background_opacity_ = 0.75f;
 
-    CUdeviceptr line1_symbol_ = 0;
-    CUdeviceptr line2_symbol_ = 0;
-    CUdeviceptr line3_symbol_ = 0;
-    size_t line_symbol_size_ = 0;
+    cuda_overlay::DeviceBuffer<cuda_overlay::BatchedTextLabel> d_labels_;
+    cuda_overlay::DeviceBuffer<char> d_text_blob_;
 
     const char* nodeName() const override { return "draw_bbox_labels"; }
 
+    std::string readShotType(const av::VideoFrame& frm) const {
+        const AVFrame* raw = frm.raw();
+        if (!raw || !raw->metadata || camera_shot_metadata_key_.empty()) return {};
+
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
+        if (!entry || !entry->value) return {};
+
+        try {
+            Parameters md = Parameters::parse(entry->value);
+            return md.value("camera_shot_type", std::string());
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
     void onKernelsUnloaded() override {
-        line1_symbol_ = 0;
-        line2_symbol_ = 0;
-        line3_symbol_ = 0;
-        line_symbol_size_ = 0;
+        d_labels_.release(cu_ctx_);
+        d_text_blob_.release(cu_ctx_);
     }
 
     bool loadTextKernels() {
-        if (!loadKernels(avpl_draw_text_ptx, avpl_draw_text_ptx_len,
-                         "kDrawTextNV12Luma", "kDrawTextNV12Chroma")) {
-            return false;
-        }
-        if (line1_symbol_ && line2_symbol_ && line3_symbol_) return true;
-
-        size_t line1_bytes = 0;
-        size_t line2_bytes = 0;
-        size_t line3_bytes = 0;
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line1_symbol_, &line1_bytes, draw_module_, "gDrawTextLine1"))) {
-            logstream << "draw_bbox_labels: failed to get line1 symbol";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line2_symbol_, &line2_bytes, draw_module_, "gDrawTextLine2"))) {
-            logstream << "draw_bbox_labels: failed to get line2 symbol";
-            return false;
-        }
-        if (CUDA_OVERLAY_CHECK_CU(cuModuleGetGlobal(&line3_symbol_, &line3_bytes, draw_module_, "gDrawTextLine3"))) {
-            logstream << "draw_bbox_labels: failed to get line3 symbol";
-            return false;
-        }
-        if (line1_bytes < kMaxGpuChars || line2_bytes < kMaxGpuChars || line3_bytes < kMaxGpuChars) {
-            logstream << "draw_bbox_labels: PTX line buffers are too small";
-            return false;
-        }
-        line_symbol_size_ = std::min(line1_bytes, std::min(line2_bytes, line3_bytes));
-        return true;
+        return loadKernels(avpl_draw_text_ptx, avpl_draw_text_ptx_len,
+                           "kDrawTextNV12Luma", "kDrawTextNV12Chroma");
     }
 
     bool compileTemplate(std::string& err_out) {
@@ -258,6 +252,26 @@ private:
             std::snprintf(buf, sizeof(buf), "%d", det.track_id);
             out = buf;
             return true;
+        case FieldToken::TeamAB:
+            if (!det.has_team || det.team < 0) {
+                out = "?";
+                return true;
+            }
+            if (det.team == 0) {
+                out = "A";
+                return true;
+            }
+            if (det.team == 1) {
+                out = "B";
+                return true;
+            }
+            out = "?";
+            return true;
+        case FieldToken::JerseyPct:
+            if (!det.has_jersey_mode_ratio) return false;
+            std::snprintf(buf, sizeof(buf), "%d", (int)std::lround(det.jersey_mode_ratio * 100.0));
+            out = buf;
+            return true;
         case FieldToken::Conf:
             std::snprintf(buf, sizeof(buf), "%.2f", det.conf);
             out = buf;
@@ -276,10 +290,6 @@ private:
             if (!det.has_cls) return false;
             std::snprintf(buf, sizeof(buf), "%d", det.cls);
             out = buf;
-            return true;
-        case FieldToken::TeamAb:
-            if (!det.has_team_ab) return false;
-            out = det.team_ab;
             return true;
         default:
             return false;
@@ -360,28 +370,14 @@ private:
         layout.origin_y = bg_y + pad_y;
     }
 
-    bool copyLabelTextToGpu(const LabelLayout& label) const {
-        if (!line1_symbol_ || !line2_symbol_ || !line3_symbol_) return false;
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line1_symbol_, label.line1.data(),
-                                       std::min(line_symbol_size_, label.line1.size()),
-                                       cuda_dev_ctx_->stream))) return false;
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line2_symbol_, label.line2.data(),
-                                       std::min(line_symbol_size_, label.line2.size()),
-                                       cuda_dev_ctx_->stream))) return false;
-        if (CUDA_OVERLAY_CHECK_CU(cuMemcpyHtoDAsync(line3_symbol_, label.line3.data(),
-                                       std::min(line_symbol_size_, label.line3.size()),
-                                       cuda_dev_ctx_->stream))) return false;
-        return true;
-    }
-
-    bool drawOneLabel(av::VideoFrame& frm, const LabelLayout& label) {
+    bool drawLabelsOnFrame(av::VideoFrame& frm, const std::vector<LabelLayout>& labels) {
+        if (labels.empty()) return true;
         const unsigned int block_x = 32;
         const unsigned int block_y = 8;
-
-        const unsigned int grid_x = (unsigned int)(label.bg_w + (int)block_x - 1) / block_x;
-        const unsigned int grid_y = (unsigned int)(label.bg_h + (int)block_y - 1) / block_y;
-        const unsigned int uv_grid_x = (unsigned int)(((label.bg_w + 1) / 2) + (int)block_x - 1) / block_x;
-        const unsigned int uv_grid_y = (unsigned int)(((label.bg_h + 1) / 2) + (int)block_y - 1) / block_y;
+        const unsigned int grid_x = (unsigned int)(frm.width() + (int)block_x - 1) / block_x;
+        const unsigned int grid_y = (unsigned int)(frm.height() + (int)block_y - 1) / block_y;
+        const unsigned int uv_grid_x = (unsigned int)(((frm.width() + 1) / 2) + (int)block_x - 1) / block_x;
+        const unsigned int uv_grid_y = (unsigned int)(((frm.height() + 1) / 2) + (int)block_y - 1) / block_y;
 
         CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
         size_t pitch_y = (size_t)frm.raw()->linesize[0];
@@ -389,38 +385,55 @@ private:
         size_t pitch_uv = (size_t)frm.raw()->linesize[1];
         int width = frm.width();
         int height = frm.height();
-        int origin_x = label.origin_x;
-        int origin_y = label.origin_y;
-        int font_scale = label.font_scale;
-        int line_spacing = label.line_spacing;
-        int glyph_preset = label.glyph_preset;
-        int line1_len = label.line1_len;
-        int line2_len = label.line2_len;
-        int line3_len = label.line3_len;
-        int bg_x = label.bg_x;
-        int bg_y = label.bg_y;
-        int bg_w = label.bg_w;
-        int bg_h = label.bg_h;
-        int draw_background = draw_background_ ? 1 : 0;
-        float background_opacity = background_opacity_;
-        int text_y = text_color_.y;
-        int text_u = text_color_.u;
-        int text_v = text_color_.v;
-        int bg_y_color = background_color_.y;
-        int bg_u = background_color_.u;
-        int bg_v = background_color_.v;
+        std::vector<cuda_overlay::BatchedTextLabel> batched_labels;
+        std::vector<char> text_blob;
+        batched_labels.reserve(labels.size());
+
+        for (const LabelLayout& label : labels) {
+            cuda_overlay::BatchedTextLabel batched;
+            batched.line1_len = label.line1_len;
+            batched.line2_len = label.line2_len;
+            batched.line3_len = label.line3_len;
+            batched.origin_x = label.origin_x;
+            batched.origin_y = label.origin_y;
+            batched.font_scale = label.font_scale;
+            batched.line_spacing = label.line_spacing;
+            batched.glyph_preset = label.glyph_preset;
+            batched.bg_x = label.bg_x;
+            batched.bg_y = label.bg_y;
+            batched.bg_w = label.bg_w;
+            batched.bg_h = label.bg_h;
+            batched.draw_background = draw_background_ ? 1 : 0;
+            batched.background_opacity = background_opacity_;
+            batched.text_y = text_color_.y;
+            batched.text_u = text_color_.u;
+            batched.text_v = text_color_.v;
+            batched.bg_y_color = background_color_.y;
+            batched.bg_u = background_color_.u;
+            batched.bg_v = background_color_.v;
+            batched.line1_offset = cuda_overlay::appendTextBlob(text_blob, label.line1.data(), label.line1_len);
+            batched.line2_offset = cuda_overlay::appendTextBlob(text_blob, label.line2.data(), label.line2_len);
+            batched.line3_offset = cuda_overlay::appendTextBlob(text_blob, label.line3.data(), label.line3_len);
+            batched_labels.push_back(batched);
+        }
+
+        if (!d_labels_.upload(batched_labels, cu_ctx_, cuda_dev_ctx_->stream)) {
+            logstream << "draw_bbox_labels: failed uploading label descriptors";
+            return false;
+        }
+        if (!d_text_blob_.uploadBytes(text_blob.data(), text_blob.size(), cu_ctx_, cuda_dev_ctx_->stream)) {
+            logstream << "draw_bbox_labels: failed uploading label text blob";
+            return false;
+        }
+        CUdeviceptr labels_ptr = d_labels_.ptr();
+        int num_labels = (int)batched_labels.size();
+        CUdeviceptr text_blob_ptr = d_text_blob_.ptr();
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
-            (void*)&origin_x, (void*)&origin_y,
-            (void*)&font_scale, (void*)&line_spacing,
-            (void*)&glyph_preset,
-            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
-            (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
-            (void*)&draw_background,
-            (void*)&background_opacity,
-            (void*)&text_y, (void*)&bg_y_color
+            (void*)&labels_ptr, (void*)&num_labels,
+            (void*)&text_blob_ptr
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                     grid_x, grid_y, 1,
@@ -432,15 +445,8 @@ private:
         void* uv_args[] = {
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
-            (void*)&origin_x, (void*)&origin_y,
-            (void*)&font_scale, (void*)&line_spacing,
-            (void*)&glyph_preset,
-            (void*)&line1_len, (void*)&line2_len, (void*)&line3_len,
-            (void*)&bg_x, (void*)&bg_y, (void*)&bg_w, (void*)&bg_h,
-            (void*)&draw_background,
-            (void*)&background_opacity,
-            (void*)&text_u, (void*)&text_v,
-            (void*)&bg_u, (void*)&bg_v
+            (void*)&labels_ptr, (void*)&num_labels,
+            (void*)&text_blob_ptr
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                     uv_grid_x, uv_grid_y, 1,
@@ -459,6 +465,17 @@ private:
         const AVFrame* raw = input.raw();
         if (!raw || !raw->metadata) return;
 
+        if (require_wide_shot_) {
+            const std::string shot_type = readShotType(input);
+            if (shot_type != "wide") {
+                if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                    logstream << "draw_bbox_labels: frame=" << frame_counter_
+                              << " suppressed shot_type=" << (shot_type.empty() ? "<missing>" : shot_type);
+                }
+                return;
+            }
+        }
+
         cuda_overlay::YoloParseConfig cfg;
         cfg.frame_width = input_params_.width;
         cfg.frame_height = input_params_.height;
@@ -471,6 +488,7 @@ private:
         cfg.model_content_offset_y = model_content_offset_y_;
 
         int labels_drawn = 0;
+        std::vector<LabelLayout> labels_to_draw;
         for (const std::string& key : metadata_keys_) {
             AVDictionaryEntry* entry = av_dict_get(raw->metadata, key.c_str(), nullptr, 0);
             if (!entry || !entry->value) continue;
@@ -483,17 +501,16 @@ private:
                     if (!buildLabelLines(det, lines)) continue;
                     LabelLayout label;
                     finalizeLayout(label, det, lines);
-                    if (!copyLabelTextToGpu(label)) {
-                        throw Error("draw_bbox_labels: failed to upload label text");
-                    }
-                    if (!drawOneLabel(output, label)) {
-                        throw Error("draw_bbox_labels: failed to draw label");
-                    }
+                    labels_to_draw.push_back(label);
                     labels_drawn++;
                 }
             } catch (const std::exception&) {
                 continue;
             }
+        }
+
+        if (!drawLabelsOnFrame(output, labels_to_draw)) {
+            throw Error("draw_bbox_labels: failed to draw labels");
         }
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
@@ -507,6 +524,7 @@ public:
     DrawBBoxLabels(std::unique_ptr<Source<av::VideoFrame>>&& source,
                    std::unique_ptr<Sink<av::VideoFrame>>&& sink,
                    std::vector<std::string> metadata_keys,
+                   std::string camera_shot_metadata_key,
                    double min_conf,
                    std::unordered_set<int> allowed_classes,
                    std::unordered_set<std::string> allowed_labels,
@@ -518,6 +536,7 @@ public:
                    int velocity_precision,
                    bool show_predicted_labels,
                    bool show_untracked,
+                   bool require_wide_shot,
                    int font_scale,
                    int line_spacing,
                    int offset_x,
@@ -533,6 +552,7 @@ public:
                    int debug_log_every_n)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_keys_(std::move(metadata_keys)),
+          camera_shot_metadata_key_(std::move(camera_shot_metadata_key)),
           min_conf_(min_conf),
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
@@ -544,6 +564,7 @@ public:
           velocity_precision_(velocity_precision),
           show_predicted_labels_(show_predicted_labels),
           show_untracked_(show_untracked),
+          require_wide_shot_(require_wide_shot),
           font_scale_(font_scale),
           line_spacing_(line_spacing),
           offset_x_(offset_x),
@@ -607,6 +628,7 @@ public:
         }
 
         const double min_conf = params.value("min_conf", 0.0);
+        const std::string camera_shot_metadata_key = params.value("camera_shot_metadata_key", std::string("camera_shot_info"));
         const double model_content_width = params.value("model_content_width", 0.0);
         const double model_content_height = params.value("model_content_height", 0.0);
         const double model_content_offset_x = params.value("model_content_offset_x", 0.0);
@@ -615,6 +637,7 @@ public:
         const int velocity_precision = params.value("velocity_precision", 1);
         const bool show_predicted_labels = params.value("show_predicted_labels", false);
         const bool show_untracked = params.value("show_untracked", false);
+        const bool require_wide_shot = params.value("require_wide_shot", false);
         const int font_scale = params.value("font_scale", 2);
         const int line_spacing = params.value("line_spacing", 8);
         const int offset_x = params.value("offset_x", 0);
@@ -669,6 +692,7 @@ public:
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBoxLabels>(
             edges, params,
             std::move(metadata_keys),
+            camera_shot_metadata_key,
             min_conf,
             std::move(allowed_classes),
             std::move(allowed_labels),
@@ -680,6 +704,7 @@ public:
             velocity_precision,
             show_predicted_labels,
             show_untracked,
+            require_wide_shot,
             font_scale,
             line_spacing,
             offset_x,

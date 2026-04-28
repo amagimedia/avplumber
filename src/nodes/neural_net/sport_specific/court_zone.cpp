@@ -14,7 +14,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-class CourtZone : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class CourtZone : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string handler_metadata_key_ = "ball_handler";
     std::string ball_metadata_key_ = "yolo_ball";
     std::string player_metadata_key_ = "yolo_players";
@@ -331,15 +331,19 @@ class CourtZone : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
         if (isEofMarker(frm)) {
             frame_counter_ = 0;
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 

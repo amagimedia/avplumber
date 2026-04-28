@@ -30,6 +30,9 @@ private:
 
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     virtual void process() override {
         consumeEofMarkers();

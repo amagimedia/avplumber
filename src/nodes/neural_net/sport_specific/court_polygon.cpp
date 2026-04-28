@@ -24,7 +24,7 @@ struct CourtKeypoint {
     bool visible = false;
 };
 
-class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
 
     std::string pose_metadata_key_ = "yolo_pose";
     std::string metadata_key_out_ = "yolo_seg";
@@ -385,16 +385,20 @@ class CourtPolygon : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             frame_counter_ = 0;
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 

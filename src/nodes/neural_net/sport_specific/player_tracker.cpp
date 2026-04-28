@@ -4,7 +4,7 @@ extern "C" {
 #include <libavutil/dict.h>
 }
 
-#include <BYTETracker.h>
+#include <bytetrack/BYTETracker.h>
 
 #include <algorithm>
 #include <cctype>
@@ -38,7 +38,7 @@ float computeIoU(const std::vector<float>& a_tlbr, float bx1, float by1, float b
 
 } // anonymous namespace
 
-class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
+class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 
     std::string metadata_key_ = "yolo_players";
     std::vector<std::string> target_labels_ = {"player"};
@@ -49,6 +49,7 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
 
     // Shot-aware reset
     std::string camera_shot_metadata_key_;  // empty = disabled
+    bool require_wide_shot_ = false;
     int track_buffer_ = 30;
     float track_thresh_ = 0.5f;
     float high_thresh_ = 0.6f;
@@ -79,9 +80,13 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
         tracker_->low_match_thresh = low_match_thresh_;
     }
 
+    void resetTrackerState() {
+        initTracker();
+    }
+
     void resetState() {
         frame_counter_ = 0;
-        initTracker();
+        resetTrackerState();
     }
 
     bool matchesTarget(const Parameters& det) const {
@@ -99,6 +104,38 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
             }
         }
         return false;
+    }
+
+    bool readShotInfo(const av::VideoFrame& frm, std::string& shot_type_out, bool& transition_out) const {
+        shot_type_out.clear();
+        transition_out = false;
+        if (camera_shot_metadata_key_.empty()) return false;
+
+        const AVFrame* raw = frm.raw();
+        if (!raw || !raw->metadata) return false;
+
+        AVDictionaryEntry* shot_entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
+        if (!shot_entry || !shot_entry->value) return false;
+
+        try {
+            Parameters shot_md = Parameters::parse(shot_entry->value);
+            shot_type_out = shot_md.value("camera_shot_type", std::string());
+            transition_out = shot_md.value("camera_shot_transition", false);
+            return true;
+        } catch (...) {
+            shot_type_out.clear();
+            transition_out = false;
+            return false;
+        }
+    }
+
+    void stripTrackAnnotation(Parameters& det) const {
+        det.erase("track_id");
+        det.erase("tracklet_len");
+        det.erase("track_state");
+        det.erase("predicted");
+        det.erase("velocity");
+        det.erase("predicted_xyxy");
     }
 
     Parameters buildTrackAnnotation(const bytetrack::STrack& track, bool predicted) const {
@@ -152,6 +189,9 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void resetInput() override { resetState(); }
 
@@ -179,35 +219,27 @@ public:
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             resetState();
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 
-        // Shot-aware reset: reset tracker on any shot transition so IDs restart from 1
-        if (!camera_shot_metadata_key_.empty()) {
-            const AVFrame* raw_shot = frm.raw();
-            if (raw_shot && raw_shot->metadata) {
-                AVDictionaryEntry* shot_entry = av_dict_get(raw_shot->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
-                if (shot_entry && shot_entry->value) {
-                    try {
-                        Parameters shot_md = Parameters::parse(shot_entry->value);
-                        bool transition = shot_md.value("camera_shot_transition", false);
-                        if (transition) {
-                            resetState();
-                            stat_resets_++;
-                            if (debug_log_every_n_ > 0) {
-                                logstream << "player_tracker: frame=" << frame_counter_
-                                          << " reset (shot transition to " << shot_md.value("camera_shot_type", std::string("?")) << ")";
-                            }
-                        }
-                    } catch (...) {}
-                }
+        // Shot-aware reset: reset tracker on any shot transition so IDs restart from 1.
+        std::string shot_type;
+        bool shot_transition = false;
+        const bool have_shot_info = readShotInfo(frm, shot_type, shot_transition);
+        if (shot_transition) {
+            resetTrackerState();
+            stat_resets_++;
+            if (debug_log_every_n_ > 0) {
+                logstream << "player_tracker: frame=" << frame_counter_
+                          << " reset (shot transition to " << (shot_type.empty() ? std::string("?") : shot_type) << ")";
             }
         }
 
@@ -250,6 +282,34 @@ public:
                 }
                 idx++;
             }
+        }
+
+        const bool shot_suppressed = require_wide_shot_ && (!have_shot_info || shot_type != "wide");
+        if (shot_suppressed) {
+            resetTrackerState();
+
+            if (has_metadata) {
+                Parameters out_md = md;
+                Parameters out_dets = passthrough_dets;
+                for (auto det_out : target_dets) {
+                    stripTrackAnnotation(det_out);
+                    out_dets.push_back(det_out);
+                }
+                out_md["detections"] = out_dets;
+                av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), out_md.dump().c_str(), 0);
+            }
+
+            stat_total_frames_++;
+            stat_total_target_dets_ += target_dets.size();
+
+            if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "player_tracker: frame=" << frame_counter_
+                          << " suppressed shot_type=" << (shot_type.empty() ? std::string("<missing>") : shot_type)
+                          << " targets=" << target_dets.size();
+            }
+
+            this->sink_->put(frm);
+            return;
         }
 
         // Convert target detections to ByteTrack Objects
@@ -397,6 +457,7 @@ public:
         r->auto_eof_ = false;
 
         if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
+        if (params.count("require_wide_shot")) r->require_wide_shot_ = params["require_wide_shot"].get<bool>();
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_labels")) {
             if (!params["target_labels"].is_array()) throw Error("player_tracker: target_labels must be a string array");

@@ -7,15 +7,18 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string player_metadata_key_ = "yolo_players";
     std::string ball_metadata_key_ = "yolo_ball";
     std::string ball_handler_metadata_key_ = "ball_handler";
@@ -35,13 +38,17 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     std::string output_file_trail_;
     std::string output_file_events_;
     std::string output_file_summary_;
-    int summary_update_every_n_ = 50;
+    int summary_update_every_n_ = 1;
     std::string video_label_;
     int fps_ = 0;
-    int schema_ = 2;
+    int schema_ = 3;
     int dump_every_n_ = 1;
     int debug_log_every_n_ = 0;
     int shot_result_wait_frames_ = 25;
+    int score_change_confirm_frames_ = 6;
+    int score_change_max_delta_ = 4;
+    bool include_ocr_game_state_ = false;
+    bool emit_ocr_clock_events_ = false;
 
     int court_seg_slot_ = 0;
     int player_seg_slot_ = 1;
@@ -85,26 +92,84 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int shots_missed_ = 0;
     int shots_unknown_ = 0;
     int shot_attempts_total_ = 0;
+    int score_events_total_ = 0;
+    int score_events_2pt_ = 0;
+    int score_events_3pt_ = 0;
+    int scoreboard_verified_shots_ = 0;
+    int scoreboard_unverified_shots_ = 0;
+    int detector_score_disagreements_ = 0;
+    int score_ocr_regressions_ = 0;
+    int score_ocr_rejected_ = 0;
     int first_game_clock_sec_ = -1;
     int latest_game_clock_sec_ = -1;
+
+    // Game-shape aggregates derived from confirmed score changes.
+    int lead_changes_ = 0;
+    int largest_lead_ = 0;
+    std::string current_leader_;       // "A", "B", or "" while tied
+    int longest_run_points_ = 0;
+    std::string current_run_side_;     // "team_a" / "team_b"
+    int current_run_points_ = 0;
+    uint64_t total_possession_frames_ = 0;
     std::string prev_possessing_team_;
     int prev_period_num_ = -1;
     int prev_shot_clock_sec_ = -1;
     std::string prev_camera_shot_;
 
+    int team_identity_evidence_[2][2] = {{0, 0}, {0, 0}}; // visual A/B x scoreboard team_a/team_b
+    bool team_identity_locked_ = false;
+    bool team_identity_just_locked_ = false;
+    int team_identity_lock_frame_ = -1;
+    std::string visual_to_scoreboard_[2];
+    std::string scoreboard_to_visual_[2];
+    int team_identity_lock_min_evidence_ = 2;
+    int team_identity_lock_min_margin_ = 1;
+
+    std::string locked_scoreboard_team_[2];
+    std::string scoreboard_team_candidate_[2];
+    int scoreboard_team_candidate_hits_ = 0;
+    int scoreboard_team_name_lock_hits_ = 1;
+
+    struct ScoreState {
+        int a = -1;
+        int b = -1;
+        int period = -1;
+        int clock_sec = -1;
+        int shot_clock_sec = -1;
+    };
+
+    bool have_confirmed_score_ = false;
+    ScoreState confirmed_score_;
+    ScoreState score_candidate_;
+    int score_candidate_frames_ = 0;
+    uint64_t score_candidate_first_frame_ = 0;
+    int64_t score_candidate_first_pts_ = 0;
+
     struct PendingRelease {
         uint64_t frame = 0;
+        int64_t pts = 0;
+        int player_id = -1;
         std::string shooting_team;
+        std::string attempt_type;
+        int attempt_points = 0;
+        ScoreState score_at_release;
     };
     bool have_last_release_ = false;
     PendingRelease last_release_;
 
     struct PendingShot {
+        uint64_t release_frame = 0;
         uint64_t arrival_frame = 0;
         int64_t arrival_pts = 0;
+        int player_id = -1;
         std::string shooting_team;
-        int score_a_start = -1;
-        int score_b_start = -1;
+        std::string attempt_type_detected;
+        int points_detected = 0;
+        ScoreState score_at_release;
+        bool detector_result_seen = false;
+        std::string detector_result;
+        std::string detector_source;
+        float detector_confidence = -1.0f;
         int frames_waited = 0;
     };
     bool have_pending_shot_ = false;
@@ -119,7 +184,51 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         int game_clock_sec = -1;    // at release
         int period_num = -1;        // at release
         std::string result;
+        std::string result_source;
         int points = 0;
+        bool scoreboard_verified = false;
+        int points_detected = 0;
+        std::string attempt_type_detected;
+        int points_scoreboard = 0;
+        std::string attempt_type_scoreboard;
+        std::string score_delta_side;
+        std::string visual_team;
+        std::string scoreboard_team_abbrev;
+        std::string scoreboard_team_name;
+        int score_before_a = -1;
+        int score_before_b = -1;
+        int score_after_a = -1;
+        int score_after_b = -1;
+        std::string detector_result;
+        bool detector_disagreement = false;
+        bool attempt_type_corrected_by_scoreboard = false;
+    };
+
+    struct ShotResultData {
+        std::string result;
+        std::string source;
+        int points = 0;
+        std::string attempt_type;
+        bool scoreboard_verified = false;
+        int points_detected = 0;
+        std::string attempt_type_detected;
+        int points_scoreboard = 0;
+        std::string attempt_type_scoreboard;
+        std::string score_delta_side;
+        std::string visual_team;
+        std::string scoreboard_team_abbrev;
+        std::string scoreboard_team_name;
+        ScoreState score_before;
+        ScoreState score_after;
+        std::string detector_result;
+        bool detector_disagreement = false;
+        bool attempt_type_corrected_by_scoreboard = false;
+    };
+
+    struct Touch {
+        int track_id = -1;
+        int start_frame = 0;
+        int frames = 0;
     };
 
     struct PossessionAcc {
@@ -134,14 +243,34 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         int frames_loose = 0;
         int frames_in_flight = 0;
         std::vector<int> handler_ids;
+        std::vector<Touch> touches;
         std::vector<std::string> zones_visited;
+        std::map<std::string, int> zone_frames;
         std::vector<ShotRecord> shots;
+        // Game-state snapshots — populated from OCR'd game state on the
+        // first/last frame of the possession. -1 means "not observed".
+        int period_at_start = -1;
+        int period_at_end = -1;
+        bool period_changed_during = false;
+        int clock_at_start = -1;
+        int clock_at_end = -1;
+        int shot_clock_at_end = -1;
+        int score_a_at_start = -1;
+        int score_b_at_start = -1;
+        int score_a_at_end = -1;
+        int score_b_at_end = -1;
     };
     bool poss_active_ = false;
     PossessionAcc poss_acc_;
     bool have_deferred_poss_ = false;
     PossessionAcc deferred_poss_;
     std::string output_file_possessions_;
+    std::string output_file_pbp_;
+    bool emit_handler_change_events_ = false;
+    // Frames at which a brief same-team handler flicker is folded back into
+    // the prior touch instead of opening a new one. Default tuned for 25 fps:
+    // 6 frames ≈ 240 ms — shorter than any real pass.
+    int touch_merge_gap_frames_ = 6;
 
     struct JsonFileWriter {
         std::ofstream out;
@@ -172,6 +301,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     JsonFileWriter file_trail_;
     JsonFileWriter file_events_;
     JsonFileWriter file_possessions_;
+    JsonFileWriter file_pbp_;
 
     static Parameters tryParse(const AVFrame* raw, const std::string& key) {
         if (!raw || !raw->metadata) return {};
@@ -194,6 +324,286 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         } catch (...) {
             return fallback;
         }
+    }
+
+    static bool haveScore(const ScoreState& s) {
+        return s.a >= 0 && s.b >= 0;
+    }
+
+    static bool sameScore(const ScoreState& a, const ScoreState& b) {
+        return a.a == b.a && a.b == b.b;
+    }
+
+    static std::string attemptTypeForPoints(int points) {
+        if (points == 2) return "2pt";
+        if (points == 3) return "3pt";
+        return "unknown";
+    }
+
+    static int visualTeamIndex(const std::string& team) {
+        if (team == "A") return 0;
+        if (team == "B") return 1;
+        return -1;
+    }
+
+    static int scoreboardSideIndex(const std::string& side) {
+        if (side == "team_a") return 0;
+        if (side == "team_b") return 1;
+        return -1;
+    }
+
+    static std::string visualTeamName(int idx) {
+        if (idx == 0) return "A";
+        if (idx == 1) return "B";
+        return "?";
+    }
+
+    static std::string scoreboardSideName(int idx) {
+        if (idx == 0) return "team_a";
+        if (idx == 1) return "team_b";
+        return "";
+    }
+
+    static bool isKnownNbaAbbrev(const std::string& abbrev) {
+        static const std::unordered_set<std::string> nba = {
+            "ATL", "BOS", "BKN", "BRK", "CHA", "CHI", "CLE", "DAL", "DEN", "DET",
+            "GS", "GSW", "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN",
+            "NOP", "NO", "NY", "NYK", "OKC", "ORL", "PHI", "PHX", "POR", "SAC",
+            "SA", "SAS", "TOR", "UTA", "WAS"
+        };
+        return nba.count(abbrev) > 0;
+    }
+
+    static std::string nbaFullName(const std::string& abbrev) {
+        static const std::unordered_map<std::string, std::string> names = {
+            {"ATL", "Atlanta Hawks"}, {"BOS", "Boston Celtics"}, {"BKN", "Brooklyn Nets"},
+            {"CHA", "Charlotte Hornets"}, {"CHI", "Chicago Bulls"}, {"CLE", "Cleveland Cavaliers"},
+            {"DAL", "Dallas Mavericks"}, {"DEN", "Denver Nuggets"}, {"DET", "Detroit Pistons"},
+            {"GSW", "Golden State Warriors"}, {"HOU", "Houston Rockets"}, {"IND", "Indiana Pacers"},
+            {"LAC", "LA Clippers"}, {"LAL", "Los Angeles Lakers"}, {"MEM", "Memphis Grizzlies"},
+            {"MIA", "Miami Heat"}, {"MIL", "Milwaukee Bucks"}, {"MIN", "Minnesota Timberwolves"},
+            {"NOP", "New Orleans Pelicans"}, {"NYK", "New York Knicks"}, {"OKC", "Oklahoma City Thunder"},
+            {"ORL", "Orlando Magic"}, {"PHI", "Philadelphia 76ers"}, {"PHX", "Phoenix Suns"},
+            {"POR", "Portland Trail Blazers"}, {"SAC", "Sacramento Kings"}, {"SAS", "San Antonio Spurs"},
+            {"TOR", "Toronto Raptors"}, {"UTA", "Utah Jazz"}, {"WAS", "Washington Wizards"}
+        };
+        auto it = names.find(abbrev);
+        return it == names.end() ? std::string() : it->second;
+    }
+
+    static std::string cleanNbaAbbrev(const Parameters& obj, const char* key) {
+        if (!obj.is_object() || !obj.contains(key) || !obj[key].is_string()) return {};
+        std::string s = obj[key].get<std::string>();
+        std::string up;
+        up.reserve(s.size());
+        for (char c : s) {
+            if (std::isalpha((unsigned char)c)) up.push_back((char)std::toupper((unsigned char)c));
+        }
+        return isKnownNbaAbbrev(up) ? up : std::string();
+    }
+
+    std::string scoreboardTeamAbbrevForSide(const std::string& side) const {
+        int idx = scoreboardSideIndex(side);
+        if (idx < 0) return {};
+        return locked_scoreboard_team_[idx];
+    }
+
+    std::string scoreboardTeamNameForSide(const std::string& side) const {
+        return nbaFullName(scoreboardTeamAbbrevForSide(side));
+    }
+
+    void maybeLockScoreboardTeamNames(const Parameters& game_state_md) {
+        std::string a = cleanNbaAbbrev(game_state_md, "team_a_abbrev");
+        std::string b = cleanNbaAbbrev(game_state_md, "team_b_abbrev");
+        if (a.empty() || b.empty() || a == b) return;
+        if (!locked_scoreboard_team_[0].empty() && !locked_scoreboard_team_[1].empty()) return;
+
+        if (scoreboard_team_candidate_[0] == a && scoreboard_team_candidate_[1] == b) {
+            ++scoreboard_team_candidate_hits_;
+        } else {
+            scoreboard_team_candidate_[0] = a;
+            scoreboard_team_candidate_[1] = b;
+            scoreboard_team_candidate_hits_ = 1;
+        }
+
+        if (scoreboard_team_candidate_hits_ >= scoreboard_team_name_lock_hits_) {
+            locked_scoreboard_team_[0] = a;
+            locked_scoreboard_team_[1] = b;
+        }
+    }
+
+    int teamIdentityEvidenceTotal() const {
+        int total = 0;
+        for (int v = 0; v < 2; ++v) {
+            for (int s = 0; s < 2; ++s) total += team_identity_evidence_[v][s];
+        }
+        return total;
+    }
+
+    Parameters teamIdentityJson(bool include_evidence = true) const {
+        Parameters out = Parameters::object();
+        out["locked"] = team_identity_locked_;
+        out["source"] = "scoreboard_verified_shots";
+        const bool scoreboard_names_locked =
+            !locked_scoreboard_team_[0].empty() && !locked_scoreboard_team_[1].empty();
+        out["scoreboard_team_names_locked"] = scoreboard_names_locked;
+        if (team_identity_locked_) {
+            Parameters v2s = Parameters::object();
+            Parameters s2v = Parameters::object();
+            Parameters visual = Parameters::object();
+            Parameters scoreboard = Parameters::object();
+            for (int v = 0; v < 2; ++v) {
+                const std::string vt = visualTeamName(v);
+                const std::string side = visual_to_scoreboard_[v];
+                if (side.empty()) continue;
+                v2s[vt] = side;
+                Parameters vo = Parameters::object();
+                vo["scoreboard_side"] = side;
+                const std::string abbr = scoreboardTeamAbbrevForSide(side);
+                if (!abbr.empty()) {
+                    vo["abbrev"] = abbr;
+                    const std::string full = nbaFullName(abbr);
+                    if (!full.empty()) vo["name"] = full;
+                }
+                visual[vt] = vo;
+            }
+            for (int s = 0; s < 2; ++s) {
+                const std::string side = scoreboardSideName(s);
+                const std::string vt = scoreboard_to_visual_[s];
+                if (vt.empty()) continue;
+                s2v[side] = vt;
+                Parameters so = Parameters::object();
+                so["visual_team"] = vt;
+                if (!locked_scoreboard_team_[s].empty()) {
+                    so["abbrev"] = locked_scoreboard_team_[s];
+                    const std::string full = nbaFullName(locked_scoreboard_team_[s]);
+                    if (!full.empty()) so["name"] = full;
+                }
+                scoreboard[side] = so;
+            }
+            if (!v2s.empty()) out["visual_to_scoreboard"] = v2s;
+            if (!s2v.empty()) out["scoreboard_to_visual"] = s2v;
+            if (!visual.empty()) out["visual"] = visual;
+            if (!scoreboard.empty()) out["scoreboard"] = scoreboard;
+            if (team_identity_lock_frame_ >= 0) out["locked_frame"] = team_identity_lock_frame_;
+        }
+        if (!team_identity_locked_ && scoreboard_names_locked) {
+            Parameters scoreboard = Parameters::object();
+            for (int s = 0; s < 2; ++s) {
+                Parameters so = Parameters::object();
+                so["abbrev"] = locked_scoreboard_team_[s];
+                const std::string full = nbaFullName(locked_scoreboard_team_[s]);
+                if (!full.empty()) so["name"] = full;
+                scoreboard[scoreboardSideName(s)] = so;
+            }
+            out["scoreboard"] = scoreboard;
+        }
+        if (include_evidence) {
+            Parameters ev = Parameters::object();
+            for (int v = 0; v < 2; ++v) {
+                Parameters row = Parameters::object();
+                row["team_a"] = team_identity_evidence_[v][0];
+                row["team_b"] = team_identity_evidence_[v][1];
+                ev[visualTeamName(v)] = row;
+            }
+            out["evidence"] = ev;
+            out["evidence_total"] = teamIdentityEvidenceTotal();
+        }
+        return out;
+    }
+
+    void maybeLockTeamIdentity() {
+        if (team_identity_locked_) return;
+        const int normal = team_identity_evidence_[0][0] + team_identity_evidence_[1][1];
+        const int swapped = team_identity_evidence_[0][1] + team_identity_evidence_[1][0];
+        const bool normal_ready =
+            normal >= team_identity_lock_min_evidence_ &&
+            (normal - swapped) >= team_identity_lock_min_margin_;
+        const bool swapped_ready =
+            swapped >= team_identity_lock_min_evidence_ &&
+            (swapped - normal) >= team_identity_lock_min_margin_;
+
+        if (!normal_ready && !swapped_ready) return;
+
+        if (normal_ready) {
+            visual_to_scoreboard_[0] = "team_a";
+            visual_to_scoreboard_[1] = "team_b";
+            scoreboard_to_visual_[0] = "A";
+            scoreboard_to_visual_[1] = "B";
+        } else {
+            visual_to_scoreboard_[0] = "team_b";
+            visual_to_scoreboard_[1] = "team_a";
+            scoreboard_to_visual_[0] = "B";
+            scoreboard_to_visual_[1] = "A";
+        }
+        team_identity_locked_ = true;
+        team_identity_just_locked_ = true;
+        team_identity_lock_frame_ = (int)frame_counter_;
+    }
+
+    void observeTeamIdentityEvidence(const std::string& visual_team, const std::string& side) {
+        const int v = visualTeamIndex(visual_team);
+        const int s = scoreboardSideIndex(side);
+        if (v < 0 || s < 0) return;
+        ++team_identity_evidence_[v][s];
+        maybeLockTeamIdentity();
+    }
+
+    static Parameters scoreJson(const ScoreState& s) {
+        Parameters out;
+        if (s.a >= 0) out["team_a"] = s.a;
+        if (s.b >= 0) out["team_b"] = s.b;
+        if (s.period > 0) out["period"] = s.period;
+        if (s.clock_sec >= 0) out["period_clock_remaining_sec"] = s.clock_sec;
+        if (s.shot_clock_sec >= 0) out["shot_clock_sec"] = s.shot_clock_sec;
+        return out;
+    }
+
+    static bool readScoreState(const Parameters& frame_json, ScoreState& out) {
+        if (!frame_json.contains("game") || !frame_json["game"].is_object()) return false;
+        const auto& gs = frame_json["game"];
+        if (!gs.contains("score_a") || !gs.contains("score_b")) return false;
+        try {
+            out.a = gs["score_a"].get<int>();
+            out.b = gs["score_b"].get<int>();
+        } catch (...) {
+            return false;
+        }
+        out.period = gs.value("period", -1);
+        out.clock_sec = gs.value("period_clock_remaining_sec", gs.value("clock_sec", -1));
+        out.shot_clock_sec = gs.value("shot_clock_sec", -1);
+        return haveScore(out);
+    }
+
+    static bool isKnownZone(const std::string& zone) {
+        return !zone.empty() && zone != "unknown";
+    }
+
+    static std::string bestCourtZone(const Parameters& court_zone_md, std::string* source = nullptr) {
+        const std::string handler_zone = getOr<std::string>(court_zone_md, "handler_zone", std::string());
+        const std::string ball_zone = getOr<std::string>(court_zone_md, "ball_zone", std::string());
+        if (isKnownZone(handler_zone)) {
+            if (source) *source = "handler";
+            return handler_zone;
+        }
+        if (isKnownZone(ball_zone)) {
+            if (source) *source = "ball";
+            return ball_zone;
+        }
+        if (source) source->clear();
+        return {};
+    }
+
+    static std::string dominantZone(const std::map<std::string, int>& zone_frames) {
+        std::string best;
+        int best_count = 0;
+        for (const auto& kv : zone_frames) {
+            if (kv.second > best_count) {
+                best = kv.first;
+                best_count = kv.second;
+            }
+        }
+        return best_count >= 5 ? best : std::string();
     }
 
     Parameters scaleBox(const Parameters& det) const {
@@ -352,8 +762,12 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             if (shot_events_md.contains("result_conf")) {
                 shot["confidence"] = std::round(shot_events_md["result_conf"].get<float>() * 1000.0f) / 1000.0f;
             }
+            if (shot_events_md.contains("result_vx")) shot["result_vx"] = shot_events_md["result_vx"];
+            if (shot_events_md.contains("result_vy")) shot["result_vy"] = shot_events_md["result_vy"];
             if (shot_events_md.contains("attempt_type")) shot["attempt_type"] = shot_events_md["attempt_type"];
+            if (shot_events_md.contains("attempt_points")) shot["attempt_points"] = shot_events_md["attempt_points"];
             if (shot_events_md.contains("points")) shot["points"] = shot_events_md["points"];
+            if (shot_events_md.contains("result_source")) shot["result_source"] = shot_events_md["result_source"];
             if (shot_events_md.contains("ball_hoop_dist")) {
                 shot["ball_hoop_dist"] = scaleDist(shot_events_md["ball_hoop_dist"].get<float>());
             }
@@ -372,38 +786,75 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             if (!possession_out.empty()) out["possession"] = possession_out;
         }
 
-        // Parsed game state. Raw OCR strings are intentionally omitted; they are noisy.
-        if (game_state_md.is_object() && !game_state_md.is_null()) {
+        // Parsed OCR game state is intentionally opt-in. Current OCR is noisy enough
+        // that exposing it by default makes the semantic dump harder to interpret.
+        if (include_ocr_game_state_ && game_state_md.is_object() && !game_state_md.is_null()) {
+            maybeLockScoreboardTeamNames(game_state_md);
             Parameters game_out;
+            if (!locked_scoreboard_team_[0].empty()) {
+                game_out["team_a"] = locked_scoreboard_team_[0];
+                const std::string full = nbaFullName(locked_scoreboard_team_[0]);
+                if (!full.empty()) game_out["team_a_name"] = full;
+            } else if (game_state_md.contains("team_a_abbrev")) {
+                game_out["team_a"] = game_state_md["team_a_abbrev"];
+                if (game_state_md.contains("team_a_name")) game_out["team_a_name"] = game_state_md["team_a_name"];
+            }
+            if (!locked_scoreboard_team_[1].empty()) {
+                game_out["team_b"] = locked_scoreboard_team_[1];
+                const std::string full = nbaFullName(locked_scoreboard_team_[1]);
+                if (!full.empty()) game_out["team_b_name"] = full;
+            } else if (game_state_md.contains("team_b_abbrev")) {
+                game_out["team_b"] = game_state_md["team_b_abbrev"];
+                if (game_state_md.contains("team_b_name")) game_out["team_b_name"] = game_state_md["team_b_name"];
+            }
+            if (game_state_md.contains("score_a")) game_out["score_a"] = game_state_md["score_a"];
+            if (game_state_md.contains("score_b")) game_out["score_b"] = game_state_md["score_b"];
+            if (game_state_md.contains("score_margin")) game_out["score_margin"] = game_state_md["score_margin"];
+            if (game_state_md.contains("leading_team")) game_out["leading_team"] = game_state_md["leading_team"];
+            if (game_state_md.contains("leading_team_name")) game_out["leading_team_name"] = game_state_md["leading_team_name"];
+            if (game_out.contains("score_a") && game_out.contains("score_b")) {
+                const int a = game_out["score_a"].get<int>();
+                const int b = game_out["score_b"].get<int>();
+                if (a > b && !locked_scoreboard_team_[0].empty()) {
+                    game_out["leading_team"] = locked_scoreboard_team_[0];
+                    const std::string full = nbaFullName(locked_scoreboard_team_[0]);
+                    if (!full.empty()) game_out["leading_team_name"] = full;
+                } else if (b > a && !locked_scoreboard_team_[1].empty()) {
+                    game_out["leading_team"] = locked_scoreboard_team_[1];
+                    const std::string full = nbaFullName(locked_scoreboard_team_[1]);
+                    if (!full.empty()) game_out["leading_team_name"] = full;
+                } else if (a == b) {
+                    game_out["leading_team"] = "TIE";
+                    game_out.erase("leading_team_name");
+                }
+            }
             if (game_state_md.contains("period_num")) game_out["period"] = game_state_md["period_num"];
-            if (game_state_md.contains("game_clock_sec")) game_out["clock_sec"] = game_state_md["game_clock_sec"];
+            if (game_state_md.contains("game_clock_sec")) {
+                game_out["clock_sec"] = game_state_md["game_clock_sec"];
+                game_out["period_clock_remaining_sec"] = game_state_md["game_clock_sec"];
+            }
+            if (game_state_md.contains("period_clock_remaining_sec")) {
+                game_out["period_clock_remaining_sec"] = game_state_md["period_clock_remaining_sec"];
+            }
             if (game_state_md.contains("shot_clock_sec")) game_out["shot_clock_sec"] = game_state_md["shot_clock_sec"];
             if (!game_out.empty()) out["game"] = game_out;
         }
 
-        // Court zone — omit placeholder values when zone unknown
+        if (team_identity_locked_ || teamIdentityEvidenceTotal() > 0 ||
+            !locked_scoreboard_team_[0].empty() || !locked_scoreboard_team_[1].empty()) {
+            out["team_identity"] = teamIdentityJson(false);
+        }
+
+        // Court zone — concise semantic form. Detailed court geometry stays in the
+        // court sidecar; the main frame stream only keeps the coarse basketball zone.
         if (court_zone_md.is_object() && !court_zone_md.is_null()) {
             Parameters zone_out;
-            const std::string handler_zone = getOr<std::string>(court_zone_md, "handler_zone", std::string());
-            const std::string ball_zone = getOr<std::string>(court_zone_md, "ball_zone", std::string());
-            const bool any_known = (!handler_zone.empty() && handler_zone != "unknown") ||
-                                   (!ball_zone.empty() && ball_zone != "unknown") ||
-                                   getOr<bool>(court_zone_md, "inside_court", false);
-            if (any_known) {
-                if (court_zone_md.contains("zone_source")) zone_out["zone_source"] = court_zone_md["zone_source"];
-                if (!handler_zone.empty() && handler_zone != "unknown") zone_out["handler_zone"] = handler_zone;
-                if (!ball_zone.empty() && ball_zone != "unknown") zone_out["ball_zone"] = ball_zone;
+            std::string source;
+            const std::string zone = bestCourtZone(court_zone_md, &source);
+            if (isKnownZone(zone)) {
+                zone_out["zone"] = zone;
+                if (!source.empty()) zone_out["source"] = source;
                 if (court_zone_md.contains("hoop_side")) zone_out["hoop_side"] = court_zone_md["hoop_side"];
-                if (court_zone_md.contains("inside_court")) zone_out["inside_court"] = court_zone_md["inside_court"];
-                if (court_zone_md.contains("inside_three_point_area")) zone_out["inside_three_point_area"] = court_zone_md["inside_three_point_area"];
-                float raw_rx = getOr<float>(court_zone_md, "relative_to_hoop_x", 0.0f);
-                float raw_ry = getOr<float>(court_zone_md, "relative_to_hoop_y", 0.0f);
-                float raw_d = getOr<float>(court_zone_md, "distance_to_hoop", 0.0f);
-                if (raw_rx != 0.0f || raw_ry != 0.0f) {
-                    zone_out["relative_to_hoop_x"] = scaleX(raw_rx);
-                    zone_out["relative_to_hoop_y"] = scaleY(raw_ry);
-                }
-                if (raw_d > 0.0f) zone_out["distance_to_hoop"] = scaleDist(raw_d);
             }
             if (!zone_out.empty()) out["court_zone"] = zone_out;
         }
@@ -653,6 +1104,216 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         file_events_.writeLine(ev.dump());
     }
 
+    void startScoreCandidate(const ScoreState& observed, int64_t pts) {
+        score_candidate_ = observed;
+        score_candidate_frames_ = 1;
+        score_candidate_first_frame_ = frame_counter_;
+        score_candidate_first_pts_ = pts;
+    }
+
+    bool buildScoreboardShotResult(const ScoreState& before,
+                                   const ScoreState& after,
+                                   const std::string& side,
+                                   int delta,
+                                   Parameters& score_ev,
+                                   Parameters& shot_ev,
+                                   ShotResultData& result) {
+        if (!have_pending_shot_) {
+            if (delta == 2 || delta == 3) score_ev["shot_match"] = "none";
+            return false;
+        }
+        if (delta != 2 && delta != 3) {
+            score_ev["shot_match"] = "not_field_goal_delta";
+            return false;
+        }
+        if (pending_shot_.frames_waited > shot_result_wait_frames_) {
+            score_ev["shot_match"] = "pending_shot_expired";
+            return false;
+        }
+
+        const std::string visual_team = pending_shot_.shooting_team;
+        observeTeamIdentityEvidence(visual_team, side);
+        const std::string scoreboard_team_abbrev = scoreboardTeamAbbrevForSide(side);
+        const std::string scoreboard_team_name = scoreboardTeamNameForSide(side);
+
+        const std::string scoreboard_attempt_type = attemptTypeForPoints(delta);
+        score_ev["shot_match"] = "pending_shot";
+        score_ev["shot_release_frame"] = pending_shot_.release_frame;
+        score_ev["shot_arrival_frame"] = pending_shot_.arrival_frame;
+        if (!visual_team.empty()) score_ev["visual_team"] = visual_team;
+        if (!scoreboard_team_abbrev.empty()) score_ev["scoreboard_team_abbrev"] = scoreboard_team_abbrev;
+        if (!scoreboard_team_name.empty()) score_ev["scoreboard_team_name"] = scoreboard_team_name;
+        if (team_identity_locked_) score_ev["team_identity"] = teamIdentityJson(false);
+
+        shot_ev["type"] = "shot_result";
+        shot_ev["result"] = "made";
+        shot_ev["source"] = "scoreboard_delta";
+        shot_ev["scoreboard_verified"] = true;
+        shot_ev["points"] = delta;
+        shot_ev["points_scoreboard"] = delta;
+        shot_ev["attempt_type_scoreboard"] = scoreboard_attempt_type;
+        shot_ev["score_delta_side"] = side;
+        if (!scoreboard_team_abbrev.empty()) shot_ev["scoreboard_team_abbrev"] = scoreboard_team_abbrev;
+        if (!scoreboard_team_name.empty()) shot_ev["scoreboard_team_name"] = scoreboard_team_name;
+        shot_ev["score_before"] = scoreJson(before);
+        shot_ev["score_after"] = scoreJson(after);
+        shot_ev["release_frame"] = pending_shot_.release_frame;
+        shot_ev["arrival_frame"] = pending_shot_.arrival_frame;
+        if (pending_shot_.player_id >= 0) shot_ev["player_id"] = pending_shot_.player_id;
+        if (!visual_team.empty()) {
+            shot_ev["tracking_team"] = visual_team;
+            shot_ev["visual_team"] = visual_team;
+        }
+        if (team_identity_locked_) shot_ev["team_identity"] = teamIdentityJson(false);
+        if (!pending_shot_.attempt_type_detected.empty()) shot_ev["attempt_type_detected"] = pending_shot_.attempt_type_detected;
+        if (pending_shot_.points_detected > 0) shot_ev["points_detected"] = pending_shot_.points_detected;
+        if (pending_shot_.detector_result_seen) {
+            shot_ev["detector_result"] = pending_shot_.detector_result;
+            if (!pending_shot_.detector_source.empty()) shot_ev["detector_source"] = pending_shot_.detector_source;
+            if (pending_shot_.detector_confidence >= 0.0f) {
+                shot_ev["detector_confidence"] =
+                    std::round(pending_shot_.detector_confidence * 1000.0f) / 1000.0f;
+            }
+        }
+
+        const bool detector_disagrees = pending_shot_.detector_result_seen &&
+                                        pending_shot_.detector_result == "missed";
+        const bool corrected_attempt = pending_shot_.points_detected > 0 &&
+                                       pending_shot_.points_detected != delta;
+        if (detector_disagrees) shot_ev["detector_disagreement"] = true;
+        if (corrected_attempt) shot_ev["attempt_type_corrected_by_scoreboard"] = true;
+
+        result.result = "made";
+        result.source = "scoreboard_delta";
+        result.points = delta;
+        result.attempt_type = scoreboard_attempt_type;
+        result.scoreboard_verified = true;
+        result.points_detected = pending_shot_.points_detected;
+        result.attempt_type_detected = pending_shot_.attempt_type_detected;
+        result.points_scoreboard = delta;
+        result.attempt_type_scoreboard = scoreboard_attempt_type;
+        result.score_delta_side = side;
+        result.visual_team = visual_team;
+        result.scoreboard_team_abbrev = scoreboard_team_abbrev;
+        result.scoreboard_team_name = scoreboard_team_name;
+        result.score_before = before;
+        result.score_after = after;
+        result.detector_result = pending_shot_.detector_result;
+        result.detector_disagreement = detector_disagrees;
+        result.attempt_type_corrected_by_scoreboard = corrected_attempt;
+        return true;
+    }
+
+    void processScoreObservation(const Parameters& frame_json, int64_t pts) {
+        ScoreState observed;
+        if (!readScoreState(frame_json, observed)) return;
+
+        if (!have_confirmed_score_) {
+            if (score_candidate_frames_ <= 0 || !sameScore(score_candidate_, observed)) {
+                startScoreCandidate(observed, pts);
+            } else {
+                ++score_candidate_frames_;
+            }
+            if (score_candidate_frames_ >= score_change_confirm_frames_) {
+                confirmed_score_ = observed;
+                have_confirmed_score_ = true;
+                score_candidate_frames_ = 0;
+                Parameters ev;
+                ev["type"] = "score_initialized";
+                ev["score"] = scoreJson(confirmed_score_);
+                ev["confirm_frames"] = score_change_confirm_frames_;
+                ev["first_seen_frame"] = score_candidate_first_frame_;
+                ev["first_seen_pts"] = score_candidate_first_pts_;
+                emitEvent(ev, pts);
+            }
+            return;
+        }
+
+        if (sameScore(observed, confirmed_score_)) {
+            score_candidate_frames_ = 0;
+            return;
+        }
+
+        if (observed.a < confirmed_score_.a || observed.b < confirmed_score_.b) {
+            ++score_ocr_regressions_;
+            score_candidate_frames_ = 0;
+            return;
+        }
+
+        const int delta_a = observed.a - confirmed_score_.a;
+        const int delta_b = observed.b - confirmed_score_.b;
+        const bool one_side_changed = (delta_a > 0 && delta_b == 0) || (delta_b > 0 && delta_a == 0);
+        const int delta = std::max(delta_a, delta_b);
+        if (!one_side_changed || delta <= 0 || delta > score_change_max_delta_) {
+            ++score_ocr_rejected_;
+            score_candidate_frames_ = 0;
+            return;
+        }
+
+        if (score_candidate_frames_ <= 0 || !sameScore(score_candidate_, observed)) {
+            startScoreCandidate(observed, pts);
+            return;
+        }
+
+        ++score_candidate_frames_;
+        if (score_candidate_frames_ < score_change_confirm_frames_) return;
+
+        const ScoreState before = confirmed_score_;
+        const ScoreState after = observed;
+        const std::string side = delta_a > 0 ? "team_a" : "team_b";
+
+        Parameters ev;
+        ev["type"] = "score_change";
+        ev["side"] = side;
+        ev["delta"] = delta;
+        ev["score_before"] = scoreJson(before);
+        ev["score_after"] = scoreJson(after);
+        ev["confirm_frames"] = score_change_confirm_frames_;
+        ev["first_seen_frame"] = score_candidate_first_frame_;
+        ev["first_seen_pts"] = score_candidate_first_pts_;
+
+        ++score_events_total_;
+        if (delta == 2) ++score_events_2pt_;
+        else if (delta == 3) ++score_events_3pt_;
+
+        // Lead / run aggregates use the scoreboard side ("team_a"/"team_b").
+        // Visual A/B is irrelevant here — we just track who scored next.
+        if (current_run_side_ == side) {
+            current_run_points_ += delta;
+        } else {
+            current_run_side_ = side;
+            current_run_points_ = delta;
+        }
+        if (current_run_points_ > longest_run_points_) longest_run_points_ = current_run_points_;
+        const int lead = std::abs(after.a - after.b);
+        if (lead > largest_lead_) largest_lead_ = lead;
+        std::string new_leader = after.a > after.b ? "A" : (after.b > after.a ? "B" : std::string());
+        if (!new_leader.empty() && !current_leader_.empty() && new_leader != current_leader_) ++lead_changes_;
+        if (!new_leader.empty()) current_leader_ = new_leader;
+
+        Parameters shot_ev;
+        ShotResultData shot_result;
+        const bool have_scoreboard_shot_result =
+            buildScoreboardShotResult(before, after, side, delta, ev, shot_ev, shot_result);
+
+        emitEvent(ev, pts);
+        if (have_scoreboard_shot_result) {
+            emitEvent(shot_ev, pts);
+            onShotResult(shot_result);
+            have_pending_shot_ = false;
+        }
+        if (team_identity_just_locked_) {
+            Parameters identity_ev;
+            identity_ev["type"] = "team_identity_locked";
+            identity_ev["team_identity"] = teamIdentityJson(true);
+            emitEvent(identity_ev, pts);
+            team_identity_just_locked_ = false;
+        }
+
+        confirmed_score_ = observed;
+        score_candidate_frames_ = 0;
+    }
+
     void detectAndEmitEvents(const Parameters& frame_json, int64_t pts) {
         // Update last-known handler before any events (current frame's handler, if any)
         if (frame_json.contains("possession")) {
@@ -685,21 +1346,29 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         int total_arr = getOr<int>(se_dump, "total_hoop_arrivals", prev_total_arrivals_);
         if (total_rel > prev_total_releases_) {
             Parameters ev;
-            ev["type"] = "release";
+            ev["type"] = "shot_release";
             // At the release frame, possession often already flipped to shot_in_air.
             // Attribute to the last-known handler from prior frames.
             if (last_known_handler_id_ >= 0) ev["player_id"] = last_known_handler_id_;
             if (!last_known_handler_team_.empty()) ev["team"] = last_known_handler_team_;
+            if (se_dump.contains("attempt_type")) ev["attempt_type_detected"] = se_dump["attempt_type"];
+            if (se_dump.contains("attempt_points")) ev["points_detected"] = se_dump["attempt_points"];
             emitEvent(ev, pts);
             have_last_release_ = true;
             last_release_.frame = frame_counter_;
+            last_release_.pts = pts;
+            last_release_.player_id = last_known_handler_id_;
             last_release_.shooting_team = last_known_handler_team_;
+            last_release_.attempt_type = getOr<std::string>(se_dump, "attempt_type", std::string("unknown"));
+            last_release_.attempt_points = getOr<int>(se_dump, "attempt_points", 0);
+            last_release_.score_at_release = ScoreState();
+            readScoreState(frame_json, last_release_.score_at_release);
             onShotRelease(pts, frame_json);
             prev_total_releases_ = total_rel;
         }
         if (total_arr > prev_total_arrivals_) {
             Parameters ev;
-            ev["type"] = "hoop_arrival";
+            ev["type"] = "shot_hoop_arrival";
             int hoop_dist_val = -1;
             if (se_dump.contains("ball_hoop_dist")) hoop_dist_val = se_dump["ball_hoop_dist"].get<int>();
             if (hoop_dist_val >= 0) ev["ball_hoop_dist"] = hoop_dist_val;
@@ -709,40 +1378,50 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             // Start pending shot if a recent release is associated
             if (have_last_release_ && (frame_counter_ - last_release_.frame) < 200) {
                 have_pending_shot_ = true;
+                pending_shot_.release_frame = last_release_.frame;
                 pending_shot_.arrival_frame = frame_counter_;
                 pending_shot_.arrival_pts = pts;
+                pending_shot_.player_id = last_release_.player_id;
                 pending_shot_.shooting_team = last_release_.shooting_team;
+                pending_shot_.attempt_type_detected = last_release_.attempt_type;
+                pending_shot_.points_detected = last_release_.attempt_points;
+                pending_shot_.score_at_release = last_release_.score_at_release;
+                pending_shot_.detector_result_seen = false;
+                pending_shot_.detector_result.clear();
+                pending_shot_.detector_source.clear();
+                pending_shot_.detector_confidence = -1.0f;
                 pending_shot_.frames_waited = 0;
-                pending_shot_.score_a_start = -1;
-                pending_shot_.score_b_start = -1;
                 have_last_release_ = false;
             }
             prev_total_arrivals_ = total_arr;
         }
         if (getOr<bool>(se_dump, "result_event", false)) {
             Parameters ev;
-            ev["type"] = "shot_result";
+            ev["type"] = "shot_detector_result";
             if (!last_known_handler_team_.empty()) ev["team"] = last_known_handler_team_;
             ev["result"] = getOr<std::string>(se_dump, "result", std::string("outcome_unknown"));
             if (se_dump.contains("result_source")) ev["source"] = se_dump["result_source"];
-            if (se_dump.contains("result_conf")) ev["confidence"] = se_dump["result_conf"];
+            if (se_dump.contains("confidence")) ev["confidence"] = se_dump["confidence"];
             if (se_dump.contains("result_vx")) ev["vx"] = se_dump["result_vx"];
             if (se_dump.contains("result_vy")) ev["vy"] = se_dump["result_vy"];
-            if (se_dump.contains("attempt_type")) ev["attempt_type"] = se_dump["attempt_type"];
-            if (se_dump.contains("attempt_points")) ev["attempt_points"] = se_dump["attempt_points"];
+            if (se_dump.contains("attempt_type")) ev["attempt_type_detected"] = se_dump["attempt_type"];
+            if (se_dump.contains("attempt_points")) ev["points_detected"] = se_dump["attempt_points"];
             if (se_dump.contains("points")) ev["points"] = se_dump["points"];
             emitEvent(ev, pts);
-            onShotResult(getOr<std::string>(ev, "result", std::string("outcome_unknown")),
-                         getOr<int>(ev, "points", 0),
-                         getOr<std::string>(ev, "attempt_type", std::string()));
-            have_pending_shot_ = false;
+            if (have_pending_shot_) {
+                pending_shot_.detector_result_seen = true;
+                pending_shot_.detector_result = getOr<std::string>(se_dump, "result", std::string("outcome_unknown"));
+                pending_shot_.detector_source = getOr<std::string>(se_dump, "result_source", std::string());
+                pending_shot_.detector_confidence = getOr<float>(se_dump, "confidence", -1.0f);
+            }
         }
 
         // Possession change — debounced: new handler must persist N frames before emitting.
         if (frame_json.contains("possession")) {
             const auto& pos = frame_json["possession"];
             int hid = pos.value("handler_id", -1);
-            std::string pteam = pos.value("team", std::string());
+            std::string pteam = pos.value("handler_team", std::string());
+            if (pteam.empty()) pteam = pos.value("team", std::string());
 
             if (hid >= 0 && hid != prev_handler_id_) {
                 if (hid == pending_new_handler_id_) {
@@ -755,12 +1434,21 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
                 }
                 if (pending_new_handler_frames_ >= possession_change_confirm_frames_) {
                     Parameters ev;
-                    ev["type"] = "possession_change";
+                    const bool team_changed = !prev_possessing_team_.empty() &&
+                                              !pending_new_handler_team_.empty() &&
+                                              pending_new_handler_team_ != prev_possessing_team_;
+                    ev["type"] = team_changed ? "team_control_change" : "handler_change";
                     if (prev_handler_id_ >= 0) ev["from_id"] = prev_handler_id_;
-                    if (!prev_possessing_team_.empty()) ev["from_team"] = prev_possessing_team_;
                     ev["to_id"] = pending_new_handler_id_;
-                    if (!pending_new_handler_team_.empty()) ev["to_team"] = pending_new_handler_team_;
-                    emitEvent(ev, pts);
+                    if (team_changed) {
+                        ev["from_team"] = prev_possessing_team_;
+                        ev["to_team"] = pending_new_handler_team_;
+                    } else if (!pending_new_handler_team_.empty()) {
+                        ev["team"] = pending_new_handler_team_;
+                    }
+                    // handler_change is high-volume noise for downstream LLM analysis;
+                    // touches are aggregated into the possession record instead.
+                    if (team_changed || emit_handler_change_events_) emitEvent(ev, pts);
                     prev_handler_id_ = pending_new_handler_id_;
                     prev_possessing_team_ = pending_new_handler_team_;
                     pending_new_handler_id_ = -1;
@@ -788,92 +1476,239 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
                     ev["from"] = prev_period_num_;
                     ev["to"] = pn;
                     emitEvent(ev, pts);
+                    if (poss_active_) poss_acc_.period_changed_during = true;
                 }
                 prev_period_num_ = pn;
             }
-            int sc = gs.value("shot_clock_sec", -1);
-            if (sc >= 0 && prev_shot_clock_sec_ >= 0 && sc > prev_shot_clock_sec_ + 1) {
-                Parameters ev;
-                ev["type"] = "shot_clock_reset";
-                ev["to"] = sc;
-                emitEvent(ev, pts);
+            if (emit_ocr_clock_events_) {
+                int sc = gs.value("shot_clock_sec", -1);
+                if (sc >= 0 && prev_shot_clock_sec_ >= 0 && sc > prev_shot_clock_sec_ + 1) {
+                    Parameters ev;
+                    ev["type"] = "shot_clock_reset";
+                    ev["to"] = sc;
+                    emitEvent(ev, pts);
+                }
+                if (sc >= 0) prev_shot_clock_sec_ = sc;
             }
-            if (sc >= 0) prev_shot_clock_sec_ = sc;
         }
+
+        processScoreObservation(frame_json, pts);
     }
 
     void tickPendingShot(const Parameters& frame_json, int64_t pts) {
         if (!have_pending_shot_) return;
-        if (!frame_json.contains("game")) {
-            ++pending_shot_.frames_waited;
-        } else {
-            int score_a_now = -1;
-            int score_b_now = -1;
-            int pts_scored = 0;
-            const std::string& team = pending_shot_.shooting_team;
-            if (team == "A" && pending_shot_.score_a_start >= 0 && score_a_now > pending_shot_.score_a_start) {
-                pts_scored = score_a_now - pending_shot_.score_a_start;
-            } else if (team == "B" && pending_shot_.score_b_start >= 0 && score_b_now > pending_shot_.score_b_start) {
-                pts_scored = score_b_now - pending_shot_.score_b_start;
-            }
-            if (pts_scored >= 1 && pts_scored <= 3) {
-                Parameters ev;
-                ev["type"] = "shot_result";
-                ev["team"] = team;
-                ev["result"] = "scored";
-                ev["points"] = pts_scored;
-                emitEvent(ev, pts);
-                onShotResult("scored", pts_scored);
-                have_pending_shot_ = false;
-                return;
-            }
-            ++pending_shot_.frames_waited;
-        }
+        (void)frame_json;
+        ++pending_shot_.frames_waited;
         if (pending_shot_.frames_waited >= shot_result_wait_frames_) {
+            const bool detector_claimed_score = pending_shot_.detector_result_seen &&
+                                                (pending_shot_.detector_result == "scored" ||
+                                                 pending_shot_.detector_result == "made");
+            const bool detector_claimed_miss = pending_shot_.detector_result_seen &&
+                                               pending_shot_.detector_result == "missed";
+            const std::string result = detector_claimed_miss ? "missed" :
+                                       (detector_claimed_score ? "scoreboard_unconfirmed" : "outcome_unknown");
             Parameters ev;
             ev["type"] = "shot_result";
             if (!pending_shot_.shooting_team.empty()) ev["team"] = pending_shot_.shooting_team;
-            // Missed is asserted ONLY when we have the shooter team's score both at shot start
-            // AND at timeout, and the values match. Any absence → outcome_unknown (no guessing).
-            int score_start = -1, score_now = -1;
-            if (pending_shot_.shooting_team == "A") {
-                score_start = pending_shot_.score_a_start;
-                score_now = -1;
-            } else if (pending_shot_.shooting_team == "B") {
-                score_start = pending_shot_.score_b_start;
-                score_now = -1;
+            if (!pending_shot_.shooting_team.empty()) ev["visual_team"] = pending_shot_.shooting_team;
+            ev["result"] = result;
+            ev["source"] = "scoreboard_no_delta";
+            ev["scoreboard_verified"] = false;
+            ev["release_frame"] = pending_shot_.release_frame;
+            ev["arrival_frame"] = pending_shot_.arrival_frame;
+            if (pending_shot_.player_id >= 0) ev["player_id"] = pending_shot_.player_id;
+            if (!pending_shot_.attempt_type_detected.empty()) ev["attempt_type_detected"] = pending_shot_.attempt_type_detected;
+            if (pending_shot_.points_detected > 0) ev["points_detected"] = pending_shot_.points_detected;
+            if (haveScore(pending_shot_.score_at_release)) ev["score_at_release"] = scoreJson(pending_shot_.score_at_release);
+            if (pending_shot_.detector_result_seen) {
+                ev["detector_result"] = pending_shot_.detector_result;
+                if (!pending_shot_.detector_source.empty()) ev["detector_source"] = pending_shot_.detector_source;
+                if (pending_shot_.detector_confidence >= 0.0f) {
+                    ev["detector_confidence"] =
+                        std::round(pending_shot_.detector_confidence * 1000.0f) / 1000.0f;
+                }
             }
-            const bool confident_missed = (score_start >= 0 && score_now >= 0 && score_now == score_start);
-            ev["result"] = confident_missed ? "missed" : "outcome_unknown";
+            if (detector_claimed_score) ev["detector_disagreement"] = true;
             emitEvent(ev, pts);
-            onShotResult(ev.value("result", std::string("outcome_unknown")),
-                         ev.value("points", 0));
+
+            ShotResultData data;
+            data.result = result;
+            data.source = "scoreboard_no_delta";
+            data.scoreboard_verified = false;
+            data.points_detected = pending_shot_.points_detected;
+            data.attempt_type_detected = pending_shot_.attempt_type_detected;
+            data.visual_team = pending_shot_.shooting_team;
+            data.detector_result = pending_shot_.detector_result;
+            data.detector_disagreement = detector_claimed_score;
+            onShotResult(data);
             have_pending_shot_ = false;
         }
     }
 
+    // Picks the shot whose result is most informative for labelling the
+    // possession outcome. Made shots win over misses, misses over unknowns,
+    // and within a tier we prefer the latest shot.
+    static const ShotRecord* representativeShot(const PossessionAcc& a) {
+        const ShotRecord* best = nullptr;
+        int best_tier = -1;
+        for (const auto& sh : a.shots) {
+            int tier;
+            if (sh.scoreboard_verified && sh.points > 0) tier = 3;
+            else if (sh.result == "missed") tier = 2;
+            else if (!sh.result.empty()) tier = 1;
+            else tier = 0;
+            if (!best || tier >= best_tier) { best = &sh; best_tier = tier; }
+        }
+        return best;
+    }
+
+    // Classifies how the possession ended. Used by both the legacy
+    // possessions.ndjson record and the LLM-facing pbp.ndjson stream.
+    static std::string possessionOutcomeType(const PossessionAcc& a) {
+        const ShotRecord* sh = representativeShot(a);
+        if (sh) {
+            if (sh->scoreboard_verified && sh->points > 0) {
+                if (sh->points == 3) return "made_3pt";
+                if (sh->points == 2) return "made_2pt";
+                if (sh->points == 1) return "made_1pt";
+                return "made_shot";
+            }
+            if (sh->result == "missed") return "missed_shot";
+            return "shot_attempt_unverified";
+        }
+        if (a.period_changed_during) return "end_of_period";
+        if (a.clock_at_end == 0) return "end_of_period";
+        if (a.shot_clock_at_end == 0) return "shot_clock_violation";
+        return "turnover";
+    }
+
+    void writePbpRecord(const PossessionAcc& a) {
+        if (!file_pbp_.opened) return;
+        if (a.team.empty() && a.shots.empty()) return;
+        Parameters p;
+        p["type"] = "possession";
+        p["id"] = a.possession_id;
+        if (!a.team.empty()) p["team"] = a.team;
+        if (fps_ > 0) {
+            p["start_t"] = std::round((float)a.start_frame / (float)fps_ * 1000.0f) / 1000.0f;
+            p["end_t"] = std::round((float)a.end_frame / (float)fps_ * 1000.0f) / 1000.0f;
+            p["duration_sec"] = std::round((float)a.total_frames / (float)fps_ * 100.0f) / 100.0f;
+        }
+        Parameters outcome;
+        outcome["type"] = possessionOutcomeType(a);
+        const ShotRecord* sh = representativeShot(a);
+        if (sh) {
+            if (sh->points > 0) outcome["points"] = sh->points;
+            if (!sh->attempt_type.empty()) outcome["attempt_type"] = sh->attempt_type;
+            if (sh->scoreboard_verified) outcome["scoreboard_verified"] = true;
+        }
+        p["outcome"] = outcome;
+        if (a.score_a_at_start >= 0 && a.score_b_at_start >= 0) {
+            Parameters sb; sb["a"] = a.score_a_at_start; sb["b"] = a.score_b_at_start;
+            p["score_before"] = sb;
+        }
+        if (a.score_a_at_end >= 0 && a.score_b_at_end >= 0) {
+            Parameters sa; sa["a"] = a.score_a_at_end; sa["b"] = a.score_b_at_end;
+            p["score_after"] = sa;
+        }
+        if (a.period_at_start > 0) p["period"] = a.period_at_start;
+        if (a.clock_at_start >= 0) p["clock_at_start_sec"] = a.clock_at_start;
+        if (a.clock_at_end >= 0) p["clock_at_end_sec"] = a.clock_at_end;
+        const std::string dz = dominantZone(a.zone_frames);
+        if (!dz.empty()) {
+            Parameters c; c["dominant"] = dz;
+            Parameters visited = Parameters::array();
+            for (const auto& z : a.zones_visited) visited.push_back(z);
+            if (!visited.empty()) c["visited"] = visited;
+            p["court"] = c;
+        }
+        if (!a.touches.empty()) {
+            Parameters arr = Parameters::array();
+            for (const auto& t : a.touches) {
+                Parameters tj;
+                tj["id"] = t.track_id;
+                if (fps_ > 0) tj["sec"] = std::round((float)t.frames / (float)fps_ * 100.0f) / 100.0f;
+                else tj["frames"] = t.frames;
+                arr.push_back(tj);
+            }
+            p["touches"] = arr;
+            // pass_count = number of distinct-handler hand-offs (touches.size()-1).
+            // It overcounts the rare case where the ball returns to a teammate
+            // mid-possession, but undercounts nothing — close enough for an LLM.
+            p["pass_count"] = (int)a.touches.size() - 1;
+        }
+        if (!a.shots.empty()) {
+            Parameters arr = Parameters::array();
+            for (const auto& s : a.shots) {
+                Parameters sj;
+                if (s.release_frame >= 0 && fps_ > 0) sj["release_t"] = std::round((float)s.release_frame / (float)fps_ * 1000.0f) / 1000.0f;
+                if (s.arrival_frame >= 0 && fps_ > 0) sj["arrival_t"] = std::round((float)s.arrival_frame / (float)fps_ * 1000.0f) / 1000.0f;
+                if (!s.attempt_type.empty()) sj["attempt_type"] = s.attempt_type;
+                if (!s.result.empty()) sj["result"] = s.result;
+                if (s.points > 0) sj["points"] = s.points;
+                if (s.scoreboard_verified) sj["scoreboard_verified"] = true;
+                if (s.game_clock_sec >= 0) sj["clock_sec"] = s.game_clock_sec;
+                arr.push_back(sj);
+            }
+            p["shots"] = arr;
+        }
+        file_pbp_.writeLine(p.dump());
+    }
+
     void writePossessionRecord(const PossessionAcc& a) {
+        writePbpRecord(a);
         if (!file_possessions_.opened) return;
         if (a.team.empty() && a.shots.empty()) return;
         Parameters p;
         p["type"] = "possession";
         p["possession_id"] = a.possession_id;
         if (!a.team.empty()) p["team"] = a.team;
-        p["start_frame"] = a.start_frame;
-        p["end_frame"] = a.end_frame;
-        p["start_pts"] = a.start_pts;
-        p["end_pts"] = a.end_pts;
-        p["frames"] = a.total_frames;
-        if (fps_ > 0) p["duration_sec"] = std::round((float)a.total_frames / (float)fps_ * 100.0f) / 100.0f;
-        if (!a.handler_ids.empty()) p["handler_ids"] = a.handler_ids;
-        if (!a.zones_visited.empty()) p["zones_visited"] = a.zones_visited;
+        if (team_identity_locked_) {
+            const int v = visualTeamIndex(a.team);
+            if (v >= 0 && !visual_to_scoreboard_[v].empty()) {
+                p["scoreboard_side"] = visual_to_scoreboard_[v];
+                const std::string abbr = scoreboardTeamAbbrevForSide(visual_to_scoreboard_[v]);
+                if (!abbr.empty()) {
+                    p["team_abbrev"] = abbr;
+                    const std::string full = nbaFullName(abbr);
+                    if (!full.empty()) p["team_name"] = full;
+                }
+            }
+        }
+        Parameters span;
+        span["start_frame"] = a.start_frame;
+        span["end_frame"] = a.end_frame;
+        span["frames"] = a.total_frames;
+        if (fps_ > 0) {
+            span["start_t"] = std::round((float)a.start_frame / (float)fps_ * 1000.0f) / 1000.0f;
+            span["end_t"] = std::round((float)a.end_frame / (float)fps_ * 1000.0f) / 1000.0f;
+            span["duration_sec"] = std::round((float)a.total_frames / (float)fps_ * 100.0f) / 100.0f;
+        }
+        p["span"] = span;
+        if (!a.handler_ids.empty()) p["handler_track_ids"] = a.handler_ids;
+
+        Parameters court;
+        const std::string dz = dominantZone(a.zone_frames);
+        if (!dz.empty()) court["dominant_zone"] = dz;
+        Parameters zone_counts;
+        Parameters visited = Parameters::array();
+        for (const auto& kv : a.zone_frames) {
+            if (kv.second < 5) continue;
+            zone_counts[kv.first] = kv.second;
+            visited.push_back(kv.first);
+        }
+        if (!zone_counts.empty()) court["zone_frames"] = zone_counts;
+        if (!visited.empty()) court["zones_visited"] = visited;
+        if (!court.empty()) p["court"] = court;
+
         Parameters bs;
         bs["controlled"] = a.frames_controlled;
         bs["loose"] = a.frames_loose;
         bs["in_flight"] = a.frames_in_flight;
         p["ball_state_frames"] = bs;
         const bool has_shots = !a.shots.empty();
-        p["ended_with"] = has_shots ? "shot_attempt" : "team_change";
+        Parameters outcome;
+        outcome["type"] = possessionOutcomeType(a);
         if (has_shots) {
             Parameters arr = Parameters::array();
             for (const auto& sh : a.shots) {
@@ -886,14 +1721,50 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
                 if (sh.game_clock_sec >= 0) sj["game_clock_sec"] = sh.game_clock_sec;
                 if (sh.period_num >= 0) sj["period_num"] = sh.period_num;
                 if (!sh.result.empty()) sj["result"] = sh.result;
+                if (!sh.result_source.empty()) sj["result_source"] = sh.result_source;
                 if (sh.points > 0) sj["points"] = sh.points;
+                if (sh.scoreboard_verified) sj["scoreboard_verified"] = true;
+                else if (!sh.result_source.empty()) sj["scoreboard_verified"] = false;
+                if (sh.points_detected > 0) sj["points_detected"] = sh.points_detected;
+                if (!sh.attempt_type_detected.empty()) sj["attempt_type_detected"] = sh.attempt_type_detected;
+                if (sh.points_scoreboard > 0) sj["points_scoreboard"] = sh.points_scoreboard;
+                if (!sh.attempt_type_scoreboard.empty()) sj["attempt_type_scoreboard"] = sh.attempt_type_scoreboard;
+                if (!sh.score_delta_side.empty()) sj["score_delta_side"] = sh.score_delta_side;
+                if (!sh.visual_team.empty()) sj["visual_team"] = sh.visual_team;
+                if (!sh.scoreboard_team_abbrev.empty()) sj["scoreboard_team_abbrev"] = sh.scoreboard_team_abbrev;
+                if (!sh.scoreboard_team_name.empty()) sj["scoreboard_team_name"] = sh.scoreboard_team_name;
+                if (sh.score_before_a >= 0 && sh.score_before_b >= 0) {
+                    Parameters score_before;
+                    score_before["team_a"] = sh.score_before_a;
+                    score_before["team_b"] = sh.score_before_b;
+                    sj["score_before"] = score_before;
+                }
+                if (sh.score_after_a >= 0 && sh.score_after_b >= 0) {
+                    Parameters score_after;
+                    score_after["team_a"] = sh.score_after_a;
+                    score_after["team_b"] = sh.score_after_b;
+                    sj["score_after"] = score_after;
+                }
+                if (!sh.detector_result.empty()) sj["detector_result"] = sh.detector_result;
+                if (sh.detector_disagreement) sj["detector_disagreement"] = true;
+                if (sh.attempt_type_corrected_by_scoreboard) sj["attempt_type_corrected_by_scoreboard"] = true;
                 arr.push_back(sj);
+                if (!sh.result.empty()) outcome["result"] = sh.result;
+                if (sh.points > 0) outcome["points"] = sh.points;
+                if (!sh.attempt_type.empty()) outcome["attempt_type"] = sh.attempt_type;
+                if (sh.scoreboard_verified) outcome["scoreboard_verified"] = true;
+                if (!sh.score_delta_side.empty()) outcome["score_delta_side"] = sh.score_delta_side;
+                if (!sh.visual_team.empty()) outcome["visual_team"] = sh.visual_team;
+                if (!sh.scoreboard_team_abbrev.empty()) outcome["scoreboard_team_abbrev"] = sh.scoreboard_team_abbrev;
+                if (!sh.scoreboard_team_name.empty()) outcome["scoreboard_team_name"] = sh.scoreboard_team_name;
             }
             p["shots"] = arr;
         }
+        p["outcome"] = outcome;
         // Possession counters are written here; shot counters are updated when a
         // shot result event is observed so unknown-team shots still reach summary.
         ++possessions_by_team_[a.team.empty() ? std::string("?") : a.team];
+        total_possession_frames_ += a.total_frames;
         file_possessions_.writeLine(p.dump());
     }
 
@@ -920,10 +1791,52 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             r["scored"] = shots_made_;
             r["missed"] = shots_missed_;
             r["outcome_unknown"] = shots_unknown_;
+            r["scoreboard_verified"] = scoreboard_verified_shots_;
+            r["scoreboard_unverified"] = scoreboard_unverified_shots_;
+            r["detector_score_disagreements"] = detector_score_disagreements_;
             s["shot_results"] = r;
+        }
+        if (score_events_total_ > 0) {
+            Parameters se;
+            se["total"] = score_events_total_;
+            se["two_point_deltas"] = score_events_2pt_;
+            se["three_point_deltas"] = score_events_3pt_;
+            s["score_changes"] = se;
+        }
+        // Game-shape aggregates derived from score-change history and possession durations.
+        Parameters shape;
+        if (score_events_total_ > 0) {
+            shape["lead_changes"] = lead_changes_;
+            shape["largest_lead"] = largest_lead_;
+            shape["longest_run_points"] = longest_run_points_;
+        }
+        if (poss_total > 0) {
+            if (fps_ > 0 && total_possession_frames_ > 0) {
+                shape["avg_possession_sec"] =
+                    std::round((float)total_possession_frames_ / (float)poss_total / (float)fps_ * 100.0f) / 100.0f;
+            }
+            if (fps_ > 0 && frame_counter_ > 0) {
+                const float duration_min = (float)frame_counter_ / (float)fps_ / 60.0f;
+                if (duration_min > 0.0f) {
+                    shape["pace_per_minute"] =
+                        std::round((float)poss_total / duration_min * 100.0f) / 100.0f;
+                }
+            }
+        }
+        if (!shape.empty()) s["game_shape"] = shape;
+        if (score_ocr_regressions_ > 0 || score_ocr_rejected_ > 0) {
+            Parameters oq;
+            if (score_ocr_regressions_ > 0) oq["regressions_ignored"] = score_ocr_regressions_;
+            if (score_ocr_rejected_ > 0) oq["invalid_changes_ignored"] = score_ocr_rejected_;
+            s["score_ocr_quality"] = oq;
         }
         if (first_game_clock_sec_ >= 0) s["first_game_clock_sec"] = first_game_clock_sec_;
         if (latest_game_clock_sec_ >= 0) s["last_game_clock_sec"] = latest_game_clock_sec_;
+        if (team_identity_locked_ || teamIdentityEvidenceTotal() > 0 ||
+            !locked_scoreboard_team_[0].empty() || !locked_scoreboard_team_[1].empty()) {
+            s["team_identity"] = teamIdentityJson(true);
+        }
+        s["ocr_game_state"] = include_ocr_game_state_ ? "included" : "disabled";
         return s;
     }
 
@@ -940,6 +1853,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         if (file_main_.opened) file_main_.writeLine(json);
         if (file_events_.opened) file_events_.writeLine(json);
         if (file_possessions_.opened) file_possessions_.writeLine(json);
+        if (file_pbp_.opened) file_pbp_.writeLine(json);
         writeClipSummaryFile();
     }
 
@@ -970,7 +1884,8 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         if (pid < 0) return;
         std::string team = pos.value("team", std::string());
 
-        if (!poss_active_ || pid != poss_acc_.possession_id) {
+        const bool poss_starting = !poss_active_ || pid != poss_acc_.possession_id;
+        if (poss_starting) {
             flushPossession();
             poss_acc_ = PossessionAcc();
             poss_active_ = true;
@@ -978,6 +1893,14 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             poss_acc_.team = team;
             poss_acc_.start_frame = frame_counter_;
             poss_acc_.start_pts = pts;
+            if (frame_json.contains("game")) {
+                const auto& gs = frame_json["game"];
+                poss_acc_.period_at_start = gs.value("period", -1);
+                if (gs.contains("period_clock_remaining_sec")) poss_acc_.clock_at_start = gs["period_clock_remaining_sec"].get<int>();
+                else if (gs.contains("clock_sec")) poss_acc_.clock_at_start = gs["clock_sec"].get<int>();
+                poss_acc_.score_a_at_start = gs.value("score_a", -1);
+                poss_acc_.score_b_at_start = gs.value("score_b", -1);
+            }
         }
         if (poss_acc_.team.empty() && !team.empty()) poss_acc_.team = team;
         poss_acc_.end_frame = frame_counter_;
@@ -988,14 +1911,46 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         else if (bs == "loose") ++poss_acc_.frames_loose;
         else if (bs == "shot_in_air") ++poss_acc_.frames_in_flight;
         int hid = pos.value("handler_id", -1);
-        if (hid >= 0 && std::find(poss_acc_.handler_ids.begin(), poss_acc_.handler_ids.end(), hid) == poss_acc_.handler_ids.end()) {
-            poss_acc_.handler_ids.push_back(hid);
+        if (hid >= 0) {
+            if (std::find(poss_acc_.handler_ids.begin(), poss_acc_.handler_ids.end(), hid) == poss_acc_.handler_ids.end()) {
+                poss_acc_.handler_ids.push_back(hid);
+            }
+            const size_t n = poss_acc_.touches.size();
+            if (n >= 1 && poss_acc_.touches.back().track_id == hid) {
+                ++poss_acc_.touches.back().frames;
+            } else if (n >= 2 &&
+                       poss_acc_.touches[n - 2].track_id == hid &&
+                       poss_acc_.touches.back().frames <= touch_merge_gap_frames_) {
+                // Bridge a brief mis-classification of the ball-handler back
+                // into the prior touch — same player resumes possession after a
+                // tracking flicker, not a real two-pass sequence.
+                Touch& prev = poss_acc_.touches[n - 2];
+                prev.frames += poss_acc_.touches.back().frames + 1;
+                poss_acc_.touches.pop_back();
+            } else {
+                Touch t;
+                t.track_id = hid;
+                t.start_frame = (int)frame_counter_;
+                t.frames = 1;
+                poss_acc_.touches.push_back(t);
+            }
+        }
+        if (frame_json.contains("game")) {
+            const auto& gs = frame_json["game"];
+            poss_acc_.period_at_end = gs.value("period", poss_acc_.period_at_end);
+            if (gs.contains("period_clock_remaining_sec")) poss_acc_.clock_at_end = gs["period_clock_remaining_sec"].get<int>();
+            else if (gs.contains("clock_sec")) poss_acc_.clock_at_end = gs.value("clock_sec", poss_acc_.clock_at_end);
+            if (gs.contains("shot_clock_sec")) poss_acc_.shot_clock_at_end = gs["shot_clock_sec"].get<int>();
+            poss_acc_.score_a_at_end = gs.value("score_a", poss_acc_.score_a_at_end);
+            poss_acc_.score_b_at_end = gs.value("score_b", poss_acc_.score_b_at_end);
         }
         if (frame_json.contains("court_zone")) {
             const auto& cz = frame_json["court_zone"];
-            for (const char* k : {"handler_zone", "ball_zone"}) {
-                std::string z = cz.value(k, std::string());
-                if (z.empty() || z == "unknown") continue;
+            std::string z = cz.value("zone", std::string());
+            if (!isKnownZone(z)) z = cz.value("handler_zone", std::string());
+            if (!isKnownZone(z)) z = cz.value("ball_zone", std::string());
+            if (isKnownZone(z)) {
+                ++poss_acc_.zone_frames[z];
                 if (std::find(poss_acc_.zones_visited.begin(), poss_acc_.zones_visited.end(), z) == poss_acc_.zones_visited.end())
                     poss_acc_.zones_visited.push_back(z);
             }
@@ -1006,19 +1961,25 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         if (!poss_active_) return;
         ShotRecord s;
         s.release_frame = (int)frame_counter_;
+        s.visual_team = poss_acc_.team;
         if (frame_json.contains("shot") && frame_json["shot"].contains("ball_hoop_dist")) {
             s.release_hoop_dist = frame_json["shot"]["ball_hoop_dist"].get<int>();
         }
-        // Shot value is authoritative only when court_zone supplied the segmentation-derived
-        // inside-three flag for the release point.
-        if (frame_json.contains("court_zone") && frame_json["court_zone"].contains("inside_three_point_area")) {
+        if (frame_json.contains("shot") && frame_json["shot"].contains("attempt_type")) {
+            s.attempt_type = frame_json["shot"]["attempt_type"].get<std::string>();
+            s.attempt_type_detected = s.attempt_type;
+        } else if (frame_json.contains("court_zone") && frame_json["court_zone"].contains("inside_three_point_area")) {
             s.attempt_type = frame_json["court_zone"]["inside_three_point_area"].get<bool>() ? "2pt" : "3pt";
         } else {
             s.attempt_type = "unknown";
         }
+        if (frame_json.contains("shot") && frame_json["shot"].contains("attempt_points")) {
+            s.points_detected = frame_json["shot"]["attempt_points"].get<int>();
+        }
         if (frame_json.contains("game")) {
             const auto& gs = frame_json["game"];
-            if (gs.contains("clock_sec")) s.game_clock_sec = gs["clock_sec"].get<int>();
+            if (gs.contains("period_clock_remaining_sec")) s.game_clock_sec = gs["period_clock_remaining_sec"].get<int>();
+            else if (gs.contains("clock_sec")) s.game_clock_sec = gs["clock_sec"].get<int>();
             if (gs.contains("period")) s.period_num = gs["period"].get<int>();
         }
         poss_acc_.shots.push_back(s);
@@ -1040,21 +2001,54 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         poss_acc_.shots.push_back(s);
     }
 
-    static void applyResult(std::vector<ShotRecord>& shots, const std::string& result, int points,
-                            const std::string& attempt_type = std::string()) {
+    static void applyResult(std::vector<ShotRecord>& shots, const ShotResultData& data) {
         for (auto it = shots.rbegin(); it != shots.rend(); ++it) {
             if (it->result.empty()) {
-                it->result = result;
-                if (!attempt_type.empty() && attempt_type != "unknown") it->attempt_type = attempt_type;
-                if (points > 0) it->points = points;
+                it->result = data.result;
+                it->result_source = data.source;
+                if (!data.attempt_type.empty() && data.attempt_type != "unknown") it->attempt_type = data.attempt_type;
+                if (data.points > 0) it->points = data.points;
+                it->scoreboard_verified = data.scoreboard_verified;
+                if (data.points_detected > 0) it->points_detected = data.points_detected;
+                if (!data.attempt_type_detected.empty()) it->attempt_type_detected = data.attempt_type_detected;
+                if (data.points_scoreboard > 0) it->points_scoreboard = data.points_scoreboard;
+                if (!data.attempt_type_scoreboard.empty()) it->attempt_type_scoreboard = data.attempt_type_scoreboard;
+                it->score_delta_side = data.score_delta_side;
+                it->visual_team = data.visual_team;
+                it->scoreboard_team_abbrev = data.scoreboard_team_abbrev;
+                it->scoreboard_team_name = data.scoreboard_team_name;
+                it->score_before_a = data.score_before.a;
+                it->score_before_b = data.score_before.b;
+                it->score_after_a = data.score_after.a;
+                it->score_after_b = data.score_after.b;
+                it->detector_result = data.detector_result;
+                it->detector_disagreement = data.detector_disagreement;
+                it->attempt_type_corrected_by_scoreboard = data.attempt_type_corrected_by_scoreboard;
                 return;
             }
         }
         // No pending shot — record a standalone result (rare: result without release/arrival).
         ShotRecord s;
-        s.result = result;
-        if (!attempt_type.empty()) s.attempt_type = attempt_type;
-        if (points > 0) s.points = points;
+        s.result = data.result;
+        s.result_source = data.source;
+        if (!data.attempt_type.empty()) s.attempt_type = data.attempt_type;
+        if (data.points > 0) s.points = data.points;
+        s.scoreboard_verified = data.scoreboard_verified;
+        s.points_detected = data.points_detected;
+        s.attempt_type_detected = data.attempt_type_detected;
+        s.points_scoreboard = data.points_scoreboard;
+        s.attempt_type_scoreboard = data.attempt_type_scoreboard;
+        s.score_delta_side = data.score_delta_side;
+        s.visual_team = data.visual_team;
+        s.scoreboard_team_abbrev = data.scoreboard_team_abbrev;
+        s.scoreboard_team_name = data.scoreboard_team_name;
+        s.score_before_a = data.score_before.a;
+        s.score_before_b = data.score_before.b;
+        s.score_after_a = data.score_after.a;
+        s.score_after_b = data.score_after.b;
+        s.detector_result = data.detector_result;
+        s.detector_disagreement = data.detector_disagreement;
+        s.attempt_type_corrected_by_scoreboard = data.attempt_type_corrected_by_scoreboard;
         shots.push_back(s);
     }
 
@@ -1065,17 +2059,28 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         else ++shots_unknown_;
     }
 
-    void onShotResult(const std::string& result, int points, const std::string& attempt_type = std::string()) {
-        countShotResultForSummary(result);
+    void onShotResult(const ShotResultData& data) {
+        countShotResultForSummary(data.result);
+        if (data.scoreboard_verified) ++scoreboard_verified_shots_;
+        else if (data.source == "scoreboard_no_delta") ++scoreboard_unverified_shots_;
+        if (data.detector_disagreement) ++detector_score_disagreements_;
 
         // A deferred possession owns this result (shot was released there).
         if (have_deferred_poss_) {
-            applyResult(deferred_poss_.shots, result, points, attempt_type);
+            applyResult(deferred_poss_.shots, data);
             flushDeferredPossession();
             return;
         }
         if (!poss_active_) return;
-        applyResult(poss_acc_.shots, result, points, attempt_type);
+        applyResult(poss_acc_.shots, data);
+    }
+
+    void onShotResult(const std::string& result, int points, const std::string& attempt_type = std::string()) {
+        ShotResultData data;
+        data.result = result;
+        data.points = points;
+        data.attempt_type = attempt_type;
+        onShotResult(data);
     }
 
     void resetRunState() {
@@ -1106,15 +2111,39 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         camera_shot_frames_.clear();
         possessions_by_team_.clear();
         shots_made_ = shots_missed_ = shots_unknown_ = shot_attempts_total_ = 0;
+        score_events_total_ = score_events_2pt_ = score_events_3pt_ = 0;
+        scoreboard_verified_shots_ = scoreboard_unverified_shots_ = detector_score_disagreements_ = 0;
+        score_ocr_regressions_ = score_ocr_rejected_ = 0;
+        have_confirmed_score_ = false;
+        confirmed_score_ = ScoreState();
+        score_candidate_ = ScoreState();
+        score_candidate_frames_ = 0;
+        score_candidate_first_frame_ = 0;
+        score_candidate_first_pts_ = 0;
+        for (int v = 0; v < 2; ++v) {
+            visual_to_scoreboard_[v].clear();
+            for (int s = 0; s < 2; ++s) team_identity_evidence_[v][s] = 0;
+        }
+        for (int s = 0; s < 2; ++s) {
+            scoreboard_to_visual_[s].clear();
+            locked_scoreboard_team_[s].clear();
+            scoreboard_team_candidate_[s].clear();
+        }
+        team_identity_locked_ = false;
+        team_identity_just_locked_ = false;
+        team_identity_lock_frame_ = -1;
+        scoreboard_team_candidate_hits_ = 0;
         first_game_clock_sec_ = latest_game_clock_sec_ = -1;
     }
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
         if (isEofMarker(frm)) {
             flushPossession();
             flushDeferredPossession();
@@ -1125,10 +2154,13 @@ public:
             file_trail_.close();
             file_events_.close();
             file_possessions_.close();
+            file_pbp_.close();
             resetRunState();
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 
@@ -1153,11 +2185,14 @@ public:
                 logstream << "metadata_dump: cannot open events file: " << output_file_events_;
             if (!output_file_possessions_.empty() && !file_possessions_.opened && !file_possessions_.open(output_file_possessions_))
                 logstream << "metadata_dump: cannot open possessions file: " << output_file_possessions_;
+            if (!output_file_pbp_.empty() && !file_pbp_.opened && !file_pbp_.open(output_file_pbp_))
+                logstream << "metadata_dump: cannot open pbp file: " << output_file_pbp_;
 
             const std::string header = buildHeader().dump();
             if (file_main_.opened) file_main_.writeLine(header);
             if (file_events_.opened) file_events_.writeLine(header);
             if (file_possessions_.opened) file_possessions_.writeLine(header);
+            if (file_pbp_.opened) file_pbp_.writeLine(header);
             if (file_court_.opened) file_court_.writeLine(header);
             if (file_outlines_.opened) file_outlines_.writeLine(header);
             if (file_trail_.opened) file_trail_.writeLine(header);
@@ -1191,14 +2226,14 @@ public:
             if (first_game_clock_sec_ < 0) first_game_clock_sec_ = sec;
             latest_game_clock_sec_ = sec;
             if (sec != last_game_clock_sec_) {
-                if (clock_currently_stopped_) {
+                if (emit_ocr_clock_events_ && clock_currently_stopped_) {
                     Parameters ev; ev["type"] = "clock_started"; ev["to"] = sec;
                     emitEvent(ev, pts);
-                    clock_currently_stopped_ = false;
                 }
+                clock_currently_stopped_ = false;
                 last_game_clock_sec_ = sec;
                 last_game_clock_change_t_ = now_t;
-            } else if (!clock_currently_stopped_ && last_game_clock_change_t_ >= 0.0f &&
+            } else if (emit_ocr_clock_events_ && !clock_currently_stopped_ && last_game_clock_change_t_ >= 0.0f &&
                        (now_t - last_game_clock_change_t_) >= clock_stopped_threshold_s_) {
                 Parameters ev; ev["type"] = "clock_stopped"; ev["at"] = sec;
                 emitEvent(ev, pts);
@@ -1251,11 +2286,21 @@ public:
         if (params.count("output_file_trail")) r->output_file_trail_ = params["output_file_trail"].get<std::string>();
         if (params.count("output_file_events")) r->output_file_events_ = params["output_file_events"].get<std::string>();
         if (params.count("output_file_possessions")) r->output_file_possessions_ = params["output_file_possessions"].get<std::string>();
+        if (params.count("output_file_pbp")) r->output_file_pbp_ = params["output_file_pbp"].get<std::string>();
+        if (params.count("emit_handler_change_events")) r->emit_handler_change_events_ = params["emit_handler_change_events"].get<bool>();
+        if (params.count("touch_merge_gap_frames")) r->touch_merge_gap_frames_ = std::max(0, params["touch_merge_gap_frames"].get<int>());
         if (params.count("video_label")) r->video_label_ = params["video_label"].get<std::string>();
         if (params.count("fps")) r->fps_ = params["fps"].get<int>();
         if (params.count("dump_every_n")) r->dump_every_n_ = std::max(1, params["dump_every_n"].get<int>());
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
         if (params.count("shot_result_wait_frames")) r->shot_result_wait_frames_ = std::max(1, params["shot_result_wait_frames"].get<int>());
+        if (params.count("score_change_confirm_frames")) r->score_change_confirm_frames_ = std::max(1, params["score_change_confirm_frames"].get<int>());
+        if (params.count("score_change_max_delta")) r->score_change_max_delta_ = std::max(1, params["score_change_max_delta"].get<int>());
+        if (params.count("team_identity_lock_min_evidence")) r->team_identity_lock_min_evidence_ = std::max(1, params["team_identity_lock_min_evidence"].get<int>());
+        if (params.count("team_identity_lock_min_margin")) r->team_identity_lock_min_margin_ = std::max(0, params["team_identity_lock_min_margin"].get<int>());
+        if (params.count("scoreboard_team_name_lock_hits")) r->scoreboard_team_name_lock_hits_ = std::max(1, params["scoreboard_team_name_lock_hits"].get<int>());
+        if (params.count("include_ocr_game_state")) r->include_ocr_game_state_ = params["include_ocr_game_state"].get<bool>();
+        if (params.count("emit_ocr_clock_events")) r->emit_ocr_clock_events_ = params["emit_ocr_clock_events"].get<bool>();
         if (params.count("possession_change_confirm_frames")) r->possession_change_confirm_frames_ = std::max(1, params["possession_change_confirm_frames"].get<int>());
         if (params.count("clock_stopped_threshold_s")) r->clock_stopped_threshold_s_ = params["clock_stopped_threshold_s"].get<float>();
         if (params.count("output_file_summary")) r->output_file_summary_ = params["output_file_summary"].get<std::string>();

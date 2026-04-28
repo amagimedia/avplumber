@@ -11,7 +11,7 @@ extern "C" {
 #include <deque>
 #include <string>
 
-class ShotAttemptDetector : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class ShotAttemptDetector : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string ball_metadata_key_ = "yolo_ball";
     std::string player_metadata_key_ = "yolo_players";
     std::string handler_metadata_key_ = "ball_handler";
@@ -320,10 +320,12 @@ class ShotAttemptDetector : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             logstream << "shot_attempt_detector: total releases=" << total_releases_
@@ -336,8 +338,10 @@ public:
             total_hoop_arrivals_ = 0;
             last_handler_frame_ = 0;
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
 
@@ -399,10 +403,17 @@ public:
             if (in_flight_) flight_frames_++;
 
             if (flight_frames_ >= release_confirm_frames_ && !release_emitted_) {
-                // Disable point-value classification until shooter/line geometry is reliable.
-                // The score outcome can still be synthesized from the near-hoop ball vector.
-                pending_attempt_type_ = "unknown";
-                pending_attempt_points_ = 0;
+                HandlerState shooter;
+                if (handler_state.found) {
+                    shooter = handler_state;
+                } else if (last_handler_.found && frame_counter_ >= last_handler_frame_ &&
+                           frame_counter_ - last_handler_frame_ <= shooter_hold_frames_) {
+                    shooter = last_handler_;
+                }
+                const CourtContext court = parseCourtContext(raw, seg_md, hoop);
+                const AttemptValue attempt = classifyAttemptValue(court, shooter);
+                pending_attempt_type_ = attempt.known ? attempt.type : std::string("unknown");
+                pending_attempt_points_ = attempt.known ? attempt.points : 0;
                 release_emitted_ = true;
                 total_releases_++;
                 events["release"] = true;

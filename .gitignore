@@ -5,3 +5,6 @@ graph_factory.generated.cpp
 builddate.h
 compile_flags.txt
 /docs/superpowers/
+*.o
+*.a
+*.so

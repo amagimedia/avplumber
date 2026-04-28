@@ -46,4 +46,3 @@ struct GpuMaskSideDataHeader {
     uint32_t model_w;
     uint32_t model_h;
 };
-

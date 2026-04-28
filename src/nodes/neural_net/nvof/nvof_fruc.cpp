@@ -33,9 +33,12 @@ static int check_cu(CUresult err, const char *func)
 }
 #define CHECK_CU_FRUC(x) check_cu((x), #x)
 
-class NvOFFruc : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class NvOFFruc : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
 public:
 	using NodeSISO::NodeSISO;
+	bool consumeEofIfPresent() override {
+		return false;
+	}
 
 private:
 	std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -458,6 +461,7 @@ public:
 			this->source_->pop();
 			have_prev_pts_ = false;
 			prev_pts_ = NOTS;
+			this->finished_ = true;
 			return;
 		}
 

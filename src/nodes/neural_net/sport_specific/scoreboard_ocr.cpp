@@ -24,6 +24,7 @@ constexpr int kOcrDstWidthPadded = 320;
 
 struct ScoreboardDetection {
     std::string label;
+    std::string raw_label;
     float x1, y1, x2, y2;
     float conf;
     int cls = -1;
@@ -88,11 +89,14 @@ void limitPerClass(std::vector<ScoreboardDetection>& dets) {
     dets = std::move(kept);
 }
 
-    struct OcrResult {
-        std::string label;
-        std::string text;
-        float mean_conf = 0.0f;
-        float center_x = 0.0f;
+struct OcrResult {
+    std::string label;
+    std::string raw_label;
+    std::string text;
+    float mean_conf = 0.0f;
+    float det_conf = 0.0f;
+    float center_x = 0.0f;
+    float center_y = 0.0f;
 };
 
 // CTC greedy decode: argmax per timestep, dedup consecutive, skip blank (index 0).
@@ -129,7 +133,7 @@ std::string ctcGreedyDecode(const float* output, int seq_len, int num_classes,
 
 } // namespace
 
-class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yolo_base::CudaInferTrtBase {
+class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yolo_base::CudaInferTrtBase, public ReportsFinishByFlag {
     std::string detection_metadata_key_ = "yolo_players";
     std::string output_metadata_key_ = "scoreboard";
     std::vector<std::string> scoreboard_labels_ = {"Period", "Shot Clock", "Team Name", "Team Points", "Time Remaining"};
@@ -159,7 +163,6 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     int pair_warmup_samples_ = 3;
     int pair_hard_lock_hits_ = 2;
     int unlock_bad_frames_ = 12;
-
     std::vector<std::string> keys_;
     CUmodule crop_module_ = nullptr;
     CUfunction crop_kernel_ = nullptr;
@@ -233,6 +236,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         if (label == "time") return "Time Remaining";
         if (label == "quarter") return "Period";
         if (label == "countdown") return "Shot Clock";
+        if (label == "Basketball-Scoreboard") return "Scoreboard";
         return label;
     }
 
@@ -254,6 +258,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
             ScoreboardDetection sd;
             sd.label = label;
+            sd.raw_label = raw_label;
             sd.x1 = det["xyxy"][0].get<float>();
             sd.y1 = det["xyxy"][1].get<float>();
             sd.x2 = det["xyxy"][2].get<float>();
@@ -270,23 +275,38 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     static float bboxWidth(const ScoreboardDetection& det) { return det.x2 - det.x1; }
     static float bboxHeight(const ScoreboardDetection& det) { return det.y2 - det.y1; }
 
-    static bool parseStrictUnsigned(const std::string& text, int min_val, int max_val) {
-        if (text.empty()) return false;
-        int value = 0;
-        bool have_digit = false;
-        for (char c : text) {
-            if (std::isdigit((unsigned char)c)) {
-                have_digit = true;
-                value = value * 10 + (c - '0');
-                if (value > max_val) return false;
-            } else if (!std::isspace((unsigned char)c)) {
-                return false;
-            }
-        }
-        return have_digit && value >= min_val && value <= max_val;
+    static std::string upperAscii(std::string s) {
+        for (char& c : s) c = (char)std::toupper((unsigned char)c);
+        return s;
     }
 
-    static bool looksLikeGameClock(const std::string& text) {
+    static bool parseLooseUnsigned(const std::string& text, int min_val, int max_val, int& out) {
+        if (text.empty()) return false;
+        std::string digits;
+        digits.reserve(text.size());
+        for (char c : text) {
+            if (std::isdigit((unsigned char)c)) digits.push_back(c);
+            else if (!std::isspace((unsigned char)c) && c != ':') return false;
+        }
+        if (digits.empty() || digits.size() > 3) return false;
+        int value = 0;
+        for (char c : digits) {
+            value = value * 10 + (c - '0');
+            if (value > max_val) return false;
+        }
+        if (value < min_val || value > max_val) return false;
+        out = value;
+        return true;
+    }
+
+    static bool parseStrictUnsigned(const std::string& text, int min_val, int max_val) {
+        int out = -1;
+        return parseLooseUnsigned(text, min_val, max_val, out);
+    }
+
+    static bool parseGameClockSec(const std::string& text, int& out) {
+        const std::string up = upperAscii(text);
+        if (up.find("AM") != std::string::npos || up.find("PM") != std::string::npos) return false;
         for (size_t i = 0; i + 3 < text.size(); ++i) {
             if (!std::isdigit((unsigned char)text[i])) continue;
             size_t colon = text.find(':', i);
@@ -300,18 +320,45 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             }
             if (!ok || mm > 12) continue;
             int ss = (text[colon + 1] - '0') * 10 + (text[colon + 2] - '0');
-            if (ss < 60) return true;
+            if (ss < 60) {
+                out = mm * 60 + ss;
+                return true;
+            }
         }
         return false;
     }
 
+    static bool looksLikeGameClock(const std::string& text) {
+        int sec = -1;
+        return parseGameClockSec(text, sec);
+    }
+
+    static int parsePeriodNum(const std::string& text) {
+        const std::string up = upperAscii(text);
+        if (up.find("1ST") != std::string::npos || up.find("IST") != std::string::npos) return 1;
+        if (up.find("2ND") != std::string::npos) return 2;
+        if (up.find("3RD") != std::string::npos) return 3;
+        if (up.find("4TH") != std::string::npos) return 4;
+        if (up.find("OT") != std::string::npos) return 5;
+        for (char c : up) {
+            if (std::isdigit((unsigned char)c)) {
+                int n = c - '0';
+                if (n >= 1 && n <= 9) return n;
+            }
+        }
+        return -1;
+    }
+
     static bool looksLikePeriod(const std::string& text) {
-        std::string up;
-        up.reserve(text.size());
-        for (char c : text) up.push_back((char)std::toupper((unsigned char)c));
-        return up.find("1ST") != std::string::npos || up.find("IST") != std::string::npos ||
-               up.find("2ND") != std::string::npos || up.find("3RD") != std::string::npos ||
-               up.find("4TH") != std::string::npos || up.find("OT") != std::string::npos;
+        return parsePeriodNum(text) > 0;
+    }
+
+    static bool rawLabelIs(const OcrResult& r, const std::string& label) {
+        return r.raw_label == label || r.label == label;
+    }
+
+    static bool rawLabelIs(const ScoreboardDetection& d, const std::string& label) {
+        return d.raw_label == label || d.label == label;
     }
 
     int ocrQualityScore(const std::string& label, const OcrResult& r) const {
@@ -365,10 +412,16 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     }
 
     OcrResult runOcrOnce(const av::VideoFrame& frm, const ScoreboardDetection& det,
-                         double scale_x, double scale_y, float center_x_override) {
+                         float model_w, float model_h, float center_x_override) {
         OcrResult result;
         result.label = det.label;
+        result.raw_label = det.raw_label;
+        result.det_conf = det.conf;
         result.center_x = center_x_override;
+        result.center_y = bboxCenterY(det);
+
+        const double scale_x = model_w > 0.0f ? (double)frm.width() / (double)model_w : 1.0;
+        const double scale_y = model_h > 0.0f ? (double)frm.height() / (double)model_h : 1.0;
 
         int sx1 = std::max(0, (int)(det.x1 * scale_x));
         int sy1 = std::max(0, (int)(det.y1 * scale_y));
@@ -424,7 +477,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     }
 
     OcrResult runBestOcrOnCrop(const av::VideoFrame& frm, const ScoreboardDetection& det,
-                               double scale_x, double scale_y, float model_w, float model_h) {
+                               float model_w, float model_h) {
         float pad_x_rel = 0.0f, pad_y_rel = 0.0f;
         cropPaddingForLabel(det.label, pad_x_rel, pad_y_rel);
         const float center_x = bboxCenterX(det);
@@ -442,7 +495,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         OcrResult best;
         int best_score = std::numeric_limits<int>::min();
         for (const auto& var : variants) {
-            OcrResult cur = runOcrOnce(frm, var, scale_x, scale_y, center_x);
+            OcrResult cur = runOcrOnce(frm, var, model_w, model_h, center_x);
             int score = ocrQualityScore(det.label, cur);
             if (score > best_score) {
                 best_score = score;
@@ -576,10 +629,11 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             if (r.text.empty()) continue;
             const auto cands = extractAbbrevCandidates(r.text);
             if (cands.empty()) continue;
-            const float add = std::max(0.05f, r.mean_conf) * labelBonus(r.label);
+            float add = std::max(0.05f, r.mean_conf) * labelBonus(r.label);
+            if (r.raw_label == "team_1" || r.raw_label == "team_2") add *= 2.0f;
             for (const auto& abbrev : cands) {
                 auto& ev = team_evidence_[abbrev];
-                if (r.center_x < mid_x) {
+                if (r.raw_label == "team_1" || (r.raw_label != "team_2" && r.center_x < mid_x)) {
                     ev.left_score += add;
                     ev.left_hits++;
                 } else {
@@ -587,6 +641,52 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
                     ev.right_hits++;
                 }
                 ev.last_frame_seen = frame_counter_;
+            }
+        }
+    }
+
+    struct BestTextField {
+        const OcrResult* result = nullptr;
+        int value = -1;
+        float score = -1.0f;
+    };
+
+    static void considerBest(BestTextField& best, const OcrResult& r, int value, float score) {
+        if (score > best.score) {
+            best.result = &r;
+            best.value = value;
+            best.score = score;
+        }
+    }
+
+    void inferTextFields(const std::vector<OcrResult>& all_results,
+                         BestTextField& game_clock,
+                         BestTextField& shot_clock,
+                         BestTextField& period) const {
+        for (const auto& r : all_results) {
+            if (r.text.empty()) continue;
+            int sec = -1;
+            if (parseGameClockSec(r.text, sec)) {
+                float score = r.mean_conf;
+                if (rawLabelIs(r, "time") || rawLabelIs(r, "Time Remaining")) score += 3.0f;
+                if (rawLabelIs(r, "countdown") || rawLabelIs(r, "Shot Clock")) score -= 1.0f;
+                considerBest(game_clock, r, sec, score);
+            }
+
+            int shot_sec = -1;
+            if (parseLooseUnsigned(r.text, 0, 24, shot_sec)) {
+                float score = r.mean_conf;
+                if (rawLabelIs(r, "countdown") || rawLabelIs(r, "Shot Clock")) score += 3.0f;
+                if (rawLabelIs(r, "score_1") || rawLabelIs(r, "score_2") || rawLabelIs(r, "Team Points")) score -= 2.0f;
+                if (rawLabelIs(r, "time") || rawLabelIs(r, "Time Remaining")) score -= 1.0f;
+                considerBest(shot_clock, r, shot_sec, score);
+            }
+
+            int period_num = parsePeriodNum(r.text);
+            if (period_num > 0) {
+                float score = r.mean_conf;
+                if (rawLabelIs(r, "quarter") || rawLabelIs(r, "Period")) score += 3.0f;
+                considerBest(period, r, period_num, score);
             }
         }
     }
@@ -788,16 +888,6 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             }
         }
 
-        updateTeamEvidence(all_results, model_w);
-        std::unordered_map<std::string, float> left_candidates;
-        std::unordered_map<std::string, float> right_candidates;
-        collectSideCandidates(all_results, model_w, left_candidates, right_candidates);
-        if (!left_candidates.empty() || !right_candidates.empty()) {
-            ++ocr_sample_counter_;
-            updatePairEvidenceFromCandidates(left_candidates, right_candidates);
-            maybeHardLockFromPairs();
-        }
-
         // Scan ALL pre-NMS OCR results for NBA-like abbreviations anywhere in the text
         std::vector<ExtractedTeam> found_teams;
         for (const auto& r : all_results) {
@@ -832,11 +922,13 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         // Sort by X: leftmost = team_a
         std::sort(team_abbrevs.begin(), team_abbrevs.end(),
                   [](const ExtractedTeam& a, const ExtractedTeam& b) { return a.center_x < b.center_x; });
-        updatePairEvidence(team_abbrevs);
 
         auto by_x_result = [](const OcrResult* a, const OcrResult* b) { return a->center_x < b->center_x; };
         std::sort(names.begin(), names.end(), by_x_result);
         std::sort(points.begin(), points.end(), by_x_result);
+
+        BestTextField best_game_clock, best_shot_clock, best_period;
+        inferTextFields(all_results, best_game_clock, best_shot_clock, best_period);
 
         // Emit team_a/team_b purely by spatial position. Keep raw OCR text when abbrev
         // extraction fails — downstream consumers (game_state, external LLMs) can still use
@@ -858,10 +950,14 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             if (points.size() >= 2) sb["team_b"]["points"] = {{"text", points.back()->text}, {"conf", points.back()->mean_conf}};
         }
 
-        checkLockConsistency(sb);
-        maybeUpdateLock();
-        if (!locked_team_a_.empty() || !locked_team_b_.empty()) {
-            applyLockedTeams(sb, points);
+        if (best_period.result) {
+            sb["period"] = {{"text", best_period.result->text}, {"conf", best_period.result->mean_conf}};
+        }
+        if (best_game_clock.result) {
+            sb["time_remaining"] = {{"text", best_game_clock.result->text}, {"conf", best_game_clock.result->mean_conf}};
+        }
+        if (best_shot_clock.result) {
+            sb["shot_clock"] = {{"text", best_shot_clock.result->text}, {"conf", best_shot_clock.result->mean_conf}};
         }
 
         return sb;
@@ -869,6 +965,9 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     ~ScoreboardOcr() {
         if (cu_ctx_) {
@@ -879,7 +978,6 @@ public:
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
         if (isEofMarker(frm)) {
             cached_scoreboard_json_.clear();
             frame_counter_ = 0;
@@ -892,21 +990,21 @@ public:
             pair_evidence_.clear();
             stable_boxes_.clear();
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
         const AVFrame* raw = frm.raw();
 
         if ((frame_counter_ % (uint64_t)ocr_every_n_) != 1 && !cached_scoreboard_json_.empty()) {
-            if (raw && raw->metadata) {
-                av_dict_set(&frm.raw()->metadata, output_metadata_key_.c_str(), cached_scoreboard_json_.c_str(), 0);
-            }
+            if (raw) av_dict_set(&frm.raw()->metadata, output_metadata_key_.c_str(), cached_scoreboard_json_.c_str(), 0);
             this->sink_->put(frm);
             return;
         }
 
-        if (!raw || !raw->metadata) {
+        if (!raw) {
             this->sink_->put(frm);
             return;
         }
@@ -938,30 +1036,28 @@ public:
 
         const double model_w = md.value("model_width", 960.0);
         const double model_h = md.value("model_height", 544.0);
-        const double scale_x = (double)frm.width() / model_w;
-        const double scale_y = (double)frm.height() / model_h;
 
         if (cu_ctx_) cuCtxSetCurrent(cu_ctx_);
 
         const float model_w_f = (float)model_w;
         const float model_h_f = (float)model_h;
 
-        // OCR all detections (pre-NMS) so we can scan everything for team abbreviations
         std::vector<OcrResult> all_results;
+        std::vector<OcrResult> results;
+        // OCR all detections (pre-NMS) so we can scan everything for team abbreviations.
         for (const auto& det : dets) {
-            OcrResult r = runBestOcrOnCrop(frm, det, scale_x, scale_y, model_w_f, model_h_f);
+            OcrResult r = runBestOcrOnCrop(frm, det, model_w_f, model_h_f);
             if (!r.text.empty()) all_results.push_back(std::move(r));
         }
 
-        // NMS + per-class limits for the main scoreboard fields
+        // NMS + per-class limits for the main scoreboard fields.
         nmsScoreboard(dets, nms_iou_thresh_);
         limitPerClass(dets);
         stabilizeDetections(dets, model_w_f, model_h_f);
 
-        // OCR stabilized post-NMS boxes for the main scoreboard fields
-        std::vector<OcrResult> results;
+        // OCR stabilized post-NMS boxes for the main scoreboard fields.
         for (const auto& det : dets) {
-            OcrResult r = runBestOcrOnCrop(frm, det, scale_x, scale_y, model_w_f, model_h_f);
+            OcrResult r = runBestOcrOnCrop(frm, det, model_w_f, model_h_f);
             if (!r.text.empty()) results.push_back(std::move(r));
         }
 
@@ -973,7 +1069,7 @@ public:
             std::string det_detail;
             for (const auto& r : results) {
                 if (!det_detail.empty()) det_detail += ", ";
-                det_detail += r.label + "=\"" + r.text + "\"(" + std::to_string(r.mean_conf).substr(0,4) + ")";
+                det_detail += r.raw_label + "/" + r.label + "=\"" + r.text + "\"(" + std::to_string(r.mean_conf).substr(0,4) + ")";
             }
             logstream << "scoreboard_ocr: frame=" << frame_counter_
                       << " dets=" << dets.size()

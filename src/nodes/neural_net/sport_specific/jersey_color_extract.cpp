@@ -107,7 +107,7 @@ void appendSegPointerDebug(std::ostringstream& oss, CUcontext expected_ctx, CUde
 
 } // namespace
 
-class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string metadata_key_ = "yolo_players_seg";
     std::vector<std::string> target_labels_ = {"player"};
     int target_class_ = -1;
@@ -261,6 +261,9 @@ class JerseyColorExtract : public NodeSISO<av::VideoFrame, av::VideoFrame> {
 
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     ~JerseyColorExtract() {
         if (cu_ctx_) {
@@ -275,11 +278,12 @@ public:
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
         if (isEofMarker(frm)) {
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
         const AVFrame* raw = frm.raw();

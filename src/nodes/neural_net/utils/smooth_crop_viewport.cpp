@@ -354,7 +354,7 @@ struct DerivSlewAxis {
 
 } // namespace
 
-class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::vector<std::string> metadata_keys_in_;
     std::string metadata_key_out_;
     double model_content_width_ = 0;
@@ -1058,6 +1058,7 @@ public:
         if (isEofMarker(frm)) {
             flushBufferOnEof();
             this->sink_->put(std::move(frm));
+            this->finished_ = true;
             return;
         }
         if (!frm)

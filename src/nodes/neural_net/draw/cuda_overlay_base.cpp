@@ -114,6 +114,10 @@ void parseYoloDetections(const Parameters& md, const YoloParseConfig& cfg,
         }
 
         parsed.conf = det.value("conf", 0.0);
+        if (det.contains("team")) {
+            parsed.team = det["team"].get<int>();
+            parsed.has_team = true;
+        }
         if (det.contains("cls")) {
             parsed.cls = det["cls"].get<int>();
             parsed.has_cls = true;
@@ -143,9 +147,9 @@ void parseYoloDetections(const Parameters& md, const YoloParseConfig& cfg,
             parsed.velocity_y = det["velocity_y"].get<double>();
             parsed.has_velocity = true;
         }
-        if (det.contains("team_ab") && det["team_ab"].is_string()) {
-            parsed.team_ab = det["team_ab"].get<std::string>();
-            parsed.has_team_ab = true;
+        if (det.contains("jersey_mode_ratio")) {
+            parsed.jersey_mode_ratio = det["jersey_mode_ratio"].get<double>();
+            parsed.has_jersey_mode_ratio = true;
         }
         detections_out.push_back(std::move(parsed));
     }

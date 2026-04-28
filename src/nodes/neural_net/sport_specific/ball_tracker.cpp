@@ -37,7 +37,7 @@ using ball_tracker_detail::roundnessPenalty;
 using ball_tracker_detail::addTrailPoint;
 using ball_tracker_detail::checkCourtBoundsHorizontalOverlap;
 
-class BallTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
+class BallTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 private:
     // Target filtering
     std::string metadata_key_ = "yolo_detections";
@@ -994,6 +994,9 @@ private:
 
 public:
     using NodeSISO::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     void resetInput() override {
         resetState();
@@ -1027,13 +1030,14 @@ public:
 
     void process() override {
         av::VideoFrame frm = this->source_->get();
-        if (!frm) return;
 
         if (isEofMarker(frm)) {
             resetState();
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
+        if (!frm) return;
 
         ++frame_counter_;
         const std::string shot_type = getShotType(frm.raw());

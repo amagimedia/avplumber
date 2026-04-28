@@ -611,7 +611,6 @@ server.listen(HTTP_PORT, () => {
     );
   } else {
     console.log('No avplumber instances configured yet. Use POST /api/instances to add some.');
-    console.log(`Or launch avplumber with: -p 22422 --webui-api http://localhost:${HTTP_PORT}`);
   }
 });
 
