@@ -1,6 +1,5 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
-#include "../../video_parameters.hpp"
 #include "../../SharedTimeline.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
@@ -17,7 +16,6 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -272,7 +270,7 @@ static int alphaPlaneIndex(AVPixelFormat fmt) {
     return max_plane > 0 ? max_plane : -1;
 }
 
-// Set a rectangular region of one plane to a constant byte value (synchronous cuMemsetD8).
+// Set a rectangular region of one plane to a constant byte value.
 static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
                            int lx, int ly, int lw, int lh, uint8_t value) {
     if (!f->data[plane] || f->linesize[plane] <= 0) return;
@@ -281,9 +279,8 @@ static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
     if (bw <= 0 || bh <= 0) return;
     const size_t pitch = (size_t)f->linesize[plane];
     CUdeviceptr base = (CUdeviceptr)(uintptr_t)f->data[plane];
-    for (int row = 0; row < bh; ++row)
-        CHECK_CU(cuMemsetD8(base + (CUdeviceptr)((size_t)(by + row) * pitch + (size_t)bx),
-                            value, (unsigned int)bw));
+    CHECK_CU(cuMemsetD2D8(base + (CUdeviceptr)((size_t)by * pitch + (size_t)bx),
+                          (unsigned int)pitch, value, (size_t)bw, (size_t)bh));
 }
 
 static uint8_t blackLumaValue(const AVFrame *color_src) {
@@ -368,10 +365,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
     std::atomic<uint32_t> active_inputs_{~0u};
-    std::atomic<uint64_t> canvas_clear_generation_{1};
-    uint32_t last_composited_active_inputs_ = ~0u;
-    std::vector<DrawOp> last_draw_ops_;
-    std::unordered_map<uintptr_t, uint64_t> surface_clear_generation_;
 
     void freeHwContexts() {
         av_buffer_unref(&out_frames_ref_);
@@ -438,18 +431,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         return ctx ? ctx->sw_format : AV_PIX_FMT_NONE;
     }
 
-    void markCanvasDirty() {
-        canvas_clear_generation_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void clearCanvasIfNeeded(av::VideoFrame &outf, const AVFrame *color_src) {
-        const uintptr_t surface_key = (uintptr_t)outf.raw()->data[0];
-        const uint64_t generation = canvas_clear_generation_.load(std::memory_order_relaxed);
-        if (surface_clear_generation_[surface_key] == generation)
-            return;
+    void clearCanvas(av::VideoFrame &outf, const AVFrame *color_src) {
         if (!fillFrameBlack(sw_fmt_, outf.raw(), color_src))
-            throw Error("cuda_rect_overlay: unsupported sw_format for scene-change canvas clear");
-        surface_clear_generation_[surface_key] = generation;
+            throw Error("cuda_rect_overlay: unsupported sw_format for canvas clear");
     }
 
     std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame *> &sources,
@@ -505,11 +489,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
         std::vector<DrawOp> ops = resolveDrawOps(sources, layers);
-        if (ops != last_draw_ops_) {
-            markCanvasDirty();
-            last_draw_ops_ = ops;
-        }
-        clearCanvasIfNeeded(outf, metadata_src ? metadata_src->raw() : nullptr);
+        clearCanvas(outf, metadata_src ? metadata_src->raw() : nullptr);
 
         for (const DrawOp &op : ops) {
             const av::VideoFrame *srcp = op.src;
@@ -618,10 +598,6 @@ public:
                     break;
                 }
             }
-        }
-        if (active_mask != last_composited_active_inputs_) {
-            markCanvasDirty();
-            last_composited_active_inputs_ = active_mask;
         }
         auto isActive = [active_mask](size_t i) { return (active_mask & (1u << i)) != 0; };
 
@@ -808,13 +784,11 @@ public:
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "active_inputs") {
             const uint32_t new_mask = parseBitmask(value);
-            if (active_inputs_.exchange(new_mask, std::memory_order_relaxed) != new_mask)
-                markCanvasDirty();
+            active_inputs_.store(new_mask, std::memory_order_relaxed);
         } else if (key == "layers") {
             auto new_layers = parseLayersArray(value);
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
-            markCanvasDirty();
         }
     }
 
