@@ -7,13 +7,17 @@ Scene composition (graphs, PiP positions) is defined on the avplumber side with
 plus ``dst_x`` / ``dst_y`` (see doc/mixer_orchestrator.md). This UI only refers
 to scenes by name.
 
+Scene names are fetched automatically from the server via ``mixer.scenes`` on
+connect and refreshed every 10 seconds. No scene names need to be passed as
+arguments.
+
 Usage:
-    python tools/mixer_tui.py --host localhost --port 5555 --mixer mixer \\
-        fullcam1 pip sidebyside
+    python tools/mixer_tui.py --host localhost --port 5555 --mixer mixer
 
 Keyboard shortcuts:
     1-9        Select scene N on Preview bus
     F1-F9      Direct CUT to scene N (skips preview step)
+    o          Toggle HTML overlay bypass
     c          CUT  (take preview to program, hard cut)
     x          X-FADE (crossfade preview to program at set duration)
     w          WIPE (prompt for wipe file path, then execute)
@@ -300,6 +304,8 @@ class SceneButton(Static):
 # Main application
 # ---------------------------------------------------------------------------
 
+OVERLAY_SETTLE_SECONDS = 0.2
+
 TRANSITION_SYMBOLS = {
     "idle": "─",
     "cut": "✂",
@@ -448,6 +454,10 @@ Screen {
     margin-right: 1;
 }
 
+#btn_overlay {
+    margin-left: 1;
+}
+
 /* ── Connection status ── */
 #conn_status {
     height: 1;
@@ -476,6 +486,7 @@ class MixerTUI(App):
         Binding("x", "auto_transition", "X-FADE", show=False),
         Binding("w", "wipe", "WIPE", show=False),
         Binding("d", "focus_duration", "Duration", show=False),
+        Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
         # F1-F9: direct cut to scene (bound dynamically in on_key)
     ]
@@ -485,19 +496,26 @@ class MixerTUI(App):
     pvw_scene_remote: reactive[str] = reactive("")
     transition_mode: reactive[str] = reactive("idle")
 
+    # Scene list — fetched from the server; drives the scene button row.
+    scenes: reactive[list] = reactive(list, layout=True)
+
     # Local PVW selection (TD's intent)
     pvw_selected: reactive[int] = reactive(-1, layout=True)
+    overlay_enabled: reactive[bool] = reactive(True, layout=True)
 
     connected: reactive[bool] = reactive(False)
 
-    def __init__(self, host: str, port: int, mixer: str, scenes: list[str]) -> None:
+    def __init__(self, host: str, port: int, mixer: str, overlay_otm: str, overlay_selector: str) -> None:
         super().__init__()
         self.avp_host = host
         self.avp_port = port
         self.mixer_name = mixer
-        self.scenes = scenes
+        self.overlay_otm_name = overlay_otm
+        self.overlay_selector_name = overlay_selector
         self._conn = AvpConnection(host, port)
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
+        self._scene_poll_counter = 0
+        self._overlay_toggle_in_progress = False
 
     # ── Layout ──────────────────────────────────────────────────────────────
 
@@ -517,8 +535,7 @@ class MixerTUI(App):
                 yield Static("READY", id="pvw_sub")
 
         with Horizontal(id="scenes_container"):
-            for i, name in enumerate(self.scenes):
-                yield SceneButton(i, name)
+            pass  # populated dynamically by watch_scenes
 
         with Horizontal(id="transition_bar"):
             yield Static("Mode: idle", id="trans_mode_label")
@@ -527,14 +544,13 @@ class MixerTUI(App):
             yield Static("Duration:", id="dur_label")
             yield Input("2.0", id="dur_input")
             yield Button("▶ WIPE", id="btn_wipe", variant="primary")
+            yield Button("Overlay: ON", id="btn_overlay", variant="primary")
 
         yield Footer()
 
     # ── On mount ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        if self.scenes:
-            self.pvw_selected = 0
         self._start_connection_loop()
         self._poll_status()
         self.call_later(self.action_show_help_panel)
@@ -546,22 +562,35 @@ class MixerTUI(App):
     # one worker — the poll worker was killing the connection loop on startup).
     @work(exclusive=True, thread=False, group="mixer_avp_connect")
     async def _start_connection_loop(self) -> None:
-        """Keep trying to connect; on success hand off to polling."""
+        """Keep trying to connect; on success fetch scenes and hand off to polling."""
         while True:
             if not self._conn.connected:
                 ok = await self._conn.ensure_connected()
                 self.connected = ok
                 if ok:
                     self._set_status_bar(False)
+                    await self._fetch_scenes()
                 else:
                     self._set_status_bar(True, f"Connecting to {self.avp_host}:{self.avp_port}…")
                     await asyncio.sleep(self._conn.RECONNECT_INTERVAL)
             else:
                 await asyncio.sleep(0.5)
 
+    async def _fetch_scenes(self) -> None:
+        """Fetch scene list from the server and update the reactive."""
+        resp = await self._conn.command(f"mixer.scenes {self.mixer_name}", raise_for_status=False)
+        if resp is None or resp.code != 201 or not resp.content:
+            return
+        try:
+            scenes = json.loads(resp.content.strip())
+            if isinstance(scenes, list) and scenes != self.scenes:
+                self.scenes = scenes
+        except Exception:
+            pass
+
     @work(exclusive=True, thread=False, group="mixer_avp_poll")
     async def _poll_status(self) -> None:
-        """Poll mixer.status every 500 ms and update reactive state."""
+        """Poll mixer.status every 500 ms; refresh scene list every 10 s."""
         while True:
             await asyncio.sleep(0.5)
             if not self._conn.connected:
@@ -579,6 +608,10 @@ class MixerTUI(App):
                     self.transition_mode = data.get("transition", "idle")
                 except Exception:
                     pass
+            self._scene_poll_counter += 1
+            if self._scene_poll_counter >= 20:  # every ~10 s
+                self._scene_poll_counter = 0
+                await self._fetch_scenes()
 
     # ── Reactive watchers ────────────────────────────────────────────────────
 
@@ -591,6 +624,22 @@ class MixerTUI(App):
         self.query_one("#pvw_scene_name", Static).update(name or "(none)")
         self._refresh_scene_buttons()
 
+    def watch_scenes(self, scenes: list) -> None:
+        try:
+            container = self.query_one("#scenes_container")
+        except NoMatches:
+            return
+        for btn in list(container.query(SceneButton)):
+            btn.remove()
+        for i, name in enumerate(scenes):
+            container.mount(SceneButton(i, name))
+        # Keep pvw_selected in-range; auto-select first scene if nothing selected yet.
+        if scenes and self.pvw_selected < 0:
+            self.pvw_selected = 0
+        elif self.pvw_selected >= len(scenes):
+            self.pvw_selected = len(scenes) - 1 if scenes else -1
+        self.call_after_refresh(self._refresh_scene_buttons)
+
     def watch_transition_mode(self, value: str) -> None:
         sym = TRANSITION_SYMBOLS.get(value, "?")
         label = self.query_one("#trans_mode_label", Static)
@@ -601,6 +650,14 @@ class MixerTUI(App):
         pvw = self.query_one("#pvw_panel")
         pgm.set_class(busy, "transitioning")
         pvw.set_class(busy, "transitioning")
+
+    def watch_overlay_enabled(self, value: bool) -> None:
+        try:
+            button = self.query_one("#btn_overlay", Button)
+            button.label = "Overlay: ON" if value else "Overlay: BYPASS"
+            button.variant = "primary" if value else "warning"
+        except NoMatches:
+            pass
 
     def watch_connected(self, value: bool) -> None:
         if value:
@@ -714,6 +771,45 @@ class MixerTUI(App):
     def action_refresh_status(self) -> None:
         self._poll_status()
 
+    def action_toggle_overlay(self) -> None:
+        if self._overlay_toggle_in_progress:
+            return
+        self._overlay_toggle_in_progress = True
+        self._set_overlay_enabled(not self.overlay_enabled)
+
+    @work(thread=False)
+    async def _set_overlay_enabled(self, enabled: bool) -> None:
+        try:
+            if not self._conn.connected:
+                self.notify("Connection lost", severity="error")
+                return
+
+            target_active = 1 if enabled else 0
+            # In bypass, keep the overlay filter's main input fed. If the main
+            # input stops while HTML overlay frames keep arriving, framesync
+            # buffers them inside the filter graph and grows GPU memory.
+            target_outputs = 2 if enabled else 3
+            commands = [
+                f"node.object.set {self.overlay_otm_name} outputs 3",
+                f"node.object.set {self.overlay_selector_name} active {target_active}",
+                f"node.object.set {self.overlay_otm_name} outputs {target_outputs}",
+            ]
+
+            for i, cmd in enumerate(commands):
+                if i > 0:
+                    await asyncio.sleep(OVERLAY_SETTLE_SECONDS)
+                resp = await self._conn.command(cmd, raise_for_status=False)
+                if resp is None:
+                    self.notify("Connection lost", severity="error")
+                    return
+                if resp.code >= 400:
+                    self.notify(f"Overlay toggle failed: {resp.code} {resp.status}", severity="error")
+                    return
+
+            self.overlay_enabled = enabled
+        finally:
+            self._overlay_toggle_in_progress = False
+
     @work(thread=False)
     async def _do_command(self, cmd: str) -> None:
         is_take = cmd.startswith(("mixer.cut", "mixer.fade", "mixer.wipe"))
@@ -778,6 +874,10 @@ class MixerTUI(App):
     def on_btn_wipe(self) -> None:
         self.action_wipe()
 
+    @on(Button.Pressed, "#btn_overlay")
+    def on_btn_overlay(self) -> None:
+        self.action_toggle_overlay()
+
     def on_scene_button_selected(self, event: SceneButton.Selected) -> None:
         self._select_pvw(event.index)
 
@@ -795,22 +895,16 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="avplumber host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
-    parser.add_argument(
-        "scenes",
-        nargs="+",
-        metavar="SCENE",
-        help="Scene names (must match mixer.scene definitions on the server)",
-    )
+    parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
+    parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
     args = parser.parse_args()
-
-    if len(args.scenes) > 9:
-        print("Warning: only the first 9 scenes will be mapped to number keys", file=sys.stderr)
 
     app = MixerTUI(
         host=args.host,
         port=args.port,
         mixer=args.mixer,
-        scenes=args.scenes,
+        overlay_otm=args.overlay_otm,
+        overlay_selector=args.overlay_selector,
     )
     app.run()
 

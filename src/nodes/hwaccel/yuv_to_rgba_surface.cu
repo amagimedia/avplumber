@@ -1,8 +1,6 @@
 // BT.709 LIMITED and FULL input -> Nonlinear (display-referred) full-range RGBA8 output via surface writes.
 // This is intended for OBS' standard linear-sRGB pipeline, where OBS will decode to linear on sampling.
 #include <cuda_runtime.h>
-#include <cuda_surface_types.h>
-#include <surface_functions.h>
 #include <stdint.h>
 #include <math.h>
 

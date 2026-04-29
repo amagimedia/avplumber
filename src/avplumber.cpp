@@ -875,6 +875,17 @@ public:
             cs << orch.status() << "\n";
         };
 
+        // mixer.scenes <mixer_name>
+        // Returns a JSON array of scene names registered with this mixer, sorted alphabetically.
+        commands_["mixer.scenes"] = [this](ClientStream &cs, std::string &arg) {
+            std::string mixer_name = strutils::trim(arg);
+            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
+            MixerOrchestrator orch(manager_->shared_from_this(), state, tl);
+            json arr = orch.sceneNames();
+            cs << arr << "\n";
+        };
+
         // mixer.init <mixer_name> <json_config>
         // Initialize MixerState with slot node names and global settings.
         commands_["mixer.init"] = [this](ClientStream &cs, std::string &arg) {

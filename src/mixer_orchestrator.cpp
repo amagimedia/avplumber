@@ -607,6 +607,16 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
                 scene_name, pvw_is_slot_a, midpoint_ms + margin_ms_, total_ms + margin_ms_).detach();
 }
 
+std::vector<std::string> MixerOrchestrator::sceneNames() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<std::string> names;
+    names.reserve(state_->scenes.size());
+    for (const auto& [name, _] : state_->scenes)
+        names.push_back(name);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 Parameters MixerOrchestrator::status() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     Parameters s;

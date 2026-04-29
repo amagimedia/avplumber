@@ -340,6 +340,10 @@ Media wipe to scene. If `duration_sec` omitted, probed from wipe file metadata. 
 
 Returns JSON: `{"pgm_scene":"fullcam1","pvw_scene":"","pgm_slot":"A","transition":"idle"}`
 
+```mixer.scenes <mixer_name>```
+
+Returns a JSON array of all registered scene names, sorted alphabetically. Example: `["fullcam1","pip","sidebyside"]`
+
 ## Example setup
 
 See `examples/mixer.avplumber` for a complete 2-camera setup with fullscreen and PiP scenes. Key points:

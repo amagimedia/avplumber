@@ -266,6 +266,7 @@ clean:
 clean_deps:
 	rm -r deps/cpr/build || true
 	rm -r deps/avcpp/build || true
+	rm deps/cuda_loader/*.o || true
 	cd deps/libklvanc && git clean -xdf || true
 	cd deps/libklscte35 && git clean -xdf || true
 

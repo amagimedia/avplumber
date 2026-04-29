@@ -76,5 +76,7 @@ public:
     void fade(const std::string& scene_name, double duration_sec);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec);
 
+    /// Returns the names of all registered scenes, sorted alphabetically.
+    std::vector<std::string> sceneNames() const;
     Parameters status() const;
 };
