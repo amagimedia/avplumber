@@ -1,0 +1,235 @@
+hwaccel.init { "name": "@drm", "type": "drm", "device": "/dev/dri/renderD128" }
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+queue.plan_capacity * 3
+
+
+# ============================================================
+# Input Layer: 3 synchronized SRT live sources
+#
+# All three realtime nodes share "sync_team" so avplumber
+# cooperates to keep their outputs wall-clock aligned.
+# ============================================================
+
+queue.plan_capacity sync1_pkt 511
+node.add { "type": "input", "url": "srt://ingest-1-qa.tellyo.com:9000?streamid=output/live/sync164bdf34f", "dst": "in_sync1_pkt", "group": "input_sync1", "name": "input_sync1", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_sync1_pkt", "wait_for_keyframe": true, "routing": { "?v:0": "sync1_pkt" }, "group": "input_sync1", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "sync1_pkt", "dst": "sync1_dec", "group": "input_sync1", "auto_restart": "group", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "realtime", "src": "sync1_dec", "dst": "sync1_rt", "set_pts": true, "team": "sync_team", "group": "input_sync1", "discontinuity_threshold": 10, "negative_time_tolerance": 0.016, "jitter_margin": 0.1, "initial_jitter_margin": 0.5 }
+node.add { "type": "force_fps", "fps": "30/1", "src": "sync1_rt", "dst": "sync1_fps", "group": "input_sync1" }
+node.add { "type": "one_to_many", "name": "otm_sync1", "src": "sync1_fps", "dst": ["sync1_a", "sync1_b"], "outputs": 1, "timeline": "mixer_tl", "group": "input_sync1" }
+
+queue.plan_capacity sync2_pkt 511
+node.add { "type": "input", "url": "srt://ingest-1-qa.tellyo.com:9000?streamid=output/live/sync2e446f12e", "dst": "in_sync2_pkt", "group": "input_sync2", "name": "input_sync2", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_sync2_pkt", "wait_for_keyframe": true, "routing": { "?v:0": "sync2_pkt" }, "group": "input_sync2", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "sync2_pkt", "dst": "sync2_dec", "group": "input_sync2", "auto_restart": "group", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "realtime", "src": "sync2_dec", "dst": "sync2_rt", "set_pts": true, "team": "sync_team", "group": "input_sync2", "discontinuity_threshold": 10, "negative_time_tolerance": 0.016, "jitter_margin": 0.1, "initial_jitter_margin": 0.5 }
+node.add { "type": "force_fps", "fps": "30/1", "src": "sync2_rt", "dst": "sync2_fps", "group": "input_sync2" }
+node.add { "type": "one_to_many", "name": "otm_sync2", "src": "sync2_fps", "dst": ["sync2_a", "sync2_b"], "outputs": 0, "timeline": "mixer_tl", "group": "input_sync2" }
+
+queue.plan_capacity sync3_pkt 511
+node.add { "type": "input", "url": "srt://ingest-1-qa.tellyo.com:9000?streamid=output/live/sync3db1fd89c", "dst": "in_sync3_pkt", "group": "input_sync3", "name": "input_sync3", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_sync3_pkt", "wait_for_keyframe": true, "routing": { "?v:0": "sync3_pkt" }, "group": "input_sync3", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "sync3_pkt", "dst": "sync3_dec", "group": "input_sync3", "auto_restart": "group", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "realtime", "src": "sync3_dec", "dst": "sync3_rt", "set_pts": true, "team": "sync_team", "group": "input_sync3", "discontinuity_threshold": 10, "negative_time_tolerance": 0.016, "jitter_margin": 0.1, "initial_jitter_margin": 0.5 }
+node.add { "type": "force_fps", "fps": "30/1", "src": "sync3_rt", "dst": "sync3_fps", "group": "input_sync3" }
+node.add { "type": "one_to_many", "name": "otm_sync3", "src": "sync3_fps", "dst": ["sync3_a", "sync3_b"], "outputs": 0, "timeline": "mixer_tl", "group": "input_sync3" }
+
+# ============================================================
+# Input Layer: 2 local mp4 loops
+# ============================================================
+
+node.add { "type": "input_rec", "url": "/home/fedora/bbl_alt_420.mp4", "dst": "in_mp4_1_pkt", "group": "input_mp4_1", "name": "input_mp4_1", "initial_timeout": 20, "timeout": 3942000000, "loop": true }
+node.add { "type": "demux", "src": "in_mp4_1_pkt", "wait_for_keyframe": false, "routing": { "?v:0": "mp4_1_pkt" }, "group": "input_mp4_1", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "mp4_1_pkt", "dst": "mp4_1_dec", "group": "input_mp4_1", "pixel_format": "?cuda", "hwaccel": "@gpu", "auto_restart": "group" }
+node.add { "type": "realtime", "src": "mp4_1_dec", "dst": "mp4_1_rt", "set_pts": true, "group": "input_mp4_1" }
+node.add { "type": "force_fps", "fps": "30/1", "src": "mp4_1_rt", "dst": "mp4_1_fps", "group": "input_mp4_1" }
+node.add { "type": "one_to_many", "name": "otm_mp4_1", "src": "mp4_1_fps", "dst": ["mp4_1_a", "mp4_1_b"], "outputs": 0, "timeline": "mixer_tl", "group": "input_mp4_1" }
+
+node.add { "type": "input_rec", "url": "/home/fedora/nba.mp4", "dst": "in_mp4_2_pkt", "group": "input_mp4_2", "name": "input_mp4_2", "initial_timeout": 20, "timeout": 3942000000, "loop": true }
+node.add { "type": "demux", "src": "in_mp4_2_pkt", "wait_for_keyframe": false, "routing": { "?v:0": "mp4_2_pkt" }, "group": "input_mp4_2", "auto_restart": "group" }
+node.add { "type": "dec_video", "src": "mp4_2_pkt", "dst": "mp4_2_dec", "group": "input_mp4_2", "pixel_format": "?cuda", "hwaccel": "@gpu", "auto_restart": "group" }
+node.add { "type": "realtime", "src": "mp4_2_dec", "dst": "mp4_2_rt", "set_pts": true, "group": "input_mp4_2" }
+node.add { "type": "force_fps", "fps": "30/1", "src": "mp4_2_rt", "dst": "mp4_2_fps", "group": "input_mp4_2" }
+node.add { "type": "one_to_many", "name": "otm_mp4_2", "src": "mp4_2_fps", "dst": ["mp4_2_a", "mp4_2_b"], "outputs": 0, "timeline": "mixer_tl", "group": "input_mp4_2" }
+
+# ============================================================
+# Per-input crop/scale chains (one per source per compositor slot)
+#
+# Source index assignments for cuda_rect_overlay:
+#   0 = sync1, 1 = sync2, 2 = sync3, 3 = mp4_1, 4 = mp4_2
+#
+# Initial scales match initial PGM scene (fullsync1).
+# The mixer orchestrator reconfigures these graphs on scene change.
+# ============================================================
+
+# scale_cuda interp_algo: lanczos (sharper). Wipe leg cannot use scale_cuda on alpha.
+node.add { "type": "filter_video", "name": "cs_sync1_a", "src": "sync1_a", "dst": "sync1_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync1", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_sync1_b", "src": "sync1_b", "dst": "sync1_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync1", "auto_restart": "on" }
+
+node.add { "type": "filter_video", "name": "cs_sync2_a", "src": "sync2_a", "dst": "sync2_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync2", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_sync2_b", "src": "sync2_b", "dst": "sync2_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync2", "auto_restart": "on" }
+
+node.add { "type": "filter_video", "name": "cs_sync3_a", "src": "sync3_a", "dst": "sync3_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync3", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_sync3_b", "src": "sync3_b", "dst": "sync3_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_sync3", "auto_restart": "on" }
+
+node.add { "type": "filter_video", "name": "cs_mp4_1_a", "src": "mp4_1_a", "dst": "mp4_1_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_mp4_1", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_mp4_1_b", "src": "mp4_1_b", "dst": "mp4_1_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_mp4_1", "auto_restart": "on" }
+
+node.add { "type": "filter_video", "name": "cs_mp4_2_a", "src": "mp4_2_a", "dst": "mp4_2_a_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_mp4_2", "auto_restart": "on" }
+node.add { "type": "filter_video", "name": "cs_mp4_2_b", "src": "mp4_2_b", "dst": "mp4_2_b_scaled", "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "hwaccel": "@gpu", "group": "input_mp4_2", "auto_restart": "on" }
+
+# ============================================================
+# Scene Rendering Layer: fixed 2-slot compositors
+# ============================================================
+
+# Slot A compositor (initial PGM: fullscreen sync1 only)
+node.add { "type": "cuda_rect_overlay", "name": "comp_a", "src": ["sync1_a_scaled", "sync2_a_scaled", "sync3_a_scaled", "mp4_1_a_scaled", "mp4_2_a_scaled"], "dst": "scene_a_out", "hwaccel": "@gpu", "width": 1920, "height": 1080, "sw_format": "nv12", "layers": [{"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}], "active_inputs": 1, "timeline": "mixer_tl", "group": "mixer_a" }
+node.add { "type": "force_fps", "name": "norm_a", "fps": "30/1", "src": "scene_a_out", "dst": "scene_a_norm", "group": "mixer_a" }
+node.add { "type": "one_to_many", "name": "otm_scene_a", "src": "scene_a_norm", "dst": ["scA_direct", "scA_trans"], "outputs": 1, "timeline": "mixer_tl", "group": "mixer_a" }
+
+# Slot B compositor (initial PVW: idle)
+node.add { "type": "cuda_rect_overlay", "name": "comp_b", "src": ["sync1_b_scaled", "sync2_b_scaled", "sync3_b_scaled", "mp4_1_b_scaled", "mp4_2_b_scaled"], "dst": "scene_b_out", "hwaccel": "@gpu", "width": 1920, "height": 1080, "sw_format": "nv12", "layers": [{"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}, {"dst_x": 0, "dst_y": 0}], "active_inputs": 0, "timeline": "mixer_tl", "group": "mixer_b" }
+node.add { "type": "force_fps", "name": "norm_b", "fps": "30/1", "src": "scene_b_out", "dst": "scene_b_norm", "group": "mixer_b" }
+node.add { "type": "one_to_many", "name": "otm_scene_b", "src": "scene_b_norm", "dst": ["scB_direct", "scB_trans"], "outputs": 0, "timeline": "mixer_tl", "group": "mixer_b" }
+
+# ============================================================
+# Output Selection Layer
+# ============================================================
+
+node.add { "type": "source_switcher", "name": "out_sel", "src": ["scA_direct", "scB_direct", "trans_out"], "dst": "mixer_out", "active": 0, "timeline": "mixer_tl", "group": "mixer" }
+
+# Normalize mixer_out first, then split for the direct and wipe-overlay legs.
+# Using the same normalized source avoids a PTS jump when wipe_sel switches back to direct.
+node.add { "type": "force_fps", "name": "wipe_base_fps", "fps": "30/1", "src": "mixer_out", "dst": "final_wipe_pre", "group": "mixer" }
+node.add { "type": "one_to_many", "name": "otm_final", "src": "final_wipe_pre", "dst": ["final_direct", "final_wipe_in"], "outputs": 1, "timeline": "mixer_tl", "group": "mixer" }
+node.add { "type": "source_switcher", "name": "wipe_sel", "src": ["final_direct", "wipe_overlay_out"], "dst": "final_out", "active": 0, "timeline": "mixer_tl", "group": "mixer" }
+
+# ============================================================
+# HTML Overlay Source
+#
+# HTML renderer sends RGBA frames over DMA-BUF (UNIX socket).
+# drm_prime_to_cuda imports them into CUDA, convert_cuda adds
+# the alpha plane as YUVA420P for overlay_many_cuda below.
+# ============================================================
+
+node.add { "type": "ipc_dmabuf_source", "name": "html_overlay_src", "group": "overlay_src", "auto_restart": "group", "dst": "html_dma", "socket": "/tmp/electron-hwaccel/test.sock", "hwaccel": "@drm" }
+node.add { "type": "drm_prime_to_cuda", "name": "html_to_cuda", "group": "overlay_src", "auto_restart": "group", "src": "html_dma", "dst": "html_cuda", "hwaccel": "@gpu" }
+node.add { "type": "force_fps", "fps": "30/1", "name": "html_fps", "group": "overlay_src", "src": "html_cuda", "dst": "html_cuda_fps" }
+node.add { "type": "filter_video", "graph": "convert_cuda=format=yuva420p", "group": "overlay_src", "auto_restart": "group", "name": "html_convert", "src": "html_cuda_fps", "dst": "html_overlay_yuva", "dst_width": 1920, "dst_height": 1080, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+node.add { "type": "realtime", "src": "html_overlay_yuva", "dst": "html_overlay_rt", "set_pts": true, "group": "overlay_src" }
+node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "yuva420p", "group": "overlay_src", "src": "html_overlay_rt", "dst": "html_overlay_assumed", "auto_restart": "group" }
+
+# ============================================================
+# Output chain with independently switchable HTML overlay
+#
+# overlay_many_cuda requires YUV420P main; scale_cuda converts
+# NV12 <-> YUV420P on GPU (same pattern as the wipe overlay).
+# The pre-overlay force_fps provides frame-rate metadata to the filter.
+# Bypass keeps both one_to_many outputs enabled: overlay_sel selects the
+# direct output, while pre_overlay still feeds overlay_many_cuda so the HTML
+# overlay input is not buffered indefinitely inside the filter graph.
+# ============================================================
+
+node.add { "type": "one_to_many", "name": "otm_html_overlay", "src": "final_out", "dst": ["no_overlay", "pre_overlay"], "outputs": 2, "group": "output" }
+
+node.add { "type": "force_fps", "name": "pre_overlay_fps", "fps": "30/1", "src": "pre_overlay", "dst": "pre_overlay_fps", "group": "output" }
+node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "output", "src": "pre_overlay_fps", "dst": "pre_overlay_norm", "auto_restart": "panic" }
+node.add { "type": "filter_video", "name": "html_overlay_filter", "src": ["pre_overlay_norm", "html_overlay_assumed"], "dst": "post_overlay", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "output", "auto_restart": "on" }
+node.add { "type": "source_switcher", "name": "overlay_sel", "src": ["no_overlay", "post_overlay"], "dst": "video_output", "active": 1, "group": "output" }
+
+# Keep a single post-selector CUDA frames pool in front of the encoder.
+# Otherwise the first bypass asks NVENC/FFmpeg to accept raw compositor frames
+# after overlay-filter frames, which grows a second lazy hardware pool.
+node.add { "type": "force_fps", "name": "enc_input_fps", "fps": "30/1", "src": "video_output", "dst": "enc_input_fps", "group": "output" }
+node.add { "type": "filter_video", "name": "enc_input_hwctx", "src": "enc_input_fps", "dst": "enc_input_hwctx", "graph": "scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "output", "auto_restart": "on" }
+node.add { "type": "force_fps", "name": "pre_enc_fps", "fps": "30/1", "src": "enc_input_hwctx", "dst": "pre_enc_fps", "group": "output" }
+node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "output", "src": "pre_enc_fps", "dst": "pre_enc_norm", "auto_restart": "panic" }
+
+node.add { "type": "enc_video", "src": "pre_enc_norm", "dst": "v_enc", "group": "output", "name": "enc", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "14000k", "bufsize": "20000k", "g": 60, "bf": 0, "preset": "p3", "profile": "high" } }
+node.add { "type": "mux", "src": ["v_enc"], "dst": "mux_out", "group": "output", "ts_sort_wait": 0 }
+node.add { "type": "output", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output", "src": "mux_out", "group": "output", "auto_restart": "panic" }
+
+# ============================================================
+# Wipe subgraph (pre-created, not started; mixer_wipe group is
+# started by the orchestrator at wipe begin and stopped at wipe end)
+# ============================================================
+
+node.add { "type": "input_rec", "name": "wipe_input", "url": "", "loop": false, "dst": "wipe_raw_pkt", "group": "mixer_wipe" }
+node.add { "type": "demux", "name": "wipe_demux", "src": "wipe_raw_pkt", "routing": { "v:0": "wipe_v_pkt" }, "group": "mixer_wipe" }
+node.add { "type": "dec_video", "name": "wipe_dec", "src": "wipe_v_pkt", "dst": "wipe_dec_out", "pixel_format": "?cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
+# scale_cuda has no yuva420p support, so the software scale→format→hwupload pipeline is used here.
+# overlay_many_cuda requires the overlay to be >= main size, so scaling to 1920x1080 is mandatory.
+node.add { "type": "filter_video", "name": "wipe_fmt", "src": "wipe_dec_out", "dst": "wipe_fmt_out", "graph": "format=yuva420p,scale=1920:1080:flags=lanczos,hwupload_cuda", "hwaccel": "@gpu", "group": "mixer_wipe" }
+node.add { "type": "realtime", "name": "wipe_rt", "src": "wipe_fmt_out", "dst": "wipe_rt_out", "set_pts": true, "group": "mixer_wipe" }
+# Normalize wipe overlay to 30fps so both wipe_overlay inputs share the same PTS grid as
+# final_wipe_in (also 30fps via wipe_base_fps), letting framesync advance both simultaneously.
+node.add { "type": "force_fps", "name": "wipe_rt_fps", "fps": "30/1", "src": "wipe_rt_out", "dst": "wipe_rt_fps_out", "group": "mixer_wipe" }
+# overlay_many_cuda requires YUV420P main; scale_cuda converts NV12<->YUV420P on GPU.
+node.add { "type": "filter_video", "name": "wipe_overlay", "src": ["final_wipe_in", "wipe_rt_fps_out"], "dst": "wipe_overlay_out", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "mixer_wipe" }
+
+# ============================================================
+# Initialize Mixer State
+# ============================================================
+
+mixer.init mixer { "timeline": "mixer_tl", "hwaccel": "@gpu", "fps_num": 30, "fps_den": 1, "source_switcher": "out_sel", "initial_pgm_slot": "A", "initial_pgm_scene": "fullsync1", "wipe_otm": "otm_final", "wipe_base_fps": "wipe_base_fps", "wipe_selector": "wipe_sel", "wipe_group": "mixer_wipe", "wipe_input_node": "wipe_input", "wipe_tail_edge": "wipe_rt_fps_out", "wipe_flush_edges": ["wipe_raw_pkt", "wipe_v_pkt", "wipe_dec_out", "wipe_fmt_out", "wipe_rt_out", "wipe_rt_fps_out", "final_wipe_pre", "final_wipe_in", "wipe_overlay_out"], "slot_a": { "compositor": "comp_a", "norm_ts": "norm_a", "post_otm": "otm_scene_a" }, "slot_b": { "compositor": "comp_b", "norm_ts": "norm_b", "post_otm": "otm_scene_b" } }
+
+# Register sources (name, otm_node, input_index, cs_node_a, cs_node_b)
+mixer.source mixer sync1 otm_sync1 0 cs_sync1_a cs_sync1_b
+mixer.source mixer sync2 otm_sync2 1 cs_sync2_a cs_sync2_b
+mixer.source mixer sync3 otm_sync3 2 cs_sync3_a cs_sync3_b
+mixer.source mixer mp4_1 otm_mp4_1 3 cs_mp4_1_a cs_mp4_1_b
+mixer.source mixer mp4_2 otm_mp4_2 4 cs_mp4_2_a cs_mp4_2_b
+
+# Define scenes
+# --- full-screen scenes (one source per scene) ---
+mixer.scene mixer fullsync1 { "sources": { "sync1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer fullsync2 { "sources": { "sync2": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer fullsync3 { "sources": { "sync3": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer fullmp4_1 { "sources": { "mp4_1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer fullmp4_2 { "sources": { "mp4_2": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+
+# --- multiviewer: 5-source tile layout ---
+# Top row: sync1 | sync2 | sync3  (each 640x360 at y=0)
+# Bottom row (centred): mp4_1 | mp4_2  (each 640x360 at y=360, x offset by 320 to centre)
+mixer.scene mixer multiviewer { "sources": { "sync1": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 }, "sync2": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 640, "dst_y": 0 }, "sync3": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 1280, "dst_y": 0 }, "mp4_1": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 320, "dst_y": 360 }, "mp4_2": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 960, "dst_y": 360 } } }
+
+# --- sync test: 3 sync sources ---
+# Horizontally moving bars will appear at identical x-offsets in all three panels
+# if streams are in sync; any desync shows as a visible discontinuity at the panel edges.
+mixer.scene mixer synctest { "sources": { "sync1": { "graph": "scale_cuda=w=1920:h=300:interp_algo=lanczos", "dst_x": 0, "dst_y": 180 }, "sync2": { "graph": "scale_cuda=w=1920:h=300:interp_algo=lanczos", "dst_x": 0, "dst_y": 480 }, "sync3": { "graph": "scale_cuda=w=1920:h=300:interp_algo=lanczos", "dst_x": 0, "dst_y": 780 } } }
+
+# ============================================================
+# Start all groups
+# ============================================================
+
+detach retry group.start input_sync1
+detach retry group.start input_sync2
+detach retry group.start input_sync3
+detach retry group.start input_mp4_1
+detach retry group.start input_mp4_2
+detach retry group.start mixer_a
+detach retry group.start mixer_b
+detach retry group.start mixer
+detach retry group.start overlay_src
+detach retry group.start output
+
+# ============================================================
+# Usage examples (send via TCP control socket):
+#
+#   mixer.cut mixer fullsync1                        -- switch to sync source 1 fullscreen
+#   mixer.cut mixer fullsync2                        -- switch to sync source 2 fullscreen
+#   mixer.cut mixer fullsync3                        -- switch to sync source 3 fullscreen
+#   mixer.cut mixer synctest                         -- side-by-side sync sources for sync testing
+#   mixer.cut mixer multiviewer                      -- 5-source tile layout
+#   mixer.cut mixer fullmp4_1                        -- mp4 loop 1 fullscreen
+#   mixer.cut mixer fullmp4_2                        -- mp4 loop 2 fullscreen
+#   mixer.fade mixer synctest 2                      -- 2-second crossfade to synctest scene
+#   mixer.wipe mixer fullsync1 /path/to/wipe.mov     -- media wipe to sync source 1
+#   mixer.status mixer                               -- show current PGM/PVW/transition state
+#   node.object.set otm_html_overlay outputs 3       -- bypass output; keep overlay branch fed
+#   node.object.set overlay_sel active 0             -- select bypass path
+#   node.object.set otm_html_overlay outputs 2       -- feed HTML overlay branch only
+#   node.object.set overlay_sel active 1             -- select HTML overlay path
+#   realtime.team.reset sync_team                    -- manually reset sync group
+# ============================================================

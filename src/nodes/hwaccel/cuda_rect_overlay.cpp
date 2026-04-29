@@ -12,10 +12,12 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -43,6 +45,25 @@ struct LayerSpec {
     int crop_y = 0;
     int crop_w= 0;
     int crop_h = 0;
+
+    bool operator==(const LayerSpec &other) const {
+        return dst_x == other.dst_x && dst_y == other.dst_y &&
+               crop_x == other.crop_x && crop_y == other.crop_y &&
+               crop_w == other.crop_w && crop_h == other.crop_h;
+    }
+};
+
+struct DrawOp {
+    const av::VideoFrame *src = nullptr;
+    int src_w = 0;
+    int src_h = 0;
+    LayerSpec layer;
+
+    bool operator==(const DrawOp &other) const {
+        return (src != nullptr) == (other.src != nullptr) &&
+               src_w == other.src_w && src_h == other.src_h &&
+               layer == other.layer;
+    }
 };
 
 static bool frameUsable(const av::VideoFrame &f) {
@@ -265,6 +286,62 @@ static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
                             value, (unsigned int)bw));
 }
 
+static uint8_t blackLumaValue(const AVFrame *color_src) {
+    return color_src && color_src->color_range == AVCOL_RANGE_JPEG ? 0 : 16;
+}
+
+static bool planeClearValue(AVPixelFormat fmt, const AVFrame *color_src, int plane, uint8_t &value) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    if (!d)
+        return false;
+
+    const int alpha_p = alphaPlaneIndex(fmt);
+    if (plane == alpha_p) {
+        value = 255;
+        return true;
+    }
+
+    if (d->flags & AV_PIX_FMT_FLAG_RGB) {
+        // Packed RGB without alpha can be cleared with all-zero bytes.
+        // Packed RGBA needs a byte pattern to make opaque black; leave it unsupported here.
+        if ((d->flags & AV_PIX_FMT_FLAG_ALPHA) && alpha_p < 0)
+            return false;
+        value = 0;
+        return true;
+    }
+
+    if (fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_NV21) {
+        value = plane == 0 ? blackLumaValue(color_src) : 128;
+        return true;
+    }
+
+    const int planes = numPlanes(fmt);
+    if (planes == 1) {
+        if (d->nb_components == 1) {
+            value = blackLumaValue(color_src);
+            return true;
+        }
+        // Packed YUV (e.g. yuyv422) requires a repeating Y/Cb/Y/Cr pattern.
+        return false;
+    }
+
+    value = (plane == 1 || plane == 2) ? 128 : blackLumaValue(color_src);
+    return true;
+}
+
+static bool fillFrameBlack(AVPixelFormat fmt, AVFrame *f, const AVFrame *color_src) {
+    const int planes = numPlanes(fmt);
+    for (int p = 0; p < planes && p < AV_NUM_DATA_POINTERS; ++p) {
+        if (!f->data[p])
+            continue;
+        uint8_t value = 0;
+        if (!planeClearValue(fmt, color_src, p, value))
+            return false;
+        fillPlaneRect(fmt, f, p, 0, 0, f->width, f->height, value);
+    }
+    return true;
+}
+
 } // namespace
 
 class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
@@ -291,6 +368,10 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
     std::atomic<uint32_t> active_inputs_{~0u};
+    std::atomic<uint64_t> canvas_clear_generation_{1};
+    uint32_t last_composited_active_inputs_ = ~0u;
+    std::vector<DrawOp> last_draw_ops_;
+    std::unordered_map<uintptr_t, uint64_t> surface_clear_generation_;
 
     void freeHwContexts() {
         av_buffer_unref(&out_frames_ref_);
@@ -357,6 +438,55 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         return ctx ? ctx->sw_format : AV_PIX_FMT_NONE;
     }
 
+    void markCanvasDirty() {
+        canvas_clear_generation_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void clearCanvasIfNeeded(av::VideoFrame &outf, const AVFrame *color_src) {
+        const uintptr_t surface_key = (uintptr_t)outf.raw()->data[0];
+        const uint64_t generation = canvas_clear_generation_.load(std::memory_order_relaxed);
+        if (surface_clear_generation_[surface_key] == generation)
+            return;
+        if (!fillFrameBlack(sw_fmt_, outf.raw(), color_src))
+            throw Error("cuda_rect_overlay: unsupported sw_format for scene-change canvas clear");
+        surface_clear_generation_[surface_key] = generation;
+    }
+
+    std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame *> &sources,
+                                       const std::vector<LayerSpec> &layers) const {
+        std::vector<DrawOp> ops;
+        ops.reserve(std::min(sources.size(), layers.size()));
+        for (size_t i = 0; i < sources.size() && i < layers.size(); ++i) {
+            const av::VideoFrame *srcp = sources[i];
+            if (!srcp || !srcp->raw()) {
+                ops.push_back({});
+                continue;
+            }
+            LayerSpec L = layers[i];
+            // 0 means "remaining source extent from the crop origin".
+            if (L.crop_w <= 0) L.crop_w = srcp->width()  - L.crop_x;
+            if (L.crop_h <= 0) L.crop_h = srcp->height() - L.crop_y;
+            if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()) ||
+                !clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w_, canvas_h_)) {
+                ops.push_back({});
+                continue;
+            }
+            const int ax = chromaXAlign(sw_fmt_);
+            const int ay = chromaYAlign(sw_fmt_);
+            L.crop_x = alignCoord(L.crop_x, ax);
+            L.crop_y = alignCoord(L.crop_y, ay);
+            L.dst_x = alignCoord(L.dst_x, ax);
+            L.dst_y = alignCoord(L.dst_y, ay);
+            if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()) ||
+                !clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w_, canvas_h_)) {
+                ops.push_back({});
+                continue;
+            }
+            ops.push_back({srcp, srcp->width(), srcp->height(), L});
+        }
+        return ops;
+    }
+
     void processComposite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
                           const av::VideoFrame *metadata_src) {
         ensureCudaDevice();
@@ -374,29 +504,18 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         outf.setComplete(true);
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
+        std::vector<DrawOp> ops = resolveDrawOps(sources, layers);
+        if (ops != last_draw_ops_) {
+            markCanvasDirty();
+            last_draw_ops_ = ops;
+        }
+        clearCanvasIfNeeded(outf, metadata_src ? metadata_src->raw() : nullptr);
 
-        for (size_t i = 0; i < sources.size() && i < layers.size(); ++i) {
-            const av::VideoFrame *srcp = sources[i];
-            if (!srcp || !srcp->raw())
+        for (const DrawOp &op : ops) {
+            const av::VideoFrame *srcp = op.src;
+            if (!srcp)
                 continue;
-            LayerSpec L = layers[i];
-            // 0 means "remaining source extent from the crop origin".
-            if (L.crop_w <= 0) L.crop_w = srcp->width()  - L.crop_x;
-            if (L.crop_h <= 0) L.crop_h = srcp->height() - L.crop_y;
-            if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()))
-                continue;
-            if (!clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w_, canvas_h_))
-                continue;
-            const int ax = chromaXAlign(sw_fmt_);
-            const int ay = chromaYAlign(sw_fmt_);
-            L.crop_x = alignCoord(L.crop_x, ax);
-            L.crop_y = alignCoord(L.crop_y, ay);
-            L.dst_x = alignCoord(L.dst_x, ax);
-            L.dst_y = alignCoord(L.dst_y, ay);
-            if (!clipRect(L.crop_x, L.crop_y, L.crop_w, L.crop_h, srcp->width(), srcp->height()))
-                continue;
-            if (!clipRect(L.dst_x, L.dst_y, L.crop_w, L.crop_h, canvas_w_, canvas_h_))
-                continue;
+            const LayerSpec &L = op.layer;
 
             if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,
                                  L.crop_h, L.dst_x, L.dst_y))
@@ -499,6 +618,10 @@ public:
                     break;
                 }
             }
+        }
+        if (active_mask != last_composited_active_inputs_) {
+            markCanvasDirty();
+            last_composited_active_inputs_ = active_mask;
         }
         auto isActive = [active_mask](size_t i) { return (active_mask & (1u << i)) != 0; };
 
@@ -684,11 +807,14 @@ public:
 
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "active_inputs") {
-            active_inputs_.store(parseBitmask(value), std::memory_order_relaxed);
+            const uint32_t new_mask = parseBitmask(value);
+            if (active_inputs_.exchange(new_mask, std::memory_order_relaxed) != new_mask)
+                markCanvasDirty();
         } else if (key == "layers") {
             auto new_layers = parseLayersArray(value);
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
+            markCanvasDirty();
         }
     }
 
