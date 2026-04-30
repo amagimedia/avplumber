@@ -114,10 +114,10 @@ detach retry group.start output
 # ============================================================
 # Usage examples (send via TCP control socket):
 #
-#   mixer.cut mixer pip                          -- instant switch to PiP scene
-#   mixer.fade mixer fullcam1 3                  -- 3-second crossfade to fullscreen cam1
-#   mixer.wipe mixer pip /path/to/wipe.mov       -- media wipe to PiP (duration probed from file)
-#   mixer.wipe mixer fullcam1 /path/to/wipe.mov 2.5  -- media wipe with explicit duration
+#   mixer.cut {"mixer":"mixer","scene":"pip"}                                      -- instant switch to PiP scene
+#   mixer.fade {"mixer":"mixer","scene":"fullcam1","duration_sec":3}               -- 3-second crossfade to fullscreen cam1
+#   mixer.wipe {"mixer":"mixer","scene":"pip","wipe_file":"/path/to/wipe.mov"}     -- media wipe to PiP (duration probed from file)
+#   mixer.wipe {"mixer":"mixer","scene":"fullcam1","wipe_file":"/path/to/wipe.mov","duration_sec":2.5} -- media wipe with explicit duration
 #   mixer.status mixer                           -- show current PGM/PVW/transition state
 #   timeline.dump mixer_tl                       -- inspect all scheduled timeline entries
 # ============================================================

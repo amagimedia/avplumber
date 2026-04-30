@@ -740,17 +740,17 @@ mixer.preview scene_name
 Load scene into preview slot (build renderer, but don't switch yet).
 
 ```
-mixer.cut [scene_name]
+mixer.cut {"mixer":"mixer","scene":"scene_name"}
 ```
 Hard cut to scene (loads into preview first if not already there).
 
 ```
-mixer.fade scene_name duration_sec
+mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0}
 ```
 Crossfade to scene over duration.
 
 ```
-mixer.wipe scene_name wipe_file [duration_sec]
+mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/to/wipe.mov","duration_sec":2.0}
 ```
 Media wipe to scene. If duration not specified, read from file metadata.
 

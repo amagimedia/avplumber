@@ -738,18 +738,22 @@ class MixerTUI(App):
     def _mixer_take_in_progress(self) -> bool:
         return self.transition_mode != "idle"
 
+    def _mixer_command(self, command: str, **payload) -> str:
+        payload.setdefault("mixer", self.mixer_name)
+        return f"mixer.{command} {json.dumps(payload, separators=(',', ':'))}"
+
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def action_cut(self) -> None:
         scene = self._pvw_scene_name()
         if scene:
-            self._do_command(f"mixer.cut {self.mixer_name} {scene}")
+            self._do_command(self._mixer_command("cut", scene=scene))
 
     def action_auto_transition(self) -> None:
         scene = self._pvw_scene_name()
         if scene:
             dur = self._duration()
-            self._do_command(f"mixer.fade {self.mixer_name} {scene} {dur}")
+            self._do_command(self._mixer_command("fade", scene=scene, duration_sec=dur))
 
     def action_wipe(self) -> None:
         if self._mixer_take_in_progress():
@@ -760,7 +764,7 @@ class MixerTUI(App):
 
     def _do_wipe(self, scene: str, path: Optional[str]) -> None:
         if path:
-            self._do_command(f"mixer.wipe {self.mixer_name} {scene} {path}")
+            self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=path))
 
     def action_focus_duration(self) -> None:
         try:
@@ -856,7 +860,7 @@ class MixerTUI(App):
             if 1 <= fnum <= 9:
                 idx = fnum - 1
                 if 0 <= idx < len(self.scenes):
-                    self._do_command(f"mixer.cut {self.mixer_name} {self.scenes[idx]}")
+                    self._do_command(self._mixer_command("cut", scene=self.scenes[idx]))
                     event.stop()
                     return
 

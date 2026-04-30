@@ -144,6 +144,17 @@ void MixerOrchestrator::ensureIdle() const {
         throw Error("mixer: transition already in progress");
 }
 
+int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
+    int64_t now = wallclock.pts();
+    int64_t earliest = now + margin_ms_;
+    if (requested_start_pts_ms < 0)
+        return earliest;
+    if (requested_start_pts_ms < earliest)
+        throw Error("mixer: start_pts_ms must be at least " + std::to_string(margin_ms_) +
+                    "ms in the future");
+    return requested_start_pts_ms;
+}
+
 void MixerOrchestrator::defineSource(const std::string& name, const std::string& otm_node, int input_index,
                                       const std::string& cs_node_a, const std::string& cs_node_b) {
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -228,7 +239,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 // Caller must hold state_->mutex.
 // Returns the T_cleanup PTS (wallclock ms) so the caller can schedule the flip.
 // ---------------------------------------------------------------------------
-int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
+int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
     loadSceneIntoSlot(pvw_is_slot_a, scene_name);
@@ -237,7 +248,7 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name) {
     uint32_t pvw_bit = state_->pvwOutputBit();
 
     int64_t T_prep = wallclock.pts();
-    int64_t T_cut = T_prep + margin_ms_;
+    int64_t T_cut = start_pts_ms;
     const auto& new_slot = state_->pvwSlot();
     const auto& old_slot = state_->pgmSlot();
 
@@ -316,14 +327,15 @@ void MixerOrchestrator::deferredCleanup(
 // cut: PTS-scheduled hard cut.  Graph work + timeline entries happen now;
 // state flip is deferred until the timeline entries have taken effect.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::cut(const std::string& scene_name) {
+void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
 
+    int64_t T_cut = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Cut;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    int64_t T_cleanup = cutInternal(scene_name);
+    int64_t T_cleanup = cutInternal(scene_name, T_cut);
 
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
     std::thread(deferredCleanup, nodes_, state_,
@@ -335,10 +347,11 @@ void MixerOrchestrator::cut(const std::string& scene_name) {
 // fade: crossfade transition.  All timeline values are computed from the
 // pre-flip state.  The state flip + transition node deletion are deferred.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec) {
+void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
 
+    int64_t T_start = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
 
     // Capture all needed values from pre-flip state
@@ -375,11 +388,10 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec)
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
     // 4–5. Timeline: priming post-scene otms (direct+trans) then visible-path switches
-    int64_t T_prep = wallclock.pts();
+    int64_t T_prep = T_start - margin_ms_;
     timeline_->set(state_->slot_a.post_otm_name, "outputs", T_prep, Parameters(3u)); // 0b11 warmup
     timeline_->set(state_->slot_b.post_otm_name, "outputs", T_prep, Parameters(3u));
 
-    int64_t T_start = wallclock.pts() + margin_ms_;
     int64_t T_end = T_start + (int64_t)(duration_sec * 1000);
 
     // At T_start: switch output to transition
@@ -564,7 +576,54 @@ void MixerOrchestrator::wipeThread(
 // The wipe subgraph (group wipe_group_name) is pre-created but not running
 // in steady state; it is started here and stopped at the end of the wipe.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec) {
+void MixerOrchestrator::wipePrepAndRun(
+        std::shared_ptr<NodeManager> nodes,
+        std::shared_ptr<MixerState> state,
+        std::shared_ptr<SharedTimeline> timeline,
+        std::string scene_name,
+        std::string wipe_file,
+        double duration_sec,
+        bool new_pgm_is_slot_a,
+        int64_t start_pts_ms,
+        int64_t margin_ms) {
+    int64_t T_prep = start_pts_ms - margin_ms;
+    int64_t prep_delay = T_prep - wallclock.pts();
+    if (prep_delay > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(prep_delay));
+
+    try {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        MixerOrchestrator orch(nodes, state, timeline);
+
+        nodes->node(state->wipe_input_node_name)->stop(true);
+        orch.setNodeParam(state->wipe_input_node_name, "url", wipe_file);
+        orch.flushWipeEdges();
+        resetInputIf(nodes, state->wipe_base_fps_name);
+        orch.startGroup(state->wipe_group_name);
+
+        timeline->set(state->wipe_otm_name, "outputs", T_prep, Parameters(3u));       // 0b11 both direct + wipe_in
+        timeline->set(state->wipe_selector_name, "active", start_pts_ms, Parameters(1)); // wipe_overlay_out
+
+        int64_t total_ms = (int64_t)(duration_sec * 1000);
+        int64_t midpoint_ms = total_ms / 2;
+        logstream << "mixer wipe: scene=" << scene_name << " file=" << wipe_file << " T_prep=" << T_prep
+                  << " T_start=" << start_pts_ms << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
+                  << " new_pgm_slot_" << (new_pgm_is_slot_a ? 'A' : 'B');
+    } catch (const std::exception& e) {
+        logstream << "mixer: wipe prep error: " << e.what();
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->transition_mode = MixerState::TransitionMode::Idle;
+        return;
+    }
+
+    int64_t total_ms = (int64_t)(duration_sec * 1000);
+    int64_t midpoint_ms = total_ms / 2;
+    wipeThread(nodes, state, timeline, std::move(scene_name), new_pgm_is_slot_a,
+               midpoint_ms + margin_ms, total_ms + margin_ms);
+}
+
+void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
+                             int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
 
@@ -573,38 +632,44 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     if (state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
         throw Error("mixer: wipe requires wipe_group and wipe_input_node (see mixer.init)");
 
+    int64_t T_start = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    // Reset the input node so it is re-created with the new URL when the group starts.
-    // On the first wipe the node_ was pre-created with an empty URL; stopping it (while
-    // not running) destroys the pre-created node_ object so createNode() will pick up
-    // the updated params on the next start().  On subsequent wipes node_ is already null
-    // (destroyed when the group was stopped at the end of the previous wipe), so this
-    // stop() call is a no-op.
-    nodes_->node(state_->wipe_input_node_name)->stop(true);
-    setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
-    // Discard any frames left over from a previous wipe run before starting fresh.
-    flushWipeEdges();
-    resetInputIf(nodes_, state_->wipe_base_fps_name);
-    startGroup(state_->wipe_group_name);
+    if (start_pts_ms < 0) {
+        // Reset the input node so it is re-created with the new URL when the group starts.
+        // On the first wipe the node_ was pre-created with an empty URL; stopping it (while
+        // not running) destroys the pre-created node_ object so createNode() will pick up
+        // the updated params on the next start().  On subsequent wipes node_ is already null
+        // (destroyed when the group was stopped at the end of the previous wipe), so this
+        // stop() call is a no-op.
+        nodes_->node(state_->wipe_input_node_name)->stop(true);
+        setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
+        // Discard any frames left over from a previous wipe run before starting fresh.
+        flushWipeEdges();
+        resetInputIf(nodes_, state_->wipe_base_fps_name);
+        startGroup(state_->wipe_group_name);
 
-    // Pre-roll the wipe branch before making it visible. Switching `wipe_sel`
-    // immediately after `startGroup()` can expose the startup latency of the
-    // wipe decode/filter chain as a freeze on the last direct frame.
-    int64_t T_prep = wallclock.pts();
-    int64_t T_start = T_prep + margin_ms_;
-    timeline_->set(state_->wipe_otm_name, "outputs", T_prep, Parameters(3u));    // 0b11 both direct + wipe_in
-    timeline_->set(state_->wipe_selector_name, "active", T_start, Parameters(1)); // wipe_overlay_out
+        // Pre-roll the wipe branch before making it visible. Switching `wipe_sel`
+        // immediately after `startGroup()` can expose the startup latency of the
+        // wipe decode/filter chain as a freeze on the last direct frame.
+        int64_t T_prep = T_start - margin_ms_;
+        timeline_->set(state_->wipe_otm_name, "outputs", T_prep, Parameters(3u));    // 0b11 both direct + wipe_in
+        timeline_->set(state_->wipe_selector_name, "active", T_start, Parameters(1)); // wipe_overlay_out
 
-    // Launch background thread for midpoint cut + cleanup
-    int64_t total_ms = (int64_t)(duration_sec * 1000);
-    int64_t midpoint_ms = total_ms / 2;
-    logstream << "mixer wipe: scene=" << scene_name << " file=" << wipe_file << " T_prep=" << T_prep
-              << " T_start=" << T_start << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
-              << " new_pgm_slot_" << (pvw_is_slot_a ? 'A' : 'B');
-    std::thread(wipeThread, nodes_, state_, timeline_,
-                scene_name, pvw_is_slot_a, midpoint_ms + margin_ms_, total_ms + margin_ms_).detach();
+        // Launch background thread for midpoint cut + cleanup
+        int64_t total_ms = (int64_t)(duration_sec * 1000);
+        int64_t midpoint_ms = total_ms / 2;
+        logstream << "mixer wipe: scene=" << scene_name << " file=" << wipe_file << " T_prep=" << T_prep
+                  << " T_start=" << T_start << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
+                  << " new_pgm_slot_" << (pvw_is_slot_a ? 'A' : 'B');
+        std::thread(wipeThread, nodes_, state_, timeline_,
+                    scene_name, pvw_is_slot_a, midpoint_ms + margin_ms_, total_ms + margin_ms_).detach();
+        return;
+    }
+
+    std::thread(wipePrepAndRun, nodes_, state_, timeline_,
+                scene_name, wipe_file, duration_sec, pvw_is_slot_a, T_start, margin_ms_).detach();
 }
 
 std::vector<std::string> MixerOrchestrator::sceneNames() const {
