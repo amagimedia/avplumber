@@ -986,8 +986,6 @@ int64_t AVPlumber::obs_get_duration() {
         return -1;
     auto node = impl_->manager()->node_if_exists(INPUT_NODE);
     if (node) {
-<<<<<<< HEAD
-=======
         auto n_rec = dynamic_cast<IPlaybackControl*>(node->node().get());
         if (!n_rec) {
             // this is simple input, not recording input
@@ -995,7 +993,6 @@ int64_t AVPlumber::obs_get_duration() {
             // prevent polluting the log with exception
             return -1;
         }
->>>>>>> develop
         try {
             Parameters duration;
             if (!node->getObjectTry("stream-limits", duration)) {
