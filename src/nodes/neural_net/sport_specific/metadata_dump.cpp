@@ -12,7 +12,9 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +32,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     std::string game_state_metadata_key_ = "game_state";
     std::string viewport_metadata_key_ = "smoothed_crop_viewport_v1";
     std::string player_seg_metadata_key_ = "yolo_players_seg";
+    std::string player_feet_metadata_key_ = "player_feet";
     std::string court_seg_metadata_key_ = "yolo_seg";
     std::string output_metadata_key_ = "frame_dump";
     std::string output_file_;
@@ -41,12 +44,15 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     int summary_update_every_n_ = 1;
     std::string video_label_;
     int fps_ = 0;
-    int schema_ = 3;
+    int schema_ = 4;
     int dump_every_n_ = 1;
     int debug_log_every_n_ = 0;
     int shot_result_wait_frames_ = 25;
     int score_change_confirm_frames_ = 6;
     int score_change_max_delta_ = 4;
+    int score_resync_max_delta_per_side_ = 8;
+    int score_resync_max_total_delta_ = 12;
+    int score_relock_confirm_frames_ = 30;
     bool include_ocr_game_state_ = false;
     bool emit_ocr_clock_events_ = false;
 
@@ -95,6 +101,9 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     int score_events_total_ = 0;
     int score_events_2pt_ = 0;
     int score_events_3pt_ = 0;
+    int score_resyncs_ = 0;
+    int score_resync_points_a_ = 0;
+    int score_resync_points_b_ = 0;
     int scoreboard_verified_shots_ = 0;
     int scoreboard_unverified_shots_ = 0;
     int detector_score_disagreements_ = 0;
@@ -144,14 +153,26 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     int score_candidate_frames_ = 0;
     uint64_t score_candidate_first_frame_ = 0;
     int64_t score_candidate_first_pts_ = 0;
+    ScoreState score_regression_candidate_;
+    int score_regression_frames_ = 0;
+    uint64_t score_regression_first_frame_ = 0;
+    int64_t score_regression_first_pts_ = 0;
+    bool have_relocked_away_score_ = false;
+    ScoreState relocked_away_score_;
 
     struct PendingRelease {
         uint64_t frame = 0;
         int64_t pts = 0;
         int player_id = -1;
+        int assist_id = -1;
         std::string shooting_team;
         std::string attempt_type;
         int attempt_points = 0;
+        std::string attempt_type_source;
+        float attempt_confidence = -1.0f;
+        int three_point_line_signed_distance_px = 0;
+        int three_point_line_y_delta_px = 0;
+        std::string three_point_line_relation;
         ScoreState score_at_release;
     };
     bool have_last_release_ = false;
@@ -162,9 +183,15 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         uint64_t arrival_frame = 0;
         int64_t arrival_pts = 0;
         int player_id = -1;
+        int assist_id = -1;
         std::string shooting_team;
         std::string attempt_type_detected;
         int points_detected = 0;
+        std::string attempt_type_source;
+        float attempt_confidence = -1.0f;
+        int three_point_line_signed_distance_px = 0;
+        int three_point_line_y_delta_px = 0;
+        std::string three_point_line_relation;
         ScoreState score_at_release;
         bool detector_result_seen = false;
         std::string detector_result;
@@ -178,6 +205,8 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     struct ShotRecord {
         int release_frame = -1;
         int arrival_frame = -1;
+        int shooter_id = -1;
+        int assist_id = -1;
         int hoop_dist = -1;
         int release_hoop_dist = -1;
         std::string attempt_type;   // "2pt" | "3pt" | "unknown"
@@ -189,6 +218,11 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         bool scoreboard_verified = false;
         int points_detected = 0;
         std::string attempt_type_detected;
+        std::string attempt_type_source;
+        float attempt_confidence = -1.0f;
+        int three_point_line_signed_distance_px = 0;
+        int three_point_line_y_delta_px = 0;
+        std::string three_point_line_relation;
         int points_scoreboard = 0;
         std::string attempt_type_scoreboard;
         std::string score_delta_side;
@@ -207,11 +241,18 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     struct ShotResultData {
         std::string result;
         std::string source;
+        int shooter_id = -1;
+        int assist_id = -1;
         int points = 0;
         std::string attempt_type;
         bool scoreboard_verified = false;
         int points_detected = 0;
         std::string attempt_type_detected;
+        std::string attempt_type_source;
+        float attempt_confidence = -1.0f;
+        int three_point_line_signed_distance_px = 0;
+        int three_point_line_y_delta_px = 0;
+        std::string three_point_line_relation;
         int points_scoreboard = 0;
         std::string attempt_type_scoreboard;
         std::string score_delta_side;
@@ -225,6 +266,42 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         bool attempt_type_corrected_by_scoreboard = false;
     };
 
+    static bool hasAttemptLocation(const std::string& source,
+                                   float confidence,
+                                   const std::string& relation) {
+        return !source.empty() || confidence >= 0.0f || !relation.empty();
+    }
+
+    static void appendAttemptLocationFields(Parameters& out,
+                                            const std::string& source,
+                                            float confidence,
+                                            int signed_distance_px,
+                                            int y_delta_px,
+                                            const std::string& relation) {
+        if (!hasAttemptLocation(source, confidence, relation)) return;
+        Parameters loc;
+        if (!source.empty()) loc["attempt_type_source"] = source;
+        if (confidence >= 0.0f) loc["attempt_confidence"] = std::round(confidence * 1000.0f) / 1000.0f;
+        loc["three_point_line_signed_distance_px"] = signed_distance_px;
+        loc["three_point_line_y_delta_px"] = y_delta_px;
+        if (!relation.empty()) loc["three_point_line_relation"] = relation;
+        out["shot_location"] = loc;
+    }
+
+    static void appendAttemptLocationFields(Parameters& out, const PendingShot& s) {
+        appendAttemptLocationFields(out, s.attempt_type_source, s.attempt_confidence,
+                                    s.three_point_line_signed_distance_px,
+                                    s.three_point_line_y_delta_px,
+                                    s.three_point_line_relation);
+    }
+
+    static void appendAttemptLocationFields(Parameters& out, const ShotRecord& s) {
+        appendAttemptLocationFields(out, s.attempt_type_source, s.attempt_confidence,
+                                    s.three_point_line_signed_distance_px,
+                                    s.three_point_line_y_delta_px,
+                                    s.three_point_line_relation);
+    }
+
     struct Touch {
         int track_id = -1;
         int start_frame = 0;
@@ -234,14 +311,18 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     struct PossessionAcc {
         int possession_id = -1;
         std::string team;
+        std::string start_reason;
         uint64_t start_frame = 0;
         int64_t start_pts = 0;
         uint64_t end_frame = 0;
         int64_t end_pts = 0;
+        uint64_t next_start_frame = 0;
+        int inter_possession_gap_frames = -1;
         int total_frames = 0;
         int frames_controlled = 0;
         int frames_loose = 0;
         int frames_in_flight = 0;
+        int closeup_frames = 0;
         std::vector<int> handler_ids;
         std::vector<Touch> touches;
         std::vector<std::string> zones_visited;
@@ -739,6 +820,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         auto game_state_md = tryParse(raw, game_state_metadata_key_);
         auto viewport_md = tryParse(raw, viewport_metadata_key_);
         auto player_seg_md = tryParse(raw, player_seg_metadata_key_);
+        auto player_feet_md = tryParse(raw, player_feet_metadata_key_);
         auto court_seg_md = tryParse(raw, court_seg_metadata_key_);
 
         // Camera shot type + transition
@@ -766,10 +848,24 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             if (shot_events_md.contains("result_vy")) shot["result_vy"] = shot_events_md["result_vy"];
             if (shot_events_md.contains("attempt_type")) shot["attempt_type"] = shot_events_md["attempt_type"];
             if (shot_events_md.contains("attempt_points")) shot["attempt_points"] = shot_events_md["attempt_points"];
+            if (shot_events_md.contains("shooter_id")) shot["shooter_id"] = shot_events_md["shooter_id"];
             if (shot_events_md.contains("points")) shot["points"] = shot_events_md["points"];
             if (shot_events_md.contains("result_source")) shot["result_source"] = shot_events_md["result_source"];
             if (shot_events_md.contains("ball_hoop_dist")) {
                 shot["ball_hoop_dist"] = scaleDist(shot_events_md["ball_hoop_dist"].get<float>());
+            }
+            if (shot_events_md.contains("attempt_type_source")) shot["attempt_type_source"] = shot_events_md["attempt_type_source"];
+            if (shot_events_md.contains("attempt_confidence")) shot["attempt_confidence"] = shot_events_md["attempt_confidence"];
+            if (shot_events_md.contains("three_point_line_signed_distance_px")) {
+                shot["three_point_line_signed_distance_px"] =
+                    scaleDist(shot_events_md["three_point_line_signed_distance_px"].get<float>());
+            }
+            if (shot_events_md.contains("three_point_line_y_delta_px")) {
+                shot["three_point_line_y_delta_px"] =
+                    scaleDist(shot_events_md["three_point_line_y_delta_px"].get<float>());
+            }
+            if (shot_events_md.contains("three_point_line_relation")) {
+                shot["three_point_line_relation"] = shot_events_md["three_point_line_relation"];
             }
             if (!shot.empty()) out["shot"] = shot;
         }
@@ -927,6 +1023,17 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
 
         Parameters outlines_arr = Parameters::array();
 
+        auto findFootDet = [&](int track_id) -> const Parameters* {
+            if (track_id < 0 || !player_feet_md.contains("detections") || !player_feet_md["detections"].is_array()) {
+                return nullptr;
+            }
+            for (const auto& fd : player_feet_md["detections"]) {
+                if (!fd.is_object()) continue;
+                if (fd.value("track_id", -1) == track_id) return &fd;
+            }
+            return nullptr;
+        };
+
         // Players, refs, hoop — all boxes scaled to source space
         if (players_md.contains("detections") && players_md["detections"].is_array()) {
             Parameters players_arr = Parameters::array();
@@ -948,6 +1055,32 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                     if (tab != "?") p["team"] = tab;
                     if (det.contains("team_lock_age")) p["team_lock_age"] = det["team_lock_age"].get<uint32_t>();
                     p["box"] = box;
+                    if (const Parameters* foot_det = findFootDet(tid)) {
+                        Parameters foot;
+                        if (foot_det->contains("foot_point") && (*foot_det)["foot_point"].is_array() &&
+                            (*foot_det)["foot_point"].size() >= 2) {
+                            const float fx = (*foot_det)["foot_point"][0].get<float>();
+                            const float fy = (*foot_det)["foot_point"][1].get<float>();
+                            foot["point"] = Parameters::array({scaleX(fx), scaleY(fy)});
+                        }
+                        if (foot_det->contains("left_point") && (*foot_det)["left_point"].is_array() &&
+                            (*foot_det)["left_point"].size() >= 2) {
+                            const float fx = (*foot_det)["left_point"][0].get<float>();
+                            const float fy = (*foot_det)["left_point"][1].get<float>();
+                            foot["left"] = Parameters::array({scaleX(fx), scaleY(fy)});
+                        }
+                        if (foot_det->contains("right_point") && (*foot_det)["right_point"].is_array() &&
+                            (*foot_det)["right_point"].size() >= 2) {
+                            const float fx = (*foot_det)["right_point"][0].get<float>();
+                            const float fy = (*foot_det)["right_point"][1].get<float>();
+                            foot["right"] = Parameters::array({scaleX(fx), scaleY(fy)});
+                        }
+                        if (foot_det->contains("conf")) foot["confidence"] = (*foot_det)["conf"];
+                        if (foot_det->contains("source")) foot["source"] = (*foot_det)["source"];
+                        if (foot_det->contains("pixels")) foot["pixels"] = (*foot_det)["pixels"];
+                        if (foot_det->contains("valid")) foot["valid"] = (*foot_det)["valid"];
+                        if (!foot.empty()) p["foot"] = foot;
+                    }
                     if (tid >= 0 && tid == handler_track_id) p["has_ball"] = true;
                     if (det.contains("track_state")) {
                         std::string ts = det["track_state"].get<std::string>();
@@ -1111,6 +1244,56 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         score_candidate_first_pts_ = pts;
     }
 
+    bool plausibleScoreResync(int delta_a, int delta_b) const {
+        if (delta_a < 0 || delta_b < 0) return false;
+        const int total_delta = delta_a + delta_b;
+        if (total_delta <= 0) return false;
+        return delta_a <= score_resync_max_delta_per_side_ &&
+               delta_b <= score_resync_max_delta_per_side_ &&
+               total_delta <= score_resync_max_total_delta_;
+    }
+
+    bool suppressedRelockedAwayScore(const ScoreState& observed, int delta_a, int delta_b) const {
+        if (!have_relocked_away_score_ || !sameScore(observed, relocked_away_score_)) return false;
+        return delta_a > score_change_max_delta_ ||
+               delta_b > score_change_max_delta_ ||
+               (delta_a > 0 && delta_b > 0);
+    }
+
+    void observeConfirmedScoreState(const ScoreState& after) {
+        const int lead = std::abs(after.a - after.b);
+        if (lead > largest_lead_) largest_lead_ = lead;
+        std::string new_leader = after.a > after.b ? "A" : (after.b > after.a ? "B" : std::string());
+        if (!new_leader.empty() && !current_leader_.empty() && new_leader != current_leader_) ++lead_changes_;
+        if (!new_leader.empty()) current_leader_ = new_leader;
+    }
+
+    void recordScoringRun(const std::string& side, int delta) {
+        if (current_run_side_ == side) {
+            current_run_points_ += delta;
+        } else {
+            current_run_side_ = side;
+            current_run_points_ = delta;
+        }
+        if (current_run_points_ > longest_run_points_) longest_run_points_ = current_run_points_;
+    }
+
+    int pendingShotScoreboardMatchWaitFrames() const {
+        return shot_result_wait_frames_ + std::max(0, score_change_confirm_frames_);
+    }
+
+    bool scoreCandidateCouldConfirmPendingShot() const {
+        if (!have_pending_shot_ || !have_confirmed_score_ || score_candidate_frames_ <= 0) return false;
+        if (sameScore(score_candidate_, confirmed_score_)) return false;
+        if (score_candidate_.a < confirmed_score_.a || score_candidate_.b < confirmed_score_.b) return false;
+
+        const int delta_a = score_candidate_.a - confirmed_score_.a;
+        const int delta_b = score_candidate_.b - confirmed_score_.b;
+        const bool one_side_changed = (delta_a > 0 && delta_b == 0) || (delta_b > 0 && delta_a == 0);
+        const int delta = std::max(delta_a, delta_b);
+        return one_side_changed && (delta == 2 || delta == 3);
+    }
+
     bool buildScoreboardShotResult(const ScoreState& before,
                                    const ScoreState& after,
                                    const std::string& side,
@@ -1126,7 +1309,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             score_ev["shot_match"] = "not_field_goal_delta";
             return false;
         }
-        if (pending_shot_.frames_waited > shot_result_wait_frames_) {
+        if (pending_shot_.frames_waited > pendingShotScoreboardMatchWaitFrames()) {
             score_ev["shot_match"] = "pending_shot_expired";
             return false;
         }
@@ -1159,7 +1342,11 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         shot_ev["score_after"] = scoreJson(after);
         shot_ev["release_frame"] = pending_shot_.release_frame;
         shot_ev["arrival_frame"] = pending_shot_.arrival_frame;
-        if (pending_shot_.player_id >= 0) shot_ev["player_id"] = pending_shot_.player_id;
+        if (pending_shot_.player_id >= 0) {
+            shot_ev["player_id"] = pending_shot_.player_id;
+            shot_ev["shooter_id"] = pending_shot_.player_id;
+        }
+        if (pending_shot_.assist_id >= 0) shot_ev["assist_id"] = pending_shot_.assist_id;
         if (!visual_team.empty()) {
             shot_ev["tracking_team"] = visual_team;
             shot_ev["visual_team"] = visual_team;
@@ -1167,6 +1354,18 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         if (team_identity_locked_) shot_ev["team_identity"] = teamIdentityJson(false);
         if (!pending_shot_.attempt_type_detected.empty()) shot_ev["attempt_type_detected"] = pending_shot_.attempt_type_detected;
         if (pending_shot_.points_detected > 0) shot_ev["points_detected"] = pending_shot_.points_detected;
+        if (!pending_shot_.attempt_type_source.empty()) shot_ev["attempt_type_source"] = pending_shot_.attempt_type_source;
+        if (pending_shot_.attempt_confidence >= 0.0f) {
+            shot_ev["attempt_confidence"] = std::round(pending_shot_.attempt_confidence * 1000.0f) / 1000.0f;
+        }
+        if (!pending_shot_.attempt_type_source.empty() || !pending_shot_.three_point_line_relation.empty()) {
+            shot_ev["three_point_line_signed_distance_px"] = pending_shot_.three_point_line_signed_distance_px;
+            shot_ev["three_point_line_y_delta_px"] = pending_shot_.three_point_line_y_delta_px;
+        }
+        if (!pending_shot_.three_point_line_relation.empty()) {
+            shot_ev["three_point_line_relation"] = pending_shot_.three_point_line_relation;
+        }
+        appendAttemptLocationFields(shot_ev, pending_shot_);
         if (pending_shot_.detector_result_seen) {
             shot_ev["detector_result"] = pending_shot_.detector_result;
             if (!pending_shot_.detector_source.empty()) shot_ev["detector_source"] = pending_shot_.detector_source;
@@ -1185,11 +1384,18 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
 
         result.result = "made";
         result.source = "scoreboard_delta";
+        result.shooter_id = pending_shot_.player_id;
+        result.assist_id = pending_shot_.assist_id;
         result.points = delta;
         result.attempt_type = scoreboard_attempt_type;
         result.scoreboard_verified = true;
         result.points_detected = pending_shot_.points_detected;
         result.attempt_type_detected = pending_shot_.attempt_type_detected;
+        result.attempt_type_source = pending_shot_.attempt_type_source;
+        result.attempt_confidence = pending_shot_.attempt_confidence;
+        result.three_point_line_signed_distance_px = pending_shot_.three_point_line_signed_distance_px;
+        result.three_point_line_y_delta_px = pending_shot_.three_point_line_y_delta_px;
+        result.three_point_line_relation = pending_shot_.three_point_line_relation;
         result.points_scoreboard = delta;
         result.attempt_type_scoreboard = scoreboard_attempt_type;
         result.score_delta_side = side;
@@ -1237,14 +1443,50 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         if (observed.a < confirmed_score_.a || observed.b < confirmed_score_.b) {
             ++score_ocr_regressions_;
             score_candidate_frames_ = 0;
+            // If the same lower score keeps showing up, the original lock was wrong
+            // (typically a bad first-frame OCR read). Re-lock to the persistent value.
+            if (score_regression_frames_ <= 0 || !sameScore(score_regression_candidate_, observed)) {
+                score_regression_candidate_ = observed;
+                score_regression_frames_ = 1;
+                score_regression_first_frame_ = frame_counter_;
+                score_regression_first_pts_ = pts;
+            } else {
+                ++score_regression_frames_;
+            }
+            if (score_regression_frames_ >= score_relock_confirm_frames_) {
+                const ScoreState bogus = confirmed_score_;
+                confirmed_score_ = observed;
+                relocked_away_score_ = bogus;
+                have_relocked_away_score_ = true;
+                Parameters ev;
+                ev["type"] = "score_relocked";
+                ev["score"] = scoreJson(confirmed_score_);
+                ev["score_rejected"] = scoreJson(bogus);
+                ev["confirm_frames"] = score_relock_confirm_frames_;
+                ev["first_seen_frame"] = score_regression_first_frame_;
+                ev["first_seen_pts"] = score_regression_first_pts_;
+                emitEvent(ev, pts);
+                score_regression_frames_ = 0;
+                score_ocr_regressions_ = 0;
+                score_ocr_rejected_ = 0;
+            }
             return;
         }
+        score_regression_frames_ = 0;
 
         const int delta_a = observed.a - confirmed_score_.a;
         const int delta_b = observed.b - confirmed_score_.b;
+        if (suppressedRelockedAwayScore(observed, delta_a, delta_b)) {
+            ++score_ocr_rejected_;
+            score_candidate_frames_ = 0;
+            return;
+        }
         const bool one_side_changed = (delta_a > 0 && delta_b == 0) || (delta_b > 0 && delta_a == 0);
         const int delta = std::max(delta_a, delta_b);
-        if (!one_side_changed || delta <= 0 || delta > score_change_max_delta_) {
+        const bool single_scoring_change =
+            one_side_changed && delta > 0 && delta <= score_change_max_delta_;
+        const bool score_resync = !single_scoring_change && plausibleScoreResync(delta_a, delta_b);
+        if (!single_scoring_change && !score_resync) {
             ++score_ocr_rejected_;
             score_candidate_frames_ = 0;
             return;
@@ -1260,7 +1502,29 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
 
         const ScoreState before = confirmed_score_;
         const ScoreState after = observed;
-        const std::string side = delta_a > 0 ? "team_a" : "team_b";
+        const std::string side = delta_a >= delta_b ? "team_a" : "team_b";
+
+        if (score_resync) {
+            Parameters ev;
+            ev["type"] = "score_resync";
+            ev["source"] = "stable_scoreboard_span";
+            ev["score_before"] = scoreJson(before);
+            ev["score_after"] = scoreJson(after);
+            ev["delta_team_a"] = delta_a;
+            ev["delta_team_b"] = delta_b;
+            ev["confirm_frames"] = score_change_confirm_frames_;
+            ev["first_seen_frame"] = score_candidate_first_frame_;
+            ev["first_seen_pts"] = score_candidate_first_pts_;
+            emitEvent(ev, pts);
+
+            ++score_resyncs_;
+            score_resync_points_a_ += delta_a;
+            score_resync_points_b_ += delta_b;
+            observeConfirmedScoreState(after);
+            confirmed_score_ = observed;
+            score_candidate_frames_ = 0;
+            return;
+        }
 
         Parameters ev;
         ev["type"] = "score_change";
@@ -1278,18 +1542,8 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
 
         // Lead / run aggregates use the scoreboard side ("team_a"/"team_b").
         // Visual A/B is irrelevant here — we just track who scored next.
-        if (current_run_side_ == side) {
-            current_run_points_ += delta;
-        } else {
-            current_run_side_ = side;
-            current_run_points_ = delta;
-        }
-        if (current_run_points_ > longest_run_points_) longest_run_points_ = current_run_points_;
-        const int lead = std::abs(after.a - after.b);
-        if (lead > largest_lead_) largest_lead_ = lead;
-        std::string new_leader = after.a > after.b ? "A" : (after.b > after.a ? "B" : std::string());
-        if (!new_leader.empty() && !current_leader_.empty() && new_leader != current_leader_) ++lead_changes_;
-        if (!new_leader.empty()) current_leader_ = new_leader;
+        recordScoringRun(side, delta);
+        observeConfirmedScoreState(after);
 
         Parameters shot_ev;
         ShotResultData shot_result;
@@ -1345,22 +1599,46 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         int total_rel = getOr<int>(se_dump, "total_releases", prev_total_releases_);
         int total_arr = getOr<int>(se_dump, "total_hoop_arrivals", prev_total_arrivals_);
         if (total_rel > prev_total_releases_) {
+            const int shooter_id = getOr<int>(se_dump, "shooter_id", last_known_handler_id_);
+            const int assist_id = assistIdBeforeShot(poss_acc_, shooter_id);
             Parameters ev;
             ev["type"] = "shot_release";
             // At the release frame, possession often already flipped to shot_in_air.
-            // Attribute to the last-known handler from prior frames.
-            if (last_known_handler_id_ >= 0) ev["player_id"] = last_known_handler_id_;
+            // Prefer the shot detector's debounced pre-release shooter identity.
+            if (shooter_id >= 0) {
+                ev["player_id"] = shooter_id;
+                ev["shooter_id"] = shooter_id;
+            }
+            if (assist_id >= 0) ev["assist_id"] = assist_id;
             if (!last_known_handler_team_.empty()) ev["team"] = last_known_handler_team_;
             if (se_dump.contains("attempt_type")) ev["attempt_type_detected"] = se_dump["attempt_type"];
             if (se_dump.contains("attempt_points")) ev["points_detected"] = se_dump["attempt_points"];
+            if (se_dump.contains("attempt_type_source")) ev["attempt_type_source"] = se_dump["attempt_type_source"];
+            if (se_dump.contains("attempt_confidence")) ev["attempt_confidence"] = se_dump["attempt_confidence"];
+            if (se_dump.contains("three_point_line_signed_distance_px")) {
+                ev["three_point_line_signed_distance_px"] = se_dump["three_point_line_signed_distance_px"];
+            }
+            if (se_dump.contains("three_point_line_y_delta_px")) {
+                ev["three_point_line_y_delta_px"] = se_dump["three_point_line_y_delta_px"];
+            }
+            if (se_dump.contains("three_point_line_relation")) ev["three_point_line_relation"] = se_dump["three_point_line_relation"];
             emitEvent(ev, pts);
             have_last_release_ = true;
             last_release_.frame = frame_counter_;
             last_release_.pts = pts;
-            last_release_.player_id = last_known_handler_id_;
+            last_release_.player_id = shooter_id;
+            last_release_.assist_id = assist_id;
             last_release_.shooting_team = last_known_handler_team_;
             last_release_.attempt_type = getOr<std::string>(se_dump, "attempt_type", std::string("unknown"));
             last_release_.attempt_points = getOr<int>(se_dump, "attempt_points", 0);
+            last_release_.attempt_type_source = getOr<std::string>(se_dump, "attempt_type_source", std::string());
+            last_release_.attempt_confidence = getOr<float>(se_dump, "attempt_confidence", -1.0f);
+            last_release_.three_point_line_signed_distance_px =
+                getOr<int>(se_dump, "three_point_line_signed_distance_px", 0);
+            last_release_.three_point_line_y_delta_px =
+                getOr<int>(se_dump, "three_point_line_y_delta_px", 0);
+            last_release_.three_point_line_relation =
+                getOr<std::string>(se_dump, "three_point_line_relation", std::string());
             last_release_.score_at_release = ScoreState();
             readScoreState(frame_json, last_release_.score_at_release);
             onShotRelease(pts, frame_json);
@@ -1382,9 +1660,16 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                 pending_shot_.arrival_frame = frame_counter_;
                 pending_shot_.arrival_pts = pts;
                 pending_shot_.player_id = last_release_.player_id;
+                pending_shot_.assist_id = last_release_.assist_id;
                 pending_shot_.shooting_team = last_release_.shooting_team;
                 pending_shot_.attempt_type_detected = last_release_.attempt_type;
                 pending_shot_.points_detected = last_release_.attempt_points;
+                pending_shot_.attempt_type_source = last_release_.attempt_type_source;
+                pending_shot_.attempt_confidence = last_release_.attempt_confidence;
+                pending_shot_.three_point_line_signed_distance_px =
+                    last_release_.three_point_line_signed_distance_px;
+                pending_shot_.three_point_line_y_delta_px = last_release_.three_point_line_y_delta_px;
+                pending_shot_.three_point_line_relation = last_release_.three_point_line_relation;
                 pending_shot_.score_at_release = last_release_.score_at_release;
                 pending_shot_.detector_result_seen = false;
                 pending_shot_.detector_result.clear();
@@ -1407,6 +1692,15 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             if (se_dump.contains("attempt_type")) ev["attempt_type_detected"] = se_dump["attempt_type"];
             if (se_dump.contains("attempt_points")) ev["points_detected"] = se_dump["attempt_points"];
             if (se_dump.contains("points")) ev["points"] = se_dump["points"];
+            if (se_dump.contains("attempt_type_source")) ev["attempt_type_source"] = se_dump["attempt_type_source"];
+            if (se_dump.contains("attempt_confidence")) ev["attempt_confidence"] = se_dump["attempt_confidence"];
+            if (se_dump.contains("three_point_line_signed_distance_px")) {
+                ev["three_point_line_signed_distance_px"] = se_dump["three_point_line_signed_distance_px"];
+            }
+            if (se_dump.contains("three_point_line_y_delta_px")) {
+                ev["three_point_line_y_delta_px"] = se_dump["three_point_line_y_delta_px"];
+            }
+            if (se_dump.contains("three_point_line_relation")) ev["three_point_line_relation"] = se_dump["three_point_line_relation"];
             emitEvent(ev, pts);
             if (have_pending_shot_) {
                 pending_shot_.detector_result_seen = true;
@@ -1476,6 +1770,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                     ev["from"] = prev_period_num_;
                     ev["to"] = pn;
                     emitEvent(ev, pts);
+                    emitPbpPeriodBreak(prev_period_num_, pn, pts);
                     if (poss_active_) poss_acc_.period_changed_during = true;
                 }
                 prev_period_num_ = pn;
@@ -1500,6 +1795,10 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         (void)frame_json;
         ++pending_shot_.frames_waited;
         if (pending_shot_.frames_waited >= shot_result_wait_frames_) {
+            if (scoreCandidateCouldConfirmPendingShot() &&
+                pending_shot_.frames_waited <= pendingShotScoreboardMatchWaitFrames()) {
+                return;
+            }
             const bool detector_claimed_score = pending_shot_.detector_result_seen &&
                                                 (pending_shot_.detector_result == "scored" ||
                                                  pending_shot_.detector_result == "made");
@@ -1516,9 +1815,25 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             ev["scoreboard_verified"] = false;
             ev["release_frame"] = pending_shot_.release_frame;
             ev["arrival_frame"] = pending_shot_.arrival_frame;
-            if (pending_shot_.player_id >= 0) ev["player_id"] = pending_shot_.player_id;
+            if (pending_shot_.player_id >= 0) {
+                ev["player_id"] = pending_shot_.player_id;
+                ev["shooter_id"] = pending_shot_.player_id;
+            }
+            if (pending_shot_.assist_id >= 0) ev["assist_id"] = pending_shot_.assist_id;
             if (!pending_shot_.attempt_type_detected.empty()) ev["attempt_type_detected"] = pending_shot_.attempt_type_detected;
             if (pending_shot_.points_detected > 0) ev["points_detected"] = pending_shot_.points_detected;
+            if (!pending_shot_.attempt_type_source.empty()) ev["attempt_type_source"] = pending_shot_.attempt_type_source;
+            if (pending_shot_.attempt_confidence >= 0.0f) {
+                ev["attempt_confidence"] = std::round(pending_shot_.attempt_confidence * 1000.0f) / 1000.0f;
+            }
+            if (!pending_shot_.attempt_type_source.empty() || !pending_shot_.three_point_line_relation.empty()) {
+                ev["three_point_line_signed_distance_px"] = pending_shot_.three_point_line_signed_distance_px;
+                ev["three_point_line_y_delta_px"] = pending_shot_.three_point_line_y_delta_px;
+            }
+            if (!pending_shot_.three_point_line_relation.empty()) {
+                ev["three_point_line_relation"] = pending_shot_.three_point_line_relation;
+            }
+            appendAttemptLocationFields(ev, pending_shot_);
             if (haveScore(pending_shot_.score_at_release)) ev["score_at_release"] = scoreJson(pending_shot_.score_at_release);
             if (pending_shot_.detector_result_seen) {
                 ev["detector_result"] = pending_shot_.detector_result;
@@ -1534,9 +1849,16 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             ShotResultData data;
             data.result = result;
             data.source = "scoreboard_no_delta";
+            data.shooter_id = pending_shot_.player_id;
+            data.assist_id = pending_shot_.assist_id;
             data.scoreboard_verified = false;
             data.points_detected = pending_shot_.points_detected;
             data.attempt_type_detected = pending_shot_.attempt_type_detected;
+            data.attempt_type_source = pending_shot_.attempt_type_source;
+            data.attempt_confidence = pending_shot_.attempt_confidence;
+            data.three_point_line_signed_distance_px = pending_shot_.three_point_line_signed_distance_px;
+            data.three_point_line_y_delta_px = pending_shot_.three_point_line_y_delta_px;
+            data.three_point_line_relation = pending_shot_.three_point_line_relation;
             data.visual_team = pending_shot_.shooting_team;
             data.detector_result = pending_shot_.detector_result;
             data.detector_disagreement = detector_claimed_score;
@@ -1582,17 +1904,114 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         return "turnover";
     }
 
+    static bool isMadePossessionOutcome(const std::string& outcome) {
+        return outcome == "made_1pt" || outcome == "made_2pt" ||
+               outcome == "made_3pt" || outcome == "made_shot";
+    }
+
+    static double roundTo(double value, double scale) {
+        return std::round(value * scale) / scale;
+    }
+
+    static double secondsForFrames(int frames, int fps, double scale = 100.0) {
+        if (fps <= 0) return 0.0;
+        return roundTo((double)frames / (double)fps, scale);
+    }
+
+    static int assistIdBeforeShot(const PossessionAcc& a, int shooter_id) {
+        if (a.touches.size() < 2) return -1;
+
+        if (shooter_id >= 0) {
+            bool found_shooter_touch = false;
+            for (auto it = a.touches.rbegin(); it != a.touches.rend(); ++it) {
+                if (!found_shooter_touch) {
+                    if (it->track_id == shooter_id) found_shooter_touch = true;
+                    continue;
+                }
+                if (it->track_id >= 0 && it->track_id != shooter_id) return it->track_id;
+            }
+        }
+
+        const int last_id = a.touches.back().track_id;
+        for (auto it = a.touches.rbegin() + 1; it != a.touches.rend(); ++it) {
+            if (it->track_id >= 0 && it->track_id != last_id) return it->track_id;
+        }
+        return -1;
+    }
+
+    static std::string possessionStartReasonFromPrevious(const PossessionAcc* previous,
+                                                         int current_period,
+                                                         bool clock_stopped) {
+        if (!previous) return "period_start";
+        const std::string outcome = possessionOutcomeType(*previous);
+        if (previous->period_changed_during || outcome == "end_of_period" ||
+            (previous->period_at_end > 0 && current_period > 0 && previous->period_at_end != current_period)) {
+            return "period_start";
+        }
+        if (isMadePossessionOutcome(outcome)) return "inbound_after_score";
+        if (outcome == "shot_clock_violation") return "shot_clock_violation";
+        if (outcome == "missed_shot" || outcome == "shot_attempt_unverified") return "defensive_rebound";
+        if (outcome == "turnover") return clock_stopped ? "jump_ball" : "steal";
+        return "jump_ball";
+    }
+
+    Parameters zoneSecondsJson(const PossessionAcc& a) const {
+        Parameters zone_sec = Parameters::object();
+        if (fps_ <= 0) return zone_sec;
+        for (const auto& kv : a.zone_frames) {
+            if (kv.second <= 0) continue;
+            zone_sec[kv.first] = secondsForFrames(kv.second, fps_);
+        }
+        return zone_sec;
+    }
+
+    void stampNextPossessionStart(PossessionAcc& a, uint64_t next_start_frame) const {
+        if (next_start_frame == 0) return;
+        a.next_start_frame = next_start_frame;
+        a.inter_possession_gap_frames =
+            next_start_frame > a.end_frame ? (int)(next_start_frame - a.end_frame) : 0;
+    }
+
+    void refreshActiveStartReasonFromPrevious(const PossessionAcc& previous) {
+        if (!poss_active_) return;
+        poss_acc_.start_reason =
+            possessionStartReasonFromPrevious(&previous, poss_acc_.period_at_start, clock_currently_stopped_);
+    }
+
+    void emitPbpPeriodBreak(int from_period, int to_period, int64_t pts) {
+        if (!file_pbp_.opened) return;
+        Parameters ev;
+        ev["type"] = "period_break";
+        ev["frame"] = frame_counter_;
+        ev["pts"] = pts;
+        if (fps_ > 0) ev["t"] = roundTo((double)frame_counter_ / (double)fps_, 1000.0);
+        ev["from_period"] = from_period;
+        ev["to_period"] = to_period;
+        file_pbp_.writeLine(ev.dump());
+    }
+
+    static bool shouldWritePossession(const PossessionAcc& a) {
+        return !a.team.empty() || !a.shots.empty();
+    }
+
     void writePbpRecord(const PossessionAcc& a) {
         if (!file_pbp_.opened) return;
-        if (a.team.empty() && a.shots.empty()) return;
+        if (!shouldWritePossession(a)) return;
         Parameters p;
         p["type"] = "possession";
         p["id"] = a.possession_id;
         if (!a.team.empty()) p["team"] = a.team;
+        if (!a.start_reason.empty()) p["start_reason"] = a.start_reason;
         if (fps_ > 0) {
             p["start_t"] = std::round((float)a.start_frame / (float)fps_ * 1000.0f) / 1000.0f;
             p["end_t"] = std::round((float)a.end_frame / (float)fps_ * 1000.0f) / 1000.0f;
             p["duration_sec"] = std::round((float)a.total_frames / (float)fps_ * 100.0f) / 100.0f;
+            if (a.inter_possession_gap_frames >= 0) {
+                p["inter_possession_gap_sec"] = secondsForFrames(a.inter_possession_gap_frames, fps_, 1000.0);
+            }
+        }
+        if (a.total_frames > 0) {
+            p["closeup_fraction"] = roundTo((double)a.closeup_frames / (double)a.total_frames, 1000.0);
         }
         Parameters outcome;
         outcome["type"] = possessionOutcomeType(a);
@@ -1614,14 +2033,12 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         if (a.period_at_start > 0) p["period"] = a.period_at_start;
         if (a.clock_at_start >= 0) p["clock_at_start_sec"] = a.clock_at_start;
         if (a.clock_at_end >= 0) p["clock_at_end_sec"] = a.clock_at_end;
+        Parameters c = Parameters::object();
         const std::string dz = dominantZone(a.zone_frames);
-        if (!dz.empty()) {
-            Parameters c; c["dominant"] = dz;
-            Parameters visited = Parameters::array();
-            for (const auto& z : a.zones_visited) visited.push_back(z);
-            if (!visited.empty()) c["visited"] = visited;
-            p["court"] = c;
-        }
+        if (!dz.empty()) c["dominant"] = dz;
+        Parameters zone_sec = zoneSecondsJson(a);
+        if (!zone_sec.empty()) c["time_per_zone_sec"] = zone_sec;
+        if (!c.empty()) p["court"] = c;
         if (!a.touches.empty()) {
             Parameters arr = Parameters::array();
             for (const auto& t : a.touches) {
@@ -1643,10 +2060,16 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                 Parameters sj;
                 if (s.release_frame >= 0 && fps_ > 0) sj["release_t"] = std::round((float)s.release_frame / (float)fps_ * 1000.0f) / 1000.0f;
                 if (s.arrival_frame >= 0 && fps_ > 0) sj["arrival_t"] = std::round((float)s.arrival_frame / (float)fps_ * 1000.0f) / 1000.0f;
+                if (s.shooter_id >= 0) sj["shooter_id"] = s.shooter_id;
+                if (s.assist_id >= 0) sj["assist_id"] = s.assist_id;
                 if (!s.attempt_type.empty()) sj["attempt_type"] = s.attempt_type;
                 if (!s.result.empty()) sj["result"] = s.result;
                 if (s.points > 0) sj["points"] = s.points;
                 if (s.scoreboard_verified) sj["scoreboard_verified"] = true;
+                if (s.points_detected > 0) sj["points_detected"] = s.points_detected;
+                if (!s.attempt_type_detected.empty()) sj["attempt_type_detected"] = s.attempt_type_detected;
+                if (s.attempt_type_corrected_by_scoreboard) sj["attempt_type_corrected_by_scoreboard"] = true;
+                appendAttemptLocationFields(sj, s);
                 if (s.game_clock_sec >= 0) sj["clock_sec"] = s.game_clock_sec;
                 arr.push_back(sj);
             }
@@ -1658,11 +2081,12 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
     void writePossessionRecord(const PossessionAcc& a) {
         writePbpRecord(a);
         if (!file_possessions_.opened) return;
-        if (a.team.empty() && a.shots.empty()) return;
+        if (!shouldWritePossession(a)) return;
         Parameters p;
         p["type"] = "possession";
         p["possession_id"] = a.possession_id;
         if (!a.team.empty()) p["team"] = a.team;
+        if (!a.start_reason.empty()) p["start_reason"] = a.start_reason;
         if (team_identity_locked_) {
             const int v = visualTeamIndex(a.team);
             if (v >= 0 && !visual_to_scoreboard_[v].empty()) {
@@ -1683,8 +2107,14 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             span["start_t"] = std::round((float)a.start_frame / (float)fps_ * 1000.0f) / 1000.0f;
             span["end_t"] = std::round((float)a.end_frame / (float)fps_ * 1000.0f) / 1000.0f;
             span["duration_sec"] = std::round((float)a.total_frames / (float)fps_ * 100.0f) / 100.0f;
+            if (a.inter_possession_gap_frames >= 0) {
+                span["inter_possession_gap_sec"] = secondsForFrames(a.inter_possession_gap_frames, fps_, 1000.0);
+            }
         }
         p["span"] = span;
+        if (a.total_frames > 0) {
+            p["closeup_fraction"] = roundTo((double)a.closeup_frames / (double)a.total_frames, 1000.0);
+        }
         if (!a.handler_ids.empty()) p["handler_track_ids"] = a.handler_ids;
 
         Parameters court;
@@ -1698,6 +2128,8 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             visited.push_back(kv.first);
         }
         if (!zone_counts.empty()) court["zone_frames"] = zone_counts;
+        Parameters zone_sec = zoneSecondsJson(a);
+        if (!zone_sec.empty()) court["time_per_zone_sec"] = zone_sec;
         if (!visited.empty()) court["zones_visited"] = visited;
         if (!court.empty()) p["court"] = court;
 
@@ -1715,6 +2147,8 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                 Parameters sj;
                 if (sh.release_frame >= 0) sj["release_frame"] = sh.release_frame;
                 if (sh.arrival_frame >= 0) sj["arrival_frame"] = sh.arrival_frame;
+                if (sh.shooter_id >= 0) sj["shooter_id"] = sh.shooter_id;
+                if (sh.assist_id >= 0) sj["assist_id"] = sh.assist_id;
                 if (sh.release_hoop_dist >= 0) sj["release_hoop_dist"] = sh.release_hoop_dist;
                 if (sh.hoop_dist >= 0) sj["hoop_dist"] = sh.hoop_dist;
                 if (!sh.attempt_type.empty()) sj["attempt_type"] = sh.attempt_type;
@@ -1727,6 +2161,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                 else if (!sh.result_source.empty()) sj["scoreboard_verified"] = false;
                 if (sh.points_detected > 0) sj["points_detected"] = sh.points_detected;
                 if (!sh.attempt_type_detected.empty()) sj["attempt_type_detected"] = sh.attempt_type_detected;
+                appendAttemptLocationFields(sj, sh);
                 if (sh.points_scoreboard > 0) sj["points_scoreboard"] = sh.points_scoreboard;
                 if (!sh.attempt_type_scoreboard.empty()) sj["attempt_type_scoreboard"] = sh.attempt_type_scoreboard;
                 if (!sh.score_delta_side.empty()) sj["score_delta_side"] = sh.score_delta_side;
@@ -1773,6 +2208,13 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         s["type"] = "clip_summary";
         s["total_frames"] = frame_counter_;
         if (fps_ > 0) s["duration_sec"] = std::round((float)frame_counter_ / (float)fps_ * 100.0f) / 100.0f;
+        if (haveScore(confirmed_score_) && fps_ > 0) {
+            std::ostringstream final;
+            final << "A " << confirmed_score_.a << " — B " << confirmed_score_.b
+                  << " in " << std::fixed << std::setprecision(1)
+                  << ((double)frame_counter_ / (double)fps_) << "s";
+            s["final"] = final.str();
+        }
         if (!camera_shot_frames_.empty()) {
             Parameters cs;
             for (const auto& kv : camera_shot_frames_) cs[kv.first] = kv.second;
@@ -1801,11 +2243,25 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             se["total"] = score_events_total_;
             se["two_point_deltas"] = score_events_2pt_;
             se["three_point_deltas"] = score_events_3pt_;
+            if (score_resyncs_ > 0) {
+                se["resyncs"] = score_resyncs_;
+                se["resync_points_team_a"] = score_resync_points_a_;
+                se["resync_points_team_b"] = score_resync_points_b_;
+            }
+            s["score_changes"] = se;
+        } else if (score_resyncs_ > 0) {
+            Parameters se;
+            se["total"] = 0;
+            se["two_point_deltas"] = 0;
+            se["three_point_deltas"] = 0;
+            se["resyncs"] = score_resyncs_;
+            se["resync_points_team_a"] = score_resync_points_a_;
+            se["resync_points_team_b"] = score_resync_points_b_;
             s["score_changes"] = se;
         }
         // Game-shape aggregates derived from score-change history and possession durations.
         Parameters shape;
-        if (score_events_total_ > 0) {
+        if (score_events_total_ > 0 || score_resyncs_ > 0) {
             shape["lead_changes"] = lead_changes_;
             shape["largest_lead"] = largest_lead_;
             shape["longest_run_points"] = longest_run_points_;
@@ -1863,9 +2319,10 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         writePossessionRecord(deferred_poss_);
     }
 
-    void flushPossession() {
+    void flushPossession(uint64_t next_start_frame = 0) {
         if (!poss_active_) return;
         poss_active_ = false;
+        stampNextPossessionStart(poss_acc_, next_start_frame);
         // If the last shot is unresolved, defer flush so the result lands here.
         const bool last_unresolved = !poss_acc_.shots.empty() && poss_acc_.shots.back().result.empty();
         if (last_unresolved && have_pending_shot_) {
@@ -1885,8 +2342,11 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         std::string team = pos.value("team", std::string());
 
         const bool poss_starting = !poss_active_ || pid != poss_acc_.possession_id;
+        PossessionAcc previous_acc;
+        const bool have_previous_acc = poss_starting && poss_active_ && shouldWritePossession(poss_acc_);
+        if (have_previous_acc) previous_acc = poss_acc_;
         if (poss_starting) {
-            flushPossession();
+            flushPossession(frame_counter_);
             poss_acc_ = PossessionAcc();
             poss_active_ = true;
             poss_acc_.possession_id = pid;
@@ -1901,11 +2361,16 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
                 poss_acc_.score_a_at_start = gs.value("score_a", -1);
                 poss_acc_.score_b_at_start = gs.value("score_b", -1);
             }
+            poss_acc_.start_reason = possessionStartReasonFromPrevious(
+                have_previous_acc ? &previous_acc : nullptr,
+                poss_acc_.period_at_start,
+                clock_currently_stopped_);
         }
         if (poss_acc_.team.empty() && !team.empty()) poss_acc_.team = team;
         poss_acc_.end_frame = frame_counter_;
         poss_acc_.end_pts = pts;
         ++poss_acc_.total_frames;
+        if (frame_json.value("camera_shot", std::string()) == "closeup") ++poss_acc_.closeup_frames;
         std::string bs = pos.value("state", std::string());
         if (bs == "controlled") ++poss_acc_.frames_controlled;
         else if (bs == "loose") ++poss_acc_.frames_loose;
@@ -1961,21 +2426,29 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         if (!poss_active_) return;
         ShotRecord s;
         s.release_frame = (int)frame_counter_;
+        const Parameters empty_shot = Parameters::object();
+        const Parameters& shot = (frame_json.contains("shot") && frame_json["shot"].is_object())
+            ? frame_json["shot"] : empty_shot;
+        s.shooter_id = getOr<int>(shot, "shooter_id", last_known_handler_id_);
+        s.assist_id = assistIdBeforeShot(poss_acc_, s.shooter_id);
         s.visual_team = poss_acc_.team;
-        if (frame_json.contains("shot") && frame_json["shot"].contains("ball_hoop_dist")) {
-            s.release_hoop_dist = frame_json["shot"]["ball_hoop_dist"].get<int>();
+        if (shot.contains("ball_hoop_dist")) {
+            s.release_hoop_dist = shot["ball_hoop_dist"].get<int>();
         }
-        if (frame_json.contains("shot") && frame_json["shot"].contains("attempt_type")) {
-            s.attempt_type = frame_json["shot"]["attempt_type"].get<std::string>();
+        if (shot.contains("attempt_type")) {
+            s.attempt_type = shot["attempt_type"].get<std::string>();
             s.attempt_type_detected = s.attempt_type;
         } else if (frame_json.contains("court_zone") && frame_json["court_zone"].contains("inside_three_point_area")) {
             s.attempt_type = frame_json["court_zone"]["inside_three_point_area"].get<bool>() ? "2pt" : "3pt";
         } else {
             s.attempt_type = "unknown";
         }
-        if (frame_json.contains("shot") && frame_json["shot"].contains("attempt_points")) {
-            s.points_detected = frame_json["shot"]["attempt_points"].get<int>();
-        }
+        s.points_detected = getOr<int>(shot, "attempt_points", 0);
+        s.attempt_type_source = getOr<std::string>(shot, "attempt_type_source", std::string());
+        s.attempt_confidence = getOr<float>(shot, "attempt_confidence", -1.0f);
+        s.three_point_line_signed_distance_px = getOr<int>(shot, "three_point_line_signed_distance_px", 0);
+        s.three_point_line_y_delta_px = getOr<int>(shot, "three_point_line_y_delta_px", 0);
+        s.three_point_line_relation = getOr<std::string>(shot, "three_point_line_relation", std::string());
         if (frame_json.contains("game")) {
             const auto& gs = frame_json["game"];
             if (gs.contains("period_clock_remaining_sec")) s.game_clock_sec = gs["period_clock_remaining_sec"].get<int>();
@@ -2006,11 +2479,20 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
             if (it->result.empty()) {
                 it->result = data.result;
                 it->result_source = data.source;
+                if (data.shooter_id >= 0 && it->shooter_id < 0) it->shooter_id = data.shooter_id;
+                if (data.assist_id >= 0 && it->assist_id < 0) it->assist_id = data.assist_id;
                 if (!data.attempt_type.empty() && data.attempt_type != "unknown") it->attempt_type = data.attempt_type;
                 if (data.points > 0) it->points = data.points;
                 it->scoreboard_verified = data.scoreboard_verified;
                 if (data.points_detected > 0) it->points_detected = data.points_detected;
                 if (!data.attempt_type_detected.empty()) it->attempt_type_detected = data.attempt_type_detected;
+                if (!data.attempt_type_source.empty()) it->attempt_type_source = data.attempt_type_source;
+                if (data.attempt_confidence >= 0.0f) it->attempt_confidence = data.attempt_confidence;
+                if (!data.attempt_type_source.empty() || !data.three_point_line_relation.empty()) {
+                    it->three_point_line_signed_distance_px = data.three_point_line_signed_distance_px;
+                    it->three_point_line_y_delta_px = data.three_point_line_y_delta_px;
+                }
+                if (!data.three_point_line_relation.empty()) it->three_point_line_relation = data.three_point_line_relation;
                 if (data.points_scoreboard > 0) it->points_scoreboard = data.points_scoreboard;
                 if (!data.attempt_type_scoreboard.empty()) it->attempt_type_scoreboard = data.attempt_type_scoreboard;
                 it->score_delta_side = data.score_delta_side;
@@ -2031,11 +2513,18 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         ShotRecord s;
         s.result = data.result;
         s.result_source = data.source;
+        s.shooter_id = data.shooter_id;
+        s.assist_id = data.assist_id;
         if (!data.attempt_type.empty()) s.attempt_type = data.attempt_type;
         if (data.points > 0) s.points = data.points;
         s.scoreboard_verified = data.scoreboard_verified;
         s.points_detected = data.points_detected;
         s.attempt_type_detected = data.attempt_type_detected;
+        s.attempt_type_source = data.attempt_type_source;
+        s.attempt_confidence = data.attempt_confidence;
+        s.three_point_line_signed_distance_px = data.three_point_line_signed_distance_px;
+        s.three_point_line_y_delta_px = data.three_point_line_y_delta_px;
+        s.three_point_line_relation = data.three_point_line_relation;
         s.points_scoreboard = data.points_scoreboard;
         s.attempt_type_scoreboard = data.attempt_type_scoreboard;
         s.score_delta_side = data.score_delta_side;
@@ -2068,6 +2557,7 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         // A deferred possession owns this result (shot was released there).
         if (have_deferred_poss_) {
             applyResult(deferred_poss_.shots, data);
+            refreshActiveStartReasonFromPrevious(deferred_poss_);
             flushDeferredPossession();
             return;
         }
@@ -2112,14 +2602,25 @@ class MetadataDump : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Rep
         possessions_by_team_.clear();
         shots_made_ = shots_missed_ = shots_unknown_ = shot_attempts_total_ = 0;
         score_events_total_ = score_events_2pt_ = score_events_3pt_ = 0;
+        score_resyncs_ = score_resync_points_a_ = score_resync_points_b_ = 0;
         scoreboard_verified_shots_ = scoreboard_unverified_shots_ = detector_score_disagreements_ = 0;
         score_ocr_regressions_ = score_ocr_rejected_ = 0;
+        lead_changes_ = largest_lead_ = longest_run_points_ = current_run_points_ = 0;
+        current_leader_.clear();
+        current_run_side_.clear();
+        total_possession_frames_ = 0;
         have_confirmed_score_ = false;
         confirmed_score_ = ScoreState();
         score_candidate_ = ScoreState();
         score_candidate_frames_ = 0;
         score_candidate_first_frame_ = 0;
         score_candidate_first_pts_ = 0;
+        score_regression_candidate_ = ScoreState();
+        score_regression_frames_ = 0;
+        score_regression_first_frame_ = 0;
+        score_regression_first_pts_ = 0;
+        have_relocked_away_score_ = false;
+        relocked_away_score_ = ScoreState();
         for (int v = 0; v < 2; ++v) {
             visual_to_scoreboard_[v].clear();
             for (int s = 0; s < 2; ++s) team_identity_evidence_[v][s] = 0;
@@ -2278,6 +2779,7 @@ public:
         if (params.count("game_state_metadata_key")) r->game_state_metadata_key_ = params["game_state_metadata_key"].get<std::string>();
         if (params.count("viewport_metadata_key")) r->viewport_metadata_key_ = params["viewport_metadata_key"].get<std::string>();
         if (params.count("player_seg_metadata_key")) r->player_seg_metadata_key_ = params["player_seg_metadata_key"].get<std::string>();
+        if (params.count("player_feet_metadata_key")) r->player_feet_metadata_key_ = params["player_feet_metadata_key"].get<std::string>();
         if (params.count("court_seg_metadata_key")) r->court_seg_metadata_key_ = params["court_seg_metadata_key"].get<std::string>();
         if (params.count("output_metadata_key")) r->output_metadata_key_ = params["output_metadata_key"].get<std::string>();
         if (params.count("output_file")) r->output_file_ = params["output_file"].get<std::string>();
@@ -2295,7 +2797,10 @@ public:
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
         if (params.count("shot_result_wait_frames")) r->shot_result_wait_frames_ = std::max(1, params["shot_result_wait_frames"].get<int>());
         if (params.count("score_change_confirm_frames")) r->score_change_confirm_frames_ = std::max(1, params["score_change_confirm_frames"].get<int>());
+        if (params.count("score_relock_confirm_frames")) r->score_relock_confirm_frames_ = std::max(1, params["score_relock_confirm_frames"].get<int>());
         if (params.count("score_change_max_delta")) r->score_change_max_delta_ = std::max(1, params["score_change_max_delta"].get<int>());
+        if (params.count("score_resync_max_delta_per_side")) r->score_resync_max_delta_per_side_ = std::max(1, params["score_resync_max_delta_per_side"].get<int>());
+        if (params.count("score_resync_max_total_delta")) r->score_resync_max_total_delta_ = std::max(1, params["score_resync_max_total_delta"].get<int>());
         if (params.count("team_identity_lock_min_evidence")) r->team_identity_lock_min_evidence_ = std::max(1, params["team_identity_lock_min_evidence"].get<int>());
         if (params.count("team_identity_lock_min_margin")) r->team_identity_lock_min_margin_ = std::max(0, params["team_identity_lock_min_margin"].get<int>());
         if (params.count("scoreboard_team_name_lock_hits")) r->scoreboard_team_name_lock_hits_ = std::max(1, params["scoreboard_team_name_lock_hits"].get<int>());

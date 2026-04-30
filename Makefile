@@ -121,11 +121,13 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cu,avpl_draw_tactical_court_ptx,objs/src/nodes/neural_net/draw/draw_tactical_court.o))
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
@@ -140,6 +142,7 @@ endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_SPECIFIC)$(HAVE_NVCC),111)
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_extract.cu,avpl_jersey_uv_mean_ptx,objs/src/nodes/neural_net/sport_specific/jersey_color_extract.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_feet_seg.cu,avpl_player_feet_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_feet_seg.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_torso_seg.cu,avpl_player_torso_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_torso_seg.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif

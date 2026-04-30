@@ -108,22 +108,6 @@ class GameState : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Report
         return "";
     }
 
-    static int extractInt(const std::string& text) {
-        int best = -1;
-        int cur = -1;
-        for (char c : text) {
-            if (std::isdigit((unsigned char)c)) {
-                if (cur < 0) cur = 0;
-                cur = cur * 10 + (c - '0');
-            } else if (cur >= 0) {
-                best = cur;
-                cur = -1;
-            }
-        }
-        if (cur >= 0) best = cur;
-        return best;
-    }
-
     static bool parseStrictNumberText(const std::string& text, int min_val, int max_val, int& out) {
         std::string digits;
         for (char c : text) {
@@ -162,15 +146,29 @@ class GameState : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Report
         return -1;
     }
 
-    static int parsePeriodNum(const std::string& text) {
+    static std::string compactAlnumUpper(const std::string& text) {
         const std::string up = upperAscii(text);
-        if (up.find("1ST") != std::string::npos || up.find("IST") != std::string::npos) return 1;
-        if (up.find("2ND") != std::string::npos) return 2;
-        if (up.find("3RD") != std::string::npos) return 3;
-        if (up.find("4TH") != std::string::npos) return 4;
-        if (up.find("OT") != std::string::npos) return 5;
-        int n = extractInt(up);
-        if (n >= 1 && n <= 9) return n;
+        std::string out;
+        out.reserve(up.size());
+        for (char c : up) {
+            if (std::isalnum((unsigned char)c)) out.push_back(c);
+        }
+        return out;
+    }
+
+    static int parsePeriodNum(const std::string& text) {
+        const std::string tok = compactAlnumUpper(text);
+        if (tok == "1ST" || tok == "IST" || tok == "Q1" || tok == "1Q" ||
+            tok == "QTR1" || tok == "1QTR" || tok == "1") {
+            return 1;
+        }
+        if (tok == "2ND" || tok == "Q2" || tok == "2Q" || tok == "QTR2" || tok == "2QTR" || tok == "2") return 2;
+        if (tok == "3RD" || tok == "Q3" || tok == "3Q" || tok == "QTR3" || tok == "3QTR" || tok == "3") return 3;
+        if (tok == "4TH" || tok == "Q4" || tok == "4Q" || tok == "QTR4" || tok == "4QTR" || tok == "4") return 4;
+        if (tok == "OT" || tok == "1OT") return 5;
+        if (tok == "2OT") return 6;
+        if (tok == "3OT") return 7;
+        if (tok == "4OT") return 8;
         return -1;
     }
 

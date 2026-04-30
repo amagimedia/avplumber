@@ -18,6 +18,7 @@ class CourtZone : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Report
     std::string handler_metadata_key_ = "ball_handler";
     std::string ball_metadata_key_ = "yolo_ball";
     std::string player_metadata_key_ = "yolo_players";
+    std::string feet_metadata_key_ = "player_feet";
     std::string seg_metadata_key_ = "yolo_seg";
     std::string output_metadata_key_ = "court_zone";
     int seg_side_data_slot_ = 0;
@@ -149,11 +150,28 @@ class CourtZone : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Report
         return (y < hoop_y) ? left_name : right_name;
     }
 
-    Point parseHandlerPoint(const Parameters& handler_md) const {
+    Point parseFeetPoint(const Parameters& feet_md, int track_id) const {
+        Point p;
+        if (track_id < 0 || !feet_md.contains("detections") || !feet_md["detections"].is_array()) return p;
+        for (const auto& det : feet_md["detections"]) {
+            if (!det.is_object()) continue;
+            if (det.value("track_id", -1) != track_id) continue;
+            if (!det.contains("foot_point") || !det["foot_point"].is_array() || det["foot_point"].size() < 2) continue;
+            p.x = det["foot_point"][0].get<float>();
+            p.y = det["foot_point"][1].get<float>();
+            p.valid = true;
+            return p;
+        }
+        return p;
+    }
+
+    Point parseHandlerPoint(const Parameters& handler_md, const Parameters& feet_md) const {
         Point p;
         if (!handler_md.contains("detections") || !handler_md["detections"].is_array()) return p;
         for (const auto& det : handler_md["detections"]) {
             if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
+            Point fp = parseFeetPoint(feet_md, det.value("track_id", -1));
+            if (fp.valid) return fp;
             p.x = (det["xyxy"][0].get<float>() + det["xyxy"][2].get<float>()) * 0.5f;
             p.y = det["xyxy"][3].get<float>();
             p.valid = true;
@@ -351,6 +369,7 @@ public:
         auto handler_md = tryParse(raw, handler_metadata_key_);
         auto ball_md = tryParse(raw, ball_metadata_key_);
         auto players_md = tryParse(raw, player_metadata_key_);
+        auto feet_md = tryParse(raw, feet_metadata_key_);
         auto seg_md = tryParse(raw, seg_metadata_key_);
 
         CourtContext ctx;
@@ -359,7 +378,7 @@ public:
         parseHoop(players_md, ctx);
         parseCourt(raw, seg_md, ctx);
 
-        Point handler_pt = parseHandlerPoint(handler_md);
+        Point handler_pt = parseHandlerPoint(handler_md, feet_md);
         Point ball_pt = parseBallPoint(ball_md);
 
         Parameters out_md;
@@ -411,6 +430,7 @@ public:
         if (params.count("handler_metadata_key")) r->handler_metadata_key_ = params["handler_metadata_key"].get<std::string>();
         if (params.count("ball_metadata_key")) r->ball_metadata_key_ = params["ball_metadata_key"].get<std::string>();
         if (params.count("player_metadata_key")) r->player_metadata_key_ = params["player_metadata_key"].get<std::string>();
+        if (params.count("feet_metadata_key")) r->feet_metadata_key_ = params["feet_metadata_key"].get<std::string>();
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
         if (params.count("output_metadata_key")) r->output_metadata_key_ = params["output_metadata_key"].get<std::string>();
         if (params.count("seg_side_data_slot")) r->seg_side_data_slot_ = params["seg_side_data_slot"].get<int>();

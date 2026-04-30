@@ -75,12 +75,18 @@ void nmsScoreboard(std::vector<ScoreboardDetection>& dets, float iou_thresh) {
     dets = std::move(kept);
 }
 
-// Limit detections per class: Team Name/Points keep 2, others keep 1
-void limitPerClass(std::vector<ScoreboardDetection>& dets) {
+// Limit detections per class: Team Name/Points keep 2, scalar fields keep 1.
+// Generic lower-third Text scan boxes intentionally keep more than one candidate.
+void limitPerClass(std::vector<ScoreboardDetection>& dets, int max_text_detections) {
     std::unordered_map<std::string, int> counts;
     std::vector<ScoreboardDetection> kept;
     for (auto& d : dets) {
-        int max_per_class = (d.label == "Team Name" || d.label == "Team Points") ? 2 : 1;
+        int max_per_class = 1;
+        if (d.label == "Team Name" || d.label == "Team Points") {
+            max_per_class = 2;
+        } else if (d.label == "Text") {
+            max_per_class = std::max(1, max_text_detections);
+        }
         if (counts[d.label] < max_per_class) {
             counts[d.label]++;
             kept.push_back(std::move(d));
@@ -97,6 +103,10 @@ struct OcrResult {
     float det_conf = 0.0f;
     float center_x = 0.0f;
     float center_y = 0.0f;
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
 };
 
 // CTC greedy decode: argmax per timestep, dedup consecutive, skip blank (index 0).
@@ -136,7 +146,7 @@ std::string ctcGreedyDecode(const float* output, int seq_len, int num_classes,
 class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yolo_base::CudaInferTrtBase, public ReportsFinishByFlag {
     std::string detection_metadata_key_ = "yolo_players";
     std::string output_metadata_key_ = "scoreboard";
-    std::vector<std::string> scoreboard_labels_ = {"Period", "Shot Clock", "Team Name", "Team Points", "Time Remaining"};
+    std::vector<std::string> scoreboard_labels_ = {"Period", "Shot Clock", "Team Name", "Team Points", "Time Remaining", "Text"};
     float min_conf_ = 0.4f;
     float nms_iou_thresh_ = 0.3f;
     int ocr_every_n_ = 25;
@@ -144,7 +154,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     std::string keys_file_;
     float crop_pad_x_team_name_rel_ = 0.22f;
     float crop_pad_y_team_name_rel_ = 0.18f;
-    float crop_pad_x_points_rel_ = 0.16f;
+    float crop_pad_x_points_rel_ = 0.60f;
     float crop_pad_y_points_rel_ = 0.18f;
     float crop_pad_x_clock_rel_ = 0.12f;
     float crop_pad_y_clock_rel_ = 0.16f;
@@ -163,6 +173,20 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     int pair_warmup_samples_ = 3;
     int pair_hard_lock_hits_ = 2;
     int unlock_bad_frames_ = 12;
+    int inferred_score_confirm_samples_ = 2;
+    float inferred_score_min_candidate_conf_ = 0.22f;
+    int max_text_detections_ = 32;
+    bool clock_anchor_score_scan_ = true;
+    int clock_anchor_score_max_crops_ = 160;
+    float clock_anchor_score_min_clock_conf_ = 0.45f;
+    std::vector<float> clock_anchor_score_x_offsets_rel_ = {
+        -0.285f, -0.245f, -0.205f, -0.165f, -0.125f,
+        -0.105f, -0.075f, -0.050f, -0.025f,
+         0.025f,  0.050f,  0.075f,  0.105f, 0.135f
+    };
+    std::vector<float> clock_anchor_score_y_offsets_rel_ = {-0.095f, -0.075f};
+    std::vector<float> clock_anchor_score_widths_rel_ = {0.026f, 0.034f};
+    std::vector<float> clock_anchor_score_heights_rel_ = {0.055f, 0.075f};
     std::vector<std::string> keys_;
     CUmodule crop_module_ = nullptr;
     CUfunction crop_kernel_ = nullptr;
@@ -174,6 +198,9 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
     int lock_inconsistent_frames_ = 0;
     uint64_t ocr_sample_counter_ = 0;
     bool hard_lock_active_ = false;
+    int pending_inferred_score_a_ = -1;
+    int pending_inferred_score_b_ = -1;
+    int pending_inferred_score_hits_ = 0;
 
     struct TeamEvidence {
         float left_score = 0.0f;
@@ -237,6 +264,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         if (label == "quarter") return "Period";
         if (label == "countdown") return "Shot Clock";
         if (label == "Basketball-Scoreboard") return "Scoreboard";
+        if (label == "scoreboard_text" || label == "lower_third_text") return "Text";
         return label;
     }
 
@@ -304,6 +332,48 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         return parseLooseUnsigned(text, min_val, max_val, out);
     }
 
+    // Find the first all-digit token in mixed text (e.g. "ATL 2 LAL 0" → 2).
+    // Used when the score crop is wide enough to include adjacent team-name
+    // letters; PPOCRv3 needs that horizontal context to read single digits well.
+    static bool parseFirstDigitToken(const std::string& text, int min_val, int max_val, int& out) {
+        size_t i = 0;
+        while (i < text.size()) {
+            if (!std::isdigit((unsigned char)text[i])) { ++i; continue; }
+            size_t j = i;
+            while (j < text.size() && std::isdigit((unsigned char)text[j])) ++j;
+            const size_t len = j - i;
+            if (len > 0 && len <= 3) {
+                int v = 0;
+                for (size_t k = i; k < j; ++k) v = v * 10 + (text[k] - '0');
+                if (v >= min_val && v <= max_val) { out = v; return true; }
+            }
+            i = j;
+        }
+        return false;
+    }
+
+    static bool parseStandaloneUnsigned(const std::string& text, int min_val, int max_val, int& out) {
+        if (text.empty()) return false;
+        std::string digits;
+        digits.reserve(text.size());
+        for (char c : text) {
+            if (std::isdigit((unsigned char)c)) {
+                digits.push_back(c);
+            } else if (!std::isspace((unsigned char)c)) {
+                return false;
+            }
+        }
+        if (digits.empty() || digits.size() > 3) return false;
+        int value = 0;
+        for (char c : digits) {
+            value = value * 10 + (c - '0');
+            if (value > max_val) return false;
+        }
+        if (value < min_val || value > max_val) return false;
+        out = value;
+        return true;
+    }
+
     static bool parseGameClockSec(const std::string& text, int& out) {
         const std::string up = upperAscii(text);
         if (up.find("AM") != std::string::npos || up.find("PM") != std::string::npos) return false;
@@ -333,20 +403,51 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         return parseGameClockSec(text, sec);
     }
 
-    static int parsePeriodNum(const std::string& text) {
+    static std::string compactAlnumUpper(const std::string& text) {
         const std::string up = upperAscii(text);
-        if (up.find("1ST") != std::string::npos || up.find("IST") != std::string::npos) return 1;
-        if (up.find("2ND") != std::string::npos) return 2;
-        if (up.find("3RD") != std::string::npos) return 3;
-        if (up.find("4TH") != std::string::npos) return 4;
-        if (up.find("OT") != std::string::npos) return 5;
+        std::string out;
+        out.reserve(up.size());
         for (char c : up) {
-            if (std::isdigit((unsigned char)c)) {
-                int n = c - '0';
-                if (n >= 1 && n <= 9) return n;
-            }
+            if (std::isalnum((unsigned char)c)) out.push_back(c);
+        }
+        return out;
+    }
+
+    static int parseExplicitPeriodNum(const std::string& text) {
+        const std::string tok = compactAlnumUpper(text);
+        if (tok == "1ST" || tok == "IST" || tok == "Q1" || tok == "1Q" ||
+            tok == "QTR1" || tok == "1QTR") {
+            return 1;
+        }
+        if (tok == "2ND" || tok == "Q2" || tok == "2Q" || tok == "QTR2" || tok == "2QTR") return 2;
+        if (tok == "3RD" || tok == "Q3" || tok == "3Q" || tok == "QTR3" || tok == "3QTR") return 3;
+        if (tok == "4TH" || tok == "Q4" || tok == "4Q" || tok == "QTR4" || tok == "4QTR") return 4;
+        if (tok == "OT" || tok == "1OT") return 5;
+        if (tok == "2OT") return 6;
+        if (tok == "3OT") return 7;
+        if (tok == "4OT") return 8;
+        return -1;
+    }
+
+    static int parsePeriodNum(const std::string& text) {
+        int explicit_num = parseExplicitPeriodNum(text);
+        if (explicit_num > 0) return explicit_num;
+
+        const std::string tok = compactAlnumUpper(text);
+        if (tok.size() == 1 && std::isdigit((unsigned char)tok[0])) {
+            int n = tok[0] - '0';
+            if (n >= 1 && n <= 9) return n;
         }
         return -1;
+    }
+
+    static bool hasExplicitPeriodToken(const std::string& text) {
+        return parseExplicitPeriodNum(text) > 0;
+    }
+
+    static bool hasGenericTextPeriodToken(const std::string& text) {
+        int n = parseExplicitPeriodNum(text);
+        return n >= 1 && n <= 4;
     }
 
     static bool looksLikePeriod(const std::string& text) {
@@ -367,13 +468,21 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         if (label == "Team Name") {
             if (!extractAbbrevCandidates(r.text).empty()) score += 1000;
         } else if (label == "Team Points") {
-            if (parseStrictUnsigned(r.text, 0, 199)) score += 1000;
+            int v = -1;
+            if (parseStrictUnsigned(r.text, 0, 199) || parseFirstDigitToken(r.text, 0, 199, v)) score += 1000;
         } else if (label == "Shot Clock") {
             if (parseStrictUnsigned(r.text, 0, 24)) score += 1000;
         } else if (label == "Time Remaining") {
             if (looksLikeGameClock(r.text)) score += 1000;
         } else if (label == "Period") {
             if (looksLikePeriod(r.text)) score += 1000;
+        } else if (label == "Text") {
+            int value = -1;
+            if (looksLikeGameClock(r.text) ||
+                hasGenericTextPeriodToken(r.text) ||
+                parseStandaloneUnsigned(r.text, 0, 199, value)) {
+                score += 1000;
+            }
         }
         score += (int)std::lround(r.mean_conf * 100.0f);
         return score;
@@ -419,6 +528,10 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
         result.det_conf = det.conf;
         result.center_x = center_x_override;
         result.center_y = bboxCenterY(det);
+        result.x1 = det.x1;
+        result.y1 = det.y1;
+        result.x2 = det.x2;
+        result.y2 = det.y2;
 
         const double scale_x = model_w > 0.0f ? (double)frm.width() / (double)model_w : 1.0;
         const double scale_y = model_h > 0.0f ? (double)frm.height() / (double)model_h : 1.0;
@@ -674,7 +787,7 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             }
 
             int shot_sec = -1;
-            if (parseLooseUnsigned(r.text, 0, 24, shot_sec)) {
+            if (!rawLabelIs(r, "score_anchor") && parseLooseUnsigned(r.text, 0, 24, shot_sec)) {
                 float score = r.mean_conf;
                 if (rawLabelIs(r, "countdown") || rawLabelIs(r, "Shot Clock")) score += 3.0f;
                 if (rawLabelIs(r, "score_1") || rawLabelIs(r, "score_2") || rawLabelIs(r, "Team Points")) score -= 2.0f;
@@ -684,9 +797,342 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
 
             int period_num = parsePeriodNum(r.text);
             if (period_num > 0) {
+                if (rawLabelIs(r, "score_anchor")) continue;
+                if (r.label == "Text" && !hasGenericTextPeriodToken(r.text)) continue;
                 float score = r.mean_conf;
                 if (rawLabelIs(r, "quarter") || rawLabelIs(r, "Period")) score += 3.0f;
                 considerBest(period, r, period_num, score);
+            }
+        }
+    }
+
+    struct PointCandidate {
+        const OcrResult* result = nullptr;
+        int value = -1;
+        float score = -1.0f;
+    };
+
+    struct BestPointPair {
+        const OcrResult* left = nullptr;
+        const OcrResult* right = nullptr;
+        int left_value = -1;
+        int right_value = -1;
+        float score = -1.0f;
+    };
+
+    static bool sameSpatialResult(const OcrResult& a, const OcrResult* b) {
+        if (!b) return false;
+        const float acx = (a.x1 + a.x2) * 0.5f;
+        const float acy = (a.y1 + a.y2) * 0.5f;
+        const float bcx = (b->x1 + b->x2) * 0.5f;
+        const float bcy = (b->y1 + b->y2) * 0.5f;
+        const float dx = acx - bcx;
+        const float dy = acy - bcy;
+        if (std::sqrt(dx * dx + dy * dy) <= 2.0f) return true;
+        return bboxIoU(a.x1, a.y1, a.x2, a.y2, b->x1, b->y1, b->x2, b->y2) > 0.55f;
+    }
+
+    static float closeness01(float dist, float max_dist) {
+        if (max_dist <= 0.0f) return 0.0f;
+        return std::clamp(1.0f - dist / max_dist, 0.0f, 1.0f);
+    }
+
+    static bool isPointLabel(const OcrResult& r) {
+        return rawLabelIs(r, "score_1") || rawLabelIs(r, "score_2") ||
+               rawLabelIs(r, "Team Points");
+    }
+
+    BestPointPair inferPointFields(const std::vector<OcrResult>& all_results,
+                                   double model_w,
+                                   double model_h,
+                                   const BestTextField& game_clock,
+                                   const BestTextField& shot_clock,
+                                   const BestTextField& period) const {
+        BestPointPair empty;
+        if (!game_clock.result || game_clock.result->mean_conf < 0.45f || game_clock.value < 0) {
+            return empty;
+        }
+
+        std::vector<PointCandidate> candidates;
+        const float mw = (float)model_w;
+        const float mh = (float)model_h;
+        const float clock_x = game_clock.result->center_x;
+        const float clock_y = game_clock.result->center_y;
+        const float min_score_row_above_clock = 0.025f * mh;
+        const float max_score_row_above_clock = 0.20f * mh;
+
+        for (const auto& r : all_results) {
+            if (r.text.empty()) continue;
+            int value = -1;
+            if (!parseStandaloneUnsigned(r.text, 0, 199, value)) {
+                // Score crops widened to capture team-name context produce mixed
+                // text like "ATL 2"; pull the first digit token only when the
+                // detection is actually labeled as a score box.
+                const bool is_score_label = rawLabelIs(r, "Team Points") ||
+                                            rawLabelIs(r, "score_1") ||
+                                            rawLabelIs(r, "score_2") ||
+                                            rawLabelIs(r, "score_anchor");
+                if (!is_score_label) continue;
+                if (!parseFirstDigitToken(r.text, 0, 199, value)) continue;
+            }
+            if (sameSpatialResult(r, game_clock.result)) continue;
+            const bool score_anchor = rawLabelIs(r, "score_anchor");
+            if (score_anchor && value > 9) continue;
+            if (!score_anchor && r.label == "Text" &&
+                period.value == 1 && game_clock.value >= 600 && value > 30) {
+                // Early first-quarter scorebugs are often next to small logos or ad glyphs.
+                // Generic scan crops can merge that extra digit with the true score ("92"
+                // instead of "2"). A 30+ point score in the first two minutes is not plausible.
+                continue;
+            }
+            const float min_candidate_conf = score_anchor
+                ? std::min(inferred_score_min_candidate_conf_, 0.10f)
+                : inferred_score_min_candidate_conf_;
+            if (r.mean_conf < min_candidate_conf) continue;
+            if (std::fabs(r.center_x - clock_x) > 0.35f * mw) continue;
+
+            const bool explicit_points =
+                rawLabelIs(r, "score_1") || rawLabelIs(r, "score_2") ||
+                rawLabelIs(r, "Team Points") || score_anchor;
+            const float score_row_above_clock = clock_y - r.center_y;
+            const bool score_row_near_clock =
+                score_row_above_clock >= min_score_row_above_clock &&
+                score_row_above_clock <= max_score_row_above_clock;
+            const bool same_row_before_clock =
+                r.center_x < clock_x - 0.030f * mw &&
+                std::fabs(score_row_above_clock) <= 0.120f * mh;
+            if (explicit_points) {
+                if (!score_row_near_clock && !same_row_before_clock &&
+                    (r.center_y < clock_y - 0.20f * mh || r.center_y > clock_y + 0.08f * mh)) {
+                    continue;
+                }
+            } else {
+                // In a layout-agnostic lower-third scan, scores are the numeric pair above
+                // the game-clock/quarter row. Some scorebugs put both scores before the
+                // clock on the same row, so keep those left-of-clock numbers for pair scoring.
+                if (!score_row_near_clock && !same_row_before_clock) {
+                    continue;
+                }
+            }
+
+            float score = r.mean_conf;
+            if (explicit_points) {
+                score += 3.0f;
+            } else if (r.label == "Text") {
+                score += 0.2f;
+                if (score_row_near_clock) {
+                    score += 0.8f * closeness01(std::fabs(score_row_above_clock - 0.10f * mh), 0.10f * mh);
+                } else if (same_row_before_clock) {
+                    score += 0.5f * closeness01(std::fabs(score_row_above_clock), 0.08f * mh);
+                }
+            }
+            if (rawLabelIs(r, "countdown") || rawLabelIs(r, "Shot Clock")) score -= 2.0f;
+            if (sameSpatialResult(r, shot_clock.result)) score -= 2.5f;
+
+            if (game_clock.result) {
+                const float dx = std::fabs(r.center_x - game_clock.result->center_x);
+                const float dy = std::fabs(r.center_y - game_clock.result->center_y);
+                score += 0.8f * closeness01(dx, 0.32f * mw);
+                score += 0.5f * closeness01(dy, 0.14f * mh);
+            }
+            if (shot_clock.result) {
+                const float dy = std::fabs(r.center_y - shot_clock.result->center_y);
+                score += 0.2f * closeness01(dy, 0.14f * mh);
+            }
+            candidates.push_back({&r, value, score});
+        }
+
+        BestPointPair best;
+        const float min_dx = 0.035f * mw;
+        const float max_dx = 0.25f * mw;
+        const float max_row_dy = 0.035f * mh;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            for (size_t j = i + 1; j < candidates.size(); ++j) {
+                const PointCandidate* a = &candidates[i];
+                const PointCandidate* b = &candidates[j];
+                if (a->result->center_x > b->result->center_x) std::swap(a, b);
+
+                const float dx = std::fabs(a->result->center_x - b->result->center_x);
+                const float dy = std::fabs(a->result->center_y - b->result->center_y);
+                if (dx < min_dx || dx > max_dx || dy > max_row_dy) continue;
+                if (bboxIoU(a->result->x1, a->result->y1, a->result->x2, a->result->y2,
+                            b->result->x1, b->result->y1, b->result->x2, b->result->y2) > 0.15f) {
+                    continue;
+                }
+
+                if (game_clock.result) {
+                    const float pair_cx = (a->result->center_x + b->result->center_x) * 0.5f;
+                    const float pair_cy = (a->result->center_y + b->result->center_y) * 0.5f;
+                    if (std::fabs(pair_cx - game_clock.result->center_x) > 0.22f * mw) continue;
+                    const bool anchored_pair =
+                        rawLabelIs(*a->result, "score_anchor") || rawLabelIs(*b->result, "score_anchor");
+                    const float left_gap = game_clock.result->center_x - a->result->center_x;
+                    const float right_gap = b->result->center_x - game_clock.result->center_x;
+                    const float pair_above_clock = game_clock.result->center_y - pair_cy;
+                    const bool above_flank_layout =
+                        a->result->center_x < game_clock.result->center_x - 0.018f * mw &&
+                        b->result->center_x > game_clock.result->center_x + 0.006f * mw;
+                    const bool before_clock_layout =
+                        b->result->center_x < game_clock.result->center_x - 0.030f * mw &&
+                        dx >= 0.085f * mw &&
+                        dx <= 0.340f * mw &&
+                        pair_above_clock >= -0.120f * mh &&
+                        pair_above_clock <= max_score_row_above_clock;
+
+                    if (!above_flank_layout && !before_clock_layout) continue;
+                    if (before_clock_layout && anchored_pair) continue;
+                    const float pair_min_conf = std::min(a->result->mean_conf, b->result->mean_conf);
+                    const float pair_max_conf = std::max(a->result->mean_conf, b->result->mean_conf);
+                    const float pair_avg_conf = (a->result->mean_conf + b->result->mean_conf) * 0.5f;
+                    if (anchored_pair && above_flank_layout) {
+                        // Clock-anchored crops intentionally look near the time display, so they
+                        // produce many plausible but weak digits from logos and clock separators.
+                        // Keep this layout for compact scorebugs, but require a strong pair.
+                        if (pair_avg_conf < 0.60f && !(pair_max_conf >= 0.90f && pair_min_conf >= 0.22f)) {
+                            continue;
+                        }
+                    }
+                    if (anchored_pair) {
+                        if (above_flank_layout) {
+                            // The clock-anchored scan probes boxes around the scoreboard clock.
+                            // Digits too close to the clock on the right are often team logos
+                            // decoded as numbers, while the actual right score sits in the
+                            // next flanking score column.
+                            if (right_gap < 0.055f * mw || dx < 0.085f * mw) continue;
+                            if (left_gap > 0.14f * mw || right_gap > 0.18f * mw) continue;
+                        } else if (before_clock_layout) {
+                            if (left_gap < 0.10f * mw || left_gap > 0.34f * mw) continue;
+                        }
+                    }
+                    const bool explicit_pair =
+                        isPointLabel(*a->result) || isPointLabel(*b->result) || anchored_pair;
+                    if (before_clock_layout && !explicit_pair &&
+                        (a->result->mean_conf + b->result->mean_conf) * 0.5f < 0.45f) {
+                        continue;
+                    }
+                    if (explicit_pair) {
+                        if (pair_above_clock < -0.080f * mh ||
+                            pair_above_clock > max_score_row_above_clock) {
+                            continue;
+                        }
+                    } else if (!before_clock_layout &&
+                               (pair_above_clock < min_score_row_above_clock ||
+                                pair_above_clock > max_score_row_above_clock)) {
+                        continue;
+                    }
+                    float pair_score = a->score + b->score;
+                    pair_score += 1.5f * closeness01(dy, max_row_dy);
+                    if (before_clock_layout) {
+                        const float right_before_gap = game_clock.result->center_x - b->result->center_x;
+                        pair_score += 0.9f * closeness01(std::fabs(dx - 0.180f * mw), 0.140f * mw);
+                        pair_score += 0.9f * closeness01(std::fabs(left_gap - 0.260f * mw), 0.140f * mw);
+                        pair_score += 0.8f * closeness01(std::fabs(right_before_gap - 0.105f * mw), 0.090f * mw);
+                        pair_score += 0.8f * closeness01(std::fabs(pair_above_clock), 0.120f * mh);
+                        pair_score += 2.4f * pair_avg_conf;
+                    } else {
+                        pair_score += 0.9f * closeness01(std::fabs(dx - 0.105f * mw), 0.085f * mw);
+                    }
+                    if (anchored_pair && above_flank_layout) {
+                        pair_score += 0.6f * closeness01(std::fabs(left_gap - 0.035f * mw), 0.060f * mw);
+                        pair_score += 1.1f * closeness01(std::fabs(right_gap - 0.085f * mw), 0.060f * mw);
+                    } else if (!before_clock_layout) {
+                        pair_score += 0.5f * closeness01(std::fabs(pair_cx - game_clock.result->center_x), 0.28f * mw);
+                    }
+                    pair_score += 0.6f * closeness01(std::fabs(pair_cy - game_clock.result->center_y), 0.14f * mh);
+                    if (!explicit_pair && !before_clock_layout) {
+                        pair_score += 0.8f * closeness01(std::fabs(pair_above_clock - 0.10f * mh), 0.10f * mh);
+                    }
+                    if (shot_clock.result) {
+                        pair_score += 0.3f * closeness01(std::fabs(pair_cx - shot_clock.result->center_x), 0.35f * mw);
+                    }
+
+                    if (pair_score > best.score) {
+                        best.left = a->result;
+                        best.right = b->result;
+                        best.left_value = a->value;
+                        best.right_value = b->value;
+                        best.score = pair_score;
+                    }
+                }
+            }
+        }
+        if (best.score < 3.8f) return empty;
+        return best;
+    }
+
+    bool inferredScorePairIsConfirmed(const BestPointPair& pair) {
+        if (!pair.left || !pair.right || pair.left_value < 0 || pair.right_value < 0) {
+            pending_inferred_score_a_ = -1;
+            pending_inferred_score_b_ = -1;
+            pending_inferred_score_hits_ = 0;
+            return false;
+        }
+        if (pair.left_value == pending_inferred_score_a_ && pair.right_value == pending_inferred_score_b_) {
+            pending_inferred_score_hits_++;
+        } else {
+            pending_inferred_score_a_ = pair.left_value;
+            pending_inferred_score_b_ = pair.right_value;
+            pending_inferred_score_hits_ = 1;
+        }
+        return pending_inferred_score_hits_ >= inferred_score_confirm_samples_;
+    }
+
+    void appendClockAnchoredScoreOcr(const av::VideoFrame& frm,
+                                     std::vector<OcrResult>& all_results,
+                                     double model_w,
+                                     double model_h) {
+        if (!clock_anchor_score_scan_ || clock_anchor_score_max_crops_ <= 0) return;
+
+        BestTextField game_clock, shot_clock, period;
+        inferTextFields(all_results, game_clock, shot_clock, period);
+        if (!game_clock.result || game_clock.result->mean_conf < clock_anchor_score_min_clock_conf_) return;
+
+        const float mw = (float)model_w;
+        const float mh = (float)model_h;
+        const float clock_x = game_clock.result->center_x;
+        const float clock_y = game_clock.result->center_y;
+        int crops = 0;
+
+        for (float y_off : clock_anchor_score_y_offsets_rel_) {
+            for (float x_off : clock_anchor_score_x_offsets_rel_) {
+                for (float h_rel : clock_anchor_score_heights_rel_) {
+                    for (float w_rel : clock_anchor_score_widths_rel_) {
+                        if (crops >= clock_anchor_score_max_crops_) return;
+                        const float w = std::max(6.0f, w_rel * mw);
+                        const float h = std::max(10.0f, h_rel * mh);
+                        const float cx = clock_x + x_off * mw;
+                        const float cy = clock_y + y_off * mh;
+
+                        ScoreboardDetection det;
+                        det.label = "Team Points";
+                        det.raw_label = "score_anchor";
+                        det.conf = 0.85f;
+                        det.cls = -1;
+                        det.x1 = std::clamp(cx - w * 0.5f, 0.0f, mw);
+                        det.y1 = std::clamp(cy - h * 0.5f, 0.0f, mh);
+                        det.x2 = std::clamp(cx + w * 0.5f, 0.0f, mw);
+                        det.y2 = std::clamp(cy + h * 0.5f, 0.0f, mh);
+                        if (det.x2 <= det.x1 || det.y2 <= det.y1) continue;
+                        OcrResult probe_box;
+                        probe_box.x1 = det.x1;
+                        probe_box.y1 = det.y1;
+                        probe_box.x2 = det.x2;
+                        probe_box.y2 = det.y2;
+                        if (sameSpatialResult(probe_box, game_clock.result)) {
+                            continue;
+                        }
+
+                        ++crops;
+                        OcrResult r = runBestOcrOnCrop(frm, det, (float)model_w, (float)model_h);
+                        int value = -1;
+                        const float min_anchor_conf = std::min(inferred_score_min_candidate_conf_, 0.10f);
+                        if (!r.text.empty() &&
+                            r.mean_conf >= min_anchor_conf &&
+                            parseStandaloneUnsigned(r.text, 0, 9, value)) {
+                            all_results.push_back(std::move(r));
+                        }
+                    }
+                }
             }
         }
     }
@@ -870,7 +1316,8 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
 
     Parameters buildScoreboardJson(const std::vector<OcrResult>& results,
                                     const std::vector<OcrResult>& all_results,
-                                    double model_w) {
+                                    double model_w,
+                                    double model_h) {
         Parameters sb;
 
         std::vector<const OcrResult*> names, points;
@@ -929,6 +1376,8 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
 
         BestTextField best_game_clock, best_shot_clock, best_period;
         inferTextFields(all_results, best_game_clock, best_shot_clock, best_period);
+        BestPointPair inferred_points = inferPointFields(all_results, model_w, model_h, best_game_clock, best_shot_clock, best_period);
+        const bool inferred_points_ready = inferredScorePairIsConfirmed(inferred_points);
 
         // Emit team_a/team_b purely by spatial position. Keep raw OCR text when abbrev
         // extraction fails — downstream consumers (game_state, external LLMs) can still use
@@ -939,15 +1388,26 @@ class ScoreboardOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public yo
             return Parameters{{"text", text}, {"conf", r->mean_conf}};
         };
 
+        const OcrResult* points_a = points.size() >= 1 ? points.front() : (inferred_points_ready ? inferred_points.left : nullptr);
+        const OcrResult* points_b = points.size() >= 2 ? points.back() : (inferred_points_ready ? inferred_points.right : nullptr);
+
         if (!names.empty() || !points.empty()) {
             sb["team_a"] = Parameters::object();
             if (!names.empty()) sb["team_a"]["name"] = nameField(names.front());
-            if (!points.empty()) sb["team_a"]["points"] = {{"text", points.front()->text}, {"conf", points.front()->mean_conf}};
+            if (points_a) sb["team_a"]["points"] = {{"text", points_a->text}, {"conf", points_a->mean_conf}};
         }
-        if (names.size() >= 2 || points.size() >= 2) {
+        if (names.size() >= 2 || points.size() >= 2 || (inferred_points_ready && inferred_points.left && inferred_points.right)) {
             sb["team_b"] = Parameters::object();
             if (names.size() >= 2) sb["team_b"]["name"] = nameField(names.back());
-            if (points.size() >= 2) sb["team_b"]["points"] = {{"text", points.back()->text}, {"conf", points.back()->mean_conf}};
+            if (points_b) sb["team_b"]["points"] = {{"text", points_b->text}, {"conf", points_b->mean_conf}};
+        }
+        if (points.size() < 2 && inferred_points_ready && inferred_points.left && inferred_points.right) {
+            if (!sb.contains("team_a") || !sb["team_a"].is_object()) sb["team_a"] = Parameters::object();
+            sb["team_a"]["points"] = {{"text", inferred_points.left->text}, {"conf", inferred_points.left->mean_conf}};
+            if (!sb.contains("team_b") || !sb["team_b"].is_object()) sb["team_b"] = Parameters::object();
+            sb["team_b"]["points"] = {{"text", inferred_points.right->text}, {"conf", inferred_points.right->mean_conf}};
+            sb["score_source"] = "lower_third_scan";
+            sb["score_pair_conf"] = inferred_points.score;
         }
 
         if (best_period.result) {
@@ -986,6 +1446,9 @@ public:
             lock_inconsistent_frames_ = 0;
             ocr_sample_counter_ = 0;
             hard_lock_active_ = false;
+            pending_inferred_score_a_ = -1;
+            pending_inferred_score_b_ = -1;
+            pending_inferred_score_hits_ = 0;
             team_evidence_.clear();
             pair_evidence_.clear();
             stable_boxes_.clear();
@@ -1050,9 +1513,11 @@ public:
             if (!r.text.empty()) all_results.push_back(std::move(r));
         }
 
+        appendClockAnchoredScoreOcr(frm, all_results, model_w, model_h);
+
         // NMS + per-class limits for the main scoreboard fields.
         nmsScoreboard(dets, nms_iou_thresh_);
-        limitPerClass(dets);
+        limitPerClass(dets, max_text_detections_);
         stabilizeDetections(dets, model_w_f, model_h_f);
 
         // OCR stabilized post-NMS boxes for the main scoreboard fields.
@@ -1061,7 +1526,7 @@ public:
             if (!r.text.empty()) results.push_back(std::move(r));
         }
 
-        Parameters sb = buildScoreboardJson(results, all_results, model_w);
+        Parameters sb = buildScoreboardJson(results, all_results, model_w, model_h);
         cached_scoreboard_json_ = sb.dump();
         av_dict_set(&frm.raw()->metadata, output_metadata_key_.c_str(), cached_scoreboard_json_.c_str(), 0);
 
@@ -1071,9 +1536,38 @@ public:
                 if (!det_detail.empty()) det_detail += ", ";
                 det_detail += r.raw_label + "/" + r.label + "=\"" + r.text + "\"(" + std::to_string(r.mean_conf).substr(0,4) + ")";
             }
+            std::string anchor_detail;
+            std::string numeric_detail;
+            int anchor_numeric = 0;
+            int numeric_count = 0;
+            for (const auto& r : all_results) {
+                int value = -1;
+                if (!parseStandaloneUnsigned(r.text, 0, 199, value)) continue;
+                ++numeric_count;
+                if (numeric_count <= 20) {
+                    if (!numeric_detail.empty()) numeric_detail += ", ";
+                    numeric_detail += r.raw_label + ":" + r.text + "@" +
+                                      std::to_string((int)std::lround(r.center_x)) +
+                                      "," + std::to_string((int)std::lround(r.center_y)) +
+                                      "(" + std::to_string(r.mean_conf).substr(0,4) + ")";
+                }
+                if (rawLabelIs(r, "score_anchor")) {
+                    ++anchor_numeric;
+                    if (anchor_numeric <= 12) {
+                        if (!anchor_detail.empty()) anchor_detail += ", ";
+                        anchor_detail += r.text + "@" + std::to_string((int)std::lround(r.center_x)) +
+                                         "," + std::to_string((int)std::lround(r.center_y)) +
+                                         "(" + std::to_string(r.mean_conf).substr(0,4) + ")";
+                    }
+                }
+            }
             logstream << "scoreboard_ocr: frame=" << frame_counter_
                       << " dets=" << dets.size()
                       << " results=" << results.size()
+                      << " all_results=" << all_results.size()
+                      << " score_anchor_numeric=" << anchor_numeric
+                      << " score_anchor=[" << anchor_detail << "]"
+                      << " numeric=[" << numeric_detail << "]"
                       << " [" << det_detail << "]"
                       << " json=" << cached_scoreboard_json_;
         }
@@ -1113,6 +1607,12 @@ public:
         if (params.count("pair_warmup_samples")) r->pair_warmup_samples_ = std::max(1, params["pair_warmup_samples"].get<int>());
         if (params.count("pair_hard_lock_hits")) r->pair_hard_lock_hits_ = std::max(1, params["pair_hard_lock_hits"].get<int>());
         if (params.count("unlock_bad_frames")) r->unlock_bad_frames_ = params["unlock_bad_frames"].get<int>();
+        if (params.count("inferred_score_confirm_samples")) r->inferred_score_confirm_samples_ = std::max(1, params["inferred_score_confirm_samples"].get<int>());
+        if (params.count("inferred_score_min_candidate_conf")) r->inferred_score_min_candidate_conf_ = params["inferred_score_min_candidate_conf"].get<float>();
+        if (params.count("max_text_detections")) r->max_text_detections_ = std::max(1, params["max_text_detections"].get<int>());
+        if (params.count("clock_anchor_score_scan")) r->clock_anchor_score_scan_ = params["clock_anchor_score_scan"].get<bool>();
+        if (params.count("clock_anchor_score_max_crops")) r->clock_anchor_score_max_crops_ = std::max(0, params["clock_anchor_score_max_crops"].get<int>());
+        if (params.count("clock_anchor_score_min_clock_conf")) r->clock_anchor_score_min_clock_conf_ = params["clock_anchor_score_min_clock_conf"].get<float>();
         if (params.count("scoreboard_labels")) {
             r->scoreboard_labels_.clear();
             for (const auto& item : params["scoreboard_labels"]) r->scoreboard_labels_.push_back(item.get<std::string>());

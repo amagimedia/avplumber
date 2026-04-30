@@ -130,6 +130,48 @@ Vision-only export of `google/siglip-base-patch16-224` for player embedding / te
 | .onnx | `siglip-base-patch16-224/siglip_vision_224.onnx` | 355 MB | vision-only export, dynamic batch on `pixel_values` |
 | .plan | `siglip-base-patch16-224/siglip_vision_224.plan` | 179 MB | TensorRT engine, min/opt/max batch `1/8/16` at `224x224` |
 
+### scoreboard-digits (single-digit classifier, planned)
+
+Tiny CNN replacement for PP-OCRv3 on `Team Points`, `Period`, and `Shot Clock` crops.
+PP-OCRv3's 48×320 horizontal-text input is wrong shape for single broadcast digits:
+the digit ends up as a small island in ~272 px of black padding, which is OOD for
+the model and produces hallucinated reads (e.g. "2" → "9" on the NBA scoreboard).
+
+| Property | Value | Notes |
+|---|---|---|
+| Input | `1 × 64 × 64` grayscale (single digit) | Letterboxed in C++; multi-digit numbers split by vertical projection first |
+| Output | 11-class softmax | 0..9 + `blank` (rejects empty / non-digit crops) |
+| Architecture | 3× conv blocks (16→32→64 ch, k=3) + GAP + FC | ~50k params |
+| Plan size target | ~200 KB (FP16) | <0.1 ms / digit on T4 |
+| Training data | 50k synthetic (Pillow renders, ~10 broadcast fonts × digits × augmentations) + ~2k hand-labeled real crops | |
+| Falls back to PPOCR for | `Team Name`, `Time Remaining` | Word recognition + colon parsing stay on PPOCR |
+
+Pipeline (planned, on remote `/home/fedora/tensorrt/scoreboard-digits/`):
+```bash
+# 1. Render synthetic crops
+python scripts/render_digits.py --fonts fonts/ --out synth/  # ~50k crops
+
+# 2. Train tiny CNN (PyTorch)
+python scripts/train_digits.py --data synth/ --real real/ \
+  --epochs 30 --out scoreboard-digits.pt
+
+# 3. Export ONNX
+python scripts/export_digits.py scoreboard-digits.pt scoreboard-digits.onnx
+
+# 4. Build TensorRT plan (fixed shape)
+/opt/tensorrt/bin/trtexec \
+  --onnx=scoreboard-digits.onnx \
+  --saveEngine=scoreboard-digits_64x64.plan \
+  --fp16 \
+  --minShapes=input:1x1x64x64 \
+  --optShapes=input:16x1x64x64 \
+  --maxShapes=input:32x1x64x64
+```
+
+C++ integration: new `runDigitClassifier(...)` path in `scoreboard_ocr.cpp`, used
+when `det.label ∈ {Team Points, Period, Shot Clock}`. Multi-digit splitter
+operates on the binarized luminance crop before classification.
+
 ### en-ppocr-v4-rec (English OCR recognition)
 
 English-only PP-OCRv4 recognition model for scoreboard text (team names, scores, time).
