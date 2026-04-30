@@ -501,16 +501,18 @@ class MixerTUI(App):
 
     # Local PVW selection (TD's intent)
     pvw_selected: reactive[int] = reactive(-1, layout=True)
-    overlay_enabled: reactive[bool] = reactive(True, layout=True)
+    overlay_enabled: reactive[bool] = reactive(False, layout=True)
 
     connected: reactive[bool] = reactive(False)
 
-    def __init__(self, host: str, port: int, mixer: str, overlay_otm: str, overlay_selector: str) -> None:
+    def __init__(self, host: str, port: int, mixer: str, overlay_otm: str,
+                 overlay_source_otm: str, overlay_selector: str) -> None:
         super().__init__()
         self.avp_host = host
         self.avp_port = port
         self.mixer_name = mixer
         self.overlay_otm_name = overlay_otm
+        self.overlay_source_otm_name = overlay_source_otm
         self.overlay_selector_name = overlay_selector
         self._conn = AvpConnection(host, port)
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
@@ -788,16 +790,20 @@ class MixerTUI(App):
                 self.notify("Connection lost", severity="error")
                 return
 
-            target_active = 1 if enabled else 0
-            # In bypass, keep the overlay filter's main input fed. If the main
-            # input stops while HTML overlay frames keep arriving, framesync
-            # buffers them inside the filter graph and grows GPU memory.
-            target_outputs = 2 if enabled else 3
-            commands = [
-                f"node.object.set {self.overlay_otm_name} outputs 3",
-                f"node.object.set {self.overlay_selector_name} active {target_active}",
-                f"node.object.set {self.overlay_otm_name} outputs {target_outputs}",
-            ]
+            if enabled:
+                commands = [
+                    f"node.object.set {self.overlay_source_otm_name} outputs 1",
+                    f"node.object.set {self.overlay_otm_name} outputs 3",
+                    f"node.object.set {self.overlay_selector_name} active 1",
+                    f"node.object.set {self.overlay_otm_name} outputs 2",
+                ]
+            else:
+                commands = [
+                    f"node.object.set {self.overlay_otm_name} outputs 3",
+                    f"node.object.set {self.overlay_selector_name} active 0",
+                    f"node.object.set {self.overlay_otm_name} outputs 1",
+                    f"node.object.set {self.overlay_source_otm_name} outputs 0",
+                ]
 
             for i, cmd in enumerate(commands):
                 if i > 0:
@@ -900,6 +906,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
     parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
+    parser.add_argument("--overlay-source-otm", default="otm_html_overlay_src", help="overlay source one_to_many node name")
     parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
     args = parser.parse_args()
 
@@ -908,6 +915,7 @@ def main() -> None:
         port=args.port,
         mixer=args.mixer,
         overlay_otm=args.overlay_otm,
+        overlay_source_otm=args.overlay_source_otm,
         overlay_selector=args.overlay_selector,
     )
     app.run()

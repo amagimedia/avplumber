@@ -113,7 +113,7 @@ node.add { "type": "source_switcher", "name": "wipe_sel", "src": ["final_direct"
 # the alpha plane as YUVA420P for overlay_many_cuda below.
 # ============================================================
 
-node.add { "type": "ipc_dmabuf_source", "name": "html_overlay_src", "group": "overlay_src", "auto_restart": "group", "dst": "html_dma", "socket": "/tmp/electron-hwaccel/test.sock", "hwaccel": "@drm" }
+node.add { "type": "ipc_dmabuf_source", "name": "html_overlay_src", "group": "overlay_src", "auto_restart": "group", "dst": "html_dma", "socket": "/tmp/electron-hwaccel/test2.sock", "hwaccel": "@drm" }
 node.add { "type": "drm_prime_to_cuda", "name": "html_to_cuda", "group": "overlay_src", "auto_restart": "group", "src": "html_dma", "dst": "html_cuda", "hwaccel": "@gpu" }
 node.add { "type": "force_fps", "fps": "30/1", "name": "html_fps", "group": "overlay_src", "src": "html_cuda", "dst": "html_cuda_fps" }
 node.add { "type": "filter_video", "graph": "convert_cuda=format=yuva420p", "group": "overlay_src", "auto_restart": "group", "name": "html_convert", "src": "html_cuda_fps", "dst": "html_overlay_yuva", "dst_width": 1920, "dst_height": 1080, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
@@ -126,17 +126,20 @@ node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_
 # overlay_many_cuda requires YUV420P main; scale_cuda converts
 # NV12 <-> YUV420P on GPU (same pattern as the wipe overlay).
 # The pre-overlay force_fps provides frame-rate metadata to the filter.
-# Bypass keeps both one_to_many outputs enabled: overlay_sel selects the
-# direct output, while pre_overlay still feeds overlay_many_cuda so the HTML
-# overlay input is not buffered indefinitely inside the filter graph.
+# Start in bypass so output is live even before an HTML renderer connects.
+# The two one_to_many gates prevent both visible output backpressure and
+# libavfilter framesync buffering while overlay is disabled.  The source-side
+# gate still drains/drops dmabuf frames, so the renderer can be connected while
+# bypassed without accumulating CUDA frames inside html_overlay_filter.
 # ============================================================
 
-node.add { "type": "one_to_many", "name": "otm_html_overlay", "src": "final_out", "dst": ["no_overlay", "pre_overlay"], "outputs": 2, "group": "output" }
+node.add { "type": "one_to_many", "name": "otm_html_overlay", "src": "final_out", "dst": ["no_overlay", "pre_overlay"], "outputs": 1, "drop": true, "group": "output" }
 
+node.add { "type": "one_to_many", "name": "otm_html_overlay_src", "src": "html_overlay_assumed", "dst": ["html_overlay_enabled"], "outputs": 0, "drop": true, "group": "output" }
 node.add { "type": "force_fps", "name": "pre_overlay_fps", "fps": "30/1", "src": "pre_overlay", "dst": "pre_overlay_fps", "group": "output" }
 node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "output", "src": "pre_overlay_fps", "dst": "pre_overlay_norm", "auto_restart": "panic" }
-node.add { "type": "filter_video", "name": "html_overlay_filter", "src": ["pre_overlay_norm", "html_overlay_assumed"], "dst": "post_overlay", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "output", "auto_restart": "on" }
-node.add { "type": "source_switcher", "name": "overlay_sel", "src": ["no_overlay", "post_overlay"], "dst": "video_output", "active": 1, "group": "output" }
+node.add { "type": "filter_video", "name": "html_overlay_filter", "src": ["pre_overlay_norm", "html_overlay_enabled"], "dst": "post_overlay", "graph": "[in0]scale_cuda=format=yuv420p[main]; [main][in1]overlay_many_cuda=inputs=2[blended]; [blended]scale_cuda=format=nv12", "hwaccel": "@gpu", "group": "output", "auto_restart": "on" }
+node.add { "type": "source_switcher", "name": "overlay_sel", "src": ["no_overlay", "post_overlay"], "dst": "video_output", "active": 0, "group": "output" }
 
 # Keep a single post-selector CUDA frames pool in front of the encoder.
 # Otherwise the first bypass asks NVENC/FFmpeg to accept raw compositor frames
@@ -227,8 +230,10 @@ detach retry group.start output
 #   mixer.fade {"mixer":"mixer","scene":"synctest","duration_sec":2}                 -- 2-second crossfade to synctest scene
 #   mixer.wipe {"mixer":"mixer","scene":"fullsync1","wipe_file":"/path/to/wipe.mov"} -- media wipe to sync source 1
 #   mixer.status mixer                               -- show current PGM/PVW/transition state
-#   node.object.set otm_html_overlay outputs 3       -- bypass output; keep overlay branch fed
+#   node.object.set otm_html_overlay outputs 1       -- bypass output
+#   node.object.set otm_html_overlay_src outputs 0   -- drain/drop HTML frames before framesync
 #   node.object.set overlay_sel active 0             -- select bypass path
+#   node.object.set otm_html_overlay_src outputs 1   -- feed HTML frames into overlay filter
 #   node.object.set otm_html_overlay outputs 2       -- feed HTML overlay branch only
 #   node.object.set overlay_sel active 1             -- select HTML overlay path
 #   realtime.team.reset sync_team                    -- manually reset sync group
