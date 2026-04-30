@@ -172,7 +172,7 @@ Anything that must line up with decoded **frame PTS** (program path, camera fan-
 
 ### Hard cut flow
 
-`mixer.cut mixer scene_name`
+`mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":1234567}`
 
 All graph mutations and timeline writes happen synchronously in the calling thread. Only the internal state flip is deferred.
 
@@ -182,7 +182,7 @@ All graph mutations and timeline writes happen synchronously in the calling thre
    - For each camera in scene: `node.param.set` crop/scale chain graph + `node.auto_restart` (PVW slot prep; not frame-critical to PGM air)
    - `node.object.set` compositor layers and `active_inputs`
    - Publish compositor `active_inputs` and **every** camera `one_to_many` `outputs` for the PVW slot bit to both the node atomics and the mixer timeline: clear prior `outputs` / `active_inputs` entries for those channels (so old `T_cleanup` values cannot win over `node.object.set`), then write current wallclock entries. Nodes that use `TimelineReader` for these keys would otherwise keep applying stale scheduled masks after a previous transition.
-4. Write timeline at `T_cut = wallclock + 200ms`: source_switcher `active` = PVW direct index
+4. Write timeline at `T_cut`: source_switcher `active` = PVW direct index. When `start_pts_ms` is omitted or set to `-1`, this is `wallclock + 200ms`; otherwise it is the requested `start_pts_ms`.
 5. Write timeline at `T_cleanup = T_cut + 100ms`: camera otm `outputs` converge to PVW-only; old compositor `active_inputs` = 0
 6. Spawn detached thread: sleep `T_cleanup - now + 300ms`, then flip `pgm_is_slot_a`, set `pgm_scene_name`, clear `pvw_scene_name`, set `transition_mode = Idle`
 
@@ -190,7 +190,7 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
 ### Crossfade flow
 
-`mixer.fade mixer scene_name duration_sec`
+`mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":3.0,"start_pts_ms":1234567}`
 
 1-3. Same as cut through `loadSceneIntoSlot` (including camera `outputs` rewrite for the PVW slot).
 
@@ -203,9 +203,9 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
    When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always `["scA_trans","scB_trans"]`; only the alpha expression direction changes.
 
-5. Write timeline at `T_prep = wallclock` (same command time): both post-scene otm `outputs` = `0b11` (direct + trans) to prime queues.
+5. Write timeline at `T_prep = T_start - 200ms`: both post-scene otm `outputs` = `0b11` (direct + trans) to prime queues. For scheduled fades this prevents the `transition_cuda` frame counter from advancing long before the transition is visible.
 
-6. Write timeline at `T_start = wallclock + 200ms`:
+6. Write timeline at `T_start`:
    - source_switcher `active` = 2 (transition output)
    - both post-scene otm `outputs` = `0b10` (trans only, stop wasting frames on direct)
 
@@ -224,7 +224,7 @@ Between `T_prep` and `T_start`, `transition_cuda` warms up but `source_switcher`
 
 ### Media wipe flow
 
-`mixer.wipe mixer scene_name wipe_file [duration_sec]`
+`mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/to/wipe.mov","duration_sec":2.0,"start_pts_ms":1234567}`
 
 The wipe video has an alpha channel that goes transparent -> opaque -> transparent. The fully opaque midpoint covers an invisible hard cut.
 
@@ -241,9 +241,9 @@ The `url` is empty in steady state; `final_wipe_pre` receives no frames because 
 
 1. Destroy the pre-created `wipe_input` node object (via `stop()` while not running) so that `createNode()` will pick up the updated `url` when the group starts. On subsequent wipes the node is already destroyed by the previous `stopGroup()`, so the `stop()` call is a no-op.
 
-2. Set `wipe_input` `url` parameter to `wipe_file`, then start the `mixer_wipe` group. All 6 wipe nodes run; `wipe_input` opens the file with the new URL.
+2. Set `wipe_input` `url` parameter to `wipe_file`, then start the `mixer_wipe` group. All 6 wipe nodes run; `wipe_input` opens the file with the new URL. For scheduled wipes this prep is delayed until `T_start - 200ms` so the wipe media begins near the requested visible start.
 
-3. Route output through wipe: timeline entries at current wallclock — `otm_final` `outputs` = 3 (both), `wipe_sel` `active` = 1 (overlay)
+3. Route output through wipe: timeline entries at `T_prep` / `T_start` -- `otm_final` `outputs` = 3 (both), `wipe_sel` `active` = 1 (overlay)
 
 4. Spawn background thread with two phases:
    - **Midpoint** (duration/2): load target scene into PVW slot (immediate prep + camera `outputs` rewrite as in a cut), then timeline `source_switcher` `active` = PVW direct at current wallclock. Invisible because the wipe fully covers the screen.
@@ -324,17 +324,25 @@ Define a scene composition. Definition fields:
 
 Sources not listed in `sources` are off this scene: their `one_to_many` slot bit is cleared and the orchestrator fills their layer slot with `{"dst_x":0,"dst_y":0}` when building the compositor `layers` array. The array length matches registered `mixer.source` input indices (one layer per compositor `src` order); inactive compositor inputs ignore their layer at runtime.
 
-```mixer.cut <mixer_name> <scene_name>```
+```mixer.cut <json_object>```
 
-PTS-scheduled hard cut. Always requires a scene name.
+Hard cut. Required fields: `mixer` (string), `scene` (string). Optional fields: `start_pts_ms` (int64, default `-1` = now + prep margin).
 
-```mixer.fade <mixer_name> <scene_name> <duration_sec>```
+Example: `mixer.cut {"mixer":"mixer","scene":"pip"}`
 
-Crossfade to scene over `duration_sec` seconds.
+```mixer.fade <json_object>```
 
-```mixer.wipe <mixer_name> <scene_name> <wipe_file> [duration_sec]```
+Crossfade to scene. Required fields: `mixer` (string), `scene` (string). Optional fields: `duration_sec` (number, default `1.0`), `start_pts_ms` (int64, default `-1` = now + prep margin).
 
-Media wipe to scene. If `duration_sec` omitted, probed from wipe file metadata. Wipe file must have an alpha channel (e.g., ProRes 4444, VP9 with alpha).
+Example: `mixer.fade {"mixer":"mixer","scene":"fullcam1","duration_sec":3.0}`
+
+```mixer.wipe <json_object>```
+
+Media wipe to scene. Required fields: `mixer` (string), `scene` (string), `wipe_file` (string). Optional fields: `duration_sec` (number; if omitted, probed from wipe file metadata), `start_pts_ms` (int64, default `-1` = now + prep margin). Wipe file must have an alpha channel (e.g., ProRes 4444, VP9 with alpha).
+
+Example: `mixer.wipe {"mixer":"mixer","scene":"pip","wipe_file":"/path/with spaces/wipe.mov"}`
+
+For all transition commands, `start_pts_ms` is wallclock milliseconds in the same `{1,1000}` domain used by `SharedTimeline`. If provided, it must be at least the mixer prep margin (currently 200ms) in the future. While a future transition is armed, the mixer is considered busy and later transition commands are rejected until cleanup completes.
 
 ```mixer.status <mixer_name>```
 
@@ -357,9 +365,9 @@ See `examples/mixer.avplumber` for a complete 2-camera setup with fullscreen and
 Usage after startup (via TCP socket):
 
 ```
-mixer.cut mixer pip
-mixer.fade mixer fullcam1 3
-mixer.wipe mixer pip /path/to/wipe.mov
+mixer.cut {"mixer":"mixer","scene":"pip"}
+mixer.fade {"mixer":"mixer","scene":"fullcam1","duration_sec":3}
+mixer.wipe {"mixer":"mixer","scene":"pip","wipe_file":"/path/to/wipe.mov"}
 mixer.status mixer
 timeline.dump mixer_tl
 ```
@@ -367,7 +375,7 @@ timeline.dump mixer_tl
 ## Constraints and limitations
 
 - **Video only.** Audio mixing (crossfade audio during transitions) is not implemented. Audio should be handled separately.
-- **One transition at a time.** All transition commands (`cut`, `fade`, `wipe`) reject with an error if a transition is already in progress.
+- **One transition at a time.** All transition commands (`cut`, `fade`, `wipe`) reject with an error if a transition is already in progress or already armed for the future.
 - **Fixed 2-slot architecture.** You cannot have more than 2 compositors. More scenes can be defined, but only 2 render simultaneously (PGM + PVW during transition).
 - **Wipe timing is sleep-based.** The wipe midpoint cut and cleanup are driven by `std::this_thread::sleep_for`, not PTS-synchronized timeline entries. This is acceptable because the wipe video fully covers the screen at the midpoint, hiding any timing imprecision.
 - **Deferred cleanup uses detached threads.** The internal state flip and group stop after transitions happen on detached threads. If avplumber shuts down during a transition, these threads are abandoned.

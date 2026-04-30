@@ -826,44 +826,55 @@ public:
             orch.defineScene(scene_name, def);
         };
 
-        // mixer.cut <mixer_name> <scene_name>
+        // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}
         commands_["mixer.cut"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string mixer_name, scene_name;
-            ss >> mixer_name >> scene_name;
+            json req = json::parse(arg);
+            if (!req.is_object())
+                throw Error("mixer.cut: expected JSON object");
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
             MixerOrchestrator orch(manager_->shared_from_this(), state, tl);
-            orch.cut(scene_name);
+            orch.cut(scene_name, start_pts_ms);
         };
 
-        // mixer.fade <mixer_name> <scene_name> <duration_sec>
+        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}
         commands_["mixer.fade"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string mixer_name, scene_name;
-            double duration_sec;
-            ss >> mixer_name >> scene_name >> duration_sec;
+            json req = json::parse(arg);
+            if (!req.is_object())
+                throw Error("mixer.fade: expected JSON object");
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            double duration_sec = req.value("duration_sec", 1.0);
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (duration_sec <= 0)
+                throw Error("mixer.fade: duration_sec must be > 0");
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
             MixerOrchestrator orch(manager_->shared_from_this(), state, tl);
-            orch.fade(scene_name, duration_sec);
+            orch.fade(scene_name, duration_sec, start_pts_ms);
         };
 
-        // mixer.wipe <mixer_name> <scene_name> <wipe_file> [duration_sec]
+        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
         commands_["mixer.wipe"] = [this](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string mixer_name, scene_name, wipe_file;
-            double duration_sec = 0;
-            ss >> mixer_name >> scene_name >> wipe_file;
-            bool has_duration = static_cast<bool>(ss >> duration_sec);
-            if (!has_duration)
+            json req = json::parse(arg);
+            if (!req.is_object())
+                throw Error("mixer.wipe: expected JSON object");
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            std::string wipe_file = req.at("wipe_file").get<std::string>();
+            double duration_sec = req.value("duration_sec", 0.0);
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (!req.contains("duration_sec"))
                 duration_sec = probeMediaDurationSec(wipe_file);
             if (duration_sec <= 0)
                 throw Error("mixer.wipe: duration_sec must be > 0");
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
             MixerOrchestrator orch(manager_->shared_from_this(), state, tl);
-            orch.wipe(scene_name, wipe_file, duration_sec);
+            orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
         };
 
         // mixer.status <mixer_name>

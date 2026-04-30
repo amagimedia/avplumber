@@ -217,15 +217,15 @@ detach retry group.start output
 # ============================================================
 # Usage examples (send via TCP control socket):
 #
-#   mixer.cut mixer fullsync1                        -- switch to sync source 1 fullscreen
-#   mixer.cut mixer fullsync2                        -- switch to sync source 2 fullscreen
-#   mixer.cut mixer fullsync3                        -- switch to sync source 3 fullscreen
-#   mixer.cut mixer synctest                         -- side-by-side sync sources for sync testing
-#   mixer.cut mixer multiviewer                      -- 5-source tile layout
-#   mixer.cut mixer fullmp4_1                        -- mp4 loop 1 fullscreen
-#   mixer.cut mixer fullmp4_2                        -- mp4 loop 2 fullscreen
-#   mixer.fade mixer synctest 2                      -- 2-second crossfade to synctest scene
-#   mixer.wipe mixer fullsync1 /path/to/wipe.mov     -- media wipe to sync source 1
+#   mixer.cut {"mixer":"mixer","scene":"fullsync1"}                                  -- switch to sync source 1 fullscreen
+#   mixer.cut {"mixer":"mixer","scene":"fullsync2"}                                  -- switch to sync source 2 fullscreen
+#   mixer.cut {"mixer":"mixer","scene":"fullsync3"}                                  -- switch to sync source 3 fullscreen
+#   mixer.cut {"mixer":"mixer","scene":"synctest"}                                   -- side-by-side sync sources for sync testing
+#   mixer.cut {"mixer":"mixer","scene":"multiviewer"}                                -- 5-source tile layout
+#   mixer.cut {"mixer":"mixer","scene":"fullmp4_1"}                                  -- mp4 loop 1 fullscreen
+#   mixer.cut {"mixer":"mixer","scene":"fullmp4_2"}                                  -- mp4 loop 2 fullscreen
+#   mixer.fade {"mixer":"mixer","scene":"synctest","duration_sec":2}                 -- 2-second crossfade to synctest scene
+#   mixer.wipe {"mixer":"mixer","scene":"fullsync1","wipe_file":"/path/to/wipe.mov"} -- media wipe to sync source 1
 #   mixer.status mixer                               -- show current PGM/PVW/transition state
 #   node.object.set otm_html_overlay outputs 3       -- bypass output; keep overlay branch fed
 #   node.object.set overlay_sel active 0             -- select bypass path
