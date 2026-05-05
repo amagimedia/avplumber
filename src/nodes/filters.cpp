@@ -103,6 +103,7 @@ protected:
         AVFilterContext* ctx_ = nullptr;
         std::string in_args_;
         AVBufferRef* initial_hw_frames_ctx_ = nullptr;
+        bool eof_closed_ = false;
     public:
         Port() {};
         ~Port() {
@@ -112,15 +113,40 @@ protected:
             }
         }
         bool checkParameters(typename MediaSpecific::Parameters params, AVFrame *raw, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
-            bool hw_frames_ctx_changed = raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data &&
-                ((!initial_hw_frames_ctx_) || (raw->hw_frames_ctx->data != initial_hw_frames_ctx_->data));
-            if (hw_frames_ctx_changed) {
-                if (initial_hw_frames_ctx_) {
-                    av_buffer_unref(&initial_hw_frames_ctx_);
-                    initial_hw_frames_ctx_ = nullptr;
-                    logstream << "hw frames ctx changed";
-                } else {
+            // Detect hw_frames_ctx changes by comparing the semantic content of
+            // the AVHWFramesContext (format, sw_format, width, height, device),
+            // not the pointer value. NVENC and hwupload_cuda can rotate pool
+            // objects (new AVBufferRef->data) while keeping the same format and
+            // size, and pointer comparison would trigger unnecessary rebuilds.
+            bool hw_frames_ctx_changed = false;
+            if (raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
+                if (!initial_hw_frames_ctx_) {
+                    // First time we see a hw_frames_ctx: not a "change" per se
+                    // (initial state was null), but we must update in_args_ and
+                    // rebuild because the buffersrc was created without it.
+                    hw_frames_ctx_changed = true;
                     logstream << "hw frames ctx appeared, was null";
+                } else {
+                    const AVHWFramesContext *prev = (const AVHWFramesContext *)initial_hw_frames_ctx_->data;
+                    const AVHWFramesContext *cur  = (const AVHWFramesContext *)raw->hw_frames_ctx->data;
+                    bool semantically_equal =
+                        (cur->format    == prev->format) &&
+                        (cur->sw_format == prev->sw_format) &&
+                        (cur->width     == prev->width) &&
+                        (cur->height    == prev->height) &&
+                        (cur->device_ref && prev->device_ref &&
+                         cur->device_ref->data == prev->device_ref->data);
+                    if (!semantically_equal) {
+                        hw_frames_ctx_changed = true;
+                        logstream << "hw frames ctx changed (semantic mismatch:"
+                                  << " fmt " << prev->format << "->" << cur->format
+                                  << " sw_fmt " << prev->sw_format << "->" << cur->sw_format
+                                  << " size " << prev->width << "x" << prev->height
+                                  << "->" << cur->width << "x" << cur->height << ")";
+                        av_buffer_unref(&initial_hw_frames_ctx_);
+                        initial_hw_frames_ctx_ = nullptr;
+                    }
+                    // else: pool rotation with same semantics — transparent, no rebuild
                 }
             }
             bool result = (timebase==prev_tb_) && (!hw_frames_ctx_changed) && ms_.checkParameters(params);
@@ -150,9 +176,11 @@ protected:
         }
         void invalidateFilterContext() {
             ctx_ = nullptr;
+            eof_closed_ = false;
         }
         void initSourceFilter(const int index, AVFilterGraph *filter_graph, std::shared_ptr<HWAccelDevice> hwaccel, AVFilterInOut *dst) {
             std::string name = "in" + std::to_string(index);
+            eof_closed_ = false;
             
             if (in_args_.empty()) {
                 logstream << "Unable to init source filter " << name << ": in_args_ not initialized";
@@ -239,9 +267,13 @@ protected:
                 throw Error("graph input count does not match node sources");
             return av_buffersrc_add_frame_flags(ctx_, frm.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
         }
-        int closeInput(int64_t pts) {
-            if (!ctx_) return 0;
-            return av_buffersrc_close(ctx_, pts, 0);
+        int closeAtEof() {
+            if (!ctx_ || eof_closed_)
+                return 0;
+            int ret = av_buffersrc_close(ctx_, AV_NOPTS_VALUE, 0);
+            if (ret >= 0 || ret == AVERROR_EOF)
+                eof_closed_ = true;
+            return ret;
         }
         int getFrame(T &frm) {
             frm.setTimeBase(getSinkLink()->time_base);
@@ -258,7 +290,7 @@ protected:
     bool do_shift_ = true;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
-    
+
     void freeFilterGraph() {
         if (filter_graph_ == nullptr) return;
         avfilter_graph_free(&filter_graph_);
@@ -268,6 +300,45 @@ protected:
             p.invalidateFilterContext();
         for (Port &p : sinks_)
             p.invalidateFilterContext();
+    }
+    bool drainFilterOutputs() {
+        if (filter_graph_ == nullptr)
+            return false;
+        int finished_sinks = 0;
+        for (int sink_index=0; sink_index<sinks_.size(); sink_index++) {
+            Port& sink_port = sinks_[sink_index];
+            while(true) {
+                T frmout;
+                int ret = sink_port.getFrame(frmout);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    if (ret==AVERROR_EOF) {
+                        finished_sinks++;
+                    }
+                    break;
+                }
+                if (ret < 0) {
+                    throw Error("Filtering error: " + std::to_string(ret));
+                }
+                if (!(frmout.isNull() || frmout.pts().isNoPts())) {
+                    frmout.setComplete(true);
+                    if (do_shift_) {
+                        eq_.out(frmout);
+                    }
+                    if (!this->sink_edges_[sink_index]->enqueue(frmout)) {
+                        this->finished_ = true;
+                        return true;
+                    }
+                } else {
+                    logstream << "WARNING: Invalid frame received from filter graph";
+                }
+            }
+        }
+        if (finished_sinks==sinks_.size()) {
+            forwardEofToSinks();
+            this->finished_ = true;
+            return true;
+        }
+        return false;
     }
     void initPorts() {
         sources_.resize(this->source_edges_.size());
@@ -489,7 +560,10 @@ public:
                 input_eof_[i] = true;
                 logstream << "EOF on filter input " << i;
                 if (filter_graph_ != nullptr) {
-                    sources_[i].closeInput(AV_NOPTS_VALUE);
+                    int ret = sources_[i].closeAtEof();
+                    if (ret < 0 && ret != AVERROR_EOF) {
+                        throw Error("Error closing filter graph source: " + av::error2string(ret));
+                    }
                 }
             }
         }
@@ -523,10 +597,59 @@ public:
                     if (ret < 0 && ret != AVERROR(EAGAIN)) {
                         throw Error("Error feeding filter graph: " + av::error2string(ret));
                     } else if (ret >= 0) {
-                        edge->pop();
+                        edge->pop(); // no need to retry, pop this frame
+                    } else {
+                        // AVERROR(EAGAIN): this buffersrc is not accepting yet. findSourceWithData()
+                        // always prefers the smallest PTS among inputs; when timebases are not comparable,
+                        // only that pad is ever fed and multi-input filters may never advance.
+                        for (int j = 0; j < (int)this->source_edges_.size(); j++) {
+                            if (j == source_index) continue;
+                            std::shared_ptr<Edge<T>> e2 = this->source_edges_[j];
+                            T* f2 = e2->peek();
+                            if (!f2 || f2->isNull() || !f2->isComplete() ||
+                                !f2->timeBase().getNumerator() || !f2->timeBase().getDenominator())
+                                continue;
+                            Port& p2 = sources_[j];
+                            if (!p2.checkFrame(*f2, e2)) {
+                                if (filter_graph_!=nullptr) {
+                                    logstream << "Input parameters changed. Restarting filter.";
+                                }
+                                freeFilterGraph();
+                            }
+                            p2.captureInitialHWFramesCtxFromFrame(*f2);
+                            if (filter_graph_==nullptr) {
+                                maybeInitFilterGraph();
+                            }
+                            if (filter_graph_==nullptr)
+                                continue;
+                            if (do_shift_) {
+                                eq_.in(*f2);
+                            }
+                            int ret2 = p2.putFrame(*f2);
+                            if (ret2 < 0 && ret2 != AVERROR(EAGAIN)) {
+                                throw Error("Error feeding filter graph: " + av::error2string(ret2));
+                            }
+                            if (ret2 >= 0) {
+                                e2->pop();
+                                break;
+                            }
+                        }
                     }
-                    if (pullSinkFrames()) return;
-                } else {
+                }
+                if (filter_graph_!=nullptr) {
+                    if (drainFilterOutputs()) {
+                        return;
+                    }
+                } else { // filter_graph_==nullptr
+                    // filter_graph_ couldn't be created because not all input
+                    // parameters are known yet.
+                    //
+                    // Peek at every source that still lacks in_args_ and try to
+                    // capture its parameters now.  Without this, a deadlock occurs
+                    // when the input queues fill up before all parameters are known:
+                    // waitForInput() polls eventfds that have already been drained,
+                    // no new items can be added to the full queues, so poll() blocks
+                    // forever while upstream nodes are stuck in enqueue().
                     for (int i = 0; i < (int)this->source_edges_.size(); i++) {
                         if (sources_[i].isSourceReadyToInit()) continue;
                         auto &ei = this->source_edges_[i];

@@ -233,70 +233,75 @@ static void processNode(std::shared_ptr<Node> node)
 }
 
 void NodeWrapper::threadFunction() {
-    decltype(node_) node = node_;
-    if (node==nullptr) {
+    if (node_==nullptr) {
         logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!!";
         return;
     }
-    IReportsFinish *node_finishable = dynamic_cast<IReportsFinish*>(node.get());
-    IFlushable *node_flushable = dynamic_cast<IFlushable*>(node.get());
-    try {
-        logstream << "Node " << name_ << " started." << std::endl;
-        node->start();
-        if (node_finishable) {
-            // Node signals that it finished work
-            while (!node_finishable->finished()) {
-                if (node_==nullptr) {
-                    logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (node_finishable loop)";
-                    return;
-                }
-                if (dowork_) {
-                    if (!node->consumeEofIfPresent()) {
-                        processNode(node);
+    // Hold the implementation only while this block runs.  When it ends, the last
+    // strong ref to the Node is dropped before on_finished (e.g. auto_restart=start),
+    // so Edge consumer weak_ptr expires and createNode can call setConsumer safely.
+    {
+        decltype(node_) node = node_;
+        IReportsFinish *node_finishable = dynamic_cast<IReportsFinish*>(node.get());
+        IFlushable *node_flushable = dynamic_cast<IFlushable*>(node.get());
+        try {
+            logstream << "Node " << name_ << " started." << std::endl;
+            node->start();
+            if (node_finishable) {
+                // Node signals that it finished work
+                while (!node_finishable->finished()) {
+                    if (node_==nullptr) {
+                        logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (node_finishable loop)";
+                        return;
                     }
-                } else if (node_flushable) {
-                    // told to finish work
-                    // and Node is IFlushable
-                    // so flush it
-                    node_flushable->flush();
-                } else {
-                    // node should finish work
-                    // but doesn't have flushing interface
-                    // give it one last process() call, then force-exit
-                    processNode(node);
-                    if (!node_finishable->finished()) {
-                        logstream << "Node " << name_ << " did not finish after stop, forcing thread exit.";
+                    if (dowork_) {
+                        if (!node->consumeEofIfPresent()) {
+                            processNode(node);
+                        }
+                    } else if (node_flushable) {
+                        // told to finish work
+                        // and Node is IFlushable
+                        // so flush it
+                        node_flushable->flush();
+                    } else {
+                        // node should finish work
+                        // but doesn't have flushing interface
+                        // give it one last process() call, then force-exit
+                        processNode(node);
+                        if (!node_finishable->finished()) {
+                            logstream << "Node " << name_ << " did not finish after stop, forcing thread exit.";
+                            break;
+                        }
+                    }
+                }
+                logstream << "Node " << name_ << " reported that it finished processing.";
+            } else {
+                // dumb Node
+                while (dowork_) {
+                    if (node_==nullptr) {
+                        logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
+                        return;
+                    }
+                    if (node->consumeEofIfPresent()) {
+                        logstream << "Node " << name_ << " consumed EOF marker.";
                         break;
                     }
+                    processNode(node);
                 }
-            }
-            logstream << "Node " << name_ << " reported that it finished processing.";
-        } else {
-            // dumb Node
-            while (dowork_) {
-                if (node_==nullptr) {
-                    logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
-                    return;
+                if (node_flushable) {
+                    node_flushable->flush();
                 }
-                if (node->consumeEofIfPresent()) {
-                    logstream << "Node " << name_ << " consumed EOF marker.";
-                    break;
-                }
-                processNode(node);
+                logstream << "Node " << name_ << " stopped processing because it was told to do so.";
             }
-            if (node_flushable) {
-                node_flushable->flush();
-            }
-            logstream << "Node " << name_ << " stopped processing because it was told to do so.";
+        } catch (std::exception &e) {
+            logstream << "Node " << name_ << " failed: " << e.what();
+            last_error_ = e.what();
         }
-    } catch (std::exception &e) {
-        logstream << "Node " << name_ << " failed: " << e.what();
-        last_error_ = e.what();
-    }
-    try {
-        node_ = nullptr;
-    } catch (std::exception &e) {
-        logstream << "Destroying node " << name_ << " failed: " << e.what();
+        try {
+            node_ = nullptr;
+        } catch (std::exception &e) {
+            logstream << "Destroying node " << name_ << " failed: " << e.what();
+        }
     }
 
     finished_ = true;

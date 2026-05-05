@@ -29,6 +29,10 @@
 #include "InputSeekTeam.hpp"
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
+#include "SharedTimeline.hpp"
+#include "MixerState.hpp"
+#include "mixer_orchestrator.hpp"
+#include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
     #include "TickSource.hpp"
@@ -46,6 +50,24 @@
 
 using boost::asio::ip::tcp;
 using nlohmann::json;
+
+static double probeMediaDurationSec(const std::string& url) {
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, url.c_str(), nullptr, nullptr) < 0) {
+        throw Error("mixer.wipe: failed to open wipe file: " + url);
+    }
+    if (avformat_find_stream_info(fmt, nullptr) < 0) {
+        avformat_close_input(&fmt);
+        throw Error("mixer.wipe: failed to probe wipe file duration: " + url);
+    }
+    if (fmt->duration == AV_NOPTS_VALUE || fmt->duration <= 0) {
+        avformat_close_input(&fmt);
+        throw Error("mixer.wipe: wipe file has no usable duration, pass duration_sec explicitly");
+    }
+    double duration_sec = double(fmt->duration) / double(AV_TIME_BASE);
+    avformat_close_input(&fmt);
+    return duration_sec;
+}
 
 namespace strutils {
     bool isWhiteSpace(const char c) {
@@ -685,6 +707,245 @@ public:
             ss >> team_name >> speed;
             std::shared_ptr<SpeedControlTeam> team = InstanceSharedObjects<SpeedControlTeam>::get(manager_->instanceData(), team_name);
             team->setSpeed(speed);
+        };
+
+        // timeline.set {"name":"mixer_tl","ch":"otm_cam1","at":1234567,"key":"outputs","val":3}
+        commands_["timeline.set"] = [this](ClientStream &cs, std::string &arg) {
+            json req = json::parse(arg);
+            if (!req.is_object())
+                throw Error("timeline.set: expected JSON object");
+            std::string tl_name = req.at("name").get<std::string>();
+            std::string channel = req.contains("ch")
+                                      ? req.at("ch").get<std::string>()
+                                      : req.at("channel").get<std::string>();
+            std::string key = req.at("key").get<std::string>();
+            int64_t at_pts_ms = req.at("at").get<int64_t>();
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
+            tl->set(channel, key, at_pts_ms, req.at("val"));
+        };
+
+        // timeline.batch <name> <entries_json_array>
+        // Each entry: {"ch":"...", "at":int64, "key":"...", "val":...}
+        commands_["timeline.batch"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string tl_name, entries_str;
+            ss >> tl_name;
+            std::getline(ss, entries_str);
+            entries_str = strutils::trim(entries_str);
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
+            json entries = json::parse(entries_str);
+            if (!entries.is_array())
+                throw Error("timeline.batch: expected JSON array");
+            std::vector<SharedTimeline::BatchEntry> batch;
+            batch.reserve(entries.size());
+            for (const auto& e : entries) {
+                batch.push_back(SharedTimeline::BatchEntry{
+                    e.at("ch").get<std::string>(),
+                    e.at("key").get<std::string>(),
+                    e.at("at").get<int64_t>(),
+                    e.at("val")
+                });
+            }
+            tl->setBatch(batch);
+        };
+
+        // timeline.clear <name> [channel]
+        commands_["timeline.clear"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string tl_name, channel;
+            ss >> tl_name;
+            if (ss >> channel) {
+                channel = strutils::trim(channel);
+            }
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
+            if (channel.empty())
+                tl->clearAll();
+            else
+                tl->clear(channel);
+        };
+
+        // timeline.gc <name> <before_pts_ms>
+        commands_["timeline.gc"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string tl_name;
+            int64_t before_pts_ms;
+            ss >> tl_name >> before_pts_ms;
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
+            tl->gc(before_pts_ms);
+        };
+
+        // timeline.dump <name>
+        commands_["timeline.dump"] = [this](ClientStream &cs, std::string &arg) {
+            std::string tl_name = strutils::trim(arg);
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), tl_name);
+            cs << tl->dump() << "\n";
+        };
+
+        auto mixerOrchestrator = [this](const std::string& mixer_name) {
+            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
+            auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
+            return MixerOrchestrator(manager_->shared_from_this(), state, tl);
+        };
+
+        auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
+            json req = json::parse(arg);
+            if (!req.is_object())
+                throw Error(command + ": expected JSON object");
+            return req;
+        };
+
+        // mixer.source <name> <otm_node> <input_index> <cs_node_a> <cs_node_b>
+        commands_["mixer.source"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string mixer_name, src_name, otm_node, cs_a, cs_b;
+            int input_index;
+            ss >> mixer_name >> src_name >> otm_node >> input_index >> cs_a >> cs_b;
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
+        };
+
+        // mixer.scene <mixer_name> <scene_name> <json_definition>
+        commands_["mixer.scene"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string mixer_name, scene_name, def_str;
+            ss >> mixer_name >> scene_name;
+            std::getline(ss, def_str);
+            def_str = strutils::trim(def_str);
+            json jdef = json::parse(def_str);
+
+            SceneDefinition def;
+            def.name = scene_name;
+            if (jdef.contains("width")) def.width = jdef["width"].get<int>();
+            if (jdef.contains("height")) def.height = jdef["height"].get<int>();
+            if (!jdef.contains("sources") || !jdef["sources"].is_object())
+                throw Error("mixer.scene: sources object required (logical source name -> { graph, dst_x, dst_y, ... })");
+            for (auto it = jdef["sources"].begin(); it != jdef["sources"].end(); ++it) {
+                SourceLayout sl;
+                const json& inj = it.value();
+                sl.crop_scale_graph = inj.value("graph", std::string(""));
+                Parameters layer = json::object();
+                for (auto jt = inj.begin(); jt != inj.end(); ++jt) {
+                    if (jt.key() != "graph")
+                        layer[jt.key()] = jt.value();
+                }
+                if (layer.empty())
+                    layer = {{"dst_x", 0}, {"dst_y", 0}};
+                sl.layer = std::move(layer);
+                def.sources[it.key()] = std::move(sl);
+            }
+
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.defineScene(scene_name, def);
+        };
+
+        // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}
+        commands_["mixer.cut"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.cut", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.cut(scene_name, start_pts_ms);
+        };
+
+        // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}
+        commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.fade", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            double duration_sec = req.value("duration_sec", 1.0);
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (duration_sec <= 0)
+                throw Error("mixer.fade: duration_sec must be > 0");
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.fade(scene_name, duration_sec, start_pts_ms);
+        };
+
+        // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
+        commands_["mixer.wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.wipe", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            std::string wipe_file = req.at("wipe_file").get<std::string>();
+            double duration_sec = req.value("duration_sec", 0.0);
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (!req.contains("duration_sec"))
+                duration_sec = probeMediaDurationSec(wipe_file);
+            if (duration_sec <= 0)
+                throw Error("mixer.wipe: duration_sec must be > 0");
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
+        };
+
+        // mixer.status <mixer_name>
+        commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::string mixer_name = strutils::trim(arg);
+            auto orch = mixerOrchestrator(mixer_name);
+            cs << orch.status() << "\n";
+        };
+
+        // mixer.scenes <mixer_name>
+        // Returns a JSON array of scene names registered with this mixer, sorted alphabetically.
+        commands_["mixer.scenes"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::string mixer_name = strutils::trim(arg);
+            auto orch = mixerOrchestrator(mixer_name);
+            json arr = orch.sceneNames();
+            cs << arr << "\n";
+        };
+
+        // mixer.init <mixer_name> <json_config>
+        // Initialize MixerState with slot node names and global settings.
+        commands_["mixer.init"] = [this](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string mixer_name, config_str;
+            ss >> mixer_name;
+            std::getline(ss, config_str);
+            config_str = strutils::trim(config_str);
+            json cfg = json::parse(config_str);
+
+            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
+            std::lock_guard<std::mutex> lock(state->mutex);
+
+            if (cfg.contains("timeline")) state->timeline_name = cfg["timeline"].get<std::string>();
+            if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
+            if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
+            if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
+            if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
+            if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
+            if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
+            if (cfg.contains("initial_pgm_slot")) {
+                std::string slot = cfg["initial_pgm_slot"].get<std::string>();
+                if (slot == "A")
+                    state->pgm_is_slot_a = true;
+                else if (slot == "B")
+                    state->pgm_is_slot_a = false;
+                else
+                    throw Error("mixer.init: initial_pgm_slot must be 'A' or 'B'");
+            }
+
+            if (cfg.contains("slot_a")) {
+                auto& sa = cfg["slot_a"];
+                state->slot_a.compositor_name = sa.value("compositor", std::string(""));
+                state->slot_a.norm_ts_name = sa.value("norm_ts", std::string(""));
+                state->slot_a.post_otm_name = sa.value("post_otm", std::string(""));
+            }
+            if (cfg.contains("slot_b")) {
+                auto& sb = cfg["slot_b"];
+                state->slot_b.compositor_name = sb.value("compositor", std::string(""));
+                state->slot_b.norm_ts_name = sb.value("norm_ts", std::string(""));
+                state->slot_b.post_otm_name = sb.value("post_otm", std::string(""));
+            }
+            if (cfg.contains("wipe_otm")) state->wipe_otm_name = cfg["wipe_otm"].get<std::string>();
+            if (cfg.contains("wipe_base_fps")) state->wipe_base_fps_name = cfg["wipe_base_fps"].get<std::string>();
+            if (cfg.contains("wipe_selector")) state->wipe_selector_name = cfg["wipe_selector"].get<std::string>();
+            if (cfg.contains("wipe_group")) state->wipe_group_name = cfg["wipe_group"].get<std::string>();
+            if (cfg.contains("wipe_input_node")) state->wipe_input_node_name = cfg["wipe_input_node"].get<std::string>();
+            if (cfg.contains("wipe_tail_edge")) state->wipe_tail_edge = cfg["wipe_tail_edge"].get<std::string>();
+            if (cfg.contains("wipe_flush_edges")) {
+                state->wipe_flush_edges.clear();
+                for (const auto& e : cfg["wipe_flush_edges"])
+                    state->wipe_flush_edges.push_back(e.get<std::string>());
+            }
         };
 
         #ifdef EMBED_IN_OBS

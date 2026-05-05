@@ -124,6 +124,14 @@
     return { width: baseW, height: baseH + ports * 16 };
   }
 
+  function nodeWidth(node) {
+    return Number(node?.width) || guessNodeSize(node).width;
+  }
+
+  function nodeHeight(node) {
+    return Number(node?.height) || guessNodeSize(node).height;
+  }
+
   function queueFillLabel(queueName, q) {
     if (!q || !q.capacity || q.capacity <= 0) return queueName;
     const pct = Math.max(0, Math.min(100, (q.occupied / q.capacity) * 100));
@@ -328,14 +336,14 @@
 
     // Keep layout compact so wide graphs can fit ~10 nodes across on typical screens.
     const xGap = 80;
-    const yGap = 48;
+    const yGap = 32;
 
     // Compute max width per level to avoid overlaps horizontally
     const levelWidth = new Map();
     for (let l = 0; l <= maxLevel; l++) {
       const arr = groups.get(l) || [];
       let mw = 0;
-      for (const n of arr) mw = Math.max(mw, Number(n.width) || guessNodeSize(n).width);
+      for (const n of arr) mw = Math.max(mw, nodeWidth(n));
       levelWidth.set(l, mw);
     }
     const xOffset = [];
@@ -345,17 +353,148 @@
       accX += (levelWidth.get(l) || 260) + xGap;
     }
 
-    // Apply positions
+    function packedCentersForLevel(arr) {
+      const centers = new Map();
+      let y = 0;
+      for (const n of arr) {
+        const h = nodeHeight(n);
+        centers.set(n.id, y + h / 2);
+        y += h + yGap;
+      }
+      return centers;
+    }
+
+    function averageNeighborCenter(nodeId, neighborIds, centers) {
+      let sum = 0;
+      let cnt = 0;
+      for (const nb of neighborIds || []) {
+        const v = centers.get(nb);
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          sum += v;
+          cnt++;
+        }
+      }
+      return cnt ? sum / cnt : null;
+    }
+
+    function resolveLevelPositions(arr, desiredCenters, existingCenters) {
+      if (!arr.length) return [];
+
+      const packedCenters = packedCentersForLevel(arr);
+      let shiftSum = 0;
+      let shiftCnt = 0;
+
+      for (const n of arr) {
+        const packed = packedCenters.get(n.id) || nodeHeight(n) / 2;
+        const desired = desiredCenters.get(n.id);
+        const existing = existingCenters.get(n.id);
+        const anchor =
+          typeof desired === 'number' && Number.isFinite(desired)
+            ? desired
+            : typeof existing === 'number' && Number.isFinite(existing)
+              ? existing
+              : null;
+        if (anchor !== null) {
+          shiftSum += anchor - packed;
+          shiftCnt++;
+        }
+      }
+
+      const shift = shiftCnt ? shiftSum / shiftCnt : 0;
+      const tops = arr.map((n) => {
+        const h = nodeHeight(n);
+        const packedTop = (packedCenters.get(n.id) || h / 2) - h / 2 + shift;
+        const desired = desiredCenters.get(n.id);
+        if (typeof desired !== 'number' || !Number.isFinite(desired)) return packedTop;
+
+        // Keep columns mostly packed, but let local neighbor pull shorten edges.
+        return packedTop + (desired - h / 2 - packedTop) * 0.45;
+      });
+
+      // Fixed-order overlap resolution. A forward/backward/forward pass keeps the
+      // column near the desired centers while preserving readable spacing.
+      for (let i = 1; i < arr.length; i++) {
+        const prevMin = tops[i - 1] + nodeHeight(arr[i - 1]) + yGap;
+        if (tops[i] < prevMin) tops[i] = prevMin;
+      }
+      for (let i = arr.length - 2; i >= 0; i--) {
+        const nextMax = tops[i + 1] - nodeHeight(arr[i]) - yGap;
+        if (tops[i] > nextMax) tops[i] = nextMax;
+      }
+      for (let i = 1; i < arr.length; i++) {
+        const prevMin = tops[i - 1] + nodeHeight(arr[i - 1]) + yGap;
+        if (tops[i] < prevMin) tops[i] = prevMin;
+      }
+
+      return tops;
+    }
+
+    function centersFromTops(topsById) {
+      const centers = new Map();
+      for (const n of nodesList) {
+        const top = topsById.get(n.id);
+        if (typeof top === 'number' && Number.isFinite(top)) {
+          centers.set(n.id, top + nodeHeight(n) / 2);
+        }
+      }
+      return centers;
+    }
+
+    const topsById = new Map();
+
+    // Initial compact placement gives the relaxation pass a stable baseline.
     for (let l = 0; l <= maxLevel; l++) {
       const arr = groups.get(l) || [];
       let y = 0;
       for (const n of arr) {
-        const w = Number(n.width) || guessNodeSize(n).width;
-        const h = Number(n.height) || guessNodeSize(n).height;
+        topsById.set(n.id, y);
+        y += nodeHeight(n) + yGap;
+      }
+    }
+
+    // Repeated vertical relaxation: keep dependency columns, but pull each node
+    // toward the vertical center of its adjacent producers/consumers.
+    for (let sweep = 0; sweep < 6; sweep++) {
+      let centers = centersFromTops(topsById);
+      for (let l = 1; l <= maxLevel; l++) {
+        const arr = groups.get(l) || [];
+        const desired = new Map();
+        for (const n of arr) {
+          const v = averageNeighborCenter(n.id, preds.get(n.id), centers);
+          if (v !== null) desired.set(n.id, v);
+        }
+        const tops = resolveLevelPositions(arr, desired, centers);
+        arr.forEach((n, i) => topsById.set(n.id, tops[i]));
+        centers = centersFromTops(topsById);
+      }
+
+      centers = centersFromTops(topsById);
+      for (let l = maxLevel - 1; l >= 0; l--) {
+        const arr = groups.get(l) || [];
+        const desired = new Map();
+        for (const n of arr) {
+          const v = averageNeighborCenter(n.id, succs.get(n.id), centers);
+          if (v !== null) desired.set(n.id, v);
+        }
+        const tops = resolveLevelPositions(arr, desired, centers);
+        arr.forEach((n, i) => topsById.set(n.id, tops[i]));
+        centers = centersFromTops(topsById);
+      }
+    }
+
+    let minY = 0;
+    for (const y of topsById.values()) minY = Math.min(minY, y);
+    if (minY < 0) {
+      for (const [id, y] of topsById.entries()) topsById.set(id, y - minY);
+    }
+
+    // Apply positions
+    for (let l = 0; l <= maxLevel; l++) {
+      const arr = groups.get(l) || [];
+      for (const n of arr) {
         allowProgrammaticTranslate = true;
-        await area.translate(n.id, { x: xOffset[l], y });
+        await area.translate(n.id, { x: xOffset[l], y: topsById.get(n.id) || 0 });
         allowProgrammaticTranslate = false;
-        y += h + yGap;
       }
     }
 
