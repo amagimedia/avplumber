@@ -7,6 +7,7 @@
 #include "util.hpp"
 #include "avplumber.hpp"
 #include "app_version.hpp"
+#include "instance_shared.hpp"
 
 std::shared_ptr<AVPlumber> avp_ptr = nullptr;
 
@@ -67,6 +68,10 @@ int main(int argc, char **argv) {
         logstream << "Finished parsing file " << script_path;
     }
     avp.mainLoop();
+
+    // Release global shared objects (e.g. @gpu HW contexts) while process
+    // runtime is still intact, instead of relying on static teardown order.
+    InstanceSharedObjectsDestructors::callGlobalDestructors();
 
     // need this because otherwise race condition happens between
     // InstanceSharedObjectsDestructors::callDestructors called in ~InstanceData

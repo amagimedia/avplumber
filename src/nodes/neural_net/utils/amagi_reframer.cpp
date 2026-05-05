@@ -147,7 +147,7 @@ struct ViewportBBox {
 };
 }
 
-class Reframer : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset {
+class Reframer : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
@@ -604,7 +604,7 @@ protected:
         if (preprocess_module_ && preprocess_rgb_kernel_) return true;
         if (!cu_ctx_) return false;
         if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
-        const std::string ptx_str(avpl_amagi_reframer_ptx, avpl_amagi_reframer_ptx + avpl_amagi_reframer_ptx_len);
+        const std::string ptx_str(avpl_reframer_ptx, avpl_reframer_ptx + avpl_reframer_ptx_len);
         if (CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, (const void*)ptx_str.c_str(), 0, nullptr, nullptr))) {
             logstream << "reframer: failed to load preprocess PTX module";
             return false;
@@ -864,6 +864,9 @@ protected:
 
 public:
     using NodeSISO::NodeSISO;
+    bool consumeEofIfPresent() override {
+        return false;
+    }
 
     ~Reframer() override {
         for (CUdeviceptr p : tensor_ptrs_) {
@@ -890,6 +893,7 @@ public:
         av::VideoFrame frm = this->source_->get();
         if (isEofMarker(frm)) {
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
         if (!frm) return;

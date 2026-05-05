@@ -1,0 +1,110 @@
+From 364d9773b677feedc39ed4a3e30a15e95878b811 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:19:35 +0100
+Subject: [PATCH 08/20] add rtp frame skip teo patch for rtp streaming (legacy
+ old tellyo code)
+
+---
+ libavformat/rtpdec_rfc4175.c | 44 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
+index 53ea616..2f0dff0 100644
+--- a/libavformat/rtpdec_rfc4175.c
++++ b/libavformat/rtpdec_rfc4175.c
+@@ -44,6 +44,8 @@ struct PayloadContext {
+     unsigned int pgroup; /* size of the pixel group in bytes */
+     unsigned int xinc;
+     int is_yuv420;
++    int next_offset;
++    int next_line;
+ 
+     uint32_t timestamp;
+ };
+@@ -111,6 +113,8 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     stream->codecpar->codec_tag = tag;
+     stream->codecpar->bits_per_coded_sample = av_get_bits_per_pixel(desc);
+     data->frame_size = data->width * data->height * data->pgroup / data->xinc;
++    data->next_offset = 0;
++    data->next_line = 0;
+ 
+     if (data->interlaced)
+         stream->codecpar->field_order = AV_FIELD_TT;
+@@ -228,6 +232,8 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+             av_freep(&data->frame);
+         }
+         data->frame = NULL;
++        data->next_offset = 0;
++        data->next_line = 0;
+     }
+ 
+     data->field = 0;
+@@ -235,6 +241,14 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+     return ret;
+ }
+ 
++static void rfc4175_discard_packet(PayloadContext *data)
++{
++    av_freep(&data->frame);
++    data->frame = NULL;
++    data->next_offset = 0;
++    data->next_line = 0;
++}
++
+ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+                                  AVStream *st, AVPacket *pkt, uint32_t *timestamp,
+                                  const uint8_t * buf, int len,
+@@ -258,8 +272,12 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+              * previous frame (or pair of fields) anyway by filling the AVPacket.
+              */
+             av_log(ctx, AV_LOG_ERROR, "Missed previous RTP Marker\n");
+-            missed_last_packet = 1;
+-            rfc4175_finalize_packet(data, pkt, st->index);
++            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++                rfc4175_discard_packet(data);
++            } else {
++                missed_last_packet = 1;
++                rfc4175_finalize_packet(data, pkt, st->index);
++            }
+         }
+ 
+         if (!data->frame)
+@@ -273,6 +291,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+         }
+     }
+ 
++    if (!data->frame) {
++        /* buffer already freed by discard, or duplicate packet */
++        return AVERROR(EAGAIN);
++    }
++
+     /*
+      * looks for the 'Continuation bit' in scan lines' headers
+      * to find where data start
+@@ -313,6 +336,23 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+         if (line >= data->height)
+             return AVERROR_INVALIDDATA;
+ 
++        if ((ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) &&
++            (data->next_line != line || data->next_offset != offset)) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "packet loss: line %d -> %d, offset %d -> %d\n",
++                   data->next_line, line, data->next_offset, offset);
++            rfc4175_discard_packet(data);
++            return AVERROR(EAGAIN);
++        }
++        if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++            data->next_offset = offset + length * data->xinc /
++                                         (data->pgroup * (1 + !!data->is_yuv420));
++            if (data->next_offset >= data->width) {
++                data->next_offset = 0;
++                data->next_line = line + 1 + !!data->is_yuv420;
++            }
++        }
++
+         if (data->is_yuv420) {
+             uint8_t *yd1p, *yd2p, *up, *vp, *udp, *vdp;
+             const uint8_t *p;
+-- 
+2.53.0
+

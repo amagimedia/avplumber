@@ -52,6 +52,7 @@ public:
         dec_(stream, codec_),
         hwaccel_(hwaccel)
     {
+        this->auto_eof_ = false;
         if (!pixel_format.empty()) {
             pixel_format_optional_ = pixel_format[0]=='?';
             pixel_format_ = av::PixelFormat(pixel_format_optional_ ? pixel_format.substr(1) : pixel_format);
@@ -288,10 +289,14 @@ public:
                 // this is flush packet
                 // so flush decoder
                 flush();
-                // pass eof packet to next node
+                // pass eof marker to next node after all codec-drained frames.
+                // Must do this AFTER flush() because flush() may have set finished_=true
+                // when all codec frames fit in the sink; resetting here ensures the EOF
+                // marker is actually sent before the decoder thread exits.
                 if (isEofMarker(pkt)) {
+                    finished_ = false;
+                    finish_after_flush_ = true;
                     this->flush_frames_.push_back(OutputFrame());
-                    //this->sink_->put(OutputFrame());
                 }
             }
         }

@@ -17,7 +17,7 @@ typedef struct obs_source obs_source_t;
 /*
  * Usage #1: (as in standalone application)
  *  mainLoop()
- * will return after any node with restart=panic finishes or you call
+ * will return after any node with restart=panic or restart=exit finishes or you call
  *  stopMainLoop()
  * from a different thread or from interrupt
  * 

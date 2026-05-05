@@ -10,9 +10,11 @@ using cuda_overlay::DrawColor;
 class DrawKeypoints : public CudaOverlayBase {
 private:
     std::string metadata_key_;
+    std::string camera_shot_metadata_key_ = "camera_shot_info";
     DrawColor color_{};
     int radius_ = 3;
     double min_conf_ = 0.0;
+    bool require_wide_shot_ = false;
     double model_content_width_ = 0.0;
     double model_content_height_ = 0.0;
     double model_content_offset_x_ = 0.0;
@@ -46,6 +48,18 @@ private:
         float y;
     };
 
+    std::string parseShotType(const AVFrame* raw) const {
+        if (!raw || !raw->metadata) return "";
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, camera_shot_metadata_key_.c_str(), nullptr, 0);
+        if (!entry || !entry->value) return "";
+        try {
+            Parameters md = Parameters::parse(entry->value);
+            return md.value("camera_shot_type", std::string());
+        } catch (const std::exception&) {
+            return "";
+        }
+    }
+
     void drawOnFrame(const av::VideoFrame& input, av::VideoFrame& output) override {
         if (!loadKernels(avpl_draw_keypoints_ptx, avpl_draw_keypoints_ptx_len,
                          "kDrawKeypointsNV12Luma", "kDrawKeypointsNV12Chroma")) {
@@ -54,6 +68,9 @@ private:
 
         const AVFrame* raw = input.raw();
         if (!raw || !raw->metadata) return;
+
+        const std::string shot_type = parseShotType(raw);
+        if (require_wide_shot_ && shot_type != "wide") return;
 
         AVDictionaryEntry* entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
         if (!entry || !entry->value) return;
@@ -169,9 +186,11 @@ public:
     DrawKeypoints(std::unique_ptr<Source<av::VideoFrame>> &&source,
                   std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                   std::string metadata_key,
+                  std::string camera_shot_metadata_key,
                   DrawColor color,
                   int radius,
                   double min_conf,
+                  bool require_wide_shot,
                   double model_content_width,
                   double model_content_height,
                   double model_content_offset_x,
@@ -182,9 +201,11 @@ public:
                   int debug_log_every_n)
         : CudaOverlayBase(std::move(source), std::move(sink)),
           metadata_key_(std::move(metadata_key)),
+          camera_shot_metadata_key_(std::move(camera_shot_metadata_key)),
           color_(color),
           radius_(radius),
           min_conf_(min_conf),
+          require_wide_shot_(require_wide_shot),
           model_content_width_(model_content_width),
           model_content_height_(model_content_height),
           model_content_offset_x_(model_content_offset_x),
@@ -210,8 +231,10 @@ public:
         const auto upstream = resolveUpstreamInfo(src_edge, params);
 
         const std::string metadata_key = params.value("metadata_key", std::string("yolo_pose"));
+        const std::string camera_shot_metadata_key = params.value("camera_shot_metadata_key", std::string("camera_shot_info"));
         const int radius = params.value("radius", 3);
         const double min_conf = params.value("min_conf", 0.0);
+        const bool require_wide_shot = params.value("require_wide_shot", false);
         const int debug_log_every_n = params.value("debug_log_every_n", 0);
         const double model_content_width = params.value("model_content_width", 0.0);
         const double model_content_height = params.value("model_content_height", 0.0);
@@ -225,7 +248,7 @@ public:
         }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawKeypoints>(
-            edges, params, metadata_key, color, radius, min_conf,
+            edges, params, metadata_key, camera_shot_metadata_key, color, radius, min_conf, require_wide_shot,
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }

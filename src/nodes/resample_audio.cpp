@@ -248,7 +248,7 @@ public:
             drainResampler(false);
         } else {
             logstream << "no input samples, flushing";
-            flush();
+            this->onEofConsumed();
         }
     }
     static av::AudioSamples audioConcat(av::AudioSamples s1, av::AudioSamples s2) {
