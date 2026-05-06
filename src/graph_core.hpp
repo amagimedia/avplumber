@@ -49,6 +49,7 @@ public:
 
     virtual void process() = 0;
     virtual void start() {};
+    virtual bool consumeEofIfPresent() { return false; }
     virtual std::weak_ptr<Node> sourceNode() {
         return {};
     }

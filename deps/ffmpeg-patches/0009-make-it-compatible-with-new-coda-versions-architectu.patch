@@ -1,0 +1,25 @@
+From de361ec1e6d9f8169f4ed8ebf0e9cbc469c57027 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:27:37 +0100
+Subject: [PATCH 09/20] make it compatible with new coda versions/architectures
+
+---
+ configure | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index 98b582a..6b98b5f 100755
+--- a/configure
++++ b/configure
+@@ -4705,7 +4705,7 @@ set_default nvcc
+ 
+ if enabled cuda_nvcc; then
+     if $nvcc $nvccflags_default 2>&1 | grep -qi unsupported; then
+-        nvccflags_default="-gencode arch=compute_60,code=sm_60 -O2"
++        nvccflags_default="-gencode arch=compute_75,code=sm_75 -O2"
+     fi
+ fi
+ 
+-- 
+2.53.0
+

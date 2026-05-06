@@ -1,0 +1,106 @@
+From 58a00475094535b234aa2a5b360fd8460b72fb86 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 12 Mar 2026 18:06:48 +0530
+Subject: [PATCH 14/20] fix for ffmpeg7
+
+---
+ libavfilter/vf_crop_cuda.c | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
+index a7e649f..d08dc38 100644
+--- a/libavfilter/vf_crop_cuda.c
++++ b/libavfilter/vf_crop_cuda.c
+@@ -22,7 +22,6 @@
+ 
+ #include "avfilter.h"
+ #include "filters.h"
+-#include "internal.h"
+ #include "video.h"
+ #include "libavutil/avstring.h"
+ #include "libavutil/cuda_check.h"
+@@ -152,23 +151,25 @@ static inline int normalize_double(int *n, double d)
+ 
+ static int config_input(AVFilterLink *link)
+ {
++    FilterLink *l = ff_filter_link(link);
+     AVFilterContext *ctx = link->dst;
+     CropCUDAContext *s = ctx->priv;
+-    AVHWFramesContext *frames_ctx = (AVHWFramesContext *)link->hw_frames_ctx->data;
++    AVHWFramesContext *frames_ctx;
+     const AVPixFmtDescriptor *pix_desc;
+     int ret;
+     const char *expr;
+     double res;
+ 
+-    if (!frames_ctx) {
++    if (!l->hw_frames_ctx) {
+         av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
+         return AVERROR(EINVAL);
+     }
++    frames_ctx = (AVHWFramesContext *)l->hw_frames_ctx->data;
+ 
+     s->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
+     if (!s->hw_device_ctx)
+         return AVERROR(ENOMEM);
+-    s->hwctx = ((AVHWDeviceContext *)frames_ctx->device_ref->data)->hwctx;
++    s->hwctx = ((AVHWDeviceContext *)s->hw_device_ctx->data)->hwctx;
+ 
+     s->sw_format = frames_ctx->sw_format;
+     pix_desc = av_pix_fmt_desc_get(s->sw_format);
+@@ -237,7 +238,7 @@ static int config_input(AVFilterLink *link)
+         AVRational dar = av_mul_q(link->sample_aspect_ratio,
+                                   (AVRational){ link->w, link->h });
+         av_reduce(&s->out_sar.num, &s->out_sar.den,
+-                  dar.num * s->h, dar.den * s->w, INT_MAX);
++                  (int64_t)dar.num * s->h, (int64_t)dar.den * s->w, INT_MAX);
+     } else {
+         s->out_sar = link->sample_aspect_ratio;
+     }
+@@ -261,6 +262,7 @@ static int config_input(AVFilterLink *link)
+     }
+ 
+     {
++        FilterLink *outl = ff_filter_link(ctx->outputs[0]);
+         AVHWFramesContext *out_ctx;
+         AVBufferRef *out_ref = av_hwframe_ctx_alloc(s->hw_device_ctx);
+         if (!out_ref)
+@@ -293,9 +295,9 @@ output_buffer_fail:
+             return ret;
+         }
+ 
+-        av_buffer_unref(&ctx->outputs[0]->hw_frames_ctx);
+-        ctx->outputs[0]->hw_frames_ctx = av_buffer_ref(s->frames_ctx);
+-        if (!ctx->outputs[0]->hw_frames_ctx)
++        av_buffer_unref(&outl->hw_frames_ctx);
++        outl->hw_frames_ctx = av_buffer_ref(s->frames_ctx);
++        if (!outl->hw_frames_ctx)
+             return AVERROR(ENOMEM);
+     }
+ 
+@@ -324,6 +326,7 @@ static int config_output(AVFilterLink *link)
+ 
+ static int filter_frame(AVFilterLink *link, AVFrame *frame_in)
+ {
++    FilterLink *l = ff_filter_link(link);
+     AVFilterContext *ctx = link->dst;
+     CropCUDAContext *s = ctx->priv;
+     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
+@@ -334,11 +337,13 @@ static int filter_frame(AVFilterLink *link, AVFrame *frame_in)
+     if (!frame_end)
+         return AVERROR(ENOMEM);
+ 
+-    s->var_values[VAR_N] = ff_filter_link(link)->frame_count_out;
++    s->var_values[VAR_N] = l->frame_count_out;
+     s->var_values[VAR_T] = frame_in->pts == AV_NOPTS_VALUE ?
+         NAN : frame_in->pts * av_q2d(link->time_base);
+ #if FF_API_FRAME_PKT
++FF_DISABLE_DEPRECATION_WARNINGS
+     s->var_values[VAR_POS] = frame_in->pkt_pos == -1 ? NAN : frame_in->pkt_pos;
++FF_ENABLE_DEPRECATION_WARNINGS
+ #endif
+     s->var_values[VAR_X] = av_expr_eval(s->x_pexpr, s->var_values, NULL);
+     s->var_values[VAR_Y] = av_expr_eval(s->y_pexpr, s->var_values, NULL);
+-- 
+2.53.0
+

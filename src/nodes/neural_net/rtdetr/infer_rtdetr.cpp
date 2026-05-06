@@ -6,7 +6,7 @@
 
 using namespace yolo_base;
 
-class CudaInferRTDetr : public NodeSingleInput<av::VideoFrame>, public CudaInferTrtBase {
+class CudaInferRTDetr : public NodeSingleInput<av::VideoFrame>, public CudaInferTrtBase, public ReportsFinishByFlag {
 protected:
     std::unique_ptr<EdgeSink<av::VideoFrame>> sink_;
 
@@ -207,8 +207,17 @@ public:
         return j.dump();
     }
 
+    bool consumeEofIfPresent() override {
+        return false;
+    }
+
     void process() override {
         av::VideoFrame frm = this->source_->get();
+        if (isEofMarker(frm)) {
+            sink_->put(frm);
+            this->finished_ = true;
+            return;
+        }
         if (!frm) return;
 
         ++frame_counter_;

@@ -74,6 +74,9 @@ public:
     inline const std::string& type() {
         return type_;
     }
+    inline bool hadError() const {
+        return !last_error_.empty();
+    }
     inline bool isWorking() {
         return threadWorks() || (isNonBlocking() && node_!=nullptr && dowork_);
     }

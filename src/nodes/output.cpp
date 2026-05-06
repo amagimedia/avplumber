@@ -32,6 +32,10 @@ public:
     }
     virtual void process() {
         av::Packet pkt = this->source_->get();
+        if (pkt && isEofMarker(pkt)) {
+            flush();
+            return;
+        }
         if (pkt) {
             try {
                 if (write_seek_table_ && octx_.raw() && octx_.raw()->pb && (pkt.streamIndex() == 0)) {

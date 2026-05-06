@@ -1,0 +1,628 @@
+From 3f0a41055cfc542662ce7ad68b131dbda2ed0bc4 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 5 Mar 2026 10:12:54 +0100
+Subject: [PATCH 02/20] add custom cuda pad filter (tellyo legacy code)
+
+---
+ libavfilter/Makefile       |   1 +
+ libavfilter/allfilters.c   |   1 +
+ libavfilter/vf_pad_cuda.c  | 538 +++++++++++++++++++++++++++++++++++++
+ libavfilter/vf_pad_cuda.cu |  37 +++
+ 4 files changed, 577 insertions(+)
+ create mode 100644 libavfilter/vf_pad_cuda.c
+ create mode 100644 libavfilter/vf_pad_cuda.cu
+
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 91487af..db4b2f9 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -417,6 +417,7 @@ OBJS-$(CONFIG_OVERLAY_VAAPI_FILTER)          += vf_overlay_vaapi.o framesync.o v
+ OBJS-$(CONFIG_OVERLAY_VULKAN_FILTER)         += vf_overlay_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_OWDENOISE_FILTER)              += vf_owdenoise.o
+ OBJS-$(CONFIG_PAD_FILTER)                    += vf_pad.o
++OBJS-$(CONFIG_PAD_CUDA_FILTER)               += vf_pad_cuda.o vf_pad_cuda.ptx.o cuda/load_helper.o
+ OBJS-$(CONFIG_PAD_OPENCL_FILTER)             += vf_pad_opencl.o opencl.o opencl/pad.o
+ OBJS-$(CONFIG_PALETTEGEN_FILTER)             += vf_palettegen.o palette.o
+ OBJS-$(CONFIG_PALETTEUSE_FILTER)             += vf_paletteuse.o framesync.o palette.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 9819f0f..ca42366 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -392,6 +392,7 @@ extern const AVFilter ff_vf_overlay_vulkan;
+ extern const AVFilter ff_vf_overlay_cuda;
+ extern const AVFilter ff_vf_owdenoise;
+ extern const AVFilter ff_vf_pad;
++extern const AVFilter ff_vf_pad_cuda;
+ extern const AVFilter ff_vf_pad_opencl;
+ extern const AVFilter ff_vf_palettegen;
+ extern const AVFilter ff_vf_paletteuse;
+diff --git a/libavfilter/vf_pad_cuda.c b/libavfilter/vf_pad_cuda.c
+new file mode 100644
+index 0000000..7daa227
+--- /dev/null
++++ b/libavfilter/vf_pad_cuda.c
+@@ -0,0 +1,538 @@
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++#include "libavutil/eval.h"
++#include "libavutil/colorspace.h"
++
++#include "avfilter.h"
++#include "formats.h"
++#include "avfilter_internal.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++
++#define BLOCK_X 32
++#define BLOCK_Y 16
++
++enum var_name {
++    VAR_IN_W,   VAR_IW,
++    VAR_IN_H,   VAR_IH,
++    VAR_OUT_W,  VAR_OW,
++    VAR_OUT_H,  VAR_OH,
++    VAR_X,
++    VAR_Y,
++    VAR_A,
++    VAR_SAR,
++    VAR_DAR,
++    VARS_NB
++};
++
++static const char *const var_names[] = {
++    "in_w",   "iw",
++    "in_h",   "ih",
++    "out_w",  "ow",
++    "out_h",  "oh",
++    "x",
++    "y",
++    "a",
++    "sar",
++    "dar",
++    NULL
++};
++
++static enum AVPixelFormat supported_formats[] = {
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVA444P,
++};
++
++#define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
++#define BLOCKX 32
++#define BLOCKY 16
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, cu, x)
++
++typedef struct PadCUDAContext {
++    const AVClass *class;
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++    
++    AVBufferRef *frames_ctx;
++    AVFrame *frame;
++    AVFrame *tmp_frame;
++
++    CUmodule cu_module;
++    CUfunction cu_func;
++    CUstream cu_stream;
++
++    enum AVPixelFormat sw_format;
++
++    char *w_expr, *h_expr, *x_expr, *y_expr;
++    AVRational aspect;
++    int w, h, x, y;
++    uint8_t pad_rgba[4];
++    uint8_t pad_color[4];
++} PadCUDAContext;
++
++
++
++static int format_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++)
++        if (supported_formats[i] == fmt)
++            return 1;
++    return 0;
++}
++
++static av_cold int pad_cuda_init(AVFilterContext *avctx)
++{
++    PadCUDAContext *ctx = avctx->priv;
++
++    ctx->frame = av_frame_alloc();
++    if (!ctx->frame)
++        return AVERROR(ENOMEM);
++
++    ctx->tmp_frame = av_frame_alloc();
++    if (!ctx->tmp_frame)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static av_cold void pad_cuda_uninit(AVFilterContext *avctx)
++{
++    PadCUDAContext *ctx = avctx->priv;
++
++    if (ctx->hwctx && ctx->cu_module) {
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++        CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    av_frame_free(&ctx->frame);
++    av_buffer_unref(&ctx->hw_device_ctx);
++    av_buffer_unref(&ctx->frames_ctx);
++    av_frame_free(&ctx->tmp_frame);
++		ctx->hwctx = NULL;
++}
++
++static av_cold int pad_cuda_output_config_props(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_pad_cuda_ptx_data[];
++    extern const unsigned int ff_vf_pad_cuda_ptx_len;
++
++    FilterLink       *outl = ff_filter_link(outlink);
++    AVFilterContext *avctx = outlink->src;
++    AVFilterLink *inlink = outlink->src->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    PadCUDAContext *ctx  = avctx->priv;
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
++    
++    AVRational adjusted_aspect = ctx->aspect;
++    double var_values[VARS_NB], res;
++    int err, ret;
++    
++    if (!frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->sw_format = frames_ctx->sw_format;
++    if (!format_is_supported(ctx->sw_format)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s\n",
++               av_get_pix_fmt_name(ctx->sw_format));
++        return AVERROR(ENOSYS);
++    }
++
++    // initialize
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext*)frames_ctx->device_ref->data)->hwctx;
++    ctx->cu_stream = ctx->hwctx->stream;
++
++    // load functions
++    {
++        CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        err = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++        if (err < 0) {
++            return err;
++        }
++
++        err = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module, ff_vf_pad_cuda_ptx_data, ff_vf_pad_cuda_ptx_len);
++        if (err < 0) {
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return err;
++        }
++
++        err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func, ctx->cu_module, "Pad_Cuda"));
++        if (err < 0) {
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return err;
++        }
++
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    // process filter parameters
++    {
++        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->sw_format);
++
++        var_values[VAR_IN_W]  = var_values[VAR_IW] = inlink->w;
++        var_values[VAR_IN_H]  = var_values[VAR_IH] = inlink->h;
++        var_values[VAR_OUT_W] = var_values[VAR_OW] = NAN;
++        var_values[VAR_OUT_H] = var_values[VAR_OH] = NAN;
++        var_values[VAR_A]     = (double) inlink->w / inlink->h;
++        var_values[VAR_SAR]   = inlink->sample_aspect_ratio.num ?
++            (double) inlink->sample_aspect_ratio.num / inlink->sample_aspect_ratio.den : 1;
++        var_values[VAR_DAR]   = var_values[VAR_A] * var_values[VAR_SAR];
++
++        av_expr_parse_and_eval(&res, ctx->w_expr,
++                            var_names, var_values,
++                            NULL, NULL, NULL, NULL, NULL, 0, ctx);
++        ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = res;
++        if ((ret = av_expr_parse_and_eval(&res, ctx->h_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = res;
++        if (!ctx->h)
++            var_values[VAR_OUT_H] = var_values[VAR_OH] = ctx->h = inlink->h;
++
++        /* evaluate the width again, as it may depend on the evaluated output height */
++        if ((ret = av_expr_parse_and_eval(&res, ctx->w_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = res;
++        if (!ctx->w)
++            var_values[VAR_OUT_W] = var_values[VAR_OW] = ctx->w = inlink->w;
++
++        if (adjusted_aspect.num && adjusted_aspect.den) {
++            adjusted_aspect = av_div_q(adjusted_aspect, inlink->sample_aspect_ratio);
++            if (ctx->h < av_rescale(ctx->w, adjusted_aspect.den, adjusted_aspect.num)) {
++                ctx->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = av_rescale(ctx->w, adjusted_aspect.den, adjusted_aspect.num);
++            } else {
++                ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = av_rescale(ctx->h, adjusted_aspect.num, adjusted_aspect.den);
++            }
++        }
++
++        /* evaluate x and y */
++        av_expr_parse_and_eval(&res, ctx->x_expr,
++                            var_names, var_values,
++                            NULL, NULL, NULL, NULL, NULL, 0, ctx);
++        ctx->x = var_values[VAR_X] = res;
++        if ((ret = av_expr_parse_and_eval(&res, ctx->y_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->y = var_values[VAR_Y] = res;
++        /* evaluate x again, as it may depend on the evaluated y value */
++        if ((ret = av_expr_parse_and_eval(&res, ctx->x_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->x = var_values[VAR_X] = res;
++
++        if (ctx->x < 0 || ctx->x + inlink->w > ctx->w)
++            ctx->x = var_values[VAR_X] = (ctx->w - inlink->w) / 2;
++        if (ctx->y < 0 || ctx->y + inlink->h > ctx->h)
++            ctx->y = var_values[VAR_Y] = (ctx->h - inlink->h) / 2;
++
++        /* sanity check params */
++        if (ctx->w < inlink->w || ctx->h < inlink->h) {
++            av_log(ctx, AV_LOG_ERROR, "Padded dimensions cannot be smaller than input dimensions.\n");
++            return AVERROR(EINVAL);
++        }
++
++        // Align x, y offsets between planes
++        ctx->x &= ~((1 << desc->log2_chroma_w) - 1);
++        ctx->y &= ~((1 << desc->log2_chroma_h) - 1);
++
++        ctx->pad_color[0] = RGB_TO_Y_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2]);
++        ctx->pad_color[1] = RGB_TO_U_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2], 0);
++        ctx->pad_color[2] = RGB_TO_V_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2], 0);
++        ctx->pad_color[3] = ctx->pad_rgba[3];
++    }
++
++
++    outlink->w = ctx->w;
++    outlink->h = ctx->h;
++
++
++    // prepare output buffer
++    {
++        AVHWFramesContext *out_ctx;
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext*)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = ctx->sw_format;
++        out_ctx->width = FFALIGN(ctx->w, 32);
++        out_ctx->height = FFALIGN(ctx->h, 32);
++        
++        ret = av_hwframe_ctx_init(out_ref);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        av_frame_unref(ctx->frame);
++        ret = av_hwframe_get_buffer(out_ref, ctx->frame, 0);
++        if (ret < 0)
++            goto output_buffer_fail;
++        
++        ctx->frame->width = ctx->w;
++        ctx->frame->height = ctx->h;
++
++        ctx->frames_ctx = out_ref;
++
++        if (ret < 0) {
++output_buffer_fail:
++            av_buffer_unref(&out_ref);
++            return ret;
++        }
++
++	outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++	if (!outl->hw_frames_ctx) {
++            return AVERROR(ENOMEM);
++        }
++    }
++
++    return 0;
++}
++
++static int pad_cuda_call_kernel(
++    PadCUDAContext *ctx,
++    uint8_t *main_data, int main_linesize,
++    int main_width, int main_height,
++    uint8_t *overlay_data, int overlay_linesize,
++    int overlay_width, int overlay_height,
++    int offset_x, int offset_y,
++    uint8_t fill_color1, uint8_t fill_color2) {
++
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    void* kernel_args[] = {
++        &main_data, &main_linesize,
++        &overlay_data, &overlay_linesize,
++        &overlay_width, &overlay_height,
++        &offset_x, &offset_y,
++        &fill_color1, &fill_color2
++    };
++
++    return CHECK_CU(cu->cuLaunchKernel(
++        ctx->cu_func,
++        DIV_UP(main_width, BLOCK_X), DIV_UP(main_height, BLOCK_Y), 1,
++        BLOCK_X, BLOCK_Y, 1,
++        0, ctx->cu_stream, kernel_args, NULL));
++}
++
++static int pad_cuda_fill_buffers(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
++{
++    PadCUDAContext *ctx = avctx->priv;
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++    CUcontext dummy;
++    int ret;
++    uint8_t color_y = ctx->pad_color[0];
++    uint8_t color_u = ctx->pad_color[1];
++    uint8_t color_v = ctx->pad_color[2];
++    uint8_t color_a = ctx->pad_color[3];
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++    if (ret < 0)
++        return ret;
++
++    // overlay first plane
++    pad_cuda_call_kernel(ctx,
++        out->data[0], out->linesize[0],
++        out->width, out->height,
++        in->data[0], in->linesize[0],
++        in->width, in->height,
++        ctx->x, ctx->y,
++        color_y, color_y);
++
++    // overlay color offset planes depending on the pixel format
++    switch(ctx->sw_format) {
++    case AV_PIX_FMT_NV12:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width, out->height / 2,
++            in->data[1], in->linesize[1],
++            in->width, in->height / 2,
++            ctx->x, ctx->y / 2,
++            color_u, color_v);
++        break;
++
++    case AV_PIX_FMT_YUV420P:
++    case AV_PIX_FMT_YUVA420P:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width / 2, out->height / 2,
++            in->data[1], in->linesize[1],
++            in->width / 2, in->height / 2,
++            ctx->x / 2, ctx->y / 2,
++            color_u, color_u);
++        pad_cuda_call_kernel(ctx,
++            out->data[2], out->linesize[2],
++            out->width / 2, out->height / 2,
++            in->data[2], in->linesize[2],
++            in->width / 2, in->height / 2,
++            ctx->x / 2, ctx->y / 2,
++            color_v, color_v);
++        break;
++
++    case AV_PIX_FMT_YUV444P:
++    case AV_PIX_FMT_YUVA444P:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width, out->height,
++            in->data[1], in->linesize[1],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_u, color_u);
++        pad_cuda_call_kernel(ctx,
++            out->data[2], out->linesize[2],
++            out->width, out->height,
++            in->data[2], in->linesize[2],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_v, color_v);
++        break;
++
++    default:
++        av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
++        av_frame_free(&out);
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return AVERROR_BUG;
++    }
++
++    if (in->data[3]) {
++        pad_cuda_call_kernel(ctx,
++            out->data[3], out->linesize[3],
++            out->width, out->height,
++            in->data[3], in->linesize[3],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_a, color_a);
++    }
++    
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    return 0;
++}
++
++static int pad_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
++{
++    AVFilterContext *avctx = link->dst;
++    PadCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    AVFrame *out = NULL;
++    CUcontext dummy;
++    int ret = 0;
++
++    out = av_frame_alloc();
++    if (!out) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++    if (ret < 0)
++        goto fail;
++
++    // fill and prepare the output frame
++    {
++        ret = pad_cuda_fill_buffers(avctx, ctx->frame, in);
++        if (ret < 0)
++            return ret;
++
++        ret = av_hwframe_get_buffer(ctx->frame->hw_frames_ctx, ctx->tmp_frame, 0);
++        if (ret < 0)
++            return ret;
++
++        av_frame_move_ref(out, ctx->frame);
++        av_frame_move_ref(ctx->frame, ctx->tmp_frame);
++
++        ctx->frame->width  = outlink->w;
++        ctx->frame->height = outlink->h;
++
++        ret = av_frame_copy_props(out, in);
++        if (ret < 0)
++            return ret;
++    }
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    if (ret < 0)
++        goto fail;
++
++    av_reduce(&out->sample_aspect_ratio.num, &out->sample_aspect_ratio.den,
++              (int64_t)in->sample_aspect_ratio.num * outlink->h * link->w,
++              (int64_t)in->sample_aspect_ratio.den * outlink->w * link->h,
++              INT_MAX);
++
++    av_frame_free(&in);
++    return ff_filter_frame(outlink, out);
++fail:
++    av_frame_free(&in);
++    av_frame_free(&out);
++    return ret;
++}
++
++
++
++#define OFFSET(x) offsetof(PadCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM)
++
++static const AVOption pad_cuda_options[] = {
++    { "width",  "set the pad area width",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
++    { "w",      "set the pad area width",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
++    { "height", "set the pad area height",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
++    { "h",      "set the pad area height",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
++    { "x",      "set the x offset for the input image position", OFFSET(x_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, INT16_MAX, FLAGS },
++    { "y",      "set the y offset for the input image position", OFFSET(y_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, INT16_MAX, FLAGS },
++    { "color",  "set the color of the padded area border", OFFSET(pad_rgba), AV_OPT_TYPE_COLOR, { .str = "black" }, 0, 0, FLAGS },
++    { "aspect", "pad to fit an aspect instead of a resolution", OFFSET(aspect), AV_OPT_TYPE_RATIONAL, {.dbl = 0}, 0, INT16_MAX, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(pad_cuda);
++
++static const AVFilterPad pad_cuda_inputs[] = {
++    {
++        .name        = "default",
++        .type        = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = pad_cuda_filter_frame,
++    },
++};
++
++static const AVFilterPad pad_cuda_outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = pad_cuda_output_config_props,
++    },
++};
++
++const AVFilter ff_vf_pad_cuda = {
++    .name = "pad_cuda",
++    .description = NULL_IF_CONFIG_SMALL("Pad CUDA accelerated video using solid color"),
++    .priv_size = sizeof(PadCUDAContext),
++    .priv_class = &pad_cuda_class,
++    .init = pad_cuda_init,
++    .uninit = pad_cuda_uninit,
++    FILTER_INPUTS(pad_cuda_inputs),
++    FILTER_OUTPUTS(pad_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_pad_cuda.cu b/libavfilter/vf_pad_cuda.cu
+new file mode 100644
+index 0000000..62f7988
+--- /dev/null
++++ b/libavfilter/vf_pad_cuda.cu
+@@ -0,0 +1,37 @@
++extern "C" {
++
++__global__ void Pad_Cuda(
++    unsigned char* main, int main_linesize,
++    unsigned char* overlay, int overlay_linesize,
++    int overlay_w, int overlay_h,
++    int offset_x, int offset_y,
++    unsigned char fill_color1, unsigned char fill_color2)
++{
++    //
++    // We pass two colors to handle NV12 plane with interleaved UV.
++    // So fill_color1 would correspond to U and fill_color2 to V.
++    // For other formats both fill_colors should be the same.
++    //
++    unsigned char color[2] = {fill_color1, fill_color2};
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    unsigned char *m = &main[x + y*main_linesize];
++
++    if (x < offset_x ||
++        y < offset_y ||
++        x >= overlay_w + offset_x ||
++        y >= overlay_h + offset_y)
++    {
++        // Picking colors[0] for even value of x; and colors[1] for odd value of x;
++        *m = color[x & 1];
++    }
++    else
++    {
++        int overlay_x = x - offset_x;
++        int overlay_y = y - offset_y;
++        *m = overlay[overlay_x + overlay_y*overlay_linesize];
++    }
++}
++
++}
+-- 
+2.53.0
+

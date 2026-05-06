@@ -62,6 +62,23 @@ struct DetectionBox {
 
 static double centerX(const DetectionBox &b) { return (b.x1 + b.x2) * 0.5; }
 static double centerY(const DetectionBox &b) { return (b.y1 + b.y2) * 0.5; }
+static double clampDouble(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
+static double moveToward(double from, double to, double max_step) {
+    if (!(max_step > 0.0) || !std::isfinite(max_step))
+        return to;
+    const double delta = to - from;
+    if (delta > max_step)
+        return from + max_step;
+    if (delta < -max_step)
+        return from - max_step;
+    return to;
+}
+
+struct ViewportMeasurement {
+    double mx = 0.0, my = 0.0;
+    double ux1 = 0.0, uy1 = 0.0, ux2 = 0.0, uy2 = 0.0;
+    bool has_union = false;
+};
 
 // Crop center (cx, cy) so fixed viewport [cx±half_w, cy±half_h] contains [ux1,ux2]×[uy1,uy2].
 // If the union is wider/taller than the viewport, use union centroid clamped to valid crop centers.
@@ -337,7 +354,7 @@ struct DerivSlewAxis {
 
 } // namespace
 
-class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
+class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::vector<std::string> metadata_keys_in_;
     std::string metadata_key_out_;
     double model_content_width_ = 0;
@@ -353,18 +370,21 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     /// "center": focus_mode centroid / best box only. "contain": place crop so viewport_dst contains union of selected dets.
     std::string viewport_fit_;
     double viewport_contain_margin_px_ = 0;
+    double soft_edge_margin_x_px_ = 0;
+    double soft_edge_margin_y_px_ = 0;
+    double soft_edge_lead_fraction_ = 1.0;
     std::unordered_set<std::string> label_priority_set_;
     std::string lost_target_mode_;
 
     std::unique_ptr<LowpassBackend> lowpass_;
-    double kalman_q_pos_ = 0.01, kalman_q_vel_ = 0.001, kalman_r_ = 4.0;
-    double iir_fc_hz_ = 2.0;
-    size_t fir_taps_ = 5;
 
     bool hold_enabled_ = false;
     double hold_speed_px_per_s_ = 30.0;
     int hold_min_frames_ = 6;
     double hold_break_px_ = 120.0;
+    double hold_latched_follow_px_per_s_ = 120.0;
+    double hold_follow_deadband_px_ = 12.0;
+    double hold_edge_release_px_per_s_ = 480.0;
     int hold_max_frames_ = 90;
     bool latched_ = false;
     double latch_x_ = 0, latch_y_ = 0;
@@ -384,9 +404,12 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     double viewport_marker_half_extent_ = 1.0;
     int viewport_dst_width_ = 0;
     int viewport_dst_height_ = 0;
+    double prev_output_x_ = 0;
+    double prev_output_y_ = 0;
+    bool have_prev_output_ = false;
     struct BufSlot {
         av::VideoFrame frm;
-        double mx = 0, my = 0;
+        ViewportMeasurement meas;
         bool valid = false;
     };
     std::deque<BufSlot> buffer_;
@@ -395,6 +418,10 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
     int last_w_ = 0, last_h_ = 0;
     uint64_t frame_counter_ = 0;
     int debug_log_every_n_ = 0;
+    int effective_viewport_dst_width_ = 0;
+    int effective_viewport_dst_height_ = 0;
+    int last_logged_effective_viewport_width_ = -1;
+    int last_logged_effective_viewport_height_ = -1;
 
     void resetPipelineState() {
         if (lowpass_)
@@ -403,9 +430,23 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         low_speed_frames_ = latched_age_ = 0;
         have_prev_meas_ = false;
         visible_streak_ = 0;
+        have_prev_output_ = false;
+        prev_output_x_ = prev_output_y_ = 0;
         buffer_.clear();
         slew_x_.reset(0);
         slew_y_.reset(0);
+    }
+
+    int effectiveViewportWidth(int frame_width) const {
+        if (frame_width <= 0)
+            return viewport_dst_width_;
+        return std::max(1, std::min(viewport_dst_width_, frame_width));
+    }
+
+    int effectiveViewportHeight(int frame_height) const {
+        if (frame_height <= 0)
+            return viewport_dst_height_;
+        return std::max(1, std::min(viewport_dst_height_, frame_height));
     }
 
     bool remapModelCoord(double x, double y, double model_w, double model_h, int fw, int fh, double &out_x,
@@ -596,9 +637,9 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         return true;
     }
 
-    bool computeViewportMeasurement(const std::vector<DetectionBox> &dets, int fw, int fh, double &mx, double &my) const {
+    bool computeViewportMeasurement(const std::vector<DetectionBox> &dets, int fw, int fh, ViewportMeasurement &meas) const {
         if (viewport_fit_ != "contain")
-            return computeFocus(dets, fw, fh, mx, my);
+            return computeFocus(dets, fw, fh, meas.mx, meas.my);
         std::vector<const DetectionBox *> sel;
         if (!collectDetsForContain(dets, sel))
             return false;
@@ -625,10 +666,117 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         y2 = std::max(0.0, std::min((double)fh, y2));
         if (!(x2 > x1 && y2 > y1))
             return false;
-        const double half_w = viewport_dst_width_ * 0.5;
-        const double half_h = viewport_dst_height_ * 0.5;
-        centerForFixedViewportContain(x1, y1, x2, y2, fw, fh, half_w, half_h, mx, my);
+        const double half_w = effectiveViewportWidth(fw) * 0.5;
+        const double half_h = effectiveViewportHeight(fh) * 0.5;
+        centerForFixedViewportContain(x1, y1, x2, y2, fw, fh, half_w, half_h, meas.mx, meas.my);
+        meas.ux1 = x1;
+        meas.uy1 = y1;
+        meas.ux2 = x2;
+        meas.uy2 = y2;
+        meas.has_union = true;
         return true;
+    }
+
+    struct SoftEdgeAxisDebug {
+        double hard_min = 0.0;
+        double hard_max = 0.0;
+        double safe_min = 0.0;
+        double safe_max = 0.0;
+        double lead_lo = 0.0;
+        double lead_hi = 0.0;
+        double raw = 0.0;
+        double softened = 0.0;
+        bool enabled = false;
+        bool clamped = false;
+        bool prev_outside = false;
+        bool compressed = false;
+    };
+
+    struct SoftEdgeDebug {
+        SoftEdgeAxisDebug x;
+        SoftEdgeAxisDebug y;
+    };
+
+    double softenAxisTarget(double raw_target, double prev_output, double union_min, double union_max, double frame_extent,
+                            double half_extent, double soft_margin, SoftEdgeAxisDebug &dbg) const {
+        dbg.raw = raw_target;
+        dbg.softened = raw_target;
+        if (!(soft_margin > 0.0) || !std::isfinite(soft_margin))
+            return raw_target;
+
+        const double hard_min = std::max(union_max - half_extent, half_extent);
+        const double hard_max = std::min(union_min + half_extent, frame_extent - half_extent);
+        dbg.hard_min = hard_min;
+        dbg.hard_max = hard_max;
+        if (!(hard_min <= hard_max))
+            return raw_target;
+
+        const double max_margin = std::max(0.0, 0.5 * (hard_max - hard_min));
+        const double eff_margin = std::min(soft_margin, max_margin);
+        const double safe_min = hard_min + eff_margin;
+        const double safe_max = hard_max - eff_margin;
+        dbg.enabled = true;
+        dbg.safe_min = safe_min;
+        dbg.safe_max = safe_max;
+        dbg.compressed = std::fabs(safe_max - safe_min) <= 1e-6;
+
+        if (!have_prev_output_) {
+            dbg.softened = clampDouble(raw_target, safe_min, safe_max);
+            dbg.clamped = std::fabs(dbg.softened - raw_target) > 1e-6;
+            return dbg.softened;
+        }
+
+        if (prev_output < safe_min) {
+            dbg.prev_outside = true;
+            dbg.lead_lo = safe_min;
+            dbg.lead_hi = safe_max;
+            dbg.softened = clampDouble(raw_target, safe_min, safe_max);
+            dbg.clamped = std::fabs(dbg.softened - raw_target) > 1e-6;
+            return dbg.softened;
+        }
+        if (prev_output > safe_max) {
+            dbg.prev_outside = true;
+            dbg.lead_lo = safe_min;
+            dbg.lead_hi = safe_max;
+            dbg.softened = clampDouble(raw_target, safe_min, safe_max);
+            dbg.clamped = std::fabs(dbg.softened - raw_target) > 1e-6;
+            return dbg.softened;
+        }
+
+        const double comfort_inset = std::min(eff_margin, std::max(0.0, 0.5 * (safe_max - safe_min)));
+        const double comfort_min = safe_min + comfort_inset;
+        const double comfort_max = safe_max - comfort_inset;
+        const bool near_left_edge = comfort_min <= comfort_max && prev_output <= comfort_min;
+        const bool near_right_edge = comfort_min <= comfort_max && prev_output >= comfort_max;
+        const bool moving_right = raw_target > prev_output;
+        const bool moving_left = raw_target < prev_output;
+
+        const double lead_lo = prev_output - (prev_output - safe_min) * soft_edge_lead_fraction_;
+        const double lead_hi = prev_output + (safe_max - prev_output) * soft_edge_lead_fraction_;
+        dbg.lead_lo = lead_lo;
+        dbg.lead_hi = lead_hi;
+        dbg.softened = raw_target;
+        if (moving_right) {
+            if (!near_left_edge && raw_target > lead_hi)
+                dbg.softened = lead_hi;
+        } else if (moving_left) {
+            if (!near_right_edge && raw_target < lead_lo)
+                dbg.softened = lead_lo;
+        }
+        dbg.clamped = std::fabs(dbg.softened - raw_target) > 1e-6;
+        return dbg.softened;
+    }
+
+    void softenMeasurementTarget(const ViewportMeasurement &raw, int fw, int fh, double &mx, double &my,
+                                 SoftEdgeDebug &dbg) const {
+        mx = raw.mx;
+        my = raw.my;
+        if (!raw.has_union)
+            return;
+        const double half_w = effectiveViewportWidth(fw) * 0.5;
+        const double half_h = effectiveViewportHeight(fh) * 0.5;
+        mx = softenAxisTarget(mx, prev_output_x_, raw.ux1, raw.ux2, (double)fw, half_w, soft_edge_margin_x_px_, dbg.x);
+        my = softenAxisTarget(my, prev_output_y_, raw.uy1, raw.uy2, (double)fh, half_h, soft_edge_margin_y_px_, dbg.y);
     }
 
     double frameDt() const {
@@ -658,7 +806,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         oy = slew_y_.d[0];
     }
 
-    void runHoldAndDeriv(double meas_x, double meas_y, bool meas_valid, double lp_x, double lp_y, int fw, int fh,
+    void runHoldAndDeriv(double meas_x, double meas_y, bool meas_valid, double lp_x, double lp_y, bool edge_pressure,
                          double dt, double &out_x, double &out_y) {
         double hx = lp_x, hy = lp_y;
 
@@ -681,7 +829,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             }
 
             if (!latched_) {
-                if (hold_min_frames_ > 0 && low_speed_frames_ >= hold_min_frames_) {
+                if (!edge_pressure && hold_min_frames_ > 0 && low_speed_frames_ >= hold_min_frames_) {
                     latched_ = true;
                     latch_x_ = lp_x;
                     latch_y_ = lp_y;
@@ -693,8 +841,14 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
                 if (meas_valid) {
                     const double ddx = meas_x - latch_x_;
                     const double ddy = meas_y - latch_y_;
-                    if (std::sqrt(ddx * ddx + ddy * ddy) > hold_break_px_)
-                        brk = true;
+                    const double dist = std::sqrt(ddx * ddx + ddy * ddy);
+                    const bool release = edge_pressure || dist > hold_break_px_;
+                    const double follow_speed = release ? hold_edge_release_px_per_s_ : hold_latched_follow_px_per_s_;
+                    if (dist > hold_follow_deadband_px_ && follow_speed > 0.0) {
+                        const double max_step = std::max(1.0, follow_speed * dt);
+                        latch_x_ = moveToward(latch_x_, meas_x, max_step);
+                        latch_y_ = moveToward(latch_y_, meas_y, max_step);
+                    }
                 } else if (lost_target_mode_ != "hold_last") {
                     brk = true;
                 }
@@ -712,18 +866,36 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         applyDerivativeLimits(hx, hy, dt, out_x, out_y);
     }
 
-    void writeViewportMetadata(av::VideoFrame &frm, double cx, double cy) {
+    std::pair<double, double> averageBufferedMeasurement(const BufSlot &out) const {
+        if (!out.valid)
+            return {0.0, 0.0};
+        double sx = out.meas.mx;
+        double sy = out.meas.my;
+        int cnt = 1;
+        const int take = std::min(lookahead_frames_, (int)buffer_.size());
+        for (int i = 0; i < take; ++i) {
+            if (!buffer_[(size_t)i].valid)
+                continue;
+            sx += buffer_[(size_t)i].meas.mx;
+            sy += buffer_[(size_t)i].meas.my;
+            ++cnt;
+        }
+        return {sx / cnt, sy / cnt};
+    }
+
+    void writeViewportMetadata(av::VideoFrame &frm, double cx, double cy, int viewport_w, int viewport_h) {
         Parameters j;
         const double h = std::max(1.0, viewport_marker_half_extent_);
         j["viewport_bbox"] = {cx - h, cy - h, cx + h, cy + h};
         j["full_frame_width"] = frm.width();
         j["full_frame_height"] = frm.height();
-        j["viewport_dst_width"] = viewport_dst_width_;
-        j["viewport_dst_height"] = viewport_dst_height_;
+        j["viewport_dst_width"] = viewport_w;
+        j["viewport_dst_height"] = viewport_h;
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), j.dump().c_str(), 0);
     }
 
-    void processOneFrame(av::VideoFrame &frm, double agg_mx, double agg_my, bool current_frame_has_det) {
+    void processOneFrame(av::VideoFrame &frm, double agg_mx, double agg_my, bool current_frame_has_det,
+                         const ViewportMeasurement *current_meas) {
         const int fw = frm.width();
         const int fh = frm.height();
         const double dt = frameDt();
@@ -735,19 +907,41 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
             slew_x_.reset(fw * 0.5);
             slew_y_.reset(fh * 0.5);
         }
-        if (viewport_dst_width_ > fw || viewport_dst_height_ > fh) {
-            throw Error("smooth_crop_viewport: viewport_dst_width/height exceed frame dimensions");
+        effective_viewport_dst_width_ = effectiveViewportWidth(fw);
+        effective_viewport_dst_height_ = effectiveViewportHeight(fh);
+        if (effective_viewport_dst_width_ != last_logged_effective_viewport_width_ ||
+            effective_viewport_dst_height_ != last_logged_effective_viewport_height_) {
+            if (effective_viewport_dst_width_ != viewport_dst_width_ ||
+                effective_viewport_dst_height_ != viewport_dst_height_) {
+                logstream << "smooth_crop_viewport: clamped viewport from "
+                          << viewport_dst_width_ << "x" << viewport_dst_height_
+                          << " to " << effective_viewport_dst_width_ << "x" << effective_viewport_dst_height_
+                          << " for frame " << fw << "x" << fh;
+            }
+            last_logged_effective_viewport_width_ = effective_viewport_dst_width_;
+            last_logged_effective_viewport_height_ = effective_viewport_dst_height_;
         }
 
         std::vector<DetectionBox> dets;
         double mx = 0, my = 0;
         bool frame_det = false;
+        ViewportMeasurement raw_meas;
         if (current_frame_has_det && finitePos(agg_mx) && finitePos(agg_my)) {
-            mx = agg_mx;
-            my = agg_my;
+            if (current_meas)
+                raw_meas = *current_meas;
+            raw_meas.mx = agg_mx;
+            raw_meas.my = agg_my;
             frame_det = true;
-        } else if (parseMetadata(frm, dets) && computeViewportMeasurement(dets, fw, fh, mx, my)) {
+        } else if (parseMetadata(frm, dets) && computeViewportMeasurement(dets, fw, fh, raw_meas)) {
             frame_det = true;
+        }
+
+        SoftEdgeDebug soft_dbg;
+        bool edge_pressure = false;
+        if (frame_det) {
+            softenMeasurementTarget(raw_meas, fw, fh, mx, my, soft_dbg);
+            edge_pressure = (soft_dbg.x.enabled && (soft_dbg.x.prev_outside || soft_dbg.x.compressed)) ||
+                            (soft_dbg.y.enabled && (soft_dbg.y.prev_outside || soft_dbg.y.compressed));
         }
 
         if (frame_det)
@@ -763,21 +957,45 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         lowpass_->step(mx, my, meas_valid, dt, fw, fh, lost_center, lp_x, lp_y);
 
         double out_x = 0, out_y = 0;
-        runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, fw, fh, dt, out_x, out_y);
+        runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, edge_pressure, dt, out_x, out_y);
 
         {
-            const double half_w = viewport_dst_width_ * 0.5;
-            const double half_h = viewport_dst_height_ * 0.5;
+            const double half_w = effective_viewport_dst_width_ * 0.5;
+            const double half_h = effective_viewport_dst_height_ * 0.5;
             out_x = std::max(half_w, std::min((double)fw - half_w, out_x));
             out_y = std::max(half_h, std::min((double)fh - half_h, out_y));
         }
 
-        writeViewportMetadata(frm, out_x, out_y);
+        writeViewportMetadata(frm, out_x, out_y, effective_viewport_dst_width_, effective_viewport_dst_height_);
+        prev_output_x_ = out_x;
+        prev_output_y_ = out_y;
+        have_prev_output_ = true;
 
         ++frame_counter_;
-        if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+        const bool soft_log = (soft_dbg.x.clamped || soft_dbg.y.clamped) &&
+                              (std::fabs(soft_dbg.x.softened - soft_dbg.x.raw) >= 4.0 ||
+                               std::fabs(soft_dbg.y.softened - soft_dbg.y.raw) >= 4.0);
+        if ((debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) || soft_log) {
             logstream << "smooth_crop_viewport: frame=" << frame_counter_ << " out=(" << out_x << "," << out_y << ")"
-                      << " meas_valid=" << (meas_valid ? 1 : 0) << " streak=" << visible_streak_;
+                      << " meas_valid=" << (meas_valid ? 1 : 0) << " streak=" << visible_streak_
+                      << " latched=" << (latched_ ? 1 : 0)
+                      << " edge_pressure=" << (edge_pressure ? 1 : 0)
+                      << " raw=(" << raw_meas.mx << "," << raw_meas.my << ")"
+                      << " softened=(" << mx << "," << my << ")";
+            if (soft_dbg.x.enabled) {
+                logstream << " soft_x={hard:[" << soft_dbg.x.hard_min << "," << soft_dbg.x.hard_max << "] safe:["
+                          << soft_dbg.x.safe_min << "," << soft_dbg.x.safe_max << "] lead:[" << soft_dbg.x.lead_lo
+                          << "," << soft_dbg.x.lead_hi << "] raw:" << soft_dbg.x.raw
+                          << " soft:" << soft_dbg.x.softened << " prev_outside:" << (soft_dbg.x.prev_outside ? 1 : 0)
+                          << "}";
+            }
+            if (soft_dbg.y.enabled) {
+                logstream << " soft_y={hard:[" << soft_dbg.y.hard_min << "," << soft_dbg.y.hard_max << "] safe:["
+                          << soft_dbg.y.safe_min << "," << soft_dbg.y.safe_max << "] lead:[" << soft_dbg.y.lead_lo
+                          << "," << soft_dbg.y.lead_hi << "] raw:" << soft_dbg.y.raw
+                          << " soft:" << soft_dbg.y.softened << " prev_outside:" << (soft_dbg.y.prev_outside ? 1 : 0)
+                          << "}";
+            }
         }
     }
 
@@ -785,25 +1003,9 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame> {
         while (!buffer_.empty()) {
             BufSlot slot = std::move(buffer_.front());
             buffer_.pop_front();
-            double sx = 0, sy = 0;
-            int cnt = 0;
-            if (slot.valid) {
-                sx += slot.mx;
-                sy += slot.my;
-                ++cnt;
-            }
-            const int take = std::min(lookahead_frames_, (int)buffer_.size());
-            for (int i = 0; i < take; ++i) {
-                if (buffer_[(size_t)i].valid) {
-                    sx += buffer_[(size_t)i].mx;
-                    sy += buffer_[(size_t)i].my;
-                    ++cnt;
-                }
-            }
             const bool current_det = slot.valid;
-            const double ax = current_det && cnt > 0 ? sx / cnt : 0;
-            const double ay = current_det && cnt > 0 ? sy / cnt : 0;
-            processOneFrame(slot.frm, ax, ay, current_det);
+            const auto [ax, ay] = averageBufferedMeasurement(slot);
+            processOneFrame(slot.frm, ax, ay, current_det, slot.valid ? &slot.meas : nullptr);
             this->sink_->put(std::move(slot.frm));
         }
     }
@@ -815,10 +1017,13 @@ public:
                        double model_content_offset_y, double min_conf, std::unordered_set<int> allowed_classes,
                        std::unordered_set<std::string> allowed_labels, std::unordered_set<int> allowed_model_indices,
                        std::vector<std::string> label_priority, std::string focus_mode, std::string viewport_fit,
-                       double viewport_contain_margin_px, std::string lost_target_mode,
-                       std::unique_ptr<LowpassBackend> &&lowpass, double kalman_q_pos,
-                       double kalman_q_vel, double kalman_r, double iir_fc_hz, size_t fir_taps, bool hold_enabled,
-                       double hold_speed_px_per_s, int hold_min_frames, double hold_break_px, int hold_max_frames,
+                       double viewport_contain_margin_px, double soft_edge_margin_x_px, double soft_edge_margin_y_px,
+                       double soft_edge_lead_fraction,
+                       std::string lost_target_mode,
+                       std::unique_ptr<LowpassBackend> &&lowpass, bool hold_enabled,
+                       double hold_speed_px_per_s, int hold_min_frames, double hold_break_px,
+                       double hold_latched_follow_px_per_s, double hold_follow_deadband_px,
+                       double hold_edge_release_px_per_s, int hold_max_frames,
                        std::vector<double> derivative_limit_by_order, double viewport_marker_half_extent,
                        int viewport_dst_width, int viewport_dst_height, int lookahead_frames, int min_visible_frames,
                        int debug_log_every_n)
@@ -830,16 +1035,20 @@ public:
           allowed_classes_(std::move(allowed_classes)), allowed_labels_(std::move(allowed_labels)),
           allowed_model_indices_(std::move(allowed_model_indices)), label_priority_(std::move(label_priority)),
           focus_mode_(std::move(focus_mode)), viewport_fit_(std::move(viewport_fit)),
-          viewport_contain_margin_px_(viewport_contain_margin_px), lost_target_mode_(std::move(lost_target_mode)),
-          lowpass_(std::move(lowpass)), kalman_q_pos_(kalman_q_pos),
-          kalman_q_vel_(kalman_q_vel), kalman_r_(kalman_r), iir_fc_hz_(iir_fc_hz), fir_taps_(fir_taps),
+          viewport_contain_margin_px_(viewport_contain_margin_px), soft_edge_margin_x_px_(soft_edge_margin_x_px),
+          soft_edge_margin_y_px_(soft_edge_margin_y_px), soft_edge_lead_fraction_(soft_edge_lead_fraction),
+          lost_target_mode_(std::move(lost_target_mode)), lowpass_(std::move(lowpass)),
           hold_enabled_(hold_enabled), hold_speed_px_per_s_(hold_speed_px_per_s),
-          hold_min_frames_(hold_min_frames), hold_break_px_(hold_break_px), hold_max_frames_(hold_max_frames),
+          hold_min_frames_(hold_min_frames), hold_break_px_(hold_break_px),
+          hold_latched_follow_px_per_s_(hold_latched_follow_px_per_s),
+          hold_follow_deadband_px_(hold_follow_deadband_px),
+          hold_edge_release_px_per_s_(hold_edge_release_px_per_s), hold_max_frames_(hold_max_frames),
           derivative_limit_by_order_(std::move(derivative_limit_by_order)),
           lookahead_frames_(lookahead_frames), min_visible_frames_(min_visible_frames),
           viewport_marker_half_extent_(viewport_marker_half_extent),
           viewport_dst_width_(viewport_dst_width), viewport_dst_height_(viewport_dst_height),
           debug_log_every_n_(debug_log_every_n) {
+        this->auto_eof_ = false;
         for (const auto &s : label_priority_)
             label_priority_set_.insert(s);
     }
@@ -849,6 +1058,7 @@ public:
         if (isEofMarker(frm)) {
             flushBufferOnEof();
             this->sink_->put(std::move(frm));
+            this->finished_ = true;
             return;
         }
         if (!frm)
@@ -858,7 +1068,7 @@ public:
         slot.frm = std::move(frm);
         std::vector<DetectionBox> dets;
         if (parseMetadata(slot.frm, dets) &&
-            computeViewportMeasurement(dets, slot.frm.width(), slot.frm.height(), slot.mx, slot.my)) {
+            computeViewportMeasurement(dets, slot.frm.width(), slot.frm.height(), slot.meas)) {
             slot.valid = true;
         }
 
@@ -871,26 +1081,10 @@ public:
         BufSlot out = std::move(buffer_.front());
         buffer_.pop_front();
 
-        double sx = 0, sy = 0;
-        int cnt = 0;
-        // Average only when the *output* frame has a detection; lookahead smooths target, not validity.
-        if (out.valid) {
-            sx += out.mx;
-            sy += out.my;
-            ++cnt;
-            for (int i = 0; i < lookahead_frames_ && i < (int)buffer_.size(); ++i) {
-                if (buffer_[(size_t)i].valid) {
-                    sx += buffer_[(size_t)i].mx;
-                    sy += buffer_[(size_t)i].my;
-                    ++cnt;
-                }
-            }
-        }
         const bool current_det = out.valid;
-        const double ax = current_det && cnt > 0 ? sx / cnt : 0;
-        const double ay = current_det && cnt > 0 ? sy / cnt : 0;
+        const auto [ax, ay] = averageBufferedMeasurement(out);
 
-        processOneFrame(out.frm, ax, ay, current_det);
+        processOneFrame(out.frm, ax, ay, current_det, out.valid ? &out.meas : nullptr);
         this->sink_->put(std::move(out.frm));
     }
 
@@ -912,7 +1106,7 @@ public:
                 metadata_keys_in.push_back(v.get<std::string>());
         }
         if (metadata_keys_in.empty())
-            metadata_keys_in.push_back(params.value("metadata_key_in", std::string("basketball_analysis_v1")));
+            metadata_keys_in.push_back(params.value("metadata_key_in", std::string("yolo_detections")));
         const std::string metadata_key_out = params.value("metadata_key_out", std::string("smoothed_crop_viewport_v1"));
         const double mcw = params.value("model_content_width", 0.0);
         const double mch = params.value("model_content_height", 0.0);
@@ -945,6 +1139,17 @@ public:
             throw Error("smooth_crop_viewport: viewport_fit must be \"center\" or \"contain\"");
         }
         const double contain_margin = params.value("viewport_contain_margin_px", 0.0);
+        const double soft_edge_margin_x_px = params.value("soft_edge_margin_x_px", 0.0);
+        const double soft_edge_margin_y_px = params.value("soft_edge_margin_y_px", 0.0);
+        double soft_edge_lead_fraction = params.value("soft_edge_lead_fraction", 1.0);
+        if (!std::isfinite(soft_edge_margin_x_px) || soft_edge_margin_x_px < 0.0 ||
+            !std::isfinite(soft_edge_margin_y_px) || soft_edge_margin_y_px < 0.0) {
+            throw Error("smooth_crop_viewport: soft_edge_margin_x_px and soft_edge_margin_y_px must be finite and >= 0");
+        }
+        if (!std::isfinite(soft_edge_lead_fraction)) {
+            throw Error("smooth_crop_viewport: soft_edge_lead_fraction must be finite");
+        }
+        soft_edge_lead_fraction = clampDouble(soft_edge_lead_fraction, 0.0, 1.0);
         const std::string lost_target = params.value("lost_target", std::string("hold_last"));
         const std::string filter_type = params.value("filter_type", std::string("kalman"));
 
@@ -981,6 +1186,9 @@ public:
         const double hold_spd = params.value("hold_speed_px_per_s", 30.0);
         const int hold_min = (int)params.value("hold_min_frames", 6);
         const double hold_break = params.value("hold_break_px", 120.0);
+        const double hold_latched_follow = params.value("hold_latched_follow_px_per_s", 120.0);
+        const double hold_follow_deadband = params.value("hold_follow_deadband_px", 12.0);
+        const double hold_edge_release = params.value("hold_edge_release_px_per_s", 480.0);
         const int hold_max = (int)params.value("hold_max_frames", 90);
 
         std::vector<double> deriv_lim = parseDerivativeLimits(params);
@@ -1005,9 +1213,11 @@ public:
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<SmoothCropViewport>(
             edges, params, std::move(metadata_keys_in), metadata_key_out, frame_rate, mcw, mch, mcx, mcy, min_conf,
             std::move(allowed_classes), std::move(allowed_labels), std::move(allowed_model_indices),
-            std::move(label_priority), focus_mode, viewport_fit, contain_margin, lost_target, std::move(lp), kq_pos,
-            kq_vel, kr,
-            iir_fc, fir_taps, hold_enabled, hold_spd, hold_min, hold_break, hold_max, std::move(deriv_lim),
+            std::move(label_priority), focus_mode, viewport_fit, contain_margin, soft_edge_margin_x_px,
+            soft_edge_margin_y_px, soft_edge_lead_fraction, lost_target,
+            std::move(lp), hold_enabled, hold_spd, hold_min, hold_break, hold_latched_follow,
+            hold_follow_deadband, hold_edge_release, hold_max,
+            std::move(deriv_lim),
             viewport_marker_half_extent, viewport_dst_width, viewport_dst_height, lookahead, min_visible, dbg);
     }
 };

@@ -9,11 +9,26 @@
 
 using namespace std::chrono_literals;
 
+class ReportsFinishByFlag: public IReportsFinish {
+protected:
+    bool finished_ = false;
+public:
+    virtual bool finished() {
+        return finished_;
+    }
+    void markFinished() {
+        finished_ = true;
+    }
+    virtual ~ReportsFinishByFlag() {
+    }
+};
+
 template<typename InputType> class NodeSingleInput: virtual public Node, public IStoppable, virtual public IInitAfterCreate, public IFlushAndSeek {
 public:
     using SourceType = Source<InputType>;
 protected:
     std::unique_ptr<SourceType> source_;
+    bool auto_eof_ = true;
     void executeUpstream(std::function<void(EdgeBase&, std::shared_ptr<Node>)> cb) {
         std::shared_ptr<EdgeBase> edge = sourceEdge();
         while (edge) {
@@ -153,6 +168,24 @@ public:
         });
         resumeProcessing();
     }
+    virtual void onEofConsumed() {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+    }
+    virtual bool consumeEofIfPresent() override {
+        if (!auto_eof_) return false;
+        InputType* ptr = source_->peek(0);
+        if (ptr == nullptr || !isEofMarker(*ptr)) return false;
+        source_->pop();
+        onEofConsumed();
+        ReportsFinishByFlag* finishable = dynamic_cast<ReportsFinishByFlag*>(this);
+        if (finishable) {
+            finishable->markFinished();
+        }
+        return true;
+    }
     virtual ~NodeSingleInput() {
     }
 };
@@ -172,6 +205,7 @@ protected:
     Event stop_event_;
     std::unique_ptr<MultiEventWait> event_wait_;
     std::atomic_bool stopping_{false};
+    bool auto_eof_ = true;
     void createSourcesFromParameters(EdgeManager &edges, const Parameters &params) {
         std::list<std::string> edge_names = jsonToStringList(params["src"]);
         size_t count = edge_names.size();
@@ -220,6 +254,28 @@ public:
     virtual void stop() {
         stopping_ = true;
         stop_event_.signal();
+    }
+    virtual void onEofConsumed() {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+    }
+    virtual bool consumeEofIfPresent() override {
+        if (!auto_eof_) return false;
+        for (auto& edge : source_edges_) {
+            auto* ptr = edge->peek();
+            if (!ptr || !isEofMarker(*ptr)) return false;
+        }
+        for (auto& edge : source_edges_) {
+            edge->pop();
+        }
+        onEofConsumed();
+        ReportsFinishByFlag* finishable = dynamic_cast<ReportsFinishByFlag*>(this);
+        if (finishable) {
+            finishable->markFinished();
+        }
+        return true;
     }
 
     virtual ~NodeMultiInput() {
@@ -339,6 +395,13 @@ public:
         NodeSingleInput<InputType>::init(edges, params);
         NodeSingleOutput<OutputType>::init(edges, params);
     }
+    virtual void onEofConsumed() override {
+        IFlushable* flushable = dynamic_cast<IFlushable*>(this);
+        if (flushable) {
+            flushable->flush();
+        }
+        this->sink_->put(createEofMarker<OutputType>());
+    }
     virtual ~NodeSISO() {
     }
 };
@@ -355,17 +418,6 @@ public:
         }
     }
     virtual ~TransparentNode() {
-    }
-};
-
-class ReportsFinishByFlag: public IReportsFinish {
-protected:
-    bool finished_ = false;
-public:
-    virtual bool finished() {
-        return finished_;
-    }
-    virtual ~ReportsFinishByFlag() {
     }
 };
 

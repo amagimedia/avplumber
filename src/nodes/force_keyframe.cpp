@@ -6,20 +6,26 @@ protected:
     int64_t last_result_ = -(1L<<62);
 public:
     virtual void process() {
-        av::VideoFrame frm = this->source_->get();
-        if (frm.isValid()) {
-            soft_assert(frm.pts().timebase().getNumerator() && frm.pts().timebase().getDenominator(), "invalid timebase in frame");
-            int result = (frm.pts().timestamp() * frm.pts().timebase().getNumerator() * interval_sec_.getDenominator()) / (frm.pts().timebase().getDenominator() * interval_sec_.getNumerator());
-            if (result != last_result_) {
-                //logstream << "Forcing key frame " << result << " != " << last_result_;
-                frm.setPictureType(AV_PICTURE_TYPE_I);
-                frm.setKeyFrame(true);
-                last_result_ = result;
-            } else {
-                frm.setPictureType(AV_PICTURE_TYPE_NONE);
-            }
+        av::VideoFrame* ptr = this->source_->peek();
+        if (ptr == nullptr) return;
+        if (isEofMarker(*ptr)) {
+            // Leave the EOF marker in the queue so consumeEofIfPresent() picks it up
+            // and correctly terminates the dumb node loop.
+            return;
+        }
+        av::VideoFrame frm = *ptr;
+        soft_assert(frm.pts().timebase().getNumerator() && frm.pts().timebase().getDenominator(), "invalid timebase in frame");
+        int result = (frm.pts().timestamp() * frm.pts().timebase().getNumerator() * interval_sec_.getDenominator()) / (frm.pts().timebase().getDenominator() * interval_sec_.getNumerator());
+        if (result != last_result_) {
+            //logstream << "Forcing key frame " << result << " != " << last_result_;
+            frm.setPictureType(AV_PICTURE_TYPE_I);
+            frm.setKeyFrame(true);
+            last_result_ = result;
+        } else {
+            frm.setPictureType(AV_PICTURE_TYPE_NONE);
         }
         this->sink_->put(frm);
+        this->source_->pop();
     }
     ForceKeyFrame(std::unique_ptr<Source<av::VideoFrame>> &&source, std::unique_ptr<Sink<av::VideoFrame>> &&sink, const av::Rational interval_sec): NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)), interval_sec_(interval_sec) {
     }

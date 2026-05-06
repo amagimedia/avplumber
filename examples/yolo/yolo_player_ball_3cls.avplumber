@@ -21,7 +21,7 @@ node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
 node.add { "type": "join_metadata", "src": ["v_dec_1080p", "v_post_yolo"], "dst": "v_1080p_with_md", "group": "in" }
 
 # Draw bounding boxes on full-res frames
-node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_BBoxes", "metadata_key": "yolo_detections", "bbox_thickness": 2, "min_conf": 0.25, "allowed_labels": ["player", "ball", "hoop"], "model_colors": { "0": "green" }, "model_content_width": 960, "model_content_height": 540, "model_content_offset_x": 0, "model_content_offset_y": 2, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 30 }
+node.add { "type": "draw_bbox", "src": "v_1080p_with_md", "dst": "v_annotated_cuda", "group": "in", "name": "Draw_BBoxes", "metadata_key": "yolo_detections", "bbox_thickness": 2, "min_conf": 0.25, "allowed_labels": ["player", "ball", "hoop"], "model_colors": { "0": "green" }, "model_content_width": 960, "model_content_height": 540, "model_content_offset_x": 0, "model_content_offset_y": 0, "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "debug_log_every_n": 30 }
 
 # Encode and output
 node.add { "type": "force_fps", "fps": "30/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps" }

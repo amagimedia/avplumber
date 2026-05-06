@@ -1,10 +1,16 @@
 #include "node_common.hpp"
 
-template<typename T> class NullSink: public NodeSingleInput<T> {
+template<typename T> class NullSink: public NodeSingleInput<T>, public ReportsFinishByFlag {
 public:
     using NodeSingleInput<T>::NodeSingleInput;
     virtual void process() {
-        this->source_->get();
+        T data = this->source_->get();
+        if (isEofMarker(data)) {
+            this->finished_ = true;
+        }
+    }
+    virtual void onEofConsumed() override {
+        this->finished_ = true;
     }
     static std::shared_ptr<NullSink> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

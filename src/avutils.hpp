@@ -143,6 +143,13 @@ bool isEofMarker(const EglImageFrame& f);
 
 av::Packet createEofPacket(int streamIndex = -1);
 
+template<typename T> T createEofMarker() {
+    return T();
+}
+template<> inline av::Packet createEofMarker<av::Packet>() {
+    return createEofPacket();
+}
+
 template<typename T> struct TSGetter {
 };
 template<typename T> struct FrameTSGetter {
