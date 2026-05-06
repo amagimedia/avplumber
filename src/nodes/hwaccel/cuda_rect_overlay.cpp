@@ -557,6 +557,7 @@ public:
 
         input_eof_.resize(default_layers_.size());
         held_.resize(default_layers_.size());
+        this->auto_eof_ = false;
     }
 
     ~CudaRectOverlay() override { freeHwContexts(); }

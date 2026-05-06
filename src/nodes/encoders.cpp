@@ -37,7 +37,7 @@ public:
         NodeSISO<InputFrame, av::Packet>(std::move(source), std::move(sink)),
         codec_(codec),
         hwaccel_(hwaccel) {
-        //enc_.open(av::Codec());
+        this->auto_eof_ = false;
     };
     av::Dictionary& options() {
         return options_;
@@ -135,6 +135,7 @@ public:
                 break;
             }
         } while (pkt);
+        this->sink_->put(createEofPacket());
         this->finished_ = true;
     }
     virtual void process() {

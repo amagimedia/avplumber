@@ -255,7 +255,9 @@ void NodeWrapper::threadFunction() {
                         return;
                     }
                     if (dowork_) {
-                        processNode(node);
+                        if (!node->consumeEofIfPresent()) {
+                            processNode(node);
+                        }
                     } else if (node_flushable) {
                         // told to finish work
                         // and Node is IFlushable
@@ -264,9 +266,12 @@ void NodeWrapper::threadFunction() {
                     } else {
                         // node should finish work
                         // but doesn't have flushing interface
-                        // so to give it a chance to finish,
-                        // call process()...
+                        // give it one last process() call, then force-exit
                         processNode(node);
+                        if (!node_finishable->finished()) {
+                            logstream << "Node " << name_ << " did not finish after stop, forcing thread exit.";
+                            break;
+                        }
                     }
                 }
                 logstream << "Node " << name_ << " reported that it finished processing.";
@@ -276,6 +281,10 @@ void NodeWrapper::threadFunction() {
                     if (node_==nullptr) {
                         logstream << "BUG: race condition detected, node_==nullptr in threadFunction() !!! (dumb Node loop)";
                         return;
+                    }
+                    if (node->consumeEofIfPresent()) {
+                        logstream << "Node " << name_ << " consumed EOF marker.";
+                        break;
                     }
                     processNode(node);
                 }
@@ -344,39 +353,84 @@ std::shared_ptr< NodeWrapper > NodeManager::createNode(Parameters& params, const
         if (params.count("auto_restart") > 0) {
             auto_restart = params["auto_restart"];
         }
+        std::string on_error = "";
+        if (params.count("on_error") > 0) {
+            on_error = params["on_error"];
+        }
 
-        // we need to create threads for any blocking operations in onFinished callbacks
-        // otherwise deadlock may occur on NodeWrapper::thread_.join()
-        if (auto_restart == "on") {
-            nw->onFinished([](std::shared_ptr<NodeWrapper> n, bool requested) {
-                if (requested) return;
-                logstream << "Node " << n->name() << " finished, restarting";
-                start_thread(std::string("R:") + n->name(), [n]() {
-                    n->start();
-                }).detach(); // TODO: should be in a thread pool, not orphaned
-            });
-        } else if (auto_restart == "group") {
-            if (!in_group) {
-                throw Error("Node must belong to group to use auto_restart=group");
+        // Validate values early.
+        auto validateRestartMode = [&in_group](const std::string &mode, const std::string &param_name) {
+            if (mode == "on" || mode == "restart_node" || mode == "group" || mode == "restart_group" || mode == "panic" || mode == "exit" || mode == "off" || mode.empty()) {
+                if (mode == "group" && !in_group) {
+                    throw Error("Node must belong to group to use " + param_name + "=group");
+                }
+            } else {
+                throw Error("Invalid " + param_name + " mode '" + mode + "', should be on=restart_node/group=restart_group/panic/exit/off");
             }
-            nw->onFinished([](std::shared_ptr<NodeWrapper> n, bool requested) {
+        };
+        validateRestartMode(auto_restart, "auto_restart");
+        validateRestartMode(on_error, "on_error");
+
+        // Build the unified on-finished callback.
+        // When `on_error` is set, `auto_restart` fires only on clean (no-exception) finish,
+        // and `on_error` fires only on error finish. When `on_error` is unset, `auto_restart`
+        // fires on any non-requested finish (backward compatible).
+        auto makeAction = [this, &nw](const std::string &mode) -> std::function<void()> {
+            if (mode == "on" || mode == "restart_node") {
+                std::weak_ptr<NodeWrapper> weak_nw = nw;
+                return [weak_nw]() {
+                    auto n = weak_nw.lock();
+                    if (!n) return;
+                    logstream << "Node " << n->name() << " finished, restarting";
+                    start_thread(std::string("R:") + n->name(), [n]() {
+                        n->start();
+                    }).detach();
+                };
+            } else if (mode == "group" || mode == "restart_group") {
+                std::weak_ptr<NodeWrapper> weak_nw = nw;
+                return [weak_nw]() {
+                    auto n = weak_nw.lock();
+                    if (!n) return;
+                    logstream << "Node " << n->name() << " initiated group auto-restart";
+                    n->group()->restartNodes();
+                    logstream << "Auto-restart scheduled.";
+                };
+            } else if (mode == "panic") {
+                return [this]() {
+                    start_thread("PANIC", [this]() {
+                        this->panic();
+                    }).detach();
+                };
+            } else if (mode == "exit") {
+                return [this]() {
+                    start_thread("EXIT", [this]() {
+                        logstream << "Orderly instance shutdown (auto_restart or on_error = exit)";
+                        this->shutdown();
+                    }).detach();
+                };
+            }
+            return nullptr;
+        };
+
+        bool has_on_error = !on_error.empty();
+        auto clean_action = makeAction(auto_restart);
+        auto error_action = has_on_error ? makeAction(on_error) : std::function<void()>(nullptr);
+
+        if (clean_action || error_action) {
+            nw->onFinished([clean_action, error_action, has_on_error](std::shared_ptr<NodeWrapper> n, bool requested) {
                 if (requested) return;
-                logstream << "Node " << n->name() << " initiated group auto-restart";
-                n->group()->restartNodes(); // non-blocking, we can call it in the same thread
-                logstream << "Auto-restart scheduled.";
+                if (has_on_error) {
+                    if (n->hadError()) {
+                        logstream << "Node " << n->name() << " finished with error, applying on_error action";
+                        if (error_action) error_action();
+                    } else {
+                        logstream << "Node " << n->name() << " finished cleanly, applying auto_restart action";
+                        if (clean_action) clean_action();
+                    }
+                } else {
+                    if (clean_action) clean_action();
+                }
             });
-        } else if (auto_restart == "panic") {
-            nw->onFinished([this](std::shared_ptr<NodeWrapper> n, bool requested) {
-                if (requested) return;
-                logstream << "Node " << n->name() << " finished but it should never finish (declared as auto_restart=panic)";
-                start_thread(std::string("PANIC:") + n->name(), [this]() {
-                    this->panic();
-                }).detach(); // TODO: should be in a thread pool, not orphaned
-            });
-        } else if (auto_restart == "off") {
-            // don't do anything
-        } else {
-            throw Error("Invalid auto_restart mode, should be on/group/panic/off");
         }
         nodes_index_[nw->name()] = nw;
         logstream << "NodeWrapper " << nw->name() << " added to manager.";

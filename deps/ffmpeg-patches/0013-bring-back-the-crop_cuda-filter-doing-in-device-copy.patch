@@ -1,0 +1,614 @@
+From 8a109d1d41400391ea3c3ac9ee6faeb925c402be Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Thu, 12 Mar 2026 17:30:00 +0530
+Subject: [PATCH 13/20] bring back the crop_cuda filter doing in device copy
+
+---
+ configure                  |   1 +
+ libavfilter/Makefile       |   1 +
+ libavfilter/allfilters.c   |   1 +
+ libavfilter/vf_crop_cuda.c | 556 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 559 insertions(+)
+ create mode 100644 libavfilter/vf_crop_cuda.c
+
+diff --git a/configure b/configure
+index a62639f..a2e3e43 100755
+--- a/configure
++++ b/configure
+@@ -3313,6 +3313,7 @@ chromakey_cuda_filter_deps="ffnvcodec"
+ chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ colorspace_cuda_filter_deps="ffnvcodec"
+ colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
++crop_cuda_filter_deps="ffnvcodec"
+ hwupload_cuda_filter_deps="ffnvcodec"
+ scale_npp_filter_deps="ffnvcodec libnpp"
+ scale2ref_npp_filter_deps="ffnvcodec libnpp"
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 4f55e99..f18b149 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -259,6 +259,7 @@ OBJS-$(CONFIG_COREIMAGE_FILTER)              += vf_coreimage.o
+ OBJS-$(CONFIG_CORR_FILTER)                   += vf_corr.o framesync.o
+ OBJS-$(CONFIG_COVER_RECT_FILTER)             += vf_cover_rect.o lavfutils.o
+ OBJS-$(CONFIG_CROP_FILTER)                   += vf_crop.o
++OBJS-$(CONFIG_CROP_CUDA_FILTER)              += vf_crop_cuda.o
+ OBJS-$(CONFIG_CROPDETECT_FILTER)             += vf_cropdetect.o edge_common.o
+ OBJS-$(CONFIG_CUE_FILTER)                    += f_cue.o
+ OBJS-$(CONFIG_CURVES_FILTER)                 += vf_curves.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 0b48c5b..d272323 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -236,6 +236,7 @@ extern const AVFilter ff_vf_coreimage;
+ extern const AVFilter ff_vf_corr;
+ extern const AVFilter ff_vf_cover_rect;
+ extern const AVFilter ff_vf_crop;
++extern const AVFilter ff_vf_crop_cuda;
+ extern const AVFilter ff_vf_cropdetect;
+ extern const AVFilter ff_vf_cue;
+ extern const AVFilter ff_vf_curves;
+diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
+new file mode 100644
+index 0000000..a7e649f
+--- /dev/null
++++ b/libavfilter/vf_crop_cuda.c
+@@ -0,0 +1,556 @@
++/*
++ * Copyright (c) 2019 - 2022
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <stdio.h>
++
++#include "avfilter.h"
++#include "filters.h"
++#include "internal.h"
++#include "video.h"
++#include "libavutil/avstring.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/eval.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/imgutils.h"
++#include "libavutil/internal.h"
++#include "libavutil/libm.h"
++#include "libavutil/mathematics.h"
++#include "libavutil/opt.h"
++
++static const char *const var_names[] = {
++    "in_w", "iw",
++    "in_h", "ih",
++    "out_w", "ow",
++    "out_h", "oh",
++    "a",
++    "sar",
++    "dar",
++    "hsub",
++    "vsub",
++    "x",
++    "y",
++    "n",
++#if FF_API_FRAME_PKT
++    "pos",
++#endif
++    "t",
++    NULL
++};
++
++enum var_name {
++    VAR_IN_W,  VAR_IW,
++    VAR_IN_H,  VAR_IH,
++    VAR_OUT_W, VAR_OW,
++    VAR_OUT_H, VAR_OH,
++    VAR_A,
++    VAR_SAR,
++    VAR_DAR,
++    VAR_HSUB,
++    VAR_VSUB,
++    VAR_X,
++    VAR_Y,
++    VAR_N,
++#if FF_API_FRAME_PKT
++    VAR_POS,
++#endif
++    VAR_T,
++    VAR_VARS_NB
++};
++
++typedef struct CropCUDAContext {
++    const AVClass *class;
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++
++    AVBufferRef *frames_ctx;
++    AVFrame *frame;
++    AVFrame *tmp_frame;
++
++    enum AVPixelFormat sw_format;
++
++    int x;
++    int y;
++    int w;
++    int h;
++
++    AVRational out_sar;
++    int keep_aspect;
++    int exact;
++
++    int max_step[4];
++    int hsub, vsub;
++    char *x_expr, *y_expr, *w_expr, *h_expr;
++    AVExpr *x_pexpr, *y_pexpr;
++    double var_values[VAR_VARS_NB];
++} CropCUDAContext;
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(s, cu, x)
++
++static av_cold int init(AVFilterContext *ctx)
++{
++    CropCUDAContext *s = ctx->priv;
++
++    s->frame = av_frame_alloc();
++    if (!s->frame)
++        return AVERROR(ENOMEM);
++
++    s->tmp_frame = av_frame_alloc();
++    if (!s->tmp_frame)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static av_cold void uninit(AVFilterContext *ctx)
++{
++    CropCUDAContext *s = ctx->priv;
++
++    av_expr_free(s->x_pexpr);
++    s->x_pexpr = NULL;
++    av_expr_free(s->y_pexpr);
++    s->y_pexpr = NULL;
++
++    av_frame_free(&s->frame);
++    av_buffer_unref(&s->hw_device_ctx);
++    av_buffer_unref(&s->frames_ctx);
++    av_frame_free(&s->tmp_frame);
++}
++
++static inline int normalize_double(int *n, double d)
++{
++    int ret = 0;
++
++    if (isnan(d)) {
++        ret = AVERROR(EINVAL);
++    } else if (d > INT_MAX || d < INT_MIN) {
++        *n = d > INT_MAX ? INT_MAX : INT_MIN;
++        ret = AVERROR(EINVAL);
++    } else {
++        *n = lrint(d);
++    }
++
++    return ret;
++}
++
++static int config_input(AVFilterLink *link)
++{
++    AVFilterContext *ctx = link->dst;
++    CropCUDAContext *s = ctx->priv;
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext *)link->hw_frames_ctx->data;
++    const AVPixFmtDescriptor *pix_desc;
++    int ret;
++    const char *expr;
++    double res;
++
++    if (!frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    s->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!s->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    s->hwctx = ((AVHWDeviceContext *)frames_ctx->device_ref->data)->hwctx;
++
++    s->sw_format = frames_ctx->sw_format;
++    pix_desc = av_pix_fmt_desc_get(s->sw_format);
++
++    s->var_values[VAR_IN_W]  = s->var_values[VAR_IW] = ctx->inputs[0]->w;
++    s->var_values[VAR_IN_H]  = s->var_values[VAR_IH] = ctx->inputs[0]->h;
++    s->var_values[VAR_A]     = (float)link->w / link->h;
++    s->var_values[VAR_SAR]   = link->sample_aspect_ratio.num ? av_q2d(link->sample_aspect_ratio) : 1;
++    s->var_values[VAR_DAR]   = s->var_values[VAR_A] * s->var_values[VAR_SAR];
++    s->var_values[VAR_HSUB]  = 1 << pix_desc->log2_chroma_w;
++    s->var_values[VAR_VSUB]  = 1 << pix_desc->log2_chroma_h;
++    s->var_values[VAR_X]     = NAN;
++    s->var_values[VAR_Y]     = NAN;
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = NAN;
++    s->var_values[VAR_OUT_H] = s->var_values[VAR_OH] = NAN;
++    s->var_values[VAR_N]     = 0;
++    s->var_values[VAR_T]     = NAN;
++#if FF_API_FRAME_PKT
++    s->var_values[VAR_POS]   = NAN;
++#endif
++
++    av_image_fill_max_pixsteps(s->max_step, NULL, pix_desc);
++
++    s->hsub = pix_desc->log2_chroma_w;
++    s->vsub = pix_desc->log2_chroma_h;
++
++    av_expr_parse_and_eval(&res, (expr = s->w_expr),
++                           var_names, s->var_values,
++                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = res;
++    if ((ret = av_expr_parse_and_eval(&res, (expr = s->h_expr),
++                                      var_names, s->var_values,
++                                      NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        goto fail_expr;
++    s->var_values[VAR_OUT_H] = s->var_values[VAR_OH] = res;
++    if ((ret = av_expr_parse_and_eval(&res, (expr = s->w_expr),
++                                      var_names, s->var_values,
++                                      NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        goto fail_expr;
++
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = res;
++    if (normalize_double(&s->w, s->var_values[VAR_OUT_W]) < 0 ||
++        normalize_double(&s->h, s->var_values[VAR_OUT_H]) < 0) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Too big value or invalid expression for out_w/ow or out_h/oh. "
++               "Maybe the expression for out_w:'%s' or for out_h:'%s' is self-referencing.\n",
++               s->w_expr, s->h_expr);
++        return AVERROR(EINVAL);
++    }
++
++    if (!s->exact) {
++        s->w &= ~((1 << s->hsub) - 1);
++        s->h &= ~((1 << s->vsub) - 1);
++    }
++
++    av_expr_free(s->x_pexpr);
++    av_expr_free(s->y_pexpr);
++    s->x_pexpr = s->y_pexpr = NULL;
++    if ((ret = av_expr_parse(&s->x_pexpr, s->x_expr, var_names,
++                             NULL, NULL, NULL, NULL, 0, ctx)) < 0 ||
++        (ret = av_expr_parse(&s->y_pexpr, s->y_expr, var_names,
++                             NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        return AVERROR(EINVAL);
++
++    if (s->keep_aspect) {
++        AVRational dar = av_mul_q(link->sample_aspect_ratio,
++                                  (AVRational){ link->w, link->h });
++        av_reduce(&s->out_sar.num, &s->out_sar.den,
++                  dar.num * s->h, dar.den * s->w, INT_MAX);
++    } else {
++        s->out_sar = link->sample_aspect_ratio;
++    }
++
++    av_log(ctx, AV_LOG_VERBOSE, "w:%d h:%d sar:%d/%d -> w:%d h:%d sar:%d/%d\n",
++           link->w, link->h, link->sample_aspect_ratio.num, link->sample_aspect_ratio.den,
++           s->w, s->h, s->out_sar.num, s->out_sar.den);
++
++    if (s->w <= 0 || s->h <= 0 || s->w > link->w || s->h > link->h) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Invalid too big or non positive size for width '%d' or height '%d'\n",
++               s->w, s->h);
++        return AVERROR(EINVAL);
++    }
++
++    s->x = (link->w - s->w) / 2;
++    s->y = (link->h - s->h) / 2;
++    if (!s->exact) {
++        s->x &= ~((1 << s->hsub) - 1);
++        s->y &= ~((1 << s->vsub) - 1);
++    }
++
++    {
++        AVHWFramesContext *out_ctx;
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(s->hw_device_ctx);
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext *)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = s->sw_format;
++        out_ctx->width = FFALIGN(s->w, 32);
++        out_ctx->height = FFALIGN(s->h, 32);
++
++        ret = av_hwframe_ctx_init(out_ref);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        av_frame_unref(s->frame);
++        ret = av_hwframe_get_buffer(out_ref, s->frame, 0);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        s->frame->width = s->w;
++        s->frame->height = s->h;
++
++        av_buffer_unref(&s->frames_ctx);
++        s->frames_ctx = out_ref;
++
++        if (ret < 0) {
++output_buffer_fail:
++            av_buffer_unref(&out_ref);
++            return ret;
++        }
++
++        av_buffer_unref(&ctx->outputs[0]->hw_frames_ctx);
++        ctx->outputs[0]->hw_frames_ctx = av_buffer_ref(s->frames_ctx);
++        if (!ctx->outputs[0]->hw_frames_ctx)
++            return AVERROR(ENOMEM);
++    }
++
++    return 0;
++
++fail_expr:
++    av_log(ctx, AV_LOG_ERROR, "Error when evaluating the expression '%s'\n", expr);
++    return ret;
++}
++
++static int config_output(AVFilterLink *link)
++{
++    CropCUDAContext *s = link->src->priv;
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
++
++    if (desc->flags & AV_PIX_FMT_FLAG_HWACCEL && link->format != AV_PIX_FMT_CUDA) {
++        /* Hardware frames adjust the cropping regions rather than changing the frame size. */
++    } else {
++        link->w = s->w;
++        link->h = s->h;
++    }
++    link->sample_aspect_ratio = s->out_sar;
++
++    return 0;
++}
++
++static int filter_frame(AVFilterLink *link, AVFrame *frame_in)
++{
++    AVFilterContext *ctx = link->dst;
++    CropCUDAContext *s = ctx->priv;
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
++    AVFrame *frame_end;
++    int ret;
++
++    frame_end = av_frame_alloc();
++    if (!frame_end)
++        return AVERROR(ENOMEM);
++
++    s->var_values[VAR_N] = ff_filter_link(link)->frame_count_out;
++    s->var_values[VAR_T] = frame_in->pts == AV_NOPTS_VALUE ?
++        NAN : frame_in->pts * av_q2d(link->time_base);
++#if FF_API_FRAME_PKT
++    s->var_values[VAR_POS] = frame_in->pkt_pos == -1 ? NAN : frame_in->pkt_pos;
++#endif
++    s->var_values[VAR_X] = av_expr_eval(s->x_pexpr, s->var_values, NULL);
++    s->var_values[VAR_Y] = av_expr_eval(s->y_pexpr, s->var_values, NULL);
++    s->var_values[VAR_X] = av_expr_eval(s->x_pexpr, s->var_values, NULL);
++
++    normalize_double(&s->x, s->var_values[VAR_X]);
++    normalize_double(&s->y, s->var_values[VAR_Y]);
++
++    if (s->x < 0)
++        s->x = 0;
++    if (s->y < 0)
++        s->y = 0;
++    if ((unsigned)s->x + (unsigned)s->w > link->w)
++        s->x = link->w - s->w;
++    if ((unsigned)s->y + (unsigned)s->h > link->h)
++        s->y = link->h - s->h;
++    if (!s->exact) {
++        s->x &= ~((1 << s->hsub) - 1);
++        s->y &= ~((1 << s->vsub) - 1);
++    }
++
++    av_log(ctx, AV_LOG_TRACE, "n:%d t:%f x:%d y:%d x+w:%d y+h:%d\n",
++           (int)s->var_values[VAR_N], s->var_values[VAR_T],
++           s->x, s->y, s->x + s->w, s->y + s->h);
++
++    {
++        CUcontext cuda_ctx = s->hwctx->cuda_ctx;
++        CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++        CUstream cu_stream = s->hwctx->stream;
++        CUcontext dummy;
++        AVFrame *frame_out = s->frame;
++        int src_y_in_bytes = s->y * frame_in->linesize[0];
++        int src_x_in_bytes = s->x * s->max_step[0];
++        int err;
++        CUDA_MEMCPY2D cpy = {
++            .dstMemoryType = CU_MEMORYTYPE_DEVICE,
++            .dstPitch = frame_out->linesize[0],
++            .dstDevice = (CUdeviceptr)frame_out->data[0],
++            .srcMemoryType = CU_MEMORYTYPE_DEVICE,
++            .srcPitch = frame_in->linesize[0],
++            .srcDevice = (CUdeviceptr)(frame_in->data[0] + src_y_in_bytes + src_x_in_bytes),
++            .WidthInBytes = s->w * s->max_step[0],
++            .Height = s->h,
++        };
++
++        err = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++        if (err < 0) {
++            av_frame_free(&frame_end);
++            return err;
++        }
++
++        err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++        if (err < 0) {
++            av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [0]\n");
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            av_frame_free(&frame_end);
++            return err;
++        }
++
++        if (!(desc->flags & AV_PIX_FMT_FLAG_PAL)) {
++            for (int i = 1; i < 3; i++) {
++                if (frame_in->data[i]) {
++                    src_y_in_bytes = (s->y >> s->vsub) * frame_in->linesize[i];
++                    src_x_in_bytes = (s->x * s->max_step[i]) >> s->hsub;
++
++                    cpy.dstPitch = frame_out->linesize[i];
++                    cpy.dstDevice = (CUdeviceptr)frame_out->data[i];
++                    cpy.srcPitch = frame_in->linesize[i];
++                    cpy.srcDevice = (CUdeviceptr)(frame_in->data[i] + src_y_in_bytes + src_x_in_bytes);
++                    cpy.WidthInBytes = (s->w * s->max_step[i]) >> s->hsub;
++                    cpy.Height = s->h >> s->vsub;
++
++                    err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++                    if (err < 0) {
++                        av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [%d]\n", i);
++                        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                        av_frame_free(&frame_end);
++                        return err;
++                    }
++                }
++            }
++        }
++
++        if (frame_in->data[3]) {
++            src_y_in_bytes = s->y * frame_in->linesize[3];
++            src_x_in_bytes = s->x * s->max_step[3];
++
++            cpy.dstPitch = frame_out->linesize[3];
++            cpy.dstDevice = (CUdeviceptr)frame_out->data[3];
++            cpy.srcPitch = frame_in->linesize[3];
++            cpy.srcDevice = (CUdeviceptr)(frame_in->data[3] + src_y_in_bytes + src_x_in_bytes);
++            cpy.WidthInBytes = s->w * s->max_step[3];
++            cpy.Height = s->h;
++
++            err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++            if (err < 0) {
++                av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [3]\n");
++                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                av_frame_free(&frame_end);
++                return err;
++            }
++        }
++
++        err = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        if (err < 0) {
++            av_frame_free(&frame_end);
++            return err;
++        }
++    }
++
++    ret = av_hwframe_get_buffer(s->frame->hw_frames_ctx, s->tmp_frame, 0);
++    if (ret < 0) {
++        av_frame_free(&frame_end);
++        return ret;
++    }
++
++    av_frame_move_ref(frame_end, s->frame);
++    av_frame_move_ref(s->frame, s->tmp_frame);
++
++    s->frame->width  = s->w;
++    s->frame->height = s->h;
++
++    ret = av_frame_copy_props(frame_end, frame_in);
++    if (ret < 0) {
++        av_frame_free(&frame_in);
++        av_frame_free(&frame_end);
++        return ret;
++    }
++
++    av_frame_free(&frame_in);
++    return ff_filter_frame(ctx->outputs[0], frame_end);
++}
++
++static int process_command(AVFilterContext *ctx, const char *cmd, const char *args,
++                           char *res, int res_len, int flags)
++{
++    CropCUDAContext *s = ctx->priv;
++    int ret;
++
++    if (!strcmp(cmd, "out_w") || !strcmp(cmd, "w") ||
++        !strcmp(cmd, "out_h") || !strcmp(cmd, "h") ||
++        !strcmp(cmd, "x") || !strcmp(cmd, "y")) {
++        int old_x = s->x;
++        int old_y = s->y;
++        int old_w = s->w;
++        int old_h = s->h;
++        AVFilterLink *outlink = ctx->outputs[0];
++        AVFilterLink *inlink = ctx->inputs[0];
++
++        av_opt_set(s, cmd, args, 0);
++
++        if ((ret = config_input(inlink)) < 0) {
++            s->x = old_x;
++            s->y = old_y;
++            s->w = old_w;
++            s->h = old_h;
++            return ret;
++        }
++
++        ret = config_output(outlink);
++    } else {
++        ret = AVERROR(ENOSYS);
++    }
++
++    return ret;
++}
++
++#define OFFSET(x) offsetof(CropCUDAContext, x)
++#define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
++#define TFLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_RUNTIME_PARAM
++
++static const AVOption crop_cuda_options[] = {
++    { "out_w",       "set the width crop area expression",  OFFSET(w_expr), AV_OPT_TYPE_STRING, { .str = "iw" }, 0, 0, TFLAGS },
++    { "w",           "set the width crop area expression",  OFFSET(w_expr), AV_OPT_TYPE_STRING, { .str = "iw" }, 0, 0, TFLAGS },
++    { "out_h",       "set the height crop area expression", OFFSET(h_expr), AV_OPT_TYPE_STRING, { .str = "ih" }, 0, 0, TFLAGS },
++    { "h",           "set the height crop area expression", OFFSET(h_expr), AV_OPT_TYPE_STRING, { .str = "ih" }, 0, 0, TFLAGS },
++    { "x",           "set the x crop area expression",      OFFSET(x_expr), AV_OPT_TYPE_STRING, { .str = "(in_w-out_w)/2" }, 0, 0, TFLAGS },
++    { "y",           "set the y crop area expression",      OFFSET(y_expr), AV_OPT_TYPE_STRING, { .str = "(in_h-out_h)/2" }, 0, 0, TFLAGS },
++    { "keep_aspect", "keep aspect ratio",                   OFFSET(keep_aspect), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "exact",       "do exact cropping",                   OFFSET(exact), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(crop_cuda);
++
++static const AVFilterPad crop_cuda_inputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = filter_frame,
++        .config_props = config_input,
++    },
++};
++
++static const AVFilterPad crop_cuda_outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = config_output,
++    },
++};
++
++const AVFilter ff_vf_crop_cuda = {
++    .name            = "crop_cuda",
++    .description     = NULL_IF_CONFIG_SMALL("Crop the input CUDA video."),
++    .priv_size       = sizeof(CropCUDAContext),
++    .priv_class      = &crop_cuda_class,
++    .init            = init,
++    .uninit          = uninit,
++    FILTER_INPUTS(crop_cuda_inputs),
++    FILTER_OUTPUTS(crop_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .process_command = process_command,
++    .flags_internal  = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+-- 
+2.53.0
+

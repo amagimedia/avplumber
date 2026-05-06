@@ -12,7 +12,8 @@ extern "C" {
 class MetadataDrivenCudaCrop: public NodeSISO<av::VideoFrame, av::VideoFrame>,
                               public IVideoFormatSource,
                               public IFrameRateSource,
-                              public ITimeBaseSource {
+                              public ITimeBaseSource,
+                              public ReportsFinishByFlag {
 private:
     std::string metadata_key_ = "reframer_bbox";
     std::string offset_log_path_ = "reframer.log";
@@ -344,6 +345,10 @@ private:
     }
 
 public:
+    bool consumeEofIfPresent() override {
+        return false;
+    }
+
     MetadataDrivenCudaCrop(std::unique_ptr<Source<av::VideoFrame>> &&source,
                            std::unique_ptr<Sink<av::VideoFrame>> &&sink,
                            std::string metadata_key,
@@ -385,6 +390,7 @@ public:
 
         if (isEofMarker(frm)) {
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
         if (!frm) return;

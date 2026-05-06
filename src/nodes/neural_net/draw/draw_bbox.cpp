@@ -1,4 +1,5 @@
 #include "cuda_overlay_base.hpp"
+#include "draw_batch_shared.hpp"
 
 #include <cstdint>
 #include <unordered_map>
@@ -47,23 +48,27 @@ private:
     double model_content_height_ = 0.0;
     double model_content_offset_x_ = 0.0;
     double model_content_offset_y_ = 0.0;
+    cuda_overlay::DeviceBuffer<cuda_overlay::BatchedBBox> d_boxes_;
 
     const char* nodeName() const override { return "draw_bbox"; }
+
+    void onKernelsUnloaded() override {
+        d_boxes_.release(cu_ctx_);
+    }
 
     static int clampInt(int value, int lo, int hi) {
         return std::max(lo, std::min(hi, value));
     }
 
-    DrawColor resolveModelColor(const Parameters& det) const {
-        if (!label_colors_.empty() && det.contains("label") && det["label"].is_string()) {
-            const auto it = label_colors_.find(det["label"].get<std::string>());
+    DrawColor resolveModelColor(const cuda_overlay::ParsedYoloDetection& det) const {
+        if (!label_colors_.empty() && det.has_label) {
+            const auto it = label_colors_.find(det.label);
             if (it != label_colors_.end()) {
                 return it->second;
             }
         }
-        if (det.contains("model_index")) {
-            const int model_index = det["model_index"].get<int>();
-            const auto it = model_colors_.find(model_index);
+        if (det.has_model_index) {
+            const auto it = model_colors_.find(det.model_index);
             if (it != model_colors_.end()) {
                 return it->second;
             }
@@ -254,43 +259,6 @@ private:
         return scaleAndClampBBox(x1, y1, x2, y2, bbox_out);
     }
 
-    bool yoloDetectionAllowed(const Parameters& det) const {
-        const double conf = det.value("conf", 0.0);
-        if (conf < min_conf_) return false;
-
-        if (allowed_classes_.empty() && allowed_labels_.empty()) {
-            return true;
-        }
-
-        bool class_match = false;
-        bool label_match = false;
-        if (!allowed_classes_.empty() && det.contains("cls")) {
-            class_match = allowed_classes_.count(det["cls"].get<int>()) > 0;
-        }
-        if (!allowed_labels_.empty() && det.contains("label") && det["label"].is_string()) {
-            label_match = allowed_labels_.count(det["label"].get<std::string>()) > 0;
-        }
-        return class_match || label_match;
-    }
-
-    bool remapModelCoord(double x, double y,
-                         double model_w, double model_h,
-                         double& out_x, double& out_y) const {
-        if (model_content_width_ > 0.0 && model_content_height_ > 0.0) {
-            const double content_x = std::max(0.0, std::min(x - model_content_offset_x_, model_content_width_));
-            const double content_y = std::max(0.0, std::min(y - model_content_offset_y_, model_content_height_));
-            out_x = content_x * ((double)input_params_.width / model_content_width_);
-            out_y = content_y * ((double)input_params_.height / model_content_height_);
-            return true;
-        }
-
-        const double sx = model_w > 0.0 ? (double)input_params_.width / model_w : 1.0;
-        const double sy = model_h > 0.0 ? (double)input_params_.height / model_h : 1.0;
-        out_x = x * sx;
-        out_y = y * sy;
-        return true;
-    }
-
     // Appends to boxes_out. Returns true if at least one bbox was added from this JSON blob.
     bool parseMetadataBlob(const Parameters& md, std::vector<BBox>& boxes_out) const {
         BBox single_bbox;
@@ -304,33 +272,30 @@ private:
     }
 
     void parseYoloDetections(const Parameters& md, std::vector<BBox>& boxes_out) const {
-        if (!md.contains("detections") || !md["detections"].is_array()) return;
+        cuda_overlay::YoloParseConfig cfg;
+        cfg.frame_width = input_params_.width;
+        cfg.frame_height = input_params_.height;
+        cfg.min_conf = min_conf_;
+        cfg.allowed_classes = &allowed_classes_;
+        cfg.allowed_labels = &allowed_labels_;
+        cfg.model_content_width = model_content_width_;
+        cfg.model_content_height = model_content_height_;
+        cfg.model_content_offset_x = model_content_offset_x_;
+        cfg.model_content_offset_y = model_content_offset_y_;
 
-        const std::string coord_space = md.value("coord_space", std::string("model"));
-        const double model_w = md.value("model_width", (double)input_params_.width);
-        const double model_h = md.value("model_height", (double)input_params_.height);
-
-        for (const auto& det : md["detections"]) {
-            if (!det.is_object()) continue;
-            if (!yoloDetectionAllowed(det)) continue;
-            if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) continue;
-            const auto& xyxy = det["xyxy"];
-            double x1 = xyxy[0].get<double>();
-            double y1 = xyxy[1].get<double>();
-            double x2 = xyxy[2].get<double>();
-            double y2 = xyxy[3].get<double>();
-            if (coord_space == "model") {
-                if (!remapModelCoord(x1, y1, model_w, model_h, x1, y1)) continue;
-                if (!remapModelCoord(x2, y2, model_w, model_h, x2, y2)) continue;
-            }
+        std::vector<cuda_overlay::ParsedYoloDetection> detections;
+        cuda_overlay::parseYoloDetections(md, cfg, detections);
+        for (const auto& det : detections) {
             BBox bbox;
-            if (scaleAndClampBBox(x1, y1, x2, y2, bbox)) {
-                const DrawColor color = resolveModelColor(det);
-                bbox.y_color = color.y;
-                bbox.u_color = color.u;
-                bbox.v_color = color.v;
-                boxes_out.push_back(bbox);
-            }
+            bbox.x1 = det.x1;
+            bbox.y1 = det.y1;
+            bbox.x2 = det.x2;
+            bbox.y2 = det.y2;
+            const DrawColor color = resolveModelColor(det);
+            bbox.y_color = color.y;
+            bbox.u_color = color.u;
+            bbox.v_color = color.v;
+            boxes_out.push_back(bbox);
         }
     }
 
@@ -356,8 +321,8 @@ private:
         return any && !boxes_out.empty();
     }
 
-    bool drawBBoxOnFrame(av::VideoFrame &frm, const BBox &bbox) {
-        if (bbox_thickness_ <= 0) return true;
+    bool drawBBoxesOnFrame(av::VideoFrame &frm, const std::vector<BBox> &boxes) {
+        if (bbox_thickness_ <= 0 || boxes.empty()) return true;
 
         const unsigned int block_x = 32;
         const unsigned int block_y = 8;
@@ -374,20 +339,31 @@ private:
         size_t pitch_uv = (size_t)frm.raw()->linesize[1];
         int width = frm.width();
         int height = frm.height();
-        int x1 = bbox.x1;
-        int y1 = bbox.y1;
-        int x2 = bbox.x2;
-        int y2 = bbox.y2;
-        int thickness = bbox_thickness_;
-        int y_color = bbox.y_color;
-        int u_color = bbox.u_color;
-        int v_color = bbox.v_color;
+        std::vector<cuda_overlay::BatchedBBox> batch;
+        batch.reserve(boxes.size());
+        for (const BBox& bbox : boxes) {
+            cuda_overlay::BatchedBBox entry;
+            entry.x1 = bbox.x1;
+            entry.y1 = bbox.y1;
+            entry.x2 = bbox.x2;
+            entry.y2 = bbox.y2;
+            entry.thickness = bbox_thickness_;
+            entry.y_color = bbox.y_color;
+            entry.u_color = bbox.u_color;
+            entry.v_color = bbox.v_color;
+            batch.push_back(entry);
+        }
+        if (!d_boxes_.upload(batch, cu_ctx_, cuda_dev_ctx_->stream)) {
+            logstream << "draw_bbox: failed uploading bbox batch";
+            return false;
+        }
+        CUdeviceptr boxes_ptr = d_boxes_.ptr();
+        int num_boxes = (int)batch.size();
 
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
-            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
-            (void*)&thickness, (void*)&y_color
+            (void*)&boxes_ptr, (void*)&num_boxes
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_luma_kernel_,
                                     grid_x, grid_y, 1,
@@ -400,8 +376,7 @@ private:
         void* uv_args[] = {
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
-            (void*)&x1, (void*)&y1, (void*)&x2, (void*)&y2,
-            (void*)&thickness, (void*)&u_color, (void*)&v_color
+            (void*)&boxes_ptr, (void*)&num_boxes
         };
         if (CUDA_OVERLAY_CHECK_CU(cuLaunchKernel(draw_chroma_kernel_,
                                     uv_grid_x, uv_grid_y, 1,
@@ -434,6 +409,8 @@ private:
             throw Error("draw_bbox: failed to initialize CUDA kernels");
         }
 
+        std::vector<BBox> all_boxes;
+
         int vdw = 0;
         int vdh = 0;
         if (tryReadViewportDstDims(input, vdw, vdh)) {
@@ -463,9 +440,7 @@ private:
             viewport.u_color = white.u;
             viewport.v_color = white.v;
             if (viewport.x2 > viewport.x1 && viewport.y2 > viewport.y1) {
-                if (!drawBBoxOnFrame(output, viewport)) {
-                    throw Error("draw_bbox: failed drawing viewport bbox");
-                }
+                all_boxes.push_back(viewport);
                 if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
                     logstream << "draw_bbox: frame=" << frame_counter_
                               << " viewport=[" << viewport.x1 << "," << viewport.y1
@@ -481,10 +456,11 @@ private:
         std::vector<BBox> boxes;
         const bool have_bbox = parseBBoxes(input, boxes);
         if (have_bbox) {
-            for (const BBox& bbox : boxes) {
-                if (!drawBBoxOnFrame(output, bbox)) {
-                    throw Error("draw_bbox: failed drawing bbox");
-                }
+            all_boxes.insert(all_boxes.end(), boxes.begin(), boxes.end());
+        }
+        if (!all_boxes.empty()) {
+            if (!drawBBoxesOnFrame(output, all_boxes)) {
+                throw Error("draw_bbox: failed drawing bbox batch");
             }
         }
         maybeLogFrame(boxes);

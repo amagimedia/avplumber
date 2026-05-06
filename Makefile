@@ -32,12 +32,12 @@ else
 OPTIMIZATION_FLAGS = -O3 -flto
 endif
 
-override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/include/ffmpeg -I/apps/ffmpeg/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
-override LFLAGS += -L/apps/ffmpeg/lib -Wl,-rpath,/apps/ffmpeg/lib $(OPTIMIZATION_FLAGS)
+override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/local/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
+override LFLAGS += -L/usr/local/lib -Wl,-rpath,/usr/local/lib $(OPTIMIZATION_FLAGS)
 # Used only for objs/src/avplumber_pybind.o and linking $(PYTHON_MODULE) (not for avplumber/static_library/cpr/avcpp).
 PYTHON_MODULE_EXTRA_CXXFLAGS = -Ideps/pybind11/include -Ideps/pybind11_json/include $(shell python3-config --includes)
 PYTHON_MODULE_EXTRA_LFLAGS = $(shell python3-config --ldflags)
-PKG_CONFIG_PATH := /apps/ffmpeg/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
+PKG_CONFIG_PATH := /usr/local/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
 BUILD_DATE_FILE = builddate.h
 #SRCDIR = $(dir $(firstword $(MAKEFILE_LIST)))src
@@ -46,6 +46,8 @@ SRCDIR = src
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 ifeq ($(NEURAL_NET_SPECIFIC),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
+BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
+override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 endif
 ifeq ($(NEURAL_NET_COMMON),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/smooth_crop_viewport.cpp
@@ -113,16 +115,19 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu,avpl_yuv
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cu,avpl_draw_tactical_court_ptx,objs/src/nodes/neural_net/draw/draw_tactical_court.o))
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
@@ -132,7 +137,14 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu,avpl_amagi_reframer_ptx,objs/src/nodes/neural_net/utils/amagi_reframer.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu,avpl_reframer_ptx,objs/src/nodes/neural_net/utils/amagi_reframer.o))
+endif
+
+ifeq ($(HAVE_CUDA)$(NEURAL_NET_SPECIFIC)$(HAVE_NVCC),111)
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_extract.cu,avpl_jersey_uv_mean_ptx,objs/src/nodes/neural_net/sport_specific/jersey_color_extract.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_feet_seg.cu,avpl_player_feet_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_feet_seg.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_torso_seg.cu,avpl_player_torso_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_torso_seg.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
 ifeq ($(HAVE_CUDA),1)
@@ -187,7 +199,7 @@ endif
 
 EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
-CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC)
+CPPSRC_LIB = $(addprefix src/,$(CPPSRC)) $(nodes_list_file) $(NODES_SRC) $(BYTETRACK_SRC)
 CPPSRC_EXE = src/main.cpp $(CPPSRC_LIB)
 # Python extension translation units (not linked into the avplumber binary/static library).
 CPPSRC_PYTHON = src/avplumber_pybind.cpp

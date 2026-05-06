@@ -3,6 +3,7 @@
 #include "../../node_common.hpp"
 #include "../../../video_parameters.hpp"
 #include "../../../hwaccel.hpp"
+#include "../common/yolo_side_data.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -14,7 +15,10 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace cuda_overlay {
 
@@ -51,6 +55,14 @@ inline bool tryParseNamedColor(const std::string& color_name, DrawColor& color_o
     const std::string normalized = normalizeColorName(color_name);
     if (normalized == "white") {
         color_out = DrawColor{235, 128, 128};
+        return true;
+    }
+    if (normalized == "light_gray" || normalized == "light_grey") {
+        color_out = DrawColor{200, 128, 128};
+        return true;
+    }
+    if (normalized == "gray" || normalized == "grey") {
+        color_out = DrawColor{128, 128, 128};
         return true;
     }
     if (normalized == "black") {
@@ -92,12 +104,68 @@ inline bool tryParseNamedColor(const std::string& color_name, DrawColor& color_o
     return false;
 }
 
+enum class GlyphPreset {
+    k5x7 = 0,
+    k10x14 = 1,
+};
+
+bool tryParseGlyphPreset(const std::string& preset_name, GlyphPreset& preset_out);
+int glyphBaseWidth(GlyphPreset preset);
+int glyphBaseHeight(GlyphPreset preset);
+int glyphAdvance(GlyphPreset preset);
+
+struct YoloParseConfig {
+    int frame_width = 0;
+    int frame_height = 0;
+    double min_conf = 0.0;
+    const std::unordered_set<int>* allowed_classes = nullptr;
+    const std::unordered_set<std::string>* allowed_labels = nullptr;
+    double model_content_width = 0.0;
+    double model_content_height = 0.0;
+    double model_content_offset_x = 0.0;
+    double model_content_offset_y = 0.0;
+};
+
+struct ParsedYoloDetection {
+    int x1 = 0;
+    int y1 = 0;
+    int x2 = 0;
+    int y2 = 0;
+    int team = -1;
+    bool has_team = false;
+    int cls = -1;
+    bool has_cls = false;
+    std::string label;
+    bool has_label = false;
+    double conf = 0.0;
+    int model_index = -1;
+    bool has_model_index = false;
+    int track_id = -1;
+    bool has_track_id = false;
+    bool predicted = false;
+    bool has_predicted = false;
+    bool has_velocity = false;
+    double velocity_x = 0.0;
+    double velocity_y = 0.0;
+    double jersey_mode_ratio = 0.0;
+    bool has_jersey_mode_ratio = false;
+};
+
+bool scaleAndClampBBox(double x1, double y1, double x2, double y2, int frame_width, int frame_height,
+                       int& out_x1, int& out_y1, int& out_x2, int& out_y2);
+bool remapModelCoord(const YoloParseConfig& cfg, double x, double y,
+                     double model_w, double model_h, double& out_x, double& out_y);
+bool yoloDetectionAllowed(const Parameters& det, const YoloParseConfig& cfg);
+void parseYoloDetections(const Parameters& md, const YoloParseConfig& cfg,
+                         std::vector<ParsedYoloDetection>& detections_out);
+
 } // namespace cuda_overlay
 
 class CudaOverlayBase : public NodeSISO<av::VideoFrame, av::VideoFrame>,
                          public IVideoFormatSource,
                          public IFrameRateSource,
-                         public ITimeBaseSource {
+                         public ITimeBaseSource,
+                         public ReportsFinishByFlag {
 protected:
     VideoParameters input_params_{};
     av::Rational frame_rate_{0, 0};
@@ -217,6 +285,29 @@ protected:
             logstream << nodeName() << ": av_frame_copy_props failed: " << av::error2string(ret);
             return false;
         }
+
+        // av_frame_copy_props clones side-data payload bytes, which is unsafe for our
+        // custom YOLO seg GPU side data because the payload contains a raw device
+        // pointer whose lifetime is carried by the side-data buffer ref itself.
+        if (frm.raw()->nb_side_data > 0) {
+            for (int i = 0; i < frm.raw()->nb_side_data; ++i) {
+                const AVFrameSideData* sd_src = frm.raw()->side_data[i];
+                if (!sd_src || !sd_src->buf) continue;
+                if (!yoloSegIsManagedSideDataType(sd_src->type)) continue;
+
+                av_frame_remove_side_data(out.raw(), sd_src->type);
+                AVBufferRef* ref = av_buffer_ref(sd_src->buf);
+                if (!ref) {
+                    logstream << nodeName() << ": av_buffer_ref failed for YOLO seg side data type " << (int)sd_src->type;
+                    return false;
+                }
+                if (!av_frame_new_side_data_from_buf(out.raw(), sd_src->type, ref)) {
+                    av_buffer_unref(&ref);
+                    logstream << nodeName() << ": av_frame_new_side_data_from_buf failed for YOLO seg side data type " << (int)sd_src->type;
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -266,6 +357,7 @@ public:
 
         if (isEofMarker(frm)) {
             this->sink_->put(frm);
+            this->finished_ = true;
             return;
         }
         if (!frm) return;
