@@ -2,7 +2,7 @@ queue.plan_capacity * 7
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "input_rec", "url": "https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4", "dst": "in_mux0", "group": "in", "name": "input", "initial_timeout": 20, "timeout": 10, "loop": true, "auto_restart": "group" }
+node.add { "type": "input_rec", "url": "/home/fedora/nba.mp4", "dst": "in_mux0", "group": "in", "name": "input", "initial_timeout": 20, "timeout": 10, "loop": true, "auto_restart": "group" }
 node.add { "type": "demux", "src": "in_mux0", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "in", "auto_restart": "group" }
 
 node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "in", "name": "Video_Dec", "auto_restart": "group", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
@@ -42,6 +42,6 @@ node.add { "type": "filter_video", "graph": "scale_cuda=w=1920:h=1080", "src": "
 node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "in", "src": "v_scaled_out", "dst": "v_preenc", "auto_restart": "group" }
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "in", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "8000k", "bufsize": "8000k", "rc": "cbr", "g": 75, "bf": 0, "preset": "p7", "tune": "ll", "profile": "high", "multipass": "disabled", "zerolatency": 1, "spatial_aq": 1, "temporal_aq": 1 } }
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "in", "ts_sort_wait": 0 }
-node.add { "type": "output", "format": "flv", "url": "rtmp://ingest-1.tellyo.com/external/nabai2026920514b2", "src": "mux_v", "group": "in", "auto_restart": "group" }
+node.add { "type": "output", "format": "flv", "url": "http://test-streamer-s3dev.aws-dev.intranet/steam_test/test", "src": "mux_v", "group": "in", "auto_restart": "group" }
 
 detach retry group.start in

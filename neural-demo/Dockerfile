@@ -189,8 +189,6 @@ RUN make -C /build -j"$(nproc)" \
         PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
         CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' \
         LFLAGS+=' -Wl,--disable-new-dtags -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib'
-RUN mkdir -p /build/deps/include/bytetrack \
-    && cp /build/deps/bytetrack/include/*.h /build/deps/include/bytetrack/
 
 FROM deps-builder AS builder
 

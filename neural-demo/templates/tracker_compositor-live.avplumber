@@ -30,7 +30,7 @@ node.add { "type": "draw_bbox", "src": "v_viewport_md", "dst": "v_annotated_cuda
 node.add { "type": "force_fps", "fps": "25/1", "group": "in", "src": "v_annotated_cuda", "dst": "v_annotated_fps", "auto_restart": "group" }
 node.add { "type": "filter_video", "graph": "scale_cuda=w=1920:h=1080", "src": "v_annotated_fps", "dst": "v_scaled_out", "group": "in", "name": "Scale_Output_1080p", "auto_restart": "group", "dst_width": 1920, "dst_height": 1080, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
 
-node.add { "type": "input_rec", "url": "https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4", "dst": "pip_in_mux0", "group": "in", "name": "pip_input", "initial_timeout": 20, "timeout": 10, "loop": true, "auto_restart": "group" }
+node.add { "type": "input_rec", "url": "__PIP_INPUT__", "dst": "pip_in_mux0", "group": "in", "name": "pip_input", "initial_timeout": 20, "timeout": 10, "loop": true, "auto_restart": "group" }
 node.add { "type": "demux", "src": "pip_in_mux0", "wait_for_keyframe": false, "routing": { "?v:0": "pip_v_pkt" }, "group": "in", "auto_restart": "group" }
 node.add { "type": "dec_video", "src": "pip_v_pkt", "dst": "pip_v_dec_cuda", "group": "in", "name": "PiP_Video_Dec", "auto_restart": "group", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
 node.add { "type": "realtime", "src": "pip_v_dec_cuda", "dst": "pip_v_dec_rt", "group": "in", "auto_restart": "group", "set_pts": true }

@@ -11,12 +11,13 @@ Build the image:
 docker build -f neural-demo/Dockerfile -t avplumber-neural-demo:latest .
 ```
 
-Run the default live demo:
+Run the default live demo (provide your own MP4):
 
 ```bash
 neural-demo/run-neural-demo.sh \
   --example tracker \
-  --mode live
+  --mode live \
+  --input /path/to/input.mp4
 ```
 
 Use `tracker` when you want to see the inference overlays and understand what
@@ -27,34 +28,28 @@ Use `tracker-cropped` when you want the alternative reframed output:
 ```bash
 neural-demo/run-neural-demo.sh \
   --example tracker-cropped \
-  --mode live
+  --mode live \
+  --input /path/to/input.mp4
 ```
 
 Use `tracker_compositor` when you want the regular drawn tracker output plus a
-looped picture-in-picture `nba.mp4` feed in the upper-left corner:
+looped picture-in-picture feed in the upper-left corner. The PiP source must be
+supplied separately:
 
 ```bash
 neural-demo/run-neural-demo.sh \
   --example tracker_compositor \
-  --mode live
+  --mode live \
+  --input /path/to/input.mp4 \
+  --pip-input /path/to/pip.mp4
 ```
 
-If you do not provide custom input or output, the demo uses:
+If you do not pass `--output`, the demo streams to:
 
-- looped input MP4:
-  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4`
-- backup input MP4:
-  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/nba.mp4`
-- default model archive:
-  `https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz`
-- default live RTMP output:
-  `rtmp://ingest-1.tellyo.com/external/nabai2026920514b2`
+- default live output: `http://test-streamer-s3dev.aws-dev.intranet/steam_test/test`
 
-That default `bbl.mp4` is the preselected demo source and works well with the
-bundled inference model set.
-Keep `nba.mp4` as a public fallback input URL if you want the previous demo
-source.
-Those demo models are open source and were borrowed from Roboflow.
+The model archive and TensorRT runtime are pulled from S3 by the entrypoint.
+The demo models are open source and were borrowed from Roboflow.
 An NVIDIA GPU is mandatory for this demo. This setup was tested on an AWS
 `g4dn.2xlarge` instance with a Tesla T4 70W, which is a minimum sensible
 option for this workflow, running about `30 fps` in live mode and about
@@ -98,14 +93,15 @@ neural-demo/run-neural-demo.sh \
 - `--example tracker-cropped` uses the same model stack but outputs the cropped
   reframed version instead.
 - `--example tracker_compositor` uses the drawn tracker output as the main
-  canvas and adds a looped `nba.mp4` picture-in-picture feed in the upper-left
-  with padding. This example is intended for `live` mode.
+  canvas and adds a looped picture-in-picture feed (provided via
+  `--pip-input`) in the upper-left with padding. This example is intended
+  for `live` mode.
 - `--mode live` means looped MP4 input plus live RTMP or SRT output.
 - `--mode vod` means finite VOD input plus file output.
-- In `live` mode, if `--input` is omitted, the demo loops the public `bbl.mp4`.
-- `nba.mp4` remains available as the documented fallback URL.
+- `--input` is required.
+- `--pip-input` is required when `--example tracker_compositor`.
 - In `live` mode, if `--output` is omitted, the demo streams to the default
-  public RTMP endpoint above.
+  output URL above.
 - In `vod` mode, `--output` is required.
 - The helper prints the final `docker run` command before executing it.
 - The helper supports `--dry-run`.
@@ -132,12 +128,15 @@ neural-demo/run-neural-demo.sh \
 
 ## Raw Docker
 
-Default live demo without the helper:
+Live demo without the helper:
 
 ```bash
 docker run --rm --gpus all \
+  -v /absolute/path/input.mp4:/run/avp/input/input.mp4:ro \
   -e AVP_EXAMPLE=tracker \
   -e AVP_MODE=live \
+  -e AVP_INPUT=/run/avp/input/input.mp4 \
+  -e AVP_OUTPUT=rtmp://your-server/app/stream \
   avplumber-neural-demo:latest
 ```
 
@@ -145,9 +144,11 @@ VOD output without the helper:
 
 ```bash
 docker run --rm --gpus all \
+  -v /absolute/path/input.mp4:/run/avp/input/input.mp4:ro \
   -v /absolute/path/output:/run/avp/output \
   -e AVP_EXAMPLE=tracker \
   -e AVP_MODE=vod \
+  -e AVP_INPUT=/run/avp/input/input.mp4 \
   -e AVP_OUTPUT=/run/avp/output/tracker.ts \
   avplumber-neural-demo:latest
 ```

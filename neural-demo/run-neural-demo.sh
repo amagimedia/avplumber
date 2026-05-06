@@ -5,10 +5,10 @@ image="avplumber-neural-demo:latest"
 example=""
 mode=""
 input=""
+pip_input=""
 output=""
 models_tar_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz"
-default_vod_input_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/bbl.mp4"
-default_live_output_url="rtmp://ingest-1.tellyo.com/external/nabai2026920514b2"
+default_live_output_url="http://test-streamer-s3dev.aws-dev.intranet/steam_test/test"
 dry_run=0
 docker_extra=()
 
@@ -23,8 +23,9 @@ Usage:
   neural-demo/run-neural-demo.sh \
     --example tracker|tracker-cropped|tracker_compositor \
     --mode vod|live \
+    --input PATH \
     [--output ...] \
-    [--input ...] \
+    [--pip-input PATH]    # required for tracker_compositor \
     [--models-tar-url ...] \
     [--image IMAGE] \
     [--docker-extra ARG] \
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --input)
             input="${2:-}"
+            shift 2
+            ;;
+        --pip-input)
+            pip_input="${2:-}"
             shift 2
             ;;
         --output)
@@ -100,6 +105,12 @@ esac
 docker_cmd=(docker run --rm --gpus all)
 docker_cmd+=("${docker_extra[@]}")
 
+[[ -n "${input}" ]] || die "--input is required"
+
+if [[ "${example}" == "tracker_compositor" ]]; then
+    [[ -n "${pip_input}" ]] || die "--pip-input is required for tracker_compositor"
+fi
+
 if [[ "${mode}" == "vod" ]]; then
     [[ -n "${output}" ]] || die "--output is required for vod mode"
     output_host="$(abspath "${output}")"
@@ -108,41 +119,33 @@ if [[ "${mode}" == "vod" ]]; then
     output_container="/run/avp/output/$(basename "${output_host}")"
     docker_cmd+=(-v "${output_dir}:/run/avp/output")
 
-    if [[ -n "${input}" ]]; then
-        input_host="$(abspath "${input}")"
-        [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
-        input_container="/run/avp/input/$(basename "${input_host}")"
-        docker_cmd+=(
-            -v "${input_host}:${input_container}:ro"
-            -e "AVP_INPUT=${input_container}"
-        )
-    else
-        docker_cmd+=(-e "AVP_INPUT=${default_vod_input_url}")
-    fi
+    input_host="$(abspath "${input}")"
+    [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
+    input_container="/run/avp/input/$(basename "${input_host}")"
+    docker_cmd+=(
+        -v "${input_host}:${input_container}:ro"
+        -e "AVP_INPUT=${input_container}"
+    )
 
     docker_cmd+=(-e "AVP_OUTPUT=${output_container}")
 else
-    if [[ -n "${input}" ]]; then
-        case "${input}" in
-            rtmp://*|rtmps://*|srt://*)
-                die "live --input must be a looped VOD source, not an RTMP/SRT URL"
-                ;;
-            http://*|https://*)
-                docker_cmd+=(-e "AVP_INPUT=${input}")
-                ;;
-            *)
-                input_host="$(abspath "${input}")"
-                [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
-                input_container="/run/avp/input/$(basename "${input_host}")"
-                docker_cmd+=(
-                    -v "${input_host}:${input_container}:ro"
-                    -e "AVP_INPUT=${input_container}"
-                )
-                ;;
-        esac
-    else
-        docker_cmd+=(-e "AVP_INPUT=${default_vod_input_url}")
-    fi
+    case "${input}" in
+        rtmp://*|rtmps://*|srt://*)
+            die "live --input must be a looped VOD source, not an RTMP/SRT URL"
+            ;;
+        http://*|https://*)
+            docker_cmd+=(-e "AVP_INPUT=${input}")
+            ;;
+        *)
+            input_host="$(abspath "${input}")"
+            [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
+            input_container="/run/avp/input/$(basename "${input_host}")"
+            docker_cmd+=(
+                -v "${input_host}:${input_container}:ro"
+                -e "AVP_INPUT=${input_container}"
+            )
+            ;;
+    esac
 
     if [[ -z "${output}" ]]; then
         output="${default_live_output_url}"
@@ -155,6 +158,23 @@ else
     docker_cmd+=(
         -e "AVP_OUTPUT=${output}"
     )
+fi
+
+if [[ -n "${pip_input}" ]]; then
+    case "${pip_input}" in
+        http://*|https://*)
+            docker_cmd+=(-e "AVP_PIP_INPUT=${pip_input}")
+            ;;
+        *)
+            pip_input_host="$(abspath "${pip_input}")"
+            [[ -f "${pip_input_host}" ]] || die "pip input file does not exist: ${pip_input_host}"
+            pip_input_container="/run/avp/input/$(basename "${pip_input_host}")"
+            docker_cmd+=(
+                -v "${pip_input_host}:${pip_input_container}:ro"
+                -e "AVP_PIP_INPUT=${pip_input_container}"
+            )
+            ;;
+    esac
 fi
 
 docker_cmd+=(

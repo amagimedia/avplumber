@@ -32,6 +32,10 @@ esac
 require_env AVP_INPUT
 require_env AVP_OUTPUT
 
+if [[ "${AVP_EXAMPLE}" == "tracker_compositor" ]]; then
+    require_env AVP_PIP_INPUT
+fi
+
 if [[ ! -e /dev/nvidiactl ]]; then
     die "GPU device /dev/nvidiactl is missing; run with NVIDIA container runtime and --gpus all"
 fi
@@ -129,6 +133,7 @@ template_path="${TEMPLATE_ROOT}/${AVP_EXAMPLE}-${AVP_MODE}.avplumber"
 rendered="${RENDER_DIR}/${AVP_EXAMPLE}-${AVP_MODE}.avplumber"
 sed \
     -e "s|__INPUT__|${AVP_INPUT}|g" \
+    -e "s|__PIP_INPUT__|${AVP_PIP_INPUT:-}|g" \
     -e "s|__OUTPUT__|${AVP_OUTPUT}|g" \
     -e "s|__OUTPUT_FORMAT__|${output_format}|g" \
     -e "s|__MODELS_DIR__|${MODEL_ROOT}|g" \
