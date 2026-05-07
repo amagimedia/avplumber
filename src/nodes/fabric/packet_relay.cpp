@@ -1,4 +1,4 @@
-#include "node_common.hpp"
+#include "../node_common.hpp"
 
 #include <avcpp/codeccontext.h>
 
@@ -7,7 +7,6 @@ class PacketRelay: public TransparentNode<av::Packet>,
                    public ITimeBaseSource, public IVideoFormatSource, public IFrameRateSource {
 protected:
     av::Stream source_stream_;
-    av::GenericCodecContext in_decoder_;
     av::VideoDecoderContext vdec_;
     av::Codec codec_;
 public:
@@ -41,35 +40,41 @@ public:
         return codec_.name();
     }
     void ensureVideo() const {
-        if (!vdec_.isValid()) {
+        if (source_stream_.mediaType() != AVMEDIA_TYPE_VIDEO) {
             throw Error("video-related function called for non-video packet relay");
         }
     }
     virtual std::string fieldOrderString() const override {
         ensureVideo();
-        return fieldOrderToString(vdec_.raw()->field_order);
+        if (vdec_.isValid()) return fieldOrderToString(vdec_.raw()->field_order);
+        return "";
     }
     virtual av::Rational frameRate() override {
         ensureVideo();
-        return vdec_.raw()->framerate;
+        if (vdec_.isValid()) return vdec_.raw()->framerate;
+        return source_stream_.frameRate();
     };
     virtual int width() override {
         ensureVideo();
-        return vdec_.width();
+        if (vdec_.isValid()) return vdec_.width();
+        return source_stream_.raw()->codecpar->width;
     }
     virtual int height() override {
         ensureVideo();
-        return vdec_.height();
+        if (vdec_.isValid()) return vdec_.height();
+        return source_stream_.raw()->codecpar->height;
     }
     virtual av::PixelFormat pixelFormat() override {
         ensureVideo();
-        return vdec_.pixelFormat();
+        if (vdec_.isValid()) return vdec_.pixelFormat();
+        return av::PixelFormat(static_cast<AVPixelFormat>(source_stream_.raw()->codecpar->format));
     }
     virtual void discardUntil(av::Timestamp pts) override {
         logstream << "packet_relay ignoring discardUntil";
     }
-    PacketRelay(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<av::Packet>> &&sink, av::Stream source_stream): TransparentNode<av::Packet>(std::move(source), std::move(sink)), source_stream_(source_stream), in_decoder_(source_stream_), codec_(in_decoder_.codec()) {
-        if (source_stream_.mediaType() == AVMEDIA_TYPE_VIDEO) {
+    PacketRelay(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<av::Packet>> &&sink, av::Stream source_stream): TransparentNode<av::Packet>(std::move(source), std::move(sink)), source_stream_(source_stream) {
+        codec_ = av::findEncodingCodec(source_stream_.raw()->codecpar->codec_id);
+        if (source_stream_.direction() == av::Direction::Decoding && source_stream_.mediaType() == AVMEDIA_TYPE_VIDEO) {
             vdec_ = av::VideoDecoderContext(source_stream);
         }
     }

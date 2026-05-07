@@ -1,0 +1,23 @@
+# H.264 all-intra NVENC over fabric TCP producer smoke test.
+
+queue.plan_capacity * 4
+queue.plan_capacity v_packet 16
+queue.plan_capacity v_cpu 4
+queue.plan_capacity v_cuda 4
+queue.plan_capacity v_rt 1
+queue.plan_capacity v_preenc 1
+queue.plan_capacity v_encoded 8
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "format": "lavfi", "url": "testsrc2=size=1280x720:rate=30", "dst": "in_testsrc", "group": "tx", "name": "TestSrc", "auto_restart": "panic", "timeout": -1 }
+node.add { "type": "demux", "src": "in_testsrc", "routing": { "v:0": "v_packet" }, "group": "tx", "name": "Demux", "auto_restart": "panic" }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_cpu", "group": "tx", "name": "RawVideoDecode", "auto_restart": "panic" }
+node.add { "type": "filter_video", "graph": "format=nv12,hwupload_cuda", "src": "v_cpu", "dst": "v_cuda", "group": "tx", "name": "UploadCudaNv12", "auto_restart": "panic", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda" }
+node.add { "type": "assume_video_format", "src": "v_cuda", "dst": "v_cuda_fmt", "group": "tx", "name": "AssumeCudaNv12", "auto_restart": "panic", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "nv12" }
+node.add { "type": "realtime<av::VideoFrame>", "src": "v_cuda_fmt", "dst": "v_rt", "group": "tx", "name": "FrameRealtime", "auto_restart": "panic", "speed": 1.0, "set_pts": true, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+node.add { "type": "force_keyframe", "src": "v_rt", "dst": "v_preenc", "group": "tx", "name": "ForceEveryFrameKey", "auto_restart": "panic", "interval_sec": "1/30" }
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_encoded", "group": "tx", "name": "H264_Intra_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "auto_restart": "panic", "options": { "preset": "p1", "tune": "ull", "rc": "constqp", "qp": "18", "g": "1", "bf": "0", "forced-idr": "1", "rc-lookahead": "0", "lookahead_level": "0", "zerolatency": "1", "delay": "0", "surfaces": "2", "multipass": "disabled", "spatial-aq": "0", "temporal-aq": "0", "profile": "high", "aud": "1", "repeat_pps": "1" } }
+node.add { "type": "fabric_sink", "src": "v_encoded", "group": "tx", "name": "H264FabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5555", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "h264_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "nv12", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
+
+group.start tx
