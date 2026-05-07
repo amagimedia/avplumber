@@ -1,0 +1,18 @@
+# GPU-only NVJPEG over fabric TCP producer.
+
+queue.plan_capacity * 4
+queue.plan_capacity v_packet 16
+queue.plan_capacity v_dec_cuda 4
+queue.plan_capacity v_rt 1
+queue.plan_capacity v_jpeg 4
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_mux0", "group": "tx", "name": "NbaInput", "auto_restart": "panic", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_mux0", "routing": { "?v:0": "v_packet" }, "group": "tx", "name": "Demux", "auto_restart": "panic", "wait_for_keyframe": false }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_dec_cuda", "group": "tx", "name": "NbaNVDEC", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
+node.add { "type": "realtime<av::VideoFrame>", "src": "v_dec_cuda", "dst": "v_rt", "group": "tx", "name": "FrameRealtime", "auto_restart": "panic", "speed": 1.0, "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+node.add { "type": "nvjpeg_enc", "src": "v_rt", "dst": "v_jpeg", "group": "tx", "name": "NVJPEG_Q95", "auto_restart": "panic", "quality": 95, "optimized_huffman": true }
+node.add { "type": "fabric_sink", "src": "v_jpeg", "group": "tx", "name": "JpegFabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5560", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "jpeg", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
+
+group.start tx

@@ -1,0 +1,13 @@
+# Active-standby H.264 intra restart/rejoin proof consumer.
+
+queue.plan_capacity * 4
+queue.plan_capacity v_fabric_pkt 32
+queue.plan_capacity v_relayed_pkt 32
+queue.plan_capacity v_muxed 4
+
+node.add { "type": "fabric_source", "dst": "v_fabric_pkt", "group": "rx", "name": "FabricActiveStandbyH264In", "provider": "tcp", "bind_ports": ["5556", "5557"], "reference_url": "/home/fedora/sync_bars_ref.ts", "redundancy_mode": "active_standby_repair", "active_replica_id": 1, "standby_replica_id": 2, "playout_delay_frames": 3, "promote_after_misses": 1, "active_timeout_ms": 120, "standby_control_host": "127.0.0.1", "standby_control_ports": {"1": 6555, "2": 6556}, "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "packet_relay", "src": "v_fabric_pkt", "dst": "v_relayed_pkt", "group": "rx", "name": "RelayFabricPackets", "auto_restart": "panic" }
+node.add { "type": "mux", "src": ["v_relayed_pkt"], "dst": "v_muxed", "group": "rx", "name": "MuxMpegTsH264Proof", "auto_restart": "panic", "ts_sort_wait": 0 }
+node.add { "type": "output", "src": "v_muxed", "format": "mpegts", "url": "/home/fedora/out_h264_active_standby_restart_rejoin.ts", "group": "rx", "name": "OutMpegTsH264Proof", "auto_restart": "panic" }
+
+group.start rx

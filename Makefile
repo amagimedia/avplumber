@@ -14,11 +14,16 @@ OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
 HAVE_TENSORRT = 0
+# Build libfabric-backed fabric_source/fabric_sink implementations.
+HAVE_LIBFABRIC ?= 0
 # Build neural_net nodes except sport_specific (draw, yolo/rtdetr, preprocess, utils)
 NEURAL_NET_COMMON ?= 0
+# Build CUDA draw/overlay nodes without pulling TensorRT inference nodes.
+NEURAL_NET_DRAW ?= 0
 # Build neural_net sport-specific nodes
 NEURAL_NET_SPECIFIC ?= 0
 TENSORRT_ROOT =
+CUDA_ROOT ?= /usr/local/cuda
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
@@ -44,6 +49,7 @@ BUILD_DATE_FILE = builddate.h
 SRCDIR = src
 
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/fabric -maxdepth 1 -name '*.cpp')
 ifeq ($(NEURAL_NET_SPECIFIC),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
@@ -73,6 +79,13 @@ CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
+
+ifeq ($(HAVE_LIBFABRIC),1)
+override CXXFLAGS += -DHAVE_LIBFABRIC=1
+override LIBS_FLAGS += -lfabric
+else
+override CXXFLAGS += -DHAVE_LIBFABRIC=0
+endif
 
 ifeq ($(HAVE_SCTE35),1)
 DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
@@ -114,16 +127,20 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu,avpl_yuv_rgba_ptx,objs/src/nodes/hwaccel/cuda_to_egl_image.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+DRAW_NODES_ENABLED := $(if $(filter 1,$(NEURAL_NET_DRAW) $(NEURAL_NET_COMMON)),1,0)
+
+ifeq ($(HAVE_CUDA)$(DRAW_NODES_ENABLED),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_text.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/static_text_overlay.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o objs/src/nodes/neural_net/draw/static_text_overlay.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
@@ -151,7 +168,9 @@ ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 override CPPSRC += cuda.cpp
-override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
+override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs -I$(CUDA_ROOT)/include -I$(CUDA_ROOT)/targets/x86_64-linux/include
+override LFLAGS += -L$(CUDA_ROOT)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_ROOT)/targets/x86_64-linux/lib
+override LIBS_FLAGS += -lnvjpeg -lcudart
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 

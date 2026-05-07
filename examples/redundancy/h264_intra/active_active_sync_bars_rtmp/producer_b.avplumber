@@ -1,0 +1,24 @@
+# Active-active producer B. Uses the source PTS as-is.
+
+queue.plan_capacity * 4
+queue.plan_capacity v_packet 16
+queue.plan_capacity v_packet_rt 16
+queue.plan_capacity v_dec_cuda 4
+queue.plan_capacity v_dec_rt 4
+queue.plan_capacity v_marked 4
+queue.plan_capacity v_preenc 1
+queue.plan_capacity v_encoded 8
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "srt://ingest-1-qa.tellyo.com:9000?streamid=output/live/sync2e446f12e", "dst": "in_mux0", "group": "tx", "name": "SyncBarsB", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_mux0", "routing": { "?v:0": "v_packet" }, "group": "tx", "name": "DemuxB", "auto_restart": "panic", "wait_for_keyframe": false }
+node.add { "type": "realtime", "src": "v_packet", "dst": "v_packet_rt", "group": "tx", "name": "PacketRealtimeB", "auto_restart": "panic", "speed": 1.0, "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+node.add { "type": "dec_video", "src": "v_packet_rt", "dst": "v_dec_cuda", "group": "tx", "name": "DecodeB", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
+node.add { "type": "realtime<av::VideoFrame>", "src": "v_dec_cuda", "dst": "v_dec_rt", "group": "tx", "name": "FrameRealtimeB", "auto_restart": "panic", "speed": 1.0, "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+node.add { "type": "static_text_overlay", "src": "v_dec_rt", "dst": "v_marked", "group": "tx", "name": "OverlayProducerB", "auto_restart": "panic", "text": "PRODUCER B", "x": 18, "y": 18, "font_scale": 2, "padding_x": 12, "padding_y": 8, "text_color": "white", "background_color": "magenta", "background_opacity": 0.85, "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12" }
+node.add { "type": "force_keyframe", "src": "v_marked", "dst": "v_preenc", "group": "tx", "name": "ForceEveryFrameKeyB", "auto_restart": "panic", "interval_sec": "1/25" }
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_encoded", "group": "tx", "name": "H264_NVENC_Intra_B", "codec": "h264_nvenc", "hwaccel": "@gpu", "auto_restart": "panic", "options": { "rc": "constqp", "qp": "8", "preset": "p1", "tune": "ull", "g": "1", "bf": "0", "forced-idr": "1", "rc-lookahead": "0", "zerolatency": "1", "delay": "0", "surfaces": "2", "profile": "high", "aud": "1", "repeat_pps": "1", "b_ref_mode": "disabled", "no-scenecut": "1", "spatial-aq": "0", "temporal-aq": "0", "strict_gop": "1" } }
+node.add { "type": "fabric_sink", "src": "v_encoded", "group": "tx", "name": "FabricHotHotB", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5557", "stream_id": "main", "replica_id": 2, "generation": 0, "redundancy_mode": "hot_hot", "media_type": "video", "codec": "h264_intra", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "completion_batch": 16, "backpressure": "block" }
+
+group.start tx

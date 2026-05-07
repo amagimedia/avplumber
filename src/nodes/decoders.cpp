@@ -49,9 +49,19 @@ public:
     template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel):
         NodeSISO<av::Packet, OutputFrame>(std::move(source), std::move(sink)),
         codec_(codecFromName(codec_name)),
-        dec_(stream, codec_),
         hwaccel_(hwaccel)
     {
+        if (stream.direction() == av::Direction::Decoding) {
+            dec_ = DecoderContext(stream, codec_);
+        } else {
+            logstream << "Decoder got non-decoding stream metadata, creating codec-only context";
+            dec_ = DecoderContext(codec_);
+            dec_.raw()->codec_type = stream.raw()->codecpar->codec_type;
+            dec_.raw()->codec_id = stream.raw()->codecpar->codec_id;
+            dec_.raw()->width = stream.raw()->codecpar->width;
+            dec_.raw()->height = stream.raw()->codecpar->height;
+            dec_.raw()->pix_fmt = static_cast<AVPixelFormat>(stream.raw()->codecpar->format);
+        }
         this->auto_eof_ = false;
         if (!pixel_format.empty()) {
             pixel_format_optional_ = pixel_format[0]=='?';
