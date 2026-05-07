@@ -29,6 +29,7 @@ private:
         std::unordered_map<uint32_t, SourceCandidate> media_by_replica;
         std::unordered_map<uint32_t, int64_t> status_raw_by_replica;
         bool repair_requested = false;
+        uint64_t repair_requested_ns = 0;
         bool promote_sent = false;
     };
 
@@ -42,6 +43,7 @@ private:
         bool eligible = false;
         uint64_t aligned_frames = 0;
         uint64_t last_seen_ns = 0;
+        int64_t highest_seen_frame = std::numeric_limits<int64_t>::min();
     };
 
     std::string redundancy_mode_ = "single";
@@ -50,6 +52,8 @@ private:
     uint64_t playout_delay_frames_ = 0;
     uint64_t promote_after_misses_ = 1;
     uint64_t active_timeout_ms_ = 50;
+    uint64_t repair_grace_ns_ = 0;
+    bool strict_frame_identity_ = false;
 
     static constexpr size_t alignment_window_frames_ = 50;
     static constexpr size_t alignment_required_frames_ = 10;
@@ -63,6 +67,7 @@ private:
     uint64_t active_miss_count_ = 0;
     uint64_t last_active_media_ns_ = 0;
     bool standby_promoted_ = false;
+    bool strict_redundancy_established_ = false;
 
 public:
     SourceTimeline() = default;
@@ -71,13 +76,17 @@ public:
                    uint32_t active_replica_id,
                    uint64_t playout_delay_frames,
                    uint64_t promote_after_misses,
-                   uint64_t active_timeout_ms):
+                   uint64_t active_timeout_ms,
+                   uint64_t repair_grace_ms,
+                   bool strict_frame_identity):
         redundancy_mode_(std::move(redundancy_mode)),
         preferred_active_replica_id_(active_replica_id),
         current_active_replica_id_(active_replica_id),
         playout_delay_frames_(playout_delay_frames),
         promote_after_misses_(promote_after_misses),
-        active_timeout_ms_(active_timeout_ms) {}
+        active_timeout_ms_(active_timeout_ms),
+        repair_grace_ns_(repair_grace_ms * 1000000ull),
+        strict_frame_identity_(strict_frame_identity) {}
 
     bool isSingle() const {
         return redundancy_mode_ == "single";
@@ -120,13 +129,15 @@ public:
 
     bool trySelect(SourceCandidate &selected, const SendControl &send_control) {
         if (!next_emit_valid_) return false;
-        if (highest_seen_frame_ < next_emit_frame_ + static_cast<int64_t>(playout_delay_frames_)) return false;
+        const int64_t watermark = strict_frame_identity_ ? strictWatermark() : highest_seen_frame_;
+        if (watermark == std::numeric_limits<int64_t>::min()) return false;
+        if (watermark < next_emit_frame_ + static_cast<int64_t>(playout_delay_frames_)) return false;
 
         auto it = frame_slots_.find(next_emit_frame_);
         if (it == frame_slots_.end()) {
             it = frame_slots_.lower_bound(next_emit_frame_);
             if (it == frame_slots_.end()) return false;
-            logstream << "fabric_source skipped missing frame slot"
+            logstream << "redundancy_selector skipped missing frame slot"
                       << " from_normalized_pts=" << next_emit_frame_
                       << " to_normalized_pts=" << it->first;
             next_emit_frame_ = it->first;
@@ -155,9 +166,11 @@ public:
             if (!slot.repair_requested) {
                 send_control(current_active_replica_id_, "REPAIR", next_emit_frame_);
                 slot.repair_requested = true;
+                slot.repair_requested_ns = monotonicNs();
                 return false;
             }
-            logstream << "fabric_source skipped active status-only frame slot"
+            if (withinRepairGrace(slot)) return false;
+            logstream << "redundancy_selector skipped active status-only frame slot"
                       << " replica_id=" << current_active_replica_id_
                       << " normalized_pts=" << next_emit_frame_;
             finishSelectedFrame(it);
@@ -169,7 +182,7 @@ public:
             if (replica_id == current_active_replica_id_) continue;
             if (!replicaEligible(replica_id)) continue;
             selected = candidate_it->second;
-            logstream << "fabric_source elected active replica_id=" << replica_id
+            logstream << "redundancy_selector elected active replica_id=" << replica_id
                       << " previous_active_replica_id=" << current_active_replica_id_
                       << " normalized_pts=" << next_emit_frame_;
             current_active_replica_id_ = replica_id;
@@ -184,12 +197,18 @@ public:
             const uint32_t replica_id = status.first;
             if (replica_id == current_active_replica_id_) continue;
             if (!replicaEligible(replica_id)) continue;
-            send_control(replica_id, "REPAIR", next_emit_frame_);
-            slot.repair_requested = true;
-            active_miss_count_++;
-            if (active_miss_count_ >= promote_after_misses_ && !slot.promote_sent) {
-                send_control(replica_id, "PROMOTE", next_emit_frame_ + 1);
-                slot.promote_sent = true;
+            if (!slot.repair_requested) {
+                send_control(replica_id, "REPAIR", next_emit_frame_);
+                slot.repair_requested = true;
+                slot.repair_requested_ns = monotonicNs();
+                active_miss_count_++;
+                if (active_miss_count_ >= promote_after_misses_ && !slot.promote_sent) {
+                    send_control(replica_id, "PROMOTE", next_emit_frame_ + 1);
+                    slot.promote_sent = true;
+                }
+            } else if (!withinRepairGrace(slot)) {
+                send_control(replica_id, "REPAIR", next_emit_frame_);
+                slot.repair_requested_ns = monotonicNs();
             }
             break;
         }
@@ -229,6 +248,11 @@ private:
         standby_promoted_ = true;
     }
 
+    bool withinRepairGrace(const FrameSlot &slot) const {
+        if (!repair_grace_ns_ || !slot.repair_requested_ns) return false;
+        return monotonicNs() - slot.repair_requested_ns < repair_grace_ns_;
+    }
+
     int64_t normalizeFrameId(const MediaHeader &media, uint64_t received_ns) {
         ReplicaState &state = replicas_[media.replica_id];
         state.history.emplace_back(received_ns, media.pts);
@@ -241,10 +265,25 @@ private:
             state.aligned_frames++;
             if (!state.eligible && state.aligned_frames >= alignment_required_frames_) {
                 state.eligible = true;
-                logstream << "fabric_source replica eligible replica_id=" << media.replica_id
+                logstream << "redundancy_selector replica eligible replica_id=" << media.replica_id
                           << " generation=" << media.generation
                           << " offset=0";
             }
+            state.highest_seen_frame = std::max(state.highest_seen_frame, media.pts);
+            return media.pts;
+        }
+
+        if (strict_frame_identity_) {
+            state.offset = 0;
+            state.offset_valid = true;
+            state.aligned_frames++;
+            if (!state.eligible && state.aligned_frames >= alignment_required_frames_) {
+                state.eligible = true;
+                logstream << "redundancy_selector replica eligible replica_id=" << media.replica_id
+                          << " generation=" << media.generation
+                          << " offset=0 strict_frame_identity=1";
+            }
+            state.highest_seen_frame = std::max(state.highest_seen_frame, media.pts);
             return media.pts;
         }
 
@@ -252,6 +291,7 @@ private:
         if (!state.offset_valid) return media.pts;
         const int64_t normalized = media.pts + state.offset;
         if (normalized < 0) return media.pts;
+        state.highest_seen_frame = std::max(state.highest_seen_frame, normalized);
         return normalized;
     }
 
@@ -279,14 +319,14 @@ private:
         std::sort(samples.begin(), samples.end());
         state.offset = samples[samples.size() / 2];
         if (!state.offset_valid) {
-            logstream << "fabric_source learned standby offset replica_id=" << media.replica_id
+            logstream << "redundancy_selector learned standby offset replica_id=" << media.replica_id
                       << " offset=" << state.offset;
         }
         state.offset_valid = true;
         state.aligned_frames++;
         if (!state.eligible && state.aligned_frames >= alignment_required_frames_) {
             state.eligible = true;
-            logstream << "fabric_source replica eligible replica_id=" << media.replica_id
+            logstream << "redundancy_selector replica eligible replica_id=" << media.replica_id
                       << " generation=" << media.generation
                       << " offset=" << state.offset;
         }
@@ -295,6 +335,34 @@ private:
     bool replicaEligible(uint32_t replica_id) const {
         auto it = replicas_.find(replica_id);
         return it != replicas_.end() && it->second.eligible;
+    }
+
+    int64_t strictWatermark() {
+        const uint64_t now = monotonicNs();
+        const uint64_t stale_ns = std::max<uint64_t>(active_timeout_ms_, 1) * 1000000ull;
+        int64_t watermark = std::numeric_limits<int64_t>::max();
+        size_t eligible_live_replicas = 0;
+        for (const auto &entry: replicas_) {
+            const ReplicaState &state = entry.second;
+            if (!state.eligible || state.highest_seen_frame == std::numeric_limits<int64_t>::min()) continue;
+            if (state.last_seen_ns && now - state.last_seen_ns > stale_ns) continue;
+            watermark = std::min(watermark, state.highest_seen_frame);
+            eligible_live_replicas++;
+        }
+        if (eligible_live_replicas >= 2) {
+            strict_redundancy_established_ = true;
+            return watermark == std::numeric_limits<int64_t>::max() ? std::numeric_limits<int64_t>::min() : watermark;
+        }
+        if (!strict_redundancy_established_) return std::numeric_limits<int64_t>::min();
+        if (eligible_live_replicas < 2) {
+            auto active_it = replicas_.find(current_active_replica_id_);
+            if (active_it != replicas_.end() && active_it->second.eligible &&
+                active_it->second.last_seen_ns && now - active_it->second.last_seen_ns <= stale_ns) {
+                return active_it->second.highest_seen_frame;
+            }
+            return watermark == std::numeric_limits<int64_t>::max() ? std::numeric_limits<int64_t>::min() : watermark;
+        }
+        return std::numeric_limits<int64_t>::min();
     }
 
     void handleGeneration(const MediaHeader &media) {
@@ -306,7 +374,7 @@ private:
         state.generation_valid = true;
         removeReplicaSlots(media.replica_id);
         if (restart && media.replica_id == current_active_replica_id_ && media.replica_id != preferred_active_replica_id_) {
-            logstream << "fabric_source active replica restarted as new generation; returning active owner to preferred replica"
+            logstream << "redundancy_selector active replica restarted as new generation; returning active owner to preferred replica"
                       << " restarted_replica_id=" << media.replica_id
                       << " preferred_replica_id=" << preferred_active_replica_id_;
             current_active_replica_id_ = preferred_active_replica_id_;
@@ -315,10 +383,10 @@ private:
             last_active_media_ns_ = 0;
         }
         if (restart) {
-            logstream << "fabric_source generation changed replica_id=" << media.replica_id
+            logstream << "redundancy_selector generation changed replica_id=" << media.replica_id
                       << " generation=" << media.generation;
         } else {
-            logstream << "fabric_source generation seen replica_id=" << media.replica_id
+            logstream << "redundancy_selector generation seen replica_id=" << media.replica_id
                       << " generation=" << media.generation;
         }
     }

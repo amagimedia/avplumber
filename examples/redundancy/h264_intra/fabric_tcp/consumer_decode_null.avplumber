@@ -1,12 +1,14 @@
 # H.264 all-intra fabric TCP consumer smoke test: receive packets, decode with h264_cuvid, drain frames.
 
 queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
 queue.plan_capacity v_h264 8
 queue.plan_capacity v_dec_cuda 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "fabric_source", "dst": "v_h264", "group": "rx", "name": "H264FabricIn", "provider": "tcp", "bind_port": "5555", "stream_id": "main", "media_type": "video", "codec": "h264_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/30", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_source", "dst": "v_fabric", "group": "rx", "name": "H264FabricIn", "provider": "tcp", "bind_port": "5555", "stream_id": "main", "media_type": "video", "codec": "h264_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/30", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_h264", "group": "rx", "name": "UnpackH264Fabric", "auto_restart": "panic" }
 node.add { "type": "dec_video", "src": "v_h264", "dst": "v_dec_cuda", "group": "rx", "name": "H264_CUVID_Decode", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
 node.add { "type": "null_sink<av::VideoFrame>", "src": "v_dec_cuda", "group": "rx", "name": "FakeSink", "auto_restart": "panic" }
 

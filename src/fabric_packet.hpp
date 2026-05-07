@@ -6,6 +6,7 @@
 
 struct FabricPacket {
     av::Packet packet;
+    uint16_t message_type = 0;
     uint64_t stream_id_hash = 0;
     uint32_t replica_id = 0;
     uint64_t generation = 0;

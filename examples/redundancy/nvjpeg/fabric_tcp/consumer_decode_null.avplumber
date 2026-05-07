@@ -1,12 +1,14 @@
 # Fabric TCP JPEG consumer smoke test: receive JPEG packets, decode with mjpeg_cuvid, drain frames.
 
 queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
 queue.plan_capacity v_jpeg 8
 queue.plan_capacity v_dec_cuda 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "fabric_source", "dst": "v_jpeg", "group": "rx", "name": "JpegFabricIn", "provider": "tcp", "bind_port": "5560", "stream_id": "main", "media_type": "video", "codec": "jpeg", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/30000", "frame_rate": "30000/1001", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_source", "dst": "v_fabric", "group": "rx", "name": "JpegFabricIn", "provider": "tcp", "bind_port": "5560", "stream_id": "main", "media_type": "video", "codec": "jpeg", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/30000", "frame_rate": "30000/1001", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_jpeg", "group": "rx", "name": "UnpackJpegFabric", "auto_restart": "panic" }
 node.add { "type": "dec_video", "src": "v_jpeg", "dst": "v_dec_cuda", "group": "rx", "name": "MJPEG_CUVID_Decode", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "mjpeg": "mjpeg_cuvid" }, "hwaccel_only_for_codecs": ["mjpeg"] }
 node.add { "type": "null_sink<av::VideoFrame>", "src": "v_dec_cuda", "group": "rx", "name": "FakeSink", "auto_restart": "panic" }
 
