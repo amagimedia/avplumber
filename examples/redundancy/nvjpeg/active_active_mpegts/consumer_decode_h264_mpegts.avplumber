@@ -3,6 +3,7 @@
 queue.plan_capacity * 4
 queue.plan_capacity v_fabric_a 64
 queue.plan_capacity v_fabric_b 64
+queue.plan_capacity v_selected_fabric 32
 queue.plan_capacity v_selected_jpeg 32
 queue.plan_capacity v_dec_cuda 4
 queue.plan_capacity v_preenc 2
@@ -11,9 +12,10 @@ queue.plan_capacity v_muxed 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "fabric_packet_ingress", "dst": "v_fabric_a", "group": "rx", "name": "FabricJpegAIn", "provider": "tcp", "bind_port": "5576", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "fabric_packet_ingress", "dst": "v_fabric_b", "group": "rx", "name": "FabricJpegBIn", "provider": "tcp", "bind_port": "5577", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "redundancy_selector", "src": ["v_fabric_a", "v_fabric_b"], "dst": "v_selected_jpeg", "group": "rx", "name": "JpegTimelineSelector", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_mode": "strict_frame_identity", "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
+node.add { "type": "fabric_source", "dst": "v_fabric_a", "group": "rx", "name": "FabricJpegAIn", "provider": "tcp", "bind_port": "5576", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "fabric_source", "dst": "v_fabric_b", "group": "rx", "name": "FabricJpegBIn", "provider": "tcp", "bind_port": "5577", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "redundancy_selector", "src": ["v_fabric_a", "v_fabric_b"], "dst": "v_selected_fabric", "group": "rx", "name": "JpegTimelineSelector", "mode": "active_active", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_mode": "strict_frame_identity", "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
+node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_selected_jpeg", "group": "rx", "name": "UnpackSelectedJpegPackets", "auto_restart": "panic" }
 node.add { "type": "dec_video", "src": "v_selected_jpeg", "dst": "v_dec_cuda", "group": "rx", "name": "MJPEG_CUVID_Selected", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "mjpeg": "mjpeg_cuvid" }, "hwaccel_only_for_codecs": ["mjpeg"] }
 node.add { "type": "force_keyframe", "src": "v_dec_cuda", "dst": "v_preenc", "group": "rx", "name": "ForceProofKeyframes", "auto_restart": "panic", "interval_sec": "1" }
 node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_h264", "group": "rx", "name": "H264_NVENC_Proof", "codec": "h264_nvenc", "hwaccel": "@gpu", "auto_restart": "panic", "options": { "rc": "cbr", "b": "6M", "maxrate": "6M", "bufsize": "6M", "preset": "p1", "tune": "ull", "g": "25", "bf": "0", "rc-lookahead": "0", "zerolatency": "1", "delay": "0", "surfaces": "2", "profile": "high", "aud": "1", "repeat_pps": "1", "spatial-aq": "0", "temporal-aq": "0" } }

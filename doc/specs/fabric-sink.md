@@ -2,12 +2,22 @@
 
 Date: 2026-05-05
 
-Status: initial sender implemented and TCP loopback smoke-tested
+Status: sender implemented and TCP/SHM loopback smoke-tested; current receiver
+side is split into `fabric_source -> redundancy_selector -> fabric_unpack`
 
 Scope: first point-to-point AVP fabric sender for NVENC H.264 all-intra
 packets. This spec intentionally covers only the sender node. The receiver,
 redundancy selector, controller, host agent, and MXL adapter are separate
 components.
+
+Current receive-side node split:
+
+```text
+fabric_source receives libfabric records and emits FabricPacket values.
+redundancy_selector optionally selects one FabricPacket from redundant inputs.
+fabric_unpack converts FabricPacket back to av::Packet for decoders/muxers.
+packet_relay remains a separate av::Packet -> av::Packet relay.
+```
 
 ## Goal
 

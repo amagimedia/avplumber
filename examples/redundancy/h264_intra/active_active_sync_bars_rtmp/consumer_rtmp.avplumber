@@ -1,12 +1,14 @@
 # Active-active 2 producer / 1 consumer redundancy. Both producers send full payloads; consumer prefers A and uses B only for missing A frames.
 
 queue.plan_capacity * 4
-queue.plan_capacity v_fabric_pkt 32
+queue.plan_capacity v_fabric_rx 32
+queue.plan_capacity v_selected_fabric 32
 queue.plan_capacity v_relayed_pkt 32
 queue.plan_capacity v_muxed 4
 
-node.add { "type": "fabric_source", "dst": "v_fabric_pkt", "group": "rx", "name": "FabricHotHotIn", "provider": "tcp", "bind_ports": ["5556", "5557"], "reference_url": "/home/fedora/sync_bars_ref.ts", "redundancy_mode": "active_standby_repair", "playout_delay_frames": 1, "active_replica_id": 1, "standby_replica_id": 2, "promote_after_misses": 1, "active_timeout_ms": 120, "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "packet_relay", "src": "v_fabric_pkt", "dst": "v_relayed_pkt", "group": "rx", "name": "RelayFabricPackets", "auto_restart": "panic" }
+node.add { "type": "fabric_source", "dst": "v_fabric_rx", "group": "rx", "name": "FabricHotHotIn", "provider": "tcp", "bind_ports": ["5556", "5557"], "reference_url": "/home/fedora/sync_bars_ref.ts", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "redundancy_selector", "src": ["v_fabric_rx"], "dst": "v_selected_fabric", "group": "rx", "name": "TimelineSelector", "mode": "active_active", "alignment_mode": "strict_frame_identity", "reference_url": "/home/fedora/sync_bars_ref.ts", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
+node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_relayed_pkt", "group": "rx", "name": "UnpackFabricPackets", "auto_restart": "panic" }
 node.add { "type": "mux", "src": ["v_relayed_pkt"], "dst": "v_muxed", "group": "rx", "name": "MuxFlv", "auto_restart": "panic", "ts_sort_wait": 0 }
 node.add { "type": "output", "src": "v_muxed", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/test", "group": "rx", "name": "OutRtmpHotHot", "auto_restart": "panic" }
 

@@ -1,12 +1,14 @@
 # Active-standby 2 producer / 1 consumer redundancy. Standby sends status and supplies repair payloads on request.
 
 queue.plan_capacity * 4
-queue.plan_capacity v_fabric_pkt 32
+queue.plan_capacity v_fabric_rx 32
+queue.plan_capacity v_selected_fabric 32
 queue.plan_capacity v_relayed_pkt 32
 queue.plan_capacity v_muxed 4
 
-node.add { "type": "fabric_source", "dst": "v_fabric_pkt", "group": "rx", "name": "FabricActiveStandbyIn", "provider": "tcp", "bind_ports": ["5556", "5557"], "reference_url": "/home/fedora/sync_bars_ref.ts", "redundancy_mode": "active_standby_repair", "active_replica_id": 1, "standby_replica_id": 2, "playout_delay_frames": 3, "promote_after_misses": 1, "active_timeout_ms": 120, "standby_control_host": "127.0.0.1", "standby_control_port": 6556, "standby_control_ports": {"1": 6555, "2": 6556}, "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "packet_relay", "src": "v_fabric_pkt", "dst": "v_relayed_pkt", "group": "rx", "name": "RelayFabricPackets", "auto_restart": "panic" }
+node.add { "type": "fabric_source", "dst": "v_fabric_rx", "group": "rx", "name": "FabricActiveStandbyIn", "provider": "tcp", "bind_ports": ["5556", "5557"], "reference_url": "/home/fedora/sync_bars_ref.ts", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "redundancy_selector", "src": ["v_fabric_rx"], "dst": "v_selected_fabric", "group": "rx", "name": "ActiveStandbySelector", "mode": "active_standby", "alignment_mode": "strict_frame_identity", "reference_url": "/home/fedora/sync_bars_ref.ts", "active_replica_id": 1, "standby_replica_id": 2, "playout_delay_frames": 3, "promote_after_misses": 1, "active_timeout_ms": 120, "repair_grace_ms": 120, "standby_control_host": "127.0.0.1", "standby_control_port": 6556, "standby_control_ports": {"1": 6555, "2": 6556} }
+node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_relayed_pkt", "group": "rx", "name": "UnpackFabricPackets", "auto_restart": "panic" }
 node.add { "type": "mux", "src": ["v_relayed_pkt"], "dst": "v_muxed", "group": "rx", "name": "MuxFlv", "auto_restart": "panic", "ts_sort_wait": 0 }
 node.add { "type": "output", "src": "v_muxed", "format": "flv", "url": "rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/test", "group": "rx", "name": "OutRtmpActiveStandby", "auto_restart": "panic" }
 

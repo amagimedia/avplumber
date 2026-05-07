@@ -3,14 +3,14 @@
 queue.plan_capacity * 4
 queue.plan_capacity v_fabric_a 64
 queue.plan_capacity v_fabric_b 64
-queue.plan_capacity v_selected_pkt 32
+queue.plan_capacity v_selected_fabric 32
 queue.plan_capacity v_relayed_pkt 32
 queue.plan_capacity v_muxed 4
 
-node.add { "type": "fabric_packet_ingress", "dst": "v_fabric_a", "group": "rx", "name": "FabricJpegAIn", "provider": "tcp", "bind_port": "5576", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "fabric_packet_ingress", "dst": "v_fabric_b", "group": "rx", "name": "FabricJpegBIn", "provider": "tcp", "bind_port": "5577", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
-node.add { "type": "redundancy_selector", "src": ["v_fabric_a", "v_fabric_b"], "dst": "v_selected_pkt", "group": "rx", "name": "JpegTimelineSelector", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_mode": "strict_frame_identity", "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
-node.add { "type": "packet_relay", "src": "v_selected_pkt", "dst": "v_relayed_pkt", "group": "rx", "name": "RelaySelectedJpegPackets", "auto_restart": "panic" }
+node.add { "type": "fabric_source", "dst": "v_fabric_a", "group": "rx", "name": "FabricJpegAIn", "provider": "tcp", "bind_port": "5576", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "fabric_source", "dst": "v_fabric_b", "group": "rx", "name": "FabricJpegBIn", "provider": "tcp", "bind_port": "5577", "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "redundancy_selector", "src": ["v_fabric_a", "v_fabric_b"], "dst": "v_selected_fabric", "group": "rx", "name": "JpegTimelineSelector", "mode": "active_active", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_mode": "strict_frame_identity", "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
+node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_relayed_pkt", "group": "rx", "name": "UnpackSelectedJpegPackets", "auto_restart": "panic" }
 node.add { "type": "mux", "src": ["v_relayed_pkt"], "dst": "v_muxed", "group": "rx", "name": "MuxMpegTs", "auto_restart": "panic", "ts_sort_wait": 0 }
 node.add { "type": "output", "src": "v_muxed", "format": "mpegts", "url": "/home/fedora/out_nvjpeg_active_active_2switch.ts", "group": "rx", "name": "OutMpegTsJpegSelector", "auto_restart": "panic" }
 

@@ -10,6 +10,19 @@ rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/test
 The jittered source generator sends ordered MPEG-TS bytes with roughly 1000 ms
 mean delay and +/-1000 ms jitter while preserving media PTS.
 
+Current receive-side split as of 2026-05-07:
+
+```text
+fabric_source receives libfabric records and emits FabricPacket values.
+redundancy_selector chooses the active media FabricPacket.
+fabric_unpack converts the selected FabricPacket back to av::Packet.
+packet_relay remains the legacy av::Packet -> av::Packet relay.
+```
+
+Older log excerpts in this file may still show `fabric_source` for selection
+events because active-standby selection originally lived there. In the current
+code those decisions belong to `redundancy_selector`.
+
 ## 1. Active-Active, Two URLs, Jittered
 
 Graphs:
@@ -524,12 +537,12 @@ decoder selected/opened: h264_cuvid
 consumer stats: pix_fmt=cuda, frame_num=390, about 30 fps, no dropped frames
 ```
 
-Note:
+Historical note:
 
 ```text
-The fabric_source nodes do not yet implement graceful stop, so test shutdown
-logs include "Stopping node ... failed". The processes were killed after the
-proof window; this did not affect media receive/decode evidence.
+Older proof runs predated the current stop/interrupt support on fabric_source.
+The processes were killed after the proof window; this did not affect media
+receive/decode evidence.
 ```
 
 ## 10. Active-Active NVJPEG, Two Switches, MPEG-TS Proof
@@ -658,30 +671,43 @@ kill B -> A repairs/promotes.
 consumer packet-relays selected H.264 into MPEG-TS.
 ```
 
-Output copied locally:
+Latest strict frame-identity output copied locally:
 
 ```text
-/home/jp/out_h264_active_standby_restart_rejoin.ts
+/home/jp/out_h264_active_standby_strict_identity.ts
 ```
 
 Result:
 
 ```text
-duration: 40.920s
-size: 9.0M
+duration: 56.720s
+size: 13M
 stream: H.264 640x360, MPEG-TS
-bitrate: about 1.85 Mbps
-max packet delta: 0.120s
-bad gaps >60ms: 2
+bitrate: about 1.84 Mbps
+max packet delta: 0.040s
+bad gaps >60ms: 0
+ffmpeg decode warnings: none
 ```
 
 Interpretation:
 
 ```text
-The fabric active-standby repair path now survives the same restart/rejoin
-scenario for H.264 too. Compared with NVJPEG, the packet timeline still shows
-two 120 ms gaps at the switches, so H.264 is functional but not as clean as
-the NVJPEG proof for this failover mode.
+The active-standby selector uses `alignment_mode=strict_frame_identity` for the
+offset SRT pair. It does not wallclock-normalize B's delayed frames onto A's
+current output; instead, once both replicas are eligible, playout is gated by
+the slowest live replica so failover can request/select the same raw PTS/frame
+identity.
+
+Contact-sheet spot check at 5 fps sampling:
+
+A->B:
+  A SYNC 1 769 +0s -> B SYNC 2 774 +2s
+B->A:
+  B SYNC 2 394 +2s -> A SYNC 1 399 +0s
+
+The producer label changes, but the visible sync-bar counter remains monotonic
+through both switches. `repair_grace_ms=120` is still used so the selector does
+not skip a status-only repair slot before the repaired H.264 payload arrives.
 ```
 
 ## 13. Encoder Latency, NBA Source, H.264 Intra QP8 vs NVJPEG Q99
@@ -808,6 +834,14 @@ Change:
 redundancy_selector alignment_mode: strict_frame_identity
 ```
 
+The same selector option is now present in the H.264 active-active sync-bars
+examples:
+
+```text
+examples/redundancy/h264_intra/active_active_sync_bars_rtmp/consumer_rtmp.avplumber
+examples/redundancy/h264_intra/active_active_sync_bars_rtmp/consumer_selector_rtmp.avplumber
+```
+
 Output copied locally:
 
 ```text
@@ -866,6 +900,6 @@ The double-switch run exposed and fixed two implementation issues:
 - initial bogus `pts=0` packets could poison `frame_step` and block
   strict playout; the selector now waits for a plausible frame step before
   starting strict output.
-- `fabric_packet_ingress` needed stop/interrupt support so consumer shutdown
-  can finalize the MPEG-TS proof cleanly.
+- `fabric_source` needed stop/interrupt support so consumer shutdown can
+  finalize the MPEG-TS proof cleanly.
 ```

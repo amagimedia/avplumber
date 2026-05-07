@@ -2,6 +2,8 @@
 # Selects JPEG packets, decodes with mjpeg_cuvid, and writes one viewable H.264 MPEG-TS proof file.
 
 queue.plan_capacity * 4
+queue.plan_capacity v_fabric_rx 32
+queue.plan_capacity v_selected_fabric 32
 queue.plan_capacity v_selected_jpeg 32
 queue.plan_capacity v_dec_cuda 4
 queue.plan_capacity v_dec_smooth 4
@@ -11,7 +13,9 @@ queue.plan_capacity v_muxed 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "fabric_source", "dst": "v_selected_jpeg", "group": "rx", "name": "FabricActiveStandbyJpegIn", "provider": "tcp", "bind_ports": ["5586", "5587"], "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "redundancy_mode": "active_standby_repair", "active_replica_id": 1, "standby_replica_id": 2, "playout_delay_frames": 3, "promote_after_misses": 1, "active_timeout_ms": 120, "standby_control_host": "127.0.0.1", "standby_control_ports": {"1": 6586, "2": 6587}, "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "fabric_source", "dst": "v_fabric_rx", "group": "rx", "name": "FabricActiveStandbyJpegIn", "provider": "tcp", "bind_ports": ["5586", "5587"], "codec": "jpeg", "width": 640, "height": 360, "pixel_format": "cuda", "real_pixel_format": "nv12", "time_base": "1/90000", "frame_rate": "25/1", "max_payload_bytes": 4194304, "queue_depth": 128 }
+node.add { "type": "redundancy_selector", "src": ["v_fabric_rx"], "dst": "v_selected_fabric", "group": "rx", "name": "ActiveStandbyJpegSelector", "mode": "active_standby", "alignment_mode": "strict_frame_identity", "active_replica_id": 1, "standby_replica_id": 2, "playout_delay_frames": 3, "promote_after_misses": 1, "active_timeout_ms": 120, "repair_grace_ms": 120, "standby_control_host": "127.0.0.1", "standby_control_ports": {"1": 6586, "2": 6587} }
+node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_selected_jpeg", "group": "rx", "name": "UnpackSelectedJpegPackets", "auto_restart": "panic" }
 node.add { "type": "dec_video", "src": "v_selected_jpeg", "dst": "v_dec_cuda", "group": "rx", "name": "MJPEG_CUVID_Selected", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "mjpeg": "mjpeg_cuvid" }, "hwaccel_only_for_codecs": ["mjpeg"] }
 node.add { "type": "smooth_timestamps<av::VideoFrame>", "src": "v_dec_cuda", "dst": "v_dec_smooth", "group": "rx", "name": "SmoothProofPts", "auto_restart": "panic", "fps": "25/1", "drift_window": 0, "discontinuity_threshold": 86400 }
 node.add { "type": "force_keyframe", "src": "v_dec_smooth", "dst": "v_preenc", "group": "rx", "name": "ForceProofKeyframes", "auto_restart": "panic", "interval_sec": "1" }
