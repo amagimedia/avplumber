@@ -153,6 +153,7 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
+override LIBS_FLAGS += -lcudart -lnvjpeg
 endif
 
 ifeq ($(NEURAL_NET_COMMON),1)
