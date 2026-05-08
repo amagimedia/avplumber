@@ -8,3 +8,8 @@ compile_flags.txt
 *.o
 *.a
 *.so
+/neural-demo/.generated-models*/
+/neural-demo/.docker-build-inputs*/
+/neural-demo/.model-build-cache*/
+/neural-demo/.models_onnx.tgz
+/neural-demo/.tensorrt*.tgz

@@ -2,7 +2,7 @@ FROM fedora:42 AS base
 
 ARG FFMPEG_TAG=n7.1.3
 ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
-ARG TENSORRT_URL=https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/tensorrt-minimal-10.15.1.29.tar.gz
+ARG TENSORRT_ARCHIVE
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         ca-certificates \
@@ -45,16 +45,20 @@ RUN dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
         cuda-driver-devel-13-0 \
         cuda-cccl-13-0 \
         cuda-culibos-devel-13-0 \
+        libnvjpeg-devel-13-0 \
         libnvptxcompiler-13-0 \
         libnvvm-13-0 \
     && dnf clean all
 
-RUN mkdir -p /opt/tensorrt/include /opt/tensorrt/lib
-RUN curl -L "${TENSORRT_URL}" -o /tmp/tensorrt.tar.gz \
+RUN mkdir -p /opt/tensorrt/bin /opt/tensorrt/include /opt/tensorrt/lib
+COPY ${TENSORRT_ARCHIVE} /tmp/tensorrt.tar.gz
+RUN tar -xzf /tmp/tensorrt.tar.gz -C /opt/tensorrt/bin --strip-components=2 --wildcards 'TensorRT-*/bin/trtexec' \
     && tar -xzf /tmp/tensorrt.tar.gz -C /opt/tensorrt/include --strip-components=2 --wildcards 'TensorRT-*/include/*' \
     && tar -xzf /tmp/tensorrt.tar.gz -C /opt/tensorrt/lib --strip-components=2 --wildcards \
         'TensorRT-*/lib/libnvinfer.so*' \
         'TensorRT-*/lib/libnvinfer_plugin.so*' \
+        'TensorRT-*/lib/libnvonnxparser.so*' \
+        'TensorRT-*/lib/libnvinfer_builder_resource*.so*' \
     && rm -f /tmp/tensorrt.tar.gz
 
 WORKDIR /build
@@ -179,6 +183,13 @@ RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' 
     && /usr/local/bin/ffmpeg -hide_banner -protocols | grep -q '^  srt$' \
     && ldd /usr/local/bin/ffmpeg | grep -q '/usr/local/lib/libavfilter'
 
+FROM base AS plan-builder
+
+COPY neural-demo/build-models.sh /usr/local/bin/avp-neural-demo-build-models
+RUN chmod +x /usr/local/bin/avp-neural-demo-build-models
+
+ENTRYPOINT ["/usr/local/bin/avp-neural-demo-build-models"]
+
 FROM ffmpeg-builder AS deps-builder
 
 COPY deps /build/deps
@@ -216,6 +227,8 @@ RUN test -x /build/avplumber \
 
 FROM fedora:42 AS runtime
 
+ARG PREBUILT_MODELS_DIR=neural-demo/.generated-models
+
 RUN dnf -y install --setopt=install_weak_deps=False \
         bash \
         boost-system \
@@ -239,9 +252,12 @@ COPY --from=builder /usr/local/lib/libavutil.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libpostproc.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libswresample.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libswscale.so* /usr/local/lib/
+COPY --from=builder /usr/local/cuda-13.0/targets/x86_64-linux/lib/libcudart.so* /usr/local/cuda-13.0/targets/x86_64-linux/lib/
+COPY --from=builder /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvjpeg.so* /usr/local/cuda-13.0/targets/x86_64-linux/lib/
 COPY --from=builder /opt/tensorrt/lib/libnvinfer.so* /opt/tensorrt/lib/
 COPY --from=builder /opt/tensorrt/lib/libnvinfer_plugin.so* /opt/tensorrt/lib/
 COPY --from=builder /build/avplumber /usr/local/bin/avplumber
+COPY ${PREBUILT_MODELS_DIR}/ /home/tensorrt/
 
 COPY neural-demo/entrypoint.sh /usr/local/bin/avp-neural-demo-entrypoint
 COPY neural-demo/templates /opt/avp-neural-demo/templates
@@ -251,6 +267,5 @@ RUN chmod +x /usr/local/bin/avp-neural-demo-entrypoint \
     && ldconfig
 
 ENV PATH=/usr/local/bin:${PATH}
-ENV AVP_MODELS_TAR_URL=https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz
 
 ENTRYPOINT ["/usr/local/bin/avp-neural-demo-entrypoint"]

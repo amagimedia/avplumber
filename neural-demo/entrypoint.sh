@@ -17,11 +17,10 @@ require_env() {
 
 require_env AVP_EXAMPLE
 require_env AVP_MODE
-require_env AVP_MODELS_TAR_URL
 
 case "${AVP_EXAMPLE}" in
-    tracker|tracker-cropped|tracker_compositor) ;;
-    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, tracker-cropped, or tracker_compositor" ;;
+    tracker|metadata|tracker-cropped|tracker_compositor) ;;
+    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, metadata, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${AVP_MODE}" in
@@ -60,45 +59,16 @@ required_models=(
     "${MODEL_ROOT}/ball_960x544.plan"
     "${MODEL_ROOT}/court-segmentation_960x544.plan"
     "${MODEL_ROOT}/basketball-players-full_960x544.plan"
+    "${MODEL_ROOT}/player-seg/player-seg_960x544.plan"
+    "${MODEL_ROOT}/pose-small/pose-small.plan"
+    "${MODEL_ROOT}/pose-small/pose-small_960x544.plan"
+    "${MODEL_ROOT}/court-pose-4/court-pose.plan"
 )
 
-have_all_models=1
 for path in "${required_models[@]}"; do
     if [[ ! -f "${path}" ]]; then
-        have_all_models=0
-        break
+        die "required baked model is missing: ${path}; rebuild the image with neural-demo/build-neural-demo-image.sh --models-onnx /path/to/models_onnx.tgz"
     fi
-done
-
-if [[ "${have_all_models}" -ne 1 ]]; then
-    tmpdir="$(mktemp -d)"
-    archive="${tmpdir}/models.tar.gz"
-    extract_dir="${tmpdir}/extract"
-    trap 'rm -rf "${tmpdir}"' EXIT
-    mkdir -p "${MODEL_ROOT}"
-    mkdir -p "${extract_dir}"
-    curl -fsSL "${AVP_MODELS_TAR_URL}" -o "${archive}" || die "failed to download model archive from ${AVP_MODELS_TAR_URL}"
-    tar -xzf "${archive}" -C "${extract_dir}" || die "failed to extract model archive"
-
-    find_model() {
-        local target="$1"
-        find "${extract_dir}" -type f -name "${target}" -print -quit
-    }
-
-    for filename in ball_960x544.plan court-segmentation_960x544.plan basketball-players-full_960x544.plan; do
-        if [[ ! -f "${MODEL_ROOT}/${filename}" ]]; then
-            source_path="$(find_model "${filename}" || true)"
-            [[ -n "${source_path}" ]] || die "required model ${filename} not found in extracted archive"
-            cp -f "${source_path}" "${MODEL_ROOT}/${filename}"
-        fi
-    done
-
-    rm -rf "${tmpdir}"
-    trap - EXIT
-fi
-
-for path in "${required_models[@]}"; do
-    [[ -f "${path}" ]] || die "required model missing after setup: ${path}"
 done
 
 mkdir -p "${RENDER_DIR}"
@@ -111,7 +81,7 @@ if [[ "${AVP_MODE}" == "vod" ]]; then
         *) die "unsupported vod output extension for AVP_OUTPUT=${AVP_OUTPUT}; expected .mp4 or .ts" ;;
     esac
 else
-    artifact_dir="/tmp/avp-sidecars"
+    artifact_dir="${AVP_ARTIFACT_DIR:-/tmp/avp-sidecars}"
     mkdir -p "${artifact_dir}"
     case "${AVP_OUTPUT}" in
         rtmp://*|rtmps://*) output_format="flv" ;;
@@ -126,6 +96,7 @@ output_stem="${output_name%.*}"
 if [[ "${output_stem}" == "${output_name}" ]]; then
     output_stem="${output_name}"
 fi
+video_label="${AVP_VIDEO_LABEL:-${AVP_INPUT##*/}}"
 
 template_path="${TEMPLATE_ROOT}/${AVP_EXAMPLE}-${AVP_MODE}.avplumber"
 [[ -f "${template_path}" ]] || die "template not found: ${template_path}"
@@ -141,12 +112,22 @@ sed \
     -e "s|__JOIN_PLAYERS_BALL_DUMP__|${artifact_dir}/${output_stem}_join_players_ball_pts.csv|g" \
     -e "s|__JOIN_INFERRED_DUMP__|${artifact_dir}/${output_stem}_join_inferred_pts.csv|g" \
     -e "s|__JOIN_1080P_TRACKED_DUMP__|${artifact_dir}/${output_stem}_join_1080p_tracked_pts.csv|g" \
+    -e "s|__METADATA_DUMP__|${artifact_dir}/${output_stem}_metadata.json|g" \
+    -e "s|__METADATA_DUMP_COURT__|${artifact_dir}/${output_stem}_metadata_court.json|g" \
+    -e "s|__METADATA_DUMP_OUTLINES__|${artifact_dir}/${output_stem}_metadata_outlines.json|g" \
+    -e "s|__METADATA_DUMP_TRAIL__|${artifact_dir}/${output_stem}_metadata_trail.json|g" \
+    -e "s|__METADATA_DUMP_EVENTS__|${artifact_dir}/${output_stem}_metadata_events.ndjson|g" \
+    -e "s|__METADATA_DUMP_POSSESSIONS__|${artifact_dir}/${output_stem}_metadata_possessions.ndjson|g" \
+    -e "s|__METADATA_DUMP_PBP__|${artifact_dir}/${output_stem}_metadata_pbp.ndjson|g" \
+    -e "s|__METADATA_DUMP_SUMMARY__|${artifact_dir}/${output_stem}_metadata_summary.json|g" \
+    -e "s|__VIDEO_LABEL__|${video_label}|g" \
     "${template_path}" > "${rendered}"
 
 echo "example=${AVP_EXAMPLE}"
 echo "mode=${AVP_MODE}"
 echo "input=${AVP_INPUT}"
 echo "output=${AVP_OUTPUT}"
+echo "artifact_dir=${artifact_dir}"
 echo "models_dir=${MODEL_ROOT}"
 echo "models_status=ready"
 

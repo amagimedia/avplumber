@@ -7,7 +7,7 @@ mode=""
 input=""
 pip_input=""
 output=""
-models_tar_url="https://tellyo-docker-dev-images.s3.eu-west-1.amazonaws.com/neural-demo-models/models.tar.gz"
+artifacts_dir=""
 default_live_output_url="http://test-streamer-s3dev.aws-dev.intranet/steam_test/test"
 dry_run=0
 docker_extra=()
@@ -21,12 +21,12 @@ usage() {
     cat <<'EOF'
 Usage:
   neural-demo/run-neural-demo.sh \
-    --example tracker|tracker-cropped|tracker_compositor \
+    --example tracker|metadata|tracker-cropped|tracker_compositor \
     --mode vod|live \
     --input PATH \
     [--output ...] \
+    [--artifacts-dir DIR] \
     [--pip-input PATH]    # required for tracker_compositor \
-    [--models-tar-url ...] \
     [--image IMAGE] \
     [--docker-extra ARG] \
     [--dry-run]
@@ -64,8 +64,8 @@ while [[ $# -gt 0 ]]; do
             output="${2:-}"
             shift 2
             ;;
-        --models-tar-url)
-            models_tar_url="${2:-}"
+        --artifacts-dir)
+            artifacts_dir="${2:-}"
             shift 2
             ;;
         --image)
@@ -93,8 +93,8 @@ done
 [[ -n "${example}" ]] || die "--example is required"
 [[ -n "${mode}" ]] || die "--mode is required"
 case "${example}" in
-    tracker|tracker-cropped|tracker_compositor) ;;
-    *) die "--example must be tracker, tracker-cropped, or tracker_compositor" ;;
+    tracker|metadata|tracker-cropped|tracker_compositor) ;;
+    *) die "--example must be tracker, metadata, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${mode}" in
@@ -160,6 +160,15 @@ else
     )
 fi
 
+if [[ -n "${artifacts_dir}" ]]; then
+    artifacts_host="$(abspath "${artifacts_dir}")"
+    mkdir -p "${artifacts_host}"
+    docker_cmd+=(
+        -v "${artifacts_host}:/run/avp/output"
+        -e "AVP_ARTIFACT_DIR=/run/avp/output"
+    )
+fi
+
 if [[ -n "${pip_input}" ]]; then
     case "${pip_input}" in
         http://*|https://*)
@@ -180,7 +189,6 @@ fi
 docker_cmd+=(
     -e "AVP_EXAMPLE=${example}"
     -e "AVP_MODE=${mode}"
-    -e "AVP_MODELS_TAR_URL=${models_tar_url}"
     "${image}"
 )
 
