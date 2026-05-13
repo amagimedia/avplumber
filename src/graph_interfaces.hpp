@@ -6,6 +6,10 @@
 #include <avcpp/formatcontext.h>
 #include "video_parameters.hpp"
 #include "audio_parameters.hpp"
+#ifdef PYTHON_MODULE
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
@@ -42,6 +46,15 @@ public:
     virtual void waitSinksEmpty() = 0;
     virtual void stopSinks() = 0;
 };
+
+
+#ifdef PYTHON_MODULE
+class IPythonNode {
+public:
+    virtual void set_python_node(py::object python_node) = 0;
+    virtual ~IPythonNode() = default;
+};
+#endif
 
 template<typename Object>
 class ILinkableTeam: public std::enable_shared_from_this<Object> {

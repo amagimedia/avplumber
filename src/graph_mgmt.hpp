@@ -9,6 +9,11 @@
 #include "graph_factory.hpp"
 #include "instance.hpp"
 
+#ifdef PYTHON_MODULE
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
+
 class NodeManager;
 
 class NodeFactory {
@@ -48,6 +53,10 @@ protected:
     Parameters params_;
     std::recursive_mutex start_stop_mutex_;
     void threadFunction();
+    #ifdef PYTHON_MODULE
+    // Keep null by default: constructing py::none() may touch refcounts on non-Python threads.
+    py::object python_node_object_ {};
+    #endif
     inline bool threadWorks() {
         return ((thread_!=nullptr) && (!finished_));
     }
@@ -114,6 +123,11 @@ public:
         return true;
     }
     void setObject(const std::string, const Parameters&);
+
+    #ifdef PYTHON_MODULE
+    // May be called from threads without the GIL if exposed beyond addNode; assignment touches py::object.
+    void setPythonNodeObject(py::object python_node_object);
+    #endif
 
     bool stopAndWait();
     void join();

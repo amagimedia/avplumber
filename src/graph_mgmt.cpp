@@ -11,6 +11,9 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#ifdef PYTHON_MODULE
+#include <pybind11/gil.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -89,13 +92,34 @@ bool NodeWrapper::start() {
 }
 
 void NodeWrapper::createNode() {
-    std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
+    std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     if (node_==nullptr) {
         auto produceObject = [&]() {
             node_ = manager_->factory_->produce(manager_, params_);
             if (node_==nullptr) {
                 throw Error("Node factory returned nullptr");
             }
+            #ifdef PYTHON_MODULE
+            // createNode() may run on avplumber worker threads (e.g. group.startNodes) with no GIL;
+            // any py::object use (is_none, set_python_node, cast, callbacks) must run under gil.
+            if (std::shared_ptr<IPythonNode> python_node =
+                    std::dynamic_pointer_cast<IPythonNode>(node_)) {
+                lock.unlock();
+                try {
+                    py::gil_scoped_acquire gil;
+                    if (python_node_object_.ptr() != nullptr && !python_node_object_.is_none()) {
+                        python_node->set_python_node(python_node_object_);
+                        python_node_object_.attr("python_node_created")(
+                            py::cast(shared_from_this()));
+                    }
+                } catch (...) {
+                    print_stack_trace();
+                    lock.lock();
+                    throw;
+                }
+                lock.lock();
+            }
+            #endif
             std::shared_ptr<IInitAfterCreate> node_init = std::dynamic_pointer_cast<IInitAfterCreate>(node_);
             if (node_init) {
                 try {
@@ -813,9 +837,24 @@ NodeGroup::~NodeGroup() {
 ///////////////////////////////////////////////////////////
 ////// NodeWrapper:
 
+#ifdef PYTHON_MODULE
+void NodeWrapper::setPythonNodeObject(py::object python_node_object) {
+    py::gil_scoped_acquire gil;
+    python_node_object_ = std::move(python_node_object);
+}
+#endif
+
 NodeWrapper::~NodeWrapper() {
     logstream << "Destroying NodeWrapper " << name_;
     stopAndWait();
+#ifdef PYTHON_MODULE
+    // Clear under GIL. Do not leave a handle to py::none() — after this block the member destructor
+    // runs without the GIL; a null py::object() has ptr()==nullptr and ~object() won't dec_ref.
+    {
+        py::gil_scoped_acquire gil;
+        python_node_object_ = py::object();
+    }
+#endif
     logstream << "Destroyed NodeWrapper " << name_;
 }
 
