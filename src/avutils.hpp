@@ -9,6 +9,7 @@
 #include <avcpp/dictionary.h>
 #include "util.hpp"
 #include "hwaccel/EglImageFrame.hpp"
+#include "metadata_frame.hpp"
 
 typedef int64_t AVTS;
 const av::Timestamp NOTS = {AV_NOPTS_VALUE, {0, 1}};
@@ -140,6 +141,7 @@ bool isEofMarker(const av::VideoFrame& f);
 bool isEofMarker(const av::AudioSamples& f);
 class EglImageFrame; // fwd
 bool isEofMarker(const EglImageFrame& f);
+bool isEofMarker(const MetadataFrame& f);
 
 av::Packet createEofPacket(int streamIndex = -1);
 
@@ -187,5 +189,16 @@ template<> struct TSGetter<EglImageFrame> {
     }
     static bool isValid(const EglImageFrame& data) {
         return data.isComplete() && data.pts().isValid();
+    }
+};
+template<> struct TSGetter<MetadataFrame> {
+    static AVTS get(const MetadataFrame& data, const AVRational time_base) {
+        return rescaleTS(data.pts(), time_base).timestamp();
+    }
+    static av::Timestamp getWithTB(const MetadataFrame& data) {
+        return data.pts();
+    }
+    static bool isValid(const MetadataFrame& data) {
+        return data.isComplete();
     }
 };

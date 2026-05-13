@@ -348,6 +348,71 @@ namespace {
             applyEntries({});
         }
     };
+
+    class MetadataFrameMetadataProxy {
+        MetadataFrame* frame_ = nullptr;
+        py::object owner_ = py::none();
+
+        Parameters* metadata() const {
+            return frame_ ? &frame_->metadata() : nullptr;
+        }
+
+    public:
+        MetadataFrameMetadataProxy() = default;
+        MetadataFrameMetadataProxy(MetadataFrame& frame, py::object owner): frame_(&frame), owner_(std::move(owner)) {}
+
+        py::object asDict() const {
+            const Parameters* md = metadata();
+            if (!md || !md->is_object()) {
+                return py::dict();
+            }
+            return py::cast(*md);
+        }
+
+        void assign(const py::dict& d) {
+            if (!frame_) {
+                return;
+            }
+            frame_->setMetadata(pyjson::to_json(d));
+        }
+
+        py::object getItem(const std::string& key) const {
+            const Parameters* md = metadata();
+            if (!md || !md->is_object() || !md->contains(key)) {
+                throw py::key_error(key);
+            }
+            return py::cast((*md)[key]);
+        }
+
+        void setItem(const std::string& key, const py::object& value) {
+            Parameters* md = metadata();
+            if (!md) {
+                return;
+            }
+            if (!md->is_object()) {
+                *md = Parameters::object();
+            }
+            (*md)[key] = pyjson::to_json(value);
+        }
+
+        void delItem(const std::string& key) {
+            Parameters* md = metadata();
+            if (!md || !md->is_object() || !md->contains(key)) {
+                throw py::key_error(key);
+            }
+            md->erase(key);
+        }
+
+        bool contains(const std::string& key) const {
+            const Parameters* md = metadata();
+            return md && md->is_object() && md->contains(key);
+        }
+
+        size_t size() const {
+            const Parameters* md = metadata();
+            return (md && md->is_object()) ? md->size() : 0;
+        }
+    };
     
     template <typename T>
     void py_registerEdge(py::module_ &m, const char *type_name) {
@@ -549,6 +614,7 @@ PYBIND11_MODULE(_avplumber, m) {
     using VideoFrameMetadataProxy = MetadataProxy<av::VideoFrame>;
     using AudioSamplesMetadataProxy = MetadataProxy<av::AudioSamples>;
     using VideoFrameSideDataProxyType = VideoFrameSideDataProxy;
+    using MetadataFrameMetadataProxyType = MetadataFrameMetadataProxy;
 
     py::class_<FrameSideData>(m, "FrameSideData")
         .def(py::init<>())
@@ -602,6 +668,19 @@ PYBIND11_MODULE(_avplumber, m) {
         .def_property_readonly("as_dict", &AudioSamplesMetadataProxy::asDict)
     ;
 
+    py::class_<MetadataFrameMetadataProxyType>(m, "MetadataFrameMetadataProxy")
+        .def("__repr__", [](const MetadataFrameMetadataProxyType& md) {
+            py::object dict_obj = md.asDict();
+            return "MetadataFrameMetadataProxy(" + py::repr(dict_obj).cast<std::string>() + ")";
+        })
+        .def("__len__", &MetadataFrameMetadataProxyType::size)
+        .def("__contains__", &MetadataFrameMetadataProxyType::contains)
+        .def("__getitem__", &MetadataFrameMetadataProxyType::getItem)
+        .def("__setitem__", &MetadataFrameMetadataProxyType::setItem)
+        .def("__delitem__", &MetadataFrameMetadataProxyType::delItem)
+        .def_property_readonly("as_dict", &MetadataFrameMetadataProxyType::asDict)
+    ;
+
     py::class_<VideoFrameSideDataProxyType>(m, "VideoFrameSideDataProxy")
         .def("__repr__", [](const VideoFrameSideDataProxyType& sd) {
             py::object list_obj = sd.asList();
@@ -628,12 +707,14 @@ PYBIND11_MODULE(_avplumber, m) {
         .def("find__AudioSamples", &EdgeManager::find<av::AudioSamples>)
         .def("find__Packet", &EdgeManager::find<av::Packet>)
         .def("find__EglImageFrame", &EdgeManager::find<EglImageFrame>)
+        .def("find__MetadataFrame", &EdgeManager::find<MetadataFrame>)
         .def("findAny", &EdgeManager::findAny)
         .def("planCapacity", &EdgeManager::planCapacity)
         .def("exists__VideoFrame", &EdgeManager::exists<av::VideoFrame>)
         .def("exists__AudioSamples", &EdgeManager::exists<av::AudioSamples>)
         .def("exists__Packet", &EdgeManager::exists<av::Packet>)
         .def("exists__EglImageFrame", &EdgeManager::exists<EglImageFrame>)
+        .def("exists__MetadataFrame", &EdgeManager::exists<MetadataFrame>)
         //.def("printEdgesStats", &EdgeManager::printEdgesStats)
         .def("edgesStatsJson", &EdgeManager::edgesStatsJson)
         .def("resetEdgesOccupancyStats", &EdgeManager::resetEdgesOccupancyStats)
@@ -644,6 +725,7 @@ PYBIND11_MODULE(_avplumber, m) {
     py_registerEdge<av::AudioSamples>(m, "Edge__AudioSamples");
     py_registerEdge<av::Packet>(m, "Edge__Packet");
     py_registerEdge<EglImageFrame>(m, "Edge__EglImageFrame");
+    py_registerEdge<MetadataFrame>(m, "Edge__MetadataFrame");
 
 
     py::class_<av::Timestamp, std::shared_ptr<av::Timestamp>>(m, "Timestamp")
@@ -666,6 +748,31 @@ PYBIND11_MODULE(_avplumber, m) {
         })
         .def_property_readonly("stream_index", [](const av::Packet &p) { return p.streamIndex(); })
         .def_property_readonly("flags", [](const av::Packet &p) { return p.flags(); })
+    ;
+
+    py::class_<MetadataFrame, std::shared_ptr<MetadataFrame>>(m, "MetadataFrame")
+        .def(py::init<>())
+        .def(py::init<av::Timestamp, Parameters>(),
+            py::arg("pts"),
+            py::arg("metadata") = Parameters::object())
+        .def(py::init([](int64_t pts, av::Rational timebase, Parameters metadata) {
+            return MetadataFrame(av::Timestamp(pts, timebase), std::move(metadata));
+        }),
+            py::arg("pts"),
+            py::arg("timebase"),
+            py::arg("metadata") = Parameters::object())
+        .def("__repr__", [](const MetadataFrame &f) {
+            return "MetadataFrame(" + std::to_string(f.pts().timestamp()) + ", " + f.metadata().dump() + ")";
+        })
+        .def_property("pts", &MetadataFrame::pts, &MetadataFrame::setPts)
+        .def_property("metadata",
+            [](MetadataFrame &f) -> MetadataFrameMetadataProxyType {
+                return MetadataFrameMetadataProxyType(f, py::cast(&f, py::return_value_policy::reference));
+            },
+            [](MetadataFrame &f, const py::dict &d) {
+                MetadataFrameMetadataProxyType(f, py::none()).assign(d);
+            })
+        .def_property_readonly("isComplete", &MetadataFrame::isComplete)
     ;
 
     py::class_<av::AudioSamples, std::shared_ptr<av::AudioSamples>>(m, "AudioSamples")
