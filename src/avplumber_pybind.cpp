@@ -13,8 +13,10 @@ extern "C" {
 #include "avplumber.hpp"
 #include "app_version.hpp"
 #include "graph_mgmt.hpp"
+#include <nlohmann/json.hpp>
 
 namespace py = pybind11;
+namespace nl = nlohmann;
 
 namespace {
 
@@ -364,8 +366,46 @@ namespace {
             .def("clear", &Edge<T>::clear)
             .def_property_readonly("occupied", [](Edge<T> &e) { return e.occupied(); })
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
-            .def("enqueue", &Edge<T>::enqueue)
+            .def("enqueue", [](Edge<T> &e, const T &elem) {
+                py::gil_scoped_release release;
+                return e.enqueue(elem);
+            })
             .def("pop", &Edge<T>::pop)
+            .def("wait_dequeue", [](Edge<T> &e) {
+                py::gil_scoped_release release;
+                T elem{};
+                e.wait_dequeue(elem);
+                return elem;
+            })
+            .def("wait_dequeue_timed_ms", [](Edge<T> &e, unsigned int msec) {
+                py::gil_scoped_release release;
+                T elem{};
+                if (!e.wait_dequeue_timed_ms(elem, msec)) {
+                    throw py::value_error("wait_dequeue_timed_ms: timeout or empty");
+                }
+                return elem;
+            })
+            // Python-friendly aliases (Edge has no get/tryGet; map to dequeue APIs)
+            .def("get", [](Edge<T> &e, int timeout_ms) {
+                py::gil_scoped_release release;
+                T elem{};
+                if (timeout_ms < 0) {
+                    e.wait_dequeue(elem);
+                    return elem;
+                }
+                if (!e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms))) {
+                    throw py::value_error("get: timeout");
+                }
+                return elem;
+            }, py::arg("timeout_ms") = -1)
+            .def("tryGet", [](Edge<T> &e, int timeout_ms) -> py::object {
+                py::gil_scoped_release release;
+                T elem{};
+                if (!e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)))) {
+                    return py::none();
+                }
+                return py::cast(elem);
+            }, py::arg("timeout_ms") = 0)
             .def("peek", &Edge<T>::peek, py::return_value_policy::reference)
             .def("wait_peek", &Edge<T>::wait_peek, py::arg("timeout_ms") = -1, py::return_value_policy::reference)
         ;
@@ -397,13 +437,34 @@ PYBIND11_MODULE(_avplumber, m) {
 
     py::class_<NodeManager, std::shared_ptr<NodeManager>>(m, "NodeManager")
         .def(py::init<>())
+        .def("addNode", [](NodeManager &nm, py::dict &parameters, bool early_create=false, bool start=false, py::object node_obj=py::none()) {
+            Parameters json_parameters = pyjson::to_json(parameters);
+            if (node_obj.is_none()) {
+                return nm.createNode(json_parameters, early_create, start);
+            }
+            auto result = nm.createNode(json_parameters, false, false);
+            result->setPythonNodeObject(node_obj);
+            if (early_create) {
+                result->createNode();
+            }
+            if (start) {
+                result->start();
+            }
+            return result;
+        })
         .def("deleteNode", &NodeManager::deleteNode)
         .def("node", &NodeManager::node, py::arg("name"))
         .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
         .def("nodes", &NodeManager::nodes, py::arg("type"))
         .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
         .def("group", &NodeManager::group, py::arg("name"))
-        .def_property_readonly("allNodes", [](NodeManager &nm) { return nm.allNodes(); })
+        .def_property_readonly("allNodes", [](NodeManager &nm) {
+            py::dict out;
+            for (auto &node: nm.allNodes()) {
+                out[node.first.c_str()] = node.second;
+            }
+            return out;
+        })
     ;
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
@@ -431,6 +492,11 @@ PYBIND11_MODULE(_avplumber, m) {
         })
         .def_property_readonly("parameters", &NodeWrapper::parameters)
         .def("getObject", &NodeWrapper::getObject)
+        .def("start", &NodeWrapper::start)
+        .def("stop", &NodeWrapper::stop)
+        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false)
+        .def("stopAndWait", &NodeWrapper::stopAndWait)
+        .def("join", &NodeWrapper::join)
         .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
     ;
 
@@ -659,7 +725,9 @@ PYBIND11_MODULE(_avplumber, m) {
             return "PixelFormat(" + std::string(pf.name()) + ", " + std::to_string(pf.bitsPerPixel()) + "bpp, " + std::to_string(pf.planesCount()) + "planes)";
         })
         .def_property_readonly("value", [&](const av::PixelFormat &pf) { return static_cast<int>(pf); })
-        .def_property_readonly("name", &av::PixelFormat::name)
+        .def_property_readonly("name", [&](const av::PixelFormat &pf) -> std::string {
+            return std::string(pf.name());
+        })
         .def_property_readonly("bitsPerPixel", &av::PixelFormat::bitsPerPixel)
         .def_property_readonly("planesCount", &av::PixelFormat::planesCount)
     ;

@@ -34,8 +34,7 @@ endif
 
 override CXXFLAGS += -g -rdynamic -fPIC -std=c++17 -Ideps/include -I/usr/local/include -Ideps/cpr/build/cpr_generated_includes $(OPTIMIZATION_FLAGS)
 override LFLAGS += -L/usr/local/lib -Wl,-rpath,/usr/local/lib $(OPTIMIZATION_FLAGS)
-# Used only for objs/src/avplumber_pybind.o and linking $(PYTHON_MODULE) (not for avplumber/static_library/cpr/avcpp).
-PYTHON_MODULE_EXTRA_CXXFLAGS = -Ideps/pybind11/include -Ideps/pybind11_json/include $(shell python3-config --includes)
+PYTHON_MODULE_EXTRA_CXXFLAGS = -Ideps/json/single_include -Ideps/pybind11/include -Ideps/pybind11_json/include $(shell python3-config --includes) -fvisibility=hidden
 PYTHON_MODULE_EXTRA_LFLAGS = $(shell python3-config --ldflags)
 PKG_CONFIG_PATH := /usr/local/lib/pkgconfig$(if PKG_CONFIG_PATH,:)$(PKG_CONFIG_PATH)
 
@@ -44,6 +43,11 @@ BUILD_DATE_FILE = builddate.h
 SRCDIR = src
 
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
+PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp')
+# Python node sources are needed in the node list/factories only for the python_module goal.
+ifneq ($(filter python_module,$(MAKECMDGOALS)),)
+NODES_SRC += $(PYTHON_NODE_SRCS)
+endif
 ifeq ($(NEURAL_NET_SPECIFIC),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
@@ -153,7 +157,6 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 override CPPSRC += cuda.cpp
 override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
-override LIBS_FLAGS += -lcudart -lnvjpeg
 endif
 
 ifeq ($(NEURAL_NET_COMMON),1)
@@ -211,7 +214,7 @@ PYTHON_EXT_SUFFIX := $(shell python3-config --extension-suffix 2>/dev/null)
 # Must match PYBIND11_MODULE name in src/avplumber_pybind.cpp (avplumber.py imports _avplumber).
 PYTHON_MODULE := _avplumber$(PYTHON_EXT_SUFFIX)
 # Build python-specific variants for translation units that depend on PYTHON_MODULE.
-PYTHON_MODULE_DEFINE_SRCS = src/avplumber.cpp src/graph_mgmt.cpp
+PYTHON_MODULE_DEFINE_SRCS = src/avplumber.cpp src/graph_mgmt.cpp $(PYTHON_NODE_SRCS)
 PYTHON_MODULE_DEFINE_OBJS = $(patsubst src/%.cpp,objs/python/src/%.o,$(PYTHON_MODULE_DEFINE_SRCS))
 PYTHON_MODULE_COMMON_OBJS = $(filter-out $(patsubst %.cpp,objs/%.o,$(PYTHON_MODULE_DEFINE_SRCS)),$(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)))
 PYTHON_MODULE_OBJS = $(PYTHON_MODULE_COMMON_OBJS) $(PYTHON_MODULE_DEFINE_OBJS) objs/src/app_version.o $(patsubst %.cpp,objs/%.o,$(CPPSRC_PYTHON))
@@ -232,7 +235,7 @@ $(BUILD_DATE_FILE): builddate
 
 $(patsubst %.cpp,objs/%.o,$(CPPSRC_PYTHON)): objs/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE $(DEPFLAGS) -c -o $@ $<
 	$(POSTCOMPILE)
 
 $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
@@ -242,7 +245,7 @@ $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 
 $(PYTHON_MODULE_DEFINE_OBJS): objs/python/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -DPYTHON_MODULE -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE -c -o $@ $<
 
 objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	@mkdir -p $(dir $@)
@@ -263,7 +266,7 @@ $(STATIC_LIBRARY): $(patsubst %.cpp,objs/%.o,$(CPPSRC_LIB)) objs/src/app_version
 
 static_library: $(STATIC_LIBRARY)
 
-$(PYTHON_MODULE): $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(PTX_H)
+$(PYTHON_MODULE): $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(ALL_PTX_H)
 	$(CXX) $(CXXFLAGS) $(LFLAGS) $(PYTHON_MODULE_EXTRA_LFLAGS) -shared -o $@ $(PYTHON_MODULE_OBJS) $(DEPS_LIBS) $(LIBS_FLAGS)
 
 python_module: $(PYTHON_MODULE)
