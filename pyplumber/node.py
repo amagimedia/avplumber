@@ -195,6 +195,10 @@ class RescaleVideo(InternalNode):
     TYPE = "rescale_video"
 
 
+class ResampleAudio(InternalNode):
+    TYPE = "resample_audio"
+
+
 class FilterVideo(InternalNode):
     TYPE = "filter_video"
 
@@ -243,6 +247,10 @@ class SmoothCropViewport(InternalNode):
     TYPE = "smooth_crop_viewport"
 
 
+class CropMetadataCuda(InternalNode):
+    TYPE = "crop_metadata_cuda"
+
+
 class AssumeVideoFormat(InternalNode):
     TYPE = "assume_video_format"
 
@@ -253,6 +261,10 @@ class EncVideo(InternalNode):
 
 class Mux(InternalNode):
     TYPE = "mux"
+
+
+class NullSink(InternalNode):
+    TYPE = "null_sink"
 
 
 class Output(InternalNode):
