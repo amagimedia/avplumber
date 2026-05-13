@@ -2,12 +2,14 @@
 #include <pybind11/gil.h>
 #include <pybind11_json/pybind11_json.hpp>
 #include <pybind11/native_enum.h>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include "avplumber.hpp"
@@ -366,9 +368,93 @@ namespace {
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
             .def("enqueue", &Edge<T>::enqueue)
             .def("pop", &Edge<T>::pop)
+            .def("wait_dequeue", [](Edge<T> &e) {
+                T elem{};
+                {
+                    py::gil_scoped_release release;
+                    e.wait_dequeue(elem);
+                }
+                return elem;
+            })
+            .def("wait_dequeue_timed_ms", [](Edge<T> &e, unsigned int msec) {
+                T elem{};
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, msec);
+                }
+                if (!ok) {
+                    throw py::value_error("wait_dequeue_timed_ms: timeout or empty");
+                }
+                return elem;
+            })
+            .def("get", [](Edge<T> &e, int timeout_ms) {
+                T elem{};
+                bool ok = true;
+                if (timeout_ms < 0) {
+                    py::gil_scoped_release release;
+                    e.wait_dequeue(elem);
+                } else {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms));
+                }
+                if (!ok) {
+                    throw py::value_error("get: timeout");
+                }
+                return elem;
+            }, py::arg("timeout_ms") = -1)
+            .def("tryGet", [](Edge<T> &e, int timeout_ms) -> py::object {
+                T elem{};
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)));
+                }
+                if (!ok) {
+                    return py::none();
+                }
+                return py::cast(elem);
+            }, py::arg("timeout_ms") = 0)
             .def("peek", &Edge<T>::peek, py::return_value_policy::reference)
             .def("wait_peek", &Edge<T>::wait_peek, py::arg("timeout_ms") = -1, py::return_value_policy::reference)
         ;
+    }
+
+    static int audioPlaneCount(const av::AudioSamples& s) {
+        if (!s.raw() || s.samplesCount() <= 0 || s.channelsCount() <= 0) {
+            return 0;
+        }
+        return s.isPlanar() ? s.channelsCount() : 1;
+    }
+
+    static const uint8_t* audioPlaneData(const av::AudioSamples& s, int plane) {
+        const AVFrame* raw = s.raw();
+        if (!raw || plane < 0 || plane >= audioPlaneCount(s)) {
+            return nullptr;
+        }
+        if (raw->extended_data && raw->extended_data[plane]) {
+            return raw->extended_data[plane];
+        }
+        return plane < AV_NUM_DATA_POINTERS ? raw->data[plane] : nullptr;
+    }
+
+    static size_t audioPlaneSize(const av::AudioSamples& s) {
+        const AVFrame* raw = s.raw();
+        if (!raw || s.samplesCount() <= 0 || s.channelsCount() <= 0) {
+            return 0;
+        }
+        if (raw->linesize[0] > 0) {
+            return static_cast<size_t>(raw->linesize[0]);
+        }
+        const int channels = s.isPlanar() ? 1 : s.channelsCount();
+        int line_size = 0;
+        const int size = av_samples_get_buffer_size(
+            &line_size,
+            channels,
+            s.samplesCount(),
+            static_cast<AVSampleFormat>(raw->format),
+            1);
+        return size > 0 ? static_cast<size_t>(size) : 0;
     }
     
 }  // namespace
@@ -397,13 +483,34 @@ PYBIND11_MODULE(_avplumber, m) {
 
     py::class_<NodeManager, std::shared_ptr<NodeManager>>(m, "NodeManager")
         .def(py::init<>())
+        .def("addNode", [](NodeManager &nm, py::dict &parameters, bool early_create=false, bool start=false, py::object node_obj=py::none()) {
+            Parameters json_parameters = pyjson::to_json(parameters);
+            if (node_obj.is_none()) {
+                return nm.createNode(json_parameters, early_create, start);
+            }
+            auto result = nm.createNode(json_parameters, false, false);
+            result->setPythonNodeObject(node_obj);
+            if (early_create) {
+                result->createNode();
+            }
+            if (start) {
+                result->start();
+            }
+            return result;
+        })
         .def("deleteNode", &NodeManager::deleteNode)
         .def("node", &NodeManager::node, py::arg("name"))
         .def("node_if_exists", &NodeManager::node_if_exists, py::arg("name"))
         .def("nodes", &NodeManager::nodes, py::arg("type"))
         .def_property_readonly("edges", [](NodeManager &nm) { return nm.edges(); })
         .def("group", &NodeManager::group, py::arg("name"))
-        .def_property_readonly("allNodes", [](NodeManager &nm) { return nm.allNodes(); })
+        .def_property_readonly("allNodes", [](NodeManager &nm) {
+            py::dict out;
+            for (auto &node: nm.allNodes()) {
+                out[node.first.c_str()] = node.second;
+            }
+            return out;
+        })
     ;
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
@@ -431,6 +538,11 @@ PYBIND11_MODULE(_avplumber, m) {
         })
         .def_property_readonly("parameters", &NodeWrapper::parameters)
         .def("getObject", &NodeWrapper::getObject)
+        .def("start", &NodeWrapper::start)
+        .def("stop", &NodeWrapper::stop)
+        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false)
+        .def("stopAndWait", &NodeWrapper::stopAndWait)
+        .def("join", &NodeWrapper::join)
         .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
     ;
 
@@ -561,6 +673,43 @@ PYBIND11_MODULE(_avplumber, m) {
         .def_property_readonly("pts", &av::AudioSamples::pts)
         .def_property_readonly("samplesCount", &av::AudioSamples::samplesCount)
         .def_property_readonly("sampleRate", &av::AudioSamples::sampleRate)
+        .def_property_readonly("channelsCount", &av::AudioSamples::channelsCount)
+        .def_property_readonly("channelsLayout", &av::AudioSamples::channelsLayout)
+        .def_property_readonly("channelsLayoutString", &av::AudioSamples::channelsLayoutString)
+        .def_property_readonly("isPlanar", &av::AudioSamples::isPlanar)
+        .def_property_readonly("sampleFormat", [](const av::AudioSamples& s) {
+            return static_cast<int>(s.sampleFormat().get());
+        })
+        .def_property_readonly("sampleFormatName", [](const av::AudioSamples& s) {
+            const char* name = av_get_sample_fmt_name(static_cast<AVSampleFormat>(s.sampleFormat().get()));
+            return std::string(name ? name : "unknown");
+        })
+        .def_property_readonly("planeSize", [](const av::AudioSamples& s) {
+            return audioPlaneSize(s);
+        })
+        .def_property_readonly("data_ptr", [](const av::AudioSamples& s) {
+            py::list out;
+            const int planes = audioPlaneCount(s);
+            for (int i = 0; i < planes; ++i) {
+                const uint8_t* ptr = audioPlaneData(s, i);
+                out.append(py::int_(ptr ? reinterpret_cast<uintptr_t>(ptr) : uintptr_t(0)));
+            }
+            return out;
+        })
+        .def_property_readonly("data", [](const av::AudioSamples& s) {
+            py::list out;
+            const int planes = audioPlaneCount(s);
+            const size_t plane_size = audioPlaneSize(s);
+            for (int i = 0; i < planes; ++i) {
+                const uint8_t* ptr = audioPlaneData(s, i);
+                if (!ptr || plane_size == 0) {
+                    out.append(py::bytes());
+                } else {
+                    out.append(py::bytes(reinterpret_cast<const char*>(ptr), plane_size));
+                }
+            }
+            return out;
+        })
         .def_property("metadata",
             [](av::AudioSamples &s) -> AudioSamplesMetadataProxy {
                 return AudioSamplesMetadataProxy(s, py::cast(&s, py::return_value_policy::reference));
@@ -659,7 +808,9 @@ PYBIND11_MODULE(_avplumber, m) {
             return "PixelFormat(" + std::string(pf.name()) + ", " + std::to_string(pf.bitsPerPixel()) + "bpp, " + std::to_string(pf.planesCount()) + "planes)";
         })
         .def_property_readonly("value", [&](const av::PixelFormat &pf) { return static_cast<int>(pf); })
-        .def_property_readonly("name", &av::PixelFormat::name)
+        .def_property_readonly("name", [&](const av::PixelFormat &pf) -> std::string {
+            return std::string(pf.name());
+        })
         .def_property_readonly("bitsPerPixel", &av::PixelFormat::bitsPerPixel)
         .def_property_readonly("planesCount", &av::PixelFormat::planesCount)
     ;

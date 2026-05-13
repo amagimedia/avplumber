@@ -1,27 +1,82 @@
 import threading
 
-from .core import AVPlumber
-
 class NodeBase():
-    def __init__(self, avplumber: AVPlumber, args: dict):
-        self._avplumber = avplumber
+    def __init__(self, args: dict):
+        self._avplumber = None
         self._args = args
+        self._wrapper = None
+
+    def _avplumber_initialized(self):
+        pass
 
     def process(self):
         pass
 
     def start(self):
-        pass
+        assert self._wrapper is not None, "Node not added to manager"
+        self._wrapper.start()
 
     def stop(self):
-        pass
+        assert self._wrapper is not None, "Node not added to manager"
+        self._wrapper.stop()
+
+    def doStart(self):
+        assert False, "doStart() must be implemented in subclass"
+
+    def doStop(self):
+        assert False, "doStop() must be implemented in subclass"
+
+    @property
+    def parameters(self):
+        return self._args
+
+    def add_to_avplumber(self, avplumber: 'AVPlumber'):
+        self._avplumber = avplumber
+        self._avplumber_initialized()
 
 
 class PythonNode(NodeBase):
-    def __init__(self, avplumber: AVPlumber, args: dict):
-        super().__init__(avplumber, args)
-        self.__thread = threading.Thread(target=self.__thread_function)
+    TYPE = "python_node"
+
+    def __init__(self, args: dict):
+        src_edges = args.get("src")
+        no_inputs = src_edges is None
+        single_input = isinstance(src_edges, str)
+        multi_input = isinstance(src_edges, list)
+        dst_edges = args.get("dst")
+        no_outputs = dst_edges is None
+        single_output = isinstance(dst_edges, str)
+        multi_output = isinstance(dst_edges, list)
+
+        if single_input and single_output:
+            self.TYPE = "python_node_siso"
+        elif single_input and multi_output:
+            self.TYPE = "python_node_simo"
+        elif multi_input and single_output:
+            self.TYPE = "python_node_miso"
+        elif multi_input and multi_output:
+            self.TYPE = "python_node_mimo"
+        elif no_inputs and single_output:
+            self.TYPE = "python_node_so"
+        elif no_inputs and multi_output:
+            self.TYPE = "python_node_mo"
+        elif single_input and no_outputs:
+            self.TYPE = "python_node_si"
+        elif multi_input and no_outputs:
+            self.TYPE = "python_node_mi"
+        else:
+            raise ValueError(f"Invalid number of source or destination edges: {src_edges} / {dst_edges}")
+
+        params = args | { "type": self.TYPE }
+        super().__init__(params)
+        self.__thread = None
+        self.__thread_name = f"[{self.__class__.__name__}] {args.get('name', id(self))}"
         self.__running = False
+        self._wrapper = None
+
+    def python_node_created(self, wrapper):
+        print("""Called from C++ when the NodeWrapper exists; required by the pybind addNode path.""")
+        self._wrapper = wrapper
 
     def __thread_function(self):
         while self.__running:
@@ -30,29 +85,153 @@ class PythonNode(NodeBase):
     def process(self):
         raise NotImplementedError("process() must be implemented in subclass")
 
-    def start(self):
+    def doStart(self):
+        if self.__thread is not None and self.__thread.is_alive():
+            return
         self.__running = True
+        self.__thread = threading.Thread(target=self.__thread_function, name=self.__thread_name)
         self.__thread.start()
 
-    def stop(self):
+    def doStop(self):
         self.__running = False
-        self.__thread.join()
+        if self.__thread is not None and self.__thread.is_alive() and threading.current_thread() is not self.__thread:
+            self.__thread.join()
+
+    def _avplumber_initialized(self):
+        super()._avplumber_initialized()
+        src_edges = self.parameters.get("src", [])
+        if isinstance(src_edges, str):
+            self._src = self._avplumber.getEdge(src_edges)
+            assert self._src is not None, f"Source edge {src_edges} not found"
+        else:
+            self._src = {}
+            for src_edge in src_edges:
+                self._src[src_edge] = self._avplumber.getEdge(src_edge)
+                assert self._src[src_edge] is not None, f"Source edge {src_edge} not found"
+
+        dst_edges = self.parameters.get("dst", [])
+        if isinstance(dst_edges, str):
+            self._dst = self._avplumber.getEdge(dst_edges)
+            assert self._dst is not None, f"Destination edge {dst_edges} not found"
+        else:
+            self._dst = {}
+            for dst_edge in dst_edges:
+                self._dst[dst_edge] = self._avplumber.getEdge(dst_edge)
+                assert self._dst[dst_edge] is not None, f"Destination edge {dst_edge} not found"
 
 
-class PythonNodeSingleOutput(PythonNode):
-    def __init__(self, avplumber: AVPlumber, args: dict):
-        super().__init__(avplumber, args)
-        self._dst = avplumber.getEdge(args["dst"])
-        assert self._dst is not None, "Destination edge not found"
+class InternalNode(NodeBase):
+    def __init__(self, parameters: dict, *args, **kwargs):
+        params = parameters | kwargs | { "type": self.TYPE }
+        super().__init__(params)
 
 
-class PythonNodeSingleInput(PythonNode):
-    def __init__(self, avplumber: AVPlumber, args: dict):
-        super().__init__(avplumber, args)
-        self._src = avplumber.getEdge(args["src"])
-        assert self._src is not None, "Source edge not found"
+class InputRec(InternalNode):
+    TYPE = "input_rec"
 
 
-class PythonNodeSISO(PythonNodeSingleInput, PythonNodeSingleOutput):
-    def __init__(self, avplumber: AVPlumber, args: dict):
-        super().__init__(avplumber, args)
+class Demux(InternalNode):
+    TYPE = "demux"
+
+
+class DecVideo(InternalNode):
+    TYPE = "dec_video"
+
+
+class DecAudio(InternalNode):
+    TYPE = "dec_audio"
+
+
+class SpeedAudio(InternalNode):
+    TYPE = "speed_audio"
+
+
+class SpeedVideo(InternalNode):
+    TYPE = "speed_video"
+
+
+class ForceFPS(InternalNode):
+    TYPE = "force_fps"
+
+
+class Pause(InternalNode):
+    TYPE = "pause"
+
+
+PauseAudio = Pause
+
+
+class RealtimeVideoFrame(InternalNode):
+    TYPE = "realtime<av::VideoFrame>"
+
+
+class Realtime(InternalNode):
+    TYPE = "realtime"
+
+
+class RescaleVideo(InternalNode):
+    TYPE = "rescale_video"
+
+
+class FilterVideo(InternalNode):
+    TYPE = "filter_video"
+
+
+class Split(InternalNode):
+    TYPE = "split"
+
+
+class CudaInferYolo(InternalNode):
+    TYPE = "cuda_infer_yolo"
+
+
+class JoinMetadata(InternalNode):
+    TYPE = "join_metadata"
+
+
+class ShotClassifier(InternalNode):
+    TYPE = "shot_classifier"
+
+
+class PlayerTracker(InternalNode):
+    TYPE = "player_tracker"
+
+
+class BallTracker(InternalNode):
+    TYPE = "ball_tracker"
+
+
+class BallHandler(InternalNode):
+    TYPE = "ball_handler"
+
+
+class DrawTrail(InternalNode):
+    TYPE = "draw_trail"
+
+
+class DrawBBox(InternalNode):
+    TYPE = "draw_bbox"
+
+
+class DrawBBoxLabels(InternalNode):
+    TYPE = "draw_bbox_labels"
+
+
+class SmoothCropViewport(InternalNode):
+    TYPE = "smooth_crop_viewport"
+
+
+class AssumeVideoFormat(InternalNode):
+    TYPE = "assume_video_format"
+
+
+class EncVideo(InternalNode):
+    TYPE = "enc_video"
+
+
+class Mux(InternalNode):
+    TYPE = "mux"
+
+
+class Output(InternalNode):
+    TYPE = "output"
