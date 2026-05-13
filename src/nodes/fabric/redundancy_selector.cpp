@@ -45,7 +45,7 @@ class RedundancySelector: public NodeMultiInput<FabricPacket>,
     uint32_t anchor_replica_id_ = 1;
     uint32_t active_replica_id_ = 1;
     uint32_t standby_replica_id_ = 2;
-    AlignmentMode alignment_mode_ = AlignmentMode::WallclockOffset;
+    AlignmentMode alignment_mode_ = AlignmentMode::StrictFrameIdentity;
     int alignment_window_frames_ = 50;
     int alignment_required_frames_ = 10;
     int64_t max_wallclock_delta_ns_ = 120000000;
@@ -94,7 +94,7 @@ public:
         standby_replica_id_ = params.value("standby_replica_id", standby_replica_id_);
         alignment_window_frames_ = params.value("alignment_window_frames", alignment_window_frames_);
         alignment_required_frames_ = params.value("alignment_required_frames", alignment_required_frames_);
-        const std::string alignment_mode = params.value("alignment_mode", std::string("wallclock_offset"));
+        const std::string alignment_mode = params.value("alignment_mode", std::string("strict_frame_identity"));
         if (alignment_mode == "wallclock_offset" || alignment_mode == "wallclock") {
             alignment_mode_ = AlignmentMode::WallclockOffset;
         } else if (alignment_mode == "strict_frame_identity" || alignment_mode == "strict") {
@@ -224,7 +224,7 @@ private:
             FabricPacket pkt = *queued;
             source_edges_[idx]->pop();
             if (!pkt.complete || pkt.message_type != avp_fabric::MSG_MEDIA) continue;
-            this->sink_->put(normalizePacket(pkt, pkt.raw_pts));
+            this->sink_->put(transparentPacket(pkt));
             emitted_++;
             return;
         }
@@ -388,13 +388,13 @@ private:
         Slot &slot = it->second;
         auto active = slot.by_replica.find(anchor_replica_id_);
         if (active != slot.by_replica.end()) {
-            selected = normalizePacket(active->second, next_emit_id_);
+            selected = transparentPacket(active->second);
             finish(it);
             return true;
         }
         auto standby = slot.by_replica.find(standby_replica_id_);
         if (standby != slot.by_replica.end()) {
-            selected = normalizePacket(standby->second, next_emit_id_);
+            selected = transparentPacket(standby->second);
             logStandbySelected(*standby, next_emit_id_, false);
             finish(it);
             return true;
@@ -423,13 +423,13 @@ private:
         Slot &slot = it->second;
         auto active = slot.by_replica.find(anchor_replica_id_);
         if (active != slot.by_replica.end()) {
-            selected = normalizePacket(active->second, next_emit_id_);
+            selected = transparentPacket(active->second);
             finish(it);
             return true;
         }
         auto standby = slot.by_replica.find(standby_replica_id_);
         if (standby != slot.by_replica.end()) {
-            selected = normalizePacket(standby->second, next_emit_id_);
+            selected = transparentPacket(standby->second);
             logStandbySelected(*standby, next_emit_id_, true);
             finish(it);
             return true;
@@ -449,11 +449,8 @@ private:
         standby_selected_++;
     }
 
-    FabricPacket normalizePacket(const FabricPacket &fp, int64_t normalized_id) {
+    FabricPacket transparentPacket(const FabricPacket &fp) {
         FabricPacket out = fp;
-        const int64_t delta = normalized_id - fp.raw_pts;
-        out.raw_pts = normalized_id;
-        out.raw_dts = fp.raw_dts != AV_NOPTS_VALUE ? fp.raw_dts + delta : normalized_id;
         applyPacketTiming(out);
         return out;
     }
@@ -477,9 +474,8 @@ private:
         out.real_pixel_format = candidate.media.real_pixel_format;
         out.sender_wallclock_ns = candidate.media.sender_wallclock_ns;
         out.receiver_wallclock_ns = avp_fabric::monotonicNs();
-        out.raw_pts = candidate.normalized_frame_id;
-        const int64_t delta = candidate.normalized_frame_id - candidate.media.pts;
-        out.raw_dts = candidate.media.dts != AV_NOPTS_VALUE ? candidate.media.dts + delta : candidate.normalized_frame_id;
+        out.raw_pts = candidate.media.pts;
+        out.raw_dts = candidate.media.dts;
         out.packet = av::Packet(candidate.payload);
         out.complete = true;
         applyPacketTiming(out);
