@@ -55,6 +55,7 @@ Environment variables
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -89,6 +90,7 @@ from pyplumber.node import (
     SmoothCropViewport,
     SmoothTimestamps,
     Split,
+    PythonNode,
 )
 from pyplumber.mixer import MixerGraphBuilder
 from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
@@ -115,6 +117,7 @@ FACE_MODEL_CONTENT_H = 540
 # Face tracking metadata key names (must match smooth_crop_viewport / crop_metadata_cuda).
 FACE_METADATA_KEY = "yolo_faces"
 VIEWPORT_METADATA_KEY = "smoothed_crop_viewport_v1"
+STATIC_VIEWPORT_METADATA_KEY = "static_crop_viewport_v1"
 
 # 9:16 portrait crop from a 1920x1080 frame (608 is the closest even number to
 # 1080 * 9/16 = 607.5, giving a <0.1 % aspect-ratio rounding error when scaled).
@@ -137,6 +140,7 @@ RENE_REQUIRED_LEAD_DB = 3.0
 
 SERGIO_INPUT_NAME = "sergio"
 RENE_INPUT_NAME = "rene"
+GENARO_INPUT_NAME = "genaro"
 
 def input_basename(url: str) -> str:
     """Return a lowercase input basename for both URL and local path inputs."""
@@ -149,6 +153,26 @@ def find_named_input(inputs: list[str], name: str) -> int | None:
         if name in input_basename(url):
             return i
     return None
+
+
+class StaticViewportMetadataNode(PythonNode):
+    """Attach fixed crop dimensions so CropMetadataCuda uses its center fallback."""
+
+    def __init__(self, args: dict):
+        super().__init__({"data_type": "VideoFrame"} | args)
+        p = self.parameters
+        self.metadata_key = str(p["metadata_key"])
+        self._metadata_json = json.dumps({
+            "viewport_dst_width": int(p["viewport_dst_width"]),
+            "viewport_dst_height": int(p["viewport_dst_height"]),
+        }, sort_keys=True)
+
+    def process(self):
+        frame = self._src.get()
+        if frame is None:
+            return
+        frame.metadata[self.metadata_key] = self._metadata_json
+        self._dst.enqueue(frame)
 
 # Visual speech metadata key names (per-input, so no collisions on the same frame).
 VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
@@ -197,6 +221,7 @@ def build_input_subgraph(
     silero_repo: str = "snakers4/silero-vad",
     silero_device: str = "cpu",
     silero_threshold: float = 0.5,
+    static_face_crop: bool = False,
 ) -> dict:
     """Build decode + face-detection + audio chain for one input.
 
@@ -351,7 +376,7 @@ def build_input_subgraph(
     }))
     # Smooth timestamps on the orig leg so the OTM always receives a well-formed
     # monotonic PTS sequence regardless of any irregularities introduced by the
-    # face-detection chain (JoinMetadata frame-drops, SmoothCropViewport holds, …).
+    # face-detection chain (JoinMetadata frame-drops, SmoothCropViewport holds, ...).
     avp.addNode(SmoothTimestamps({
         "name": f"smooth_ts_orig_{idx}",
         "src": f"v{idx}_orig_raw",
@@ -360,16 +385,39 @@ def build_input_subgraph(
         "group": g,
         "auto_restart": "group",
     }))
-    # ---- Face crop: 1920x1080 → 608x1080 portrait ----
-    avp.addNode(CropMetadataCuda({
-        "name": f"face_crop_{idx}",
-        "src": f"v{idx}_for_crop",
-        "dst": f"v{idx}_face_916_raw",
-        "metadata_key": VIEWPORT_METADATA_KEY,
-        "offset_log_path": "/dev/null",
-        "group": g,
-        "auto_restart": "group",
-    }))
+    if static_face_crop:
+        # For this input, keep the tracker-side graph shape but ignore the
+        # tracked viewport when producing the portrait source.
+        avp.addNode(StaticViewportMetadataNode({
+            "name": f"static_vp_{idx}",
+            "src": f"v{idx}_for_crop",
+            "dst": f"v{idx}_static_vp",
+            "metadata_key": STATIC_VIEWPORT_METADATA_KEY,
+            "viewport_dst_width": FACE_CROP_W,
+            "viewport_dst_height": FACE_CROP_H,
+            "group": g,
+            "auto_restart": "group",
+        }))
+        avp.addNode(CropMetadataCuda({
+            "name": f"face_crop_{idx}",
+            "src": f"v{idx}_static_vp",
+            "dst": f"v{idx}_face_916_raw",
+            "metadata_key": STATIC_VIEWPORT_METADATA_KEY,
+            "offset_log_path": "/dev/null",
+            "group": g,
+            "auto_restart": "group",
+        }))
+    else:
+        # ---- Face crop: 1920x1080 -> 608x1080 portrait ----
+        avp.addNode(CropMetadataCuda({
+            "name": f"face_crop_{idx}",
+            "src": f"v{idx}_for_crop",
+            "dst": f"v{idx}_face_916_raw",
+            "metadata_key": VIEWPORT_METADATA_KEY,
+            "offset_log_path": "/dev/null",
+            "group": g,
+            "auto_restart": "group",
+        }))
     # Same smoothing on the face-crop leg.
     avp.addNode(SmoothTimestamps({
         "name": f"smooth_ts_face_{idx}",
@@ -867,6 +915,7 @@ def main() -> None:
         parser.error("At least 2 inputs are required.")
     sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
     rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
+    genaro_input_index = find_named_input(args.inputs, GENARO_INPUT_NAME)
 
     avp = AVPlumber()
     avp.setLogFile(args.logfile)
@@ -889,6 +938,7 @@ def main() -> None:
             silero_repo=args.silero_repo,
             silero_device=args.silero_device,
             silero_threshold=args.silero_threshold,
+            static_face_crop=(i == genaro_input_index),
         )
         subgraphs.append(sg)
 
@@ -999,6 +1049,8 @@ def main() -> None:
         print(f"[auto_mixer] Sergio input detected: {sergio_input_index} ({input_basename(args.inputs[sergio_input_index])})")
     if rene_input_index is not None:
         print(f"[auto_mixer] Rene input detected: {rene_input_index} ({input_basename(args.inputs[rene_input_index])})")
+    if genaro_input_index is not None:
+        print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - static centered 9:16 crop")
     print(f"[auto_mixer] Scenes: {mx.scenes()}")
 
     # ---- Auto-switcher ----
