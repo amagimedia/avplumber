@@ -35,15 +35,21 @@ Usage
         --output rtmp://host/out \\
         --face-engine /opt/tly/engines/yolo_face.plan \\
         [--codec h264_nvenc] \\
+        [--input-start-ts 00:10] \\
         [--silero-model /opt/tly/models/silero_vad.jit] \\
         [--silero-device cpu] \\
-        [--remote-control-port 7777]
+        [--remote-control-port 7777] \\
+        [--logfile /tmp/auto_mixer.log] \\
+        [--webui-api http://localhost:22222] \\
+        [--instance-name auto-mixer]
 
 Environment variables
 ---------------------
     AVP_FACE_ENGINE      default face TRT engine path (overridden by --face-engine)
     AVP_SILERO_MODEL     Silero VAD .jit model path (optional; downloads from hub if unset)
     AVP_SILERO_REPO      torch.hub repo for Silero (default: snakers4/silero-vad)
+    AVPLUMBER_UI_HEARTBEAT_INTERVAL
+                         Web UI heartbeat interval in seconds
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, ".")
 
@@ -69,12 +76,12 @@ from pyplumber.node import (
     Demux,
     EncAudio,
     EncVideo,
-    FilterAudio,
     FilterVideo,
     ForceFPS,
     InputRec,
     JoinMetadata,
     Mux,
+    NullSink,
     Output,
     PlayerTracker,
     Realtime,
@@ -124,6 +131,24 @@ AUDIO_SAMPLE_FORMAT = "fltp"
 
 # Silero VAD requires 16 kHz mono float audio.
 VAD_SAMPLE_RATE = 16000
+MIN_ACTIVE_AUDIO_LEVEL_DBFS = -60.0
+RENE_INPUT_INDEX = 4
+RENE_REQUIRED_LEAD_DB = 3.0
+
+SERGIO_INPUT_NAME = "sergio"
+RENE_INPUT_NAME = "rene"
+
+def input_basename(url: str) -> str:
+    """Return a lowercase input basename for both URL and local path inputs."""
+    parsed = urlparse(url)
+    path = parsed.path if parsed.scheme else url
+    return Path(path).name.lower()
+def find_named_input(inputs: list[str], name: str) -> int | None:
+    name = name.lower()
+    for i, url in enumerate(inputs):
+        if name in input_basename(url):
+            return i
+    return None
 
 # Visual speech metadata key names (per-input, so no collisions on the same frame).
 VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
@@ -166,6 +191,7 @@ def build_input_subgraph(
     idx: int,
     url: str,
     face_engine: str,
+    input_start_ts: str | None = None,
     sync_team: str = "",
     silero_model: str | None = None,
     silero_repo: str = "snakers4/silero-vad",
@@ -177,7 +203,7 @@ def build_input_subgraph(
     Returns a dict with the edge names that the caller needs:
         orig_edge           -- 1920x1080 CUDA edge (after smooth_crop, with face metadata)
         face_edge           -- 608x1080 CUDA edge (face-cropped portrait)
-        amix_edge           -- 48k/stereo/fltp audio for the amix bus
+        program_audio_edge  -- 48k/stereo/fltp audio for optional program output
         vad_audio_edge      -- 16k/mono/fltp audio for SileroVADNode
         vad_events_edge     -- MetadataFrame edge from SileroVADNode (speech events)
         visual_speech_edge  -- video edge from VisualSpeechGateNode (speaking metadata attached)
@@ -186,7 +212,7 @@ def build_input_subgraph(
     g = f"input_{idx}"
 
     # ---- Input / demux ----
-    avp.addNode(InputRec({
+    input_rec_args = {
         "name": f"input_{idx}",
         "url": url,
         "dst": f"in{idx}_pkt",
@@ -194,7 +220,10 @@ def build_input_subgraph(
         "loop": True,
         "initial_timeout": 20,
         "timeout": 3_942_000_000,
-    }))
+    }
+    if input_start_ts:
+        input_rec_args["start_ts"] = input_start_ts
+    avp.addNode(InputRec(input_rec_args))
     avp.addNode(Demux({
         "name": f"demux_{idx}",
         "src": f"in{idx}_pkt",
@@ -331,7 +360,6 @@ def build_input_subgraph(
         "group": g,
         "auto_restart": "group",
     }))
-
     # ---- Face crop: 1920x1080 → 608x1080 portrait ----
     avp.addNode(CropMetadataCuda({
         "name": f"face_crop_{idx}",
@@ -420,11 +448,11 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
 
-    # ---- Audio fan-out: Silero-VAD tap + amix bus ----
+    # ---- Audio fan-out: Silero-VAD tap + optional program-audio output ----
     avp.addNode(Split({
         "name": f"split_a{idx}",
         "src": f"a{idx}_fltp",
-        "dst": [f"a{idx}_vad_48k", f"a{idx}_amix"],
+        "dst": [f"a{idx}_vad_48k", f"a{idx}_program"],
         "group": g,
     }))
     # Silero requires 16 kHz / mono / float32 (flt or fltp).
@@ -461,7 +489,7 @@ def build_input_subgraph(
     return {
         "orig_edge": f"v{idx}_orig",
         "face_edge": f"v{idx}_face_916",
-        "amix_edge": f"a{idx}_amix",
+        "program_audio_edge": f"a{idx}_program",
         "vad_events_edge": f"a{idx}_vad_events",
         "visual_speech_edge": f"v{idx}_vs_out",
         "vs_key": vs_key,
@@ -670,27 +698,18 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
 
 
 # ------------------------------------------------------------------
-# Audio output: amix all inputs
+# Audio output
 # ------------------------------------------------------------------
 
-def build_audio_output(avp: AVPlumber, amix_edges: list, codec: str = "aac") -> str:
-    """Wire all per-input audio splits into a single amix node and encode.
+def build_audio_output(avp: AVPlumber, audio_edge: str, codec: str = "aac") -> str:
+    """Encode the selected program-audio edge.
 
     Returns the name of the encoded audio edge for use in Mux.
     """
-    n = len(amix_edges)
-    avp.addNode(FilterAudio({
-        "name": "amix",
-        "src": amix_edges,
-        "dst": "a_mixed_raw",
-        "graph": f"amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0",
-        "group": "output",
-        "auto_restart": "panic",
-    }))
     avp.addNode(AssumeAudioFormat({
         "name": "assume_audio",
-        "src": "a_mixed_raw",
-        "dst": "a_mixed",
+        "src": audio_edge,
+        "dst": "a_program",
         "sample_rate": AUDIO_SAMPLE_RATE,
         "sample_format": AUDIO_SAMPLE_FORMAT,
         "channel_layout": AUDIO_CHANNEL_LAYOUT,
@@ -699,7 +718,7 @@ def build_audio_output(avp: AVPlumber, amix_edges: list, codec: str = "aac") -> 
     }))
     avp.addNode(EncAudio({
         "name": "enc_audio",
-        "src": "a_mixed",
+        "src": "a_program",
         "dst": "a_enc",
         "codec": codec,
         "options": {"b": "192k"},
@@ -784,6 +803,10 @@ def main() -> None:
         help="realtime sync_team name for live SRT sources (empty = independent)",
     )
     parser.add_argument(
+        "--input-start-ts",
+        help="Seek each input to this start timestamp (ms, MM:SS[.mmm], or HH:MM:SS[.mmm])",
+    )
+    parser.add_argument(
         "--wipe", action="store_true",
         help="Declare wipe subgraph (needed for mixer.wipe transitions)",
     )
@@ -822,6 +845,18 @@ def main() -> None:
         help="TCP port for the avplumber remote control API (0 = disabled)",
     )
     parser.add_argument(
+        "--logfile", default="",
+        help="Write avplumber messages to this file and expose it to the Web UI",
+    )
+    parser.add_argument(
+        "--webui-api", default="",
+        help="Web UI server API endpoint URL for auto-registration (e.g. http://localhost:22222)",
+    )
+    parser.add_argument(
+        "--instance-name", default="",
+        help="Instance name for Web UI registration",
+    )
+    parser.add_argument(
         "--disable-auto-switcher", action="store_true",
         help="Start the graph without automatic scene changes",
     )
@@ -830,10 +865,15 @@ def main() -> None:
     n = len(args.inputs)
     if n < 2:
         parser.error("At least 2 inputs are required.")
+    sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
+    rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
 
     avp = AVPlumber()
+    avp.setLogFile(args.logfile)
     if args.remote_control_port:
         avp.enableControlServer(args.remote_control_port)
+    if args.webui_api:
+        avp.registerWithWebUI(args.webui_api, args.instance_name, args.logfile)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
     avp.edges.planCapacity("*", 4)
 
@@ -843,6 +883,7 @@ def main() -> None:
         sg = build_input_subgraph(
             avp, i, url,
             face_engine=args.face_engine,
+            input_start_ts=args.input_start_ts,
             sync_team=args.sync_team,
             silero_model=args.silero_model,
             silero_repo=args.silero_repo,
@@ -880,8 +921,19 @@ def main() -> None:
     video_out_edge = mx.build()
 
     # ---- Audio output ----
-    amix_edges = [sg["amix_edge"] for sg in subgraphs]
-    audio_enc_edge = build_audio_output(avp, amix_edges, codec=args.audio_codec)
+    if rene_input_index is None:
+        parser.error(f'Program audio input "{RENE_INPUT_NAME}" was not found in --inputs.')
+    program_audio_edge = subgraphs[rene_input_index]["program_audio_edge"]
+    for i, sg in enumerate(subgraphs):
+        if i == rene_input_index:
+            continue
+        avp.addNode(NullSink({
+            "name": f"program_audio_sink_{i}",
+            "src": sg["program_audio_edge"],
+            "group": "output",
+            "auto_restart": "panic",
+        }))
+    audio_enc_edge = build_audio_output(avp, program_audio_edge, codec=args.audio_codec)
 
     # ---- Video output ----
     video_enc_edge = build_video_output(avp, video_out_edge, args)
@@ -943,6 +995,10 @@ def main() -> None:
 
     print(f"[auto_mixer] Graph started with {n} input(s) → {args.output}")
     print(f"[auto_mixer] Canvas: {CANVAS_W}x{CANVAS_H}, face engine: {args.face_engine}")
+    if sergio_input_index is not None:
+        print(f"[auto_mixer] Sergio input detected: {sergio_input_index} ({input_basename(args.inputs[sergio_input_index])})")
+    if rene_input_index is not None:
+        print(f"[auto_mixer] Rene input detected: {rene_input_index} ({input_basename(args.inputs[rene_input_index])})")
     print(f"[auto_mixer] Scenes: {mx.scenes()}")
 
     # ---- Auto-switcher ----
@@ -953,6 +1009,10 @@ def main() -> None:
         full_face_scene=lambda i: f"videoconf_{i}",
         fade_duration_s=args.fade,
         min_dwell_program_s=args.min_dwell,
+        min_active_level_db=MIN_ACTIVE_AUDIO_LEVEL_DBFS,
+        special_speaker_index=rene_input_index,
+        special_speaker_margin_db=RENE_REQUIRED_LEAD_DB,
+        vad_only_priority_speaker_index=sergio_input_index,
     )
     if not args.disable_auto_switcher:
         switcher.start()

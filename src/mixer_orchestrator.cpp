@@ -45,6 +45,17 @@ int edgeOccupiedIfExists(std::shared_ptr<NodeManager> nodes, const std::string& 
     return e ? e->occupied() : 0;
 }
 
+std::string firstDstEdgeName(std::shared_ptr<NodeManager> nodes, const std::string& node_name) {
+    auto node = nodes->node_if_exists(node_name);
+    if (!node)
+        return "";
+    const auto& params = node->parameters();
+    if (!params.count("dst"))
+        return "";
+    auto names = jsonToStringList(params["dst"]);
+    return names.empty() ? "" : names.front();
+}
+
 
 /// One cuda_rect_overlay layer per compositor src index (see mixer.source). Omitted sources use a dummy rect.
 Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition& scene) {
@@ -138,6 +149,48 @@ void MixerOrchestrator::flushWipeEdges() {
     }
 }
 
+void MixerOrchestrator::flushSlotEdges(bool is_slot_a) {
+    const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
+
+    auto clearEdge = [this](const std::string& name) {
+        if (name.empty())
+            return;
+        auto edge = nodes_->edges()->findAny(name);
+        if (edge && edge->occupied() > 0) {
+            logstream << "mixer: flushing stale slot edge " << name
+                      << " (" << edge->occupied() << " queued)";
+            edge->clear();
+        }
+    };
+
+    for (const auto& [_, info] : state_->sources) {
+        const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
+        auto node = nodes_->node_if_exists(cs_node);
+        if (!node)
+            continue;
+        const auto& params = node->parameters();
+        if (params.count("src")) {
+            for (const auto& edge_name : jsonToStringList(params["src"]))
+                clearEdge(edge_name);
+        }
+        if (params.count("dst")) {
+            for (const auto& edge_name : jsonToStringList(params["dst"]))
+                clearEdge(edge_name);
+        }
+    }
+
+    for (const std::string& node_name : {slot.compositor_name, slot.norm_ts_name, slot.post_otm_name}) {
+        auto node = nodes_->node_if_exists(node_name);
+        if (!node)
+            continue;
+        const auto& params = node->parameters();
+        if (params.count("dst")) {
+            for (const auto& edge_name : jsonToStringList(params["dst"]))
+                clearEdge(edge_name);
+        }
+    }
+}
+
 void MixerOrchestrator::ensureIdle() const {
     auto mode = state_->transition_mode.load();
     if (mode != MixerState::TransitionMode::Idle)
@@ -189,6 +242,12 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     auto& scene = state_->scenes.at(scene_name);
     const auto& slot = is_slot_a ? state_->slot_a : state_->slot_b;
 
+    // The slot being loaded is the broadcast-inactive PVW slot.  Its compositor
+    // was previously idled with active_inputs=0, so it may still hold frames on
+    // its input edges. If left there, the next activation starts by rendering
+    // stale frames and appears to lag behind the scene switch.
+    flushSlotEdges(is_slot_a);
+
     for (const auto& [src_name, layout] : scene.sources) {
         auto src_it = state_->sources.find(src_name);
         if (src_it == state_->sources.end()) continue;
@@ -237,20 +296,17 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 // cutInternal: the graph-level work for a hard cut, without touching
 // transition_mode or pgm_is_slot_a.  All values are read from pre-flip state.
 // Caller must hold state_->mutex.
-// Returns the T_cleanup PTS (wallclock ms) so the caller can schedule the flip.
+// Returns the earliest cut PTS (wallclock ms). The visible switch is gated by
+// readyCutThread until the incoming direct edge has produced a fresh frame.
 // ---------------------------------------------------------------------------
 int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
     loadSceneIntoSlot(pvw_is_slot_a, scene_name);
 
-    auto& scene = state_->scenes.at(scene_name);
-    uint32_t pvw_bit = state_->pvwOutputBit();
-
     int64_t T_prep = wallclock.pts();
     int64_t T_cut = start_pts_ms;
     const auto& new_slot = state_->pvwSlot();
-    const auto& old_slot = state_->pgmSlot();
 
     // Pre-warm the hidden direct branch before the visible `out_sel` switch. Without this,
     // enabling `post_otm` and switching `out_sel` at the same PTS leaves the newly selected
@@ -262,38 +318,12 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t st
     setNodeObject(new_slot.post_otm_name, "outputs", Parameters(1u));
     timeline_->set(new_slot.post_otm_name, "outputs", T_prep, Parameters(1u));
 
-    int pvw_sw = state_->pvwSourceSwitcherIndex();
-    timeline_->set(state_->source_switcher_name, "active", T_cut, Parameters(pvw_sw));
-
-    int64_t T_cleanup = T_cut + 100;
-    logstream << "mixer cut: scene=" << scene_name << " T_cut=" << T_cut << " T_cleanup=" << T_cleanup
-              << " out_sel.active=" << pvw_sw << " post_otm prep " << new_slot.post_otm_name << "->1 old="
-              << old_slot.post_otm_name << " cleanup->0";
-
-    // Disable old PGM cameras at T_cleanup
-    if (!state_->pgm_scene_name.empty()) {
-        auto& old_scene = state_->scenes.at(state_->pgm_scene_name);
-        for (const auto& [src_name, layout] : old_scene.sources) {
-            auto it = state_->sources.find(src_name);
-            if (it == state_->sources.end()) continue;
-            uint32_t new_mask = scene.sources.count(src_name) ? pvw_bit : 0u;
-            timeline_->set(it->second.otm_node_name, "outputs", T_cleanup, Parameters(new_mask));
-        }
-        timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
-        timeline_->set(old_slot.post_otm_name, "outputs", T_cleanup, Parameters(0u));
-    }
-
-    // Ensure new-scene cameras converge to pvw_bit at T_cleanup
-    for (const auto& [src_name, layout] : scene.sources) {
-        auto it = state_->sources.find(src_name);
-        if (it == state_->sources.end()) continue;
-        timeline_->set(it->second.otm_node_name, "outputs", T_cleanup, Parameters(pvw_bit));
-    }
-    timeline_->set(new_slot.post_otm_name, "outputs", T_cleanup, Parameters(1u));
+    logstream << "mixer cut armed: scene=" << scene_name << " earliest T_cut=" << T_cut
+              << " post_otm prep " << new_slot.post_otm_name << "->1";
 
     resetSlotNormFps(nodes_, *state_);
 
-    return T_cleanup;
+    return T_cut;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +384,70 @@ void MixerOrchestrator::deferredCleanup(
     state->transition_mode = MixerState::TransitionMode::Idle;
 }
 
+void MixerOrchestrator::readyCutThread(
+        std::shared_ptr<NodeManager> nodes,
+        std::shared_ptr<MixerState> state,
+        std::shared_ptr<SharedTimeline> timeline,
+        bool new_pgm_is_slot_a,
+        std::string new_pgm_scene,
+        std::string ready_edge_name,
+        av::Timestamp ready_edge_initial_ts,
+        int64_t earliest_switch_pts_ms) {
+    constexpr int64_t kPollMs = 5;
+    constexpr int64_t kMaxWaitMs = 1500;
+    int64_t waited_ms = 0;
+    while (waited_ms < kMaxWaitMs) {
+        auto edge = nodes->edges()->findAny(ready_edge_name);
+        if (!edge)
+            break;
+        av::Timestamp ts = edge->lastTS();
+        const bool edge_ready = ts.isValid() && (!ready_edge_initial_ts.isValid() || ts > ready_edge_initial_ts);
+        const bool time_ready = wallclock.pts() >= earliest_switch_pts_ms;
+        if (edge_ready && time_ready)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        waited_ms += kPollMs;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    try {
+        const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
+        const auto scene_it = state->scenes.find(new_pgm_scene);
+        if (scene_it != state->scenes.end()) {
+            const SceneDefinition& scene = scene_it->second;
+            const uint32_t active = state->computeActiveInputsMask(scene);
+            const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
+            const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
+
+            timeline->clearKey(state->source_switcher_name, "active");
+            nodes->node(state->source_switcher_name)->setObject(
+                "active", Parameters(new_pgm_is_slot_a ? 0 : 1));
+
+            for (const auto& [src_name, info] : state->sources) {
+                const bool in_scene = scene.sources.count(src_name) > 0;
+                const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
+                const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
+                timeline->clearKey(info.otm_node_name, "outputs");
+                nodes->node(info.otm_node_name)->setObject("outputs", Parameters(mask));
+            }
+            timeline->clearKey(new_slot.post_otm_name, "outputs");
+            timeline->clearKey(old_slot.post_otm_name, "outputs");
+            timeline->clearKey(new_slot.compositor_name, "active_inputs");
+            timeline->clearKey(old_slot.compositor_name, "active_inputs");
+            nodes->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
+            nodes->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
+            nodes->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
+            nodes->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
+        }
+    } catch (const std::exception& e) {
+        logstream << "mixer: ready cut error restoring routing: " << e.what();
+    }
+    state->pgm_is_slot_a = new_pgm_is_slot_a;
+    state->pgm_scene_name = std::move(new_pgm_scene);
+    state->pvw_scene_name = "";
+    state->transition_mode = MixerState::TransitionMode::Idle;
+}
+
 // ---------------------------------------------------------------------------
 // cut: PTS-scheduled hard cut.  Graph work + timeline entries happen now;
 // state flip is deferred until the timeline entries have taken effect.
@@ -366,12 +460,14 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     state_->transition_mode = MixerState::TransitionMode::Cut;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    int64_t T_cleanup = cutInternal(scene_name, T_cut);
+    cutInternal(scene_name, T_cut);
 
-    int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
-    std::thread(deferredCleanup, nodes_, state_, timeline_,
-                flip_delay, pvw_is_slot_a, scene_name,
-                std::vector<std::string>{}).detach();
+    const auto& new_slot = state_->pvwSlot();
+    std::string ready_edge_name = firstDstEdgeName(nodes_, new_slot.post_otm_name);
+    auto ready_edge = nodes_->edges()->findAny(ready_edge_name);
+    av::Timestamp ready_edge_initial_ts = ready_edge ? ready_edge->lastTS() : NOTS;
+    std::thread(readyCutThread, nodes_, state_, timeline_,
+                pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts, T_cut).detach();
 }
 
 // ---------------------------------------------------------------------------

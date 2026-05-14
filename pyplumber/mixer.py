@@ -239,7 +239,12 @@ class MixerGraphBuilder:
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
-    def fade(self, scene: str, duration_sec: float = 1.0, start_pts_ms: int = -1) -> None:
+    def fade(
+        self,
+        scene: str,
+        duration_sec: float = 1.0,
+        start_pts_ms: int = -1,
+    ) -> None:
         """Crossfade to *scene* over *duration_sec* seconds."""
         cmd = {"mixer": self.name, "scene": scene, "duration_sec": duration_sec}
         if start_pts_ms >= 0:
