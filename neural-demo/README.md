@@ -93,6 +93,16 @@ neural-demo/run-neural-demo.sh \
   --output /path/to/output/tracker.ts
 ```
 
+VOD in, multi-quality HLS out:
+
+```bash
+neural-demo/run-neural-demo.sh \
+  --example tracker \
+  --mode hls \
+  --input /path/to/input.mp4 \
+  --output /path/to/output/hls
+```
+
 VOD in, live out with a custom local MP4:
 
 ```bash
@@ -131,13 +141,19 @@ neural-demo/run-neural-demo.sh \
   for `live` mode.
 - `--mode live` means looped MP4 input plus live RTMP or SRT output.
 - `--mode vod` means finite VOD input plus file output.
+- `--mode hls` means finite VOD input plus a video-only HLS ladder under the
+  output directory. It creates `index.m3u8`, plus `med`, `hd`, and `fhd`
+  rendition playlists with 1-second keyframe-aligned segments.
 - `--input` is required.
 - `--pip-input` is required when `--example tracker_compositor`.
-- `--artifacts-dir` mounts a host directory at `/run/avp/output` and is the
-  place to persist sidecar files from live graphs, especially `metadata`.
+- `--artifacts-dir` persists sidecar files from live graphs, especially
+  `metadata`. In `hls` mode it is mounted separately from the HLS output
+  directory.
 - In `live` mode, if `--output` is omitted, the demo streams to the default
   output URL above.
 - In `vod` mode, `--output` is required.
+- In `hls` mode, `--output` is required and must be a directory. HLS mode is
+  available for `tracker` and `tracker-cropped`.
 - The build helper prints the Docker commands and model cache path before
   executing them.
 - The helper supports `--dry-run`.
@@ -256,6 +272,19 @@ docker run --rm --gpus all \
   -e AVP_MODE=vod \
   -e AVP_INPUT=/run/avp/input/input.mp4 \
   -e AVP_OUTPUT=/run/avp/output/tracker.ts \
+  avplumber-neural-demo:latest
+```
+
+HLS output without the helper:
+
+```bash
+docker run --rm --gpus all \
+  -v /absolute/path/input.mp4:/run/avp/input/input.mp4:ro \
+  -v /absolute/path/hls:/run/avp/output \
+  -e AVP_EXAMPLE=tracker \
+  -e AVP_MODE=hls \
+  -e AVP_INPUT=/run/avp/input/input.mp4 \
+  -e AVP_OUTPUT=/run/avp/output \
   avplumber-neural-demo:latest
 ```
 

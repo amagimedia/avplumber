@@ -140,6 +140,7 @@ RUN cd /tmp/ffmpeg \
         --enable-protocol=rtsp \
         --enable-protocol=srt \
         --enable-muxer=flv \
+        --enable-muxer=hls \
         --enable-muxer=rtp_mpegts \
         --enable-muxer=mpegts \
         --enable-muxer=mp4 \

@@ -22,7 +22,7 @@ usage() {
 Usage:
   neural-demo/run-neural-demo.sh \
     --example tracker|metadata|tracker-cropped|tracker_compositor \
-    --mode vod|live \
+    --mode vod|live|hls \
     --input PATH \
     [--output ...] \
     [--artifacts-dir DIR] \
@@ -98,8 +98,8 @@ case "${example}" in
 esac
 
 case "${mode}" in
-    vod|live) ;;
-    *) die "--mode must be vod or live" ;;
+    vod|live|hls) ;;
+    *) die "--mode must be vod, live, or hls" ;;
 esac
 
 docker_cmd=(docker run --rm --gpus all)
@@ -111,13 +111,30 @@ if [[ "${example}" == "tracker_compositor" ]]; then
     [[ -n "${pip_input}" ]] || die "--pip-input is required for tracker_compositor"
 fi
 
-if [[ "${mode}" == "vod" ]]; then
-    [[ -n "${output}" ]] || die "--output is required for vod mode"
-    output_host="$(abspath "${output}")"
-    output_dir="$(dirname "${output_host}")"
-    mkdir -p "${output_dir}"
-    output_container="/run/avp/output/$(basename "${output_host}")"
-    docker_cmd+=(-v "${output_dir}:/run/avp/output")
+if [[ "${mode}" == "hls" ]]; then
+    case "${example}" in
+        tracker|tracker-cropped) ;;
+        *) die "hls mode is supported for tracker and tracker-cropped" ;;
+    esac
+fi
+
+if [[ "${mode}" == "vod" || "${mode}" == "hls" ]]; then
+    [[ -n "${output}" ]] || die "--output is required for ${mode} mode"
+    if [[ "${mode}" == "hls" ]]; then
+        case "${output}" in
+            *.m3u8) die "hls --output must be a directory path; index.m3u8 is created inside it" ;;
+        esac
+        output_host="$(abspath "${output}")"
+        mkdir -p "${output_host}"
+        output_container="/run/avp/output"
+        docker_cmd+=(-v "${output_host}:/run/avp/output")
+    else
+        output_host="$(abspath "${output}")"
+        output_dir="$(dirname "${output_host}")"
+        mkdir -p "${output_dir}"
+        output_container="/run/avp/output/$(basename "${output_host}")"
+        docker_cmd+=(-v "${output_dir}:/run/avp/output")
+    fi
 
     input_host="$(abspath "${input}")"
     [[ -f "${input_host}" ]] || die "input file does not exist: ${input_host}"
@@ -163,10 +180,17 @@ fi
 if [[ -n "${artifacts_dir}" ]]; then
     artifacts_host="$(abspath "${artifacts_dir}")"
     mkdir -p "${artifacts_host}"
-    docker_cmd+=(
-        -v "${artifacts_host}:/run/avp/output"
-        -e "AVP_ARTIFACT_DIR=/run/avp/output"
-    )
+    if [[ "${mode}" == "hls" ]]; then
+        docker_cmd+=(
+            -v "${artifacts_host}:/run/avp/artifacts"
+            -e "AVP_ARTIFACT_DIR=/run/avp/artifacts"
+        )
+    else
+        docker_cmd+=(
+            -v "${artifacts_host}:/run/avp/output"
+            -e "AVP_ARTIFACT_DIR=/run/avp/output"
+        )
+    fi
 fi
 
 if [[ -n "${pip_input}" ]]; then
