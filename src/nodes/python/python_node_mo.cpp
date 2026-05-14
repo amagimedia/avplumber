@@ -28,6 +28,11 @@ public:
     }
 
     void stop() override {
+        py::gil_scoped_acquire gil;
+        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
+            throw Error("Python node is not set");
+        }
+        python_node_.attr("doStop")();
     }
 
     static std::shared_ptr<PythonNodeMO> create(NodeCreationInfo &nci) {
