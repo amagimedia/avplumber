@@ -27,6 +27,7 @@ class _TargetState:
     mouth_h_floor: float | None = None
     last_seen_pts: int | None = None
     last_score: float = 0.0
+    last_oscillation_score: float = 0.0
     emitted_events: int = 0
     active_frames: int = 0
     visible_frames: int = 0
@@ -38,6 +39,9 @@ class _TargetState:
     score_count: int = 0
     score_sum: float = 0.0
     max_score: float = 0.0
+    oscillation_candidate_frames: int = 0
+    oscillation_frame_pts: list[int] = field(default_factory=list)
+    oscillation_mouth_h: list[tuple[int, float]] = field(default_factory=list)
     segments: list[dict] = field(default_factory=list)
 
 
@@ -58,10 +62,20 @@ class VisualSpeechGateNode(PythonNode):
         self.motion_alpha = float(p.get("motion_alpha", 0.35))
         self.motion_weight = float(p.get("motion_weight", 6.0))
         self.open_weight = float(p.get("open_weight", 0.55))
+        self.score_mode = str(p.get("score_mode", "legacy"))
+        if self.score_mode not in {"legacy", "oscillation"}:
+            raise ValueError(f"unsupported visual speech score_mode: {self.score_mode}")
         self.mouth_floor_rise_alpha = float(p.get("mouth_floor_rise_alpha", 0.01))
         self.mouth_floor_fall_alpha = float(p.get("mouth_floor_fall_alpha", 0.20))
         self.open_floor_margin = float(p.get("open_floor_margin", 0.012))
         self.open_range = float(p.get("open_range", 0.055))
+        self.oscillation_window_ms = float(p.get("oscillation_window_ms", 900.0))
+        self.oscillation_min_detected_frames = int(p.get("oscillation_min_detected_frames", 10))
+        self.oscillation_min_detected_ratio = float(p.get("oscillation_min_detected_ratio", 0.45))
+        self.oscillation_min_h_range = float(p.get("oscillation_min_h_range", 0.014))
+        self.oscillation_min_direction_changes = int(p.get("oscillation_min_direction_changes", 2))
+        self.oscillation_min_derivative_sum = float(p.get("oscillation_min_derivative_sum", 0.035))
+        self.oscillation_derivative_deadband = float(p.get("oscillation_derivative_deadband", 0.0018))
         self.log_every_n = int(p.get("log_every_n", 0))
         self.event_jsonl_path = p.get("event_jsonl_path")
         self.summary_json_path = p.get("summary_json_path")
@@ -196,10 +210,69 @@ class VisualSpeechGateNode(PythonNode):
         state.score_sum += float(score)
         state.max_score = max(state.max_score, float(score))
 
-    def _score(self, state: _TargetState, features: dict | None, frame) -> tuple[float, float, float]:
+    def _trim_oscillation_window(self, state: _TargetState, frame):
+        state.oscillation_frame_pts = [
+            pts for pts in state.oscillation_frame_pts
+            if timestamp_ms_delta(frame, pts) <= self.oscillation_window_ms
+        ]
+        state.oscillation_mouth_h = [
+            (pts, value) for pts, value in state.oscillation_mouth_h
+            if timestamp_ms_delta(frame, pts) <= self.oscillation_window_ms
+        ]
+
+    def _oscillation_score(self, state: _TargetState, frame, mouth_h: float | None) -> float:
+        pts = int(frame.pts.timestamp)
+        state.oscillation_frame_pts.append(pts)
+        if mouth_h is not None:
+            state.oscillation_mouth_h.append((pts, mouth_h))
+        self._trim_oscillation_window(state, frame)
+        if mouth_h is None:
+            state.last_oscillation_score = 0.0
+            return 0.0
+
+        frame_count = len(state.oscillation_frame_pts)
+        detected_count = len(state.oscillation_mouth_h)
+        detected_ratio = detected_count / frame_count if frame_count else 0.0
+        if detected_count < self.oscillation_min_detected_frames:
+            state.last_oscillation_score = 0.0
+            return 0.0
+        if detected_ratio < self.oscillation_min_detected_ratio:
+            state.last_oscillation_score = 0.0
+            return 0.0
+
+        heights = [value for _, value in state.oscillation_mouth_h]
+        h_range = max(heights) - min(heights)
+        derivative_sum = 0.0
+        direction_changes = 0
+        last_sign = 0
+        for prev, current in zip(heights, heights[1:]):
+            delta = current - prev
+            if abs(delta) < self.oscillation_derivative_deadband:
+                continue
+            derivative_sum += abs(delta)
+            sign = 1 if delta > 0.0 else -1
+            if last_sign and sign != last_sign:
+                direction_changes += 1
+            last_sign = sign
+
+        score = min(
+            clamp(h_range / max(self.oscillation_min_h_range, 1e-9), 0.0, 1.0),
+            clamp(derivative_sum / max(self.oscillation_min_derivative_sum, 1e-9), 0.0, 1.0),
+            clamp(direction_changes / max(self.oscillation_min_direction_changes, 1), 0.0, 1.0),
+        )
+        if score <= 0.0:
+            state.last_oscillation_score = 0.0
+            return 0.0
+
+        state.oscillation_candidate_frames += 1
+        state.last_oscillation_score = score
+        return score
+
+    def _score(self, state: _TargetState, features: dict | None, frame) -> tuple[float, float, float, float]:
         if features is None or not features["mouth_visible"]:
+            self._oscillation_score(state, frame, None)
             state.motion_ema *= (1.0 - self.motion_alpha)
-            return 0.0, 0.0, state.motion_ema
+            return 0.0, 0.0, state.motion_ema, state.last_oscillation_score
 
         pts = int(frame.pts.timestamp)
         mouth_h = float(features["mouth_h"])
@@ -237,8 +310,13 @@ class VisualSpeechGateNode(PythonNode):
         state.last_seen_pts = pts
 
         motion_score = clamp(state.motion_ema * self.motion_weight, 0.0, 1.0)
-        score = clamp(max(motion_score, open_score * self.open_weight), 0.0, 1.0)
-        return score, open_score, motion_score
+        legacy_score = clamp(max(motion_score, open_score * self.open_weight), 0.0, 1.0)
+        oscillation_score = self._oscillation_score(state, frame, mouth_h)
+        if self.score_mode == "oscillation":
+            score = oscillation_score
+        else:
+            score = legacy_score
+        return score, open_score, motion_score, oscillation_score
 
     def _update_state(self, name: str, state: _TargetState, score: float, frame) -> list[dict]:
         pts = int(frame.pts.timestamp)
@@ -350,6 +428,14 @@ class VisualSpeechGateNode(PythonNode):
                 "stop_confirm_ms": self.stop_confirm_ms,
                 "motion_weight": self.motion_weight,
                 "open_weight": self.open_weight,
+                "score_mode": self.score_mode,
+                "oscillation_window_ms": self.oscillation_window_ms,
+                "oscillation_min_detected_frames": self.oscillation_min_detected_frames,
+                "oscillation_min_detected_ratio": self.oscillation_min_detected_ratio,
+                "oscillation_min_h_range": self.oscillation_min_h_range,
+                "oscillation_min_direction_changes": self.oscillation_min_direction_changes,
+                "oscillation_min_derivative_sum": self.oscillation_min_derivative_sum,
+                "oscillation_derivative_deadband": self.oscillation_derivative_deadband,
             },
             "targets": {},
         }
@@ -360,6 +446,7 @@ class VisualSpeechGateNode(PythonNode):
                 "last_score": round(float(state.last_score), 6),
                 "max_score": round(float(state.max_score), 6),
                 "mean_score": round(float(state.score_sum / state.score_count), 6) if state.score_count else 0.0,
+                "oscillation_candidate_frames": int(state.oscillation_candidate_frames),
                 "active_frames": active_frames,
                 "visible_frames": int(state.visible_frames),
                 "mouth_visible_frames": int(state.mouth_visible_frames),
@@ -427,7 +514,7 @@ class VisualSpeechGateNode(PythonNode):
             state = self._state(name)
             item = mouth_by_target.get(name)
             features = self._features_from_target(item)
-            score, open_score, motion_score = self._score(state, features, frame)
+            score, open_score, motion_score, oscillation_score = self._score(state, features, frame)
             self._record_score(state, score, features)
             events = self._update_state(name, state, score, frame)
             for event in events:
@@ -444,6 +531,7 @@ class VisualSpeechGateNode(PythonNode):
                 "score": round(float(score), 6),
                 "mouth_open_score": round(float(open_score), 6),
                 "mouth_motion_score": round(float(motion_score), 6),
+                "mouth_oscillation_score": round(float(oscillation_score), 6),
             }
             if features:
                 result["face_xyxy"] = [round(float(v), 3) for v in features["face_xyxy"]]
