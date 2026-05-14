@@ -823,6 +823,28 @@ PYBIND11_MODULE(_avplumber, m) {
                 AudioSamplesMetadataProxy(s, py::none()).assign(d);
             }
         )
+        .def("data", [](av::AudioSamples &s, int channel) -> py::bytes {
+            if (channel < 0 || static_cast<int>(s.channelsCount()) <= channel)
+                return py::bytes();
+            const uint8_t *ptr = s.data(channel);
+            if (!ptr) return py::bytes();
+            const AVFrame *raw = s.raw();
+            if (!raw) return py::bytes();
+            int bps = av_get_bytes_per_sample(static_cast<AVSampleFormat>(raw->format));
+            if (bps <= 0) return py::bytes();
+            return py::bytes(reinterpret_cast<const char*>(ptr),
+                             static_cast<size_t>(raw->nb_samples) * static_cast<size_t>(bps));
+        }, py::arg("channel") = 0, "Return raw PCM bytes for the given channel plane.")
+        .def_property_readonly("channelsCount", [](const av::AudioSamples &s) -> int {
+            return static_cast<int>(s.channelsCount());
+        })
+        .def_property_readonly("sampleFormat", [](const av::AudioSamples &s) -> int {
+            const AVFrame *raw = s.raw();
+            return raw ? raw->format : -1;
+        })
+        .def_property_readonly("isComplete", [](const av::AudioSamples &s) -> bool {
+            return s.isComplete();
+        })
     ;
 
     py::class_<av::VideoFrame, std::shared_ptr<av::VideoFrame>>(m, "VideoFrame")

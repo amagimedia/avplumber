@@ -246,6 +246,23 @@ class Mux(InternalNode):
 class Output(InternalNode):
     TYPE = "output"
 
+class OneToMany(InternalNode):
+    TYPE = "one_to_many"
+class SourceSwitcher(InternalNode):
+    TYPE = "source_switcher"
+class CudaRectOverlay(InternalNode):
+    TYPE = "cuda_rect_overlay"
+class Input(InternalNode):
+    TYPE = "input"
+class ResampleAudio(InternalNode):
+    TYPE = "resample_audio"
+class FilterAudio(InternalNode):
+    TYPE = "filter_audio"
+class EncAudio(InternalNode):
+    TYPE = "enc_audio"
+class WriteAudioEnvelope(InternalNode):
+    TYPE = "write_audio_envelope"
+
 
 class NullSink(InternalNode):
     TYPE = "null_sink"
