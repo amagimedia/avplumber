@@ -786,6 +786,11 @@ public:
         if (key == "active_inputs") {
             const uint32_t new_mask = parseBitmask(value);
             active_inputs_.store(new_mask, std::memory_order_relaxed);
+            sent_eof_ = false;
+            std::fill(input_eof_.begin(), input_eof_.end(), false);
+            for (auto& edge : this->source_edges_) {
+                edge->producedEvent().signal();
+            }
         } else if (key == "layers") {
             auto new_layers = parseLayersArray(value);
             std::lock_guard<std::mutex> lock(layers_mutex_);

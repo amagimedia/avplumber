@@ -801,7 +801,7 @@ PYBIND11_MODULE(_avplumber, m) {
             }
             return out;
         })
-        .def_property_readonly("data", [](const av::AudioSamples& s) {
+        .def_property_readonly("planes", [](const av::AudioSamples& s) {
             py::list out;
             const int planes = audioPlaneCount(s);
             const size_t plane_size = audioPlaneSize(s);
@@ -835,13 +835,6 @@ PYBIND11_MODULE(_avplumber, m) {
             return py::bytes(reinterpret_cast<const char*>(ptr),
                              static_cast<size_t>(raw->nb_samples) * static_cast<size_t>(bps));
         }, py::arg("channel") = 0, "Return raw PCM bytes for the given channel plane.")
-        .def_property_readonly("channelsCount", [](const av::AudioSamples &s) -> int {
-            return static_cast<int>(s.channelsCount());
-        })
-        .def_property_readonly("sampleFormat", [](const av::AudioSamples &s) -> int {
-            const AVFrame *raw = s.raw();
-            return raw ? raw->format : -1;
-        })
         .def_property_readonly("isComplete", [](const av::AudioSamples &s) -> bool {
             return s.isComplete();
         })
