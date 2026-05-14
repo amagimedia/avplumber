@@ -29,6 +29,25 @@ public:
         python_node_.attr("process")();
     }
 
+    void stop() override {
+        std::exception_ptr stop_error;
+        {
+            py::gil_scoped_acquire gil;
+            try {
+                if (python_node_.ptr() == nullptr || python_node_.is_none()) {
+                    throw Error("Python node is not set");
+                }
+                python_node_.attr("doStop")();
+            } catch (...) {
+                stop_error = std::current_exception();
+            }
+        }
+        NodeSingleInput<T>::stop();
+        if (stop_error) {
+            std::rethrow_exception(stop_error);
+        }
+    }
+
     static std::shared_ptr<PythonNodeSIMO> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;

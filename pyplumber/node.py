@@ -68,6 +68,9 @@ class PythonNode(NodeBase):
     def python_node_created(self, wrapper):
         self._wrapper = wrapper
 
+    def doStop(self):
+        pass
+
     def process(self):
         raise NotImplementedError("process() must be implemented in subclass")
 

@@ -407,7 +407,10 @@ namespace {
                 return py::cast(elem);
             }, py::arg("timeout_ms") = 0)
             .def("peek", &Edge<T>::peek, py::return_value_policy::reference)
-            .def("wait_peek", &Edge<T>::wait_peek, py::arg("timeout_ms") = -1, py::return_value_policy::reference)
+            .def("wait_peek", [](Edge<T> &e, int timeout_ms) {
+                py::gil_scoped_release release;
+                return e.wait_peek(timeout_ms);
+            }, py::arg("timeout_ms") = -1, py::return_value_policy::reference)
         ;
     }
     

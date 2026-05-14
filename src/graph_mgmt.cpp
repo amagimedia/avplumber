@@ -168,7 +168,6 @@ void NodeWrapper::setObject(const std::string object_name, const Parameters& p) 
 }
 
 bool NodeWrapper::stopAndWait() {
-    std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     bool r = interrupt(true);
     if (!r) {
         r = stop();
@@ -184,17 +183,30 @@ void NodeWrapper::join() {
 
 
 bool NodeWrapper::stop(bool inhibit_actions) {
-    std::lock_guard<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
+    std::unique_lock<decltype(start_stop_mutex_)> lock(start_stop_mutex_);
     if (threadWorks()) {
-        std::shared_ptr<IStoppable> node_stoppable = std::dynamic_pointer_cast<IStoppable>(node_);
+        std::shared_ptr<Node> node = node_;
+        std::shared_ptr<IStoppable> node_stoppable = std::dynamic_pointer_cast<IStoppable>(node);
         if (node_stoppable) {
             if (inhibit_actions) stop_requested_ = true;
             dowork_ = false;
-            node_stoppable->stop();
         } else {
             throw Error("NodeWrapper::stop() called for node which doesn't have stopping interface!");
         }
-        std::shared_ptr<IWaitsSinksEmpty> node_sinks = std::dynamic_pointer_cast<IWaitsSinksEmpty>(node_);
+        std::shared_ptr<IWaitsSinksEmpty> node_sinks = std::dynamic_pointer_cast<IWaitsSinksEmpty>(node);
+
+#ifdef PYTHON_MODULE
+        // Avoid lock-order inversion (start_stop_mutex_ -> GIL): python stop() acquires GIL.
+        if (std::dynamic_pointer_cast<IPythonNode>(node)) {
+            lock.unlock();
+            node_stoppable->stop();
+            if (node_sinks) {
+                node_sinks->stopSinks();
+            }
+            return true;
+        }
+#endif
+        node_stoppable->stop();
         if (node_sinks) {
             node_sinks->stopSinks();
         }
