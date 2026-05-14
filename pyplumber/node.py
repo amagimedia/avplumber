@@ -12,6 +12,12 @@ class NodeBase():
     def process(self):
         pass
 
+    def doStart(self):
+        pass
+
+    def doStop(self):
+        pass
+
     def start(self):
         assert self._wrapper is not None, "Node not added to manager"
         self._wrapper.start()
@@ -33,6 +39,7 @@ class PythonNode(NodeBase):
     TYPE = "python_node"
 
     def __init__(self, args: dict):
+        explicit_type = args.get("type")
         src_edges = args.get("src")
         no_inputs = src_edges is None
         single_input = isinstance(src_edges, str)
@@ -42,24 +49,34 @@ class PythonNode(NodeBase):
         single_output = isinstance(dst_edges, str)
         multi_output = isinstance(dst_edges, list)
 
-        if single_input and single_output:
-            self.TYPE = "python_node_siso"
-        elif single_input and multi_output:
-            self.TYPE = "python_node_simo"
-        elif multi_input and single_output:
-            self.TYPE = "python_node_miso"
-        elif multi_input and multi_output:
-            self.TYPE = "python_node_mimo"
-        elif no_inputs and single_output:
-            self.TYPE = "python_node_so"
-        elif no_inputs and multi_output:
-            self.TYPE = "python_node_mo"
-        elif single_input and no_outputs:
-            self.TYPE = "python_node_si"
-        elif multi_input and no_outputs:
-            self.TYPE = "python_node_mi"
+        if explicit_type is not None:
+            self.TYPE = explicit_type
         else:
-            raise ValueError(f"Invalid number of source or destination edges: {src_edges} / {dst_edges}")
+            if single_input and single_output:
+                self.TYPE = "python_node_siso"
+            elif single_input and multi_output:
+                self.TYPE = "python_node_simo"
+            elif multi_input and single_output:
+                self.TYPE = "python_node_miso"
+            elif multi_input and multi_output:
+                self.TYPE = "python_node_mimo"
+            elif no_inputs and single_output:
+                self.TYPE = "python_node_so"
+            elif no_inputs and multi_output:
+                self.TYPE = "python_node_mo"
+            elif single_input and no_outputs:
+                self.TYPE = "python_node_si"
+            elif multi_input and no_outputs:
+                self.TYPE = "python_node_mi"
+            else:
+                raise ValueError(f"Invalid number of source or destination edges: {src_edges} / {dst_edges}")
+
+        data_type = args.get("data_type", "VideoFrame")
+        self._src_data_type = args.get("src_data_type", data_type)
+        self._dst_data_type = args.get("dst_data_type", data_type)
+        if self.TYPE == "python_node_audio_to_metadata":
+            self._src_data_type = args.get("src_data_type", "AudioSamples")
+            self._dst_data_type = args.get("dst_data_type", "MetadataFrame")
 
         params = args | { "type": self.TYPE }
         super().__init__(params)
@@ -68,9 +85,6 @@ class PythonNode(NodeBase):
     def python_node_created(self, wrapper):
         self._wrapper = wrapper
 
-    def doStop(self):
-        pass
-
     def process(self):
         raise NotImplementedError("process() must be implemented in subclass")
 
@@ -78,23 +92,34 @@ class PythonNode(NodeBase):
         super()._avplumber_initialized()
         src_edges = self.parameters.get("src", [])
         if isinstance(src_edges, str):
-            self._src = self._avplumber.getEdge(src_edges)
+            self._src = self._avplumber.getEdge(src_edges, self._src_data_type)
             assert self._src is not None, f"Source edge {src_edges} not found"
         else:
             self._src = {}
             for src_edge in src_edges:
-                self._src[src_edge] = self._avplumber.getEdge(src_edge)
+                self._src[src_edge] = self._avplumber.getEdge(src_edge, self._src_data_type)
                 assert self._src[src_edge] is not None, f"Source edge {src_edge} not found"
 
         dst_edges = self.parameters.get("dst", [])
         if isinstance(dst_edges, str):
-            self._dst = self._avplumber.getEdge(dst_edges)
+            self._dst = self._avplumber.getEdge(dst_edges, self._dst_data_type)
             assert self._dst is not None, f"Destination edge {dst_edges} not found"
         else:
             self._dst = {}
             for dst_edge in dst_edges:
-                self._dst[dst_edge] = self._avplumber.getEdge(dst_edge)
+                self._dst[dst_edge] = self._avplumber.getEdge(dst_edge, self._dst_data_type)
                 assert self._dst[dst_edge] is not None, f"Destination edge {dst_edge} not found"
+
+
+class AudioToMetadataPythonNode(PythonNode):
+    TYPE = "python_node_audio_to_metadata"
+
+    def __init__(self, args: dict):
+        params = {
+            "src_data_type": "AudioSamples",
+            "dst_data_type": "MetadataFrame",
+        } | args | {"type": self.TYPE}
+        super().__init__(params)
 
 
 class InternalNode(NodeBase):
@@ -148,6 +173,10 @@ class Realtime(InternalNode):
 
 class RescaleVideo(InternalNode):
     TYPE = "rescale_video"
+
+
+class ResampleAudio(InternalNode):
+    TYPE = "resample_audio"
 
 
 class FilterVideo(InternalNode):
@@ -216,3 +245,7 @@ class Mux(InternalNode):
 
 class Output(InternalNode):
     TYPE = "output"
+
+
+class NullSink(InternalNode):
+    TYPE = "null_sink"
