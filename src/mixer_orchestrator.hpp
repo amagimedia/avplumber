@@ -26,6 +26,7 @@ class MixerOrchestrator {
     // Flush all wipe pipeline edges listed in state_->wipe_flush_edges.
     // Call before startGroup (clean slate) and after stopGroup (release memory).
     void flushWipeEdges();
+    void flushSlotEdges(bool is_slot_a);
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name);
 
@@ -50,6 +51,14 @@ class MixerOrchestrator {
                                 bool new_pgm_is_slot_a,
                                 std::string new_pgm_scene,
                                 std::vector<std::string> nodes_to_delete);
+    static void readyCutThread(std::shared_ptr<NodeManager> nodes,
+                               std::shared_ptr<MixerState> state,
+                               std::shared_ptr<SharedTimeline> timeline,
+                               bool new_pgm_is_slot_a,
+                               std::string new_pgm_scene,
+                               std::string ready_edge_name,
+                               av::Timestamp ready_edge_initial_ts,
+                               int64_t earliest_switch_pts_ms);
 
     // Wipe lifecycle: midpoint scene switch (immediate, hidden behind opaque wipe)
     // + end-of-wipe teardown.

@@ -1,8 +1,8 @@
 """Auto-switcher policy for a pyplumber video mixer.
 
 ``AutoSwitcher`` runs a background thread that periodically reads the
-``Speaker`` registry (written by ``RmsVadNode`` instances) and issues
-``MixerGraphBuilder.fade()`` calls when the active speaker changes.
+``Speaker`` registry and issues ``MixerGraphBuilder.fade()`` calls when the
+active speaker changes.
 
 Usage
 -----
@@ -37,13 +37,17 @@ class AutoSwitcher:
 
     Decision logic (runs every ``tick_s`` seconds)
     -----------------------------------------------
-    1. Find the input where Silero audio VAD and visual speech are both active
-       for at least ``min_dwell_speaking_s`` seconds, choosing the highest
-       audio loudness when several inputs qualify.
-    2. If that input differs from the current program AND the last
+    1. If a priority VAD-only speaker is active, choose that input without
+       requiring visual speech or loudest-camera status.
+    2. Otherwise, find the input where Silero audio VAD and visual speech are
+       both active, the measured RMS level is above ``min_active_level_db``,
+       and the input has held that state for at least
+       ``min_dwell_speaking_s`` seconds. Choose the highest audio loudness
+       when several inputs qualify.
+    3. If that input differs from the current program AND the last
        transition completed at least ``min_dwell_program_s`` seconds ago,
        trigger a ``mixer.fade`` to ``full_face_<candidate>``.
-    3. A ``cooldown_s`` lockout after each transition prevents oscillation
+    4. A ``cooldown_s`` lockout after each transition prevents oscillation
        even if min_dwell_program_s has elapsed.
     """
 
@@ -58,6 +62,10 @@ class AutoSwitcher:
         fade_duration_s: float = 0.6,
         cooldown_s: float = 1.5,
         tick_s: float = 0.25,
+        min_active_level_db: float = -60.0,
+        special_speaker_index: Optional[int] = None,
+        special_speaker_margin_db: float = 0.0,
+        vad_only_priority_speaker_index: Optional[int] = None,
     ) -> None:
         self._mixer = mixer
         self._registry = registry
@@ -68,6 +76,10 @@ class AutoSwitcher:
         self._fade_duration = fade_duration_s
         self._cooldown = cooldown_s
         self._tick = tick_s
+        self._min_active_level_db = min_active_level_db
+        self._special_speaker_index = special_speaker_index
+        self._special_speaker_margin_db = special_speaker_margin_db
+        self._vad_only_priority_speaker_index = vad_only_priority_speaker_index
 
         self._current_input: Optional[int] = None
         self._last_switch_ts: float = 0.0
@@ -110,6 +122,22 @@ class AutoSwitcher:
             self._tick_once()
             self._stop_event.wait(timeout=self._tick)
 
+    def _try_switch_to(self, index: int, now: float) -> bool:
+        if index == self._current_input:
+            return True
+        if (now - self._last_switch_ts) < self._min_dwell_program:
+            return False
+
+        scene = self._full_face_scene(index)
+        if scene not in self._mixer.scenes():
+            return False
+
+        #self._mixer.fade(scene, duration_sec=self._fade_duration)
+        self._mixer.cut(scene)
+        self._current_input = index
+        self._last_switch_ts = now
+        return True
+
     def _tick_once(self) -> None:
         now = time.monotonic()
 
@@ -117,9 +145,17 @@ class AutoSwitcher:
         if (now - self._last_switch_ts) < self._cooldown:
             return
 
-        # Find the best candidate: audio VAD and visual speech both active.
-        best_index: Optional[int] = None
-        best_level: float = -999.0
+        priority_index = self._vad_only_priority_speaker_index
+        if priority_index is not None:
+            entry = self._registry.get(priority_index)
+            if entry is not None and entry.speaking:
+                speaking_duration_s = now - entry.last_change_ts
+                if speaking_duration_s >= self._min_dwell_speaking:
+                    self._try_switch_to(priority_index, now)
+                    return
+
+        # Find candidates: audio VAD and visual speech both active, with usable RMS.
+        candidates = []
 
         for i in range(self._n_inputs):
             entry = self._registry.get(i)
@@ -130,25 +166,22 @@ class AutoSwitcher:
             speaking_duration_s = now - entry.last_change_ts
             if speaking_duration_s < self._min_dwell_speaking:
                 continue
-            if entry.level_db > best_level:
-                best_level = entry.level_db
-                best_index = i
+            if entry.level_db <= self._min_active_level_db:
+                continue
+            candidates.append(entry)
 
-        if best_index is None:
+        if not candidates:
             return
 
-        # Same as current program — nothing to do.
-        if best_index == self._current_input:
-            return
+        candidates.sort(key=lambda e: e.level_db, reverse=True)
+        best = candidates[0]
+        if (
+            self._special_speaker_index is not None
+            and best.index == self._special_speaker_index
+            and len(candidates) > 1
+            and best.level_db < candidates[1].level_db + self._special_speaker_margin_db
+        ):
+            best = candidates[1]
+        best_index = best.index
 
-        # Respect minimum time between program changes.
-        if (now - self._last_switch_ts) < self._min_dwell_program:
-            return
-
-        scene = self._full_face_scene(best_index)
-        if scene not in self._mixer.scenes():
-            return
-
-        self._mixer.fade(scene, duration_sec=self._fade_duration)
-        self._current_input = best_index
-        self._last_switch_ts = now
+        self._try_switch_to(best_index, now)
