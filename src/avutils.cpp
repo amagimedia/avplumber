@@ -98,6 +98,11 @@ bool isEofMarker(const EglImageFrame& f)
     return f.pts().isNoPts();
 }
 
+bool isEofMarker(const MetadataFrame& f)
+{
+    return f.pts().isNoPts();
+}
+
 av::Packet createEofPacket(int streamIndex)
 {
     auto p = av::Packet({ 0xFF });
