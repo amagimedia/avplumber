@@ -27,6 +27,7 @@ Usage
 
 from __future__ import annotations
 
+import json
 import math
 import struct
 import threading
@@ -50,6 +51,8 @@ class SpeakerEntry:
     last_change_ts: float = field(default_factory=time.monotonic)
     # Accumulated continuous speaking duration at the last update.
     speaking_duration_s: float = 0.0
+    # Visual (lip-motion) speech signal — set independently of audio.
+    visual_speaking: bool = False
 
 
 class Speaker:
@@ -87,6 +90,15 @@ class Speaker:
     def all(self) -> List[SpeakerEntry]:
         with self._lock:
             return list(self._entries.values())
+
+    def update_visual(self, index: int, visual_speaking: bool) -> None:
+        """Update the visual (lip-motion) speaking flag independently of audio."""
+        with self._lock:
+            entry = self._entries.get(index)
+            if entry is None:
+                entry = SpeakerEntry(index=index)
+                self._entries[index] = entry
+            entry.visual_speaking = visual_speaking
 
     def loudest_speaker(self) -> Optional[SpeakerEntry]:
         """Return the speaking input with the highest sustained level."""
@@ -248,3 +260,128 @@ class RmsVadNode(PythonNode):
             level_db=level_db,
             speaking_duration_s=speaking_dur,
         )
+
+
+class SileroVadRegistryBridge(PythonNode):
+    """MetadataFrame sink that bridges SileroVADNode events to the Speaker registry.
+
+    For live switching, SileroVADNode should be configured with
+    ``emit_state_events=True``.  This node then consumes ``speech_start`` and
+    ``speech_stop`` events and updates the registry immediately.  Completed
+    ``speech`` segment events are deliberately ignored because they arrive after
+    the segment has ended and are too late to drive live switching.
+
+    ``level_db`` in the registry comes from SileroVADNode's RMS measurement
+    when available.  Older event payloads without ``level_db`` fall back to a
+    probability-derived pseudo-level.
+
+    Usage
+    -----
+        bridge = SileroVadRegistryBridge(
+            {"name": f"vad_bridge_{i}", "src": "vad_events", "group": g},
+            index=i,
+            registry=speaker_registry,
+        )
+        avp.addNode(bridge)
+    """
+
+    def __init__(
+        self,
+        args: dict,
+        index: int,
+        registry: Speaker,
+        holdoff_s: float = 1.5,
+    ) -> None:
+        if "dst" in args:
+            raise ValueError("SileroVadRegistryBridge is a sink: do not pass 'dst'")
+        super().__init__({"data_type": "MetadataFrame"} | args)
+        self._index = index
+        self._registry = registry
+        # Kept for CLI compatibility with earlier auto_mixer.py revisions.
+        self._holdoff_s = holdoff_s
+
+    def _set_speaking(self, speaking: bool, metadata: dict) -> None:
+        prob = float(metadata.get("last_probability", 0.0))
+        level_db = metadata.get("level_db")
+        if level_db is None:
+            # Map Silero probability [0.0, 1.0] -> pseudo-level [-40, 0].
+            level_db = max(-96.0, 40.0 * (prob - 1.0))
+        else:
+            level_db = float(level_db)
+        duration_s = float(metadata.get("duration_ms", 0)) / 1000.0
+        self._registry.update(
+            index=self._index,
+            speaking=speaking,
+            level_db=level_db if speaking else -96.0,
+            speaking_duration_s=duration_s,
+        )
+
+    def process(self) -> None:
+        frame = self._src.get()
+        if not frame:
+            return
+        try:
+            metadata = dict(frame.metadata.as_dict)
+        except Exception:
+            return
+        event = metadata.get("event")
+        if event == "speech_start":
+            self._set_speaking(True, metadata)
+        elif event == "speech_update":
+            self._set_speaking(True, metadata)
+        elif event == "speech_stop":
+            self._set_speaking(False, metadata)
+
+
+class VisualSpeechRegistryNode(PythonNode):
+    """VideoFrame sink that reads VisualSpeechGateNode metadata and updates the
+    Speaker registry's visual_speaking flag.
+
+    It reads the JSON metadata attached by VisualSpeechGateNode (keyed by
+    ``visual_metadata_key``) on every video frame and calls
+    ``registry.update_visual()`` accordingly.  Updates happen at frame rate, so
+    there is no need for a holdoff timer — the VisualSpeechGateNode already
+    implements hysteresis (start_confirm_ms / stop_confirm_ms).
+
+    Usage
+    -----
+        node = VisualSpeechRegistryNode(
+            {"name": f"vs_registry_{i}", "src": f"v{i}_vs_out", "group": g},
+            index=i,
+            registry=speaker_registry,
+            visual_metadata_key=f"visual_speech_{i}",
+        )
+        avp.addNode(node)
+    """
+
+    def __init__(
+        self,
+        args: dict,
+        index: int,
+        registry: Speaker,
+        visual_metadata_key: str = "visual_speech_v1",
+        target_name: str = "primary",
+    ) -> None:
+        if "dst" in args:
+            raise ValueError("VisualSpeechRegistryNode is a sink: do not pass 'dst'")
+        super().__init__({"data_type": "VideoFrame"} | args)
+        self._index = index
+        self._registry = registry
+        self._visual_metadata_key = visual_metadata_key
+        self._target_name = target_name
+
+    def process(self) -> None:
+        frame = self._src.get()
+        if frame is None:
+            return
+        speaking = False
+        try:
+            raw = frame.metadata[self._visual_metadata_key]
+            data = json.loads(str(raw))
+            for target in data.get("targets", []):
+                if str(target.get("target")) == self._target_name:
+                    speaking = bool(target.get("speaking", False))
+                    break
+        except (KeyError, json.JSONDecodeError, Exception):
+            pass
+        self._registry.update_visual(self._index, speaking)

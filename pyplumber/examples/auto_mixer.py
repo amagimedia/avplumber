@@ -1,10 +1,20 @@
-"""Automatic scene switcher with face reframer and audio VAD.
+"""Automatic scene switcher with face reframer and multi-modal speech detection.
 
 Each input fans out to:
   - an original 16:9 leg (for PiP / multiviewer / vstack layouts)
   - a face-tracked 9:16 leg (for fullscreen and videoconference layouts)
 
-Audio RMS VAD determines the active speaker and drives mixer.fade().
+Speech detection uses two complementary signals:
+  - Audio: Silero neural VAD (far more accurate than RMS energy thresholds).
+    Requires audio resampled to 16 kHz / mono.  Events are bridged into the
+    Speaker registry via SileroVadRegistryBridge.
+  - Visual: lip-motion analysis via FaceAnchoredMouthTrackerNode +
+    VisualSpeechGateNode.  Taps the raw YOLO output (before PlayerTracker) so
+    that Mouth / Nose bounding boxes are available even though only the "face"
+    label is used for viewport tracking.  Updates Speaker.visual_speaking via
+    VisualSpeechRegistryNode.
+The AutoSwitcher triggers a scene change only when both signals are active.
+
 All inputs are mixed on a 1080x1920 (9:16) canvas.
 
 Available scene types
@@ -24,12 +34,16 @@ Usage
         --inputs rtmp://host/a rtmp://host/b \\
         --output rtmp://host/out \\
         --face-engine /opt/tly/engines/yolo_face.plan \\
-        [--rtmp-output rtmp://out] \\
-        [--codec h264_nvenc]
+        [--codec h264_nvenc] \\
+        [--silero-model /opt/tly/models/silero_vad.jit] \\
+        [--silero-device cpu] \\
+        [--remote-control-port 7777]
 
 Environment variables
 ---------------------
-    AVP_FACE_ENGINE   default face TRT engine path (overridden by --face-engine)
+    AVP_FACE_ENGINE      default face TRT engine path (overridden by --face-engine)
+    AVP_SILERO_MODEL     Silero VAD .jit model path (optional; downloads from hub if unset)
+    AVP_SILERO_REPO      torch.hub repo for Silero (default: snakers4/silero-vad)
 """
 
 from __future__ import annotations
@@ -40,11 +54,13 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
 from pyplumber import AVPlumber
 from pyplumber.node import (
+    AssumeAudioFormat,
     AssumeVideoFormat,
     CropMetadataCuda,
     CudaInferYolo,
@@ -64,11 +80,15 @@ from pyplumber.node import (
     Realtime,
     ResampleAudio,
     SmoothCropViewport,
+    SmoothTimestamps,
     Split,
 )
 from pyplumber.mixer import MixerGraphBuilder
-from pyplumber.audio_vad import RmsVadNode, Speaker
+from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
 from pyplumber.auto_switcher import AutoSwitcher
+from pyplumber.mouth_tracker import FaceAnchoredMouthTrackerNode
+from pyplumber.vad import SileroVADNode
+from pyplumber.visual_speech import VisualSpeechGateNode
 
 # ------------------------------------------------------------------
 # Canvas and pipeline constants
@@ -94,13 +114,48 @@ VIEWPORT_METADATA_KEY = "smoothed_crop_viewport_v1"
 FACE_CROP_W = 608
 FACE_CROP_H = 1080
 
-# YOLO face class labels used by the model.
-FACE_CLASS_NAMES = ["face", "Eye", "Nose", "Mouth"]
-FACE_TRACKED_LABELS = ["face"]
+# YOLO face-part class labels used by the face-recognition-1.2 model.
+FACE_CLASS_NAMES = ["Eye", "Face", "MakeUp", "Mouth", "Nose", "Tooth", "Topping"]
+FACE_TRACKED_LABELS = ["Face"]
 
 AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNEL_LAYOUT = "stereo"
 AUDIO_SAMPLE_FORMAT = "fltp"
+
+# Silero VAD requires 16 kHz mono float audio.
+VAD_SAMPLE_RATE = 16000
+
+# Visual speech metadata key names (per-input, so no collisions on the same frame).
+VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
+VS_VISUAL_KEY_PREFIX = "vs_visual_speech"
+
+
+def default_face_engine() -> str:
+    """Resolve the face TRT engine used by local dev images and remote test hosts."""
+    env_engine = os.environ.get("AVP_FACE_ENGINE")
+    if env_engine:
+        return env_engine
+
+    model_dir_env = os.environ.get("AVP_MODEL_DIR")
+    candidates = []
+    if model_dir_env:
+        model_dir = Path(model_dir_env)
+        candidates.extend([
+            model_dir / "face-recognition_960x544.plan",
+            model_dir / "face-recognition_960x544.engine",
+            model_dir / "best.plan",
+            model_dir / "best.engine",
+        ])
+    candidates.extend([
+        Path("/opt/tly/engines/yolo_face.plan"),
+        Path("/home/fedora/models/face-recognition-1.2/face-recognition_960x544.plan"),
+        Path("/home/user/tensorrt/face-recognition-1.2/face-recognition_960x544.plan"),
+    ])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
 
 # ------------------------------------------------------------------
 # Per-input subgraph
@@ -112,14 +167,21 @@ def build_input_subgraph(
     url: str,
     face_engine: str,
     sync_team: str = "",
+    silero_model: str | None = None,
+    silero_repo: str = "snakers4/silero-vad",
+    silero_device: str = "cpu",
+    silero_threshold: float = 0.5,
 ) -> dict:
     """Build decode + face-detection + audio chain for one input.
 
     Returns a dict with the edge names that the caller needs:
-        orig_edge   -- 1920x1080 CUDA edge (after smooth_crop, with face metadata)
-        face_edge   -- 608x1080 CUDA edge (face-cropped portrait)
-        amix_edge   -- 48k/stereo/fltp audio for the amix bus
-        vad_edge    -- 48k/stereo/fltp audio for the VAD node
+        orig_edge           -- 1920x1080 CUDA edge (after smooth_crop, with face metadata)
+        face_edge           -- 608x1080 CUDA edge (face-cropped portrait)
+        amix_edge           -- 48k/stereo/fltp audio for the amix bus
+        vad_audio_edge      -- 16k/mono/fltp audio for SileroVADNode
+        vad_events_edge     -- MetadataFrame edge from SileroVADNode (speech events)
+        visual_speech_edge  -- video edge from VisualSpeechGateNode (speaking metadata attached)
+        input_group         -- avplumber group name for this input
     """
     g = f"input_{idx}"
 
@@ -152,7 +214,7 @@ def build_input_subgraph(
         "group": g,
         "auto_restart": "group",
     }))
-    rt_kwargs: dict = {"set_pts": True, "group": g}
+    rt_kwargs: dict = {"set_pts": True, "group": g, "auto_restart": "group"}
     if sync_team:
         rt_kwargs["team"] = sync_team
     avp.addNode(Realtime({
@@ -167,13 +229,14 @@ def build_input_subgraph(
         "src": f"v{idx}_rt",
         "dst": f"v{idx}_fps",
         "group": g,
+        "auto_restart": "group",
     }))
 
-    # ---- Video fan-out: full-res leg + YOLO leg ----
+    # ---- Video fan-out: full-res leg + YOLO leg + visual-speech full-res copy ----
     avp.addNode(Split({
         "name": f"split_v{idx}",
         "src": f"v{idx}_fps",
-        "dst": [f"v{idx}_fullres", f"v{idx}_for_yolo"],
+        "dst": [f"v{idx}_fullres", f"v{idx}_for_yolo", f"v{idx}_fullres_vs"],
         "group": g,
     }))
 
@@ -193,7 +256,7 @@ def build_input_subgraph(
     avp.addNode(CudaInferYolo({
         "name": f"yolo_{idx}",
         "src": f"v{idx}_yolo_in",
-        "dst": f"v{idx}_yolo_out",
+        "dst": f"v{idx}_yolo_raw",
         "metadata_key_detection": FACE_METADATA_KEY,
         "models": [{
             "engine": face_engine,
@@ -204,9 +267,18 @@ def build_input_subgraph(
         "group": g,
         "auto_restart": "group",
     }))
+    # Split raw YOLO output: one copy for face-tracking and one for visual-speech.
+    # PlayerTracker filters to target_labels=["Face"] and may discard Mouth/Nose
+    # detections; the visual-speech branch therefore needs the unmodified output.
+    avp.addNode(Split({
+        "name": f"split_yolo_{idx}",
+        "src": f"v{idx}_yolo_raw",
+        "dst": [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"],
+        "group": g,
+    }))
     avp.addNode(PlayerTracker({
         "name": f"tracker_{idx}",
-        "src": f"v{idx}_yolo_out",
+        "src": f"v{idx}_yolo_for_tracker",
         "dst": f"v{idx}_tracked",
         "metadata_key": FACE_METADATA_KEY,
         "target_labels": FACE_TRACKED_LABELS,
@@ -245,22 +317,81 @@ def build_input_subgraph(
     avp.addNode(Split({
         "name": f"split_legs_{idx}",
         "src": f"v{idx}_smooth",
-        "dst": [f"v{idx}_orig", f"v{idx}_for_crop"],
+        "dst": [f"v{idx}_orig_raw", f"v{idx}_for_crop"],
         "group": g,
+    }))
+    # Smooth timestamps on the orig leg so the OTM always receives a well-formed
+    # monotonic PTS sequence regardless of any irregularities introduced by the
+    # face-detection chain (JoinMetadata frame-drops, SmoothCropViewport holds, …).
+    avp.addNode(SmoothTimestamps({
+        "name": f"smooth_ts_orig_{idx}",
+        "src": f"v{idx}_orig_raw",
+        "dst": f"v{idx}_orig",
+        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "group": g,
+        "auto_restart": "group",
     }))
 
     # ---- Face crop: 1920x1080 → 608x1080 portrait ----
     avp.addNode(CropMetadataCuda({
         "name": f"face_crop_{idx}",
         "src": f"v{idx}_for_crop",
-        "dst": f"v{idx}_face_916",
+        "dst": f"v{idx}_face_916_raw",
         "metadata_key": VIEWPORT_METADATA_KEY,
         "offset_log_path": "/dev/null",
         "group": g,
         "auto_restart": "group",
     }))
+    # Same smoothing on the face-crop leg.
+    avp.addNode(SmoothTimestamps({
+        "name": f"smooth_ts_face_{idx}",
+        "src": f"v{idx}_face_916_raw",
+        "dst": f"v{idx}_face_916",
+        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "group": g,
+        "auto_restart": "group",
+    }))
 
-    # ---- Audio: decode → resample to fltp ----
+    # ---- Visual-speech branch ----
+    # Attach raw YOLO detections (Face, Mouth, Nose, Eye) onto a full-res copy
+    # so that FaceAnchoredMouthTrackerNode can locate the mouth bounding box.
+    # If the face engine doesn't detect sub-parts (Mouth/Nose), the tracker
+    # falls back to geometric estimation, still providing a motion signal.
+    mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
+    vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
+    avp.addNode(JoinMetadata({
+        "name": f"join_vs_{idx}",
+        "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
+        "dst": f"v{idx}_vs_md",
+        "group": g,
+        "auto_restart": "group",
+    }))
+    avp.addNode(FaceAnchoredMouthTrackerNode({
+        "name": f"mouth_tracker_{idx}",
+        "src": f"v{idx}_vs_md",
+        "dst": f"v{idx}_vs_mouth",
+        "group": g,
+        "source": f"input_{idx}",
+        "input_metadata_key": FACE_METADATA_KEY,
+        "output_metadata_key": mouth_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+    avp.addNode(VisualSpeechGateNode({
+        "name": f"vs_gate_{idx}",
+        "src": f"v{idx}_vs_mouth",
+        "dst": f"v{idx}_vs_out",
+        "group": g,
+        "source": f"input_{idx}",
+        "mouth_metadata_key": mouth_key,
+        "output_metadata_key": vs_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+
+    # ---- Audio: decode → realtime → resample to fltp ----
     avp.addNode(DecAudio({
         "name": f"dec_a{idx}",
         "src": f"a{idx}_pkt",
@@ -268,9 +399,18 @@ def build_input_subgraph(
         "group": g,
         "auto_restart": "group",
     }))
+    audio_rt_kwargs: dict = {"set_pts": True, "group": g, "auto_restart": "group"}
+    if sync_team:
+        audio_rt_kwargs["team"] = sync_team
+    avp.addNode(Realtime({
+        "name": f"rt_a{idx}",
+        "src": f"a{idx}_dec",
+        "dst": f"a{idx}_rt",
+        **audio_rt_kwargs,
+    }))
     avp.addNode(ResampleAudio({
         "name": f"resamp_{idx}",
-        "src": f"a{idx}_dec",
+        "src": f"a{idx}_rt",
         "dst": f"a{idx}_fltp",
         "dst_sample_rate": AUDIO_SAMPLE_RATE,
         "dst_channel_layout": AUDIO_CHANNEL_LAYOUT,
@@ -280,19 +420,51 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
 
-    # ---- Audio fan-out: VAD tap + amix bus ----
+    # ---- Audio fan-out: Silero-VAD tap + amix bus ----
     avp.addNode(Split({
         "name": f"split_a{idx}",
         "src": f"a{idx}_fltp",
-        "dst": [f"a{idx}_vad", f"a{idx}_amix"],
+        "dst": [f"a{idx}_vad_48k", f"a{idx}_amix"],
         "group": g,
     }))
+    # Silero requires 16 kHz / mono / float32 (flt or fltp).
+    avp.addNode(ResampleAudio({
+        "name": f"resamp_vad_{idx}",
+        "src": f"a{idx}_vad_48k",
+        "dst": f"a{idx}_vad_16k",
+        "dst_sample_rate": VAD_SAMPLE_RATE,
+        "dst_channel_layout": "mono",
+        "dst_sample_format": "fltp",
+        "compensation": 0,
+        "group": g,
+        "auto_restart": "group",
+    }))
+    # SileroVADNode reads the 16 kHz audio and emits speech-segment events.
+    silero_args: dict = {
+        "name": f"silero_{idx}",
+        "src": f"a{idx}_vad_16k",
+        "dst": f"a{idx}_vad_events",
+        "group": g,
+        "source": f"input_{idx}",
+        "sample_rate": VAD_SAMPLE_RATE,
+        "threshold": silero_threshold,
+        "emit_state_events": True,
+        "emit_state_updates": True,
+        "repo_or_dir": silero_repo,
+        "device": silero_device,
+        "auto_restart": "group",
+    }
+    if silero_model:
+        silero_args["model_path"] = silero_model
+    avp.addNode(SileroVADNode(silero_args))
 
     return {
         "orig_edge": f"v{idx}_orig",
         "face_edge": f"v{idx}_face_916",
         "amix_edge": f"a{idx}_amix",
-        "vad_edge": f"a{idx}_vad",
+        "vad_events_edge": f"a{idx}_vad_events",
+        "visual_speech_edge": f"v{idx}_vs_out",
+        "vs_key": vs_key,
         "input_group": g,
     }
 
@@ -314,11 +486,8 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
         Camera *i* face-tracked 9:16 portrait scaled to fill the full canvas.
 
     videoconf_{i}
-        Camera *i* as a static 1:1 crop in the top 1080×1080 slot, with up to
-        5 other cameras shown as portrait thumbnails in the bottom strip.
-        The 1:1 area is produced by scaling the face-tracked portrait to fill
-        1080 px wide; the canvas clips the bottom, leaving the head/shoulders
-        region visible — no extra face-tracking pass required.
+        Camera *i* as a top 1:1 crop in the top 1080×1080 slot, with up
+        to 5 other cameras shown as portrait thumbnails in the bottom strip.
 
     vstack3_{a}_{b}_{c}
         Three landscape sources (orig_a / orig_b / orig_c) stacked vertically,
@@ -353,9 +522,7 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
     # 2. Videoconference: dominant speaker 1:1 (top) + others portrait below
     #
     # Top slot (1080 × 1080 — 1:1):
-    #   face_{i} (608 × 1080) scaled to fill 1080 px wide → ~1918 px tall.
-    #   The canvas clips the bottom, so only the upper 1080 px are rendered —
-    #   a static 1:1 crop of the already face-tracked portrait.
+    #   face_{i} (608 × 1080) is cropped from the top to 608 × 608, then scaled.
     #
     # Bottom strip (1080 × 840):
     #   Up to 5 other cameras tiled horizontally as 9:16 portrait thumbnails,
@@ -363,9 +530,7 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
     # ------------------------------------------------------------------
     CONF_TOP_H = W                          # 1080 — square (1:1) top slot
     CONF_BOT_H = H - CONF_TOP_H            # 840
-    # Height when face portrait (608 × 1080) is scaled to fill 1080 px wide.
-    # Ceiling-divide then round to even to avoid any letterbox gap at the edge.
-    _face_fill_h = (W * FACE_CROP_H // FACE_CROP_W + 1) & ~1  # 1918
+    CONF_MAIN_CROP_Y = 0
 
     for i in range(n):
         others = [j for j in range(n) if j != i][:5]
@@ -383,7 +548,10 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
 
         sources: dict = {
             f"face_{i}": {
-                "graph": f"scale_cuda=w={W}:h={_face_fill_h}:interp_algo=lanczos",
+                "graph": (
+                    f"crop_cuda=w={FACE_CROP_W}:h={FACE_CROP_W}:x=0:y={CONF_MAIN_CROP_Y},"
+                    f"scale_cuda=w={W}:h={CONF_TOP_H}:interp_algo=lanczos"
+                ),
                 "dst_x": 0,
                 "dst_y": 0,
             }
@@ -514,8 +682,18 @@ def build_audio_output(avp: AVPlumber, amix_edges: list, codec: str = "aac") -> 
     avp.addNode(FilterAudio({
         "name": "amix",
         "src": amix_edges,
-        "dst": "a_mixed",
+        "dst": "a_mixed_raw",
         "graph": f"amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0",
+        "group": "output",
+        "auto_restart": "panic",
+    }))
+    avp.addNode(AssumeAudioFormat({
+        "name": "assume_audio",
+        "src": "a_mixed_raw",
+        "dst": "a_mixed",
+        "sample_rate": AUDIO_SAMPLE_RATE,
+        "sample_format": AUDIO_SAMPLE_FORMAT,
+        "channel_layout": AUDIO_CHANNEL_LAYOUT,
         "group": "output",
         "auto_restart": "panic",
     }))
@@ -590,7 +768,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--face-engine",
-        default=os.environ.get("AVP_FACE_ENGINE", "/opt/tly/engines/yolo_face.plan"),
+        default=default_face_engine(),
         help="Path to the face detection TensorRT engine (.plan)",
     )
     parser.add_argument(
@@ -602,7 +780,7 @@ def main() -> None:
         help="Audio encoder codec (default: aac)",
     )
     parser.add_argument(
-        "--sync-team", default="",
+        "--sync-team", default="syncgroup",
         help="realtime sync_team name for live SRT sources (empty = independent)",
     )
     parser.add_argument(
@@ -617,6 +795,36 @@ def main() -> None:
         "--min-dwell", default=2.5, type=float,
         help="Minimum program dwell time in seconds before switching (default: 2.5)",
     )
+    parser.add_argument(
+        "--silero-model",
+        default=os.environ.get("AVP_SILERO_MODEL"),
+        help="Path to Silero VAD .jit model (downloads from torch.hub if unset)",
+    )
+    parser.add_argument(
+        "--silero-repo",
+        default=os.environ.get("AVP_SILERO_REPO", "snakers4/silero-vad"),
+        help="torch.hub repo or local dir for Silero VAD (default: snakers4/silero-vad)",
+    )
+    parser.add_argument(
+        "--silero-device", default="cpu",
+        help="Device for Silero inference: 'cpu' or 'cuda' (default: cpu)",
+    )
+    parser.add_argument(
+        "--silero-threshold", default=0.5, type=float,
+        help="Silero speech probability threshold (default: 0.5)",
+    )
+    parser.add_argument(
+        "--vad-holdoff", default=1.5, type=float,
+        help="Deprecated; retained for CLI compatibility",
+    )
+    parser.add_argument(
+        "--remote-control-port", default=0, type=int, metavar="PORT",
+        help="TCP port for the avplumber remote control API (0 = disabled)",
+    )
+    parser.add_argument(
+        "--disable-auto-switcher", action="store_true",
+        help="Start the graph without automatic scene changes",
+    )
     args = parser.parse_args()
 
     n = len(args.inputs)
@@ -624,6 +832,8 @@ def main() -> None:
         parser.error("At least 2 inputs are required.")
 
     avp = AVPlumber()
+    if args.remote_control_port:
+        avp.enableControlServer(args.remote_control_port)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
     avp.edges.planCapacity("*", 4)
 
@@ -634,6 +844,10 @@ def main() -> None:
             avp, i, url,
             face_engine=args.face_engine,
             sync_team=args.sync_team,
+            silero_model=args.silero_model,
+            silero_repo=args.silero_repo,
+            silero_device=args.silero_device,
+            silero_threshold=args.silero_threshold,
         )
         subgraphs.append(sg)
 
@@ -662,7 +876,7 @@ def main() -> None:
         )
 
     define_auto_scenes(mx, n)
-    mx.set_initial_scene("full_face_0", slot="A")
+    mx.set_initial_scene("videoconf_0", slot="A")
     video_out_edge = mx.build()
 
     # ---- Audio output ----
@@ -688,20 +902,38 @@ def main() -> None:
         "auto_restart": "panic",
     }))
 
-    # ---- VAD nodes ----
+    # ---- Speech detection: Silero audio VAD + visual lip-motion ----
     speaker_registry = Speaker()
     for i, sg in enumerate(subgraphs):
-        vad_node = RmsVadNode(
+        g = sg["input_group"]
+
+        # Audio: SileroVADNode is already wired inside build_input_subgraph().
+        # This bridge converts its live speech_start / speech_stop metadata events
+        # to registry updates.
+        avp.addNode(SileroVadRegistryBridge(
             {
-                "name": f"vad_{i}",
-                "src": sg["vad_edge"],
-                "group": sg["input_group"],
+                "name": f"vad_bridge_{i}",
+                "src": sg["vad_events_edge"],
+                "group": g,
                 "auto_restart": "group",
             },
             index=i,
             registry=speaker_registry,
-        )
-        avp.addNode(vad_node)
+            holdoff_s=args.vad_holdoff,
+        ))
+
+        # Visual: VisualSpeechGateNode output is already wired in build_input_subgraph().
+        avp.addNode(VisualSpeechRegistryNode(
+            {
+                "name": f"vs_registry_{i}",
+                "src": sg["visual_speech_edge"],
+                "group": g,
+                "auto_restart": "group",
+            },
+            index=i,
+            registry=speaker_registry,
+            visual_metadata_key=sg["vs_key"],
+        ))
 
     # ---- Start all groups ----
     for i in range(n):
@@ -718,11 +950,15 @@ def main() -> None:
         mixer=mx,
         registry=speaker_registry,
         n_inputs=n,
-        full_face_scene=lambda i: f"full_face_{i}",
+        full_face_scene=lambda i: f"videoconf_{i}",
         fade_duration_s=args.fade,
         min_dwell_program_s=args.min_dwell,
     )
-    switcher.start()
+    if not args.disable_auto_switcher:
+        switcher.start()
+
+    # Unlock the control server so remote clients can issue commands.
+    avp.setReady()
 
     # ---- Run until interrupted ----
     stop_event = threading.Event()
@@ -741,15 +977,18 @@ def main() -> None:
             if int(time.monotonic()) % 10 == 0:
                 entries = speaker_registry.all()
                 for e in entries:
-                    state = "SPEAKING" if e.speaking else "silent "
+                    audio_s = "AUDIO" if e.speaking else "     "
+                    visual_s = "VIS" if e.visual_speaking else "   "
+                    duration_s = time.monotonic() - e.last_change_ts if e.speaking else e.speaking_duration_s
                     print(
-                        f"[vad] input {e.index}: {state}  "
+                        f"[vad] input {e.index}: {audio_s} {visual_s}  "
                         f"{e.level_db:+.1f} dB  "
-                        f"dur={e.speaking_duration_s:.1f}s"
+                        f"dur={duration_s:.1f}s"
                     )
                 print(f"[mixer] PGM: {mx.current_scene}")
     finally:
-        switcher.stop()
+        if not args.disable_auto_switcher:
+            switcher.stop()
         print("[auto_mixer] Done.")
 
 

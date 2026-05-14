@@ -37,8 +37,9 @@ class AutoSwitcher:
 
     Decision logic (runs every ``tick_s`` seconds)
     -----------------------------------------------
-    1. Find the input that has been speaking continuously for at least
-       ``min_dwell_speaking_s`` seconds with the highest level.
+    1. Find the input where Silero audio VAD and visual speech are both active
+       for at least ``min_dwell_speaking_s`` seconds, choosing the highest
+       audio loudness when several inputs qualify.
     2. If that input differs from the current program AND the last
        transition completed at least ``min_dwell_program_s`` seconds ago,
        trigger a ``mixer.fade`` to ``full_face_<candidate>``.
@@ -116,7 +117,7 @@ class AutoSwitcher:
         if (now - self._last_switch_ts) < self._cooldown:
             return
 
-        # Find the best candidate: speaking for long enough.
+        # Find the best candidate: audio VAD and visual speech both active.
         best_index: Optional[int] = None
         best_level: float = -999.0
 
@@ -124,9 +125,10 @@ class AutoSwitcher:
             entry = self._registry.get(i)
             if entry is None:
                 continue
-            if not entry.speaking:
+            if not entry.speaking or not entry.visual_speaking:
                 continue
-            if entry.speaking_duration_s < self._min_dwell_speaking:
+            speaking_duration_s = now - entry.last_change_ts
+            if speaking_duration_s < self._min_dwell_speaking:
                 continue
             if entry.level_db > best_level:
                 best_level = entry.level_db

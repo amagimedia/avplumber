@@ -303,6 +303,7 @@ int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t st
 void MixerOrchestrator::deferredCleanup(
         std::shared_ptr<NodeManager> nodes,
         std::shared_ptr<MixerState> state,
+        std::shared_ptr<SharedTimeline> timeline,
         int64_t sleep_ms,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
@@ -317,6 +318,36 @@ void MixerOrchestrator::deferredCleanup(
         }
     }
     std::lock_guard<std::mutex> lock(state->mutex);
+    try {
+        const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
+        const auto scene_it = state->scenes.find(new_pgm_scene);
+        if (scene_it != state->scenes.end()) {
+            const SceneDefinition& scene = scene_it->second;
+            const uint32_t active = state->computeActiveInputsMask(scene);
+            for (const auto& [src_name, info] : state->sources) {
+                const bool in_scene = scene.sources.count(src_name) > 0;
+                const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
+                const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
+                timeline->clearKey(info.otm_node_name, "outputs");
+                nodes->node(info.otm_node_name)->setObject("outputs", Parameters(mask));
+            }
+            const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
+            const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
+            timeline->clearKey(new_slot.post_otm_name, "outputs");
+            timeline->clearKey(old_slot.post_otm_name, "outputs");
+            timeline->clearKey(new_slot.compositor_name, "active_inputs");
+            timeline->clearKey(old_slot.compositor_name, "active_inputs");
+            timeline->clearKey(state->source_switcher_name, "active");
+            nodes->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
+            nodes->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
+            nodes->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
+            nodes->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
+            nodes->node(state->source_switcher_name)->setObject(
+                "active", Parameters(new_pgm_is_slot_a ? 0 : 1));
+        }
+    } catch (const std::exception& e) {
+        logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
+    }
     state->pgm_is_slot_a = new_pgm_is_slot_a;
     state->pgm_scene_name = std::move(new_pgm_scene);
     state->pvw_scene_name = "";
@@ -338,7 +369,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     int64_t T_cleanup = cutInternal(scene_name, T_cut);
 
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
-    std::thread(deferredCleanup, nodes_, state_,
+    std::thread(deferredCleanup, nodes_, state_, timeline_,
                 flip_delay, pvw_is_slot_a, scene_name,
                 std::vector<std::string>{}).detach();
 }
@@ -416,7 +447,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 
     // 6. Deferred cleanup: delete transition node + flip state
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
-    std::thread(deferredCleanup, nodes_, state_,
+    std::thread(deferredCleanup, nodes_, state_, timeline_,
                 flip_delay, pvw_is_slot_a, scene_name,
                 std::vector<std::string>{transition_node_name_}).detach();
 }

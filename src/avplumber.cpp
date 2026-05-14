@@ -1099,7 +1099,7 @@ AVPlumber::AVPlumber() {
         set_thread_name("avplumber main");
     }
     av::init();
-    av::set_logging_level(AV_LOG_VERBOSE);
+    av::set_logging_level(AV_LOG_INFO);
     std::shared_ptr<NodeManager> nm = std::make_shared<NodeManager>();
     impl_ = new ControlImpl(nm);
     control_port_ = 0;

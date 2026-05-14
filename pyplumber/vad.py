@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 
@@ -16,7 +17,7 @@ def _audio_samples_to_float32_mono(samples):
     fmt = samples.sampleFormatName
     channels = int(samples.channelsCount)
     count = int(samples.samplesCount)
-    planes = samples.data
+    planes = samples.planes
     if count <= 0 or channels <= 0:
         return np.empty(0, dtype=np.float32)
 
@@ -43,6 +44,18 @@ def _audio_samples_to_float32_mono(samples):
     raise RuntimeError(f"unsupported VAD sample format: {fmt}")
 
 
+def _float32_mono_rms_db(audio) -> float:
+    if audio.size == 0:
+        return -96.0
+    import numpy as np
+
+    audio = audio.astype(np.float32, copy=False)
+    rms = float(np.sqrt(np.mean(audio * audio)))
+    if rms <= 0.0:
+        return -96.0
+    return max(-96.0, 20.0 * math.log10(rms + 1e-12))
+
+
 class SileroVADNode(AudioToMetadataPythonNode):
     def __init__(self, args: dict):
         super().__init__(args)
@@ -59,6 +72,8 @@ class SileroVADNode(AudioToMetadataPythonNode):
         self.device = str(p.get("device", "cpu"))
         self.model_path = p.get("model_path") or os.environ.get("AVP_SILERO_MODEL")
         self.repo_or_dir = p.get("repo_or_dir") or os.environ.get("AVP_SILERO_REPO", "snakers4/silero-vad")
+        self.emit_state_events = bool(p.get("emit_state_events", False))
+        self.emit_state_updates = bool(p.get("emit_state_updates", False))
 
         self._torch = None
         self._np = None
@@ -107,6 +122,7 @@ class SileroVADNode(AudioToMetadataPythonNode):
         self._last_speech_pts = None
         self._silence_start_pts = None
         self._last_prob = 0.0
+        self._last_level_db = -96.0
 
     def _reset_stream_state(self):
         self._pending = None
@@ -152,6 +168,26 @@ class SileroVADNode(AudioToMetadataPythonNode):
         else:
             self._dst.enqueue(frame)
 
+    def _emit_state_event(self, event: str, pts: int, metadata: dict | None = None):
+        if not self.emit_state_events:
+            return
+        tb = self._timebase
+        payload = {
+            "event": event,
+            "source": self.source_name,
+            "pts": int(pts),
+            "sec": round(self._pts_to_sec(pts), 6),
+            "timebase_num": int(tb.num) if tb else 1,
+            "timebase_den": int(tb.den) if tb else self.sample_rate,
+            "sample_rate": self.sample_rate,
+            "threshold": self.threshold,
+            "last_probability": round(float(self._last_prob), 6),
+            "level_db": round(float(self._last_level_db), 3),
+        }
+        if metadata:
+            payload.update(metadata)
+        self._enqueue_event(self._event_frame(pts, payload))
+
     def _emit_segment(self, start_pts: int, end_pts: int):
         if end_pts <= start_pts:
             return
@@ -178,6 +214,8 @@ class SileroVADNode(AudioToMetadataPythonNode):
 
     def _vad_probability(self, chunk):
         self._ensure_model()
+        if not chunk.flags.writeable:
+            chunk = chunk.copy()
         tensor = self._torch.from_numpy(chunk).to(self.device)
         with self._torch.inference_mode():
             result = self._model(tensor, self.sample_rate)
@@ -185,6 +223,8 @@ class SileroVADNode(AudioToMetadataPythonNode):
 
     def _handle_window(self, chunk, chunk_start_pts: int, chunk_end_pts: int):
         prob = self._vad_probability(chunk)
+        self._last_prob = prob
+        self._last_level_db = _float32_mono_rms_db(chunk)
         if prob >= self.threshold:
             if not self._in_speech:
                 pad_pts = self._sample_count_to_pts(self.speech_pad_samples)
@@ -193,8 +233,13 @@ class SileroVADNode(AudioToMetadataPythonNode):
                     start_pts = max(self._stream_floor_pts, start_pts)
                 self._segment_start_pts = start_pts
                 self._in_speech = True
+                self._emit_state_event("speech_start", chunk_end_pts, {
+                    "speech_start_pts": int(start_pts),
+                    "speech_start_sec": round(self._pts_to_sec(start_pts), 6),
+                })
+            elif self.emit_state_updates:
+                self._emit_state_event("speech_update", chunk_end_pts)
             self._last_speech_pts = chunk_end_pts
-            self._last_prob = prob
             self._silence_start_pts = None
             return
 
@@ -210,6 +255,13 @@ class SileroVADNode(AudioToMetadataPythonNode):
         pad_pts = self._sample_count_to_pts(self.speech_pad_samples)
         end_pts = min(chunk_end_pts, (self._last_speech_pts or self._silence_start_pts) + pad_pts)
         self._emit_segment(self._segment_start_pts, end_pts)
+        self._emit_state_event("speech_stop", chunk_end_pts, {
+            "speech_start_pts": int(self._segment_start_pts),
+            "speech_end_pts": int(end_pts),
+            "speech_start_sec": round(self._pts_to_sec(self._segment_start_pts), 6),
+            "speech_end_sec": round(self._pts_to_sec(end_pts), 6),
+            "duration_ms": int(round(self._pts_to_ms(end_pts - self._segment_start_pts))),
+        })
         self._reset_segment()
 
     def _append_audio(self, audio, start_pts: int):
@@ -233,6 +285,14 @@ class SileroVADNode(AudioToMetadataPythonNode):
     def flush_open_segment(self):
         if self._in_speech and self._segment_start_pts is not None and self._last_speech_pts is not None:
             self._emit_segment(self._segment_start_pts, self._last_speech_pts)
+            self._emit_state_event("speech_stop", self._last_speech_pts, {
+                "speech_start_pts": int(self._segment_start_pts),
+                "speech_end_pts": int(self._last_speech_pts),
+                "speech_start_sec": round(self._pts_to_sec(self._segment_start_pts), 6),
+                "speech_end_sec": round(self._pts_to_sec(self._last_speech_pts), 6),
+                "duration_ms": int(round(self._pts_to_ms(self._last_speech_pts - self._segment_start_pts))),
+                "reason": "flush",
+            })
         self._reset_segment()
 
     def process(self):

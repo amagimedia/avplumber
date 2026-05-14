@@ -43,8 +43,12 @@ public:
     }
 
     void setObject(const std::string key, const Parameters& value) override {
-        if (key == "active")
+        if (key == "active") {
             active_input_.store(value.get<int>(), std::memory_order_relaxed);
+            for (auto& edge : this->source_edges_) {
+                edge->producedEvent().signal();
+            }
+        }
     }
 
     static std::shared_ptr<MixerSourceSwitcher> create(NodeCreationInfo& nci) {

@@ -45,6 +45,7 @@ class MixerOrchestrator {
     // (node deletion and internal bookkeeping flip).
     static void deferredCleanup(std::shared_ptr<NodeManager> nodes,
                                 std::shared_ptr<MixerState> state,
+                                std::shared_ptr<SharedTimeline> timeline,
                                 int64_t sleep_ms,
                                 bool new_pgm_is_slot_a,
                                 std::string new_pgm_scene,

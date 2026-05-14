@@ -223,6 +223,10 @@ class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
 
 
+class SmoothTimestamps(InternalNode):
+    TYPE = "smooth_timestamps"
+
+
 class SmoothCropViewport(InternalNode):
     TYPE = "smooth_crop_viewport"
 
@@ -233,6 +237,10 @@ class CropMetadataCuda(InternalNode):
 
 class AssumeVideoFormat(InternalNode):
     TYPE = "assume_video_format"
+
+
+class AssumeAudioFormat(InternalNode):
+    TYPE = "assume_audio_format"
 
 
 class EncVideo(InternalNode):
