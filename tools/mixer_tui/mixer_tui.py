@@ -20,7 +20,8 @@ Keyboard shortcuts:
     o          Toggle HTML overlay bypass
     c          CUT  (take preview to program, hard cut)
     x          X-FADE (crossfade preview to program at set duration)
-    w          WIPE (prompt for wipe file path, then execute)
+    w          WIPE (uses --wipe-file path if set, otherwise prompts)
+    e          Change wipe file path (always opens prompt)
     d          Focus the duration input field
     s          Force an immediate mixer.status refresh
     q / ctrl+c Quit
@@ -178,7 +179,7 @@ class AvpConnection:
 # ---------------------------------------------------------------------------
 
 class WipeModal(ModalScreen[Optional[str]]):
-    """Modal dialog to enter the wipe file path."""
+    """Modal dialog to enter/change the wipe file path."""
 
     CSS = """
     WipeModal {
@@ -210,16 +211,26 @@ class WipeModal(ModalScreen[Optional[str]]):
         Binding("escape", "cancel", "Cancel"),
     ]
 
+    def __init__(self, current_path: Optional[str] = None) -> None:
+        super().__init__()
+        self._current_path = current_path or ""
+
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("Enter wipe file path:")
-            yield Input(placeholder="/path/to/wipe.mov", id="wipe_path")
+            yield Label("Wipe file path:")
+            yield Input(
+                value=self._current_path,
+                placeholder="/path/to/wipe.mov",
+                id="wipe_path",
+            )
             with Horizontal():
                 yield Button("Cancel", variant="default", id="cancel")
-                yield Button("WIPE", variant="primary", id="ok")
+                yield Button("OK", variant="primary", id="ok")
 
     def on_mount(self) -> None:
-        self.query_one("#wipe_path", Input).focus()
+        inp = self.query_one("#wipe_path", Input)
+        inp.focus()
+        inp.cursor_position = len(inp.value)
 
     @on(Button.Pressed, "#ok")
     def do_ok(self) -> None:
@@ -454,6 +465,11 @@ Screen {
     margin-right: 1;
 }
 
+#btn_change_wipe {
+    margin-left: 0;
+    margin-right: 1;
+}
+
 #btn_overlay {
     margin-left: 1;
 }
@@ -485,6 +501,7 @@ class MixerTUI(App):
         Binding("c", "cut", "CUT", show=False),
         Binding("x", "auto_transition", "X-FADE", show=False),
         Binding("w", "wipe", "WIPE", show=False),
+        Binding("e", "change_wipe_path", "Wipe path", show=False),
         Binding("d", "focus_duration", "Duration", show=False),
         Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
@@ -506,7 +523,8 @@ class MixerTUI(App):
     connected: reactive[bool] = reactive(False)
 
     def __init__(self, host: str, port: int, mixer: str, overlay_otm: str,
-                 overlay_source_otm: str, overlay_selector: str) -> None:
+                 overlay_source_otm: str, overlay_selector: str,
+                 wipe_file: Optional[str] = None) -> None:
         super().__init__()
         self.avp_host = host
         self.avp_port = port
@@ -514,6 +532,7 @@ class MixerTUI(App):
         self.overlay_otm_name = overlay_otm
         self.overlay_source_otm_name = overlay_source_otm
         self.overlay_selector_name = overlay_selector
+        self.wipe_file: Optional[str] = wipe_file
         self._conn = AvpConnection(host, port)
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
         self._scene_poll_counter = 0
@@ -546,6 +565,7 @@ class MixerTUI(App):
             yield Static("Duration:", id="dur_label")
             yield Input("2.0", id="dur_input")
             yield Button("▶ WIPE", id="btn_wipe", variant="primary")
+            yield Button("⚙ Wipe…", id="btn_change_wipe", variant="default")
             yield Button("Overlay: ON", id="btn_overlay", variant="primary")
 
         yield Footer()
@@ -556,6 +576,7 @@ class MixerTUI(App):
         self._start_connection_loop()
         self._poll_status()
         self.call_later(self.action_show_help_panel)
+        self._update_wipe_button_tooltip()
 
     # ── Connection & polling workers ────────────────────────────────────────
 
@@ -761,8 +782,36 @@ class MixerTUI(App):
         if self._mixer_take_in_progress():
             return
         scene = self._pvw_scene_name()
-        if scene:
-            self.push_screen(WipeModal(), callback=lambda path: self._do_wipe(scene, path))
+        if not scene:
+            return
+        if self.wipe_file:
+            self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=self.wipe_file))
+        else:
+            self.push_screen(
+                WipeModal(self.wipe_file),
+                callback=lambda path: self._on_wipe_path_selected(scene, path, execute=True),
+            )
+
+    def action_change_wipe_path(self) -> None:
+        """Open the wipe path modal without executing a wipe."""
+        self.push_screen(
+            WipeModal(self.wipe_file),
+            callback=lambda path: self._on_wipe_path_selected(None, path, execute=False),
+        )
+
+    def _on_wipe_path_selected(self, scene: Optional[str], path: Optional[str], *, execute: bool) -> None:
+        if path:
+            self.wipe_file = path
+            self._update_wipe_button_tooltip()
+        if execute and path and scene:
+            self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=path))
+
+    def _update_wipe_button_tooltip(self) -> None:
+        try:
+            btn = self.query_one("#btn_wipe", Button)
+            btn.tooltip = self.wipe_file or "(no wipe file set)"
+        except NoMatches:
+            pass
 
     def _do_wipe(self, scene: str, path: Optional[str]) -> None:
         if path:
@@ -884,6 +933,10 @@ class MixerTUI(App):
     def on_btn_wipe(self) -> None:
         self.action_wipe()
 
+    @on(Button.Pressed, "#btn_change_wipe")
+    def on_btn_change_wipe(self) -> None:
+        self.action_change_wipe_path()
+
     @on(Button.Pressed, "#btn_overlay")
     def on_btn_overlay(self) -> None:
         self.action_toggle_overlay()
@@ -908,6 +961,8 @@ def main() -> None:
     parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
     parser.add_argument("--overlay-source-otm", default="otm_html_overlay_src", help="overlay source one_to_many node name")
     parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
+    parser.add_argument("--wipe-file", default=None, metavar="PATH",
+                        help="default wipe file path; skips the prompt when set")
     args = parser.parse_args()
 
     app = MixerTUI(
@@ -917,6 +972,7 @@ def main() -> None:
         overlay_otm=args.overlay_otm,
         overlay_source_otm=args.overlay_source_otm,
         overlay_selector=args.overlay_selector,
+        wipe_file=args.wipe_file,
     )
     app.run()
 
