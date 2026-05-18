@@ -38,7 +38,9 @@ Usage
         [--input-start-ts 00:10] \\
         [--silero-model /opt/tly/models/silero_vad.jit] \\
         [--silero-device cpu] \\
+        [--fade-frames 15] \\
         [--remote-control-port 7777] \\
+        [--auto-switch-control-port 7778] \\
         [--logfile /tmp/auto_mixer.log] \\
         [--webui-api http://localhost:22222] \\
         [--instance-name auto-mixer] \\
@@ -70,6 +72,7 @@ from pyplumber.auto_switcher import AutoSwitcher
 from pyplumber.mixer import MixerGraphBuilder
 from pyplumber.node import NullSink, Split
 
+from .auto_switch_control import AutoSwitchControlServer
 from .config import (
     CANVAS_H,
     CANVAS_W,
@@ -143,12 +146,30 @@ def main() -> None:
         help="Seek each input to this start timestamp (ms, MM:SS[.mmm], or HH:MM:SS[.mmm])",
     )
     parser.add_argument(
-        "--wipe", action="store_true",
-        help="Declare wipe subgraph (needed for mixer.wipe transitions)",
+        "--wipe", dest="wipe", action="store_true", default=True,
+        help="Declare wipe subgraph for mixer.wipe transitions (default: enabled)",
     )
     parser.add_argument(
-        "--fade", default=0.6, type=float,
-        help="Crossfade duration in seconds for auto-switching (default: 0.6)",
+        "--disable-wipe", dest="wipe", action="store_false",
+        help="Do not declare the wipe subgraph.",
+    )
+    parser.add_argument(
+        "--fade", default=None, type=float,
+        help="Crossfade duration in seconds when auto-switch transitions use fade; overrides --fade-frames.",
+    )
+    parser.add_argument(
+        "--fade-frames", default=15, type=int,
+        help=f"Crossfade duration in frames at {FPS_NUM / FPS_DEN:g} fps (default: 15)",
+    )
+    parser.add_argument(
+        "--auto-switch-transition",
+        choices=("cut", "fade", "wipe"),
+        default="cut",
+        help="Transition used by automatic AI speaker switches (default: cut)",
+    )
+    parser.add_argument(
+        "--auto-switch-wipe-file", default="",
+        help="Media wipe file used when automatic AI speaker switches use wipe.",
     )
     parser.add_argument(
         "--min-dwell", default=2.5, type=float,
@@ -187,6 +208,17 @@ def main() -> None:
     parser.add_argument(
         "--remote-control-port", default=0, type=int, metavar="PORT",
         help="TCP port for the avplumber remote control API (0 = disabled)",
+    )
+    parser.add_argument(
+        "--auto-switch-control-host", default="0.0.0.0",
+        help="Bind address for the Python auto-switch control API (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--auto-switch-control-port", default=None, type=int, metavar="PORT",
+        help=(
+            "TCP port for runtime auto-switch settings. "
+            "Defaults to --remote-control-port + 1 when remote control is enabled; 0 disables it."
+        ),
     )
     parser.add_argument(
         "--logfile", default="",
@@ -290,6 +322,20 @@ def main() -> None:
         parser.error("--janus-video-bitrate-kbps must be greater than 0.")
     if 0 <= args.switch_pts_lead_ms < 100:
         parser.error("--switch-pts-lead-ms must be at least 100, or negative to disable PTS scheduling.")
+    if args.fade_frames <= 0:
+        parser.error("--fade-frames must be greater than 0.")
+    if args.fade is None:
+        args.fade = args.fade_frames * FPS_DEN / FPS_NUM
+    else:
+        args.fade_frames = max(1, int(round(args.fade * FPS_NUM / FPS_DEN)))
+    if args.fade <= 0.0:
+        parser.error("--fade must be greater than 0.")
+    if args.auto_switch_control_port is None:
+        args.auto_switch_control_port = args.remote_control_port + 1 if args.remote_control_port else 0
+    if args.auto_switch_control_port < 0:
+        parser.error("--auto-switch-control-port must be non-negative.")
+    if args.auto_switch_transition == "wipe" and not args.wipe:
+        parser.error("--auto-switch-transition wipe requires the wipe subgraph.")
     switch_pts_lead_ms = args.switch_pts_lead_ms if args.switch_pts_lead_ms >= 0 else None
     sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
     rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
@@ -535,6 +581,8 @@ def main() -> None:
         n_inputs=n,
         scene_for_input=auto_switch_scene,
         fade_duration_s=args.fade,
+        wipe_file=args.auto_switch_wipe_file or None,
+        transition_mode=args.auto_switch_transition,
         min_dwell_program_s=args.min_dwell,
         min_active_level_db=MIN_ACTIVE_AUDIO_LEVEL_DBFS,
         switch_pts_lead_ms=switch_pts_lead_ms,
@@ -544,6 +592,29 @@ def main() -> None:
         program_scene_getter=(
             program_scene_reader.program_scene if program_scene_reader is not None else None
         ),
+    )
+    auto_control_server = None
+    if args.auto_switch_control_port:
+        auto_control_server = AutoSwitchControlServer(
+            switcher,
+            host=args.auto_switch_control_host,
+            port=args.auto_switch_control_port,
+        )
+        auto_control_server.start()
+        print(
+            "[auto_mixer] Auto-switch control: "
+            f"{args.auto_switch_control_host}:{args.auto_switch_control_port}"
+        )
+    print(
+        "[auto_mixer] Auto-switch transition: "
+        f"{args.auto_switch_transition}"
+        f"{f' ({args.fade:.3f}s)' if args.auto_switch_transition in ('fade', 'wipe') else ''}"
+    )
+    if args.auto_switch_wipe_file:
+        print(f"[auto_mixer] Auto-switch wipe file: {args.auto_switch_wipe_file}")
+    print(
+        f"[auto_mixer] Fade duration: {args.fade_frames} frame(s) "
+        f"at {FPS_NUM / FPS_DEN:g} fps ({args.fade:.3f}s)"
     )
 
     # Unlock the control server so remote clients can issue commands.
@@ -586,6 +657,8 @@ def main() -> None:
     finally:
         if not args.disable_auto_switcher:
             switcher.stop()
+        if auto_control_server is not None:
+            auto_control_server.stop()
         if program_scene_reader is not None:
             program_scene_reader.close()
         print("[auto_mixer] Done.")

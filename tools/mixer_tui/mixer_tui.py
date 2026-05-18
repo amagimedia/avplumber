@@ -19,12 +19,13 @@ Keyboard shortcuts:
     1-9        Select scene N on Preview bus, or direct cut when Direct is ON
     F1-F9      Direct CUT to scene N (skips preview step)
     t          Toggle direct scene-click cuts
+    a          Cycle AI auto-switch transitions through CUT / FADE / WIPE
     o          Toggle HTML overlay bypass
     c          CUT  (take preview to program, hard cut)
-    x          X-FADE (crossfade preview to program at set duration)
+    x          X-FADE (crossfade preview to program at set frame count)
     w          WIPE (uses --wipe-file path if set, otherwise prompts)
     e          Change wipe file path (always opens prompt)
-    d          Focus the duration input field
+    d          Focus the fade frame input field
     s          Force an immediate mixer.status refresh
     q / ctrl+c Quit
 
@@ -318,6 +319,10 @@ class SceneButton(Static):
 # ---------------------------------------------------------------------------
 
 OVERLAY_SETTLE_SECONDS = 0.2
+DEFAULT_FADE_FPS = 30.0
+DEFAULT_FADE_FRAMES = 15
+MAX_FADE_FRAMES = 300
+AI_TRANSITION_MODES = ("cut", "fade", "wipe")
 
 TRANSITION_SYMBOLS = {
     "idle": "─",
@@ -424,13 +429,23 @@ Screen {
     overflow-x: auto;
 }
 
-/* ── Transition bar ── */
+/* ── Control bars ── */
 #transition_bar {
     height: 5;
     background: $panel;
     border: solid $primary-darken-2;
     align: left middle;
     padding: 0 1;
+    margin-bottom: 0;
+}
+
+#utility_bar {
+    height: 5;
+    background: $panel;
+    border: solid $primary-darken-2;
+    align: left middle;
+    padding: 0 1;
+    margin-top: 0;
     margin-bottom: 0;
 }
 
@@ -455,7 +470,13 @@ Screen {
 }
 
 #dur_input {
-    width: 8;
+    width: 16;
+    min-width: 16;
+    max-width: 16;
+    margin-right: 1;
+}
+
+#btn_ai_transition {
     margin-right: 1;
 }
 
@@ -464,6 +485,10 @@ Screen {
 }
 
 #btn_auto {
+    margin-right: 1;
+}
+
+#btn_wipe {
     margin-right: 1;
 }
 
@@ -509,7 +534,8 @@ class MixerTUI(App):
         Binding("x", "auto_transition", "X-FADE", show=False),
         Binding("w", "wipe", "WIPE", show=False),
         Binding("e", "change_wipe_path", "Wipe path", show=False),
-        Binding("d", "focus_duration", "Duration", show=False),
+        Binding("d", "focus_duration", "Fade frames", show=False),
+        Binding("a", "toggle_ai_transition_mode", "AI transition", show=False),
         Binding("t", "toggle_direct_cut_mode", "Direct cuts", show=False),
         Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
@@ -528,23 +554,36 @@ class MixerTUI(App):
     pvw_selected: reactive[int] = reactive(-1, layout=True)
     overlay_enabled: reactive[bool] = reactive(False, layout=True)
     direct_cut_mode: reactive[bool] = reactive(False, layout=True)
+    auto_control_connected: reactive[bool] = reactive(False, layout=True)
+    auto_transition_mode: reactive[str] = reactive("n/a", layout=True)
 
     connected: reactive[bool] = reactive(False)
 
     def __init__(self, host: str, port: int, mixer: str, overlay_otm: str,
                  overlay_source_otm: str, overlay_selector: str,
-                 wipe_file: Optional[str] = None) -> None:
+                 wipe_file: Optional[str] = None,
+                 auto_host: Optional[str] = None,
+                 auto_port: int = 0,
+                 fade_fps: float = DEFAULT_FADE_FPS,
+                 fade_frames: int = DEFAULT_FADE_FRAMES) -> None:
         super().__init__()
         self.avp_host = host
         self.avp_port = port
+        self.auto_host = auto_host or host
+        self.auto_port = auto_port
+        self.fade_fps = fade_fps if fade_fps > 0 else DEFAULT_FADE_FPS
+        self.default_fade_frames = min(MAX_FADE_FRAMES, max(1, int(fade_frames)))
         self.mixer_name = mixer
         self.overlay_otm_name = overlay_otm
         self.overlay_source_otm_name = overlay_source_otm
         self.overlay_selector_name = overlay_selector
         self.wipe_file: Optional[str] = wipe_file
         self._conn = AvpConnection(host, port)
+        self._auto_conn = AvpConnection(self.auto_host, self.auto_port) if self.auto_port else None
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
         self._scene_poll_counter = 0
+        self._auto_poll_counter = 0
+        self._auto_duration_initialized = False
         self._overlay_toggle_in_progress = False
 
     # ── Layout ──────────────────────────────────────────────────────────────
@@ -569,13 +608,16 @@ class MixerTUI(App):
 
         with Horizontal(id="transition_bar"):
             yield Static("Mode: idle", id="trans_mode_label")
-            yield Button("Direct: OFF", id="btn_direct", variant="default")
             yield Button("✂ CUT", id="btn_cut", variant="error")
             yield Button("⟿ X-FADE", id="btn_auto", variant="success")
-            yield Static("Duration:", id="dur_label")
-            yield Input("2.0", id="dur_input")
-            yield Button("▶ WIPE", id="btn_wipe", variant="primary")
-            yield Button("⚙ Wipe…", id="btn_change_wipe", variant="default")
+            yield Button("▶ MEDIA WIPE", id="btn_wipe", variant="primary")
+            yield Static("Fade frames:", id="dur_label")
+            yield Input(str(self.default_fade_frames), id="dur_input")
+
+        with Horizontal(id="utility_bar"):
+            yield Button("Direct: OFF", id="btn_direct", variant="default")
+            yield Button("AI: n/a", id="btn_ai_transition", variant="default")
+            yield Button("⚙ Wipe file…", id="btn_change_wipe", variant="default")
             yield Button("Overlay: ON", id="btn_overlay", variant="primary")
 
         yield Footer()
@@ -587,6 +629,7 @@ class MixerTUI(App):
         self._poll_status()
         self.call_later(self.action_show_help_panel)
         self._update_wipe_button_tooltip()
+        self._refresh_ai_transition_button()
 
     # ── Connection & polling workers ────────────────────────────────────────
 
@@ -645,6 +688,10 @@ class MixerTUI(App):
             if self._scene_poll_counter >= 20:  # every ~10 s
                 self._scene_poll_counter = 0
                 await self._fetch_scenes()
+            self._auto_poll_counter += 1
+            if self._auto_poll_counter >= 2:  # every ~1 s
+                self._auto_poll_counter = 0
+                await self._refresh_auto_status()
 
     # ── Reactive watchers ────────────────────────────────────────────────────
 
@@ -707,6 +754,12 @@ class MixerTUI(App):
         except NoMatches:
             pass
 
+    def watch_auto_control_connected(self, value: bool) -> None:
+        self._refresh_ai_transition_button()
+
+    def watch_auto_transition_mode(self, value: str) -> None:
+        self._refresh_ai_transition_button()
+
     def watch_connected(self, value: bool) -> None:
         if value:
             self._set_status_bar(False)
@@ -739,10 +792,88 @@ class MixerTUI(App):
         return None
 
     def _duration(self) -> float:
+        return self._fade_frames() / self.fade_fps
+
+    def _fade_frames(self) -> int:
         try:
-            return float(self.query_one("#dur_input", Input).value)
+            value = int(self.query_one("#dur_input", Input).value.strip())
+            return min(MAX_FADE_FRAMES, max(1, value))
         except (ValueError, NoMatches):
-            return 2.0
+            return self.default_fade_frames
+
+    def _set_duration(self, duration_s: float) -> None:
+        frames = max(1, int(round(duration_s * self.fade_fps)))
+        self._set_fade_frames(frames)
+
+    def _set_fade_frames(self, frames: int) -> None:
+        try:
+            clamped = min(MAX_FADE_FRAMES, max(1, int(frames)))
+            self.query_one("#dur_input", Input).value = str(clamped)
+        except NoMatches:
+            pass
+
+    def _refresh_ai_transition_button(self) -> None:
+        try:
+            button = self.query_one("#btn_ai_transition", Button)
+        except NoMatches:
+            return
+
+        if self._auto_conn is None:
+            button.label = "AI: n/a"
+            button.variant = "default"
+            button.tooltip = "Auto-switch control disabled"
+            return
+        if not self.auto_control_connected:
+            button.label = "AI: n/a"
+            button.variant = "default"
+            button.tooltip = f"Auto-switch control not connected at {self.auto_host}:{self.auto_port}"
+            return
+        if self.auto_transition_mode == "fade":
+            button.label = "AI: FADE"
+            button.variant = "success"
+            button.tooltip = "Automatic speaker switches crossfade using the Fade frames value"
+        elif self.auto_transition_mode == "wipe":
+            button.label = "AI: WIPE"
+            button.variant = "primary"
+            button.tooltip = "Automatic speaker switches use the selected media wipe"
+        else:
+            button.label = "AI: CUT"
+            button.variant = "warning"
+            button.tooltip = "Automatic speaker switches hard cut"
+
+    async def _refresh_auto_status(self) -> None:
+        if self._auto_conn is None:
+            return
+        if not self._auto_conn.connected:
+            ok = await self._auto_conn.ensure_connected()
+            self.auto_control_connected = ok
+            if not ok:
+                self.auto_transition_mode = "n/a"
+                return
+        resp = await self._auto_conn.command("auto_switch.status", raise_for_status=False)
+        if resp is None or resp.code != 201 or not resp.content:
+            self.auto_control_connected = False
+            self.auto_transition_mode = "n/a"
+            return
+        self.auto_control_connected = True
+        try:
+            data = json.loads(resp.content.strip())
+        except Exception:
+            return
+        mode = data.get("transition_mode")
+        if isinstance(mode, str):
+            self.auto_transition_mode = mode
+        duration = data.get("fade_duration_s")
+        if duration is not None and not self._auto_duration_initialized:
+            try:
+                self._set_duration(float(duration))
+                self._auto_duration_initialized = True
+            except (TypeError, ValueError):
+                pass
+        wipe_file = data.get("wipe_file")
+        if isinstance(wipe_file, str) and wipe_file and not self.wipe_file:
+            self.wipe_file = wipe_file
+            self._update_wipe_button_tooltip()
 
     def _scene_index(self, scene_name: str) -> int:
         if not scene_name:
@@ -810,6 +941,7 @@ class MixerTUI(App):
     def action_auto_transition(self) -> None:
         scene = self._pvw_scene_name()
         if scene:
+            self._set_fade_frames(self._fade_frames())
             dur = self._duration()
             self._do_command(self._mixer_command("fade", scene=scene, duration_sec=dur))
 
@@ -838,6 +970,8 @@ class MixerTUI(App):
         if path:
             self.wipe_file = path
             self._update_wipe_button_tooltip()
+            if self.auto_transition_mode == "wipe":
+                self._set_auto_transition_settings()
         if execute and path and scene:
             self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=path))
 
@@ -877,6 +1011,81 @@ class MixerTUI(App):
 
     def action_toggle_direct_cut_mode(self) -> None:
         self.direct_cut_mode = not self.direct_cut_mode
+
+    def _available_ai_transition_modes(self) -> tuple[str, ...]:
+        if self.wipe_file:
+            return AI_TRANSITION_MODES
+        return ("cut", "fade")
+
+    def action_toggle_ai_transition_mode(self) -> None:
+        modes = self._available_ai_transition_modes()
+        try:
+            index = modes.index(self.auto_transition_mode)
+        except ValueError:
+            self._set_auto_transition_settings(transition_mode=modes[0])
+            return
+        next_mode = modes[(index + 1) % len(modes)]
+        self._set_auto_transition_settings(transition_mode=next_mode)
+
+    def _on_ai_wipe_path_selected(self, path: Optional[str]) -> None:
+        if not path:
+            return
+        self.wipe_file = path
+        self._update_wipe_button_tooltip()
+        self._set_auto_transition_settings(transition_mode="wipe")
+
+    @work(thread=False)
+    async def _set_auto_transition_settings(self, transition_mode: Optional[str] = None) -> None:
+        if self._auto_conn is None:
+            self.notify("Auto-switch control is disabled", severity="warning")
+            return
+        if not self._auto_conn.connected:
+            ok = await self._auto_conn.ensure_connected()
+            self.auto_control_connected = ok
+            if not ok:
+                self.auto_transition_mode = "n/a"
+                self.notify(
+                    f"Auto-switch control not connected at {self.auto_host}:{self.auto_port}",
+                    severity="warning",
+                )
+                return
+
+        mode = transition_mode or self.auto_transition_mode
+        payload = {"fade_duration_s": self._duration()}
+        if transition_mode is not None:
+            payload["transition_mode"] = transition_mode
+        if self.wipe_file:
+            payload["wipe_file"] = self.wipe_file
+        elif mode == "wipe":
+            self.notify("Select a media wipe file first", severity="warning")
+            return
+        cmd = f"auto_switch.set {json.dumps(payload, separators=(',', ':'))}"
+        resp = await self._auto_conn.command(cmd, raise_for_status=False)
+        if resp is None:
+            self.auto_control_connected = False
+            self.auto_transition_mode = "n/a"
+            self.notify("Auto-switch control connection lost", severity="warning")
+            return
+        if resp.code >= 400:
+            self.notify(f"Auto-switch update failed: {resp.code} {resp.status}", severity="error")
+            return
+        if resp.code == 201 and resp.content:
+            try:
+                data = json.loads(resp.content.strip())
+                mode = data.get("transition_mode")
+                if isinstance(mode, str):
+                    self.auto_transition_mode = mode
+                duration = data.get("fade_duration_s")
+                if duration is not None:
+                    self._set_duration(float(duration))
+                    self._auto_duration_initialized = True
+                wipe_file = data.get("wipe_file")
+                if isinstance(wipe_file, str) and wipe_file:
+                    self.wipe_file = wipe_file
+                    self._update_wipe_button_tooltip()
+                self.auto_control_connected = True
+            except Exception:
+                pass
 
     @work(thread=False)
     async def _set_overlay_enabled(self, enabled: bool) -> None:
@@ -948,6 +1157,8 @@ class MixerTUI(App):
     # ── Key events ───────────────────────────────────────────────────────────
 
     def on_key(self, event) -> None:
+        if isinstance(getattr(self, "focused", None), Input):
+            return
         key = event.key
         # 1-9: select preview, or direct cut if direct mode is enabled.
         if key.isdigit() and key != "0":
@@ -991,6 +1202,16 @@ class MixerTUI(App):
     def on_btn_direct(self) -> None:
         self.action_toggle_direct_cut_mode()
 
+    @on(Button.Pressed, "#btn_ai_transition")
+    def on_btn_ai_transition(self) -> None:
+        self.action_toggle_ai_transition_mode()
+
+    @on(Input.Submitted, "#dur_input")
+    def on_duration_submitted(self) -> None:
+        self._set_fade_frames(self._fade_frames())
+        if self.auto_transition_mode in ("fade", "wipe"):
+            self._set_auto_transition_settings()
+
     def on_scene_button_selected(self, event: SceneButton.Selected) -> None:
         self._select_or_cut_scene(event.index)
 
@@ -1007,22 +1228,35 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1", help="avplumber host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
+    parser.add_argument("--auto-host", default=None,
+                        help="Python auto-switch control host (default: --host)")
+    parser.add_argument("--auto-port", type=int, default=None,
+                        help="Python auto-switch control port (default: --port + 1; 0 disables)")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
     parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
     parser.add_argument("--overlay-source-otm", default="otm_html_overlay_src", help="overlay source one_to_many node name")
     parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
     parser.add_argument("--wipe-file", default=None, metavar="PATH",
                         help="default wipe file path; skips the prompt when set")
+    parser.add_argument("--fade-fps", type=float, default=DEFAULT_FADE_FPS,
+                        help=f"frame rate used to convert fade frames to seconds (default: {DEFAULT_FADE_FPS:g})")
+    parser.add_argument("--fade-frames", type=int, default=DEFAULT_FADE_FRAMES,
+                        help=f"default fade/wipe transition frame count (default: {DEFAULT_FADE_FRAMES})")
     args = parser.parse_args()
+    auto_port = args.port + 1 if args.auto_port is None else args.auto_port
 
     app = MixerTUI(
         host=args.host,
         port=args.port,
+        auto_host=args.auto_host,
+        auto_port=auto_port,
         mixer=args.mixer,
         overlay_otm=args.overlay_otm,
         overlay_source_otm=args.overlay_source_otm,
         overlay_selector=args.overlay_selector,
         wipe_file=args.wipe_file,
+        fade_fps=args.fade_fps,
+        fade_frames=args.fade_frames,
     )
     app.run()
 

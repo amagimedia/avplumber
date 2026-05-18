@@ -3,12 +3,14 @@
 #include "graph_interfaces.hpp"
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <thread>
 #include <chrono>
 
 namespace {
 
 constexpr int64_t kWipeSwitchGraceMs = 250;
+constexpr int64_t kFadeColdPrepMs = 700;
 
 void resetInputIf(std::shared_ptr<NodeManager> nodes, const std::string& name) {
     if (name.empty())
@@ -76,6 +78,24 @@ std::string firstDstEdgeName(std::shared_ptr<NodeManager> nodes, const std::stri
         return "";
     auto names = jsonToStringList(params["dst"]);
     return names.empty() ? "" : names.front();
+}
+
+std::string edgeNameAt(std::shared_ptr<NodeManager> nodes,
+                       const std::string& node_name,
+                       const std::string& param_name,
+                       size_t index) {
+    auto node = nodes->node_if_exists(node_name);
+    if (!node)
+        return "";
+    const auto& params = node->parameters();
+    if (!params.count(param_name))
+        return "";
+    auto names = jsonToStringList(params[param_name]);
+    if (index >= names.size())
+        return "";
+    auto it = names.begin();
+    std::advance(it, index);
+    return *it;
 }
 
 
@@ -204,6 +224,13 @@ void MixerOrchestrator::flushSlotEdges(bool is_slot_a) {
             return;
         auto edge = nodes_->edges()->findAny(name);
         if (edge && edge->occupied() > 0) {
+            // readerwriterqueue is SPSC: clearing from this control thread would
+            // consume the queue concurrently with the node that owns the edge.
+            if (!edge->consumer().expired()) {
+                logstream << "mixer: leaving live slot edge " << name
+                          << " unflushed (" << edge->occupied() << " queued)";
+                return;
+            }
             logstream << "mixer: flushing stale slot edge " << name
                       << " (" << edge->occupied() << " queued)";
             edge->clear();
@@ -583,44 +610,57 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 
     // Capture all needed values from pre-flip state
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
+    bool was_preloaded = state_->pvw_scene_name == scene_name;
     uint32_t pvw_bit = state_->pvwOutputBit();
     const auto& target_slot = pvw_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot    = pvw_is_slot_a ? state_->slot_b : state_->slot_a;
     int pvw_sw_idx = state_->pvwSourceSwitcherIndex();
 
+    if (!was_preloaded) {
+        T_start = std::max(T_start, wallclock.pts() + kFadeColdPrepMs);
+    }
+
     // 1. Ensure target scene is loaded into PVW slot.
-    if (state_->pvw_scene_name == scene_name) {
+    if (was_preloaded) {
         logstream << "mixer fade: reusing preloaded PVW scene=" << scene_name;
     } else {
         loadSceneIntoSlot(pvw_is_slot_a, scene_name);
     }
 
     auto& target_scene = state_->scenes.at(scene_name);
-    int frames = (int)std::round(duration_sec * state_->fps_num / state_->fps_den);
     scheduleSceneControls(target_scene, T_start);
 
     // 2. Create transition_cuda with direction-dependent alpha expression
-    std::string alpha_expr;
-    if (pvw_is_slot_a) {
-        alpha_expr = "clip(1-n/" + std::to_string(frames) + "\\,0\\,1)";
-    } else {
-        alpha_expr = "clip(n/" + std::to_string(frames) + "\\,0\\,1)";
-    }
+    std::string progress_expr = "clip((t-" + std::to_string(T_start / 1000.0) +
+        ")/" + std::to_string(duration_sec) + "\\,0\\,1)";
+    std::string alpha_expr = pvw_is_slot_a ? "1-" + progress_expr : progress_expr;
+
+    std::string slot_a_trans_edge = edgeNameAt(nodes_, state_->slot_a.post_otm_name, "dst", 1);
+    std::string slot_b_trans_edge = edgeNameAt(nodes_, state_->slot_b.post_otm_name, "dst", 1);
+    std::string transition_out_edge = edgeNameAt(
+        nodes_, state_->source_switcher_name, "src", MixerState::transSourceSwitcherIndex());
+    if (slot_a_trans_edge.empty() || slot_b_trans_edge.empty() || transition_out_edge.empty())
+        throw Error("mixer.fade: graph is missing transition edges");
+
+    std::string transition_node_name = state_->source_switcher_name.empty()
+        ? transition_node_name_
+        : state_->source_switcher_name + "_transition";
 
     Parameters trans_params;
     trans_params["type"] = "filter_video";
-    trans_params["name"] = transition_node_name_;
-    trans_params["src"] = Parameters::array({"scA_trans", "scB_trans"});
-    trans_params["dst"] = transition_edge_name_;
+    trans_params["name"] = transition_node_name;
+    trans_params["src"] = Parameters::array({slot_a_trans_edge, slot_b_trans_edge});
+    trans_params["dst"] = transition_out_edge;
     trans_params["graph"] = "transition_cuda=alpha='" + alpha_expr + "':eval=frame";
     trans_params["hwaccel"] = state_->hwaccel_name;
+    trans_params["defer_preliminary_init"] = true;
     trans_params["group"] = "mixer_trans";
     createAndStartNode(trans_params);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
     // 4–5. Timeline: priming post-scene otms (direct+trans) then visible-path switches
-    int64_t T_prep = T_start - margin_ms_;
+    int64_t T_prep = T_start - (was_preloaded ? margin_ms_ : kFadeColdPrepMs);
     timeline_->set(state_->slot_a.post_otm_name, "outputs", T_prep, Parameters(3u)); // 0b11 warmup
     timeline_->set(state_->slot_b.post_otm_name, "outputs", T_prep, Parameters(3u));
 
@@ -650,7 +690,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
     std::thread(deferredCleanup, nodes_, state_, timeline_,
                 flip_delay, pvw_is_slot_a, scene_name,
-                std::vector<std::string>{transition_node_name_}).detach();
+                std::vector<std::string>{transition_node_name}).detach();
     prep_guard.release();
 }
 

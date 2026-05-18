@@ -480,7 +480,7 @@ class MixerGraphBuilder:
             "src": [
                 self._e("scA_direct"),
                 self._e("scB_direct"),
-                "trans_out",
+                self._e("trans_out"),
             ],
             "dst": self._e("mixer_out"),
             "active": initial_active,
