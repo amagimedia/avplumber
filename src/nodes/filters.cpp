@@ -288,6 +288,7 @@ protected:
     TSEqualizer eq_;
     std::string graph_desc_;
     bool do_shift_ = true;
+    bool defer_preliminary_init_ = false;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     std::vector<bool> input_eof_;
 
@@ -688,6 +689,9 @@ public:
             shift = params["shift"].get<bool>();
         }
         std::shared_ptr<Child> result = std::make_shared<Child>(graph_desc, shift);
+        if (params.count("defer_preliminary_init")==1) {
+            result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
+        }
         if (params.count("hwaccel")) {
             result->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
         }
@@ -699,11 +703,13 @@ public:
             // TODO (would require huge change in architecture - support of in/out pads)
             throw Error("Currently only single-output filters are supported");
         }
-        try {
-            result->preliminaryInit();
-        } catch (std::exception &e) {
-            logstream << "preliminary init failed, will retry when we get first frame: " << e.what();
-            result->freeFilterGraph();
+        if (!result->defer_preliminary_init_) {
+            try {
+                result->preliminaryInit();
+            } catch (std::exception &e) {
+                logstream << "preliminary init failed, will retry when we get first frame: " << e.what();
+                result->freeFilterGraph();
+            }
         }
         return result;
     }

@@ -170,6 +170,7 @@ class HistoryAwareShotSelector:
         self._recent_scenes: deque[str] = deque(maxlen=self.rules.avoid_recent_scenes)
         self._history_version = 0
         self._active_stack_signature: Optional[tuple[int, ...]] = None
+        self._active_stack_scene: Optional[str] = None
         self._active_stack_until = 0.0
         self._active_stack_history_version = 0
         self._manual_suggestion_family: Optional[str] = None
@@ -215,6 +216,7 @@ class HistoryAwareShotSelector:
         self._manual_suggestion_speaker = speaker_index
         self._manual_suggestion_until = now + self.rules.manual_suggestion_window_s
         self._active_stack_signature = None
+        self._active_stack_scene = None
         self._active_stack_until = 0.0
         print(
             f"[auto_switcher] manual layout suggestion: {family} "
@@ -308,13 +310,18 @@ class HistoryAwareShotSelector:
             signature = (rule.distinct_speakers, *speakers)
             if self._active_stack_signature == signature and now >= self._active_stack_until:
                 return None
+            if self._active_stack_signature == signature and self._active_stack_scene is not None:
+                return self._active_stack_scene
             scene = self._stack_scene(rule.shot_family, speakers)
             if scene is None:
                 continue
             if self._active_stack_signature != signature:
                 self._active_stack_signature = signature
+                self._active_stack_scene = scene
                 self._active_stack_until = now + self.rules.stack_hold_s
                 self._active_stack_history_version = self._history_version
+            else:
+                self._active_stack_scene = scene
             return scene
         return None
 

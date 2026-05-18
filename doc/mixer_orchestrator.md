@@ -236,12 +236,12 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
 4. Create `transition_cuda` dynamically:
    ```
-   filter_video name=mixer_transition src=["scA_trans","scB_trans"] dst=trans_out
+   filter_video name=<out_sel>_transition src=[slot A post-OTM dst[1], slot B post-OTM dst[1]] dst=out_sel src[2]
      graph="transition_cuda=alpha='clip(n/FRAMES,0,1)':eval=frame"
    ```
    The `n` variable starts at 0 when the filter is created, producing a 0-to-1 ramp over `FRAMES = round(duration_sec * fps)` frames.
 
-   When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always `["scA_trans","scB_trans"]`; only the alpha expression direction changes.
+   When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always slot A transition edge, then slot B transition edge; only the alpha expression direction changes.
 
 5. Write timeline at `T_prep = T_start - 200ms`: both post-scene otm `outputs` = `0b11` (direct + trans) to prime queues. For scheduled fades this prevents the `transition_cuda` frame counter from advancing long before the transition is visible.
 

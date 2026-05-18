@@ -1,7 +1,7 @@
 """Auto-switcher policy for a pyplumber video mixer.
 
 ``AutoSwitcher`` runs a background thread that periodically reads the
-``Speaker`` registry and issues ``MixerGraphBuilder.fade()`` calls when the
+``Speaker`` registry and issues cut, fade, or wipe mixer transitions when the
 active speaker changes.
 
 Usage
@@ -16,6 +16,7 @@ Usage
         min_dwell_speaking_s=0.6,
         min_dwell_program_s=2.5,
         fade_duration_s=0.6,
+        wipe_file="/path/to/wipe.mov",
     )
     switcher.start()
     # ... run the pipeline ...
@@ -24,12 +25,15 @@ Usage
 
 from __future__ import annotations
 
+import math
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from .audio_vad import Speaker
 from .mixer import MixerGraphBuilder
+
+MAX_TRANSITION_DURATION_S = 10.0
 
 
 class AutoSwitcher:
@@ -60,6 +64,8 @@ class AutoSwitcher:
         min_dwell_speaking_s: float = 0.6,
         min_dwell_program_s: float = 2.5,
         fade_duration_s: float = 0.6,
+        wipe_file: Optional[str] = None,
+        transition_mode: str = "cut",
         cooldown_s: float = 1.5,
         tick_s: float = 0.25,
         min_active_level_db: float = -60.0,
@@ -76,7 +82,10 @@ class AutoSwitcher:
         self._scene_for_input = scene_for_input
         self._min_dwell_speaking = min_dwell_speaking_s
         self._min_dwell_program = min_dwell_program_s
-        self._fade_duration = fade_duration_s
+        self._settings_lock = threading.Lock()
+        self._fade_duration = self._validate_fade_duration(fade_duration_s)
+        self._wipe_file = wipe_file or None
+        self._transition_mode = self._validate_transition_mode(transition_mode)
         self._cooldown = cooldown_s
         self._tick = tick_s
         self._min_active_level_db = min_active_level_db
@@ -95,6 +104,22 @@ class AutoSwitcher:
         self._pending_auto_scene_until: float = 0.0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+
+    @staticmethod
+    def _validate_transition_mode(mode: str) -> str:
+        normalized = str(mode).strip().lower()
+        if normalized not in ("cut", "fade", "wipe"):
+            raise ValueError("transition_mode must be 'cut', 'fade', or 'wipe'")
+        return normalized
+
+    @staticmethod
+    def _validate_fade_duration(duration_s: float) -> float:
+        duration = float(duration_s)
+        if not math.isfinite(duration) or duration <= 0.0:
+            raise ValueError("fade_duration_s must be a finite value greater than 0")
+        if duration > MAX_TRANSITION_DURATION_S:
+            raise ValueError(f"fade_duration_s must be <= {MAX_TRANSITION_DURATION_S:g}")
+        return duration
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -124,6 +149,63 @@ class AutoSwitcher:
             self._current_input = index
             self._current_scene = scene
             self._last_switch_ts = time.monotonic()
+
+    def set_transition_mode(self, mode: str) -> Dict[str, object]:
+        """Set whether automatic speaker switches use cuts, fades, or wipes."""
+        normalized = self._validate_transition_mode(mode)
+        with self._settings_lock:
+            self._transition_mode = normalized
+        return self.settings()
+
+    def set_fade_duration(self, duration_s: float) -> Dict[str, object]:
+        """Set the crossfade duration used when automatic transitions are fades."""
+        duration = self._validate_fade_duration(duration_s)
+        with self._settings_lock:
+            self._fade_duration = duration
+        return self.settings()
+
+    def configure(
+        self,
+        *,
+        transition_mode: Optional[str] = None,
+        fade_duration_s: Optional[float] = None,
+        wipe_file: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Apply one or more runtime auto-switch settings."""
+        next_mode = None
+        next_duration = None
+        next_wipe_file = None
+        if transition_mode is not None:
+            next_mode = self._validate_transition_mode(transition_mode)
+        if fade_duration_s is not None:
+            next_duration = self._validate_fade_duration(fade_duration_s)
+        if wipe_file is not None:
+            next_wipe_file = str(wipe_file).strip() or None
+        with self._settings_lock:
+            if next_mode is not None:
+                self._transition_mode = next_mode
+            if next_duration is not None:
+                self._fade_duration = next_duration
+            if wipe_file is not None:
+                self._wipe_file = next_wipe_file
+        return self.settings()
+
+    def settings(self) -> Dict[str, object]:
+        """Return the small runtime state needed by operator controls."""
+        with self._settings_lock:
+            transition_mode = self._transition_mode
+            fade_duration = self._fade_duration
+            wipe_file = self._wipe_file
+        return {
+            "transition_mode": transition_mode,
+            "fade_duration_s": fade_duration,
+            "wipe_file": wipe_file,
+            "running": self._thread is not None and self._thread.is_alive(),
+            "current_input": self._current_input,
+            "current_scene": self._current_scene,
+            "min_dwell_program_s": self._min_dwell_program,
+            "cooldown_s": self._cooldown,
+        }
 
     # ------------------------------------------------------------------
     # Internal
@@ -156,21 +238,43 @@ class AutoSwitcher:
             return False
 
         start_pts_ms = self._switch_start_pts_ms(entry, now) if entry is not None else None
+        with self._settings_lock:
+            transition_mode = self._transition_mode
+            fade_duration = self._fade_duration
+            wipe_file = self._wipe_file
         try:
-            #self._mixer.fade(scene, duration_sec=self._fade_duration)
-            if start_pts_ms is None:
-                self._mixer.cut(scene)
+            if transition_mode == "fade":
+                if start_pts_ms is None:
+                    self._mixer.fade(scene, duration_sec=fade_duration)
+                else:
+                    self._mixer.fade(scene, duration_sec=fade_duration, start_pts_ms=start_pts_ms)
+            elif transition_mode == "wipe":
+                if not wipe_file:
+                    raise RuntimeError("auto-switch wipe_file is not set")
+                if start_pts_ms is None:
+                    self._mixer.wipe(scene, wipe_file=wipe_file, duration_sec=fade_duration)
+                else:
+                    self._mixer.wipe(
+                        scene,
+                        wipe_file=wipe_file,
+                        duration_sec=fade_duration,
+                        start_pts_ms=start_pts_ms,
+                    )
             else:
-                self._mixer.cut(scene, start_pts_ms=start_pts_ms)
+                if start_pts_ms is None:
+                    self._mixer.cut(scene)
+                else:
+                    self._mixer.cut(scene, start_pts_ms=start_pts_ms)
         except Exception as exc:
             print(
-                f"[auto_switcher] switch to {scene} failed"
+                f"[auto_switcher] {transition_mode} to {scene} failed"
                 f"{f' at pts={start_pts_ms}ms' if start_pts_ms is not None else ''}: {exc}",
                 flush=True,
             )
             return False
         print(
-            f"[auto_switcher] switch to {scene}"
+            f"[auto_switcher] {transition_mode} to {scene}"
+            f"{f' duration={fade_duration:.3f}s' if transition_mode in ('fade', 'wipe') else ''}"
             f"{f' at pts={start_pts_ms}ms' if start_pts_ms is not None else ''}",
             flush=True,
         )
