@@ -985,83 +985,84 @@ public:
 };
 
 class TcpControlServer: public ControlServerBase {
-    struct Client {
+    struct Client: public std::enable_shared_from_this<Client> {
         ControlImpl &control;
         TcpControlServer &server;
-        std::list<Client>::iterator iter;
+        std::list<std::shared_ptr<Client>>::iterator iter;
         boost::asio::io_service &io_service;
         tcp::socket socket;
         boost::asio::streambuf buff;
         ClientPipe pipe;
         std::thread thread;
-        size_t pending_operations = 0;
-        bool self_destruct = false;
+        bool closing = false;
         Client(ControlImpl &_control, TcpControlServer &_server, boost::asio::io_service &_io_service):
             control(_control), server(_server), io_service(_io_service), socket(_io_service),
             pipe([this]() {
-                pending_operations++;
-                io_service.post([this]() {
-                    pending_operations--;
-                    ControlPacket pkt;
-                    if (!pipe.to_client.try_dequeue(pkt)) {
-                        logstream << "BUG: nothing in to_client queue but send_to_client was called";
-                        return;
-                    }
-                    if (pkt.type==ControlPacket::Data) {
-                        pending_operations++;
-                        boost::asio::async_write(socket, boost::asio::buffer(pkt.data), [this](const boost::system::error_code& error, const size_t) {
-                            pending_operations--;
-                            if (error) {
-                                logstream << "send error: " << error;
-                            }
-                            if (self_destruct && (pending_operations==0)) {
-                                server.clients_.erase(iter);
-                            }
-                        });
-                    } else if (pkt.type==ControlPacket::End) {
-                        try {
-                            socket.close();
-                        } catch (std::exception &e) {
-                        }
-                    }
-                    if (self_destruct && (pending_operations==0)) {
-                        server.clients_.erase(iter);
+                postToClient();
+            }) {
+        };
+        void start() {
+            auto self = shared_from_this();
+            thread = start_thread("control", [self]() {
+                self->control.communicate(self->pipe);
+            });
+        }
+        void postToClient() {
+            auto self = shared_from_this();
+            io_service.post([self]() {
+                self->sendToClient();
+            });
+        }
+        void sendToClient() {
+            ControlPacket pkt;
+            if (!pipe.to_client.try_dequeue(pkt)) {
+                logstream << "BUG: nothing in to_client queue but send_to_client was called";
+                return;
+            }
+            if (pkt.type==ControlPacket::Data) {
+                auto data = std::make_shared<std::string>(std::move(pkt.data));
+                auto self = shared_from_this();
+                boost::asio::async_write(socket, boost::asio::buffer(*data), [self, data](const boost::system::error_code& error, const size_t) {
+                    if (error) {
+                        logstream << "send error: " << error;
                     }
                 });
-            }),
-            thread(start_thread("control", [this]() {
-                control.communicate(pipe);
-            })) {
-        };
+            } else if (pkt.type==ControlPacket::End) {
+                closeSocket();
+            }
+        }
+        void closeSocket() {
+            try {
+                socket.close();
+            } catch (std::exception &e) {
+            }
+        }
+        void closeAndRemove() {
+            if (closing) {
+                return;
+            }
+            closing = true;
+            closeSocket();
+            pipe.from_client.emplace(ControlPacket::End);
+            if (thread.joinable()) {
+                thread.join();
+            }
+            server.clients_.erase(iter);
+        }
         void receiveNextLine() {
-            pending_operations++;
-            boost::asio::async_read_until(socket, buff, '\n', [this](const boost::system::error_code& error, size_t size) {
-                pending_operations--;
+            auto self = shared_from_this();
+            boost::asio::async_read_until(socket, buff, '\n', [self](const boost::system::error_code& error, size_t size) {
                 if (error) {
                     logstream << "line receive error: " << error;
-                    pipe.from_client.emplace(ControlPacket::End);
-                    // now we are sure that the this lambda won't run another time (receiveNextLine() is not called)
-                    TcpControlServer &s = server;
-                    auto &ci = iter;
-                    auto &pending = pending_operations;
-                    auto &destroy = self_destruct;
-                    io_service.post([&s, &ci, &pending, &destroy]() {
-                        ci->thread.join();
-                        // now we are sure that send_to_client won't be called (it's called only in ci->thread)
-                        if (pending == 0) {
-                            s.clients_.erase(ci);
-                        } else {
-                            destroy = true;
-                        }
-                    });
+                    self->closeAndRemove();
                     return;
                 }
-                auto buff_begin = boost::asio::buffers_begin(buff.data());
+                auto buff_begin = boost::asio::buffers_begin(self->buff.data());
                 std::string line(buff_begin, buff_begin+size);
-                buff.consume(size);
-                pipe.from_client.emplace(ControlPacket::Data, line);
+                self->buff.consume(size);
+                self->pipe.from_client.emplace(ControlPacket::Data, line);
                 // response is handled by posting into the event loop
-                receiveNextLine();
+                self->receiveNextLine();
             });
         }
     };
@@ -1069,21 +1070,23 @@ class TcpControlServer: public ControlServerBase {
     ControlImpl &control_;
     boost::asio::io_service io_service_;
     tcp::acceptor acceptor_;
-    std::list<Client> clients_;
+    std::list<std::shared_ptr<Client>> clients_;
     std::thread net_thread_;
 
     void nextConnection() {
-        clients_.emplace_front(control_, *this, io_service_);
-        decltype(clients_)::iterator iter = clients_.begin();
-        Client &client = *iter;
-        client.iter = iter;
-        acceptor_.async_accept(client.socket, [this, &client](const boost::system::error_code& error) {
+        auto client = std::make_shared<Client>(control_, *this, io_service_);
+        clients_.push_front(client);
+        auto iter = clients_.begin();
+        client->iter = iter;
+        acceptor_.async_accept(client->socket, [this, client](const boost::system::error_code& error) {
             if (error) {
                 logstream << "connection accept error: " << error;
+                clients_.erase(client->iter);
                 return;
             }
-            client.pipe.from_client.emplace(ControlPacket::Start);
-            client.receiveNextLine();
+            client->start();
+            client->pipe.from_client.emplace(ControlPacket::Start);
+            client->receiveNextLine();
             nextConnection();
         });
     }
@@ -1102,15 +1105,14 @@ public:
         acceptor_.cancel();
         io_service_.stop();
         net_thread_.join();
-        for (Client& client: clients_) {
-            try {
-                client.socket.close();
-            } catch (std::exception &e) {
-            }
-            client.pipe.from_client.emplace(ControlPacket::End);
+        for (auto& client: clients_) {
+            client->closeSocket();
+            client->pipe.from_client.emplace(ControlPacket::End);
         }
-        for (Client& client: clients_) {
-            client.thread.join();
+        for (auto& client: clients_) {
+            if (client->thread.joinable()) {
+                client->thread.join();
+            }
         }
     }
 };
