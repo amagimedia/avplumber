@@ -12,7 +12,7 @@ Usage
         mixer=mx,
         registry=speaker_registry,
         n_inputs=2,
-        full_face_scene=lambda i: f"full_face_{i}",
+        scene_for_input=lambda i: f"videoconf_{i}",
         min_dwell_speaking_s=0.6,
         min_dwell_program_s=2.5,
         fade_duration_s=0.6,
@@ -46,7 +46,7 @@ class AutoSwitcher:
        when several inputs qualify.
     3. If that input differs from the current program AND the last
        transition completed at least ``min_dwell_program_s`` seconds ago,
-       trigger a ``mixer.fade`` to ``full_face_<candidate>``.
+       trigger a scene change to the configured scene for that input.
     4. A ``cooldown_s`` lockout after each transition prevents oscillation
        even if min_dwell_program_s has elapsed.
     """
@@ -56,13 +56,14 @@ class AutoSwitcher:
         mixer: MixerGraphBuilder,
         registry: Speaker,
         n_inputs: int,
-        full_face_scene: Callable[[int], str] = lambda i: f"full_face_{i}",
+        scene_for_input: Callable[[int], str] = lambda i: f"full_face_{i}",
         min_dwell_speaking_s: float = 0.6,
         min_dwell_program_s: float = 2.5,
         fade_duration_s: float = 0.6,
         cooldown_s: float = 1.5,
         tick_s: float = 0.25,
         min_active_level_db: float = -60.0,
+        switch_pts_lead_ms: Optional[int] = None,
         special_speaker_index: Optional[int] = None,
         special_speaker_margin_db: float = 0.0,
         vad_only_priority_speaker_index: Optional[int] = None,
@@ -70,13 +71,14 @@ class AutoSwitcher:
         self._mixer = mixer
         self._registry = registry
         self._n_inputs = n_inputs
-        self._full_face_scene = full_face_scene
+        self._scene_for_input = scene_for_input
         self._min_dwell_speaking = min_dwell_speaking_s
         self._min_dwell_program = min_dwell_program_s
         self._fade_duration = fade_duration_s
         self._cooldown = cooldown_s
         self._tick = tick_s
         self._min_active_level_db = min_active_level_db
+        self._switch_pts_lead_ms = switch_pts_lead_ms
         self._special_speaker_index = special_speaker_index
         self._special_speaker_margin_db = special_speaker_margin_db
         self._vad_only_priority_speaker_index = vad_only_priority_speaker_index
@@ -106,8 +108,8 @@ class AutoSwitcher:
         self._last_switch_ts = time.monotonic()
 
     def force_input(self, index: int) -> None:
-        """Cut to the fullscreen face scene for *index* and reset the dwell timer."""
-        scene = self._full_face_scene(index)
+        """Cut to the auto-switch scene for *index* and reset the dwell timer."""
+        scene = self._scene_for_input(index)
         if scene in self._mixer.scenes():
             self._mixer.cut(scene)
             self._current_input = index
@@ -122,18 +124,45 @@ class AutoSwitcher:
             self._tick_once()
             self._stop_event.wait(timeout=self._tick)
 
-    def _try_switch_to(self, index: int, now: float) -> bool:
+    def _switch_start_pts_ms(self, entry, now: float) -> Optional[int]:
+        if self._switch_pts_lead_ms is None:
+            return None
+        if entry.audio_event_pts_ms is None or entry.audio_event_observed_ts is None:
+            return None
+        estimated_media_now_ms = entry.audio_event_pts_ms + int(
+            round((now - entry.audio_event_observed_ts) * 1000.0)
+        )
+        return estimated_media_now_ms + self._switch_pts_lead_ms
+
+    def _try_switch_to(self, index: int, now: float, entry=None) -> bool:
         if index == self._current_input:
             return True
         if (now - self._last_switch_ts) < self._min_dwell_program:
             return False
 
-        scene = self._full_face_scene(index)
+        scene = self._scene_for_input(index)
         if scene not in self._mixer.scenes():
             return False
 
-        #self._mixer.fade(scene, duration_sec=self._fade_duration)
-        self._mixer.cut(scene)
+        start_pts_ms = self._switch_start_pts_ms(entry, now) if entry is not None else None
+        try:
+            #self._mixer.fade(scene, duration_sec=self._fade_duration)
+            if start_pts_ms is None:
+                self._mixer.cut(scene)
+            else:
+                self._mixer.cut(scene, start_pts_ms=start_pts_ms)
+        except Exception as exc:
+            print(
+                f"[auto_switcher] switch to {scene} failed"
+                f"{f' at pts={start_pts_ms}ms' if start_pts_ms is not None else ''}: {exc}",
+                flush=True,
+            )
+            return False
+        print(
+            f"[auto_switcher] switch to {scene}"
+            f"{f' at pts={start_pts_ms}ms' if start_pts_ms is not None else ''}",
+            flush=True,
+        )
         self._current_input = index
         self._last_switch_ts = now
         return True
@@ -149,9 +178,10 @@ class AutoSwitcher:
         if priority_index is not None:
             entry = self._registry.get(priority_index)
             if entry is not None and entry.speaking:
-                speaking_duration_s = now - entry.last_change_ts
+                speaking_since = entry.audio_since or entry.last_change_ts
+                speaking_duration_s = now - speaking_since
                 if speaking_duration_s >= self._min_dwell_speaking:
-                    self._try_switch_to(priority_index, now)
+                    self._try_switch_to(priority_index, now, entry)
                     return
 
         # Find candidates: audio VAD and visual speech both active, with usable RMS.
@@ -163,7 +193,9 @@ class AutoSwitcher:
                 continue
             if not entry.speaking or not entry.visual_speaking:
                 continue
-            speaking_duration_s = now - entry.last_change_ts
+            if entry.combined_speaking_since is None:
+                continue
+            speaking_duration_s = now - entry.combined_speaking_since
             if speaking_duration_s < self._min_dwell_speaking:
                 continue
             if entry.level_db <= self._min_active_level_db:
@@ -184,4 +216,4 @@ class AutoSwitcher:
             best = candidates[1]
         best_index = best.index
 
-        self._try_switch_to(best_index, now)
+        self._try_switch_to(best_index, now, best)

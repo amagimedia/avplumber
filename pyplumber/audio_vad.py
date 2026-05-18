@@ -47,8 +47,20 @@ class SpeakerEntry:
     index: int
     speaking: bool = False
     level_db: float = -96.0
-    # Wall-clock time (time.monotonic()) of last state transition.
+    # Wall-clock time (time.monotonic()) of last audio state transition.
     last_change_ts: float = field(default_factory=time.monotonic)
+    audio_since: Optional[float] = None
+    audio_event_pts: Optional[int] = None
+    audio_speech_start_pts: Optional[int] = None
+    audio_speech_end_pts: Optional[int] = None
+    audio_timebase_num: Optional[int] = None
+    audio_timebase_den: Optional[int] = None
+    audio_event_pts_ms: Optional[int] = None
+    audio_speech_start_pts_ms: Optional[int] = None
+    audio_speech_end_pts_ms: Optional[int] = None
+    audio_event_observed_ts: Optional[float] = None
+    visual_since: Optional[float] = None
+    combined_speaking_since: Optional[float] = None
     # Accumulated continuous speaking duration at the last update.
     speaking_duration_s: float = 0.0
     # Visual (lip-motion) speech signal — set independently of audio.
@@ -65,23 +77,59 @@ class Speaker:
         self._lock = threading.Lock()
         self._entries: Dict[int, SpeakerEntry] = {}
 
+    @staticmethod
+    def _refresh_combined(entry: SpeakerEntry, now: float) -> None:
+        if entry.speaking and entry.visual_speaking:
+            if entry.combined_speaking_since is None:
+                entry.combined_speaking_since = now
+        else:
+            entry.combined_speaking_since = None
+
     def update(
         self,
         index: int,
         speaking: bool,
         level_db: float,
         speaking_duration_s: float,
+        audio_event_pts: Optional[int] = None,
+        audio_speech_start_pts: Optional[int] = None,
+        audio_speech_end_pts: Optional[int] = None,
+        audio_timebase_num: Optional[int] = None,
+        audio_timebase_den: Optional[int] = None,
+        audio_event_pts_ms: Optional[int] = None,
+        audio_speech_start_pts_ms: Optional[int] = None,
+        audio_speech_end_pts_ms: Optional[int] = None,
     ) -> None:
         with self._lock:
             entry = self._entries.get(index)
             if entry is None:
                 entry = SpeakerEntry(index=index)
                 self._entries[index] = entry
+            now = time.monotonic()
+            was_speaking = entry.speaking
             if entry.speaking != speaking:
-                entry.last_change_ts = time.monotonic()
+                entry.last_change_ts = now
+                entry.audio_since = now if speaking else None
             entry.speaking = speaking
             entry.level_db = level_db
             entry.speaking_duration_s = speaking_duration_s
+            if audio_timebase_num is not None and audio_timebase_den is not None:
+                entry.audio_timebase_num = audio_timebase_num
+                entry.audio_timebase_den = audio_timebase_den
+            if audio_event_pts is not None:
+                entry.audio_event_pts = audio_event_pts
+                entry.audio_event_pts_ms = audio_event_pts_ms
+                entry.audio_event_observed_ts = now
+            if audio_speech_start_pts is not None:
+                entry.audio_speech_start_pts = audio_speech_start_pts
+                entry.audio_speech_start_pts_ms = audio_speech_start_pts_ms
+            if audio_speech_end_pts is not None:
+                entry.audio_speech_end_pts = audio_speech_end_pts
+                entry.audio_speech_end_pts_ms = audio_speech_end_pts_ms
+            elif speaking and not was_speaking:
+                entry.audio_speech_end_pts = None
+                entry.audio_speech_end_pts_ms = None
+            self._refresh_combined(entry, now)
 
     def get(self, index: int) -> Optional[SpeakerEntry]:
         with self._lock:
@@ -98,7 +146,11 @@ class Speaker:
             if entry is None:
                 entry = SpeakerEntry(index=index)
                 self._entries[index] = entry
+            now = time.monotonic()
+            if entry.visual_speaking != visual_speaking:
+                entry.visual_since = now if visual_speaking else None
             entry.visual_speaking = visual_speaking
+            self._refresh_combined(entry, now)
 
     def loudest_speaker(self) -> Optional[SpeakerEntry]:
         """Return the speaking input with the highest sustained level."""
@@ -300,6 +352,26 @@ class SileroVadRegistryBridge(PythonNode):
         # Kept for CLI compatibility with earlier auto_mixer.py revisions.
         self._holdoff_s = holdoff_s
 
+    @staticmethod
+    def _optional_int(metadata: dict, key: str) -> Optional[int]:
+        value = metadata.get(key)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _pts_to_ms(
+        pts: Optional[int],
+        timebase_num: Optional[int],
+        timebase_den: Optional[int],
+    ) -> Optional[int]:
+        if pts is None or timebase_num is None or timebase_den in (None, 0):
+            return None
+        return int(round(1000.0 * pts * timebase_num / timebase_den))
+
     def _set_speaking(self, speaking: bool, metadata: dict) -> None:
         prob = float(metadata.get("last_probability", 0.0))
         level_db = metadata.get("level_db")
@@ -309,11 +381,24 @@ class SileroVadRegistryBridge(PythonNode):
         else:
             level_db = float(level_db)
         duration_s = float(metadata.get("duration_ms", 0)) / 1000.0
+        timebase_num = self._optional_int(metadata, "timebase_num")
+        timebase_den = self._optional_int(metadata, "timebase_den")
+        event_pts = self._optional_int(metadata, "pts")
+        speech_start_pts = self._optional_int(metadata, "speech_start_pts")
+        speech_end_pts = self._optional_int(metadata, "speech_end_pts")
         self._registry.update(
             index=self._index,
             speaking=speaking,
             level_db=level_db if speaking else -96.0,
             speaking_duration_s=duration_s,
+            audio_event_pts=event_pts,
+            audio_speech_start_pts=speech_start_pts,
+            audio_speech_end_pts=speech_end_pts,
+            audio_timebase_num=timebase_num,
+            audio_timebase_den=timebase_den,
+            audio_event_pts_ms=self._pts_to_ms(event_pts, timebase_num, timebase_den),
+            audio_speech_start_pts_ms=self._pts_to_ms(speech_start_pts, timebase_num, timebase_den),
+            audio_speech_end_pts_ms=self._pts_to_ms(speech_end_pts, timebase_num, timebase_den),
         )
 
     def process(self) -> None:

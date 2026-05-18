@@ -3,6 +3,8 @@
 #include "../../graph_interfaces.hpp"
 #include <pybind11/gil.h>
 
+namespace py = pybind11;
+
 template<typename T>
 class PythonNodeSO: public NodeSingleOutput<T>, public IStoppable, public IPythonNode {
 private:

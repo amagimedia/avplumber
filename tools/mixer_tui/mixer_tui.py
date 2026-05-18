@@ -9,7 +9,8 @@ to scenes by name.
 
 Scene names are fetched automatically from the server via ``mixer.scenes`` on
 connect and refreshed every 10 seconds. No scene names need to be passed as
-arguments.
+arguments. Selecting a preview scene preloads that scene into avplumber's
+hidden PVW slot so a later CUT can take it without cold-loading the graph.
 
 Usage:
     python tools/mixer_tui.py --host localhost --port 5555 --mixer mixer
@@ -646,6 +647,8 @@ class MixerTUI(App):
         name = self.scenes[value] if 0 <= value < len(self.scenes) else ""
         self.query_one("#pvw_scene_name", Static).update(name or "(none)")
         self._refresh_scene_buttons()
+        if name:
+            self._preview_scene(name)
 
     def watch_scenes(self, scenes: list) -> None:
         try:
@@ -816,6 +819,14 @@ class MixerTUI(App):
     def _do_wipe(self, scene: str, path: Optional[str]) -> None:
         if path:
             self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=path))
+
+    @work(exclusive=True, thread=False, group="mixer_preview")
+    async def _preview_scene(self, scene: str) -> None:
+        if self._mixer_take_in_progress() or scene == self.pvw_scene_remote:
+            return
+        resp = await self._conn.command(self._mixer_command("preview", scene=scene), raise_for_status=False)
+        if resp is not None and resp.code < 400:
+            await self._refresh_once()
 
     def action_focus_duration(self) -> None:
         try:
