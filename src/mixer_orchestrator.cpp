@@ -38,6 +38,28 @@ bool nodeWorkingIfExists(std::shared_ptr<NodeManager> nodes, const std::string& 
     return w && w->isWorking();
 }
 
+bool setNodeObjectIfCreated(std::shared_ptr<NodeManager> nodes,
+                            const std::string& node_name,
+                            const std::string& key,
+                            const Parameters& value) {
+    auto wrapper = nodes->node_if_exists(node_name);
+    if (!wrapper)
+        throw Error("Node " + node_name + " doesn't exist.");
+
+    wrapper->parameters()[key] = value;
+    if (!wrapper->node())
+        return false;
+
+    try {
+        wrapper->setObject(key, value);
+        return true;
+    } catch (const std::exception& e) {
+        if (std::string(e.what()) == "Node not created")
+            return false;
+        throw;
+    }
+}
+
 int edgeOccupiedIfExists(std::shared_ptr<NodeManager> nodes, const std::string& name) {
     if (name.empty())
         return 0;
@@ -87,6 +109,24 @@ Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition
     return arr;
 }
 
+class TransitionPrepGuard {
+    std::shared_ptr<MixerState> state_;
+    bool active_ = true;
+
+public:
+    explicit TransitionPrepGuard(std::shared_ptr<MixerState> state)
+        : state_(std::move(state)) {}
+
+    ~TransitionPrepGuard() {
+        if (active_)
+            state_->transition_mode = MixerState::TransitionMode::Idle;
+    }
+
+    void release() {
+        active_ = false;
+    }
+};
+
 } // namespace
 
 MixerOrchestrator::MixerOrchestrator(
@@ -96,8 +136,12 @@ MixerOrchestrator::MixerOrchestrator(
     : nodes_(std::move(nodes)), state_(std::move(state)), timeline_(std::move(timeline)) {}
 
 void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value) {
-    auto node = nodes_->node(node_name);
-    node->setObject(key, value);
+    try {
+        auto node = nodes_->node(node_name);
+        node->setObject(key, value);
+    } catch (const std::exception& e) {
+        throw Error("mixer: set " + node_name + "." + key + " failed: " + e.what());
+    }
 }
 
 void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask) {
@@ -107,7 +151,10 @@ void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uin
     // cut/fade append new `outputs` rows at T_cleanup *after* loadSceneIntoSlot returns, so
     // those are not cleared by this call. Overlapping mixer commands are rejected by ensureIdle().
     timeline_->clearKey(otm_name, "outputs");
-    setNodeObject(otm_name, "outputs", Parameters(mask));
+    if (!setNodeObjectIfCreated(nodes_, otm_name, "outputs", Parameters(mask))) {
+        logstream << "mixer: queued " << otm_name << ".outputs=" << mask
+                  << " for node not created yet";
+    }
     timeline_->set(otm_name, "outputs", wallclock.pts(), Parameters(mask));
 }
 
@@ -284,25 +331,55 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     setNodeObject(slot.compositor_name, "active_inputs", Parameters(active_mask));
     timeline_->set(slot.compositor_name, "active_inputs", wallclock.pts(), Parameters(active_mask));
 
-    state_->pvw_scene_name = scene_name;
-
     // Drop slot bit for every camera, then enable only sources in scene with active_inputs set.
     // Keeps `outputs` consistent with compositor consumption (no frames into unused inputs).
     const uint32_t slot_bit = is_slot_a ? 1u : 2u;
     rewriteCameraOutputsForSlot(slot_bit, scene);
+
+    state_->pvw_scene_name = scene_name;
+}
+
+void MixerOrchestrator::preview(const std::string& scene_name) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    ensureIdle();
+    if (!state_->scenes.count(scene_name))
+        throw Error("mixer.preview: unknown scene: " + scene_name);
+
+    bool pvw_is_slot_a = !state_->pgm_is_slot_a;
+    const auto& slot = state_->pvwSlot();
+
+    if (state_->pvw_scene_name == scene_name) {
+        logstream << "mixer preview: scene already loaded in PVW: " << scene_name;
+    } else {
+        loadSceneIntoSlot(pvw_is_slot_a, scene_name);
+        resetInputIf(nodes_, slot.norm_ts_name);
+    }
+
+    int64_t T_prep = wallclock.pts();
+    timeline_->clearKey(slot.post_otm_name, "outputs");
+    setNodeObject(slot.post_otm_name, "outputs", Parameters(1u));
+    timeline_->set(slot.post_otm_name, "outputs", T_prep, Parameters(1u));
+    logstream << "mixer preview armed: scene=" << scene_name
+              << " slot=" << (pvw_is_slot_a ? 'A' : 'B')
+              << " post_otm " << slot.post_otm_name << "->1";
 }
 
 // ---------------------------------------------------------------------------
 // cutInternal: the graph-level work for a hard cut, without touching
 // transition_mode or pgm_is_slot_a.  All values are read from pre-flip state.
 // Caller must hold state_->mutex.
-// Returns the earliest cut PTS (wallclock ms). The visible switch is gated by
-// readyCutThread until the incoming direct edge has produced a fresh frame.
+// Returns the earliest cut PTS (wallclock ms). Cold cuts are gated until the
+// incoming direct edge has produced a fresh frame; preloaded PVW cuts only wait
+// for the scheduled PTS.
 // ---------------------------------------------------------------------------
 int64_t MixerOrchestrator::cutInternal(const std::string& scene_name, int64_t start_pts_ms) {
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
 
-    loadSceneIntoSlot(pvw_is_slot_a, scene_name);
+    if (state_->pvw_scene_name == scene_name) {
+        logstream << "mixer cut: reusing preloaded PVW scene=" << scene_name;
+    } else {
+        loadSceneIntoSlot(pvw_is_slot_a, scene_name);
+    }
 
     int64_t T_prep = wallclock.pts();
     int64_t T_cut = start_pts_ms;
@@ -359,7 +436,7 @@ void MixerOrchestrator::deferredCleanup(
                 const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
                 const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
                 timeline->clearKey(info.otm_node_name, "outputs");
-                nodes->node(info.otm_node_name)->setObject("outputs", Parameters(mask));
+                setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
             }
             const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
             const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
@@ -392,21 +469,30 @@ void MixerOrchestrator::readyCutThread(
         std::string new_pgm_scene,
         std::string ready_edge_name,
         av::Timestamp ready_edge_initial_ts,
-        int64_t earliest_switch_pts_ms) {
+        int64_t earliest_switch_pts_ms,
+        bool require_new_ready_frame) {
     constexpr int64_t kPollMs = 5;
     constexpr int64_t kMaxWaitMs = 1500;
     int64_t waited_ms = 0;
     while (waited_ms < kMaxWaitMs) {
-        auto edge = nodes->edges()->findAny(ready_edge_name);
-        if (!edge)
-            break;
-        av::Timestamp ts = edge->lastTS();
-        const bool edge_ready = ts.isValid() && (!ready_edge_initial_ts.isValid() || ts > ready_edge_initial_ts);
         const bool time_ready = wallclock.pts() >= earliest_switch_pts_ms;
+        bool edge_ready = !require_new_ready_frame;
+        if (require_new_ready_frame) {
+            auto edge = nodes->edges()->findAny(ready_edge_name);
+            if (!edge)
+                break;
+            av::Timestamp ts = edge->lastTS();
+            edge_ready = ts.isValid() && (!ready_edge_initial_ts.isValid() || ts > ready_edge_initial_ts);
+        }
         if (edge_ready && time_ready)
             break;
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
         waited_ms += kPollMs;
+    }
+    if (waited_ms > 0 || require_new_ready_frame) {
+        logstream << "mixer ready cut: scene=" << new_pgm_scene
+                  << " waited_ms=" << waited_ms
+                  << " require_new_ready_frame=" << (require_new_ready_frame ? "true" : "false");
     }
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -428,7 +514,7 @@ void MixerOrchestrator::readyCutThread(
                 const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
                 const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
                 timeline->clearKey(info.otm_node_name, "outputs");
-                nodes->node(info.otm_node_name)->setObject("outputs", Parameters(mask));
+                setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
             }
             timeline->clearKey(new_slot.post_otm_name, "outputs");
             timeline->clearKey(old_slot.post_otm_name, "outputs");
@@ -458,7 +544,9 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
 
     int64_t T_cut = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Cut;
+    TransitionPrepGuard prep_guard(state_);
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
+    bool was_preloaded = state_->pvw_scene_name == scene_name;
 
     cutInternal(scene_name, T_cut);
 
@@ -467,7 +555,9 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     auto ready_edge = nodes_->edges()->findAny(ready_edge_name);
     av::Timestamp ready_edge_initial_ts = ready_edge ? ready_edge->lastTS() : NOTS;
     std::thread(readyCutThread, nodes_, state_, timeline_,
-                pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts, T_cut).detach();
+                pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts,
+                T_cut, !was_preloaded).detach();
+    prep_guard.release();
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +570,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 
     int64_t T_start = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
+    TransitionPrepGuard prep_guard(state_);
 
     // Capture all needed values from pre-flip state
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
@@ -488,8 +579,12 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     const auto& old_slot    = pvw_is_slot_a ? state_->slot_b : state_->slot_a;
     int pvw_sw_idx = state_->pvwSourceSwitcherIndex();
 
-    // 1. Load target scene into PVW slot
-    loadSceneIntoSlot(pvw_is_slot_a, scene_name);
+    // 1. Ensure target scene is loaded into PVW slot.
+    if (state_->pvw_scene_name == scene_name) {
+        logstream << "mixer fade: reusing preloaded PVW scene=" << scene_name;
+    } else {
+        loadSceneIntoSlot(pvw_is_slot_a, scene_name);
+    }
 
     auto& target_scene = state_->scenes.at(scene_name);
     int frames = (int)std::round(duration_sec * state_->fps_num / state_->fps_den);
@@ -546,6 +641,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     std::thread(deferredCleanup, nodes_, state_, timeline_,
                 flip_delay, pvw_is_slot_a, scene_name,
                 std::vector<std::string>{transition_node_name_}).detach();
+    prep_guard.release();
 }
 
 // ---------------------------------------------------------------------------

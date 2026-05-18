@@ -36,7 +36,7 @@ class MixerOrchestrator {
     void ensureIdle() const;
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
-    // Core hard-cut logic: reconfigure PVW, enable cameras, write timeline entries.
+    // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
     // Does NOT modify pgm_is_slot_a, pgm_scene_name, or transition_mode.
     // Caller must hold state_->mutex. Returns T_cleanup timestamp.
     int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms);
@@ -58,7 +58,8 @@ class MixerOrchestrator {
                                std::string new_pgm_scene,
                                std::string ready_edge_name,
                                av::Timestamp ready_edge_initial_ts,
-                               int64_t earliest_switch_pts_ms);
+                               int64_t earliest_switch_pts_ms,
+                               bool require_new_ready_frame);
 
     // Wipe lifecycle: midpoint scene switch (immediate, hidden behind opaque wipe)
     // + end-of-wipe teardown.
@@ -92,6 +93,7 @@ public:
                       const std::string& cs_node_a, const std::string& cs_node_b);
     void defineScene(const std::string& name, const SceneDefinition& def);
 
+    void preview(const std::string& scene_name);
     void cut(const std::string& scene_name, int64_t start_pts_ms = -1);
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,

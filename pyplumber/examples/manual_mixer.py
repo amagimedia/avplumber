@@ -122,7 +122,7 @@ def build_output(avp: AVPlumber, video_edge: str, output_url: str) -> None:
             "profile": "high",
         },
     }))
-        avp.addNode(Mux({
+    avp.addNode(Mux({
         "src": ["v_enc"],
         "dst": "mux_out",
         "group": g,

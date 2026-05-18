@@ -216,7 +216,7 @@ All graph mutations and timeline writes happen synchronously in the calling thre
 
 1. `ensureIdle()` -- reject if transition already in progress
 2. Set `transition_mode = Cut`
-3. `loadSceneIntoSlot(pvw_slot, scene_name)`:
+3. If the requested scene is not already preloaded in PVW, `loadSceneIntoSlot(pvw_slot, scene_name)`:
    - For each camera in scene: update the PVW crop/scale chain graph and restart that filter only if the graph string changed (PVW slot prep; not frame-critical to PGM air)
    - `node.object.set` compositor layers and `active_inputs`
    - Publish compositor `active_inputs` and **every** camera `one_to_many` `outputs` for the PVW slot bit to both the node atomics and the mixer timeline: clear prior `outputs` / `active_inputs` entries for those channels (so old `T_cleanup` values cannot win over `node.object.set`), then write current wallclock entries. Nodes that use `TimelineReader` for these keys would otherwise keep applying stale scheduled masks after a previous transition.
@@ -378,6 +378,12 @@ Hard cut. Required fields: `mixer` (string), `scene` (string). Optional fields: 
 
 Example: `mixer.cut {"mixer":"mixer","scene":"multiviewer"}`
 
+```mixer.preview <json_object>```
+
+Preload a scene into the hidden PVW slot without taking it to program. Required fields: `mixer` (string), `scene` (string). The next `mixer.cut` or `mixer.fade` to the same scene reuses the warmed slot instead of flushing/reloading it; a cut to that scene switches at its scheduled PTS instead of waiting for a new post-cut readiness frame.
+
+Example: `mixer.preview {"mixer":"mixer","scene":"multiviewer"}`
+
 ```mixer.fade <json_object>```
 
 Crossfade to scene. Required fields: `mixer` (string), `scene` (string). Optional fields: `duration_sec` (number, default `1.0`), `start_pts_ms` (int64, default `-1` = now + prep margin).
@@ -406,7 +412,7 @@ Returns a JSON array of all registered scene names, sorted alphabetically. Examp
 
 - It connects to the avplumber TCP control port and fetches scene names from `mixer.scenes <mixer_name>` on connect, then refreshes the list roughly every 10 seconds.
 - It polls `mixer.status <mixer_name>` every 500ms and treats any non-`idle` transition as busy; cut/fade/wipe commands are not sent while busy.
-- Preview is local UI state. Selecting a scene with `1`-`9` or a scene button does not send a preview command to avplumber. Pressing `c`, `x`, or `w` sends `mixer.cut`, `mixer.fade`, or `mixer.wipe` for the selected scene.
+- Selecting a scene with `1`-`9` or a scene button sends `mixer.preview` so avplumber preloads the hidden PVW slot. Pressing `c`, `x`, or `w` sends `mixer.cut`, `mixer.fade`, or `mixer.wipe` for the selected scene.
 - After a take completes, the UI polls until `transition == "idle"` and then puts the previous PGM scene on the local PVW bus to mimic a production switcher bus swap.
 - `F1`-`F9` sends a direct `mixer.cut` to that scene, skipping the local preview selection.
 - The HTML overlay buttons are outside `MixerOrchestrator`. Enabling first opens the HTML-source gate (`otm_html_overlay_src outputs 1`) and prewarms both final-output legs (`otm_html_overlay outputs 3`), then selects `overlay_sel active 1` and settles on `otm_html_overlay outputs 2`. Disabling prewarms the direct leg, selects `overlay_sel active 0`, settles on `otm_html_overlay outputs 1`, and closes the HTML-source gate (`otm_html_overlay_src outputs 0`). Closing the source gate drains and drops dmabuf frames before they reach `html_overlay_filter`, avoiding libavfilter framesync buffering while bypassed.

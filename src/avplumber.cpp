@@ -838,6 +838,15 @@ public:
             orch.defineScene(scene_name, def);
         };
 
+        // mixer.preview {"mixer":"mixer","scene":"scene_name"}
+        commands_["mixer.preview"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.preview", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.preview(scene_name);
+        };
+
         // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}
         commands_["mixer.cut"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.cut", arg);
@@ -1441,4 +1450,3 @@ void AVPlumber::stopMainLoop() {
 void AVPlumber::heartbeat() {
     impl_->printAllQueues();
 }
-

@@ -41,7 +41,11 @@ Usage
         [--remote-control-port 7777] \\
         [--logfile /tmp/auto_mixer.log] \\
         [--webui-api http://localhost:22222] \\
-        [--instance-name auto-mixer]
+        [--instance-name auto-mixer] \\
+        [--janus-preview]
+
+For WebRTC-only operation through a local Janus streaming mountpoint, omit
+`--output` and pass `--janus-output`.
 
 Environment variables
 ---------------------
@@ -57,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import signal
 import sys
 import threading
@@ -75,6 +80,8 @@ from pyplumber.node import (
     DecAudio,
     DecVideo,
     Demux,
+    DrawBBox,
+    DrawBBoxLabels,
     EncAudio,
     EncVideo,
     FilterVideo,
@@ -98,6 +105,7 @@ from pyplumber.auto_switcher import AutoSwitcher
 from pyplumber.mouth_tracker import FaceAnchoredMouthTrackerNode
 from pyplumber.vad import SileroVADNode
 from pyplumber.visual_speech import VisualSpeechGateNode
+from pyplumber.visual_utils import valid_pts
 
 # ------------------------------------------------------------------
 # Canvas and pipeline constants
@@ -131,22 +139,53 @@ FACE_TRACKED_LABELS = ["Face"]
 AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNEL_LAYOUT = "stereo"
 AUDIO_SAMPLE_FORMAT = "fltp"
+OPUS_SAMPLE_FORMAT = "fltp"
 
 # Silero VAD requires 16 kHz mono float audio.
 VAD_SAMPLE_RATE = 16000
 MIN_ACTIVE_AUDIO_LEVEL_DBFS = -60.0
 RENE_INPUT_INDEX = 4
 RENE_REQUIRED_LEAD_DB = 3.0
+JANUS_DEFAULT_HOST = "127.0.0.1"
+JANUS_DEFAULT_VIDEO_PORT = 5004
+JANUS_DEFAULT_AUDIO_PORT = 5002
+JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 3000
+RTP_PKT_SIZE = 1200
 
 SERGIO_INPUT_NAME = "sergio"
 RENE_INPUT_NAME = "rene"
 GENARO_INPUT_NAME = "genaro"
+SAMPLED_MANUAL_SCENE_COUNT = 5
+PIP_SCENE_SAMPLE_SEED = 20260518
+VSTACK2_SCENE_SAMPLE_SEED = 20260519
+VSTACK3_SCENE_SAMPLE_SEED = 20260520
+
+
+def sampled_ordered_pairs(n: int, limit: int, seed: int) -> list[tuple[int, int]]:
+    pairs = [(a, b) for a in range(n) for b in range(n) if a != b]
+    random.Random(seed).shuffle(pairs)
+    return pairs[:limit]
+
+
+def sampled_ordered_triples(n: int, limit: int, seed: int) -> list[tuple[int, int, int]]:
+    triples = [
+        (a, b, c)
+        for a in range(n)
+        for b in range(n)
+        for c in range(n)
+        if a != b and a != c and b != c
+    ]
+    random.Random(seed).shuffle(triples)
+    return triples[:limit]
+
 
 def input_basename(url: str) -> str:
     """Return a lowercase input basename for both URL and local path inputs."""
     parsed = urlparse(url)
     path = parsed.path if parsed.scheme else url
     return Path(path).name.lower()
+
+
 def find_named_input(inputs: list[str], name: str) -> int | None:
     name = name.lower()
     for i, url in enumerate(inputs):
@@ -174,9 +213,129 @@ class StaticViewportMetadataNode(PythonNode):
         frame.metadata[self.metadata_key] = self._metadata_json
         self._dst.enqueue(frame)
 
+
+class SpeakingStatusLabelNode(PythonNode):
+    """Convert registry state into small A/V labels for the debug overlay."""
+
+    def __init__(self, args: dict, index: int, registry: Speaker):
+        super().__init__({"data_type": "VideoFrame"} | args)
+        p = self.parameters
+        self.index = index
+        self.registry = registry
+        self.visual_metadata_key = str(p["visual_metadata_key"])
+        self.viewport_metadata_key = str(p["viewport_metadata_key"])
+        self.output_metadata_key = str(p["output_metadata_key"])
+        self.model_width = int(p.get("model_width", FACE_MODEL_W))
+        self.model_height = int(p.get("model_height", FACE_MODEL_H))
+        self.frame_width = int(p.get("frame_width", 1920))
+        self.frame_height = int(p.get("frame_height", 1080))
+        self.static_face_crop = bool(p.get("static_face_crop", False))
+        self.fallback_x = float(p.get("fallback_x", 24))
+        self.fallback_y = float(p.get("fallback_y", 8))
+
+    def _crop_origin(self, frame) -> tuple[float, float]:
+        if self.static_face_crop:
+            return (
+                max(0.0, (self.frame_width - FACE_CROP_W) * 0.5),
+                max(0.0, (self.frame_height - FACE_CROP_H) * 0.5),
+            )
+        try:
+            metadata = json.loads(str(frame.metadata[self.viewport_metadata_key]))
+            viewport_box = metadata.get("viewport_bbox")
+            viewport_w = float(metadata.get("viewport_dst_width", FACE_CROP_W))
+            viewport_h = float(metadata.get("viewport_dst_height", FACE_CROP_H))
+            frame_w = float(metadata.get("full_frame_width", self.frame_width))
+            frame_h = float(metadata.get("full_frame_height", self.frame_height))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return self.fallback_x, self.fallback_y
+
+        if not isinstance(viewport_box, list) or len(viewport_box) < 4:
+            return self.fallback_x, self.fallback_y
+        try:
+            cx = (float(viewport_box[0]) + float(viewport_box[2])) * 0.5
+            cy = (float(viewport_box[1]) + float(viewport_box[3])) * 0.5
+        except (TypeError, ValueError):
+            return self.fallback_x, self.fallback_y
+
+        x = max(0.0, min(cx - viewport_w * 0.5, frame_w - viewport_w))
+        y = max(0.0, min(cy - viewport_h * 0.5, frame_h - viewport_h))
+        return x, y
+
+    def _label_box(self, frame, offset_y: float) -> list[float]:
+        crop_x, crop_y = self._crop_origin(frame)
+        x = crop_x + self.fallback_x
+        y = crop_y + self.fallback_y + offset_y
+        return [x, y, x + 64, y + 20]
+
+    def _detection(self, frame, label: str, offset_y: float) -> dict:
+        return {
+            "label": label,
+            "conf": 1.0,
+            "xyxy": [round(float(v), 3) for v in self._label_box(frame, offset_y)],
+        }
+
+    def process(self):
+        frame = self._src.get()
+        if frame is None:
+            return
+        if not valid_pts(frame) or frame.width <= 0 or frame.height <= 0:
+            return
+
+        detections = []
+        entry = self.registry.get(self.index)
+        video_speaking = bool(entry.visual_speaking) if entry is not None else False
+        try:
+            metadata = json.loads(str(frame.metadata[self.visual_metadata_key]))
+        except (KeyError, json.JSONDecodeError):
+            metadata = {}
+
+        for target in metadata.get("targets", []):
+            if isinstance(target, dict):
+                video_speaking = video_speaking or bool(target.get("speaking"))
+
+        if video_speaking:
+            detections.append(self._detection(frame, "V", 0))
+
+        if entry is not None and entry.speaking:
+            detections.append(self._detection(frame, "A", 26))
+
+        frame.metadata[self.output_metadata_key] = json.dumps({
+            "version": 1,
+            "coord_space": "model",
+            "model_width": self.model_width,
+            "model_height": self.model_height,
+            "detections": detections,
+        }, sort_keys=True)
+        self._dst.enqueue(frame)
+
+
+class DropInvalidVideoFrameNode(PythonNode):
+    """Drop EOF/NOPTS markers before terminal C++ overlay nodes see them."""
+
+    def __init__(self, args: dict):
+        super().__init__({"data_type": "VideoFrame"} | args)
+
+    def process(self):
+        frame = self._src.get()
+        if frame is None:
+            return
+        if not valid_pts(frame) or frame.width <= 0 or frame.height <= 0:
+            return
+        self._dst.enqueue(frame)
+
+
 # Visual speech metadata key names (per-input, so no collisions on the same frame).
 VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
 VS_VISUAL_KEY_PREFIX = "vs_visual_speech"
+VS_SPEAKING_LABEL_KEY_PREFIX = "vs_speaking_labels"
+DEBUG_MOUTH_LABELS = ["M", "M (interpolated)"]
+DEBUG_MOUTH_TEXT_LABELS = ["M"]
+DEBUG_MOUTH_LABEL_COLORS = {
+    "M": "green",
+    "M (interpolated)": "yellow",
+}
+DEBUG_VIDEO_SPEAKING_LABELS = ["V"]
+DEBUG_AUDIO_SPEAKING_LABELS = ["A"]
 
 
 def default_face_engine() -> str:
@@ -222,6 +381,8 @@ def build_input_subgraph(
     silero_device: str = "cpu",
     silero_threshold: float = 0.5,
     static_face_crop: bool = False,
+    debug_mouth_rois: bool = False,
+    speaker_registry: Speaker | None = None,
 ) -> dict:
     """Build decode + face-detection + audio chain for one input.
 
@@ -291,6 +452,7 @@ def build_input_subgraph(
         "name": f"split_v{idx}",
         "src": f"v{idx}_fps",
         "dst": [f"v{idx}_fullres", f"v{idx}_for_yolo", f"v{idx}_fullres_vs"],
+        "drop": True,
         "group": g,
     }))
 
@@ -324,10 +486,14 @@ def build_input_subgraph(
     # Split raw YOLO output: one copy for face-tracking and one for visual-speech.
     # PlayerTracker filters to target_labels=["Face"] and may discard Mouth/Nose
     # detections; the visual-speech branch therefore needs the unmodified output.
+    yolo_split_dsts = [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"]
+    if debug_mouth_rois:
+        yolo_split_dsts.append(f"v{idx}_yolo_for_debug")
     avp.addNode(Split({
         "name": f"split_yolo_{idx}",
         "src": f"v{idx}_yolo_raw",
-        "dst": [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"],
+        "dst": yolo_split_dsts,
+        "drop": True,
         "group": g,
     }))
     avp.addNode(PlayerTracker({
@@ -367,11 +533,168 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
 
-    # ---- Split smooth output into: orig leg + crop-input leg ----
+    # ---- Visual-speech branch ----
+    # Attach raw YOLO detections (Face, Mouth, Nose, Eye) onto a full-res copy
+    # so that FaceAnchoredMouthTrackerNode can locate the mouth bounding box.
+    # If the face engine doesn't detect sub-parts (Mouth/Nose), the tracker
+    # falls back to geometric estimation, still providing a motion signal.
+    mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
+    vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
+    speaking_label_key = f"{VS_SPEAKING_LABEL_KEY_PREFIX}_{idx}"
+    vs_gate_dst = f"v{idx}_vs_out_raw" if debug_mouth_rois else f"v{idx}_vs_out"
+    debug_visual_edge = vs_gate_dst
+    avp.addNode(JoinMetadata({
+        "name": f"join_vs_{idx}",
+        "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
+        "dst": f"v{idx}_vs_md",
+        "group": g,
+        "auto_restart": "group",
+    }))
+    avp.addNode(FaceAnchoredMouthTrackerNode({
+        "name": f"mouth_tracker_{idx}",
+        "src": f"v{idx}_vs_md",
+        "dst": f"v{idx}_vs_mouth",
+        "group": g,
+        "source": f"input_{idx}",
+        "input_metadata_key": FACE_METADATA_KEY,
+        "output_metadata_key": mouth_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+    avp.addNode(VisualSpeechGateNode({
+        "name": f"vs_gate_{idx}",
+        "src": f"v{idx}_vs_mouth",
+        "dst": vs_gate_dst,
+        "group": g,
+        "source": f"input_{idx}",
+        "mouth_metadata_key": mouth_key,
+        "output_metadata_key": vs_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+    if debug_mouth_rois:
+        debug_visual_edge = f"v{idx}_vs_debug"
+        avp.addNode(Split({
+            "name": f"split_vs_debug_{idx}",
+            "src": vs_gate_dst,
+            "dst": [f"v{idx}_vs_out", debug_visual_edge],
+            "drop": True,
+            "group": g,
+        }))
+
+    # ---- Optional visible mouth ROI debug overlay ----
+    visible_src_edge = f"v{idx}_smooth"
+    if debug_mouth_rois:
+        avp.addNode(JoinMetadata({
+            "name": f"join_mouth_debug_{idx}",
+            "src": [f"v{idx}_smooth", f"v{idx}_yolo_for_debug"],
+            "dst": f"v{idx}_debug_mouth_md",
+            "group": g,
+            "auto_restart": "group",
+        }))
+        avp.addNode(AssumeVideoFormat({
+            "name": f"assume_debug_mouth_{idx}",
+            "src": f"v{idx}_debug_mouth_md",
+            "dst": f"v{idx}_debug_mouth_fmt",
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "group": g,
+            "auto_restart": "group",
+        }))
+        avp.addNode(DrawBBox({
+            "name": f"draw_mouth_debug_boxes_{idx}",
+            "src": f"v{idx}_debug_mouth_fmt",
+            "dst": f"v{idx}_debug_mouth_boxes",
+            "group": g,
+            "metadata_key": FACE_METADATA_KEY,
+            "bbox_thickness": 4,
+            "min_conf": 0.0,
+            "allowed_labels": DEBUG_MOUTH_LABELS,
+            "label_colors": DEBUG_MOUTH_LABEL_COLORS,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        if speaker_registry is None:
+            raise ValueError("speaker_registry is required when debug_mouth_rois is enabled")
+        avp.addNode(SpeakingStatusLabelNode({
+            "name": f"speaking_label_metadata_{idx}",
+            "src": f"v{idx}_debug_mouth_boxes",
+            "dst": f"v{idx}_debug_speaking_md",
+            "group": g,
+            "visual_metadata_key": vs_key,
+            "viewport_metadata_key": VIEWPORT_METADATA_KEY,
+            "output_metadata_key": speaking_label_key,
+            "model_width": FACE_MODEL_W,
+            "model_height": FACE_MODEL_H,
+            "static_face_crop": static_face_crop,
+            "auto_restart": "group",
+        }, index=idx, registry=speaker_registry))
+        avp.addNode(DrawBBoxLabels({
+            "name": f"draw_video_speaking_debug_label_{idx}",
+            "src": f"v{idx}_debug_speaking_md",
+            "dst": f"v{idx}_debug_video_speaking_label",
+            "group": g,
+            "metadata_key": speaking_label_key,
+            "label_template": "{label}",
+            "allowed_labels": DEBUG_VIDEO_SPEAKING_LABELS,
+            "min_conf": 0.0,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "text_color": "white",
+            "background_color": "green",
+            "font_scale": 1,
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        avp.addNode(DrawBBoxLabels({
+            "name": f"draw_audio_speaking_debug_label_{idx}",
+            "src": f"v{idx}_debug_video_speaking_label",
+            "dst": f"v{idx}_debug_speaking_labels",
+            "group": g,
+            "metadata_key": speaking_label_key,
+            "label_template": "{label}",
+            "allowed_labels": DEBUG_AUDIO_SPEAKING_LABELS,
+            "min_conf": 0.0,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "text_color": "white",
+            "background_color": "light_blue",
+            "font_scale": 1,
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        visible_src_edge = f"v{idx}_debug_speaking_labels"
+
+    # ---- Split visible full-res output into: orig leg + crop-input leg ----
     avp.addNode(Split({
         "name": f"split_legs_{idx}",
-        "src": f"v{idx}_smooth",
+        "src": visible_src_edge,
         "dst": [f"v{idx}_orig_raw", f"v{idx}_for_crop"],
+        "drop": True,
         "group": g,
     }))
     # Smooth timestamps on the orig leg so the OTM always receives a well-formed
@@ -428,45 +751,6 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
 
-    # ---- Visual-speech branch ----
-    # Attach raw YOLO detections (Face, Mouth, Nose, Eye) onto a full-res copy
-    # so that FaceAnchoredMouthTrackerNode can locate the mouth bounding box.
-    # If the face engine doesn't detect sub-parts (Mouth/Nose), the tracker
-    # falls back to geometric estimation, still providing a motion signal.
-    mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
-    vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
-    avp.addNode(JoinMetadata({
-        "name": f"join_vs_{idx}",
-        "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
-        "dst": f"v{idx}_vs_md",
-        "group": g,
-        "auto_restart": "group",
-    }))
-    avp.addNode(FaceAnchoredMouthTrackerNode({
-        "name": f"mouth_tracker_{idx}",
-        "src": f"v{idx}_vs_md",
-        "dst": f"v{idx}_vs_mouth",
-        "group": g,
-        "source": f"input_{idx}",
-        "input_metadata_key": FACE_METADATA_KEY,
-        "output_metadata_key": mouth_key,
-        "targets": [{"name": "primary"}],
-        "run_in_wrapper_thread": True,
-        "auto_restart": "group",
-    }))
-    avp.addNode(VisualSpeechGateNode({
-        "name": f"vs_gate_{idx}",
-        "src": f"v{idx}_vs_mouth",
-        "dst": f"v{idx}_vs_out",
-        "group": g,
-        "source": f"input_{idx}",
-        "mouth_metadata_key": mouth_key,
-        "output_metadata_key": vs_key,
-        "targets": [{"name": "primary"}],
-        "run_in_wrapper_thread": True,
-        "auto_restart": "group",
-    }))
-
     # ---- Audio: decode → realtime → resample to fltp ----
     avp.addNode(DecAudio({
         "name": f"dec_a{idx}",
@@ -501,6 +785,7 @@ def build_input_subgraph(
         "name": f"split_a{idx}",
         "src": f"a{idx}_fltp",
         "dst": [f"a{idx}_vad_48k", f"a{idx}_program"],
+        "drop": True,
         "group": g,
     }))
     # Silero requires 16 kHz / mono / float32 (flt or fltp).
@@ -566,16 +851,16 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
         to 5 other cameras shown as portrait thumbnails in the bottom strip.
 
     vstack3_{a}_{b}_{c}
-        Three landscape sources (orig_a / orig_b / orig_c) stacked vertically,
+        Sampled manual scenes with three landscape sources stacked vertically,
         each scaled to 1080×608 (16:9).  Three tiles occupy 1824 px; the
         remaining 96 px are split evenly as top/bottom margins.
 
     vstack_{a}_{b}
-        Two landscape sources stacked vertically (same as above but 2×16:9).
+        Sampled manual scenes with two landscape sources stacked vertically.
 
     pip_{i}_{j}
-        Camera *i* face portrait fullscreen + camera *j* landscape thumbnail
-        in the top-right corner.
+        Sampled manual scenes with camera *i* face portrait fullscreen +
+        camera *j* landscape thumbnail in the top-right corner.
 
     multiviewer
         2×2 grid of face portraits (up to 4 inputs, ≥ 3 required).
@@ -650,30 +935,24 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
         tile_w3 = W           # 1080
         tile_h3 = 608
         top3 = (H - 3 * tile_h3) // 2  # 48
-        for a in range(n):
-            for b in range(n):
-                if b == a:
-                    continue
-                for c in range(n):
-                    if c == a or c == b:
-                        continue
-                    mx.add_scene(f"vstack3_{a}_{b}_{c}", {
-                        f"orig_{a}": {
-                            "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
-                            "dst_x": 0,
-                            "dst_y": top3,
-                        },
-                        f"orig_{b}": {
-                            "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
-                            "dst_x": 0,
-                            "dst_y": top3 + tile_h3,
-                        },
-                        f"orig_{c}": {
-                            "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
-                            "dst_x": 0,
-                            "dst_y": top3 + 2 * tile_h3,
-                        },
-                    })
+        for a, b, c in sampled_ordered_triples(n, SAMPLED_MANUAL_SCENE_COUNT, VSTACK3_SCENE_SAMPLE_SEED):
+            mx.add_scene(f"vstack3_{a}_{b}_{c}", {
+                f"orig_{a}": {
+                    "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": top3,
+                },
+                f"orig_{b}": {
+                    "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": top3 + tile_h3,
+                },
+                f"orig_{c}": {
+                    "graph": f"scale_cuda=w={tile_w3}:h={tile_h3}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": top3 + 2 * tile_h3,
+                },
+            })
 
     # ------------------------------------------------------------------
     # PiP: face i fullscreen + orig j as thumbnail in top-right corner.
@@ -683,22 +962,19 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
         pip_h = (pip_w * 9 // 16) & ~1  # 202
         pip_x = W - pip_w - 16
         pip_y = 16
-        for i in range(n):
-            for j in range(n):
-                if i == j:
-                    continue
-                mx.add_scene(f"pip_{i}_{j}", {
-                    f"face_{i}": {
-                        "graph": f"scale_cuda=w={W}:h={H}:interp_algo=lanczos",
-                        "dst_x": 0,
-                        "dst_y": 0,
-                    },
-                    f"orig_{j}": {
-                        "graph": f"scale_cuda=w={pip_w}:h={pip_h}:interp_algo=lanczos",
-                        "dst_x": pip_x,
-                        "dst_y": pip_y,
-                    },
-                })
+        for i, j in sampled_ordered_pairs(n, SAMPLED_MANUAL_SCENE_COUNT, PIP_SCENE_SAMPLE_SEED):
+            mx.add_scene(f"pip_{i}_{j}", {
+                f"face_{i}": {
+                    "graph": f"scale_cuda=w={W}:h={H}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": 0,
+                },
+                f"orig_{j}": {
+                    "graph": f"scale_cuda=w={pip_w}:h={pip_h}:interp_algo=lanczos",
+                    "dst_x": pip_x,
+                    "dst_y": pip_y,
+                },
+            })
 
     # ------------------------------------------------------------------
     # Vertical stack: 2 × 16:9 landscape sources.
@@ -708,22 +984,19 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
         tile_w = W    # 1080
         tile_h = 608
         gap = (H - 2 * tile_h) // 2  # 352
-        for a in range(n):
-            for b in range(n):
-                if a == b:
-                    continue
-                mx.add_scene(f"vstack_{a}_{b}", {
-                    f"orig_{a}": {
-                        "graph": f"scale_cuda=w={tile_w}:h={tile_h}:interp_algo=lanczos",
-                        "dst_x": 0,
-                        "dst_y": gap,
-                    },
-                    f"orig_{b}": {
-                        "graph": f"scale_cuda=w={tile_w}:h={tile_h}:interp_algo=lanczos",
-                        "dst_x": 0,
-                        "dst_y": gap + tile_h,
-                    },
-                })
+        for a, b in sampled_ordered_pairs(n, SAMPLED_MANUAL_SCENE_COUNT, VSTACK2_SCENE_SAMPLE_SEED):
+            mx.add_scene(f"vstack_{a}_{b}", {
+                f"orig_{a}": {
+                    "graph": f"scale_cuda=w={tile_w}:h={tile_h}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": gap,
+                },
+                f"orig_{b}": {
+                    "graph": f"scale_cuda=w={tile_w}:h={tile_h}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": gap + tile_h,
+                },
+            })
 
     # ------------------------------------------------------------------
     # Multiviewer: 2×2 grid of face portraits (up to 4 inputs).
@@ -746,77 +1019,212 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
 
 
 # ------------------------------------------------------------------
-# Audio output
+# Output builders
 # ------------------------------------------------------------------
 
-def build_audio_output(avp: AVPlumber, audio_edge: str, codec: str = "aac") -> str:
+def output_format_for_url(url: str) -> str:
+    return "flv" if url.startswith("rtmp://") else "mp4"
+
+
+def rtp_url(host: str, port: int) -> str:
+    return f"rtp://{host}:{port}?pkt_size={RTP_PKT_SIZE}"
+
+
+def build_audio_output(
+    avp: AVPlumber,
+    audio_edge: str,
+    codec: str = "aac",
+    *,
+    prefix: str = "program",
+    group: str = "output",
+    bitrate: str = "192k",
+    sample_format: str = AUDIO_SAMPLE_FORMAT,
+    options: dict | None = None,
+    resample: bool = False,
+) -> str:
     """Encode the selected program-audio edge.
 
     Returns the name of the encoded audio edge for use in Mux.
     """
-    avp.addNode(AssumeAudioFormat({
-        "name": "assume_audio",
-        "src": audio_edge,
-        "dst": "a_program",
-        "sample_rate": AUDIO_SAMPLE_RATE,
-        "sample_format": AUDIO_SAMPLE_FORMAT,
-        "channel_layout": AUDIO_CHANNEL_LAYOUT,
-        "group": "output",
-        "auto_restart": "panic",
-    }))
+    assumed_edge = f"{prefix}_a_program"
+    encoded_edge = f"{prefix}_a_enc"
+    enc_options = {"b": bitrate}
+    if options:
+        enc_options.update(options)
+    if resample:
+        avp.addNode(ResampleAudio({
+            "name": f"{prefix}_resample_audio",
+            "src": audio_edge,
+            "dst": assumed_edge,
+            "dst_sample_rate": AUDIO_SAMPLE_RATE,
+            "dst_sample_format": sample_format,
+            "dst_channel_layout": AUDIO_CHANNEL_LAYOUT,
+            "compensation": 0,
+            "group": group,
+            "auto_restart": "panic",
+        }))
+    else:
+        avp.addNode(AssumeAudioFormat({
+            "name": f"{prefix}_assume_audio",
+            "src": audio_edge,
+            "dst": assumed_edge,
+            "sample_rate": AUDIO_SAMPLE_RATE,
+            "sample_format": sample_format,
+            "channel_layout": AUDIO_CHANNEL_LAYOUT,
+            "group": group,
+            "auto_restart": "panic",
+        }))
     avp.addNode(EncAudio({
-        "name": "enc_audio",
-        "src": "a_program",
-        "dst": "a_enc",
+        "name": f"{prefix}_enc_audio",
+        "src": assumed_edge,
+        "dst": encoded_edge,
         "codec": codec,
-        "options": {"b": "192k"},
-        "group": "output",
+        "options": enc_options,
+        "group": group,
         "auto_restart": "panic",
     }))
-    return "a_enc"
+    return encoded_edge
 
 
-# ------------------------------------------------------------------
-# Video output
-# ------------------------------------------------------------------
-
-def build_video_output(avp: AVPlumber, video_edge: str, args: argparse.Namespace) -> str:
+def build_video_output(
+    avp: AVPlumber,
+    video_edge: str,
+    args: argparse.Namespace,
+    *,
+    prefix: str = "program",
+    group: str = "output",
+    codec: str | None = None,
+    options: dict | None = None,
+) -> str:
     """Add fps-normalizer, format hint, encoder.  Returns encoded video edge."""
-    g = "output"
+    fps_edge = f"{prefix}_mixer_norm_fps"
+    assumed_edge = f"{prefix}_mixer_norm"
+    encoded_edge = f"{prefix}_v_enc"
+    enc_options = {
+        "b": "8000k",
+        "maxrate": "14000k",
+        "bufsize": "20000k",
+        "g": 60,
+        "bf": 0,
+        "preset": "p3",
+        "profile": "high",
+    }
+    if options:
+        enc_options.update(options)
     avp.addNode(ForceFPS({
         "fps": f"{FPS_NUM}/{FPS_DEN}",
         "src": video_edge,
-        "dst": "mixer_norm_fps",
-        "group": g,
+        "dst": fps_edge,
+        "group": group,
     }))
     avp.addNode(AssumeVideoFormat({
-        "src": "mixer_norm_fps",
-        "dst": "mixer_norm",
+        "name": f"{prefix}_assume_video",
+        "src": fps_edge,
+        "dst": assumed_edge,
         "width": CANVAS_W,
         "height": CANVAS_H,
         "pixel_format": "cuda",
         "real_pixel_format": "nv12",
-        "group": g,
+        "group": group,
         "auto_restart": "panic",
     }))
     avp.addNode(EncVideo({
-        "src": "mixer_norm",
-        "dst": "v_enc",
-        "name": "enc_video",
-        "codec": args.codec,
+        "src": assumed_edge,
+        "dst": encoded_edge,
+        "name": f"{prefix}_enc_video",
+        "codec": codec or args.codec,
         "hwaccel": HWACCEL,
-        "group": g,
-        "options": {
-            "b": "8000k",
-            "maxrate": "14000k",
-            "bufsize": "20000k",
+        "group": group,
+        "options": enc_options,
+    }))
+    return encoded_edge
+
+
+def build_mux_output(
+    avp: AVPlumber,
+    encoded_edges: list[str],
+    *,
+    mux_edge: str,
+    output_url: str,
+    output_format: str,
+    group: str = "output",
+    options: dict | None = None,
+) -> None:
+    avp.addNode(Mux({
+        "name": f"{mux_edge}_mux",
+        "src": encoded_edges,
+        "dst": mux_edge,
+        "group": group,
+        "ts_sort_wait": 0,
+    }))
+    output_params = {
+        "name": f"{mux_edge}_output",
+        "format": output_format,
+        "url": output_url,
+        "src": mux_edge,
+        "group": group,
+        "auto_restart": "panic",
+    }
+    if options:
+        output_params["options"] = options
+    avp.addNode(Output(output_params))
+
+
+def build_janus_rtp_output(
+    avp: AVPlumber,
+    video_edge: str,
+    audio_edge: str,
+    args: argparse.Namespace,
+) -> None:
+    video_bitrate = f"{args.janus_video_bitrate_kbps}k"
+    video_enc_edge = build_video_output(
+        avp,
+        video_edge,
+        args,
+        prefix="janus",
+        codec=args.janus_video_codec,
+        options={
+            "b": video_bitrate,
+            "maxrate": video_bitrate,
+            "bufsize": video_bitrate,
             "g": 60,
             "bf": 0,
             "preset": "p3",
-            "profile": "high",
+            "profile": "baseline",
+            "tune": "ll",
+            "zerolatency": 1,
+            "delay": 0,
         },
-    }))
-    return "v_enc"
+    )
+    audio_enc_edge = build_audio_output(
+        avp,
+        audio_edge,
+        codec="opus",
+        prefix="janus",
+        bitrate=args.janus_audio_bitrate,
+        sample_format=OPUS_SAMPLE_FORMAT,
+        resample=True,
+        options={
+            "strict": "-2",
+            "opus_delay": 20,
+        },
+    )
+    build_mux_output(
+        avp,
+        [video_enc_edge],
+        mux_edge="janus_video_rtp_mux",
+        output_url=rtp_url(args.janus_host, args.janus_video_port),
+        output_format="rtp",
+        options={"payload_type": args.janus_video_pt},
+    )
+    build_mux_output(
+        avp,
+        [audio_enc_edge],
+        mux_edge="janus_audio_rtp_mux",
+        output_url=rtp_url(args.janus_host, args.janus_audio_port),
+        output_format="rtp",
+        options={"payload_type": args.janus_audio_pt},
+    )
 
 
 # ------------------------------------------------------------------
@@ -830,8 +1238,8 @@ def main() -> None:
         help="Input URLs (at least 2)",
     )
     parser.add_argument(
-        "--output", required=True,
-        help="Output RTMP URL or file path",
+        "--output",
+        help="Output RTMP URL or file path. Optional when --janus-output or --janus-preview is set.",
     )
     parser.add_argument(
         "--face-engine",
@@ -865,6 +1273,14 @@ def main() -> None:
     parser.add_argument(
         "--min-dwell", default=2.5, type=float,
         help="Minimum program dwell time in seconds before switching (default: 2.5)",
+    )
+    parser.add_argument(
+        "--switch-pts-lead-ms", default=600, type=int,
+        help=(
+            "Schedule auto-switch cuts this many milliseconds ahead of the latest "
+            "VAD event PTS; use a negative value to disable PTS scheduling "
+            "(default: 600)"
+        ),
     )
     parser.add_argument(
         "--silero-model",
@@ -908,14 +1324,79 @@ def main() -> None:
         "--disable-auto-switcher", action="store_true",
         help="Start the graph without automatic scene changes",
     )
+    parser.add_argument(
+        "--auto-switch-layout",
+        choices=("videoconf", "full_face"),
+        default="videoconf",
+        help="Scene family used by the auto switcher (default: videoconf)",
+    )
+    parser.add_argument(
+        "--debug-mouth-roi-bboxes", action="store_true",
+        help="Draw mouth ROI boxes plus separate audio/video speaking labels into the output video.",
+    )
+    parser.add_argument(
+        "--static-genaro-face-crop", action="store_true",
+        help="Use a centered static 9:16 crop for the Genaro input instead of face tracking.",
+    )
+    parser.add_argument(
+        "--janus-preview", action="store_true",
+        help="Send a low-latency RTP copy to Janus in addition to any --output.",
+    )
+    parser.add_argument(
+        "--janus-output", action="store_true",
+        help="Send the program output to Janus RTP. May be used without --output.",
+    )
+    parser.add_argument(
+        "--janus-host", default=JANUS_DEFAULT_HOST,
+        help=f"Janus RTP ingest host (default: {JANUS_DEFAULT_HOST})",
+    )
+    parser.add_argument(
+        "--janus-video-port", default=JANUS_DEFAULT_VIDEO_PORT, type=int,
+        help=f"Janus RTP H.264 video port (default: {JANUS_DEFAULT_VIDEO_PORT})",
+    )
+    parser.add_argument(
+        "--janus-audio-port", default=JANUS_DEFAULT_AUDIO_PORT, type=int,
+        help=f"Janus RTP Opus audio port (default: {JANUS_DEFAULT_AUDIO_PORT})",
+    )
+    parser.add_argument(
+        "--janus-video-pt", default=96, type=int,
+        help="RTP payload type for Janus H.264 video (default: 96)",
+    )
+    parser.add_argument(
+        "--janus-audio-pt", default=111, type=int,
+        help="RTP payload type for Janus Opus audio (default: 111)",
+    )
+    parser.add_argument(
+        "--janus-video-codec", default="h264_nvenc",
+        help="Video encoder codec for Janus RTP output (default: h264_nvenc)",
+    )
+    parser.add_argument(
+        "--janus-video-bitrate-kbps", default=JANUS_DEFAULT_VIDEO_BITRATE_KBPS, type=int,
+        help=f"Janus H.264 bitrate in kbit/s (default: {JANUS_DEFAULT_VIDEO_BITRATE_KBPS})",
+    )
+    parser.add_argument(
+        "--janus-audio-bitrate", default="100k",
+        help="Janus Opus audio bitrate (default: 100k)",
+    )
     args = parser.parse_args()
 
     n = len(args.inputs)
     if n < 2:
         parser.error("At least 2 inputs are required.")
+    janus_enabled = args.janus_preview or args.janus_output
+    if not args.output and not janus_enabled:
+        parser.error("Either --output or --janus-output/--janus-preview is required.")
+    if args.janus_preview and not args.output and not args.janus_output:
+        parser.error("--janus-preview needs --output; use --janus-output for Janus-only.")
+    if args.janus_video_bitrate_kbps <= 0:
+        parser.error("--janus-video-bitrate-kbps must be greater than 0.")
+    if 0 <= args.switch_pts_lead_ms < 200:
+        parser.error("--switch-pts-lead-ms must be at least 200, or negative to disable PTS scheduling.")
+    switch_pts_lead_ms = args.switch_pts_lead_ms if args.switch_pts_lead_ms >= 0 else None
     sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
     rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
     genaro_input_index = find_named_input(args.inputs, GENARO_INPUT_NAME)
+    speaker_registry = Speaker()
 
     avp = AVPlumber()
     avp.setLogFile(args.logfile)
@@ -938,7 +1419,9 @@ def main() -> None:
             silero_repo=args.silero_repo,
             silero_device=args.silero_device,
             silero_threshold=args.silero_threshold,
-            static_face_crop=(i == genaro_input_index),
+            static_face_crop=(args.static_genaro_face_crop and i == genaro_input_index),
+            debug_mouth_rois=args.debug_mouth_roi_bboxes,
+            speaker_registry=speaker_registry,
         )
         subgraphs.append(sg)
 
@@ -967,10 +1450,13 @@ def main() -> None:
         )
 
     define_auto_scenes(mx, n)
-    mx.set_initial_scene("videoconf_0", slot="A")
+    auto_switch_scene = lambda i: f"{args.auto_switch_layout}_{i}"
+    mx.set_initial_scene(auto_switch_scene(0), slot="A")
     video_out_edge = mx.build()
 
-    # ---- Audio output ----
+    record_enabled = args.output is not None
+
+    # ---- Output routing ----
     if rene_input_index is None:
         parser.error(f'Program audio input "{RENE_INPUT_NAME}" was not found in --inputs.')
     program_audio_edge = subgraphs[rene_input_index]["program_audio_edge"]
@@ -980,32 +1466,48 @@ def main() -> None:
         avp.addNode(NullSink({
             "name": f"program_audio_sink_{i}",
             "src": sg["program_audio_edge"],
-            "group": "output",
-            "auto_restart": "panic",
+            "group": sg["input_group"],
+            "auto_restart": "group",
         }))
-    audio_enc_edge = build_audio_output(avp, program_audio_edge, codec=args.audio_codec)
 
-    # ---- Video output ----
-    video_enc_edge = build_video_output(avp, video_out_edge, args)
+    record_video_edge = video_out_edge
+    janus_video_edge = video_out_edge
+    record_audio_edge = program_audio_edge
+    janus_audio_edge = program_audio_edge
 
-    # ---- Mux + output ----
-    avp.addNode(Mux({
-        "src": [video_enc_edge, audio_enc_edge],
-        "dst": "mux_out",
-        "group": "output",
-        "ts_sort_wait": 0,
-    }))
-    out_fmt = "flv" if args.output.startswith("rtmp://") else "mp4"
-    avp.addNode(Output({
-        "format": out_fmt,
-        "url": args.output,
-        "src": "mux_out",
-        "group": "output",
-        "auto_restart": "panic",
-    }))
+    if record_enabled and janus_enabled:
+        avp.addNode(Split({
+            "name": "split_program_video_output",
+            "src": video_out_edge,
+            "dst": ["program_video_record", "program_video_janus"],
+            "group": "output",
+        }))
+        record_video_edge = "program_video_record"
+        janus_video_edge = "program_video_janus"
+        avp.addNode(Split({
+            "name": "split_program_audio_output",
+            "src": program_audio_edge,
+            "dst": ["program_audio_record", "program_audio_janus"],
+            "group": "output",
+        }))
+        record_audio_edge = "program_audio_record"
+        janus_audio_edge = "program_audio_janus"
+
+    if record_enabled:
+        audio_enc_edge = build_audio_output(avp, record_audio_edge, codec=args.audio_codec, prefix="program")
+        video_enc_edge = build_video_output(avp, record_video_edge, args, prefix="program")
+        build_mux_output(
+            avp,
+            [video_enc_edge, audio_enc_edge],
+            mux_edge="program_mux_out",
+            output_url=args.output,
+            output_format=output_format_for_url(args.output),
+        )
+
+    if janus_enabled:
+        build_janus_rtp_output(avp, janus_video_edge, janus_audio_edge, args)
 
     # ---- Speech detection: Silero audio VAD + visual lip-motion ----
-    speaker_registry = Speaker()
     for i, sg in enumerate(subgraphs):
         g = sg["input_group"]
 
@@ -1043,14 +1545,28 @@ def main() -> None:
     mx.start_groups()
     avp.group("output").startNodes()
 
-    print(f"[auto_mixer] Graph started with {n} input(s) → {args.output}")
+    output_targets = []
+    if record_enabled:
+        output_targets.append(args.output)
+    if janus_enabled:
+        output_targets.append(
+            f"Janus RTP video={args.janus_host}:{args.janus_video_port} audio={args.janus_host}:{args.janus_audio_port}"
+        )
+    print(f"[auto_mixer] Graph started with {n} input(s) → {', '.join(output_targets)}")
     print(f"[auto_mixer] Canvas: {CANVAS_W}x{CANVAS_H}, face engine: {args.face_engine}")
     if sergio_input_index is not None:
         print(f"[auto_mixer] Sergio input detected: {sergio_input_index} ({input_basename(args.inputs[sergio_input_index])})")
     if rene_input_index is not None:
         print(f"[auto_mixer] Rene input detected: {rene_input_index} ({input_basename(args.inputs[rene_input_index])})")
     if genaro_input_index is not None:
-        print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - static centered 9:16 crop")
+        crop_mode = "static centered 9:16 crop" if args.static_genaro_face_crop else "face-tracked 9:16 crop"
+        print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - {crop_mode}")
+    if args.debug_mouth_roi_bboxes:
+        print("[auto_mixer] Debug mouth ROI and speaking status overlays enabled")
+    if switch_pts_lead_ms is None:
+        print("[auto_mixer] Auto-switch PTS scheduling disabled")
+    else:
+        print(f"[auto_mixer] Auto-switch cuts scheduled {switch_pts_lead_ms} ms ahead of VAD PTS")
     print(f"[auto_mixer] Scenes: {mx.scenes()}")
 
     # ---- Auto-switcher ----
@@ -1058,10 +1574,11 @@ def main() -> None:
         mixer=mx,
         registry=speaker_registry,
         n_inputs=n,
-        full_face_scene=lambda i: f"videoconf_{i}",
+        scene_for_input=auto_switch_scene,
         fade_duration_s=args.fade,
         min_dwell_program_s=args.min_dwell,
         min_active_level_db=MIN_ACTIVE_AUDIO_LEVEL_DBFS,
+        switch_pts_lead_ms=switch_pts_lead_ms,
         special_speaker_index=rene_input_index,
         special_speaker_margin_db=RENE_REQUIRED_LEAD_DB,
         vad_only_priority_speaker_index=sergio_input_index,
@@ -1092,10 +1609,16 @@ def main() -> None:
                     audio_s = "AUDIO" if e.speaking else "     "
                     visual_s = "VIS" if e.visual_speaking else "   "
                     duration_s = time.monotonic() - e.last_change_ts if e.speaking else e.speaking_duration_s
+                    audio_pts_s = (
+                        f"  a_pts={e.audio_event_pts_ms / 1000.0:.3f}s"
+                        if e.audio_event_pts_ms is not None
+                        else ""
+                    )
                     print(
                         f"[vad] input {e.index}: {audio_s} {visual_s}  "
                         f"{e.level_db:+.1f} dB  "
                         f"dur={duration_s:.1f}s"
+                        f"{audio_pts_s}"
                     )
                 print(f"[mixer] PGM: {mx.current_scene}")
     finally:

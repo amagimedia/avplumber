@@ -239,6 +239,11 @@ class MixerGraphBuilder:
         self.avp.executeCommandsFromString(f"mixer.cut {json.dumps(cmd)}")
         self._current_pgm = scene
 
+    def preview(self, scene: str) -> None:
+        """Preload *scene* into the hidden PVW slot without taking it to program."""
+        cmd = {"mixer": self.name, "scene": scene}
+        self.avp.executeCommandsFromString(f"mixer.preview {json.dumps(cmd)}")
+
     def fade(
         self,
         scene: str,
