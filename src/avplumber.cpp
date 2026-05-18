@@ -833,6 +833,19 @@ public:
                 sl.layer = std::move(layer);
                 def.sources[it.key()] = std::move(sl);
             }
+            if (jdef.contains("controls")) {
+                if (!jdef["controls"].is_array())
+                    throw Error("mixer.scene: controls must be an array");
+                for (const auto& c : jdef["controls"]) {
+                    if (!c.is_object())
+                        throw Error("mixer.scene: control entries must be objects");
+                    SceneControl sc;
+                    sc.node_name = c.at("node").get<std::string>();
+                    sc.key = c.at("key").get<std::string>();
+                    sc.value = c.at("value");
+                    def.controls.push_back(std::move(sc));
+                }
+            }
 
             auto orch = mixerOrchestrator(mixer_name);
             orch.defineScene(scene_name, def);

@@ -40,7 +40,13 @@ def sampled_ordered_triples(n: int, limit: int, seed: int) -> list[tuple[int, in
 # ------------------------------------------------------------------
 
 
-def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
+def define_auto_scenes(
+    mx: MixerGraphBuilder,
+    n: int,
+    *,
+    include_full_face_scenes: bool = True,
+    include_videoconf_scenes: bool = True,
+) -> None:
     """Register scenes for *n* inputs on the 1080x1920 (9:16) canvas.
 
     Source names follow the convention used in build_input_subgraph:
@@ -76,14 +82,15 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
     # ------------------------------------------------------------------
     # 1. Full screen: dominant speaker 9:16 (face-tracked portrait)
     # ------------------------------------------------------------------
-    for i in range(n):
-        mx.add_scene(f"full_face_{i}", {
-            f"face_{i}": {
-                "graph": f"scale_cuda=w={W}:h={H}:interp_algo=lanczos",
-                "dst_x": 0,
-                "dst_y": 0,
-            }
-        })
+    if include_full_face_scenes:
+        for i in range(n):
+            mx.add_scene(f"full_face_{i}", {
+                f"face_{i}": {
+                    "graph": f"scale_cuda=w={W}:h={H}:interp_algo=lanczos",
+                    "dst_x": 0,
+                    "dst_y": 0,
+                }
+            })
 
     # ------------------------------------------------------------------
     # 2. Videoconference: dominant speaker 1:1 (top) + others portrait below
@@ -99,37 +106,38 @@ def define_auto_scenes(mx: MixerGraphBuilder, n: int) -> None:
     CONF_BOT_H = H - CONF_TOP_H            # 840
     CONF_MAIN_CROP_Y = 0
 
-    for i in range(n):
-        others = [j for j in range(n) if j != i][:5]
-        n_oth = len(others)
+    if include_videoconf_scenes:
+        for i in range(n):
+            others = [j for j in range(n) if j != i][:5]
+            n_oth = len(others)
 
-        cell_w = (W // n_oth) & ~1
-        cell_h = (cell_w * 16 // 9) & ~1
-        if cell_h > CONF_BOT_H:
-            # Portrait cells taller than the strip; constrain height and width.
-            cell_h = CONF_BOT_H & ~1
-            cell_w = (cell_h * 9 // 16) & ~1
+            cell_w = (W // n_oth) & ~1
+            cell_h = (cell_w * 16 // 9) & ~1
+            if cell_h > CONF_BOT_H:
+                # Portrait cells taller than the strip; constrain height and width.
+                cell_h = CONF_BOT_H & ~1
+                cell_w = (cell_h * 9 // 16) & ~1
 
-        x_off = (W - n_oth * cell_w) // 2          # centre cells horizontally
-        y_off = CONF_TOP_H + (CONF_BOT_H - cell_h) // 2  # centre in strip
+            x_off = (W - n_oth * cell_w) // 2          # centre cells horizontally
+            y_off = CONF_TOP_H + (CONF_BOT_H - cell_h) // 2  # centre in strip
 
-        sources: dict = {
-            f"face_{i}": {
-                "graph": (
-                    f"crop_cuda=w={FACE_CROP_W}:h={FACE_CROP_W}:x=0:y={CONF_MAIN_CROP_Y},"
-                    f"scale_cuda=w={W}:h={CONF_TOP_H}:interp_algo=lanczos"
-                ),
-                "dst_x": 0,
-                "dst_y": 0,
+            sources: dict = {
+                f"face_{i}": {
+                    "graph": (
+                        f"crop_cuda=w={FACE_CROP_W}:h={FACE_CROP_W}:x=0:y={CONF_MAIN_CROP_Y},"
+                        f"scale_cuda=w={W}:h={CONF_TOP_H}:interp_algo=lanczos"
+                    ),
+                    "dst_x": 0,
+                    "dst_y": 0,
+                }
             }
-        }
-        for k, j in enumerate(others):
-            sources[f"face_{j}"] = {
-                "graph": f"scale_cuda=w={cell_w}:h={cell_h}:interp_algo=lanczos",
-                "dst_x": x_off + k * cell_w,
-                "dst_y": y_off,
-            }
-        mx.add_scene(f"videoconf_{i}", sources)
+            for k, j in enumerate(others):
+                sources[f"face_{j}"] = {
+                    "graph": f"scale_cuda=w={cell_w}:h={cell_h}:interp_algo=lanczos",
+                    "dst_x": x_off + k * cell_w,
+                    "dst_y": y_off,
+                }
+            mx.add_scene(f"videoconf_{i}", sources)
 
     # ------------------------------------------------------------------
     # 3. Vertical stack: 3 × 16:9 landscape sources

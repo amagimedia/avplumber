@@ -16,8 +16,9 @@ Usage:
     python tools/mixer_tui.py --host localhost --port 5555 --mixer mixer
 
 Keyboard shortcuts:
-    1-9        Select scene N on Preview bus
+    1-9        Select scene N on Preview bus, or direct cut when Direct is ON
     F1-F9      Direct CUT to scene N (skips preview step)
+    t          Toggle direct scene-click cuts
     o          Toggle HTML overlay bypass
     c          CUT  (take preview to program, hard cut)
     x          X-FADE (crossfade preview to program at set duration)
@@ -471,6 +472,11 @@ Screen {
     margin-right: 1;
 }
 
+#btn_direct {
+    margin-left: 0;
+    margin-right: 1;
+}
+
 #btn_overlay {
     margin-left: 1;
 }
@@ -504,6 +510,7 @@ class MixerTUI(App):
         Binding("w", "wipe", "WIPE", show=False),
         Binding("e", "change_wipe_path", "Wipe path", show=False),
         Binding("d", "focus_duration", "Duration", show=False),
+        Binding("t", "toggle_direct_cut_mode", "Direct cuts", show=False),
         Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
         # F1-F9: direct cut to scene (bound dynamically in on_key)
@@ -520,6 +527,7 @@ class MixerTUI(App):
     # Local PVW selection (TD's intent)
     pvw_selected: reactive[int] = reactive(-1, layout=True)
     overlay_enabled: reactive[bool] = reactive(False, layout=True)
+    direct_cut_mode: reactive[bool] = reactive(False, layout=True)
 
     connected: reactive[bool] = reactive(False)
 
@@ -561,6 +569,7 @@ class MixerTUI(App):
 
         with Horizontal(id="transition_bar"):
             yield Static("Mode: idle", id="trans_mode_label")
+            yield Button("Direct: OFF", id="btn_direct", variant="default")
             yield Button("✂ CUT", id="btn_cut", variant="error")
             yield Button("⟿ X-FADE", id="btn_auto", variant="success")
             yield Static("Duration:", id="dur_label")
@@ -685,6 +694,19 @@ class MixerTUI(App):
         except NoMatches:
             pass
 
+    def watch_direct_cut_mode(self, value: bool) -> None:
+        try:
+            button = self.query_one("#btn_direct", Button)
+            button.label = "Direct: ON" if value else "Direct: OFF"
+            button.variant = "warning" if value else "default"
+            button.tooltip = (
+                "Scene clicks cut directly to program"
+                if value else
+                "Scene clicks load preview"
+            )
+        except NoMatches:
+            pass
+
     def watch_connected(self, value: bool) -> None:
         if value:
             self._set_status_bar(False)
@@ -760,6 +782,16 @@ class MixerTUI(App):
     def _select_pvw(self, index: int) -> None:
         if 0 <= index < len(self.scenes):
             self.pvw_selected = index
+
+    def _select_or_cut_scene(self, index: int) -> None:
+        if not (0 <= index < len(self.scenes)):
+            return
+        scene = self.scenes[index]
+        if self.direct_cut_mode:
+            if scene != self.pgm_scene:
+                self._do_command(self._mixer_command("cut", scene=scene))
+        else:
+            self._select_pvw(index)
 
     def _mixer_take_in_progress(self) -> bool:
         return self.transition_mode != "idle"
@@ -843,6 +875,9 @@ class MixerTUI(App):
         self._overlay_toggle_in_progress = True
         self._set_overlay_enabled(not self.overlay_enabled)
 
+    def action_toggle_direct_cut_mode(self) -> None:
+        self.direct_cut_mode = not self.direct_cut_mode
+
     @work(thread=False)
     async def _set_overlay_enabled(self, enabled: bool) -> None:
         try:
@@ -914,10 +949,10 @@ class MixerTUI(App):
 
     def on_key(self, event) -> None:
         key = event.key
-        # 1-9: select preview
+        # 1-9: select preview, or direct cut if direct mode is enabled.
         if key.isdigit() and key != "0":
             idx = int(key) - 1
-            self._select_pvw(idx)
+            self._select_or_cut_scene(idx)
             event.stop()
             return
         # F1-F9: direct cut (skip preview)
@@ -952,8 +987,12 @@ class MixerTUI(App):
     def on_btn_overlay(self) -> None:
         self.action_toggle_overlay()
 
+    @on(Button.Pressed, "#btn_direct")
+    def on_btn_direct(self) -> None:
+        self.action_toggle_direct_cut_mode()
+
     def on_scene_button_selected(self, event: SceneButton.Selected) -> None:
-        self._select_pvw(event.index)
+        self._select_or_cut_scene(event.index)
 
 
 # ---------------------------------------------------------------------------

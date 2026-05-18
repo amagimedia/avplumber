@@ -96,6 +96,11 @@ from .profiles.talkshow import (
     RENE_REQUIRED_LEAD_DB,
     SERGIO_INPUT_NAME,
 )
+from .preheated import (
+    PREHEATED_GROUP,
+    build_preheated_scene_sources,
+    define_preheated_scenes,
+)
 from .scenes import define_auto_scenes
 
 
@@ -199,6 +204,12 @@ def main() -> None:
         help="Scene family used by the auto switcher (default: videoconf)",
     )
     parser.add_argument(
+        "--disable-preheated-scenes", "--disable-preheated-speaker-scenes",
+        dest="disable_preheated_scenes",
+        action="store_true",
+        help="Use dynamic mixer scene loading instead of geometry-preheated scene sources.",
+    )
+    parser.add_argument(
         "--debug-mouth-roi-bboxes", action="store_true",
         help="Draw mouth ROI boxes plus separate audio/video speaking labels into the output video.",
     )
@@ -258,8 +269,8 @@ def main() -> None:
         parser.error("--janus-preview needs --output; use --janus-output for Janus-only.")
     if args.janus_video_bitrate_kbps <= 0:
         parser.error("--janus-video-bitrate-kbps must be greater than 0.")
-    if 0 <= args.switch_pts_lead_ms < 200:
-        parser.error("--switch-pts-lead-ms must be at least 200, or negative to disable PTS scheduling.")
+    if 0 <= args.switch_pts_lead_ms < 100:
+        parser.error("--switch-pts-lead-ms must be at least 100, or negative to disable PTS scheduling.")
     switch_pts_lead_ms = args.switch_pts_lead_ms if args.switch_pts_lead_ms >= 0 else None
     sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
     rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
@@ -303,21 +314,33 @@ def main() -> None:
         enable_wipe=args.wipe,
     )
 
-    for i, sg in enumerate(subgraphs):
-        # Register the face-crop 9:16 source.
-        mx.add_source(
-            f"face_{i}",
-            pre_otm_edge=sg["face_edge"],
-            input_group=sg["input_group"],
-        )
-        # Register the original 16:9 source.
-        mx.add_source(
-            f"orig_{i}",
-            pre_otm_edge=sg["orig_edge"],
-            input_group=sg["input_group"],
+    preheated_scenes = None
+    if not args.disable_preheated_scenes:
+        preheated_scenes = build_preheated_scene_sources(
+            avp,
+            mx,
+            face_edges=[sg["face_edge"] for sg in subgraphs],
+            orig_edges=[sg["orig_edge"] for sg in subgraphs],
+            input_groups=[sg["input_group"] for sg in subgraphs],
         )
 
-    define_auto_scenes(mx, n)
+    if preheated_scenes:
+        define_preheated_scenes(mx, n, preheated_scenes)
+    else:
+        for i, sg in enumerate(subgraphs):
+            # Register the face-crop 9:16 source.
+            mx.add_source(
+                f"face_{i}",
+                pre_otm_edge=sg["face_edge"],
+                input_group=sg["input_group"],
+            )
+            # Register the original 16:9 source.
+            mx.add_source(
+                f"orig_{i}",
+                pre_otm_edge=sg["orig_edge"],
+                input_group=sg["input_group"],
+            )
+        define_auto_scenes(mx, n)
     auto_switch_scene = lambda i: f"{args.auto_switch_layout}_{i}"
     mx.set_initial_scene(auto_switch_scene(0), slot="A")
     video_out_edge = mx.build()
@@ -410,6 +433,8 @@ def main() -> None:
     # ---- Start all groups ----
     for i in range(n):
         avp.group(f"input_{i}").startNodes()
+    if preheated_scenes:
+        avp.group(PREHEATED_GROUP).startNodes()
     mx.start_groups()
     avp.group("output").startNodes()
 
@@ -431,6 +456,10 @@ def main() -> None:
         print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - {crop_mode}")
     if args.debug_mouth_roi_bboxes:
         print("[auto_mixer] Debug mouth ROI and speaking status overlays enabled")
+    if preheated_scenes:
+        print(f"[auto_mixer] Preheated scene geometries enabled: {preheated_scenes.summary()}")
+    else:
+        print("[auto_mixer] Preheated scene geometries disabled")
     if switch_pts_lead_ms is None:
         print("[auto_mixer] Auto-switch PTS scheduling disabled")
     else:

@@ -246,9 +246,9 @@ void MixerOrchestrator::ensureIdle() const {
 
 int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
     int64_t now = wallclock.pts();
-    int64_t earliest = now + margin_ms_;
     if (requested_start_pts_ms < 0)
-        return earliest;
+        return now;
+    int64_t earliest = now + margin_ms_;
     if (requested_start_pts_ms < earliest)
         throw Error("mixer: start_pts_ms must be at least " + std::to_string(margin_ms_) +
                     "ms in the future");
@@ -337,6 +337,14 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     rewriteCameraOutputsForSlot(slot_bit, scene);
 
     state_->pvw_scene_name = scene_name;
+}
+
+void MixerOrchestrator::scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms) {
+    for (const auto& control : scene.controls) {
+        timeline_->set(control.node_name, control.key, at_pts_ms, control.value);
+        logstream << "mixer scene control: " << control.node_name << "." << control.key
+                  << " at " << at_pts_ms << " -> " << control.value;
+    }
 }
 
 void MixerOrchestrator::preview(const std::string& scene_name) {
@@ -548,6 +556,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     bool was_preloaded = state_->pvw_scene_name == scene_name;
 
+    scheduleSceneControls(state_->scenes.at(scene_name), T_cut);
     cutInternal(scene_name, T_cut);
 
     const auto& new_slot = state_->pvwSlot();
@@ -588,6 +597,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 
     auto& target_scene = state_->scenes.at(scene_name);
     int frames = (int)std::round(duration_sec * state_->fps_num / state_->fps_den);
+    scheduleSceneControls(target_scene, T_start);
 
     // 2. Create transition_cuda with direction-dependent alpha expression
     std::string alpha_expr;
@@ -858,6 +868,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     int64_t T_start = resolveTransitionStartPts(start_pts_ms);
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
+    scheduleSceneControls(state_->scenes.at(scene_name), T_start);
 
     if (start_pts_ms < 0) {
         // Reset the input node so it is re-created with the new URL when the group starts.
