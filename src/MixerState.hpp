@@ -14,10 +14,17 @@ struct SourceLayout {
     Parameters layer;
 };
 
+struct SceneControl {
+    std::string node_name;
+    std::string key;
+    Parameters value;
+};
+
 struct SceneDefinition {
     std::string name;
     /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
     std::unordered_map<std::string, SourceLayout> sources;
+    std::vector<SceneControl> controls;
     int width = 1920;
     int height = 1080;
 

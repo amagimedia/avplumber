@@ -72,6 +72,7 @@ class MixerSource:
     pre_otm_edge: str
     input_group: str
     audio_edge: Optional[str] = None
+    default_graph: Optional[str] = None
 
 
 @dataclass
@@ -79,6 +80,7 @@ class MixerScene:
     name: str
     # source_name -> {"graph": ..., "dst_x": ..., "dst_y": ..., ...}
     sources: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    controls: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class MixerGraphBuilder:
@@ -129,6 +131,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         audio_edge: Optional[str] = None,
+        default_graph: Optional[str] = None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -148,13 +151,18 @@ class MixerGraphBuilder:
         audio_edge:
             Optional name of the audio edge associated with this source.
             Not wired by the builder; stored as metadata for the caller.
+        default_graph:
+            Initial crop/scale filter graph for this source's slot filters.
+            Scene switches can still replace it, but preheated geometry
+            sources should start with their fixed graph to avoid a cold
+            filter restart on the first take.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
         if name in self._source_index:
             raise ValueError(f"Source '{name}' already registered")
         idx = len(self._sources)
-        self._sources.append(MixerSource(name, pre_otm_edge, input_group, audio_edge))
+        self._sources.append(MixerSource(name, pre_otm_edge, input_group, audio_edge, default_graph))
         self._source_index[name] = idx
         return self
 
@@ -162,6 +170,7 @@ class MixerGraphBuilder:
         self,
         name: str,
         sources: Dict[str, Dict[str, Any]],
+        controls: Optional[List[Dict[str, Any]]] = None,
     ) -> "MixerGraphBuilder":
         """Define a named scene.
 
@@ -180,7 +189,7 @@ class MixerGraphBuilder:
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
-        self._scenes[name] = MixerScene(name=name, sources=sources)
+        self._scenes[name] = MixerScene(name=name, sources=sources, controls=controls or [])
         return self
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
@@ -344,9 +353,10 @@ class MixerGraphBuilder:
 
             # Default scale: fit to canvas.  MixerOrchestrator rewrites the
             # graph string on every scene switch via node.param.set + auto_restart.
-            default_graph = (
+            fallback_graph = (
                 f"scale_cuda=w={self.canvas_w}:h={self.canvas_h}:interp_algo=lanczos"
             )
+            default_graph = src.default_graph or fallback_graph
 
             self.avp.addNode(FilterVideo({
                 "name": self._n(f"cs_{src.name}_a"),
@@ -608,6 +618,8 @@ class MixerGraphBuilder:
 
         for scene_name, scene in self._scenes.items():
             scene_def = {"sources": scene.sources}
+            if scene.controls:
+                scene_def["controls"] = scene.controls
             lines.append(f"mixer.scene {self.name} {scene_name} {json.dumps(scene_def)}")
 
         self.avp.executeCommandsFromString("\n".join(lines))

@@ -3,11 +3,27 @@
 
 template <typename T>
 class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>,
-                            public TimelineReader, public IInputsObjects {
+                            public TimelineReader, public IInputsObjects,
+                            public IVideoFormatSource, public IFrameRateSource,
+                            public IAudioMetadataSource, public ITimeBaseSource {
     std::atomic<int> active_input_{0};
     std::string label_;
     int last_selected_input_ = -1;
     av::Timestamp last_output_pts_ = NOTS;
+
+    template <typename Interface>
+    std::shared_ptr<Interface> upstreamInterface(const char* interface_name) {
+        const int active = active_input_.load(std::memory_order_relaxed);
+        if (active >= 0 && active < (int)this->source_edges_.size()) {
+            auto src = this->source_edges_[active]->template findNodeUp<Interface>();
+            if (src) return src;
+        }
+        for (auto& edge : this->source_edges_) {
+            auto src = edge->template findNodeUp<Interface>();
+            if (src) return src;
+        }
+        throw Error("source_switcher[" + label_ + "]: no upstream " + interface_name);
+    }
 
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
@@ -49,6 +65,42 @@ public:
                 edge->producedEvent().signal();
             }
         }
+    }
+
+    int width() override {
+        return upstreamInterface<IVideoFormatSource>("video format source")->width();
+    }
+
+    int height() override {
+        return upstreamInterface<IVideoFormatSource>("video format source")->height();
+    }
+
+    av::PixelFormat pixelFormat() override {
+        return upstreamInterface<IVideoFormatSource>("video format source")->pixelFormat();
+    }
+
+    av::PixelFormat realPixelFormat() override {
+        return upstreamInterface<IVideoFormatSource>("video format source")->realPixelFormat();
+    }
+
+    av::Rational frameRate() override {
+        return upstreamInterface<IFrameRateSource>("frame rate source")->frameRate();
+    }
+
+    int sampleRate() override {
+        return upstreamInterface<IAudioMetadataSource>("audio metadata source")->sampleRate();
+    }
+
+    av::SampleFormat sampleFormat() override {
+        return upstreamInterface<IAudioMetadataSource>("audio metadata source")->sampleFormat();
+    }
+
+    uint64_t channelLayout() override {
+        return upstreamInterface<IAudioMetadataSource>("audio metadata source")->channelLayout();
+    }
+
+    av::Rational timeBase() override {
+        return upstreamInterface<ITimeBaseSource>("timebase source")->timeBase();
     }
 
     static std::shared_ptr<MixerSourceSwitcher> create(NodeCreationInfo& nci) {

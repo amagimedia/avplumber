@@ -29,6 +29,7 @@ class MixerOrchestrator {
     void flushSlotEdges(bool is_slot_a);
 
     void loadSceneIntoSlot(bool is_slot_a, const std::string& scene_name);
+    void scheduleSceneControls(const SceneDefinition& scene, int64_t at_pts_ms);
 
     /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
     void rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene);
@@ -80,7 +81,7 @@ class MixerOrchestrator {
                                int64_t start_pts_ms,
                                int64_t margin_ms);
 
-    int64_t margin_ms_ = 200;
+    int64_t margin_ms_ = 100;
     std::string transition_node_name_ = "mixer_transition";
     std::string transition_edge_name_ = "trans_out";
 
