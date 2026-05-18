@@ -227,8 +227,9 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
     # Split raw YOLO output: one copy for face-tracking and one for visual-speech.
-    # PlayerTracker filters to target_labels=["Face"] and may discard Mouth/Nose
-    # detections; the visual-speech branch therefore needs the unmodified output.
+    # PlayerTracker tracks only Face but preserves non-target detections as
+    # passthrough metadata; the visual-speech branch still needs the unmodified
+    # output for raw Mouth/Nose detections.
     yolo_split_dsts = [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"]
     if debug_mouth_rois:
         yolo_split_dsts.append(f"v{idx}_yolo_for_debug")
@@ -270,6 +271,8 @@ def build_input_subgraph(
         "viewport_dst_width": FACE_CROP_W,
         "viewport_dst_height": FACE_CROP_H,
         "focus_mode": "label_priority",
+        "allowed_labels": FACE_TRACKED_LABELS,
+        "label_priority": FACE_TRACKED_LABELS,
         "filter_type": "kalman",
         "lost_target": "hold_last",
         "group": g,

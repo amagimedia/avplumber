@@ -67,6 +67,8 @@ class AutoSwitcher:
         special_speaker_index: Optional[int] = None,
         special_speaker_margin_db: float = 0.0,
         vad_only_priority_speaker_index: Optional[int] = None,
+        program_scene_getter: Optional[Callable[[], Optional[str]]] = None,
+        program_scene_poll_s: float = 0.5,
     ) -> None:
         self._mixer = mixer
         self._registry = registry
@@ -82,9 +84,15 @@ class AutoSwitcher:
         self._special_speaker_index = special_speaker_index
         self._special_speaker_margin_db = special_speaker_margin_db
         self._vad_only_priority_speaker_index = vad_only_priority_speaker_index
+        self._program_scene_getter = program_scene_getter
+        self._program_scene_poll_s = program_scene_poll_s
 
         self._current_input: Optional[int] = None
+        self._current_scene: Optional[str] = None
         self._last_switch_ts: float = 0.0
+        self._next_program_scene_poll_ts: float = 0.0
+        self._pending_auto_scene: Optional[str] = None
+        self._pending_auto_scene_until: float = 0.0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -105,6 +113,7 @@ class AutoSwitcher:
     def force_scene(self, scene_name: str) -> None:
         """Immediately cut to an arbitrary scene and reset the dwell timer."""
         self._mixer.cut(scene_name)
+        self._current_scene = scene_name
         self._last_switch_ts = time.monotonic()
 
     def force_input(self, index: int) -> None:
@@ -113,6 +122,7 @@ class AutoSwitcher:
         if scene in self._mixer.scenes():
             self._mixer.cut(scene)
             self._current_input = index
+            self._current_scene = scene
             self._last_switch_ts = time.monotonic()
 
     # ------------------------------------------------------------------
@@ -135,12 +145,13 @@ class AutoSwitcher:
         return estimated_media_now_ms + self._switch_pts_lead_ms
 
     def _try_switch_to(self, index: int, now: float, entry=None) -> bool:
-        if index == self._current_input:
-            return True
         if (now - self._last_switch_ts) < self._min_dwell_program:
             return False
 
         scene = self._scene_for_input(index)
+        if scene == self._current_scene:
+            self._current_input = index
+            return True
         if scene not in self._mixer.scenes():
             return False
 
@@ -164,11 +175,15 @@ class AutoSwitcher:
             flush=True,
         )
         self._current_input = index
+        self._current_scene = scene
+        self._pending_auto_scene = scene
+        self._pending_auto_scene_until = now + 3.0
         self._last_switch_ts = now
         return True
 
     def _tick_once(self) -> None:
         now = time.monotonic()
+        self._observe_program_scene(now)
 
         # Respect post-transition cooldown.
         if (now - self._last_switch_ts) < self._cooldown:
@@ -217,3 +232,35 @@ class AutoSwitcher:
         best_index = best.index
 
         self._try_switch_to(best_index, now, best)
+
+    def _observe_program_scene(self, now: float) -> None:
+        if self._program_scene_getter is None or now < self._next_program_scene_poll_ts:
+            return
+        self._next_program_scene_poll_ts = now + self._program_scene_poll_s
+        try:
+            scene = self._program_scene_getter()
+        except Exception:
+            return
+        if not scene:
+            return
+
+        if self._pending_auto_scene is not None:
+            if scene == self._pending_auto_scene:
+                self._pending_auto_scene = None
+                self._current_scene = scene
+            elif now < self._pending_auto_scene_until:
+                return
+            else:
+                self._pending_auto_scene = None
+
+        if self._current_scene is None:
+            self._current_scene = scene
+            return
+        if scene == self._current_scene:
+            return
+
+        self._current_scene = scene
+        self._last_switch_ts = now
+        observer = getattr(self._scene_for_input, "observe_program_scene", None)
+        if observer is not None:
+            observer(scene, now)

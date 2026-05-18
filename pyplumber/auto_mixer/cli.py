@@ -82,6 +82,7 @@ from .config import (
     JANUS_DEFAULT_VIDEO_PORT,
     MIN_ACTIVE_AUDIO_LEVEL_DBFS,
 )
+from .control_status import MixerProgramSceneReader
 from .inputs import build_input_subgraph, default_face_engine, find_named_input, input_basename
 from .outputs import (
     build_audio_output,
@@ -102,6 +103,12 @@ from .preheated import (
     define_preheated_scenes,
 )
 from .scenes import define_auto_scenes
+from .shot_selector import (
+    AutoShotSceneBuilder,
+    HistoryAwareShotSelector,
+    fixed_scene_selector,
+    profile_names,
+)
 
 
 def main() -> None:
@@ -201,7 +208,19 @@ def main() -> None:
         "--auto-switch-layout",
         choices=("videoconf", "full_face"),
         default="videoconf",
-        help="Scene family used by the auto switcher (default: videoconf)",
+        help="Scene family used by the fixed auto switcher and as profile fallback (default: videoconf)",
+    )
+    parser.add_argument(
+        "--auto-switch-shot-profile",
+        choices=("fixed", *profile_names()),
+        default="fixed",
+        help="Auto-switch shot selection profile. fixed preserves --auto-switch-layout.",
+    )
+    parser.add_argument(
+        "--auto-switch-random-seed",
+        default=20260521,
+        type=int,
+        help="Random seed for non-fixed auto-switch shot profiles.",
     )
     parser.add_argument(
         "--disable-preheated-scenes", "--disable-preheated-speaker-scenes",
@@ -341,8 +360,31 @@ def main() -> None:
                 input_group=sg["input_group"],
             )
         define_auto_scenes(mx, n)
-    auto_switch_scene = lambda i: f"{args.auto_switch_layout}_{i}"
-    mx.set_initial_scene(auto_switch_scene(0), slot="A")
+
+    auto_scene_builder = None
+    auto_switch_selector = None
+    if args.auto_switch_shot_profile == "fixed":
+        auto_switch_scene = fixed_scene_selector(args.auto_switch_layout)
+        auto_initial_scene = auto_switch_scene(0)
+    else:
+        auto_scene_builder = AutoShotSceneBuilder(
+            mx,
+            n_inputs=n,
+            preheated=preheated_scenes,
+        )
+        auto_scene_builder.register_initial_scenes()
+        auto_switch_selector = HistoryAwareShotSelector(
+            mx.scenes(),
+            n_inputs=n,
+            profile_name=args.auto_switch_shot_profile,
+            fallback_layout=args.auto_switch_layout,
+            scene_builder=auto_scene_builder,
+            seed=args.auto_switch_random_seed,
+        )
+        auto_switch_scene = auto_switch_selector
+        auto_initial_scene = auto_switch_selector.initial_scene(0)
+
+    mx.set_initial_scene(auto_initial_scene, slot="A")
     video_out_edge = mx.build()
 
     record_enabled = args.output is not None
@@ -464,9 +506,29 @@ def main() -> None:
         print("[auto_mixer] Auto-switch PTS scheduling disabled")
     else:
         print(f"[auto_mixer] Auto-switch cuts scheduled {switch_pts_lead_ms} ms ahead of VAD PTS")
+    if args.auto_switch_shot_profile == "fixed":
+        print(f"[auto_mixer] Auto-switch layout: fixed {args.auto_switch_layout}")
+    else:
+        print(
+            f"[auto_mixer] Auto-switch shot profile: {args.auto_switch_shot_profile} "
+            f"(seed={args.auto_switch_random_seed})"
+        )
+        if auto_switch_selector is not None:
+            print(
+                "[auto_mixer] Manual layout suggestions: "
+                f"{auto_switch_selector.rules.manual_suggestion_window_s:.1f}s "
+                f"{auto_switch_selector.rules.manual_suggestion_families}"
+            )
     print(f"[auto_mixer] Scenes: {mx.scenes()}")
 
     # ---- Auto-switcher ----
+    program_scene_reader = None
+    if args.remote_control_port:
+        program_scene_reader = MixerProgramSceneReader(
+            host="127.0.0.1",
+            port=args.remote_control_port,
+            mixer_name=mx.name,
+        )
     switcher = AutoSwitcher(
         mixer=mx,
         registry=speaker_registry,
@@ -479,12 +541,15 @@ def main() -> None:
         special_speaker_index=rene_input_index,
         special_speaker_margin_db=RENE_REQUIRED_LEAD_DB,
         vad_only_priority_speaker_index=sergio_input_index,
+        program_scene_getter=(
+            program_scene_reader.program_scene if program_scene_reader is not None else None
+        ),
     )
-    if not args.disable_auto_switcher:
-        switcher.start()
 
     # Unlock the control server so remote clients can issue commands.
     avp.setReady()
+    if not args.disable_auto_switcher:
+        switcher.start()
 
     # ---- Run until interrupted ----
     stop_event = threading.Event()
@@ -521,6 +586,8 @@ def main() -> None:
     finally:
         if not args.disable_auto_switcher:
             switcher.stop()
+        if program_scene_reader is not None:
+            program_scene_reader.close()
         print("[auto_mixer] Done.")
 
 
