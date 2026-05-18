@@ -186,10 +186,27 @@ class MixerGraphBuilder:
         """
         if self._built:
             raise RuntimeError("Cannot add scenes after build()")
+        return self.define_scene(name, sources, controls=controls)
+
+    def define_scene(
+        self,
+        name: str,
+        sources: Dict[str, Dict[str, Any]],
+        controls: Optional[List[Dict[str, Any]]] = None,
+    ) -> "MixerGraphBuilder":
+        """Define or replace a scene.
+
+        Before build, this registers the scene for the initial mixer setup.
+        After build, it also emits ``mixer.scene`` so runtime policies can
+        reuse generic scene names with different source-slot assignments.
+        """
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
-        self._scenes[name] = MixerScene(name=name, sources=sources, controls=controls or [])
+        scene = MixerScene(name=name, sources=sources, controls=controls or [])
+        self._scenes[name] = scene
+        if self._built:
+            self.avp.executeCommandsFromString(self._scene_command(name, scene))
         return self
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
@@ -617,9 +634,12 @@ class MixerGraphBuilder:
             )
 
         for scene_name, scene in self._scenes.items():
-            scene_def = {"sources": scene.sources}
-            if scene.controls:
-                scene_def["controls"] = scene.controls
-            lines.append(f"mixer.scene {self.name} {scene_name} {json.dumps(scene_def)}")
+            lines.append(self._scene_command(scene_name, scene))
 
         self.avp.executeCommandsFromString("\n".join(lines))
+
+    def _scene_command(self, scene_name: str, scene: MixerScene) -> str:
+        scene_def = {"sources": scene.sources}
+        if scene.controls:
+            scene_def["controls"] = scene.controls
+        return f"mixer.scene {self.name} {scene_name} {json.dumps(scene_def)}"
