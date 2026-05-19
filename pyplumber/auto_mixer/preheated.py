@@ -50,12 +50,6 @@ def _face_conf_thumb_size() -> tuple[int, int]:
     return cell_w, cell_h
 
 
-def _face_grid_graph() -> str:
-    cell_w = CANVAS_W // 2
-    cell_h = cell_w * 16 // 9
-    return f"scale_cuda=w={cell_w}:h={cell_h}:interp_algo=lanczos"
-
-
 def _orig_stack_graph() -> str:
     return f"scale_cuda=w={CANVAS_W}:h=608:interp_algo=lanczos"
 
@@ -72,10 +66,6 @@ def _one_if_any(n: int) -> int:
 
 def _conference_thumb_slots(n: int) -> int:
     return min(max(n - 1, 0), 5)
-
-
-def _grid_slots(n: int) -> int:
-    return min(n, 4) if n >= 3 else 0
 
 
 def _stack_slots(n: int) -> int:
@@ -104,7 +94,6 @@ PREHEAT_TEMPLATES: tuple[PreheatTemplate, ...] = (
     PreheatTemplate("face_full", "face", _one_if_any, _face_full_graph),
     PreheatTemplate("face_square", "face", _one_if_any, _face_square_graph),
     PreheatTemplate("face_conf_thumb", "face", _conference_thumb_slots, _face_conf_thumb_graph),
-    PreheatTemplate("face_grid", "face", _grid_slots, _face_grid_graph),
     PreheatTemplate("orig_stack", "orig", _stack_slots, _orig_stack_graph),
     PreheatTemplate("orig_pip_thumb", "orig", _pip_slots, _orig_pip_thumb_graph),
 )
@@ -262,7 +251,6 @@ def define_preheated_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedS
     _define_vstack3_scenes(mx, n, preheated)
     _define_pip_scenes(mx, n, preheated)
     _define_vstack2_scenes(mx, n, preheated)
-    _define_multiviewer_scene(mx, n, preheated)
 
 
 def _define_full_face_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSceneSources) -> None:
@@ -372,23 +360,3 @@ def _define_vstack2_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSc
             controls.append(preheated.control("orig_stack", slot, cam))
         mx.add_scene(f"vstack_{a}_{b}", sources, controls=controls)
 
-
-def _define_multiviewer_scene(mx: MixerGraphBuilder, n: int, preheated: PreheatedSceneSources) -> None:
-    if n < 3:
-        return
-    graph = preheated.graph("face_grid")
-    cols = 2
-    cell_w = CANVAS_W // cols
-    cell_h = cell_w * 16 // 9
-    grid_n = min(n, preheated.slot_counts["face_grid"])
-    sources = {}
-    controls = []
-    for j in range(grid_n):
-        row, col = j // cols, j % cols
-        sources[preheated.source("face_grid", j)] = {
-            "graph": graph,
-            "dst_x": col * cell_w,
-            "dst_y": row * cell_h,
-        }
-        controls.append(preheated.control("face_grid", j, j))
-    mx.add_scene("multiviewer", sources, controls=controls)

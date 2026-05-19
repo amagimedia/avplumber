@@ -206,7 +206,7 @@ def build_input_subgraph(
         "dst": f"v{idx}_yolo_in",
         "graph": (
             f"scale_cuda=w={FACE_MODEL_W}:h={FACE_MODEL_CONTENT_H},"
-            f"pad_cuda={FACE_MODEL_W}:{FACE_MODEL_H}:0:2"
+            f"pad_cuda=w={FACE_MODEL_W}:h={FACE_MODEL_H}:x=0:y=2"
         ),
         "hwaccel": HWACCEL,
         "group": g,
