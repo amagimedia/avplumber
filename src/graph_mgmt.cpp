@@ -194,22 +194,36 @@ bool NodeWrapper::stop(bool inhibit_actions) {
             throw Error("NodeWrapper::stop() called for node which doesn't have stopping interface!");
         }
         std::shared_ptr<IWaitsSinksEmpty> node_sinks = std::dynamic_pointer_cast<IWaitsSinksEmpty>(node);
+        auto stopNodeAndSinks = [&]() {
+            std::exception_ptr stop_error;
+            try {
+                node_stoppable->stop();
+            } catch (...) {
+                stop_error = std::current_exception();
+            }
+            if (node_sinks) {
+                try {
+                    node_sinks->stopSinks();
+                } catch (...) {
+                    if (!stop_error) {
+                        stop_error = std::current_exception();
+                    }
+                }
+            }
+            if (stop_error) {
+                std::rethrow_exception(stop_error);
+            }
+        };
 
 #ifdef PYTHON_MODULE
         // Avoid lock-order inversion (start_stop_mutex_ -> GIL): python stop() acquires GIL.
         if (std::dynamic_pointer_cast<IPythonNode>(node)) {
             lock.unlock();
-            node_stoppable->stop();
-            if (node_sinks) {
-                node_sinks->stopSinks();
-            }
+            stopNodeAndSinks();
             return true;
         }
 #endif
-        node_stoppable->stop();
-        if (node_sinks) {
-            node_sinks->stopSinks();
-        }
+        stopNodeAndSinks();
         return true;
     } else {
         dowork_ = false;
