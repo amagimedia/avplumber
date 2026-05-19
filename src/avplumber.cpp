@@ -1411,6 +1411,14 @@ void AVPlumber::setLogCallback(std::function<void(const std::string &)> callback
     }
 }
 
+void AVPlumber::setExceptionCallback(std::function<void(const std::string&, const std::string&, const std::string&)> callback) {
+    auto mngr = manager();
+    if (!mngr) {
+        return;
+    }
+    mngr->instanceData().setExceptionCallback(std::move(callback));
+}
+
 void AVPlumber::setReady() {
     logstream << APP_VERSION << " READY." << std::endl;
     impl_->setReady();

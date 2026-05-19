@@ -346,6 +346,19 @@ void NodeWrapper::threadFunction() {
         } catch (std::exception &e) {
             logstream << "Node " << name_ << " failed: " << e.what();
             last_error_ = e.what();
+            try {
+                manager_->instanceData().notifyException(name_, type_, last_error_);
+            } catch (std::exception &callback_error) {
+                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
+            }
+        } catch (...) {
+            last_error_ = "unknown non-std exception";
+            logstream << "Node " << name_ << " failed: " << last_error_;
+            try {
+                manager_->instanceData().notifyException(name_, type_, last_error_);
+            } catch (std::exception &callback_error) {
+                logstream << "Exception callback failed for node " << name_ << ": " << callback_error.what();
+            }
         }
         try {
             node_ = nullptr;
@@ -596,6 +609,17 @@ const std::list<NodeGroup::Item>& NodeGroup::sortedNodes() {
 ///////////////////////////////////////////////////////////
 ////// NodeGroup
 
+void NodeGroup::reportException(const std::string &message) {
+    if (!manager_) {
+        return;
+    }
+    try {
+        manager_->instanceData().notifyException(name_, "NodeGroup", message);
+    } catch (std::exception &callback_error) {
+        logstream << "Exception callback failed for group " << name_ << ": " << callback_error.what();
+    }
+}
+
 void NodeGroup::add(SolidItem node) {
     collectGarbage();
     {
@@ -839,7 +863,15 @@ NodeGroup::NodeGroup(NodeManager* manager, const std::string name):
                     if (currentState() == desired) {
                         logstream << "BUG: state change caused exception but left currentState() == desired";
                     }
-                    logstream << "Error while changing state: " << e.what() << ", retrying";
+                    std::string error_message = "Error while changing state: " + std::string(e.what());
+                    logstream << error_message << ", retrying";
+                    reportException(error_message);
+                    wallclock.sleepms(1000);
+                    retry = true;
+                } catch (...) {
+                    const std::string error_message = "Error while changing state: unknown non-std exception";
+                    logstream << error_message << ", retrying";
+                    reportException(error_message);
                     wallclock.sleepms(1000);
                     retry = true;
                 }
