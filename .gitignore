@@ -13,3 +13,5 @@ compile_flags.txt
 /neural-demo/.model-build-cache*/
 /neural-demo/.models_onnx.tgz
 /neural-demo/.tensorrt*.tgz
+/deps/mediapipe-src/
+/deps/mediapipe-face-mesh/

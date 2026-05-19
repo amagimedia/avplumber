@@ -191,6 +191,14 @@ class CudaInferYolo(InternalNode):
     TYPE = "cuda_infer_yolo"
 
 
+class CudaToEglImage(InternalNode):
+    TYPE = "cuda_to_egl_image"
+
+
+class MediaPipeFaceMeshGpu(InternalNode):
+    TYPE = "mediapipe_face_mesh_gpu"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 

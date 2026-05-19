@@ -83,6 +83,8 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
 -   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
+-   HAVE_MEDIAPIPE=1: enable MediaPipe GPU face mesh sidecar node (`mediapipe_face_mesh_gpu`). Requires `HAVE_GL=1`. By default this runs `scripts/build_mediapipe_face_mesh.sh` to clone a pinned MediaPipe source tree and build only the AVP face-mesh bridge.
+    -   The MediaPipe bridge build expects Bazel/Bazelisk, `git`, `pkg-config`, and OpenCV development files (`opencv-devel` on Fedora, providing `opencv4.pc`).
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
@@ -90,10 +92,18 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
+-   `mediapipe_face_mesh_gpu` builds only when `HAVE_MEDIAPIPE=1 HAVE_GL=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
 -   `scte35_parse` builds only when `HAVE_SCTE35=1`
+
+MediaPipe bridge variables:
+-   `MEDIAPIPE_AUTO_BUILD=1` (default) builds the local face-mesh bridge under `deps/mediapipe-face-mesh` when `HAVE_MEDIAPIPE=1`.
+-   `MEDIAPIPE_AUTO_BUILD=0` skips the clone/build step and expects `MEDIAPIPE_INSTALL_DIR` or `MEDIAPIPE_LIBS` to point at an existing bridge install.
+-   `MEDIAPIPE_REV` pins the cloned MediaPipe revision used by `scripts/build_mediapipe_face_mesh.sh`.
+-   `MEDIAPIPE_BRIDGE_SOURCE_DIR` (default `deps/mediapipe-bridge`) points at the AVP-owned bridge overlay copied into the MediaPipe checkout.
+-   `MEDIAPIPE_SRC_DIR` (default `deps/mediapipe-src`) and `MEDIAPIPE_INSTALL_DIR` (default `deps/mediapipe-face-mesh`) control where the optional MediaPipe checkout and exported bridge are stored.
 
 
 ### Using as a library
@@ -1202,6 +1212,39 @@ Convert CUDA `av::VideoFrame` to `EglImageFrame` (RGBA) using CUDA kernels and a
 Parameters:
 -   `pool_id` (name of instance-shared object, default `"default"`) - shared EGL image pool id
 -   `pool_size` (int, default `8`) - pool capacity
+-   `pool_max_size` (int, default `pool_size`) - maximum capacity after on-demand growth
+-   `pool_grow_step` (int, default `8`) - entries added on each growth attempt
+-   `sync` (bool, default `false`) - synchronize CUDA after conversion before publishing the EGL image
+
+### `mediapipe_face_mesh_gpu`
+
+Run MediaPipe Framework Face Mesh GPU on an `EglImageFrame` sidecar branch and emit face landmark metadata.
+
+1 input: `EglImageFrame`, 1 output: `MetadataFrame`
+
+This node is built only with `HAVE_MEDIAPIPE=1 HAVE_GL=1`. AVP does not include MediaPipe headers directly in the node; the optional build script exports a small bridge library plus the face detection/landmark model files. A typical CUDA decode path is:
+
+```
+dec_video(pixel_format="?cuda")
+  -> filter_video(scale_cuda=...)
+  -> cuda_to_egl_image
+  -> mediapipe_face_mesh_gpu
+  -> MetadataFrame consumer
+```
+
+Parameters:
+-   `metadata_key` (string, default `"face_landmarks_v1"`) - key used in the emitted `MetadataFrame` object
+-   `resource_root` (string, default `MEDIAPIPE_INSTALL_DIR/share`) - root used by the bridge to resolve MediaPipe model resources
+-   `max_faces` (int, default `1`) - maximum faces tracked by the MediaPipe graph
+-   `with_attention` (bool, default `true`) - use the attention face-landmark model for better lips/eyes landmarks
+-   `use_prev_landmarks` (bool, default `true`) - let MediaPipe reuse previous landmarks for tracking
+-   `infer_every_n` (int, default `1`) - process every Nth input frame
+-   `emit_dropped_metadata` (bool, default `true`) - emit metadata for skipped frames
+-   `speaking_start_open_ratio` (float, default `0.045`) - mouth-open ratio required to start visual-speaking state
+-   `speaking_stop_open_ratio` (float, default `0.030`) - mouth-open ratio below which visual-speaking can stop
+-   `speaking_start_confirm_frames` (int, default `2`) - consecutive frames required to emit `started_speaking`
+-   `speaking_stop_confirm_frames` (int, default `5`) - consecutive frames required to emit `stopped_speaking`
+-   `debug_log_every_n` (int, default `0`) - log status periodically
 
 ### `drm_prime_to_cuda`
 

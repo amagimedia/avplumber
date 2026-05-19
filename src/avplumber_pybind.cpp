@@ -773,6 +773,22 @@ PYBIND11_MODULE(_avplumber, m) {
         .def_property_readonly("isComplete", &MetadataFrame::isComplete)
     ;
 
+    py::class_<EglImageFrame, std::shared_ptr<EglImageFrame>>(m, "EglImageFrame")
+        .def(py::init<>())
+        .def("__repr__", [](const EglImageFrame &f) {
+            return "EglImageFrame(" + std::to_string(f.width()) + "x" + std::to_string(f.height()) +
+                   ", " + std::to_string(f.pts().timestamp()) + ")";
+        })
+        .def_property_readonly("width", &EglImageFrame::width)
+        .def_property_readonly("height", &EglImageFrame::height)
+        .def_property_readonly("pts", &EglImageFrame::pts)
+        .def_property_readonly("isComplete", &EglImageFrame::isComplete)
+        .def_property_readonly("image_ptr", [](const EglImageFrame &f) {
+            return py::int_(reinterpret_cast<uintptr_t>(f.image()));
+        })
+        .def_property_readonly("gl_texture", &EglImageFrame::glTexture)
+    ;
+
     py::class_<av::AudioSamples, std::shared_ptr<av::AudioSamples>>(m, "AudioSamples")
         .def(py::init<>())
         .def_property_readonly("pts", &av::AudioSamples::pts)

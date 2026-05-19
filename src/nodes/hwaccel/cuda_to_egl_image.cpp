@@ -357,7 +357,7 @@ public:
 		});
 		// Holder owns the token; token captures pool_, so pool stays alive
 		std::shared_ptr<void> holder = token_sp;
-		EglImageFrame out(entry.egl_image, W, H, frm.pts(), frm.timeBase(), holder);
+		EglImageFrame out(entry.egl_image, W, H, frm.pts(), frm.timeBase(), holder, entry.gl_tex_rgba);
 		out.copyMetadata(frm);
 		// Blocking put: wait for space in sink, then remove input from source
 		this->sink_->put(out, false);

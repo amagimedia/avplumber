@@ -1,0 +1,330 @@
+#define EGL_EGLEXT_PROTOTYPES 1
+#define GL_GLEXT_PROTOTYPES 1
+
+#include "avp_mediapipe_face_mesh_bridge.h"
+
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <exception>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "google/protobuf/text_format.h"
+#include "mediapipe/framework/calculator.pb.h"
+#include "mediapipe/framework/calculator_graph.h"
+#include "mediapipe/framework/formats/landmark.pb.h"
+#include "mediapipe/framework/packet.h"
+#include "mediapipe/framework/timestamp.h"
+#include "mediapipe/framework/deps/file_helpers.h"
+#include "mediapipe/gpu/gl_context.h"
+#include "mediapipe/gpu/gl_texture_buffer.h"
+#include "mediapipe/gpu/gpu_buffer.h"
+#include "mediapipe/gpu/gpu_buffer_format.h"
+#include "mediapipe/gpu/gpu_shared_data_internal.h"
+#include "mediapipe/util/resource_util_custom.h"
+
+namespace {
+
+using GlEGLImageTargetTexture2DOESFn = void (*)(GLenum, void*);
+
+constexpr const char* kGraph = R"pbtxt(
+input_stream: "input_video"
+input_side_packet: "num_faces"
+input_side_packet: "use_prev_landmarks"
+input_side_packet: "with_attention"
+output_stream: "multi_face_landmarks"
+
+node {
+  calculator: "FaceLandmarkFrontGpu"
+  input_stream: "IMAGE:input_video"
+  input_side_packet: "NUM_FACES:num_faces"
+  input_side_packet: "USE_PREV_LANDMARKS:use_prev_landmarks"
+  input_side_packet: "WITH_ATTENTION:with_attention"
+  output_stream: "LANDMARKS:multi_face_landmarks"
+}
+)pbtxt";
+
+static void set_error(char* error, size_t error_size, const std::string& message) {
+	if (!error || error_size == 0) return;
+	std::snprintf(error, error_size, "%s", message.c_str());
+}
+
+static std::string status_text(const absl::Status& status) {
+	return std::string(status.message());
+}
+
+static std::string join_path(const std::string& root, const std::string& path) {
+	if (root.empty() || path.empty() || path[0] == '/') return path;
+	if (root.back() == '/') return root + path;
+	return root + "/" + path;
+}
+
+static void configure_resource_root(const char* root_ptr) {
+	if (!root_ptr || root_ptr[0] == '\0') return;
+	const std::string root(root_ptr);
+	mediapipe::SetCustomGlobalResourceProvider(
+		[root](const std::string& path, std::string* output) -> absl::Status {
+			absl::Status status = mediapipe::file::GetContents(join_path(root, path), output, true);
+			if (status.ok()) return status;
+			return mediapipe::file::GetContents(path, output, true);
+		});
+}
+
+struct GraphResult {
+	bool observed = false;
+	std::vector<mediapipe::NormalizedLandmarkList> faces;
+};
+
+class FaceMeshBridge {
+public:
+	explicit FaceMeshBridge(const AvpMpFaceMeshConfig& config)
+		: max_faces_(std::max(1, config.max_faces)),
+		  with_attention_(config.with_attention != 0),
+		  use_prev_landmarks_(config.use_prev_landmarks != 0) {}
+
+	absl::Status start(const AvpMpFaceMeshConfig& config) {
+		configure_resource_root(config.resource_root);
+
+		gl_egl_image_target_texture_ =
+			reinterpret_cast<GlEGLImageTargetTexture2DOESFn>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+		if (!gl_egl_image_target_texture_) {
+			return absl::InternalError("glEGLImageTargetTexture2DOES unavailable");
+		}
+
+		auto gpu_resources_or = mediapipe::GpuResources::Create();
+		if (!gpu_resources_or.ok()) return gpu_resources_or.status();
+		gpu_resources_ = std::move(gpu_resources_or).value();
+		gl_context_ = gpu_resources_->gl_context();
+		if (!gl_context_) {
+			return absl::InternalError("MediaPipe GPU resources have no GL context");
+		}
+
+		mediapipe::CalculatorGraphConfig graph_config;
+		if (!google::protobuf::TextFormat::ParseFromString(kGraph, &graph_config)) {
+			return absl::InternalError("failed to parse embedded face mesh graph");
+		}
+
+		graph_ = std::make_unique<mediapipe::CalculatorGraph>();
+		absl::Status status = graph_->SetGpuResources(gpu_resources_);
+		if (!status.ok()) return status;
+		status = graph_->Initialize(graph_config);
+		if (!status.ok()) return status;
+		status = graph_->ObserveOutputStream(
+			"multi_face_landmarks",
+			[this](const mediapipe::Packet& packet) -> absl::Status {
+				GraphResult result;
+				result.observed = true;
+				result.faces = packet.Get<std::vector<mediapipe::NormalizedLandmarkList>>();
+				std::lock_guard<std::mutex> lock(results_mtx_);
+				results_[packet.Timestamp().Value()] = std::move(result);
+				return absl::OkStatus();
+			});
+		if (!status.ok()) return status;
+
+		std::map<std::string, mediapipe::Packet> side_packets;
+		side_packets["num_faces"] = mediapipe::MakePacket<int>(max_faces_);
+		side_packets["use_prev_landmarks"] = mediapipe::MakePacket<bool>(use_prev_landmarks_);
+		side_packets["with_attention"] = mediapipe::MakePacket<bool>(with_attention_);
+		status = graph_->StartRun(side_packets);
+		if (!status.ok()) return status;
+		graph_->SetInputStreamMaxQueueSize("input_video", 1).IgnoreError();
+		return absl::OkStatus();
+	}
+
+	absl::Status process(void* egl_image, int width, int height, int64_t timestamp_us, AvpMpFaceMeshResult* result) {
+		if (!egl_image) return absl::InvalidArgumentError("null EGLImage");
+		if (width <= 0 || height <= 0) return absl::InvalidArgumentError("invalid image geometry");
+		if (!result) return absl::InvalidArgumentError("null result");
+		result->face_count = 0;
+		result->faces = nullptr;
+
+		mediapipe::GpuBuffer buffer;
+		absl::Status status = wrap_frame(egl_image, width, height, &buffer);
+		if (!status.ok()) return status;
+
+		auto packet = mediapipe::MakePacket<mediapipe::GpuBuffer>(buffer)
+		                  .At(mediapipe::Timestamp::FromMicroseconds(timestamp_us));
+		status = graph_->AddPacketToInputStream("input_video", std::move(packet));
+		if (!status.ok()) return status;
+
+		status = graph_->WaitUntilIdle();
+		if (!status.ok()) return status;
+
+		GraphResult graph_result = take_result(timestamp_us);
+		if (!graph_result.observed) return absl::OkStatus();
+
+		result->face_count = int(graph_result.faces.size());
+		if (result->face_count == 0) return absl::OkStatus();
+		result->faces = new AvpMpFaceMeshFace[result->face_count]();
+		for (int i = 0; i < result->face_count; ++i) {
+			const auto& face = graph_result.faces[size_t(i)];
+			result->faces[i].landmark_count = face.landmark_size();
+			if (face.landmark_size() <= 0) continue;
+			result->faces[i].landmarks = new AvpMpFaceMeshLandmark[face.landmark_size()]();
+			for (int j = 0; j < face.landmark_size(); ++j) {
+				const auto& lm = face.landmark(j);
+				result->faces[i].landmarks[j] = {lm.x(), lm.y(), lm.z()};
+			}
+		}
+		return absl::OkStatus();
+	}
+
+	void stop() {
+		if (graph_) {
+			graph_->CloseAllInputStreams().IgnoreError();
+			graph_->WaitUntilDone().IgnoreError();
+			graph_.reset();
+		}
+		gl_context_.reset();
+		gpu_resources_.reset();
+	}
+
+	~FaceMeshBridge() {
+		stop();
+	}
+
+private:
+	int max_faces_ = 1;
+	bool with_attention_ = true;
+	bool use_prev_landmarks_ = true;
+	std::unique_ptr<mediapipe::CalculatorGraph> graph_;
+	std::shared_ptr<mediapipe::GpuResources> gpu_resources_;
+	std::shared_ptr<mediapipe::GlContext> gl_context_;
+	GlEGLImageTargetTexture2DOESFn gl_egl_image_target_texture_ = nullptr;
+	std::mutex results_mtx_;
+	std::map<int64_t, GraphResult> results_;
+
+	absl::Status wrap_frame(void* egl_image, int width, int height, mediapipe::GpuBuffer* out) {
+		std::shared_ptr<mediapipe::GlTextureBuffer> texture_buffer;
+		absl::Status status = gl_context_->Run([&]() -> absl::Status {
+			GLuint tex = 0;
+			glGenTextures(1, &tex);
+			if (!tex) return absl::InternalError("glGenTextures failed");
+			glBindTexture(GL_TEXTURE_2D, tex);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+			gl_egl_image_target_texture_(GL_TEXTURE_2D, egl_image);
+			GLenum err = glGetError();
+			if (err != GL_NO_ERROR) {
+				glBindTexture(GL_TEXTURE_2D, 0);
+				glDeleteTextures(1, &tex);
+				std::ostringstream oss;
+				oss << "glEGLImageTargetTexture2DOES failed: 0x" << std::hex << err;
+				return absl::InternalError(oss.str());
+			}
+
+			auto cleanup = [ctx = gl_context_, tex](std::shared_ptr<mediapipe::GlSyncPoint> sync_token) {
+				if (sync_token) sync_token->Wait();
+				ctx->Run([tex]() -> absl::Status {
+					GLuint t = tex;
+					glDeleteTextures(1, &t);
+					return absl::OkStatus();
+				}).IgnoreError();
+			};
+			auto wrapped = mediapipe::GlTextureBuffer::Wrap(
+				GL_TEXTURE_2D, tex, width, height, mediapipe::GpuBufferFormat::kRGBA32, gl_context_, std::move(cleanup));
+			if (!wrapped) {
+				glBindTexture(GL_TEXTURE_2D, 0);
+				glDeleteTextures(1, &tex);
+				return absl::InternalError("GlTextureBuffer::Wrap returned null");
+			}
+			texture_buffer = std::shared_ptr<mediapipe::GlTextureBuffer>(wrapped.release());
+			glBindTexture(GL_TEXTURE_2D, 0);
+			return absl::OkStatus();
+		});
+		if (!status.ok()) return status;
+		*out = mediapipe::GpuBuffer(texture_buffer);
+		return absl::OkStatus();
+	}
+
+	GraphResult take_result(int64_t timestamp_us) {
+		std::lock_guard<std::mutex> lock(results_mtx_);
+		auto it = results_.find(timestamp_us);
+		if (it == results_.end()) return {};
+		GraphResult result = std::move(it->second);
+		results_.erase(it);
+		return result;
+	}
+};
+
+}  // namespace
+
+struct AvpMpFaceMesh {
+	std::unique_ptr<FaceMeshBridge> impl;
+};
+
+extern "C" int avp_mp_face_mesh_create(const AvpMpFaceMeshConfig* config,
+                                       AvpMpFaceMesh** handle,
+                                       char* error,
+                                       size_t error_size) {
+	if (!config || !handle) {
+		set_error(error, error_size, "invalid create arguments");
+		return -1;
+	}
+	try {
+		std::unique_ptr<AvpMpFaceMesh> out(new AvpMpFaceMesh());
+		out->impl = std::make_unique<FaceMeshBridge>(*config);
+		absl::Status status = out->impl->start(*config);
+		if (!status.ok()) {
+			set_error(error, error_size, status_text(status));
+			return -1;
+		}
+		*handle = out.release();
+		return 0;
+	} catch (const std::exception& e) {
+		set_error(error, error_size, e.what());
+		return -1;
+	}
+}
+
+extern "C" int avp_mp_face_mesh_process_egl_image(AvpMpFaceMesh* handle,
+                                                  void* egl_image,
+                                                  int width,
+                                                  int height,
+                                                  int64_t timestamp_us,
+                                                  AvpMpFaceMeshResult* result,
+                                                  char* error,
+                                                  size_t error_size) {
+	if (!handle || !handle->impl) {
+		set_error(error, error_size, "invalid face mesh handle");
+		return -1;
+	}
+	try {
+		absl::Status status = handle->impl->process(egl_image, width, height, timestamp_us, result);
+		if (!status.ok()) {
+			set_error(error, error_size, status_text(status));
+			return -1;
+		}
+		return 0;
+	} catch (const std::exception& e) {
+		set_error(error, error_size, e.what());
+		return -1;
+	}
+}
+
+extern "C" void avp_mp_face_mesh_release_result(AvpMpFaceMeshResult* result) {
+	if (!result) return;
+	for (int i = 0; i < result->face_count; ++i) {
+		delete[] result->faces[i].landmarks;
+	}
+	delete[] result->faces;
+	result->face_count = 0;
+	result->faces = nullptr;
+}
+
+extern "C" void avp_mp_face_mesh_destroy(AvpMpFaceMesh* handle) {
+	delete handle;
+}

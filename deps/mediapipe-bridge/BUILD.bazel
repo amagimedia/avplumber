@@ -1,0 +1,34 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "libavp_mediapipe_face_mesh.so",
+    srcs = [
+        "avp_mediapipe_face_mesh_bridge.cc",
+        "avp_mediapipe_face_mesh_bridge.h",
+    ],
+    copts = [
+        "-DMESA_EGL_NO_X11_HEADERS",
+        "-DEGL_NO_X11",
+    ],
+    linkopts = [
+        "-lEGL",
+        "-lGLESv2",
+    ],
+    linkshared = 1,
+    linkstatic = 1,
+    deps = [
+        "//mediapipe/framework:calculator_graph",
+        "//mediapipe/framework/formats:landmark_cc_proto",
+        "//mediapipe/framework/deps:file_helpers",
+        "//mediapipe/gpu:gl_context",
+        "//mediapipe/gpu:gl_texture_buffer",
+        "//mediapipe/gpu:gpu_buffer",
+        "//mediapipe/gpu:gpu_buffer_format",
+        "//mediapipe/gpu:gpu_shared_data_internal",
+        "//mediapipe/modules/face_landmark:face_landmark_front_gpu",
+        "//mediapipe/util:resource_util_custom",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
+    ],
+)

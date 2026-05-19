@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <map>
+#include <cstdint>
 #include <avcpp/timestamp.h>
 #include <avcpp/rational.h>
 
@@ -18,6 +20,7 @@ typedef void* EGLImageKHR;
 class EglImageFrame {
 private:
 	EGLImageKHR image_ = nullptr;
+	uint32_t gl_texture_ = 0;
 	int width_ = 0;
 	int height_ = 0;
 	av::Timestamp pts_;
@@ -31,8 +34,9 @@ public:
 	              int height,
 	              av::Timestamp pts = {},
 	              av::Rational tb = {},
-	              std::shared_ptr<void> holder = nullptr)
-	    : image_(image), width_(width), height_(height), pts_(pts), tb_(tb), holder_(std::move(holder)) {}
+	              std::shared_ptr<void> holder = nullptr,
+	              uint32_t gl_texture = 0)
+	    : image_(image), gl_texture_(gl_texture), width_(width), height_(height), pts_(pts), tb_(tb), holder_(std::move(holder)) {}
 
 	bool isComplete() const {
 		return image_ != nullptr && width_ > 0 && height_ > 0;
@@ -50,6 +54,7 @@ public:
 
 	// Underlying EGL image handle
 	EGLImageKHR image() const { return image_; }
+	uint32_t glTexture() const { return gl_texture_; }
 
 	// Holder accessor (for advanced lifetime coordination if needed)
 	const std::shared_ptr<void>& holder() const { return holder_; }
@@ -68,5 +73,4 @@ public:
 		}
 	}
 };
-
 
