@@ -556,6 +556,24 @@ PYBIND11_MODULE(_avplumber, m) {
                 callback(py::str(s));
             });
         })
+        .def("setExceptionCallback", [](AVPlumber &avp, py::object callback_obj) {
+            if (callback_obj.is_none()) {
+                avp.setExceptionCallback(nullptr);
+                return;
+            }
+            if (!PyCallable_Check(callback_obj.ptr())) {
+                throw py::type_error("callback must be callable or None");
+            }
+            py::function callback = py::reinterpret_borrow<py::function>(callback_obj);
+            avp.setExceptionCallback([callback](const std::string &node_name, const std::string &node_type, const std::string &message) {
+                py::gil_scoped_acquire acquire;
+                try {
+                    callback(py::str(node_name), py::str(node_type), py::str(message));
+                } catch (py::error_already_set &e) {
+                    e.discard_as_unraisable("AVPlumber.on_exception");
+                }
+            });
+        }, py::arg("callback"))
         .def("setReady", &AVPlumber::setReady)
         .def("shutdown", &AVPlumber::shutdown)
         .def("mainLoop", &AVPlumber::mainLoop)
