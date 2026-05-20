@@ -124,6 +124,7 @@ def build_video_output(
         "src": video_edge,
         "dst": fps_edge,
         "group": group,
+        "on_error": "panic",
     }))
     avp.addNode(AssumeVideoFormat({
         "name": f"{prefix}_assume_video",
@@ -143,6 +144,7 @@ def build_video_output(
         "codec": codec or args.codec,
         "hwaccel": HWACCEL,
         "group": group,
+        "on_error": "panic",
         "options": enc_options,
     }))
     return encoded_edge
@@ -164,6 +166,7 @@ def build_mux_output(
         "dst": mux_edge,
         "group": group,
         "ts_sort_wait": 0,
+        "on_error": "panic",
     }))
     output_params = {
         "name": f"{mux_edge}_output",
