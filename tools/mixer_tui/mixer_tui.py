@@ -20,11 +20,11 @@ Keyboard shortcuts:
     F1-F9      Direct CUT to scene N (skips preview step)
     t          Toggle direct scene-click cuts
     a          Cycle AI auto-switch transitions through CUT / FADE / WIPE
-    o          Toggle HTML overlay bypass
+    o          Toggle HTML overlay on/off
     c          CUT  (take preview to program, hard cut)
     x          X-FADE (crossfade preview to program at set frame count)
     w          WIPE (uses --wipe-file path if set, otherwise prompts)
-    e          Change wipe file path (always opens prompt)
+    e          Select/change wipe file path
     d          Focus the fade frame input field
     s          Force an immediate mixer.status refresh
     q / ctrl+c Quit
@@ -34,8 +34,7 @@ The Textual keys / shortcuts panel and footer legend are hidden by default.
 
 import argparse
 import asyncio
-import json
-import sys
+import os
 from typing import Optional
 
 from textual import on, work
@@ -43,9 +42,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.message import Message
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Header,
@@ -54,263 +51,16 @@ from textual.widgets import (
     Static,
 )
 
-
-# ---------------------------------------------------------------------------
-# avplumber TCP client (ported from msesm/src/stream_monitor.py)
-# ---------------------------------------------------------------------------
-
-class AvpResponse:
-    def __init__(self, code: int, status: str, content: Optional[str]):
-        self.code = code
-        self.status = status
-        self.content = content
-
-    def json(self):
-        return json.loads(self.content) if self.content else None
-
-
-class AvpError(RuntimeError):
-    pass
-
-
-class AvpClient:
-    """Async TCP client for avplumber's text control protocol."""
-
-    def __init__(self):
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
-
-    async def connect(self, host: str, port: int) -> None:
-        self.reader, self.writer = await asyncio.open_connection(host, port)
-        response = await self.read()
-        if response.code != 100:
-            raise AvpError(f"Unexpected greeting from avplumber: {response.code} {response.status}")
-
-    async def disconnect(self) -> None:
-        if self.writer:
-            self.writer.close()
-            try:
-                await self.writer.wait_closed()
-            except Exception:
-                pass
-            self.writer = None
-            self.reader = None
-
-    async def read(self, raise_for_status: bool = False) -> AvpResponse:
-        line = await self.reader.readline()
-        line = line.decode("utf-8")
-        if not line:
-            raise EOFError("Connection closed by avplumber")
-        parts = line.split(maxsplit=1)
-        code = int(parts[0].strip())
-        status = parts[1].strip() if len(parts) > 1 else ""
-        content = None
-        if code == 201:
-            content = ""
-            while True:
-                line = await self.reader.readline()
-                line = line.decode("utf-8")
-                if line.rstrip("\n") == "":
-                    break
-                content += line
-        if raise_for_status and not (200 <= code < 300):
-            raise AvpError(f"avplumber error {code} {status}")
-        return AvpResponse(code=code, status=status, content=content)
-
-    async def write(self, cmd: str) -> None:
-        self.writer.write(cmd.encode("utf-8") + b"\n")
-        await self.writer.drain()
-
-    async def command(self, cmd: str, raise_for_status: bool = True) -> AvpResponse:
-        await self.write(cmd)
-        return await self.read(raise_for_status=raise_for_status)
-
-
-class AvpConnection:
-    """Manages an AvpClient with automatic reconnection."""
-
-    RECONNECT_INTERVAL = 2.0
-
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
-        self._client: Optional[AvpClient] = None
-        self._lock = asyncio.Lock()
-        self.connected = False
-
-    async def get_client(self) -> Optional[AvpClient]:
-        if self._client is not None and self.connected:
-            return self._client
-        return None
-
-    async def ensure_connected(self) -> bool:
-        async with self._lock:
-            if self.connected and self._client is not None:
-                return True
-            client = AvpClient()
-            try:
-                await client.connect(self.host, self.port)
-                self._client = client
-                self.connected = True
-                return True
-            except Exception:
-                self._client = None
-                self.connected = False
-                return False
-
-    async def command(self, cmd: str, raise_for_status: bool = True) -> Optional[AvpResponse]:
-        client = await self.get_client()
-        if client is None:
-            return None
-        try:
-            return await client.command(cmd, raise_for_status=raise_for_status)
-        except Exception:
-            self.connected = False
-            self._client = None
-            return None
-
-    async def disconnect(self) -> None:
-        if self._client:
-            await self._client.disconnect()
-        self._client = None
-        self.connected = False
-
-
-# ---------------------------------------------------------------------------
-# Wipe file prompt modal
-# ---------------------------------------------------------------------------
-
-class WipeModal(ModalScreen[Optional[str]]):
-    """Modal dialog to enter/change the wipe file path."""
-
-    CSS = """
-    WipeModal {
-        align: center middle;
-    }
-    WipeModal > Vertical {
-        width: 60;
-        height: auto;
-        border: thick $primary;
-        background: $surface;
-        padding: 1 2;
-    }
-    WipeModal Label {
-        margin-bottom: 1;
-    }
-    WipeModal Input {
-        margin-bottom: 1;
-    }
-    WipeModal Horizontal {
-        height: auto;
-        align-horizontal: right;
-    }
-    WipeModal Button {
-        margin-left: 1;
-    }
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-    ]
-
-    def __init__(self, current_path: Optional[str] = None) -> None:
-        super().__init__()
-        self._current_path = current_path or ""
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("Wipe file path:")
-            yield Input(
-                value=self._current_path,
-                placeholder="/path/to/wipe.mov",
-                id="wipe_path",
-            )
-            with Horizontal():
-                yield Button("Cancel", variant="default", id="cancel")
-                yield Button("OK", variant="primary", id="ok")
-
-    def on_mount(self) -> None:
-        inp = self.query_one("#wipe_path", Input)
-        inp.focus()
-        inp.cursor_position = len(inp.value)
-
-    @on(Button.Pressed, "#ok")
-    def do_ok(self) -> None:
-        path = self.query_one("#wipe_path", Input).value.strip()
-        self.dismiss(path if path else None)
-
-    @on(Button.Pressed, "#cancel")
-    def do_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    @on(Input.Submitted)
-    def on_submitted(self) -> None:
-        self.do_ok()
-
-
-# ---------------------------------------------------------------------------
-# Scene button widget
-# ---------------------------------------------------------------------------
-
-class SceneButton(Static):
-    """A scene selection button showing its index, name, and bus status."""
-
-    class Selected(Message):
-        """Posted when the user clicks this scene button."""
-        def __init__(self, index: int) -> None:
-            super().__init__()
-            self.index = index
-
-    DEFAULT_CSS = """
-    SceneButton {
-        width: auto;
-        min-width: 16;
-        height: 5;
-        border: solid $primary-darken-2;
-        padding: 0 1;
-        margin: 0 1;
-        content-align: center middle;
-        text-align: center;
-    }
-    SceneButton.pgm {
-        border: solid $error;
-        background: $error-darken-3;
-        color: $error-lighten-2;
-    }
-    SceneButton.pvw {
-        border: solid $success;
-        background: $success-darken-3;
-        color: $success-lighten-2;
-    }
-    SceneButton:hover {
-        border: solid $accent;
-        background: $accent-darken-3;
-    }
-    """
-
-    def __init__(self, index: int, name: str) -> None:
-        super().__init__()
-        self.scene_index = index
-        self.scene_name = name
-        self._refresh_content()
-
-    def _refresh_content(self) -> None:
-        idx = self.scene_index + 1
-        name = self.scene_name
-        classes = self.classes
-        if "pgm" in classes:
-            bus = "◉ PGM"
-        elif "pvw" in classes:
-            bus = "● PVW"
-        else:
-            bus = f"  [{idx}]"
-        self.update(f"{bus}\n{name}")
-
-    def on_click(self) -> None:
-        self.post_message(SceneButton.Selected(self.scene_index))
+from avp_client import AvpConnection
+from commands import (
+    AI_TRANSITION_MODES,
+    TAKE_COMMAND_PREFIXES,
+    auto_switch_set_command,
+    mixer_command,
+    overlay_toggle_commands,
+)
+from state import parse_auto_switch_status, parse_mixer_status, parse_scene_list
+from widgets import FadeFramesInput, SceneButton, WipeModal
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +71,6 @@ OVERLAY_SETTLE_SECONDS = 0.2
 DEFAULT_FADE_FPS = 30.0
 DEFAULT_FADE_FRAMES = 15
 MAX_FADE_FRAMES = 300
-AI_TRANSITION_MODES = ("cut", "fade", "wipe")
 
 TRANSITION_SYMBOLS = {
     "idle": "─",
@@ -534,7 +283,7 @@ class MixerTUI(App):
         Binding("w", "wipe", "WIPE", show=False),
         Binding("e", "change_wipe_path", "Wipe path", show=False),
         Binding("d", "focus_duration", "Fade frames", show=False),
-        Binding("a", "toggle_ai_transition_mode", "AI transition", show=False),
+        Binding("a", "toggle_ai_transition_mode", "AI transition", show=False, priority=True),
         Binding("t", "toggle_direct_cut_mode", "Direct cuts", show=False),
         Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
@@ -561,15 +310,12 @@ class MixerTUI(App):
     def __init__(self, host: str, port: int, mixer: str, overlay_otm: str,
                  overlay_source_otm: str, overlay_selector: str,
                  wipe_file: Optional[str] = None,
-                 auto_host: Optional[str] = None,
-                 auto_port: int = 0,
+                 wipe_dir: Optional[str] = None,
                  fade_fps: float = DEFAULT_FADE_FPS,
                  fade_frames: int = DEFAULT_FADE_FRAMES) -> None:
         super().__init__()
         self.avp_host = host
         self.avp_port = port
-        self.auto_host = auto_host or host
-        self.auto_port = auto_port
         self.fade_fps = fade_fps if fade_fps > 0 else DEFAULT_FADE_FPS
         self.default_fade_frames = min(MAX_FADE_FRAMES, max(1, int(fade_frames)))
         self.mixer_name = mixer
@@ -577,13 +323,15 @@ class MixerTUI(App):
         self.overlay_source_otm_name = overlay_source_otm
         self.overlay_selector_name = overlay_selector
         self.wipe_file: Optional[str] = wipe_file
+        self.wipe_dir: Optional[str] = wipe_dir
         self._conn = AvpConnection(host, port)
-        self._auto_conn = AvpConnection(self.auto_host, self.auto_port) if self.auto_port else None
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
-        self._scene_poll_counter = 0
         self._auto_poll_counter = 0
         self._auto_duration_initialized = False
         self._overlay_toggle_in_progress = False
+        self._connection_timer = None
+        self._poll_timer = None
+        self._scene_timer = None
 
     # ── Layout ──────────────────────────────────────────────────────────────
 
@@ -611,42 +359,55 @@ class MixerTUI(App):
             yield Button("⟿ X-FADE", id="btn_auto", variant="success")
             yield Button("▶ MEDIA WIPE", id="btn_wipe", variant="primary")
             yield Static("Fade frames:", id="dur_label")
-            yield Input(str(self.default_fade_frames), id="dur_input")
+            yield FadeFramesInput(str(self.default_fade_frames), id="dur_input")
 
         with Horizontal(id="utility_bar"):
             yield Button("Direct: OFF", id="btn_direct", variant="default")
             yield Button("AI: n/a", id="btn_ai_transition", variant="default")
             yield Button("⚙ Wipe file…", id="btn_change_wipe", variant="default")
-            yield Button("Overlay: ON", id="btn_overlay", variant="primary")
+            yield Button("Overlay: OFF", id="btn_overlay", variant="warning")
 
     # ── On mount ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self._start_connection_loop()
-        self._poll_status()
+        self._connection_timer = self.set_interval(0.5, self._connection_tick, name="mixer_avp_connect")
+        self._poll_timer = self.set_interval(0.5, self._poll_status_tick, name="mixer_avp_poll")
+        self._scene_timer = self.set_interval(10.0, self._fetch_scenes_tick, name="mixer_avp_scenes")
+        self.run_worker(
+            self._connection_tick(),
+            group="mixer_avp_connect_now",
+            exclusive=True,
+            exit_on_error=False,
+        )
+        self.call_after_refresh(self._clear_initial_focus)
         self._update_wipe_button_tooltip()
         self._refresh_ai_transition_button()
 
     # ── Connection & polling workers ────────────────────────────────────────
 
-    # Use a dedicated worker group so this is not cancelled when `_poll_status`
-    # starts (both used exclusive=True on the default group, which only allows
-    # one worker — the poll worker was killing the connection loop on startup).
-    @work(exclusive=True, thread=False, group="mixer_avp_connect")
-    async def _start_connection_loop(self) -> None:
-        """Keep trying to connect; on success fetch scenes and hand off to polling."""
-        while True:
-            if not self._conn.connected:
-                ok = await self._conn.ensure_connected()
-                self.connected = ok
-                if ok:
-                    self._set_status_bar(False)
-                    await self._fetch_scenes()
-                else:
-                    self._set_status_bar(True, f"Connecting to {self.avp_host}:{self.avp_port}…")
-                    await asyncio.sleep(self._conn.RECONNECT_INTERVAL)
-            else:
-                await asyncio.sleep(0.5)
+    def _clear_initial_focus(self) -> None:
+        self.set_focus(None)
+
+    async def _connection_tick(self) -> None:
+        """Connect or reconnect the shared control socket."""
+        if self._conn.connected:
+            self.connected = True
+            return
+        try:
+            ok = await self._conn.ensure_connected()
+        except Exception:
+            ok = False
+        self.connected = ok
+        if ok:
+            self._set_status_bar(False)
+            self.auto_control_connected = True
+            if self.auto_transition_mode == "n/a":
+                self.auto_transition_mode = "cut"
+            await self._fetch_scenes()
+            await self._refresh_once()
+            await self._refresh_auto_status_tick()
+        else:
+            self._set_status_bar(True, f"Connecting to {self.avp_host}:{self.avp_port}…")
 
     async def _fetch_scenes(self) -> None:
         """Fetch scene list from the server and update the reactive."""
@@ -654,40 +415,49 @@ class MixerTUI(App):
         if resp is None or resp.code != 201 or not resp.content:
             return
         try:
-            scenes = json.loads(resp.content.strip())
+            scenes = parse_scene_list(resp.content)
             if isinstance(scenes, list) and scenes != self.scenes:
                 self.scenes = scenes
         except Exception:
             pass
 
-    @work(exclusive=True, thread=False, group="mixer_avp_poll")
-    async def _poll_status(self) -> None:
-        """Poll mixer.status every 500 ms; refresh scene list every 10 s."""
-        while True:
-            await asyncio.sleep(0.5)
-            if not self._conn.connected:
-                continue
+    async def _fetch_scenes_tick(self) -> None:
+        if not self._conn.connected:
+            return
+        await self._fetch_scenes()
+
+    async def _poll_status_tick(self) -> None:
+        """Poll mixer.status."""
+        if not self._conn.connected:
+            return
+        try:
+            self._auto_poll_counter += 1
+            if self._auto_poll_counter >= 2:  # every ~1 s
+                self._auto_poll_counter = 0
+                await self._refresh_auto_status_tick()
+
             resp = await self._conn.command(f"mixer.status {self.mixer_name}", raise_for_status=False)
             if resp is None:
                 self.connected = False
                 self._set_status_bar(True, f"Lost connection to {self.avp_host}:{self.avp_port}")
-                continue
+                return
             if resp.code == 201 and resp.content:
                 try:
-                    data = json.loads(resp.content.strip())
-                    self.pgm_scene = data.get("pgm_scene", "")
-                    self.pvw_scene_remote = data.get("pvw_scene", "")
-                    self.transition_mode = data.get("transition", "idle")
+                    status = parse_mixer_status(resp.content)
+                    self.pgm_scene = status.pgm_scene
+                    self.pvw_scene_remote = status.pvw_scene
+                    self.transition_mode = status.transition
                 except Exception:
                     pass
-            self._scene_poll_counter += 1
-            if self._scene_poll_counter >= 20:  # every ~10 s
-                self._scene_poll_counter = 0
-                await self._fetch_scenes()
-            self._auto_poll_counter += 1
-            if self._auto_poll_counter >= 2:  # every ~1 s
-                self._auto_poll_counter = 0
-                await self._refresh_auto_status()
+        except Exception:
+            self.connected = False
+            self._set_status_bar(True, f"Lost connection to {self.avp_host}:{self.avp_port}")
+
+    async def _refresh_auto_status_tick(self) -> None:
+        try:
+            await self._refresh_auto_status()
+        except Exception:
+            pass
 
     # ── Reactive watchers ────────────────────────────────────────────────────
 
@@ -732,7 +502,7 @@ class MixerTUI(App):
     def watch_overlay_enabled(self, value: bool) -> None:
         try:
             button = self.query_one("#btn_overlay", Button)
-            button.label = "Overlay: ON" if value else "Overlay: BYPASS"
+            button.label = "Overlay: ON" if value else "Overlay: OFF"
             button.variant = "primary" if value else "warning"
         except NoMatches:
             pass
@@ -808,21 +578,41 @@ class MixerTUI(App):
         except NoMatches:
             pass
 
+    def _wipe_files(self) -> list[str]:
+        if not self.wipe_dir:
+            return []
+        try:
+            names = sorted(os.listdir(self.wipe_dir))
+        except OSError as exc:
+            self.notify(f"Wipe directory unavailable: {exc}", severity="warning")
+            return []
+
+        paths: list[str] = []
+        for name in names:
+            if not name.lower().endswith(".mov"):
+                continue
+            path = os.path.join(self.wipe_dir, name)
+            if os.path.isfile(path):
+                paths.append(path)
+        return paths
+
+    def _wipe_modal(self) -> WipeModal:
+        return WipeModal(
+            self.wipe_file,
+            wipe_dir=self.wipe_dir,
+            wipe_files=self._wipe_files(),
+        )
+
     def _refresh_ai_transition_button(self) -> None:
         try:
             button = self.query_one("#btn_ai_transition", Button)
         except NoMatches:
             return
 
-        if self._auto_conn is None:
-            button.label = "AI: n/a"
-            button.variant = "default"
-            button.tooltip = "Auto-switch control disabled"
-            return
         if not self.auto_control_connected:
             button.label = "AI: n/a"
             button.variant = "default"
-            button.tooltip = f"Auto-switch control not connected at {self.auto_host}:{self.auto_port}"
+            button.tooltip = f"Auto-switch control not available on {self.avp_host}:{self.avp_port}"
             return
         if self.auto_transition_mode == "fade":
             button.label = "AI: FADE"
@@ -838,37 +628,28 @@ class MixerTUI(App):
             button.tooltip = "Automatic speaker switches hard cut"
 
     async def _refresh_auto_status(self) -> None:
-        if self._auto_conn is None:
-            return
-        if not self._auto_conn.connected:
-            ok = await self._auto_conn.ensure_connected()
-            self.auto_control_connected = ok
-            if not ok:
-                self.auto_transition_mode = "n/a"
-                return
-        resp = await self._auto_conn.command("auto_switch.status", raise_for_status=False)
-        if resp is None or resp.code != 201 or not resp.content:
+        if not self._conn.connected:
             self.auto_control_connected = False
             self.auto_transition_mode = "n/a"
             return
+        resp = await self._conn.command("auto_switch.status", raise_for_status=False)
+        if resp is None or resp.code != 201 or not resp.content:
+            return
         self.auto_control_connected = True
         try:
-            data = json.loads(resp.content.strip())
+            status = parse_auto_switch_status(resp.content)
         except Exception:
             return
-        mode = data.get("transition_mode")
-        if isinstance(mode, str):
-            self.auto_transition_mode = mode
-        duration = data.get("fade_duration_s")
-        if duration is not None and not self._auto_duration_initialized:
+        if status.transition_mode is not None:
+            self.auto_transition_mode = status.transition_mode
+        if status.fade_duration_s is not None and not self._auto_duration_initialized:
             try:
-                self._set_duration(float(duration))
+                self._set_duration(status.fade_duration_s)
                 self._auto_duration_initialized = True
-            except (TypeError, ValueError):
+            except Exception:
                 pass
-        wipe_file = data.get("wipe_file")
-        if isinstance(wipe_file, str) and wipe_file and not self.wipe_file:
-            self.wipe_file = wipe_file
+        if status.wipe_file and not self.wipe_file:
+            self.wipe_file = status.wipe_file
             self._update_wipe_button_tooltip()
 
     def _scene_index(self, scene_name: str) -> int:
@@ -924,8 +705,7 @@ class MixerTUI(App):
         return self.transition_mode != "idle"
 
     def _mixer_command(self, command: str, **payload) -> str:
-        payload.setdefault("mixer", self.mixer_name)
-        return f"mixer.{command} {json.dumps(payload, separators=(',', ':'))}"
+        return mixer_command(command, self.mixer_name, **payload)
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -951,14 +731,14 @@ class MixerTUI(App):
             self._do_command(self._mixer_command("wipe", scene=scene, wipe_file=self.wipe_file))
         else:
             self.push_screen(
-                WipeModal(self.wipe_file),
+                self._wipe_modal(),
                 callback=lambda path: self._on_wipe_path_selected(scene, path, execute=True),
             )
 
     def action_change_wipe_path(self) -> None:
         """Open the wipe path modal without executing a wipe."""
         self.push_screen(
-            WipeModal(self.wipe_file),
+            self._wipe_modal(),
             callback=lambda path: self._on_wipe_path_selected(None, path, execute=False),
         )
 
@@ -997,7 +777,12 @@ class MixerTUI(App):
             pass
 
     def action_refresh_status(self) -> None:
-        self._poll_status()
+        self.run_worker(
+            self._poll_status_tick(),
+            group="mixer_avp_poll_now",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     def action_toggle_overlay(self) -> None:
         if self._overlay_toggle_in_progress:
@@ -1009,9 +794,7 @@ class MixerTUI(App):
         self.direct_cut_mode = not self.direct_cut_mode
 
     def _available_ai_transition_modes(self) -> tuple[str, ...]:
-        if self.wipe_file:
-            return AI_TRANSITION_MODES
-        return ("cut", "fade")
+        return AI_TRANSITION_MODES
 
     def action_toggle_ai_transition_mode(self) -> None:
         modes = self._available_ai_transition_modes()
@@ -1021,6 +804,12 @@ class MixerTUI(App):
             self._set_auto_transition_settings(transition_mode=modes[0])
             return
         next_mode = modes[(index + 1) % len(modes)]
+        if next_mode == "wipe" and not self.wipe_file:
+            self.push_screen(
+                self._wipe_modal(),
+                callback=self._on_ai_wipe_path_selected,
+            )
+            return
         self._set_auto_transition_settings(transition_mode=next_mode)
 
     def _on_ai_wipe_path_selected(self, path: Optional[str]) -> None:
@@ -1032,31 +821,25 @@ class MixerTUI(App):
 
     @work(thread=False)
     async def _set_auto_transition_settings(self, transition_mode: Optional[str] = None) -> None:
-        if self._auto_conn is None:
-            self.notify("Auto-switch control is disabled", severity="warning")
+        if not self._conn.connected:
+            self.auto_control_connected = False
+            self.auto_transition_mode = "n/a"
+            self.notify(
+                f"Auto-switch control not available on {self.avp_host}:{self.avp_port}",
+                severity="warning",
+            )
             return
-        if not self._auto_conn.connected:
-            ok = await self._auto_conn.ensure_connected()
-            self.auto_control_connected = ok
-            if not ok:
-                self.auto_transition_mode = "n/a"
-                self.notify(
-                    f"Auto-switch control not connected at {self.auto_host}:{self.auto_port}",
-                    severity="warning",
-                )
-                return
 
         mode = transition_mode or self.auto_transition_mode
-        payload = {"fade_duration_s": self._duration()}
-        if transition_mode is not None:
-            payload["transition_mode"] = transition_mode
-        if self.wipe_file:
-            payload["wipe_file"] = self.wipe_file
-        elif mode == "wipe":
+        if not self.wipe_file and mode == "wipe":
             self.notify("Select a media wipe file first", severity="warning")
             return
-        cmd = f"auto_switch.set {json.dumps(payload, separators=(',', ':'))}"
-        resp = await self._auto_conn.command(cmd, raise_for_status=False)
+        cmd = auto_switch_set_command(
+            fade_duration_s=self._duration(),
+            transition_mode=transition_mode,
+            wipe_file=self.wipe_file,
+        )
+        resp = await self._conn.command(cmd, raise_for_status=False)
         if resp is None:
             self.auto_control_connected = False
             self.auto_transition_mode = "n/a"
@@ -1067,17 +850,14 @@ class MixerTUI(App):
             return
         if resp.code == 201 and resp.content:
             try:
-                data = json.loads(resp.content.strip())
-                mode = data.get("transition_mode")
-                if isinstance(mode, str):
-                    self.auto_transition_mode = mode
-                duration = data.get("fade_duration_s")
-                if duration is not None:
-                    self._set_duration(float(duration))
+                status = parse_auto_switch_status(resp.content)
+                if status.transition_mode is not None:
+                    self.auto_transition_mode = status.transition_mode
+                if status.fade_duration_s is not None:
+                    self._set_duration(status.fade_duration_s)
                     self._auto_duration_initialized = True
-                wipe_file = data.get("wipe_file")
-                if isinstance(wipe_file, str) and wipe_file:
-                    self.wipe_file = wipe_file
+                if status.wipe_file:
+                    self.wipe_file = status.wipe_file
                     self._update_wipe_button_tooltip()
                 self.auto_control_connected = True
             except Exception:
@@ -1090,20 +870,12 @@ class MixerTUI(App):
                 self.notify("Connection lost", severity="error")
                 return
 
-            if enabled:
-                commands = [
-                    f"node.object.set {self.overlay_source_otm_name} outputs 1",
-                    f"node.object.set {self.overlay_otm_name} outputs 3",
-                    f"node.object.set {self.overlay_selector_name} active 1",
-                    f"node.object.set {self.overlay_otm_name} outputs 2",
-                ]
-            else:
-                commands = [
-                    f"node.object.set {self.overlay_otm_name} outputs 3",
-                    f"node.object.set {self.overlay_selector_name} active 0",
-                    f"node.object.set {self.overlay_otm_name} outputs 1",
-                    f"node.object.set {self.overlay_source_otm_name} outputs 0",
-                ]
+            commands = overlay_toggle_commands(
+                enabled=enabled,
+                overlay_source_otm_name=self.overlay_source_otm_name,
+                overlay_otm_name=self.overlay_otm_name,
+                overlay_selector_name=self.overlay_selector_name,
+            )
 
             for i, cmd in enumerate(commands):
                 if i > 0:
@@ -1122,7 +894,7 @@ class MixerTUI(App):
 
     @work(thread=False)
     async def _do_command(self, cmd: str) -> None:
-        is_take = cmd.startswith(("mixer.cut", "mixer.fade", "mixer.wipe"))
+        is_take = cmd.startswith(TAKE_COMMAND_PREFIXES)
         if is_take and self._mixer_take_in_progress():
             return
         old_pgm = self.pgm_scene
@@ -1132,7 +904,7 @@ class MixerTUI(App):
         elif resp.code >= 400:
             self.notify(f"Error {resp.code}: {resp.status}", severity="error")
         else:
-            if cmd.startswith(("mixer.cut", "mixer.fade", "mixer.wipe")):
+            if cmd.startswith(TAKE_COMMAND_PREFIXES):
                 await self._wait_transition_idle(self._idle_wait_budget(cmd))
                 self._apply_pgm_pvw_swap(old_pgm)
             else:
@@ -1143,10 +915,10 @@ class MixerTUI(App):
         resp = await self._conn.command(f"mixer.status {self.mixer_name}", raise_for_status=False)
         if resp and resp.code == 201 and resp.content:
             try:
-                data = json.loads(resp.content.strip())
-                self.pgm_scene = data.get("pgm_scene", "")
-                self.pvw_scene_remote = data.get("pvw_scene", "")
-                self.transition_mode = data.get("transition", "idle")
+                status = parse_mixer_status(resp.content)
+                self.pgm_scene = status.pgm_scene
+                self.pvw_scene_remote = status.pvw_scene
+                self.transition_mode = status.transition
             except Exception:
                 pass
 
@@ -1222,35 +994,31 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--host", default="127.0.0.1", help="avplumber host (default: 127.0.0.1)")
+    parser.add_argument("--host", default="localhost", help="avplumber host (default: localhost)")
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
-    parser.add_argument("--auto-host", default=None,
-                        help="Python auto-switch control host (default: --host)")
-    parser.add_argument("--auto-port", type=int, default=None,
-                        help="Python auto-switch control port (default: --port + 1; 0 disables)")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
     parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
     parser.add_argument("--overlay-source-otm", default="otm_html_overlay_src", help="overlay source one_to_many node name")
     parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
     parser.add_argument("--wipe-file", default=None, metavar="PATH",
                         help="default wipe file path; skips the prompt when set")
+    parser.add_argument("--wipe-dir", default=os.environ.get("AVP_WIPE_DIR"), metavar="PATH",
+                        help="directory of selectable wipe .mov files; may also be set with AVP_WIPE_DIR")
     parser.add_argument("--fade-fps", type=float, default=DEFAULT_FADE_FPS,
                         help=f"frame rate used to convert fade frames to seconds (default: {DEFAULT_FADE_FPS:g})")
     parser.add_argument("--fade-frames", type=int, default=DEFAULT_FADE_FRAMES,
                         help=f"default fade/wipe transition frame count (default: {DEFAULT_FADE_FRAMES})")
     args = parser.parse_args()
-    auto_port = args.port + 1 if args.auto_port is None else args.auto_port
 
     app = MixerTUI(
         host=args.host,
         port=args.port,
-        auto_host=args.auto_host,
-        auto_port=auto_port,
         mixer=args.mixer,
         overlay_otm=args.overlay_otm,
         overlay_source_otm=args.overlay_source_otm,
         overlay_selector=args.overlay_selector,
         wipe_file=args.wipe_file,
+        wipe_dir=args.wipe_dir,
         fade_fps=args.fade_fps,
         fade_frames=args.fade_frames,
     )

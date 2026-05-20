@@ -152,6 +152,20 @@ private:
 
 public:
     std::shared_ptr<NodeManager> manager() { return manager_; }
+    void registerCommand(
+            const std::string& command,
+            std::function<std::string(const std::string&)> handler,
+            bool no_lock = false) {
+        std::string normalized = command;
+        strutils::toLowerInPlace(normalized);
+        commands_[normalized] = [handler = std::move(handler)](ClientStream &cs, std::string &arg) {
+            cs << handler(arg);
+        };
+        if (no_lock)
+            no_lock_commands_.insert(normalized);
+        else
+            no_lock_commands_.erase(normalized);
+    }
     void lockOrNot(bool do_lock, std::function<void()> whattodo) {
         if (do_lock) {
             // locks should be no longer necessary
@@ -804,6 +818,16 @@ public:
             orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
         };
 
+        // mixer.routed_source <mixer> <name> <router_node> <input_index> <route_out_a> <route_out_b> <cs_node_a> <cs_node_b>
+        commands_["mixer.routed_source"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::stringstream ss(arg);
+            std::string mixer_name, src_name, router_node, cs_a, cs_b;
+            int input_index, route_out_a, route_out_b;
+            ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.defineRoutedSource(src_name, router_node, input_index, route_out_a, route_out_b, cs_a, cs_b);
+        };
+
         // mixer.scene <mixer_name> <scene_name> <json_definition>
         commands_["mixer.scene"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::stringstream ss(arg);
@@ -846,9 +870,22 @@ public:
                     def.controls.push_back(std::move(sc));
                 }
             }
+            if (jdef.contains("routes")) {
+                if (!jdef["routes"].is_object())
+                    throw Error("mixer.scene: routes must be an object");
+                for (auto it = jdef["routes"].begin(); it != jdef["routes"].end(); ++it)
+                    def.routes[it.key()] = it.value().get<int>();
+            }
 
             auto orch = mixerOrchestrator(mixer_name);
             orch.defineScene(scene_name, def);
+        };
+
+        // mixer.init_routes <mixer_name>
+        commands_["mixer.init_routes"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
+            std::string mixer_name = strutils::trim(arg);
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.initializeRoutedRoutes();
         };
 
         // mixer.preview {"mixer":"mixer","scene":"scene_name"}
@@ -1413,6 +1450,13 @@ void AVPlumber::executeCommandsFromFile(const std::string path) {
 void AVPlumber::executeCommandsFromString(const std::string script) {
     std::istringstream iss(script);
     impl_->readExecCommands(iss, std::cout, true);
+}
+
+void AVPlumber::registerControlCommand(
+        const std::string& command,
+        std::function<std::string(const std::string&)> handler,
+        bool no_lock) {
+    impl_->registerCommand(command, std::move(handler), no_lock);
 }
 
 void AVPlumber::setLogFile(const std::string path) {

@@ -40,9 +40,8 @@ Usage
         [--silero-device cpu] \\
         [--fade-frames 15] \\
         [--remote-control-port 7777] \\
-        [--auto-switch-control-port 7778] \\
         [--logfile /tmp/auto_mixer.log] \\
-        [--webui-api http://localhost:22222] \\
+        [--webui-api http://<webui-host>:<port>] \\
         [--instance-name auto-mixer] \\
         [--janus-preview]
 
@@ -61,17 +60,13 @@ Environment variables
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import signal
-import threading
-import time
 
 from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
-from pyplumber.auto_switcher import AutoSwitcher
 from pyplumber.mixer import MixerGraphBuilder
 from pyplumber.node import NullSink, Split
 
-from .auto_switch_control import AutoSwitchControlServer
 from .config import (
     CANVAS_H,
     CANVAS_W,
@@ -82,26 +77,31 @@ from .config import (
     JANUS_DEFAULT_HOST,
     JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
     JANUS_DEFAULT_VIDEO_PORT,
-    MIN_ACTIVE_AUDIO_LEVEL_DBFS,
 )
-from .control_status import MixerProgramSceneReader
-from .inputs import build_input_subgraph, default_face_engine, find_named_input, input_basename
+from .inputs import build_input_subgraph, default_face_engine
 from .native_exceptions import AutoMixerAVPlumber, NativeExceptionRegistry
 from .outputs import (
     build_audio_output,
+    build_html_overlay_output,
     build_janus_rtp_output,
     build_mux_output,
     build_video_output,
     output_format_for_url,
 )
-from .profiles.talkshow import (
-    GENARO_INPUT_NAME,
-    RENE_INPUT_NAME,
-    RENE_REQUIRED_LEAD_DB,
-    SERGIO_INPUT_NAME,
+from .profiles.talkshow import RENE_INPUT_NAME
+from .run_config import derive_run_config
+from .runtime import (
+    create_auto_switch_runtime,
+    print_startup_summary,
+    run_until_interrupted,
+    start_graph_groups,
+)
+from .shot_rules import (
+    DEFAULT_MANUAL_SUGGESTION_FAMILIES,
+    DEFAULT_MANUAL_SUGGESTION_WINDOW_S,
+    ShotRules,
 )
 from .preheated import (
-    PREHEATED_GROUP,
     build_preheated_scene_sources,
     define_preheated_scenes,
 )
@@ -109,7 +109,6 @@ from .scenes import define_auto_scenes
 from .shot_selector import (
     AutoShotSceneBuilder,
     HistoryAwareShotSelector,
-    fixed_scene_selector,
     profile_names,
 )
 
@@ -210,23 +209,12 @@ def main() -> None:
         help="TCP port for the avplumber remote control API (0 = disabled)",
     )
     parser.add_argument(
-        "--auto-switch-control-host", default="0.0.0.0",
-        help="Bind address for the Python auto-switch control API (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--auto-switch-control-port", default=None, type=int, metavar="PORT",
-        help=(
-            "TCP port for runtime auto-switch settings. "
-            "Defaults to --remote-control-port + 1 when remote control is enabled; 0 disables it."
-        ),
-    )
-    parser.add_argument(
         "--logfile", default="",
         help="Write avplumber messages to this file and expose it to the Web UI",
     )
     parser.add_argument(
         "--webui-api", default="",
-        help="Web UI server API endpoint URL for auto-registration (e.g. http://localhost:22222)",
+        help="Web UI server API endpoint URL for auto-registration",
     )
     parser.add_argument(
         "--instance-name", default="",
@@ -249,6 +237,15 @@ def main() -> None:
         help="Auto-switch shot selection profile. fixed preserves --auto-switch-layout.",
     )
     parser.add_argument(
+        "--manual-suggestion-window",
+        default=DEFAULT_MANUAL_SUGGESTION_WINDOW_S,
+        type=float,
+        help=(
+            "Seconds to keep a manually clicked scene geometry as the auto-switch "
+            f"suggestion (default: {DEFAULT_MANUAL_SUGGESTION_WINDOW_S:g})"
+        ),
+    )
+    parser.add_argument(
         "--auto-switch-random-seed",
         default=20260521,
         type=int,
@@ -265,6 +262,16 @@ def main() -> None:
         help="Draw mouth ROI boxes plus separate audio/video speaking labels into the output video.",
     )
     parser.add_argument(
+        "--html-overlay-socket",
+        default=os.environ.get("AVP_HTML_OVERLAY_SOCKET", ""),
+        help="Enable final Electron DMA-BUF overlay from this UNIX socket path (empty = disabled).",
+    )
+    parser.add_argument(
+        "--html-overlay-drm-device",
+        default=os.environ.get("AVP_HTML_OVERLAY_DRM_DEVICE", ""),
+        help="DRM render device used to attach a DRM hw_frames_ctx to the overlay source (empty = omit).",
+    )
+    parser.add_argument(
         "--static-genaro-face-crop", action="store_true",
         help="Use a centered static 9:16 crop for the Genaro input instead of face tracking.",
     )
@@ -275,6 +282,10 @@ def main() -> None:
     parser.add_argument(
         "--janus-output", action="store_true",
         help="Send the program output to Janus RTP. May be used without --output.",
+    )
+    parser.add_argument(
+        "--janus-video-only", action="store_true",
+        help="Send only video to Janus RTP.",
     )
     parser.add_argument(
         "--janus-host", default=JANUS_DEFAULT_HOST,
@@ -310,36 +321,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    n = len(args.inputs)
-    if n < 2:
-        parser.error("At least 2 inputs are required.")
-    janus_enabled = args.janus_preview or args.janus_output
-    if not args.output and not janus_enabled:
-        parser.error("Either --output or --janus-output/--janus-preview is required.")
-    if args.janus_preview and not args.output and not args.janus_output:
-        parser.error("--janus-preview needs --output; use --janus-output for Janus-only.")
-    if args.janus_video_bitrate_kbps <= 0:
-        parser.error("--janus-video-bitrate-kbps must be greater than 0.")
-    if 0 <= args.switch_pts_lead_ms < 100:
-        parser.error("--switch-pts-lead-ms must be at least 100, or negative to disable PTS scheduling.")
-    if args.fade_frames <= 0:
-        parser.error("--fade-frames must be greater than 0.")
-    if args.fade is None:
-        args.fade = args.fade_frames * FPS_DEN / FPS_NUM
-    else:
-        args.fade_frames = max(1, int(round(args.fade * FPS_NUM / FPS_DEN)))
-    if args.fade <= 0.0:
-        parser.error("--fade must be greater than 0.")
-    if args.auto_switch_control_port is None:
-        args.auto_switch_control_port = args.remote_control_port + 1 if args.remote_control_port else 0
-    if args.auto_switch_control_port < 0:
-        parser.error("--auto-switch-control-port must be non-negative.")
-    if args.auto_switch_transition == "wipe" and not args.wipe:
-        parser.error("--auto-switch-transition wipe requires the wipe subgraph.")
-    switch_pts_lead_ms = args.switch_pts_lead_ms if args.switch_pts_lead_ms >= 0 else None
-    sergio_input_index = find_named_input(args.inputs, SERGIO_INPUT_NAME)
-    rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
-    genaro_input_index = find_named_input(args.inputs, GENARO_INPUT_NAME)
+    run_config = derive_run_config(args, parser)
+    n = run_config.n_inputs
+    janus_enabled = run_config.janus_enabled
+    record_enabled = run_config.record_enabled
+    rene_input_index = run_config.rene_input_index
+    genaro_input_index = run_config.genaro_input_index
     speaker_registry = Speaker()
     native_exception_registry = NativeExceptionRegistry()
 
@@ -350,6 +337,13 @@ def main() -> None:
     if args.webui_api:
         avp.registerWithWebUI(args.webui_api, args.instance_name, args.logfile)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    overlay_source_hwaccel = None
+    if args.html_overlay_socket and args.html_overlay_drm_device:
+        avp.executeCommandsFromString(
+            'hwaccel.init { "name": "@drm", "type": "drm", '
+            f'"device": {json.dumps(args.html_overlay_drm_device)} }}'
+        )
+        overlay_source_hwaccel = "@drm"
     avp.edges.planCapacity("*", 4)
 
     # ---- Per-input subgraphs ----
@@ -408,24 +402,42 @@ def main() -> None:
             )
         define_auto_scenes(mx, n)
 
-    auto_scene_builder = None
+    auto_scene_builder = AutoShotSceneBuilder(
+        mx,
+        n_inputs=n,
+        preheated=preheated_scenes,
+    )
+    auto_scene_builder.register_initial_scenes()
     auto_switch_selector = None
     if args.auto_switch_shot_profile == "fixed":
-        auto_switch_scene = fixed_scene_selector(args.auto_switch_layout)
-        auto_initial_scene = auto_switch_scene(0)
-    else:
-        auto_scene_builder = AutoShotSceneBuilder(
-            mx,
-            n_inputs=n,
-            preheated=preheated_scenes,
+        fixed_rules = ShotRules(
+            name=f"fixed-{args.auto_switch_layout}",
+            single_speaker_weights=((args.auto_switch_layout, 100),),
+            stack_rules=(),
+            conversation_window_s=6.0,
+            stack_hold_s=4.0,
+            manual_suggestion_window_s=args.manual_suggestion_window,
+            manual_suggestion_families=DEFAULT_MANUAL_SUGGESTION_FAMILIES,
+            avoid_recent_scenes=3,
         )
-        auto_scene_builder.register_initial_scenes()
+        auto_switch_selector = HistoryAwareShotSelector(
+            mx.scenes(),
+            n_inputs=n,
+            fallback_layout=args.auto_switch_layout,
+            scene_builder=auto_scene_builder,
+            rules=fixed_rules,
+            seed=args.auto_switch_random_seed,
+        )
+        auto_switch_scene = auto_switch_selector
+        auto_initial_scene = auto_switch_selector.initial_scene(0)
+    else:
         auto_switch_selector = HistoryAwareShotSelector(
             mx.scenes(),
             n_inputs=n,
             profile_name=args.auto_switch_shot_profile,
             fallback_layout=args.auto_switch_layout,
             scene_builder=auto_scene_builder,
+            manual_suggestion_window_s=args.manual_suggestion_window,
             seed=args.auto_switch_random_seed,
         )
         auto_switch_scene = auto_switch_selector
@@ -433,8 +445,13 @@ def main() -> None:
 
     mx.set_initial_scene(auto_initial_scene, slot="A")
     video_out_edge = mx.build()
-
-    record_enabled = args.output is not None
+    if args.html_overlay_socket:
+        video_out_edge = build_html_overlay_output(
+            avp,
+            video_out_edge,
+            socket_path=args.html_overlay_socket,
+            source_hwaccel=overlay_source_hwaccel,
+        )
 
     # ---- Output routing ----
     if rene_input_index is None:
@@ -453,7 +470,7 @@ def main() -> None:
     record_video_edge = video_out_edge
     janus_video_edge = video_out_edge
     record_audio_edge = program_audio_edge
-    janus_audio_edge = program_audio_edge
+    janus_audio_edge = None if args.janus_video_only else program_audio_edge
 
     if record_enabled and janus_enabled:
         avp.addNode(Split({
@@ -465,15 +482,18 @@ def main() -> None:
         }))
         record_video_edge = "program_video_record"
         janus_video_edge = "program_video_janus"
-        avp.addNode(Split({
-            "name": "split_program_audio_output",
-            "src": program_audio_edge,
-            "dst": ["program_audio_record", "program_audio_janus"],
-            "group": "output",
-            "on_error": "panic",
-        }))
-        record_audio_edge = "program_audio_record"
-        janus_audio_edge = "program_audio_janus"
+        if args.janus_video_only:
+            record_audio_edge = program_audio_edge
+        else:
+            avp.addNode(Split({
+                "name": "split_program_audio_output",
+                "src": program_audio_edge,
+                "dst": ["program_audio_record", "program_audio_janus"],
+                "group": "output",
+                "on_error": "panic",
+            }))
+            record_audio_edge = "program_audio_record"
+            janus_audio_edge = "program_audio_janus"
 
     if record_enabled:
         audio_enc_edge = build_audio_output(avp, record_audio_edge, codec=args.audio_codec, prefix="program")
@@ -522,150 +542,38 @@ def main() -> None:
         ))
 
     # ---- Start all groups ----
-    for i in range(n):
-        avp.group(f"input_{i}").startNodes()
-    if preheated_scenes:
-        avp.group(PREHEATED_GROUP).startNodes()
-    mx.start_groups()
-    avp.group("output").startNodes()
+    start_graph_groups(
+        avp,
+        n_inputs=n,
+        mixer=mx,
+        preheated_scenes=preheated_scenes,
+    )
 
-    output_targets = []
-    if record_enabled:
-        output_targets.append(args.output)
-    if janus_enabled:
-        output_targets.append(
-            f"Janus RTP video={args.janus_host}:{args.janus_video_port} audio={args.janus_host}:{args.janus_audio_port}"
-        )
-    print(f"[auto_mixer] Graph started with {n} input(s) → {', '.join(output_targets)}")
-    print(f"[auto_mixer] Canvas: {CANVAS_W}x{CANVAS_H}, face engine: {args.face_engine}")
-    if sergio_input_index is not None:
-        print(f"[auto_mixer] Sergio input detected: {sergio_input_index} ({input_basename(args.inputs[sergio_input_index])})")
-    if rene_input_index is not None:
-        print(f"[auto_mixer] Rene input detected: {rene_input_index} ({input_basename(args.inputs[rene_input_index])})")
-    if genaro_input_index is not None:
-        crop_mode = "static centered 9:16 crop" if args.static_genaro_face_crop else "face-tracked 9:16 crop"
-        print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - {crop_mode}")
-    if args.debug_mouth_roi_bboxes:
-        print("[auto_mixer] Debug mouth ROI and speaking status overlays enabled")
-    if preheated_scenes:
-        print(f"[auto_mixer] Preheated scene geometries enabled: {preheated_scenes.summary()}")
-    else:
-        print("[auto_mixer] Preheated scene geometries disabled")
-    if switch_pts_lead_ms is None:
-        print("[auto_mixer] Auto-switch PTS scheduling disabled")
-    else:
-        print(f"[auto_mixer] Auto-switch cuts scheduled {switch_pts_lead_ms} ms ahead of VAD PTS")
-    if args.auto_switch_shot_profile == "fixed":
-        print(f"[auto_mixer] Auto-switch layout: fixed {args.auto_switch_layout}")
-    else:
-        print(
-            f"[auto_mixer] Auto-switch shot profile: {args.auto_switch_shot_profile} "
-            f"(seed={args.auto_switch_random_seed})"
-        )
-        if auto_switch_selector is not None:
-            print(
-                "[auto_mixer] Manual layout suggestions: "
-                f"{auto_switch_selector.rules.manual_suggestion_window_s:.1f}s "
-                f"{auto_switch_selector.rules.manual_suggestion_families}"
-            )
-    print(f"[auto_mixer] Scenes: {mx.scenes()}")
+    print_startup_summary(args, run_config, mx, preheated_scenes, auto_switch_selector)
 
     # ---- Auto-switcher ----
-    program_scene_reader = None
-    if args.remote_control_port:
-        program_scene_reader = MixerProgramSceneReader(
-            host="127.0.0.1",
-            port=args.remote_control_port,
-            mixer_name=mx.name,
-        )
-    switcher = AutoSwitcher(
-        mixer=mx,
-        registry=speaker_registry,
-        n_inputs=n,
-        scene_for_input=auto_switch_scene,
-        fade_duration_s=args.fade,
-        wipe_file=args.auto_switch_wipe_file or None,
-        transition_mode=args.auto_switch_transition,
-        min_dwell_program_s=args.min_dwell,
-        min_active_level_db=MIN_ACTIVE_AUDIO_LEVEL_DBFS,
-        switch_pts_lead_ms=switch_pts_lead_ms,
-        special_speaker_index=rene_input_index,
-        special_speaker_margin_db=RENE_REQUIRED_LEAD_DB,
-        vad_only_priority_speaker_index=sergio_input_index,
-        program_scene_getter=(
-            program_scene_reader.program_scene if program_scene_reader is not None else None
-        ),
-    )
-    auto_control_server = None
-    if args.auto_switch_control_port:
-        auto_control_server = AutoSwitchControlServer(
-            switcher,
-            host=args.auto_switch_control_host,
-            port=args.auto_switch_control_port,
-            native_exceptions=native_exception_registry,
-        )
-        auto_control_server.start()
-        print(
-            "[auto_mixer] Auto-switch control: "
-            f"{args.auto_switch_control_host}:{args.auto_switch_control_port}"
-        )
-    print(
-        "[auto_mixer] Auto-switch transition: "
-        f"{args.auto_switch_transition}"
-        f"{f' ({args.fade:.3f}s)' if args.auto_switch_transition in ('fade', 'wipe') else ''}"
-    )
-    if args.auto_switch_wipe_file:
-        print(f"[auto_mixer] Auto-switch wipe file: {args.auto_switch_wipe_file}")
-    print(
-        f"[auto_mixer] Fade duration: {args.fade_frames} frame(s) "
-        f"at {FPS_NUM / FPS_DEN:g} fps ({args.fade:.3f}s)"
+    auto_runtime = create_auto_switch_runtime(
+        args=args,
+        avp=avp,
+        mx=mx,
+        speaker_registry=speaker_registry,
+        run_config=run_config,
+        native_exception_registry=native_exception_registry,
+        auto_switch_scene=auto_switch_scene,
     )
 
     # Unlock the control server so remote clients can issue commands.
     avp.setReady()
-    if not args.disable_auto_switcher:
-        switcher.start()
+    auto_switcher_enabled = not args.disable_auto_switcher
+    auto_runtime.start_switcher(enabled=auto_switcher_enabled)
 
     # ---- Run until interrupted ----
-    stop_event = threading.Event()
-
-    def _on_signal(signum, frame):
-        print("\n[auto_mixer] Shutting down...")
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, _on_signal)
-    signal.signal(signal.SIGTERM, _on_signal)
-
-    try:
-        while not stop_event.is_set():
-            time.sleep(1.0)
-            # Heartbeat / status log every 10 s.
-            if int(time.monotonic()) % 10 == 0:
-                entries = speaker_registry.all()
-                for e in entries:
-                    audio_s = "AUDIO" if e.speaking else "     "
-                    visual_s = "VIS" if e.visual_speaking else "   "
-                    duration_s = time.monotonic() - e.last_change_ts if e.speaking else e.speaking_duration_s
-                    audio_pts_s = (
-                        f"  a_pts={e.audio_event_pts_ms / 1000.0:.3f}s"
-                        if e.audio_event_pts_ms is not None
-                        else ""
-                    )
-                    print(
-                        f"[vad] input {e.index}: {audio_s} {visual_s}  "
-                        f"{e.level_db:+.1f} dB  "
-                        f"dur={duration_s:.1f}s"
-                        f"{audio_pts_s}"
-                    )
-                print(f"[mixer] PGM: {mx.current_scene}")
-    finally:
-        if not args.disable_auto_switcher:
-            switcher.stop()
-        if auto_control_server is not None:
-            auto_control_server.stop()
-        if program_scene_reader is not None:
-            program_scene_reader.close()
-        print("[auto_mixer] Done.")
+    run_until_interrupted(
+        runtime=auto_runtime,
+        speaker_registry=speaker_registry,
+        mx=mx,
+        auto_switcher_enabled=auto_switcher_enabled,
+    )
 
 
 if __name__ == "__main__":

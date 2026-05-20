@@ -24,6 +24,8 @@ struct SceneDefinition {
     std::string name;
     /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
     std::unordered_map<std::string, SourceLayout> sources;
+    /// Logical routed source name -> router input index selected by this scene.
+    std::unordered_map<std::string, int> routes;
     std::vector<SceneControl> controls;
     int width = 1920;
     int height = 1080;
@@ -43,10 +45,16 @@ struct MixerState : public InstanceShared<MixerState> {
         std::string otm_node_name;          // "otm_cam1"
         int input_index;                    // index within compositor src array
         std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
+        bool routed = false;
+        std::string router_node_name;
+        int route_output_a = -1;
+        int route_output_b = -1;
     };
     std::unordered_map<std::string, SourceInfo> sources;
 
     std::unordered_map<std::string, SceneDefinition> scenes;
+    std::unordered_map<std::string, int> router_output_counts;
+    std::unordered_map<std::string, std::vector<int>> router_routes;
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;

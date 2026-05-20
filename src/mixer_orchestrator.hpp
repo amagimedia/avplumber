@@ -33,6 +33,10 @@ class MixerOrchestrator {
 
     /// Rewrite every camera `one_to_many` bitmask for one slot bit from scene + active_inputs.
     void rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene);
+    void applyRoutedSceneRoutesForSlot(bool is_slot_a, const SceneDefinition& scene,
+                                       int64_t at_pts_ms, bool immediate);
+    void publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a, const SceneDefinition& scene,
+                                           int64_t at_pts_ms, bool immediate);
 
     void ensureIdle() const;
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
@@ -79,7 +83,7 @@ class MixerOrchestrator {
                                double duration_sec,
                                bool new_pgm_is_slot_a,
                                int64_t start_pts_ms,
-                               int64_t margin_ms);
+                               int64_t preheat_ms);
 
     int64_t margin_ms_ = 100;
     std::string transition_node_name_ = "mixer_transition";
@@ -92,7 +96,11 @@ public:
 
     void defineSource(const std::string& name, const std::string& otm_node, int input_index,
                       const std::string& cs_node_a, const std::string& cs_node_b);
+    void defineRoutedSource(const std::string& name, const std::string& router_node,
+                            int input_index, int route_output_a, int route_output_b,
+                            const std::string& cs_node_a, const std::string& cs_node_b);
     void defineScene(const std::string& name, const SceneDefinition& def);
+    void initializeRoutedRoutes();
 
     void preview(const std::string& scene_name);
     void cut(const std::string& scene_name, int64_t start_pts_ms = -1);

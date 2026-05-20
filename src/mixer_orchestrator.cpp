@@ -6,11 +6,13 @@
 #include <iterator>
 #include <thread>
 #include <chrono>
+#include <unordered_map>
 
 namespace {
 
-constexpr int64_t kWipeSwitchGraceMs = 250;
+constexpr int64_t kWipeSwitchGraceMs = 500;
 constexpr int64_t kFadeColdPrepMs = 700;
+constexpr int64_t kWipeColdPrepMs = 200;
 
 void resetInputIf(std::shared_ptr<NodeManager> nodes, const std::string& name) {
     if (name.empty())
@@ -96,6 +98,68 @@ std::string edgeNameAt(std::shared_ptr<NodeManager> nodes,
     auto it = names.begin();
     std::advance(it, index);
     return *it;
+}
+
+Parameters routesToParameters(const std::vector<int>& routes) {
+    Parameters arr = Parameters::array();
+    for (int input_index : routes)
+        arr.push_back(input_index);
+    return arr;
+}
+
+void ensureRouteTableSize(MixerState& st, const std::string& router_name) {
+    int count = st.router_output_counts[router_name];
+    auto& routes = st.router_routes[router_name];
+    if ((int)routes.size() != count)
+        routes.assign(count, -1);
+}
+
+std::unordered_map<std::string, std::vector<int>> currentRouterTables(MixerState& st) {
+    std::unordered_map<std::string, std::vector<int>> tables;
+    for (const auto& [router_name, count] : st.router_output_counts) {
+        ensureRouteTableSize(st, router_name);
+        tables[router_name] = st.router_routes[router_name];
+        if ((int)tables[router_name].size() != count)
+            tables[router_name].assign(count, -1);
+    }
+    return tables;
+}
+
+int routeOutputForSlot(const MixerState::SourceInfo& info, bool is_slot_a) {
+    return is_slot_a ? info.route_output_a : info.route_output_b;
+}
+
+void setRoutedSlotInTables(MixerState& st,
+                           std::unordered_map<std::string, std::vector<int>>& tables,
+                           bool is_slot_a,
+                           const SceneDefinition* scene) {
+    for (const auto& [src_name, info] : st.sources) {
+        if (!info.routed)
+            continue;
+        const int output_index = routeOutputForSlot(info, is_slot_a);
+        if (output_index < 0)
+            continue;
+
+        auto& routes = tables[info.router_node_name];
+        const int count = st.router_output_counts[info.router_node_name];
+        if ((int)routes.size() != count)
+            routes.assign(count, -1);
+        if (output_index >= (int)routes.size())
+            throw Error("mixer: routed source " + src_name + " output index " +
+                        std::to_string(output_index) + " exceeds router " +
+                        info.router_node_name + " route table");
+
+        routes[output_index] = -1;
+        if (!scene || !scene->sources.count(src_name))
+            continue;
+
+        auto route_it = scene->routes.find(src_name);
+        if (route_it == scene->routes.end()) {
+            throw Error("mixer: scene " + scene->name + " uses routed source " +
+                        src_name + " without an explicit route");
+        }
+        routes[output_index] = route_it->second;
+    }
 }
 
 
@@ -293,14 +357,88 @@ void MixerOrchestrator::defineSource(const std::string& name, const std::string&
     state_->sources[name] = std::move(info);
 }
 
+void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::string& router_node,
+                                           int input_index, int route_output_a, int route_output_b,
+                                           const std::string& cs_node_a, const std::string& cs_node_b) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    MixerState::SourceInfo info;
+    info.input_index = input_index;
+    info.cs_node_a = cs_node_a;
+    info.cs_node_b = cs_node_b;
+    info.routed = true;
+    info.router_node_name = router_node;
+    info.route_output_a = route_output_a;
+    info.route_output_b = route_output_b;
+    state_->sources[name] = std::move(info);
+
+    int& output_count = state_->router_output_counts[router_node];
+    output_count = std::max(output_count, std::max(route_output_a, route_output_b) + 1);
+    ensureRouteTableSize(*state_, router_node);
+}
+
 void MixerOrchestrator::defineScene(const std::string& name, const SceneDefinition& def) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->scenes[name] = def;
 }
 
+void MixerOrchestrator::applyRoutedSceneRoutesForSlot(bool is_slot_a, const SceneDefinition& scene,
+                                                       int64_t at_pts_ms, bool immediate) {
+    auto tables = currentRouterTables(*state_);
+    setRoutedSlotInTables(*state_, tables, is_slot_a, &scene);
+
+    for (const auto& [router_name, routes] : tables) {
+        Parameters value = routesToParameters(routes);
+        if (immediate) {
+            timeline_->clearKey(router_name, "routes");
+            if (!setNodeObjectIfCreated(nodes_, router_name, "routes", value)) {
+                logstream << "mixer: queued " << router_name
+                          << ".routes for router node not created yet";
+            }
+            state_->router_routes[router_name] = routes;
+        }
+        timeline_->set(router_name, "routes", at_pts_ms, value);
+    }
+}
+
+void MixerOrchestrator::publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a,
+                                                           const SceneDefinition& scene,
+                                                           int64_t at_pts_ms,
+                                                           bool immediate) {
+    auto tables = currentRouterTables(*state_);
+    setRoutedSlotInTables(*state_, tables, true, nullptr);
+    setRoutedSlotInTables(*state_, tables, false, nullptr);
+    setRoutedSlotInTables(*state_, tables, pgm_is_slot_a, &scene);
+
+    for (const auto& [router_name, routes] : tables) {
+        Parameters value = routesToParameters(routes);
+        if (immediate) {
+            timeline_->clearKey(router_name, "routes");
+            if (!setNodeObjectIfCreated(nodes_, router_name, "routes", value)) {
+                logstream << "mixer: queued " << router_name
+                          << ".routes for router node not created yet";
+            }
+            state_->router_routes[router_name] = routes;
+        }
+        timeline_->set(router_name, "routes", at_pts_ms, value);
+    }
+}
+
+void MixerOrchestrator::initializeRoutedRoutes() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->pgm_scene_name.empty() || !state_->scenes.count(state_->pgm_scene_name))
+        return;
+    publishRoutedRoutesForProgramOnly(
+        state_->pgm_is_slot_a,
+        state_->scenes.at(state_->pgm_scene_name),
+        wallclock.pts(),
+        true);
+}
+
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
     uint32_t active = state_->computeActiveInputsMask(scene);
     for (const auto& [src_name, info] : state_->sources) {
+        if (info.routed)
+            continue;
         Parameters current_val;
         uint32_t mask = nodes_->node(info.otm_node_name)->getObjectTry("outputs", current_val)
                             ? current_val.get<uint32_t>()
@@ -362,6 +500,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     // Keeps `outputs` consistent with compositor consumption (no frames into unused inputs).
     const uint32_t slot_bit = is_slot_a ? 1u : 2u;
     rewriteCameraOutputsForSlot(slot_bit, scene);
+    applyRoutedSceneRoutesForSlot(is_slot_a, scene, wallclock.pts(), true);
 
     state_->pvw_scene_name = scene_name;
 }
@@ -467,12 +606,16 @@ void MixerOrchestrator::deferredCleanup(
             const SceneDefinition& scene = scene_it->second;
             const uint32_t active = state->computeActiveInputsMask(scene);
             for (const auto& [src_name, info] : state->sources) {
+                if (info.routed)
+                    continue;
                 const bool in_scene = scene.sources.count(src_name) > 0;
                 const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
                 const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
                 timeline->clearKey(info.otm_node_name, "outputs");
                 setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
             }
+            MixerOrchestrator orch(nodes, state, timeline);
+            orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
             const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
             const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
             timeline->clearKey(new_slot.post_otm_name, "outputs");
@@ -545,12 +688,16 @@ void MixerOrchestrator::readyCutThread(
                 "active", Parameters(new_pgm_is_slot_a ? 0 : 1));
 
             for (const auto& [src_name, info] : state->sources) {
+                if (info.routed)
+                    continue;
                 const bool in_scene = scene.sources.count(src_name) > 0;
                 const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
                 const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
                 timeline->clearKey(info.otm_node_name, "outputs");
                 setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
             }
+            MixerOrchestrator orch(nodes, state, timeline);
+            orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
             timeline->clearKey(new_slot.post_otm_name, "outputs");
             timeline->clearKey(old_slot.post_otm_name, "outputs");
             timeline->clearKey(new_slot.compositor_name, "active_inputs");
@@ -681,9 +828,12 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     // pvw_bit == post-flip PGM bit (the PVW slot becomes the new PGM)
     int64_t T_cleanup = T_end + 100;
     for (const auto& [src_name, info] : state_->sources) {
+        if (info.routed)
+            continue;
         uint32_t new_mask = target_scene.sources.count(src_name) ? pvw_bit : 0u;
         timeline_->set(info.otm_node_name, "outputs", T_cleanup, Parameters(new_mask));
     }
+    publishRoutedRoutesForProgramOnly(pvw_is_slot_a, target_scene, T_cleanup, false);
     timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
 
     // 6. Deferred cleanup: delete transition node + flip state
@@ -804,9 +954,12 @@ void MixerOrchestrator::wipeThread(
         uint32_t new_pgm_bit = state->pvwOutputBit();
         auto& scene = state->scenes.at(scene_name);
         for (const auto& [src_name, info] : state->sources) {
+            if (info.routed)
+                continue;
             uint32_t mask = scene.sources.count(src_name) ? new_pgm_bit : 0u;
             timeline->set(info.otm_node_name, "outputs", Tw, Parameters(mask));
         }
+        orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, Tw, true);
 
         const auto& old_slot = state->pgmSlot();
         timeline->set(old_slot.compositor_name, "active_inputs", Tw, Parameters(0u));
@@ -858,8 +1011,8 @@ void MixerOrchestrator::wipePrepAndRun(
         double duration_sec,
         bool new_pgm_is_slot_a,
         int64_t start_pts_ms,
-        int64_t margin_ms) {
-    int64_t T_prep = start_pts_ms - margin_ms;
+        int64_t preheat_ms) {
+    int64_t T_prep = start_pts_ms - preheat_ms;
     int64_t prep_delay = T_prep - wallclock.pts();
     if (prep_delay > 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(prep_delay));
@@ -892,7 +1045,7 @@ void MixerOrchestrator::wipePrepAndRun(
     int64_t total_ms = (int64_t)(duration_sec * 1000);
     int64_t midpoint_ms = total_ms / 2;
     wipeThread(nodes, state, timeline, std::move(scene_name), new_pgm_is_slot_a,
-               midpoint_ms + margin_ms, total_ms + margin_ms);
+               midpoint_ms + preheat_ms, total_ms + preheat_ms);
 }
 
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
@@ -906,6 +1059,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
         throw Error("mixer: wipe requires wipe_group and wipe_input_node (see mixer.init)");
 
     int64_t T_start = resolveTransitionStartPts(start_pts_ms);
+    T_start = std::max(T_start, wallclock.pts() + kWipeColdPrepMs);
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     scheduleSceneControls(state_->scenes.at(scene_name), T_start);
@@ -927,7 +1081,7 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
         // Pre-roll the wipe branch before making it visible. Switching `wipe_sel`
         // immediately after `startGroup()` can expose the startup latency of the
         // wipe decode/filter chain as a freeze on the last direct frame.
-        int64_t T_prep = T_start - margin_ms_;
+        int64_t T_prep = T_start - kWipeColdPrepMs;
         timeline_->set(state_->wipe_otm_name, "outputs", T_prep, Parameters(3u));    // 0b11 both direct + wipe_in
         timeline_->set(state_->wipe_selector_name, "active", T_start, Parameters(1)); // wipe_overlay_out
 
@@ -938,12 +1092,13 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
                   << " T_start=" << T_start << " total_ms=" << total_ms << " midpoint_ms=" << midpoint_ms
                   << " new_pgm_slot_" << (pvw_is_slot_a ? 'A' : 'B');
         std::thread(wipeThread, nodes_, state_, timeline_,
-                    scene_name, pvw_is_slot_a, midpoint_ms + margin_ms_, total_ms + margin_ms_).detach();
+                    scene_name, pvw_is_slot_a,
+                    midpoint_ms + kWipeColdPrepMs, total_ms + kWipeColdPrepMs).detach();
         return;
     }
 
     std::thread(wipePrepAndRun, nodes_, state_, timeline_,
-                scene_name, wipe_file, duration_sec, pvw_is_slot_a, T_start, margin_ms_).detach();
+                scene_name, wipe_file, duration_sec, pvw_is_slot_a, T_start, kWipeColdPrepMs).detach();
 }
 
 std::vector<std::string> MixerOrchestrator::sceneNames() const {

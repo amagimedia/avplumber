@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from pyplumber.mixer import MixerGraphBuilder
-from pyplumber.node import SourceSwitcher, Split
+from pyplumber.node import PreheatVideoRouter, Split
 
 from .config import (
     CANVAS_H,
@@ -103,21 +103,17 @@ def _source_name(template_key: str, slot: int) -> str:
     return f"hot_{template_key}_{slot}"
 
 
-def _selector_name(template_key: str, slot: int) -> str:
-    return f"hot_{template_key}_{slot}_selector"
+def _router_name(input_kind: str) -> str:
+    return f"preheat_{input_kind}_router"
 
 
-def _selected_edge(template_key: str, slot: int) -> str:
-    return f"hot_{template_key}_{slot}_selected"
-
-
-def _selector_input_edge(input_index: int, template_key: str, slot: int) -> str:
-    return f"v{input_index}_{template_key}_{slot}_for_selector"
+def _router_output_edge(template_key: str, slot: int, mixer_slot: str) -> str:
+    return f"hot_{template_key}_{slot}_route_{mixer_slot.lower()}"
 
 
 @dataclass(frozen=True)
 class PreheatedSceneSources:
-    """Edges for regular mixer sources plus shared geometry selectors."""
+    """Edges for regular mixer sources plus routed hot geometry slots."""
 
     face_mixer_edges: list[str]
     orig_mixer_edges: list[str]
@@ -137,13 +133,8 @@ class PreheatedSceneSources:
     def graph(self, template_key: str) -> str:
         return self.templates[template_key].graph()
 
-    def control(self, template_key: str, slot: int, active_input: int) -> dict:
-        self.require_slot(template_key, slot)
-        return {
-            "node": _selector_name(template_key, slot),
-            "key": "active",
-            "value": active_input,
-        }
+    def add_route(self, routes: dict[str, int], template_key: str, slot: int, active_input: int) -> None:
+        routes[self.source(template_key, slot)] = active_input
 
     def require_slot(self, template_key: str, slot: int) -> None:
         if self.slot_counts.get(template_key, 0) <= slot:
@@ -171,7 +162,7 @@ def build_preheated_scene_sources(
     input_groups: list[str],
     include_regular_mixer_edges: bool = False,
 ) -> PreheatedSceneSources:
-    """Build selected raw feeds, then register one source per hot geometry slot."""
+    """Build routed raw feeds, then register one source per hot geometry slot."""
     n = len(face_edges)
     templates = _enabled_templates(n)
     slot_counts = {template.key: template.slots(n) for template in templates}
@@ -180,59 +171,85 @@ def build_preheated_scene_sources(
     face_mixer_edges: list[str] = []
     orig_mixer_edges: list[str] = []
 
-    for i, (face_edge, orig_edge, input_group) in enumerate(zip(face_edges, orig_edges, input_groups)):
-        face_outputs = []
-        orig_outputs = []
+    face_router_inputs = list(face_edges)
+    orig_router_inputs = list(orig_edges)
 
-        if include_regular_mixer_edges:
-            face_outputs.append(f"v{i}_face_for_mixer")
-            orig_outputs.append(f"v{i}_orig_for_mixer")
-            face_mixer_edges.append(face_outputs[0])
-            orig_mixer_edges.append(orig_outputs[0])
-
-        for template in templates:
-            outputs = face_outputs if template.input_kind == "face" else orig_outputs
-            for slot in range(slot_counts[template.key]):
-                outputs.append(_selector_input_edge(i, template.key, slot))
-
-        if face_outputs:
+    if include_regular_mixer_edges:
+        face_router_inputs = []
+        orig_router_inputs = []
+        for i, (face_edge, orig_edge, input_group) in enumerate(zip(face_edges, orig_edges, input_groups)):
+            face_mixer = f"v{i}_face_for_mixer"
+            orig_mixer = f"v{i}_orig_for_mixer"
+            face_router = f"v{i}_face_for_preheat_router"
+            orig_router = f"v{i}_orig_for_preheat_router"
+            face_mixer_edges.append(face_mixer)
+            orig_mixer_edges.append(orig_mixer)
+            face_router_inputs.append(face_router)
+            orig_router_inputs.append(orig_router)
             avp.addNode(Split({
                 "name": f"split_preheat_face_{i}",
                 "src": face_edge,
-                "dst": face_outputs,
+                "dst": [face_mixer, face_router],
                 "drop": True,
                 "group": input_group,
                 "auto_restart": "group",
             }))
-        if orig_outputs:
             avp.addNode(Split({
                 "name": f"split_preheat_orig_{i}",
                 "src": orig_edge,
-                "dst": orig_outputs,
+                "dst": [orig_mixer, orig_router],
                 "drop": True,
                 "group": input_group,
                 "auto_restart": "group",
             }))
 
+    router_outputs: dict[str, list[str]] = {"face": [], "orig": []}
+    router_labels: dict[str, list[str]] = {"face": [], "orig": []}
+    route_indices: dict[tuple[str, int, str], int] = {}
+
     for template in templates:
+        outputs = router_outputs[template.input_kind]
+        labels = router_labels[template.input_kind]
         for slot in range(slot_counts[template.key]):
-            selector_inputs = [
-                _selector_input_edge(i, template.key, slot)
-                for i in range(n)
-            ]
-            avp.addNode(SourceSwitcher({
-                "name": _selector_name(template.key, slot),
-                "src": selector_inputs,
-                "dst": _selected_edge(template.key, slot),
-                "active": 0,
-                "timeline": mx.timeline,
-                "group": PREHEATED_GROUP,
-                "auto_restart": "group",
-            }))
-            mx.add_source(
+            for mixer_slot in ("A", "B"):
+                route_indices[(template.key, slot, mixer_slot)] = len(outputs)
+                outputs.append(_router_output_edge(template.key, slot, mixer_slot))
+                labels.append(f"{template.key}_{slot}_{mixer_slot}")
+
+    if router_outputs["face"]:
+        avp.addNode(PreheatVideoRouter({
+            "name": _router_name("face"),
+            "src": face_router_inputs,
+            "dst": router_outputs["face"],
+            "routes": [-1] * len(router_outputs["face"]),
+            "labels": router_labels["face"],
+            "timeline": mx.timeline,
+            "group": PREHEATED_GROUP,
+            "auto_restart": "group",
+        }))
+    if router_outputs["orig"]:
+        avp.addNode(PreheatVideoRouter({
+            "name": _router_name("orig"),
+            "src": orig_router_inputs,
+            "dst": router_outputs["orig"],
+            "routes": [-1] * len(router_outputs["orig"]),
+            "labels": router_labels["orig"],
+            "timeline": mx.timeline,
+            "group": PREHEATED_GROUP,
+            "auto_restart": "group",
+        }))
+
+    for template in templates:
+        router = _router_name(template.input_kind)
+        for slot in range(slot_counts[template.key]):
+            mx.add_routed_source(
                 _source_name(template.key, slot),
-                pre_otm_edge=_selected_edge(template.key, slot),
+                pre_filter_edge_a=_router_output_edge(template.key, slot, "A"),
+                pre_filter_edge_b=_router_output_edge(template.key, slot, "B"),
                 input_group=PREHEATED_GROUP,
+                route_router=router,
+                route_output_a=route_indices[(template.key, slot, "A")],
+                route_output_b=route_indices[(template.key, slot, "B")],
                 default_graph=template.graph(),
             )
 
@@ -257,10 +274,12 @@ def _define_full_face_scenes(mx: MixerGraphBuilder, n: int, preheated: Preheated
     graph = preheated.graph("face_full")
     source = preheated.source("face_full")
     for i in range(n):
+        routes: dict[str, int] = {}
+        preheated.add_route(routes, "face_full", 0, i)
         mx.add_scene(
             f"full_face_{i}",
             {source: {"graph": graph, "dst_x": 0, "dst_y": 0}},
-            controls=[preheated.control("face_full", 0, i)],
+            routes=routes,
         )
 
 
@@ -284,7 +303,8 @@ def _define_videoconf_scenes(mx: MixerGraphBuilder, n: int, preheated: Preheated
                 "dst_y": 0,
             }
         }
-        controls = [preheated.control("face_square", 0, i)]
+        routes: dict[str, int] = {}
+        preheated.add_route(routes, "face_square", 0, i)
 
         for k, j in enumerate(others):
             sources[preheated.source("face_conf_thumb", k)] = {
@@ -292,8 +312,8 @@ def _define_videoconf_scenes(mx: MixerGraphBuilder, n: int, preheated: Preheated
                 "dst_x": x_off + k * cell_w,
                 "dst_y": y_off,
             }
-            controls.append(preheated.control("face_conf_thumb", k, j))
-        mx.add_scene(f"videoconf_{i}", sources, controls=controls)
+            preheated.add_route(routes, "face_conf_thumb", k, j)
+        mx.add_scene(f"videoconf_{i}", sources, routes=routes)
 
 
 def _define_vstack3_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSceneSources) -> None:
@@ -305,15 +325,15 @@ def _define_vstack3_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSc
     for a, b, c in sampled_ordered_triples(n, SAMPLED_MANUAL_SCENE_COUNT, VSTACK3_SCENE_SAMPLE_SEED):
         cams = [a, b, c]
         sources = {}
-        controls = []
+        routes: dict[str, int] = {}
         for slot, cam in enumerate(cams):
             sources[preheated.source("orig_stack", slot)] = {
                 "graph": graph,
                 "dst_x": 0,
                 "dst_y": top + slot * tile_h,
             }
-            controls.append(preheated.control("orig_stack", slot, cam))
-        mx.add_scene(f"vstack3_{a}_{b}_{c}", sources, controls=controls)
+            preheated.add_route(routes, "orig_stack", slot, cam)
+        mx.add_scene(f"vstack3_{a}_{b}_{c}", sources, routes=routes)
 
 
 def _define_pip_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSceneSources) -> None:
@@ -328,16 +348,16 @@ def _define_pip_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSceneS
     pip_y = 16
 
     for i, j in sampled_ordered_pairs(n, SAMPLED_MANUAL_SCENE_COUNT, PIP_SCENE_SAMPLE_SEED):
+        routes: dict[str, int] = {}
+        preheated.add_route(routes, "face_full", 0, i)
+        preheated.add_route(routes, "orig_pip_thumb", 0, j)
         mx.add_scene(
             f"pip_{i}_{j}",
             {
                 face_source: {"graph": face_graph, "dst_x": 0, "dst_y": 0},
                 thumb_source: {"graph": thumb_graph, "dst_x": pip_x, "dst_y": pip_y},
             },
-            controls=[
-                preheated.control("face_full", 0, i),
-                preheated.control("orig_pip_thumb", 0, j),
-            ],
+            routes=routes,
         )
 
 
@@ -350,13 +370,12 @@ def _define_vstack2_scenes(mx: MixerGraphBuilder, n: int, preheated: PreheatedSc
     for a, b in sampled_ordered_pairs(n, SAMPLED_MANUAL_SCENE_COUNT, VSTACK2_SCENE_SAMPLE_SEED):
         cams = [a, b]
         sources = {}
-        controls = []
+        routes: dict[str, int] = {}
         for slot, cam in enumerate(cams):
             sources[preheated.source("orig_stack", slot)] = {
                 "graph": graph,
                 "dst_x": 0,
                 "dst_y": gap + slot * tile_h,
             }
-            controls.append(preheated.control("orig_stack", slot, cam))
-        mx.add_scene(f"vstack_{a}_{b}", sources, controls=controls)
-
+            preheated.add_route(routes, "orig_stack", slot, cam)
+        mx.add_scene(f"vstack_{a}_{b}", sources, routes=routes)

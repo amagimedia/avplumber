@@ -73,6 +73,10 @@ public:
 
     void executeCommandsFromFile(const std::string path);
     void executeCommandsFromString(const std::string script);
+    void registerControlCommand(
+        const std::string& command,
+        std::function<std::string(const std::string&)> handler,
+        bool no_lock = false);
     void setLogFile(const std::string path);
     void setLogCallback(std::function<void(const std::string &)> callback);
     void setExceptionCallback(std::function<void(const std::string&, const std::string&, const std::string&)> callback);
