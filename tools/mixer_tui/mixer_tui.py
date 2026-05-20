@@ -29,7 +29,7 @@ Keyboard shortcuts:
     s          Force an immediate mixer.status refresh
     q / ctrl+c Quit
 
-The Textual keys / shortcuts panel opens on startup.
+The Textual keys / shortcuts panel and footer legend are hidden by default.
 """
 
 import argparse
@@ -48,7 +48,6 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
-    Footer,
     Header,
     Input,
     Label,
@@ -620,14 +619,11 @@ class MixerTUI(App):
             yield Button("⚙ Wipe file…", id="btn_change_wipe", variant="default")
             yield Button("Overlay: ON", id="btn_overlay", variant="primary")
 
-        yield Footer()
-
     # ── On mount ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
         self._start_connection_loop()
         self._poll_status()
-        self.call_later(self.action_show_help_panel)
         self._update_wipe_button_tooltip()
         self._refresh_ai_transition_button()
 

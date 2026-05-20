@@ -66,7 +66,6 @@ import signal
 import threading
 import time
 
-from pyplumber import AVPlumber
 from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
 from pyplumber.auto_switcher import AutoSwitcher
 from pyplumber.mixer import MixerGraphBuilder
@@ -87,6 +86,7 @@ from .config import (
 )
 from .control_status import MixerProgramSceneReader
 from .inputs import build_input_subgraph, default_face_engine, find_named_input, input_basename
+from .native_exceptions import AutoMixerAVPlumber, NativeExceptionRegistry
 from .outputs import (
     build_audio_output,
     build_janus_rtp_output,
@@ -341,8 +341,9 @@ def main() -> None:
     rene_input_index = find_named_input(args.inputs, RENE_INPUT_NAME)
     genaro_input_index = find_named_input(args.inputs, GENARO_INPUT_NAME)
     speaker_registry = Speaker()
+    native_exception_registry = NativeExceptionRegistry()
 
-    avp = AVPlumber()
+    avp = AutoMixerAVPlumber(native_exception_registry)
     avp.setLogFile(args.logfile)
     if args.remote_control_port:
         avp.enableControlServer(args.remote_control_port)
@@ -460,6 +461,7 @@ def main() -> None:
             "src": video_out_edge,
             "dst": ["program_video_record", "program_video_janus"],
             "group": "output",
+            "on_error": "panic",
         }))
         record_video_edge = "program_video_record"
         janus_video_edge = "program_video_janus"
@@ -468,6 +470,7 @@ def main() -> None:
             "src": program_audio_edge,
             "dst": ["program_audio_record", "program_audio_janus"],
             "group": "output",
+            "on_error": "panic",
         }))
         record_audio_edge = "program_audio_record"
         janus_audio_edge = "program_audio_janus"
@@ -599,6 +602,7 @@ def main() -> None:
             switcher,
             host=args.auto_switch_control_host,
             port=args.auto_switch_control_port,
+            native_exceptions=native_exception_registry,
         )
         auto_control_server.start()
         print(
