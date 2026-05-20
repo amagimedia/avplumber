@@ -75,6 +75,7 @@ public:
     void executeCommandsFromString(const std::string script);
     void setLogFile(const std::string path);
     void setLogCallback(std::function<void(const std::string &)> callback);
+    void setExceptionCallback(std::function<void(const std::string&, const std::string&, const std::string&)> callback);
     void setReady();
     void shutdown();
     void mainLoop();

@@ -4,6 +4,7 @@
 #include <pybind11/native_enum.h>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 extern "C" {
@@ -425,9 +426,16 @@ namespace {
                 return "Edge(), " + std::to_string(e.occupied()) + "/" + std::to_string(e.capacity());
             })
             .def("addWiretapCallback", [](Edge<T> &e, py::function f) {
-                e.addWiretapCallback([f](const T &p) {
+                auto callback = std::shared_ptr<py::function>(
+                    new py::function(std::move(f)),
+                    [](py::function* fn) {
+                        py::gil_scoped_acquire gil;
+                        delete fn;
+                    }
+                );
+                e.addWiretapCallback([callback](const T &p) {
                     py::gil_scoped_acquire gil;
-                    f(py::cast(p));
+                    (*callback)(py::cast(p));
                 });
             })
             .def_property_readonly("capacity", [](Edge<T> &e) { return e.capacity(); })
@@ -446,30 +454,43 @@ namespace {
                 return elem;
             })
             .def("wait_dequeue_timed_ms", [](Edge<T> &e, unsigned int msec) {
-                py::gil_scoped_release release;
                 T elem{};
-                if (!e.wait_dequeue_timed_ms(elem, msec)) {
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, msec);
+                }
+                if (!ok) {
                     throw py::value_error("wait_dequeue_timed_ms: timeout or empty");
                 }
                 return elem;
             })
             // Python-friendly aliases (Edge has no get/tryGet; map to dequeue APIs)
             .def("get", [](Edge<T> &e, int timeout_ms) {
-                py::gil_scoped_release release;
                 T elem{};
                 if (timeout_ms < 0) {
+                    py::gil_scoped_release release;
                     e.wait_dequeue(elem);
                     return elem;
                 }
-                if (!e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms))) {
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(timeout_ms));
+                }
+                if (!ok) {
                     throw py::value_error("get: timeout");
                 }
                 return elem;
             }, py::arg("timeout_ms") = -1)
             .def("tryGet", [](Edge<T> &e, int timeout_ms) -> py::object {
-                py::gil_scoped_release release;
                 T elem{};
-                if (!e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)))) {
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = e.wait_dequeue_timed_ms(elem, static_cast<unsigned>(std::max(0, timeout_ms)));
+                }
+                if (!ok) {
                     return py::none();
                 }
                 return py::cast(elem);
@@ -535,6 +556,24 @@ PYBIND11_MODULE(_avplumber, m) {
                 callback(py::str(s));
             });
         })
+        .def("setExceptionCallback", [](AVPlumber &avp, py::object callback_obj) {
+            if (callback_obj.is_none()) {
+                avp.setExceptionCallback(nullptr);
+                return;
+            }
+            if (!PyCallable_Check(callback_obj.ptr())) {
+                throw py::type_error("callback must be callable or None");
+            }
+            py::function callback = py::reinterpret_borrow<py::function>(callback_obj);
+            avp.setExceptionCallback([callback](const std::string &node_name, const std::string &node_type, const std::string &message) {
+                py::gil_scoped_acquire acquire;
+                try {
+                    callback(py::str(node_name), py::str(node_type), py::str(message));
+                } catch (py::error_already_set &e) {
+                    e.discard_as_unraisable("AVPlumber.on_exception");
+                }
+            });
+        }, py::arg("callback"))
         .def("setReady", &AVPlumber::setReady)
         .def("shutdown", &AVPlumber::shutdown)
         .def("mainLoop", &AVPlumber::mainLoop)

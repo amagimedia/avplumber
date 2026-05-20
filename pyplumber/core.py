@@ -1,4 +1,5 @@
 import _avplumber
+import weakref
 
 from _avplumber import AVPlumber as AVPlumber_C
 from .node import PythonNode
@@ -44,6 +45,19 @@ def _edge_type_name(data_type):
 class AVPlumber(AVPlumber_C):
     def __init__(self):
         super().__init__()
+        self_ref = weakref.ref(self)
+
+        def _native_exception_callback(node_name, node_type, message):
+            avp = self_ref()
+            if avp is None:
+                return
+            avp.on_exception(node_name, node_type, message)
+
+        self._native_exception_callback = _native_exception_callback
+        self.setExceptionCallback(self._native_exception_callback)
+
+    def on_exception(self, node_name: str, node_type: str, message: str):
+        pass
 
     def getEdge(self, name: str, data_type=None):
         for exists_name, find_name in _EDGE_TYPES.values():
