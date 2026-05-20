@@ -183,6 +183,14 @@ class FilterVideo(InternalNode):
     TYPE = "filter_video"
 
 
+class IpcDmabufSource(InternalNode):
+    TYPE = "ipc_dmabuf_source"
+
+
+class DrmPrimeToCuda(InternalNode):
+    TYPE = "drm_prime_to_cuda"
+
+
 class Split(InternalNode):
     TYPE = "split"
 
@@ -258,6 +266,8 @@ class OneToMany(InternalNode):
     TYPE = "one_to_many"
 class SourceSwitcher(InternalNode):
     TYPE = "source_switcher"
+class PreheatVideoRouter(InternalNode):
+    TYPE = "preheat_video_router"
 class CudaRectOverlay(InternalNode):
     TYPE = "cuda_rect_overlay"
 class Input(InternalNode):

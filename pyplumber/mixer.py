@@ -69,10 +69,15 @@ from .node import (
 @dataclass
 class MixerSource:
     name: str
-    pre_otm_edge: str
+    pre_otm_edge: Optional[str]
     input_group: str
     audio_edge: Optional[str] = None
     default_graph: Optional[str] = None
+    pre_filter_edge_a: Optional[str] = None
+    pre_filter_edge_b: Optional[str] = None
+    route_router: Optional[str] = None
+    route_output_a: Optional[int] = None
+    route_output_b: Optional[int] = None
 
 
 @dataclass
@@ -81,6 +86,7 @@ class MixerScene:
     # source_name -> {"graph": ..., "dst_x": ..., "dst_y": ..., ...}
     sources: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     controls: List[Dict[str, Any]] = field(default_factory=list)
+    routes: Dict[str, int] = field(default_factory=dict)
 
 
 class MixerGraphBuilder:
@@ -166,11 +172,45 @@ class MixerGraphBuilder:
         self._source_index[name] = idx
         return self
 
+    def add_routed_source(
+        self,
+        name: str,
+        pre_filter_edge_a: str,
+        pre_filter_edge_b: str,
+        input_group: str,
+        route_router: str,
+        route_output_a: int,
+        route_output_b: int,
+        audio_edge: Optional[str] = None,
+        default_graph: Optional[str] = None,
+    ) -> "MixerGraphBuilder":
+        """Register a source whose slot filters are fed by a native preheat router."""
+        if self._built:
+            raise RuntimeError("Cannot add sources after build()")
+        if name in self._source_index:
+            raise ValueError(f"Source '{name}' already registered")
+        idx = len(self._sources)
+        self._sources.append(MixerSource(
+            name=name,
+            pre_otm_edge=None,
+            input_group=input_group,
+            audio_edge=audio_edge,
+            default_graph=default_graph,
+            pre_filter_edge_a=pre_filter_edge_a,
+            pre_filter_edge_b=pre_filter_edge_b,
+            route_router=route_router,
+            route_output_a=route_output_a,
+            route_output_b=route_output_b,
+        ))
+        self._source_index[name] = idx
+        return self
+
     def add_scene(
         self,
         name: str,
         sources: Dict[str, Dict[str, Any]],
         controls: Optional[List[Dict[str, Any]]] = None,
+        routes: Optional[Dict[str, int]] = None,
     ) -> "MixerGraphBuilder":
         """Define a named scene.
 
@@ -186,13 +226,14 @@ class MixerGraphBuilder:
         """
         if self._built:
             raise RuntimeError("Cannot add scenes after build()")
-        return self.define_scene(name, sources, controls=controls)
+        return self.define_scene(name, sources, controls=controls, routes=routes)
 
     def define_scene(
         self,
         name: str,
         sources: Dict[str, Dict[str, Any]],
         controls: Optional[List[Dict[str, Any]]] = None,
+        routes: Optional[Dict[str, int]] = None,
     ) -> "MixerGraphBuilder":
         """Define or replace a scene.
 
@@ -203,7 +244,11 @@ class MixerGraphBuilder:
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
-        scene = MixerScene(name=name, sources=sources, controls=controls or [])
+        routes = routes or {}
+        route_unknown = [s for s in routes if s not in self._source_index]
+        if route_unknown:
+            raise ValueError(f"Scene '{name}' routes unknown source(s): {route_unknown}")
+        scene = MixerScene(name=name, sources=sources, controls=controls or [], routes=routes)
         self._scenes[name] = scene
         if self._built:
             self.avp.executeCommandsFromString(self._scene_command(name, scene))
@@ -358,15 +403,21 @@ class MixerGraphBuilder:
             # feed only the PGM slot.
             outputs_init = (1 << pgm_slot_bit) if is_in_initial else 0
 
-            self.avp.addNode(OneToMany({
-                "type": "one_to_many",
-                "name": self._n(f"otm_{src.name}"),
-                "src": src.pre_otm_edge,
-                "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b")],
-                "outputs": outputs_init,
-                "timeline": self.timeline,
-                "group": src.input_group,
-            }))
+            if src.route_router is None:
+                self.avp.addNode(OneToMany({
+                    "type": "one_to_many",
+                    "name": self._n(f"otm_{src.name}"),
+                    "src": src.pre_otm_edge,
+                    "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b")],
+                    "outputs": outputs_init,
+                    "timeline": self.timeline,
+                    "group": src.input_group,
+                }))
+                slot_a_edge = self._e(f"{src.name}_a")
+                slot_b_edge = self._e(f"{src.name}_b")
+            else:
+                slot_a_edge = src.pre_filter_edge_a
+                slot_b_edge = src.pre_filter_edge_b
 
             # Default scale: fit to canvas.  MixerOrchestrator rewrites the
             # graph string on every scene switch via node.param.set + auto_restart.
@@ -377,7 +428,7 @@ class MixerGraphBuilder:
 
             self.avp.addNode(FilterVideo({
                 "name": self._n(f"cs_{src.name}_a"),
-                "src": self._e(f"{src.name}_a"),
+                "src": slot_a_edge,
                 "dst": self._e(f"{src.name}_scaled_a"),
                 "graph": default_graph,
                 "hwaccel": self.hwaccel,
@@ -387,7 +438,7 @@ class MixerGraphBuilder:
 
             self.avp.addNode(FilterVideo({
                 "name": self._n(f"cs_{src.name}_b"),
-                "src": self._e(f"{src.name}_b"),
+                "src": slot_b_edge,
                 "dst": self._e(f"{src.name}_scaled_b"),
                 "graph": default_graph,
                 "hwaccel": self.hwaccel,
@@ -507,6 +558,9 @@ class MixerGraphBuilder:
             "src": [self._e("final_direct"), self._e("wipe_overlay_out")],
             "dst": self._e("final_out"),
             "active": 0,
+            "fallback_active": 0,
+            "timeline_reference_input": 0,
+            "fallback_when_active_missing": False,
             "timeline": self.timeline,
             "group": self.name,
         }))
@@ -574,6 +628,7 @@ class MixerGraphBuilder:
                 " [blended]scale_cuda=format=nv12"
             ),
             "hwaccel": self.hwaccel,
+            "defer_preliminary_init": True,
             "group": wipe_group,
         }))
 
@@ -626,15 +681,26 @@ class MixerGraphBuilder:
         lines = [f"mixer.init {self.name} {json.dumps(init_cfg)}"]
 
         for idx, src in enumerate(self._sources):
-            lines.append(
-                f"mixer.source {self.name} {src.name}"
-                f" {self._n('otm_' + src.name)} {idx}"
-                f" {self._n('cs_' + src.name + '_a')}"
-                f" {self._n('cs_' + src.name + '_b')}"
-            )
+            if src.route_router is None:
+                lines.append(
+                    f"mixer.source {self.name} {src.name}"
+                    f" {self._n('otm_' + src.name)} {idx}"
+                    f" {self._n('cs_' + src.name + '_a')}"
+                    f" {self._n('cs_' + src.name + '_b')}"
+                )
+            else:
+                lines.append(
+                    f"mixer.routed_source {self.name} {src.name}"
+                    f" {src.route_router} {idx}"
+                    f" {src.route_output_a} {src.route_output_b}"
+                    f" {self._n('cs_' + src.name + '_a')}"
+                    f" {self._n('cs_' + src.name + '_b')}"
+                )
 
         for scene_name, scene in self._scenes.items():
             lines.append(self._scene_command(scene_name, scene))
+
+        lines.append(f"mixer.init_routes {self.name}")
 
         self.avp.executeCommandsFromString("\n".join(lines))
 
@@ -642,4 +708,6 @@ class MixerGraphBuilder:
         scene_def = {"sources": scene.sources}
         if scene.controls:
             scene_def["controls"] = scene.controls
+        if scene.routes:
+            scene_def["routes"] = scene.routes
         return f"mixer.scene {self.name} {scene_name} {json.dumps(scene_def)}"

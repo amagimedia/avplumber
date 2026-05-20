@@ -5,12 +5,17 @@ from __future__ import annotations
 import random
 import time
 from collections import deque
+from dataclasses import replace
 from typing import Callable, Iterable, Optional
 
 from pyplumber.mixer import MixerGraphBuilder
 
 from .config import CANVAS_H, CANVAS_W
-from .shot_rules import SHOT_RULES, profile_names
+from .shot_rules import (
+    SHOT_RULES,
+    ShotRules,
+    profile_names,
+)
 
 
 def fixed_scene_selector(layout: str) -> Callable[[int], str]:
@@ -44,6 +49,9 @@ class AutoShotSceneBuilder:
         pip_y = 16
 
         if self._preheated:
+            routes: dict[str, int] = {}
+            self._preheated.add_route(routes, "face_full", 0, speaker)
+            self._preheated.add_route(routes, "orig_pip_thumb", 0, companion)
             self._mx.define_scene(
                 self.PIP_SCENE,
                 {
@@ -58,10 +66,7 @@ class AutoShotSceneBuilder:
                         "dst_y": pip_y,
                     },
                 },
-                controls=[
-                    self._preheated.control("face_full", 0, speaker),
-                    self._preheated.control("orig_pip_thumb", 0, companion),
-                ],
+                routes=routes,
             )
         else:
             self._mx.define_scene(
@@ -98,7 +103,7 @@ class AutoShotSceneBuilder:
     def _define_stack_scene(self, scene_name: str, cams: list[int], *, top: int, tile_h: int) -> None:
         graph = f"scale_cuda=w={CANVAS_W}:h={tile_h}:interp_algo=lanczos"
         sources = {}
-        controls = []
+        routes: dict[str, int] = {}
         for slot, cam in enumerate(cams):
             if self._preheated:
                 source = self._preheated.source("orig_stack", slot)
@@ -107,14 +112,14 @@ class AutoShotSceneBuilder:
                     "dst_x": 0,
                     "dst_y": top + slot * tile_h,
                 }
-                controls.append(self._preheated.control("orig_stack", slot, cam))
+                self._preheated.add_route(routes, "orig_stack", slot, cam)
             else:
                 sources[f"orig_{cam}"] = {
                     "graph": graph,
                     "dst_x": 0,
                     "dst_y": top + slot * tile_h,
                 }
-        self._mx.define_scene(scene_name, sources, controls=controls)
+        self._mx.define_scene(scene_name, sources, routes=routes)
 
     def _valid_companion(self, speaker: int, companion: int) -> int:
         if companion != speaker and 0 <= companion < self._n_inputs:
@@ -154,12 +159,19 @@ class HistoryAwareShotSelector:
         profile_name: str = "talkshow-balanced",
         fallback_layout: str = "videoconf",
         scene_builder: Optional[AutoShotSceneBuilder] = None,
+        rules: Optional[ShotRules] = None,
+        manual_suggestion_window_s: Optional[float] = None,
         seed: Optional[int] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if profile_name not in SHOT_RULES:
+        if rules is None and profile_name not in SHOT_RULES:
             raise ValueError(f"unknown shot profile: {profile_name}")
-        self.rules = SHOT_RULES[profile_name]
+        self.rules = rules if rules is not None else SHOT_RULES[profile_name]
+        if manual_suggestion_window_s is not None:
+            self.rules = replace(
+                self.rules,
+                manual_suggestion_window_s=float(manual_suggestion_window_s),
+            )
         self._scenes = set(scenes)
         self._n_inputs = n_inputs
         self._fallback_layout = fallback_layout
@@ -174,7 +186,6 @@ class HistoryAwareShotSelector:
         self._active_stack_until = 0.0
         self._active_stack_history_version = 0
         self._manual_suggestion_family: Optional[str] = None
-        self._manual_suggestion_speaker: Optional[int] = None
         self._manual_suggestion_until = 0.0
 
     def initial_scene(self, speaker_index: int = 0) -> str:
@@ -207,19 +218,18 @@ class HistoryAwareShotSelector:
         """Treat an externally selected PGM scene as a short-lived layout hint."""
         if now is None:
             now = self._clock()
-        family, speaker_index = self._parse_manual_suggestion(scene_name)
+        family = self._parse_manual_suggestion(scene_name)
         if family is None or self.rules.manual_suggestion_window_s <= 0:
             self._clear_manual_suggestion()
             return
 
         self._manual_suggestion_family = family
-        self._manual_suggestion_speaker = speaker_index
         self._manual_suggestion_until = now + self.rules.manual_suggestion_window_s
         self._active_stack_signature = None
         self._active_stack_scene = None
         self._active_stack_until = 0.0
         print(
-            f"[auto_switcher] manual layout suggestion: {family} "
+            f"[auto_switcher] manual geometry suggestion: {family} "
             f"for {self.rules.manual_suggestion_window_s:.1f}s from {scene_name}",
             flush=True,
         )
@@ -262,17 +272,13 @@ class HistoryAwareShotSelector:
         if scene is None:
             self._clear_manual_suggestion()
             return None
-
-        if self._manual_suggestion_speaker is None or speaker_index != self._manual_suggestion_speaker:
-            self._clear_manual_suggestion()
         return scene
 
     def _clear_manual_suggestion(self) -> None:
         self._manual_suggestion_family = None
-        self._manual_suggestion_speaker = None
         self._manual_suggestion_until = 0.0
 
-    def _parse_manual_suggestion(self, scene_name: str) -> tuple[Optional[str], Optional[int]]:
+    def _parse_manual_suggestion(self, scene_name: str) -> Optional[str]:
         for family in self.rules.manual_suggestion_families:
             if family in ("videoconf", "full_face"):
                 prefix = f"{family}_"
@@ -280,14 +286,32 @@ class HistoryAwareShotSelector:
                     continue
                 speaker = self._parse_int_suffix(scene_name[len(prefix):])
                 if speaker is not None and 0 <= speaker < self._n_inputs:
-                    return family, speaker
+                    return family
             elif family == "pip":
+                if scene_name == AutoShotSceneBuilder.PIP_SCENE:
+                    return family
                 parts = scene_name.split("_")
                 if len(parts) >= 3 and parts[0] == "pip":
                     speaker = self._parse_int_suffix(parts[1])
                     if speaker is not None and 0 <= speaker < self._n_inputs:
-                        return family, speaker
-        return None, None
+                        return family
+            elif family == "vstack2":
+                if scene_name == AutoShotSceneBuilder.VSTACK2_SCENE:
+                    return family
+                parts = scene_name.split("_")
+                if len(parts) == 3 and parts[0] == "vstack":
+                    speakers = [self._parse_int_suffix(p) for p in parts[1:]]
+                    if all(speaker is not None and 0 <= speaker < self._n_inputs for speaker in speakers):
+                        return family
+            elif family == "vstack3":
+                if scene_name == AutoShotSceneBuilder.VSTACK3_SCENE:
+                    return family
+                parts = scene_name.split("_")
+                if len(parts) == 4 and parts[0] == "vstack3":
+                    speakers = [self._parse_int_suffix(p) for p in parts[1:]]
+                    if all(speaker is not None and 0 <= speaker < self._n_inputs for speaker in speakers):
+                        return family
+        return None
 
     @staticmethod
     def _parse_int_suffix(value: str) -> Optional[int]:
@@ -355,6 +379,12 @@ class HistoryAwareShotSelector:
         if family == "pip" and self._scene_builder is not None:
             companion = self._pip_companion(speaker_index, recent_speakers)
             return self._scene_builder.pip(speaker_index, companion)
+        if family in ("vstack2", "vstack3"):
+            count = 2 if family == "vstack2" else 3
+            return self._stack_scene(
+                family,
+                self._stack_speakers(speaker_index, recent_speakers, count),
+            )
         candidates = self._family_candidates(family, speaker_index)
         return self._choose_scene(candidates) if candidates else None
 
@@ -364,6 +394,20 @@ class HistoryAwareShotSelector:
                 return speaker
         candidates = [i for i in range(self._n_inputs) if i != speaker_index]
         return self._rng.choice(candidates) if candidates else speaker_index
+
+    def _stack_speakers(self, speaker_index: int, recent_speakers: list[int], count: int) -> list[int]:
+        speakers = [speaker_index]
+        for speaker in recent_speakers:
+            if speaker not in speakers:
+                speakers.append(speaker)
+            if len(speakers) >= count:
+                return speakers
+        for speaker in range(self._n_inputs):
+            if speaker not in speakers:
+                speakers.append(speaker)
+            if len(speakers) >= count:
+                return speakers
+        return speakers
 
     def _family_candidates(self, family: str, speaker_index: int) -> list[str]:
         if family in ("videoconf", "full_face"):

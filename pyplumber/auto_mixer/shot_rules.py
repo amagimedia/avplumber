@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+DEFAULT_MANUAL_SUGGESTION_WINDOW_S = 15.0
+DEFAULT_MANUAL_SUGGESTION_FAMILIES = (
+    "videoconf",
+    "full_face",
+    "pip",
+    "vstack2",
+    "vstack3",
+)
+
 
 @dataclass(frozen=True)
 class StackRule:
@@ -33,8 +42,8 @@ SHOT_RULES: dict[str, ShotRules] = {
         ),
         conversation_window_s=6.0,
         stack_hold_s=4.0,
-        manual_suggestion_window_s=8.0,
-        manual_suggestion_families=("videoconf", "full_face", "pip"),
+        manual_suggestion_window_s=DEFAULT_MANUAL_SUGGESTION_WINDOW_S,
+        manual_suggestion_families=DEFAULT_MANUAL_SUGGESTION_FAMILIES,
         avoid_recent_scenes=3,
     ),
     "talkshow-balanced": ShotRules(
@@ -46,8 +55,8 @@ SHOT_RULES: dict[str, ShotRules] = {
         ),
         conversation_window_s=6.0,
         stack_hold_s=4.0,
-        manual_suggestion_window_s=8.0,
-        manual_suggestion_families=("videoconf", "full_face", "pip"),
+        manual_suggestion_window_s=DEFAULT_MANUAL_SUGGESTION_WINDOW_S,
+        manual_suggestion_families=DEFAULT_MANUAL_SUGGESTION_FAMILIES,
         avoid_recent_scenes=3,
     ),
     "talkshow-variety": ShotRules(
@@ -59,8 +68,8 @@ SHOT_RULES: dict[str, ShotRules] = {
         ),
         conversation_window_s=8.0,
         stack_hold_s=5.0,
-        manual_suggestion_window_s=8.0,
-        manual_suggestion_families=("videoconf", "full_face", "pip"),
+        manual_suggestion_window_s=DEFAULT_MANUAL_SUGGESTION_WINDOW_S,
+        manual_suggestion_families=DEFAULT_MANUAL_SUGGESTION_FAMILIES,
         avoid_recent_scenes=4,
     ),
 }

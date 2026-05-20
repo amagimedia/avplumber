@@ -80,7 +80,7 @@ def find_named_input(inputs: list[str], name: str) -> int | None:
 
 
 def default_face_engine() -> str:
-    """Resolve the face TRT engine used by local dev images and remote test hosts."""
+    """Resolve the face TRT engine from explicit config or packaged defaults."""
     env_engine = os.environ.get("AVP_FACE_ENGINE")
     if env_engine:
         return env_engine
@@ -97,8 +97,6 @@ def default_face_engine() -> str:
         ])
     candidates.extend([
         Path("/opt/tly/engines/yolo_face.plan"),
-        Path("/home/fedora/models/face-recognition-1.2/face-recognition_960x544.plan"),
-        Path("/home/user/tensorrt/face-recognition-1.2/face-recognition_960x544.plan"),
     ])
 
     for candidate in candidates:

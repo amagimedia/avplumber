@@ -549,6 +549,20 @@ PYBIND11_MODULE(_avplumber, m) {
         .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
         .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString)
         .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile)
+        .def("registerControlCommand", [](AVPlumber &avp, const std::string &command, py::function callback, bool no_lock) {
+            avp.registerControlCommand(command, [callback](const std::string &arg) -> std::string {
+                py::gil_scoped_acquire acquire;
+                try {
+                    py::object result = callback(py::str(arg));
+                    if (result.is_none()) {
+                        return "";
+                    }
+                    return py::str(result).cast<std::string>();
+                } catch (py::error_already_set &e) {
+                    throw std::runtime_error(e.what());
+                }
+            }, no_lock);
+        }, py::arg("command"), py::arg("callback"), py::arg("no_lock") = false)
         .def("setLogFile", &AVPlumber::setLogFile)
         .def("setLogCallback", [](AVPlumber &avp, py::function callback) {
             avp.setLogCallback([callback](const std::string &s) {

@@ -21,6 +21,11 @@ class NativeExceptionRegistry:
         self._total = 0
 
     def record(self, node_name: str, node_type: str, message: str) -> None:
+        if (
+            str(node_type) == "NodeGroup"
+            and str(message) == "Error while changing state: Node factory returned nullptr"
+        ):
+            return
         event = {
             "time_unix_s": round(time.time(), 3),
             "node_name": str(node_name),
