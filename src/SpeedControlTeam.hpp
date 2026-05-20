@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <mutex>
 #include "avutils.hpp"
 #include "instance_shared.hpp"
@@ -75,6 +76,7 @@ protected:
         if (synchronize && (getSpeed() != team->getSpeed())) {
             team->setSpeedNonRecursive(getSpeed());
         }
+        auto lock = getLock();
         last_pts_ = NOTS;
         last_sync_ = NOTS;
         shift_ = {0, {1, 1}};
@@ -115,6 +117,10 @@ public:
     }
     void addNode(std::weak_ptr<ISpeed> node) {
         auto lock = getLock();
+        nodes_.erase(
+            std::remove_if(nodes_.begin(), nodes_.end(), [](std::weak_ptr<ISpeed> &p) { return p.expired(); }),
+            nodes_.end()
+        );
         nodes_.push_back(node);
     }
     void setSyncObj(std::weak_ptr<IFlushAndSeek> obj) {
