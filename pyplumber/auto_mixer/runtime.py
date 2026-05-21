@@ -13,7 +13,7 @@ from .config import CANVAS_H, CANVAS_W, FPS_DEN, FPS_NUM, MIN_ACTIVE_AUDIO_LEVEL
 from .control_status import MixerProgramSceneReader
 from .inputs import input_basename
 from .native_exceptions import NativeExceptionRegistry
-from .preheated import PREHEATED_GROUP
+from .preheated import PREHEATED_GROUP, PREHEATED_ROUTER_GROUP
 from .profiles.talkshow import RENE_REQUIRED_LEAD_DB
 from .run_config import AutoMixerRunConfig
 
@@ -44,6 +44,8 @@ def start_graph_groups(avp, *, n_inputs: int, mixer, preheated_scenes) -> None:
     # before creating dependent preheat/mixer/output nodes.
     time.sleep(2.0)
     if preheated_scenes:
+        avp.group(PREHEATED_ROUTER_GROUP).startNodes()
+        time.sleep(2.0)
         avp.group(PREHEATED_GROUP).startNodes()
         time.sleep(2.0)
     mixer.start_groups()

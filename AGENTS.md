@@ -1,7 +1,13 @@
 
+# Your personality
+
+
 ## When thinking about something non-obvious
 * Do not assume that user is right, especially when they say *maybe*, *possibly* etc., it indicates uncertainity, and it's your job to point out better solution - if there is one.
 * When the user wants to change the architecture and is asking for advice, don't assume that their (or your) more recent idea is always better. Be objective.
+
+
+# General tips & guidelines
 
 
 ## When writing documentation and comments
@@ -14,6 +20,38 @@
 * avplumber is a graph-based real-time multimedia framework built around nodes connected by typed queues/edges.
 * The main binary is controlled through a line-based TCP protocol. `.avplumber` scripts are the usual way to create, connect, and start graph nodes.
 * Core media edges carry FFmpeg packets, video frames, audio samples, metadata frames, or platform-specific image handles depending on the node chain.
+* The internal workings are documented in [developing_nodes.md](doc/developing_nodes.md) and the [general README](README.md).
+
+
+## Code & logic style
+* Do not copy-paste logic between nodes. If two or more nodes need the same logic, extract a shared base class or utility in the relevant common module.
+* Do not copy-paste logic inside a single file. Extract it to a helper function, method or lambda.
+* This is C++ & Python project. Use C++ idioms instead of C where possible. For example, instead of manually freeing a resource and returning from method early, use RAII and exceptions.
+* But don't be too orthodox in it. Object-oriented programming isn't always the best solution.
+
+
+## Framework changes
+* Do not modify framework source files such as graph management, control protocol, main, or sentinel code, unless: explicitly asked, or, necessary and generally useful and future-proof.
+* Framework-wide behavior changes should be deliberate and called out as such; avoid incidental framework edits while working on node or mixer features.
+* In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new interface, new shared object etc., or adding functionality to existing ones.
+
+
+## Writing new nodes
+* Put new node implementations under `src/nodes/`; the generated node list handles registration during build.
+* Subclass the appropriate node template or `Node` directly.
+* Use the repo registration macros correctly. Do not put a semicolon after `DECLNODE(...)`.
+* Use JSON params for configuration and implement dynamic parameter handling only when the node actually needs runtime updates.
+* Node source structure & frequently-used patterns are documented in [developing_nodes.md](doc/developing_nodes.md).
+
+
+## Before implementing:
+* State your assumptions explicitly. If uncertain, ask.
+* If multiple interpretations exist, present them - don't pick silently.
+* If a simpler approach exists, say so. Push back when warranted.
+* If something is unclear, stop. Name what's confusing. Ask.
+
+
+# Agentic work guidelines
 
 
 ## When using local agent notes
@@ -35,7 +73,7 @@
 
 
 ## Build and test workflow
-* Do not build locally on ARM when the target requires the x86/CUDA runtime. Use a user-provided remote x86/GPU build environment.
+* Do not build locally when the target requires the x86/CUDA runtime, unless you are sure that the host has all needed hardware (CPU architecture & GPU). Use a user-provided remote x86/GPU build environment.
 * Do not commit remote hostnames, IPs, SSH key paths, checkout paths, CUDA paths, TensorRT paths, or other instance-specific build details. Keep those in local shell config, ignored notes, or user-provided commands.
 * For CUDA/neural builds, preserve the repo's intended feature flags: CUDA, neural_net common, neural_net specific, NVCC/PTX, and TensorRT where required. Keep optional FRUC disabled unless explicitly testing frame interpolation.
 * Python module builds for pyplumber demos must use the same neural/CUDA/TensorRT feature set as the binary build. Do not use a plain Python-module build if it drops required node factories.
@@ -44,6 +82,33 @@
 * Prefer targeted tests for Python logic when available, plus a remote build/run check for CUDA, TensorRT, Janus, or mixer graph changes.
 * When changing Python mixer code, rerun the relevant pytest coverage before reporting done. At minimum, cover the affected files under `pyplumber/auto_mixer/`, `pyplumber/auto_switcher.py`, `pyplumber/mixer.py`, and `tools/mixer_tui/`.
 * When running a remote mixer for graph debugging, keep the web UI backend running and start the mixer with web UI registration enabled so the graph is visible during testing.
+
+
+## Build and test commands
+Before building and running, prepare yourself a helper scripts: `./build.sh` and `./run.sh` on remote host, if they don't already exist.
+
+Example `build.sh` for building automatic video mixer, adapt for specific library needs, remove `python_module` target if using `./avplumber` (default target):
+
+```
+make -j8 NEURAL_NET_COMMON=1 NEURAL_NET_SPECIFIC=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc TENSORRT_ROOT=/opt/tensorrt PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
+```
+
+Example `run.sh` for running pyplumber:
+
+```
+LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 pyplumber/examples/auto_mixer.py --webui-api http://localhost:22222 --input-start-ts 660000 --remote-control-port 22422 --inputs /data/test-content/*.ts --output rtmp://... --debug-mouth-roi-bboxes
+```
+
+Example `run.sh` for running avplumber:
+
+```
+LD_LIBRARY_PATH=/usr/local/lib ./avplumber --webui-api http://localhost:22222 --port 22422 -s examples/sync_mixer.avplumber
+```
+
+Do not use these commands verbatim, adapt for specific needs (libraries, build flags, command line arguments).
+
+
+# Domain-specific rules
 
 
 ## Python/VAD and graph-management transplants
@@ -60,14 +125,3 @@
 * Only use `hwupload`/`hwdownload` in examples whose explicit purpose is CPU/GPU or DMA-BUF interop, and make that purpose clear in the graph name or comments.
 
 
-## Code reuse and framework changes
-* Do not copy-paste logic between nodes. If two or more nodes need the same logic, extract a shared base class or utility in the relevant common module.
-* Do not modify framework source files such as graph management, control protocol, main, or sentinel code unless explicitly asked.
-* Framework-wide behavior changes should be deliberate and called out as such; avoid incidental framework edits while working on node or mixer features.
-
-
-## Writing new nodes
-* Put new node implementations under `src/nodes/`; the generated node list handles registration during build.
-* Subclass the appropriate node template or `Node` directly.
-* Use the repo registration macros correctly. Do not put a semicolon after `DECLNODE(...)`.
-* Use JSON params for configuration and implement dynamic parameter handling only when the node actually needs runtime updates.

@@ -1,7 +1,6 @@
 #include "avplumber.hpp"
 
 #include <list>
-#include <limits>
 #include <fstream>
 #include <iostream>
 #include <atomic>
@@ -818,14 +817,32 @@ public:
             orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
         };
 
-        // mixer.routed_source <mixer> <name> <router_node> <input_index> <route_out_a> <route_out_b> <cs_node_a> <cs_node_b>
-        commands_["mixer.routed_source"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
-            std::stringstream ss(arg);
-            std::string mixer_name, src_name, router_node, cs_a, cs_b;
-            int input_index, route_out_a, route_out_b;
-            ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+        // mixer.routed_source {"mixer":"...","name":"...","router":"...","input_index":0,
+        //                      "route_label_a":"...","route_label_b":"...",
+        //                      "cs_node_a":"...","cs_node_b":"..."}
+        commands_["mixer.routed_source"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            std::string trimmed = strutils::trim(arg);
+            std::string mixer_name, src_name, router_node, route_label_a, route_label_b, cs_a, cs_b;
+            int input_index;
+            if (!trimmed.empty() && trimmed[0] == '{') {
+                json req = mixerJsonRequest("mixer.routed_source", arg);
+                mixer_name = req.at("mixer").get<std::string>();
+                src_name = req.at("name").get<std::string>();
+                router_node = req.at("router").get<std::string>();
+                input_index = req.at("input_index").get<int>();
+                route_label_a = req.at("route_label_a").get<std::string>();
+                route_label_b = req.at("route_label_b").get<std::string>();
+                cs_a = req.at("cs_node_a").get<std::string>();
+                cs_b = req.at("cs_node_b").get<std::string>();
+            } else {
+                std::stringstream ss(arg);
+                int route_out_a, route_out_b;
+                ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+                route_label_a = std::to_string(route_out_a);
+                route_label_b = std::to_string(route_out_b);
+            }
             auto orch = mixerOrchestrator(mixer_name);
-            orch.defineRoutedSource(src_name, router_node, input_index, route_out_a, route_out_b, cs_a, cs_b);
+            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b, cs_a, cs_b);
         };
 
         // mixer.scene <mixer_name> <scene_name> <json_definition>
@@ -881,9 +898,16 @@ public:
             orch.defineScene(scene_name, def);
         };
 
-        // mixer.init_routes <mixer_name>
-        commands_["mixer.init_routes"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
-            std::string mixer_name = strutils::trim(arg);
+        // mixer.init_routes {"mixer":"..."}
+        commands_["mixer.init_routes"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            std::string trimmed = strutils::trim(arg);
+            std::string mixer_name;
+            if (!trimmed.empty() && trimmed[0] == '{') {
+                json req = mixerJsonRequest("mixer.init_routes", arg);
+                mixer_name = req.at("mixer").get<std::string>();
+            } else {
+                mixer_name = trimmed;
+            }
             auto orch = mixerOrchestrator(mixer_name);
             orch.initializeRoutedRoutes();
         };

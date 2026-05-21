@@ -76,8 +76,8 @@ class MixerSource:
     pre_filter_edge_a: Optional[str] = None
     pre_filter_edge_b: Optional[str] = None
     route_router: Optional[str] = None
-    route_output_a: Optional[int] = None
-    route_output_b: Optional[int] = None
+    route_output_label_a: Optional[str] = None
+    route_output_label_b: Optional[str] = None
 
 
 @dataclass
@@ -183,8 +183,8 @@ class MixerGraphBuilder:
         pre_filter_edge_b: str,
         input_group: str,
         route_router: str,
-        route_output_a: int,
-        route_output_b: int,
+        route_output_label_a: str,
+        route_output_label_b: str,
         audio_edge: Optional[str] = None,
         default_graph: Optional[str] = None,
     ) -> "MixerGraphBuilder":
@@ -203,8 +203,8 @@ class MixerGraphBuilder:
             pre_filter_edge_a=pre_filter_edge_a,
             pre_filter_edge_b=pre_filter_edge_b,
             route_router=route_router,
-            route_output_a=route_output_a,
-            route_output_b=route_output_b,
+            route_output_label_a=route_output_label_a,
+            route_output_label_b=route_output_label_b,
         ))
         self._source_index[name] = idx
         return self
@@ -695,17 +695,23 @@ class MixerGraphBuilder:
                 )
             else:
                 lines.append(
-                    f"mixer.routed_source {self.name} {src.name}"
-                    f" {src.route_router} {idx}"
-                    f" {src.route_output_a} {src.route_output_b}"
-                    f" {self._n('cs_' + src.name + '_a')}"
-                    f" {self._n('cs_' + src.name + '_b')}"
+                    "mixer.routed_source "
+                    + json.dumps({
+                        "mixer": self.name,
+                        "name": src.name,
+                        "router": src.route_router,
+                        "input_index": idx,
+                        "route_label_a": src.route_output_label_a,
+                        "route_label_b": src.route_output_label_b,
+                        "cs_node_a": self._n("cs_" + src.name + "_a"),
+                        "cs_node_b": self._n("cs_" + src.name + "_b"),
+                    })
                 )
 
         for scene_name, scene in self._scenes.items():
             lines.append(self._scene_command(scene_name, scene))
 
-        lines.append(f"mixer.init_routes {self.name}")
+        lines.append("mixer.init_routes " + json.dumps({"mixer": self.name}))
 
         self.avp.executeCommandsFromString("\n".join(lines))
 
