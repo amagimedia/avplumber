@@ -188,6 +188,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--switch-margin-ms", default=100, type=int,
+        help="Minimum accepted lead time for explicitly scheduled mixer transitions (default: 100).",
+    )
+    parser.add_argument(
         "--silero-model",
         default=os.environ.get("AVP_SILERO_MODEL"),
         help="Path to Silero VAD .jit model (downloads from torch.hub if unset)",
@@ -378,6 +382,7 @@ def main() -> None:
         fps=(FPS_NUM, FPS_DEN),
         hwaccel=HWACCEL,
         enable_wipe=args.wipe,
+        switch_margin_ms=args.switch_margin_ms,
     )
 
     preheated_scenes = None

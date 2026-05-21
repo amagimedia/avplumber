@@ -61,6 +61,7 @@ struct MixerState : public InstanceShared<MixerState> {
     std::string pvw_scene_name;
 
     int fps_num = 30, fps_den = 1;
+    int64_t switch_margin_ms = 100;
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};

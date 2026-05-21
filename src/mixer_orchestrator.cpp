@@ -339,9 +339,9 @@ int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts
     int64_t now = wallclock.pts();
     if (requested_start_pts_ms < 0)
         return now;
-    int64_t earliest = now + margin_ms_;
+    int64_t earliest = now + state_->switch_margin_ms;
     if (requested_start_pts_ms < earliest)
-        throw Error("mixer: start_pts_ms must be at least " + std::to_string(margin_ms_) +
+        throw Error("mixer: start_pts_ms must be at least " + std::to_string(state_->switch_margin_ms) +
                     "ms in the future");
     return requested_start_pts_ms;
 }
@@ -807,7 +807,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
     // 4–5. Timeline: priming post-scene otms (direct+trans) then visible-path switches
-    int64_t T_prep = T_start - (was_preloaded ? margin_ms_ : kFadeColdPrepMs);
+    int64_t T_prep = T_start - (was_preloaded ? state_->switch_margin_ms : kFadeColdPrepMs);
     timeline_->set(state_->slot_a.post_otm_name, "outputs", T_prep, Parameters(3u)); // 0b11 warmup
     timeline_->set(state_->slot_b.post_otm_name, "outputs", T_prep, Parameters(3u));
 
@@ -1117,6 +1117,8 @@ Parameters MixerOrchestrator::status() const {
     s["pgm_scene"] = state_->pgm_scene_name;
     s["pvw_scene"] = state_->pvw_scene_name;
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
+    s["switch_margin_ms"] = state_->switch_margin_ms;
+    s["now_pts_ms"] = wallclock.pts();
     auto mode = state_->transition_mode.load();
     switch (mode) {
         case MixerState::TransitionMode::Idle: s["transition"] = "idle"; break;

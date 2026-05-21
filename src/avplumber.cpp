@@ -969,6 +969,11 @@ public:
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
+            if (cfg.contains("switch_margin_ms")) {
+                state->switch_margin_ms = cfg["switch_margin_ms"].get<int64_t>();
+                if (state->switch_margin_ms < 0)
+                    throw Error("mixer.init: switch_margin_ms must be >= 0");
+            }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
             if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();

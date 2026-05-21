@@ -110,7 +110,10 @@ class MixerGraphBuilder:
         hwaccel: str = "@gpu",
         timeline: Optional[str] = None,
         enable_wipe: bool = True,
+        switch_margin_ms: int = 100,
     ):
+        if switch_margin_ms < 0:
+            raise ValueError("switch_margin_ms must be >= 0")
         self.avp = avp
         self.name = name
         self.canvas_w, self.canvas_h = canvas
@@ -118,6 +121,7 @@ class MixerGraphBuilder:
         self.hwaccel = hwaccel
         self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
+        self.switch_margin_ms = switch_margin_ms
 
         self._sources: List[MixerSource] = []
         self._source_index: Dict[str, int] = {}
@@ -652,6 +656,7 @@ class MixerGraphBuilder:
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,
             "fps_den": self.fps_den,
+            "switch_margin_ms": self.switch_margin_ms,
             "source_switcher": self._n("out_sel"),
             "initial_pgm_slot": self._initial_pgm_slot,
             "initial_pgm_scene": self._initial_pgm_scene,
