@@ -41,7 +41,8 @@ Usage
         [--remote-control-port 7777] \\
         [--logfile /tmp/auto_mixer.log] \\
         [--webui-api http://localhost:22222] \\
-        [--instance-name auto-mixer]
+        [--instance-name auto-mixer] \\
+        [--debug-mouth-roi-bboxes]
 
 Environment variables
 ---------------------
@@ -75,6 +76,8 @@ from pyplumber.node import (
     DecAudio,
     DecVideo,
     Demux,
+    DrawBBox,
+    DrawBBoxLabels,
     EncAudio,
     EncVideo,
     FilterVideo,
@@ -174,9 +177,112 @@ class StaticViewportMetadataNode(PythonNode):
         frame.metadata[self.metadata_key] = self._metadata_json
         self._dst.enqueue(frame)
 
+
+class SpeakingStatusLabelNode(PythonNode):
+    """Convert speech state into label detections for drawing."""
+
+    def __init__(self, args: dict, index: int, registry: Speaker):
+        super().__init__({"data_type": "VideoFrame"} | args)
+        p = self.parameters
+        self.index = index
+        self.registry = registry
+        self.visual_metadata_key = str(p["visual_metadata_key"])
+        self.viewport_metadata_key = str(p["viewport_metadata_key"])
+        self.output_metadata_key = str(p["output_metadata_key"])
+        self.model_width = int(p.get("model_width", FACE_MODEL_W))
+        self.model_height = int(p.get("model_height", FACE_MODEL_H))
+        self.frame_width = int(p.get("frame_width", 1920))
+        self.frame_height = int(p.get("frame_height", 1080))
+        self.static_face_crop = bool(p.get("static_face_crop", False))
+        self.fallback_x = float(p.get("fallback_x", 24))
+        self.fallback_y = float(p.get("fallback_y", 8))
+
+    def _crop_origin(self, frame) -> tuple[float, float]:
+        if self.static_face_crop:
+            return (
+                max(0.0, (self.frame_width - FACE_CROP_W) * 0.5),
+                max(0.0, (self.frame_height - FACE_CROP_H) * 0.5),
+            )
+        try:
+            metadata = json.loads(str(frame.metadata[self.viewport_metadata_key]))
+            viewport_box = metadata.get("viewport_bbox")
+            viewport_w = float(metadata.get("viewport_dst_width", FACE_CROP_W))
+            viewport_h = float(metadata.get("viewport_dst_height", FACE_CROP_H))
+            frame_w = float(metadata.get("full_frame_width", self.frame_width))
+            frame_h = float(metadata.get("full_frame_height", self.frame_height))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return self.fallback_x, self.fallback_y
+
+        if not isinstance(viewport_box, list) or len(viewport_box) < 4:
+            return self.fallback_x, self.fallback_y
+        try:
+            cx = (float(viewport_box[0]) + float(viewport_box[2])) * 0.5
+            cy = (float(viewport_box[1]) + float(viewport_box[3])) * 0.5
+        except (TypeError, ValueError):
+            return self.fallback_x, self.fallback_y
+
+        x = max(0.0, min(cx - viewport_w * 0.5, frame_w - viewport_w))
+        y = max(0.0, min(cy - viewport_h * 0.5, frame_h - viewport_h))
+        return x, y
+
+    def _label_box(self, frame, offset_y: float) -> list[float]:
+        crop_x, crop_y = self._crop_origin(frame)
+        x = crop_x + self.fallback_x
+        y = crop_y + self.fallback_y + offset_y
+        return [x, y, x + 64, y + 20]
+
+    def _detection(self, frame, label: str, offset_y: float) -> dict:
+        return {
+            "label": label,
+            "conf": 1.0,
+            "xyxy": [round(float(v), 3) for v in self._label_box(frame, offset_y)],
+        }
+
+    def process(self):
+        frame = self._src.get()
+        if frame is None:
+            return
+
+        detections = []
+        video_speaking = False
+        try:
+            metadata = json.loads(str(frame.metadata[self.visual_metadata_key]))
+        except (KeyError, json.JSONDecodeError):
+            metadata = {}
+
+        for target in metadata.get("targets", []):
+            if not isinstance(target, dict):
+                continue
+            video_speaking = video_speaking or bool(target.get("speaking"))
+
+        if video_speaking:
+            detections.append(self._detection(frame, "V", 0))
+
+        entry = self.registry.get(self.index)
+        if entry is not None and entry.speaking:
+            detections.append(self._detection(frame, "A", 26))
+
+        frame.metadata[self.output_metadata_key] = json.dumps({
+            "version": 1,
+            "coord_space": "model",
+            "model_width": self.model_width,
+            "model_height": self.model_height,
+            "detections": detections,
+        }, sort_keys=True)
+        self._dst.enqueue(frame)
+
 # Visual speech metadata key names (per-input, so no collisions on the same frame).
 VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
 VS_VISUAL_KEY_PREFIX = "vs_visual_speech"
+VS_SPEAKING_LABEL_KEY_PREFIX = "vs_speaking_labels"
+DEBUG_MOUTH_LABELS = ["M", "M (interpolated)"]
+DEBUG_MOUTH_TEXT_LABELS = ["M"]
+DEBUG_MOUTH_LABEL_COLORS = {
+    "M": "green",
+    "M (interpolated)": "yellow",
+}
+DEBUG_VIDEO_SPEAKING_LABELS = ["V"]
+DEBUG_AUDIO_SPEAKING_LABELS = ["A"]
 
 
 def default_face_engine() -> str:
@@ -222,6 +328,8 @@ def build_input_subgraph(
     silero_device: str = "cpu",
     silero_threshold: float = 0.5,
     static_face_crop: bool = False,
+    debug_mouth_rois: bool = False,
+    speaker_registry: Speaker | None = None,
 ) -> dict:
     """Build decode + face-detection + audio chain for one input.
 
@@ -367,10 +475,179 @@ def build_input_subgraph(
         "auto_restart": "group",
     }))
 
+    # ---- Visual-speech branch ----
+    # Attach raw YOLO detections (Face, Mouth, Nose, Eye) onto a full-res copy
+    # so that FaceAnchoredMouthTrackerNode can locate the mouth bounding box.
+    # If the face engine doesn't detect sub-parts (Mouth/Nose), the tracker
+    # falls back to geometric estimation, still providing a motion signal.
+    mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
+    vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
+    speaking_label_key = f"{VS_SPEAKING_LABEL_KEY_PREFIX}_{idx}"
+    vs_gate_dst = f"v{idx}_vs_out_raw" if debug_mouth_rois else f"v{idx}_vs_out"
+    debug_visual_edge = vs_gate_dst
+    avp.addNode(JoinMetadata({
+        "name": f"join_vs_{idx}",
+        "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
+        "dst": f"v{idx}_vs_md",
+        "group": g,
+        "auto_restart": "group",
+    }))
+    avp.addNode(FaceAnchoredMouthTrackerNode({
+        "name": f"mouth_tracker_{idx}",
+        "src": f"v{idx}_vs_md",
+        "dst": f"v{idx}_vs_mouth",
+        "group": g,
+        "source": f"input_{idx}",
+        "input_metadata_key": FACE_METADATA_KEY,
+        "output_metadata_key": mouth_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+    avp.addNode(VisualSpeechGateNode({
+        "name": f"vs_gate_{idx}",
+        "src": f"v{idx}_vs_mouth",
+        "dst": vs_gate_dst,
+        "group": g,
+        "source": f"input_{idx}",
+        "mouth_metadata_key": mouth_key,
+        "output_metadata_key": vs_key,
+        "targets": [{"name": "primary"}],
+        "run_in_wrapper_thread": True,
+        "auto_restart": "group",
+    }))
+    if debug_mouth_rois:
+        debug_visual_edge = f"v{idx}_vs_debug"
+        avp.addNode(Split({
+            "name": f"split_vs_debug_{idx}",
+            "src": vs_gate_dst,
+            "dst": [f"v{idx}_vs_out", debug_visual_edge],
+            "group": g,
+        }))
+
+    # ---- Optional visible mouth ROI debug overlay ----
+    visible_src_edge = f"v{idx}_smooth"
+    if debug_mouth_rois:
+        avp.addNode(JoinMetadata({
+            "name": f"join_mouth_debug_{idx}",
+            "src": [f"v{idx}_smooth", debug_visual_edge],
+            "dst": f"v{idx}_debug_mouth_md",
+            "group": g,
+            "auto_restart": "group",
+        }))
+        avp.addNode(DrawBBox({
+            "name": f"draw_mouth_debug_boxes_{idx}",
+            "src": f"v{idx}_debug_mouth_md",
+            "dst": f"v{idx}_debug_mouth_boxes",
+            "group": g,
+            "metadata_key": mouth_key,
+            "bbox_thickness": 4,
+            "min_conf": 0.0,
+            "allowed_labels": DEBUG_MOUTH_LABELS,
+            "label_colors": DEBUG_MOUTH_LABEL_COLORS,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        avp.addNode(DrawBBoxLabels({
+            "name": f"draw_mouth_debug_labels_{idx}",
+            "src": f"v{idx}_debug_mouth_boxes",
+            "dst": f"v{idx}_debug_mouth_labels",
+            "group": g,
+            "metadata_key": mouth_key,
+            "label_template": "{label}",
+            "allowed_labels": DEBUG_MOUTH_TEXT_LABELS,
+            "min_conf": 0.0,
+            "show_predicted_labels": True,
+            "show_untracked": True,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "text_color": "white",
+            "background_color": "black",
+            "font_scale": 1,
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        if speaker_registry is None:
+            raise ValueError("speaker_registry is required when debug_mouth_rois is enabled")
+        avp.addNode(SpeakingStatusLabelNode({
+            "name": f"speaking_label_metadata_{idx}",
+            "src": f"v{idx}_debug_mouth_labels",
+            "dst": f"v{idx}_debug_speaking_md",
+            "group": g,
+            "visual_metadata_key": vs_key,
+            "viewport_metadata_key": VIEWPORT_METADATA_KEY,
+            "output_metadata_key": speaking_label_key,
+            "model_width": FACE_MODEL_W,
+            "model_height": FACE_MODEL_H,
+            "static_face_crop": static_face_crop,
+            "auto_restart": "group",
+        }, index=idx, registry=speaker_registry))
+        avp.addNode(DrawBBoxLabels({
+            "name": f"draw_video_speaking_debug_label_{idx}",
+            "src": f"v{idx}_debug_speaking_md",
+            "dst": f"v{idx}_debug_video_speaking_label",
+            "group": g,
+            "metadata_key": speaking_label_key,
+            "label_template": "{label}",
+            "allowed_labels": DEBUG_VIDEO_SPEAKING_LABELS,
+            "min_conf": 0.0,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "text_color": "white",
+            "background_color": "green",
+            "font_scale": 1,
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        avp.addNode(DrawBBoxLabels({
+            "name": f"draw_audio_speaking_debug_label_{idx}",
+            "src": f"v{idx}_debug_video_speaking_label",
+            "dst": f"v{idx}_debug_speaking_labels",
+            "group": g,
+            "metadata_key": speaking_label_key,
+            "label_template": "{label}",
+            "allowed_labels": DEBUG_AUDIO_SPEAKING_LABELS,
+            "min_conf": 0.0,
+            "model_content_width": FACE_MODEL_W,
+            "model_content_height": FACE_MODEL_H,
+            "model_content_offset_x": 0,
+            "model_content_offset_y": 0,
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "text_color": "white",
+            "background_color": "light_blue",
+            "font_scale": 1,
+            "debug_log_every_n": 300,
+            "auto_restart": "group",
+        }))
+        visible_src_edge = f"v{idx}_debug_speaking_labels"
+
     # ---- Split smooth output into: orig leg + crop-input leg ----
     avp.addNode(Split({
         "name": f"split_legs_{idx}",
-        "src": f"v{idx}_smooth",
+        "src": visible_src_edge,
         "dst": [f"v{idx}_orig_raw", f"v{idx}_for_crop"],
         "group": g,
     }))
@@ -425,45 +702,6 @@ def build_input_subgraph(
         "dst": f"v{idx}_face_916",
         "fps": f"{FPS_NUM}/{FPS_DEN}",
         "group": g,
-        "auto_restart": "group",
-    }))
-
-    # ---- Visual-speech branch ----
-    # Attach raw YOLO detections (Face, Mouth, Nose, Eye) onto a full-res copy
-    # so that FaceAnchoredMouthTrackerNode can locate the mouth bounding box.
-    # If the face engine doesn't detect sub-parts (Mouth/Nose), the tracker
-    # falls back to geometric estimation, still providing a motion signal.
-    mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
-    vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
-    avp.addNode(JoinMetadata({
-        "name": f"join_vs_{idx}",
-        "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
-        "dst": f"v{idx}_vs_md",
-        "group": g,
-        "auto_restart": "group",
-    }))
-    avp.addNode(FaceAnchoredMouthTrackerNode({
-        "name": f"mouth_tracker_{idx}",
-        "src": f"v{idx}_vs_md",
-        "dst": f"v{idx}_vs_mouth",
-        "group": g,
-        "source": f"input_{idx}",
-        "input_metadata_key": FACE_METADATA_KEY,
-        "output_metadata_key": mouth_key,
-        "targets": [{"name": "primary"}],
-        "run_in_wrapper_thread": True,
-        "auto_restart": "group",
-    }))
-    avp.addNode(VisualSpeechGateNode({
-        "name": f"vs_gate_{idx}",
-        "src": f"v{idx}_vs_mouth",
-        "dst": f"v{idx}_vs_out",
-        "group": g,
-        "source": f"input_{idx}",
-        "mouth_metadata_key": mouth_key,
-        "output_metadata_key": vs_key,
-        "targets": [{"name": "primary"}],
-        "run_in_wrapper_thread": True,
         "auto_restart": "group",
     }))
 
@@ -908,6 +1146,10 @@ def main() -> None:
         "--disable-auto-switcher", action="store_true",
         help="Start the graph without automatic scene changes",
     )
+    parser.add_argument(
+        "--debug-mouth-roi-bboxes", action="store_true",
+        help="Draw mouth ROI boxes plus separate audio/video speaking labels into the output video",
+    )
     args = parser.parse_args()
 
     n = len(args.inputs)
@@ -925,6 +1167,7 @@ def main() -> None:
         avp.registerWithWebUI(args.webui_api, args.instance_name, args.logfile)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
     avp.edges.planCapacity("*", 4)
+    speaker_registry = Speaker()
 
     # ---- Per-input subgraphs ----
     subgraphs = []
@@ -939,6 +1182,8 @@ def main() -> None:
             silero_device=args.silero_device,
             silero_threshold=args.silero_threshold,
             static_face_crop=(i == genaro_input_index),
+            debug_mouth_rois=args.debug_mouth_roi_bboxes,
+            speaker_registry=speaker_registry,
         )
         subgraphs.append(sg)
 
@@ -1005,7 +1250,6 @@ def main() -> None:
     }))
 
     # ---- Speech detection: Silero audio VAD + visual lip-motion ----
-    speaker_registry = Speaker()
     for i, sg in enumerate(subgraphs):
         g = sg["input_group"]
 
@@ -1051,6 +1295,8 @@ def main() -> None:
         print(f"[auto_mixer] Rene input detected: {rene_input_index} ({input_basename(args.inputs[rene_input_index])})")
     if genaro_input_index is not None:
         print(f"[auto_mixer] Genaro input detected: {genaro_input_index} ({input_basename(args.inputs[genaro_input_index])}) - static centered 9:16 crop")
+    if args.debug_mouth_roi_bboxes:
+        print("[auto_mixer] Debug mouth ROI and speaking status overlays enabled")
     print(f"[auto_mixer] Scenes: {mx.scenes()}")
 
     # ---- Auto-switcher ----
