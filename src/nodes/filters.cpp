@@ -114,10 +114,16 @@ protected:
         }
         bool checkParameters(typename MediaSpecific::Parameters params, AVFrame *raw, av::Rational timebase, std::shared_ptr<Edge<T>> edge) {
             // Detect hw_frames_ctx changes by comparing the semantic content of
-            // the AVHWFramesContext (format, sw_format, width, height, device),
+            // the AVHWFramesContext (format, sw_format, device),
             // not the pointer value. NVENC and hwupload_cuda can rotate pool
             // objects (new AVBufferRef->data) while keeping the same format and
             // size, and pointer comparison would trigger unnecessary rebuilds.
+            //
+            // Do not include AVHWFramesContext width/height here. For CUDA frames
+            // those fields can describe the aligned allocation size (for example
+            // 1088x1920) rather than the visible frame size (1080x1920). The
+            // visible frame parameters are checked separately by ms_.checkParameters
+            // and are what the buffersrc args use.
             bool hw_frames_ctx_changed = false;
             if (raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
                 if (!initial_hw_frames_ctx_) {
@@ -132,8 +138,6 @@ protected:
                     bool semantically_equal =
                         (cur->format    == prev->format) &&
                         (cur->sw_format == prev->sw_format) &&
-                        (cur->width     == prev->width) &&
-                        (cur->height    == prev->height) &&
                         (cur->device_ref && prev->device_ref &&
                          cur->device_ref->data == prev->device_ref->data);
                     if (!semantically_equal) {

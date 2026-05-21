@@ -60,8 +60,8 @@ public:
             this->source_edges_[reference_active]->wait_peek(fallback_wait_ms_);
         }
 
-        auto activeFor = [&](T* data) {
-            if (timeline_reference)
+        auto activeFor = [&](int input_index, T* data) {
+            if (timeline_reference && input_index == timeline_reference_input_)
                 return reference_active;
             av::Timestamp pts = data->pts();
             if (pts.isNoPts())
@@ -73,7 +73,7 @@ public:
         for (int i = 0; i < (int)this->source_edges_.size(); i++) {
             T* data = this->source_edges_[i]->peek();
             if (!data) continue;
-            int active = activeFor(data);
+            int active = activeFor(i, data);
             if (i == active) {
                 if (i != last_selected_input_) {
                     logstream << "source_switcher[" << label_ << "]: selected input " << i
