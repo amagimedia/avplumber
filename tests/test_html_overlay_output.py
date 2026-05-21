@@ -57,7 +57,7 @@ class HtmlOverlayOutputTest(unittest.TestCase):
         self.assertEqual(0, selector["active"])
         self.assertEqual(0, selector["fallback_active"])
         self.assertTrue(selector["fallback_when_active_missing"])
-        self.assertEqual(40, selector["fallback_wait_ms"])
+        self.assertEqual(100, selector["fallback_wait_ms"])
 
         overlay_filter = by_name["html_overlay_filter"]
         self.assertTrue(overlay_filter["defer_preliminary_init"])

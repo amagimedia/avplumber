@@ -175,7 +175,10 @@ def build_html_overlay_output(
         "active": 0,
         "fallback_active": 0,
         "fallback_when_active_missing": True,
-        "fallback_wait_ms": 40,
+        # The overlay branch has an extra filter_video/framesync stage, so it can
+        # lag the direct branch by more than one frame around wipe/source switches.
+        # Wait through that normal skew before failing open to the no-overlay path.
+        "fallback_wait_ms": 100,
         "group": group,
     }))
     return "video_output"

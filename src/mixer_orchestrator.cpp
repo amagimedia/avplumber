@@ -13,7 +13,7 @@ namespace {
 
 constexpr int64_t kWipeSwitchGraceMs = 500;
 constexpr int64_t kFadeColdPrepMs = 700;
-constexpr int64_t kWipeColdPrepMs = 200;
+constexpr int64_t kWipeColdPrepMs = 700;
 
 void resetInputIf(std::shared_ptr<NodeManager> nodes, const std::string& name) {
     if (name.empty())
