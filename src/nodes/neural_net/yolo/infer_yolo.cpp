@@ -446,6 +446,7 @@ public:
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];
         if (params.count("max_det")) r->max_det_ = params["max_det"];
         if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
+        if (params.count("use_cuda_graph")) r->use_cuda_graph_ = params["use_cuda_graph"];
         if (params.count("metadata_key_detection")) r->metadata_key_detection_ = params["metadata_key_detection"].get<std::string>();
         if (params.count("metadata_key_segmentation")) r->metadata_key_segmentation_ = params["metadata_key_segmentation"].get<std::string>();
         if (params.count("metadata_key_pose")) r->metadata_key_pose_ = params["metadata_key_pose"].get<std::string>();

@@ -129,6 +129,11 @@ def main() -> None:
         help="Path to the face detection TensorRT engine (.plan)",
     )
     parser.add_argument(
+        "--face-use-cuda-graph",
+        action="store_true",
+        help="Use CUDA Graph replay for face TensorRT inference when supported.",
+    )
+    parser.add_argument(
         "--codec", default="h264_nvenc",
         help="Video encoder codec (default: h264_nvenc)",
     )
@@ -352,6 +357,7 @@ def main() -> None:
         sg = build_input_subgraph(
             avp, i, url,
             face_engine=args.face_engine,
+            face_use_cuda_graph=args.face_use_cuda_graph,
             input_start_ts=args.input_start_ts,
             sync_team=args.sync_team,
             silero_model=args.silero_model,

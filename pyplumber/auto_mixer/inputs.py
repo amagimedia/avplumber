@@ -115,6 +115,7 @@ def build_input_subgraph(
     idx: int,
     url: str,
     face_engine: str,
+    face_use_cuda_graph: bool = False,
     input_start_ts: str | None = None,
     sync_team: str = "",
     silero_model: str | None = None,
@@ -215,6 +216,7 @@ def build_input_subgraph(
         "src": f"v{idx}_yolo_in",
         "dst": f"v{idx}_yolo_raw",
         "metadata_key_detection": FACE_METADATA_KEY,
+        "use_cuda_graph": face_use_cuda_graph,
         "models": [{
             "engine": face_engine,
             "task_type": "detection",

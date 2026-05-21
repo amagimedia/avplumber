@@ -1,7 +1,7 @@
 # Slot-Aware Preheat Video Router Design
 
 Date: 2026-05-20
-Status: approved design, pending implementation plan
+Status: approved design, router path implemented
 
 ## Context
 
@@ -14,8 +14,9 @@ preheated source per geometry slot. For six cameras the preheated geometry set i
 - `orig_stack` x 3
 - `orig_pip_thumb` x 1
 
-That is 11 logical hot geometry slots. The current Python graph generation in
-`pyplumber/auto_mixer/preheated.py` fans every camera into every hot slot:
+That is 11 logical hot geometry slots. Before the router, Python graph
+generation in `pyplumber/auto_mixer/preheated.py` fanned every camera into
+every hot slot:
 
 ```text
 face_i/orig_i
@@ -44,7 +45,7 @@ PiP, vstack2, and vstack3 geometry must all remain available.
 - Preserve correct `cut`, `fade`, and `wipe` behavior.
 - Leave room for a future move transition where one camera can feed multiple
   geometry slots during an animation.
-- Keep the non-preheated fallback path available for debugging and rollback.
+- Keep the non-preheated scene path available for debugging and rollback.
 - Improve graph scale for six cameras from 99 pre-filter routing queues to 22
   router-to-filter queues.
 
@@ -276,15 +277,10 @@ for that class of transition.
 
 ## Rollout
 
-Add a rollout flag before making the router default:
-
-```text
---preheat-routing source-switcher
---preheat-routing router
-```
-
-The initial default should remain `source-switcher`. After remote validation,
-flip the default to `router`.
+The router is now the only preheated-scene routing path. The old preheated
+`source_switcher` implementation and its rollout flag should not remain in
+production code. `--disable-preheated-scenes` remains available to use dynamic
+scene loading instead of preheated geometry.
 
 ## Observability
 
@@ -328,8 +324,7 @@ Reliability:
 - No native `Node factory returned nullptr` exceptions from preheated geometry
   startup in the router path.
 - Hidden preheat routing must not backpressure input decode or AI nodes.
-- `--disable-preheated-scenes` and `--preheat-routing source-switcher` remain
-  available for comparison and rollback.
+- `--disable-preheated-scenes` remains available for comparison and rollback.
 
 ## Implementation Touch Points
 
@@ -343,7 +338,7 @@ Reliability:
 - `pyplumber/mixer.py`: add routed-source construction and scene route emission.
 - `pyplumber/auto_mixer/preheated.py`: generate routers, routed sources, and
   explicit scene route requirements.
-- `pyplumber/auto_mixer/cli.py`: add rollout flag.
+- `pyplumber/auto_mixer/cli.py`: use router preheating by default.
 
 ## Validation Plan
 
@@ -351,9 +346,9 @@ Remote validation should run on the Fedora GPU host, not locally.
 
 1. Build `python_module` with the CUDA/TensorRT flags from the project remote
    workflow.
-2. Run a short six-camera Janus smoke test with `--preheat-routing router`.
+2. Run a short six-camera Janus smoke test with preheated scenes enabled.
 3. Query auto-switch status and native exception status while running.
 4. Exercise manual `mixer.cut`, `mixer.fade`, and `mixer.wipe` commands.
-5. Compare `queues.json` and node count against the current source-switcher
-   path.
+5. Compare `queues.json` and node count against the historical per-slot
+   selector path.
 6. Leave a live Janus preview running only when explicitly requested.

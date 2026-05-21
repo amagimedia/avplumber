@@ -1,6 +1,6 @@
 # YOLO / TensorRT Models Inventory
 
-Remote host: `fedora@172.17.36.132:/home/fedora/tensorrt/`
+Model storage host and path are environment-specific; keep real values in local config, not in this document.
 
 ## Environment
 
@@ -11,7 +11,7 @@ Remote host: `fedora@172.17.36.132:/home/fedora/tensorrt/`
 | TensorRT | 10.15.1 (`/opt/tensorrt/`) |
 | trtexec | `/opt/tensorrt/bin/trtexec` |
 | Ultralytics | 8.4.19 |
-| Python venv | `/home/fedora/tensorrt/.venv` (Python 3.13) |
+| Python venv | `${AVP_MODEL_DIR}/.venv` (Python 3.13) |
 
 ---
 
@@ -146,7 +146,7 @@ the model and produces hallucinated reads (e.g. "2" → "9" on the NBA scoreboar
 | Training data | 50k synthetic (Pillow renders, ~10 broadcast fonts × digits × augmentations) + ~2k hand-labeled real crops | |
 | Falls back to PPOCR for | `Team Name`, `Time Remaining` | Word recognition + colon parsing stay on PPOCR |
 
-Pipeline (planned, on remote `/home/fedora/tensorrt/scoreboard-digits/`):
+Pipeline (planned, on remote `${AVP_MODEL_DIR}/scoreboard-digits/`):
 ```bash
 # 1. Render synthetic crops
 python scripts/render_digits.py --fonts fonts/ --out synth/  # ~50k crops
@@ -187,13 +187,13 @@ Uses `en_dict.txt` from PaddleOCR or `ppocr_keys_v1.txt` from `deps/RapidOcrOnnx
 Download and convert:
 ```bash
 # 1. Download Paddle inference model
-cd /home/fedora/tensorrt
+cd ${AVP_MODEL_DIR}
 mkdir -p en-ppocr-v4-rec && cd en-ppocr-v4-rec
 wget https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_rec_infer.tar
 tar xf en_PP-OCRv4_rec_infer.tar
 
 # 2. Convert Paddle -> ONNX (in venv with paddle2onnx installed)
-source /home/fedora/tensorrt/.venv/bin/activate
+source ${AVP_MODEL_DIR}/.venv/bin/activate
 pip install paddle2onnx
 paddle2onnx \
   --model_dir en_PP-OCRv4_rec_infer \
@@ -234,7 +234,7 @@ paddle2onnx \
 All commands run on the remote host. Activate venv first:
 
 ```bash
-source /home/fedora/tensorrt/.venv/bin/activate
+source ${AVP_MODEL_DIR}/.venv/bin/activate
 ```
 
 ### 1. Train (.pt)
@@ -246,7 +246,7 @@ yolo detect train \
   epochs=100 \
   imgsz=960 \
   batch=16 \
-  project=/home/fedora/tensorrt/<model-name> \
+  project=${AVP_MODEL_DIR}/<model-name> \
   name=train
 ```
 
@@ -299,19 +299,19 @@ With explicit input shape (dynamic batch):
 ```bash
 # 1. Train
 yolo detect train \
-  model=/home/fedora/tensorrt/nba-ball/yolo26s.pt \
-  data=/home/fedora/tensorrt/basketball-players-full/data.yaml \
+  model=${AVP_MODEL_DIR}/nba-ball/yolo26s.pt \
+  data=${AVP_MODEL_DIR}/basketball-players-full/data.yaml \
   epochs=100 imgsz=960 batch=16 \
-  project=/home/fedora/tensorrt/basketball-players-full name=train
+  project=${AVP_MODEL_DIR}/basketball-players-full name=train
 
 # 2. Export to ONNX (960x544 for 16:9)
 yolo export \
-  model=/home/fedora/tensorrt/basketball-players-full/train2/weights/best.pt \
+  model=${AVP_MODEL_DIR}/basketball-players-full/train2/weights/best.pt \
   format=onnx imgsz=544,960 opset=13 simplify=True
 
 # 3. Convert to TensorRT
 /opt/tensorrt/bin/trtexec \
-  --onnx=/home/fedora/tensorrt/basketball-players-full/train2/weights/best.onnx \
-  --saveEngine=/home/fedora/tensorrt/basketball-players-full/basketball-players-full_960x544.plan \
+  --onnx=${AVP_MODEL_DIR}/basketball-players-full/train2/weights/best.onnx \
+  --saveEngine=${AVP_MODEL_DIR}/basketball-players-full/basketball-players-full_960x544.plan \
   --fp16
 ```
