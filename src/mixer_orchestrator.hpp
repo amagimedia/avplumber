@@ -85,7 +85,6 @@ class MixerOrchestrator {
                                int64_t start_pts_ms,
                                int64_t preheat_ms);
 
-    int64_t margin_ms_ = 100;
     std::string transition_node_name_ = "mixer_transition";
     std::string transition_edge_name_ = "trans_out";
 

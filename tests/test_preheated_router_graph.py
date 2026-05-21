@@ -24,7 +24,7 @@ class FakeAVPlumber:
 class PreheatedRouterGraphTest(unittest.TestCase):
     def test_wipe_selector_falls_back_to_direct_program_branch(self):
         avp = FakeAVPlumber()
-        mx = MixerGraphBuilder(avp, name="mixer", enable_wipe=True)
+        mx = MixerGraphBuilder(avp, name="mixer", enable_wipe=True, switch_margin_ms=0)
 
         mx.add_source("cam0", pre_otm_edge="cam0", input_group="input_0")
         mx.add_scene(
@@ -43,6 +43,10 @@ class PreheatedRouterGraphTest(unittest.TestCase):
 
         wipe_overlay = next(n for n in avp.nodes if n["name"] == "mixer_wipe_overlay")
         self.assertTrue(wipe_overlay["defer_preliminary_init"])
+
+        init_cmd = next(line for line in avp.commands if line.startswith("mixer.init mixer "))
+        init_json = json.loads(init_cmd.split(" ", 2)[2])
+        self.assertEqual(0, init_json["switch_margin_ms"])
 
     def test_preheated_sources_use_two_native_routers_and_explicit_scene_routes(self):
         avp = FakeAVPlumber()
