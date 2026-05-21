@@ -24,7 +24,8 @@ class MixerOrchestrator {
     void stopGroup(const std::string& group_name);
 
     // Flush all wipe pipeline edges listed in state_->wipe_flush_edges.
-    // Call before startGroup (clean slate) and after stopGroup (release memory).
+    // Skips edges whose configured consumer is still working; readerwriterqueue
+    // clear() is a consumer-side operation and must not race that node.
     void flushWipeEdges();
     void flushSlotEdges(bool is_slot_a);
 

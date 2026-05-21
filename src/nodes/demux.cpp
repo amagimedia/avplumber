@@ -15,6 +15,13 @@ public:
     bool consumeEofIfPresent() override {
         return false;
     }
+    void stop() override {
+        NodeSingleInput<av::Packet>::stop();
+        // The stop wake-up only releases a currently blocked source read. Without
+        // this, NodeWrapper may issue one final process() call and block forever
+        // waiting for a packet from an already-stopped input.
+        finished_ = true;
+    }
     void addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge, bool is_video) {
         if (map_.count(stream_index)!=0) {
             throw Error("Adding stream requested but this stream_index already exists.");
