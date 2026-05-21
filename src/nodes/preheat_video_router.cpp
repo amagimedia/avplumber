@@ -2,10 +2,15 @@
 #include "../SharedTimeline.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+// preheat_video_router: video-only N->M router with a timeline-driven route
+// table. Assumes all inputs share width/height/pixel format/frame rate/time
+// base. Enforces per-output monotonic PTS by default; intended for the current
+// preheated wallclock-PTS mixer pipelines rather than as a generic media router.
 class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
                            public NodeMultiOutput<av::VideoFrame>,
                            public TimelineReader,
@@ -18,43 +23,98 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
     mutable std::mutex routes_mutex_;
     mutable std::mutex stats_mutex_;
     std::vector<int> routes_;
+    std::vector<int> effective_routes_;
     std::vector<std::string> output_labels_;
+    std::unordered_map<std::string, size_t> output_index_by_label_;
     std::vector<av::Timestamp> last_output_pts_;
     std::vector<bool> input_finished_;
     std::vector<uint64_t> frames_drained_per_input_;
     std::vector<uint64_t> frames_enqueued_per_output_;
     std::vector<uint64_t> frames_dropped_per_output_;
     std::vector<uint64_t> backward_pts_drops_per_output_;
+    std::vector<std::unordered_set<size_t>> outputs_seen_by_input_;
+    std::shared_ptr<IVideoFormatSource> video_format_source_;
+    std::shared_ptr<IFrameRateSource> frame_rate_source_;
+    std::shared_ptr<ITimeBaseSource> time_base_source_;
+    int metadata_width_ = 0;
+    int metadata_height_ = 0;
+    av::PixelFormat metadata_pixel_format_;
+    av::PixelFormat metadata_real_pixel_format_;
+    av::Rational metadata_frame_rate_{0, 1};
+    av::Rational metadata_time_base_{0, 1};
+    bool enforce_monotonic_pts_ = true;
     std::string label_ = "<unnamed>";
+    static constexpr uint64_t kBackwardPtsDropLogLimit = 5;
 
     template <typename Interface>
-    std::shared_ptr<Interface> upstreamInterface(const char* interface_name) {
-        for (auto& edge : this->source_edges_) {
-            auto src = edge->template findNodeUp<Interface>();
-            if (src) return src;
+    std::shared_ptr<Interface> upstreamInterfaceAt(size_t input_index, const char* interface_name) const {
+        if (input_index >= this->source_edges_.size()) {
+            throw Error("preheat_video_router[" + label_ + "]: input index " +
+                        std::to_string(input_index) + " is out of range");
         }
-        throw Error("preheat_video_router[" + label_ + "]: no upstream " + interface_name);
+        auto src = this->source_edges_[input_index]->template findNodeUp<Interface>();
+        if (src)
+            return src;
+        throw Error("preheat_video_router[" + label_ + "]: input " +
+                    std::to_string(input_index) + " has no upstream " + interface_name);
     }
 
-    std::vector<int> parseRoutes(const Parameters& value) const {
-        if (!value.is_array())
-            throw Error("preheat_video_router[" + label_ + "]: routes must be an array");
-        if (value.size() != this->sink_edges_.size()) {
-            throw Error("preheat_video_router[" + label_ + "]: routes size " +
-                        std::to_string(value.size()) + " does not match outputs " +
+    template <typename Interface>
+    std::shared_ptr<Interface> findUpstreamInterfaceAt(size_t input_index) const {
+        if (input_index >= this->source_edges_.size())
+            return nullptr;
+        return this->source_edges_[input_index]->template findNodeUp<Interface>();
+    }
+
+    void validateRouteInputIndex(int input_index) const {
+        if (input_index < -1 || input_index >= (int)this->source_edges_.size()) {
+            throw Error("preheat_video_router[" + label_ + "]: route input index " +
+                        std::to_string(input_index) + " is outside [-1, " +
+                        std::to_string(this->source_edges_.size() - 1) + "]");
+        }
+    }
+
+    std::vector<int> parseRoutes(const Parameters& value,
+                                 const std::vector<int>* base_routes = nullptr) const {
+        if (value.is_array()) {
+            if (value.size() != this->sink_edges_.size()) {
+                throw Error("preheat_video_router[" + label_ + "]: routes size " +
+                            std::to_string(value.size()) + " does not match outputs " +
+                            std::to_string(this->sink_edges_.size()));
+            }
+
+            std::vector<int> parsed;
+            parsed.reserve(value.size());
+            for (const auto& item : value) {
+                int input_index = item.get<int>();
+                validateRouteInputIndex(input_index);
+                parsed.push_back(input_index);
+            }
+            return parsed;
+        }
+
+        if (!value.is_object()) {
+            throw Error("preheat_video_router[" + label_ + "]: routes must be an array or object");
+        }
+        if (!base_routes) {
+            throw Error("preheat_video_router[" + label_ + "]: named routes require a base route table");
+        }
+
+        std::vector<int> parsed = *base_routes;
+        if (parsed.size() != this->sink_edges_.size()) {
+            throw Error("preheat_video_router[" + label_ + "]: base route table size " +
+                        std::to_string(parsed.size()) + " does not match outputs " +
                         std::to_string(this->sink_edges_.size()));
         }
 
-        std::vector<int> parsed;
-        parsed.reserve(value.size());
-        for (const auto& item : value) {
-            int input_index = item.get<int>();
-            if (input_index < -1 || input_index >= (int)this->source_edges_.size()) {
-                throw Error("preheat_video_router[" + label_ + "]: route input index " +
-                            std::to_string(input_index) + " is outside [-1, " +
-                            std::to_string(this->source_edges_.size() - 1) + "]");
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            auto label_it = output_index_by_label_.find(it.key());
+            if (label_it == output_index_by_label_.end()) {
+                throw Error("preheat_video_router[" + label_ + "]: unknown route label: " + it.key());
             }
-            parsed.push_back(input_index);
+            int input_index = it.value().get<int>();
+            validateRouteInputIndex(input_index);
+            parsed[label_it->second] = input_index;
         }
         return parsed;
     }
@@ -66,27 +126,141 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         return arr;
     }
 
+    Parameters routesToNamedJson(const std::vector<int>& routes) const {
+        Parameters obj = Parameters::object();
+        for (size_t out_i = 0; out_i < routes.size(); ++out_i)
+            obj[output_labels_[out_i]] = routes[out_i];
+        return obj;
+    }
+
     std::vector<int> currentRoutes() const {
         std::lock_guard<std::mutex> lock(routes_mutex_);
         return routes_;
     }
 
+    std::vector<int> effectiveRoutes() const {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        return effective_routes_;
+    }
+
+    void resetOutputsForRouteChangesLocked(const std::vector<int>& old_routes,
+                                           const std::vector<int>& new_routes) {
+        for (size_t out_i = 0; out_i < new_routes.size(); ++out_i) {
+            if (out_i >= old_routes.size() || old_routes[out_i] != new_routes[out_i])
+                last_output_pts_[out_i] = NOTS;
+        }
+    }
+
     std::vector<int> routesAt(const av::Timestamp& pts) const {
         if (pts.isValid()) {
             auto opt = tlGetRaw("routes", pts);
-            if (opt)
-                return parseRoutes(*opt);
+            if (opt) {
+                std::vector<int> base_routes = effectiveRoutes();
+                return parseRoutes(*opt, &base_routes);
+            }
         }
         return currentRoutes();
     }
 
     void setRoutes(std::vector<int> routes) {
         {
-            std::lock_guard<std::mutex> lock(routes_mutex_);
-            routes_ = std::move(routes);
+            std::scoped_lock lock(routes_mutex_, stats_mutex_);
+            resetOutputsForRouteChangesLocked(effective_routes_, routes);
+            routes_ = routes;
+            effective_routes_ = std::move(routes);
         }
         for (auto& edge : this->source_edges_)
             edge->producedEvent().signal();
+    }
+
+    void applyEffectiveRoutes(const std::vector<int>& routes) {
+        std::scoped_lock lock(routes_mutex_, stats_mutex_);
+        if (effective_routes_ == routes)
+            return;
+        resetOutputsForRouteChangesLocked(effective_routes_, routes);
+        effective_routes_ = routes;
+    }
+
+    void validateOutputLabels() {
+        if (output_labels_.size() != this->sink_edges_.size()) {
+            throw Error("preheat_video_router[" + label_ + "]: labels size " +
+                        std::to_string(output_labels_.size()) + " does not match outputs " +
+                        std::to_string(this->sink_edges_.size()));
+        }
+        for (size_t out_i = 0; out_i < output_labels_.size(); ++out_i) {
+            const std::string& output_label = output_labels_[out_i];
+            if (output_label.empty()) {
+                throw Error("preheat_video_router[" + label_ + "]: output label " +
+                            std::to_string(out_i) + " must not be empty");
+            }
+            auto [_, inserted] = output_index_by_label_.emplace(output_label, out_i);
+            if (!inserted) {
+                throw Error("preheat_video_router[" + label_ + "]: duplicate output label: " +
+                            output_label);
+            }
+        }
+    }
+
+    void validateHomogeneousInputs() {
+        if (this->source_edges_.empty())
+            throw Error("preheat_video_router[" + label_ + "]: requires at least one input");
+
+        bool have_video_ref = false;
+        int ref_width = 0;
+        int ref_height = 0;
+        av::PixelFormat ref_pixel_format;
+        av::PixelFormat ref_real_pixel_format;
+        bool have_frame_rate_ref = false;
+        av::Rational ref_frame_rate{0, 1};
+        bool have_time_base_ref = false;
+        av::Rational ref_time_base{0, 1};
+
+        for (size_t input_index = 0; input_index < this->source_edges_.size(); ++input_index) {
+            auto video_src = findUpstreamInterfaceAt<IVideoFormatSource>(input_index);
+            if (video_src) {
+                if (!have_video_ref) {
+                    video_format_source_ = video_src;
+                    ref_width = video_src->width();
+                    ref_height = video_src->height();
+                    ref_pixel_format = video_src->pixelFormat();
+                    ref_real_pixel_format = video_src->realPixelFormat();
+                    have_video_ref = true;
+                } else if (video_src->width() != ref_width || video_src->height() != ref_height ||
+                        video_src->pixelFormat() != ref_pixel_format ||
+                        video_src->realPixelFormat() != ref_real_pixel_format) {
+                    throw Error("preheat_video_router[" + label_ + "]: input " +
+                                std::to_string(input_index) +
+                                " video format does not match the first input with video metadata");
+                }
+            }
+
+            auto frame_rate_src = findUpstreamInterfaceAt<IFrameRateSource>(input_index);
+            if (frame_rate_src) {
+                if (!have_frame_rate_ref) {
+                    frame_rate_source_ = frame_rate_src;
+                    ref_frame_rate = frame_rate_src->frameRate();
+                    have_frame_rate_ref = true;
+                } else if (frame_rate_src->frameRate() != ref_frame_rate) {
+                    throw Error("preheat_video_router[" + label_ + "]: input " +
+                                std::to_string(input_index) +
+                                " frame rate does not match the first input with frame-rate metadata");
+                }
+            }
+
+            auto time_base_src = findUpstreamInterfaceAt<ITimeBaseSource>(input_index);
+            if (time_base_src) {
+                if (!have_time_base_ref) {
+                    time_base_source_ = time_base_src;
+                    ref_time_base = time_base_src->timeBase();
+                    have_time_base_ref = true;
+                } else if (time_base_src->timeBase() != ref_time_base) {
+                    throw Error("preheat_video_router[" + label_ + "]: input " +
+                                std::to_string(input_index) +
+                                " timebase does not match the first input with timebase metadata");
+                }
+            }
+        }
+
     }
 
     bool allInputsFinished() const {
@@ -102,17 +276,24 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
                 continue;
 
             const av::Timestamp pts = frame.pts();
-            if (pts.isValid() && last_output_pts_[out_i].isValid() &&
-                    pts < last_output_pts_[out_i]) {
+            if (enforce_monotonic_pts_ && pts.isValid()) {
                 std::lock_guard<std::mutex> lock(stats_mutex_);
-                backward_pts_drops_per_output_[out_i]++;
-                continue;
+                if (last_output_pts_[out_i].isValid() && pts < last_output_pts_[out_i]) {
+                    const uint64_t drop_count = ++backward_pts_drops_per_output_[out_i];
+                    if (drop_count <= kBackwardPtsDropLogLimit) {
+                        logstream << "preheat_video_router[" << label_ << "]: dropping backward-pts frame on output "
+                                  << output_labels_[out_i] << " route=" << input_index
+                                  << " pts=" << pts << " last_output_pts=" << last_output_pts_[out_i];
+                    }
+                    continue;
+                }
             }
 
             bool enqueued = EdgeSink<av::VideoFrame>(this->sink_edges_[out_i]).put(frame, true);
             std::lock_guard<std::mutex> lock(stats_mutex_);
             if (enqueued) {
                 frames_enqueued_per_output_[out_i]++;
+                outputs_seen_by_input_[input_index].insert(out_i);
                 if (pts.isValid())
                     last_output_pts_[out_i] = pts;
             } else {
@@ -121,11 +302,21 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         }
     }
 
-    void propagateEofToRoutedOutputs(const std::vector<int>& routes, int input_index) {
+    void propagateEofForInput(int input_index) {
+        std::unordered_set<size_t> target_outputs;
+        std::vector<int> current_effective_routes = effectiveRoutes();
+        for (size_t out_i = 0; out_i < current_effective_routes.size(); ++out_i) {
+            if (current_effective_routes[out_i] == input_index)
+                target_outputs.insert(out_i);
+        }
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            for (size_t out_i : outputs_seen_by_input_[input_index])
+                target_outputs.insert(out_i);
+        }
+
         av::VideoFrame eof = createEofMarker<av::VideoFrame>();
-        for (size_t out_i = 0; out_i < this->sink_edges_.size(); ++out_i) {
-            if (routes[out_i] != input_index)
-                continue;
+        for (size_t out_i : target_outputs) {
             bool enqueued = EdgeSink<av::VideoFrame>(this->sink_edges_[out_i]).put(eof, true);
             std::lock_guard<std::mutex> lock(stats_mutex_);
             if (enqueued)
@@ -161,9 +352,8 @@ public:
         if (!frame)
             return;
 
-        std::vector<int> routes = routesAt(frame->pts());
         if (isEofMarker(*frame)) {
-            propagateEofToRoutedOutputs(routes, srci);
+            propagateEofForInput(srci);
             this->source_edges_[srci]->pop();
             input_finished_[srci] = true;
             if (allInputsFinished())
@@ -171,6 +361,8 @@ public:
             return;
         }
 
+        std::vector<int> routes = routesAt(frame->pts());
+        applyEffectiveRoutes(routes);
         copyToRoutedOutputs(*frame, routes, srci);
         this->source_edges_[srci]->pop();
         {
@@ -181,7 +373,8 @@ public:
 
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "routes") {
-            setRoutes(parseRoutes(value));
+            std::vector<int> base_routes = currentRoutes();
+            setRoutes(parseRoutes(value, &base_routes));
             return;
         }
         throw Error("preheat_video_router[" + label_ + "]: unknown object key: " + key);
@@ -190,11 +383,14 @@ public:
     Parameters getObject(const std::string key) override {
         if (key == "routes")
             return routesToJson(currentRoutes());
+        if (key == "routes_named")
+            return routesToNamedJson(currentRoutes());
         if (key != "status")
             throw Error("preheat_video_router[" + label_ + "]: unknown object key: " + key);
 
         Parameters status;
         status["routes"] = routesToJson(currentRoutes());
+        status["routes_named"] = routesToNamedJson(currentRoutes());
         status["labels"] = output_labels_;
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -207,27 +403,39 @@ public:
     }
 
     int width() override {
-        return upstreamInterface<IVideoFormatSource>("video format source")->width();
+        if (video_format_source_)
+            return video_format_source_->width();
+        return metadata_width_;
     }
 
     int height() override {
-        return upstreamInterface<IVideoFormatSource>("video format source")->height();
+        if (video_format_source_)
+            return video_format_source_->height();
+        return metadata_height_;
     }
 
     av::PixelFormat pixelFormat() override {
-        return upstreamInterface<IVideoFormatSource>("video format source")->pixelFormat();
+        if (video_format_source_)
+            return video_format_source_->pixelFormat();
+        return metadata_pixel_format_;
     }
 
     av::PixelFormat realPixelFormat() override {
-        return upstreamInterface<IVideoFormatSource>("video format source")->realPixelFormat();
+        if (video_format_source_)
+            return video_format_source_->realPixelFormat();
+        return metadata_real_pixel_format_;
     }
 
     av::Rational frameRate() override {
-        return upstreamInterface<IFrameRateSource>("frame rate source")->frameRate();
+        if (frame_rate_source_)
+            return frame_rate_source_->frameRate();
+        return metadata_frame_rate_;
     }
 
     av::Rational timeBase() override {
-        return upstreamInterface<ITimeBaseSource>("timebase source")->timeBase();
+        if (time_base_source_)
+            return time_base_source_->timeBase();
+        return metadata_time_base_;
     }
 
     static std::shared_ptr<PreheatVideoRouter> create(NodeCreationInfo& nci) {
@@ -246,21 +454,36 @@ public:
         r->frames_enqueued_per_output_.assign(r->sink_edges_.size(), 0);
         r->frames_dropped_per_output_.assign(r->sink_edges_.size(), 0);
         r->backward_pts_drops_per_output_.assign(r->sink_edges_.size(), 0);
+        r->outputs_seen_by_input_.assign(r->source_edges_.size(), {});
 
-        if (params.count("labels")) {
-            for (const std::string& label : jsonToStringList(params["labels"]))
-                r->output_labels_.push_back(label);
-        }
-        if (r->output_labels_.size() != r->sink_edges_.size()) {
-            r->output_labels_.clear();
-            for (size_t i = 0; i < r->sink_edges_.size(); ++i)
-                r->output_labels_.push_back(std::to_string(i));
-        }
+        if (!params.count("labels"))
+            throw Error("preheat_video_router[" + r->label_ + "]: labels are required");
+        for (const std::string& label : jsonToStringList(params["labels"]))
+            r->output_labels_.push_back(label);
+        r->validateOutputLabels();
+
+        if (params.count("enforce_monotonic_pts"))
+            r->enforce_monotonic_pts_ = params["enforce_monotonic_pts"].get<bool>();
+        if (params.count("width"))
+            r->metadata_width_ = params["width"].get<int>();
+        if (params.count("height"))
+            r->metadata_height_ = params["height"].get<int>();
+        if (params.count("pixel_format"))
+            r->metadata_pixel_format_ = av::PixelFormat(params["pixel_format"].get<std::string>());
+        if (params.count("real_pixel_format"))
+            r->metadata_real_pixel_format_ = av::PixelFormat(params["real_pixel_format"].get<std::string>());
+        if (params.count("frame_rate"))
+            r->metadata_frame_rate_ = parseRatio(params["frame_rate"]);
+        if (params.count("timebase"))
+            r->metadata_time_base_ = parseRatio(params["timebase"]);
 
         if (params.count("routes"))
             r->routes_ = r->parseRoutes(params["routes"]);
         else
             r->routes_.assign(r->sink_edges_.size(), -1);
+        r->effective_routes_ = r->routes_;
+
+        r->validateHomogeneousInputs();
 
         return r;
     }

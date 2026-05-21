@@ -47,6 +47,8 @@ struct MixerState : public InstanceShared<MixerState> {
         std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
         bool routed = false;
         std::string router_node_name;
+        std::string route_output_label_a;
+        std::string route_output_label_b;
         int route_output_a = -1;
         int route_output_b = -1;
     };

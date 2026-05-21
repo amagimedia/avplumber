@@ -97,7 +97,9 @@ public:
     void defineSource(const std::string& name, const std::string& otm_node, int input_index,
                       const std::string& cs_node_a, const std::string& cs_node_b);
     void defineRoutedSource(const std::string& name, const std::string& router_node,
-                            int input_index, int route_output_a, int route_output_b,
+                            int input_index,
+                            const std::string& route_output_label_a,
+                            const std::string& route_output_label_b,
                             const std::string& cs_node_a, const std::string& cs_node_b);
     void defineScene(const std::string& name, const SceneDefinition& def);
     void initializeRoutedRoutes();

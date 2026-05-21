@@ -2,6 +2,7 @@ import json
 import unittest
 
 from pyplumber.auto_mixer.preheated import (
+    PREHEATED_ROUTER_GROUP,
     build_preheated_scene_sources,
     define_preheated_scenes,
 )
@@ -65,8 +66,12 @@ class PreheatedRouterGraphTest(unittest.TestCase):
 
         routers = [n for n in avp.nodes if n["type"] == "preheat_video_router"]
         self.assertEqual(2, len(routers))
-        self.assertEqual(14, len(next(n for n in routers if n["name"] == "preheat_face_router")["dst"]))
-        self.assertEqual(8, len(next(n for n in routers if n["name"] == "preheat_orig_router")["dst"]))
+        face_router = next(n for n in routers if n["name"] == "preheat_face_router")
+        orig_router = next(n for n in routers if n["name"] == "preheat_orig_router")
+        self.assertEqual(14, len(face_router["dst"]))
+        self.assertEqual(8, len(orig_router["dst"]))
+        self.assertEqual(PREHEATED_ROUTER_GROUP, face_router["group"])
+        self.assertEqual(PREHEATED_ROUTER_GROUP, orig_router["group"])
 
         hot_selectors = [
             n for n in avp.nodes
@@ -82,7 +87,12 @@ class PreheatedRouterGraphTest(unittest.TestCase):
 
         routed_sources = [line for line in avp.commands if line.startswith("mixer.routed_source ")]
         self.assertEqual(11, len(routed_sources))
-        self.assertIn("mixer.init_routes mixer", avp.commands)
+        self.assertIn('mixer.init_routes {"mixer": "mixer"}', avp.commands)
+
+        routed_source_json = json.loads(routed_sources[0].split(" ", 1)[1])
+        self.assertEqual("mixer", routed_source_json["mixer"])
+        self.assertIn("route_label_a", routed_source_json)
+        self.assertIn("route_label_b", routed_source_json)
 
         full_face_cmd = next(
             line for line in avp.commands

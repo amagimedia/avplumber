@@ -12,6 +12,8 @@ from .config import (
     CANVAS_H,
     CANVAS_W,
     FACE_CROP_W,
+    FPS_DEN,
+    FPS_NUM,
     PIP_SCENE_SAMPLE_SEED,
     SAMPLED_MANUAL_SCENE_COUNT,
     VSTACK2_SCENE_SAMPLE_SEED,
@@ -21,6 +23,7 @@ from .scenes import sampled_ordered_pairs, sampled_ordered_triples
 
 
 PREHEATED_GROUP = "preheated_scene_geometry"
+PREHEATED_ROUTER_GROUP = "preheat_routers"
 
 
 def _face_full_graph() -> str:
@@ -109,6 +112,10 @@ def _router_name(input_kind: str) -> str:
 
 def _router_output_edge(template_key: str, slot: int, mixer_slot: str) -> str:
     return f"hot_{template_key}_{slot}_route_{mixer_slot.lower()}"
+
+
+def _router_output_label(template_key: str, slot: int, mixer_slot: str) -> str:
+    return f"{template_key}_{slot}_{mixer_slot}"
 
 
 @dataclass(frozen=True)
@@ -205,16 +212,13 @@ def build_preheated_scene_sources(
 
     router_outputs: dict[str, list[str]] = {"face": [], "orig": []}
     router_labels: dict[str, list[str]] = {"face": [], "orig": []}
-    route_indices: dict[tuple[str, int, str], int] = {}
-
     for template in templates:
         outputs = router_outputs[template.input_kind]
         labels = router_labels[template.input_kind]
         for slot in range(slot_counts[template.key]):
             for mixer_slot in ("A", "B"):
-                route_indices[(template.key, slot, mixer_slot)] = len(outputs)
                 outputs.append(_router_output_edge(template.key, slot, mixer_slot))
-                labels.append(f"{template.key}_{slot}_{mixer_slot}")
+                labels.append(_router_output_label(template.key, slot, mixer_slot))
 
     if router_outputs["face"]:
         avp.addNode(PreheatVideoRouter({
@@ -223,8 +227,14 @@ def build_preheated_scene_sources(
             "dst": router_outputs["face"],
             "routes": [-1] * len(router_outputs["face"]),
             "labels": router_labels["face"],
+            "width": FACE_CROP_W,
+            "height": CANVAS_H,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "frame_rate": f"{FPS_NUM}/{FPS_DEN}",
+            "timebase": f"{FPS_DEN}/{FPS_NUM}",
             "timeline": mx.timeline,
-            "group": PREHEATED_GROUP,
+            "group": PREHEATED_ROUTER_GROUP,
             "auto_restart": "group",
         }))
     if router_outputs["orig"]:
@@ -234,8 +244,14 @@ def build_preheated_scene_sources(
             "dst": router_outputs["orig"],
             "routes": [-1] * len(router_outputs["orig"]),
             "labels": router_labels["orig"],
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "cuda",
+            "real_pixel_format": "nv12",
+            "frame_rate": f"{FPS_NUM}/{FPS_DEN}",
+            "timebase": f"{FPS_DEN}/{FPS_NUM}",
             "timeline": mx.timeline,
-            "group": PREHEATED_GROUP,
+            "group": PREHEATED_ROUTER_GROUP,
             "auto_restart": "group",
         }))
 
@@ -248,8 +264,8 @@ def build_preheated_scene_sources(
                 pre_filter_edge_b=_router_output_edge(template.key, slot, "B"),
                 input_group=PREHEATED_GROUP,
                 route_router=router,
-                route_output_a=route_indices[(template.key, slot, "A")],
-                route_output_b=route_indices[(template.key, slot, "B")],
+                route_output_label_a=_router_output_label(template.key, slot, "A"),
+                route_output_label_b=_router_output_label(template.key, slot, "B"),
                 default_graph=template.graph(),
             )
 

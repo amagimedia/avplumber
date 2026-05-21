@@ -2,6 +2,7 @@
 #include "avutils.hpp"
 #include "graph_interfaces.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iterator>
 #include <thread>
@@ -122,6 +123,62 @@ std::string edgeNameAt(std::shared_ptr<NodeManager> nodes,
     return *it;
 }
 
+std::shared_ptr<NodeWrapper> requireNodeWrapper(std::shared_ptr<NodeManager> nodes,
+                                                const std::string& node_name,
+                                                const std::string& context) {
+    auto wrapper = nodes->node_if_exists(node_name);
+    if (!wrapper)
+        throw Error(context + ": node " + node_name + " doesn't exist");
+    return wrapper;
+}
+
+std::vector<std::string> routerLabels(std::shared_ptr<NodeManager> nodes, const std::string& router_name) {
+    auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.routed_source");
+    const auto& params = wrapper->parameters();
+    if (!params.count("dst"))
+        throw Error("mixer.routed_source: router " + router_name + " has no dst parameter");
+    if (!params.count("labels"))
+        throw Error("mixer.routed_source: router " + router_name + " has no labels parameter");
+
+    auto dst = jsonToStringList(params["dst"]);
+    auto labels_list = jsonToStringList(params["labels"]);
+    std::vector<std::string> labels(labels_list.begin(), labels_list.end());
+    if (dst.size() != labels.size()) {
+        throw Error("mixer.routed_source: router " + router_name + " labels size " +
+                    std::to_string(labels.size()) + " does not match dst size " +
+                    std::to_string(dst.size()));
+    }
+    return labels;
+}
+
+int routerOutputCount(std::shared_ptr<NodeManager> nodes, const std::string& router_name) {
+    auto wrapper = requireNodeWrapper(nodes, router_name, "mixer.init_routes");
+    const auto& params = wrapper->parameters();
+    if (!params.count("dst"))
+        throw Error("mixer.init_routes: router " + router_name + " has no dst parameter");
+    return static_cast<int>(jsonToStringList(params["dst"]).size());
+}
+
+int routerOutputIndexFromLabel(std::shared_ptr<NodeManager> nodes,
+                               const std::string& router_name,
+                               const std::string& label) {
+    auto labels = routerLabels(nodes, router_name);
+    if (!label.empty() && std::all_of(label.begin(), label.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+        int output_index = std::stoi(label);
+        if (output_index < 0 || output_index >= (int)labels.size()) {
+            throw Error("mixer.routed_source: router " + router_name +
+                        " output index " + label + " is out of range");
+        }
+        return output_index;
+    }
+    auto it = std::find(labels.begin(), labels.end(), label);
+    if (it == labels.end()) {
+        throw Error("mixer.routed_source: router " + router_name +
+                    " has no output label " + label);
+    }
+    return static_cast<int>(std::distance(labels.begin(), it));
+}
+
 Parameters routesToParameters(const std::vector<int>& routes) {
     Parameters arr = Parameters::array();
     for (int input_index : routes)
@@ -151,6 +208,10 @@ int routeOutputForSlot(const MixerState::SourceInfo& info, bool is_slot_a) {
     return is_slot_a ? info.route_output_a : info.route_output_b;
 }
 
+std::string routeOutputLabelForSlot(const MixerState::SourceInfo& info, bool is_slot_a) {
+    return is_slot_a ? info.route_output_label_a : info.route_output_label_b;
+}
+
 void setRoutedSlotInTables(MixerState& st,
                            std::unordered_map<std::string, std::vector<int>>& tables,
                            bool is_slot_a,
@@ -168,7 +229,8 @@ void setRoutedSlotInTables(MixerState& st,
             routes.assign(count, -1);
         if (output_index >= (int)routes.size())
             throw Error("mixer: routed source " + src_name + " output index " +
-                        std::to_string(output_index) + " exceeds router " +
+                        std::to_string(output_index) + " (" +
+                        routeOutputLabelForSlot(info, is_slot_a) + ") exceeds router " +
                         info.router_node_name + " route table");
 
         routes[output_index] = -1;
@@ -397,8 +459,14 @@ void MixerOrchestrator::defineSource(const std::string& name, const std::string&
 }
 
 void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::string& router_node,
-                                           int input_index, int route_output_a, int route_output_b,
+                                           int input_index,
+                                           const std::string& route_output_label_a,
+                                           const std::string& route_output_label_b,
                                            const std::string& cs_node_a, const std::string& cs_node_b) {
+    const int output_count = routerOutputCount(nodes_, router_node);
+    const int route_output_a = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_a);
+    const int route_output_b = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_b);
+
     std::lock_guard<std::mutex> lock(state_->mutex);
     MixerState::SourceInfo info;
     info.input_index = input_index;
@@ -406,12 +474,19 @@ void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::s
     info.cs_node_b = cs_node_b;
     info.routed = true;
     info.router_node_name = router_node;
+    info.route_output_label_a = route_output_label_a;
+    info.route_output_label_b = route_output_label_b;
     info.route_output_a = route_output_a;
     info.route_output_b = route_output_b;
     state_->sources[name] = std::move(info);
 
-    int& output_count = state_->router_output_counts[router_node];
-    output_count = std::max(output_count, std::max(route_output_a, route_output_b) + 1);
+    int& stored_output_count = state_->router_output_counts[router_node];
+    if (stored_output_count != 0 && stored_output_count != output_count) {
+        throw Error("mixer.routed_source: router " + router_node + " output count changed from " +
+                    std::to_string(stored_output_count) + " to " +
+                    std::to_string(output_count));
+    }
+    stored_output_count = output_count;
     ensureRouteTableSize(*state_, router_node);
 }
 
@@ -464,6 +539,15 @@ void MixerOrchestrator::publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a,
 
 void MixerOrchestrator::initializeRoutedRoutes() {
     std::lock_guard<std::mutex> lock(state_->mutex);
+    for (const auto& [router_name, expected_count] : state_->router_output_counts) {
+        const int actual_count = routerOutputCount(nodes_, router_name);
+        if (expected_count != actual_count) {
+            throw Error("mixer.init_routes: router " + router_name + " expected output count " +
+                        std::to_string(expected_count) + " but node dst has " +
+                        std::to_string(actual_count));
+        }
+        ensureRouteTableSize(*state_, router_name);
+    }
     if (state_->pgm_scene_name.empty() || !state_->scenes.count(state_->pgm_scene_name))
         return;
     publishRoutedRoutesForProgramOnly(
