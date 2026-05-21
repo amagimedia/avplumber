@@ -14,7 +14,7 @@
 * avplumber is a graph-based real-time multimedia framework: nodes connected by typed queues/edges.
 * Controlled via line-based TCP protocol; `.avplumber` scripts create, connect, and start nodes. Python bindings in `pyplumber/`.
 * Media edges carry FFmpeg packets, video frames, audio samples, metadata, or platform-specific image handles.
-* Internals: [developing_nodes.md](doc/developing_nodes.md), [README.md](README.md).
+* See [DEV_BASICS.md](doc/DEV_BASICS.md), scan the `doc/` directory for more docs.
 
 ## Code & logic style
 * No copy-paste between nodes or within a file; extract shared base classes, utilities, or helper functions/lambdas.
@@ -24,7 +24,7 @@
 * Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof.
 * Call out framework-wide behavior changes explicitly; don't make incidental edits during node/mixer work.
 * In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new 
-interface, new shared object etc., or adding functionality to existing ones.
+interface, new shared object etc., or improving existing ones.
 
 ## Writing new nodes
 * Put implementations under `src/nodes/`; `make` regenerates the node factory registry — rebuild after adding a node.
