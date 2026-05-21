@@ -39,7 +39,7 @@ git am /path/to/avplumber/deps/ffmpeg-patches/*.patch
 
 Host validation path:
 
-- `/home/fedora/clean-ffmpeg`
+- `<ffmpeg-checkout>`
 
 Install prefix used by the current validation plan:
 

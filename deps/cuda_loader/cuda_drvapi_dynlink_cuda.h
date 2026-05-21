@@ -70,6 +70,9 @@ typedef struct CUtexref_st *CUtexref;                     /**< CUDA texture refe
 typedef struct CUsurfref_st *CUsurfref;                   /**< CUDA surface reference */
 typedef struct CUevent_st *CUevent;                       /**< CUDA event */
 typedef struct CUstream_st *CUstream;                     /**< CUDA stream */
+typedef struct CUgraph_st *CUgraph;                       /**< CUDA graph */
+typedef struct CUgraphExec_st *CUgraphExec;               /**< CUDA executable graph */
+typedef struct CUgraphNode_st *CUgraphNode;               /**< CUDA graph node */
 typedef struct CUgraphicsResource_st *CUgraphicsResource; /**< CUDA graphics interop resource */
 typedef unsigned long long CUtexObject;                   /**< CUDA texture object */
 typedef unsigned long long CUsurfObject;                  /**< CUDA surface object */
@@ -107,6 +110,13 @@ typedef enum CUevent_flags_enum
     CU_EVENT_BLOCKING_SYNC  = 1, /**< Event uses blocking synchronization */
     CU_EVENT_DISABLE_TIMING = 2  /**< Event will not record timing data */
 } CUevent_flags;
+
+typedef enum CUstreamCaptureMode_enum
+{
+    CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
+    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
+    CU_STREAM_CAPTURE_MODE_RELAXED = 2
+} CUstreamCaptureMode;
 
 /**
  * Array formats
@@ -1767,6 +1777,13 @@ typedef CUresult CUDAAPI tcuStreamQuery(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamSynchronize(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamDestroy(CUstream hStream);
 typedef CUresult CUDAAPI tcuStreamGetCtx(CUstream hStream, CUcontext *pctx);
+typedef CUresult CUDAAPI tcuStreamBeginCapture(CUstream hStream, CUstreamCaptureMode mode);
+typedef CUresult CUDAAPI tcuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
+
+typedef CUresult CUDAAPI tcuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph, CUgraphNode *phErrorNode, char *logBuffer, size_t bufferSize);
+typedef CUresult CUDAAPI tcuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
+typedef CUresult CUDAAPI tcuGraphExecDestroy(CUgraphExec hGraphExec);
+typedef CUresult CUDAAPI tcuGraphDestroy(CUgraph hGraph);
 
 /************************************
  **
@@ -1919,6 +1936,12 @@ extern tcuStreamAddCallback            *cuStreamAddCallback;
 extern tcuStreamSynchronize            *cuStreamSynchronize;
 extern tcuStreamDestroy                *cuStreamDestroy;
 extern tcuStreamGetCtx                 *cuStreamGetCtx;
+extern tcuStreamBeginCapture           *cuStreamBeginCapture;
+extern tcuStreamEndCapture             *cuStreamEndCapture;
+extern tcuGraphInstantiate             *cuGraphInstantiate;
+extern tcuGraphLaunch                  *cuGraphLaunch;
+extern tcuGraphExecDestroy             *cuGraphExecDestroy;
+extern tcuGraphDestroy                 *cuGraphDestroy;
 extern tcuGraphicsUnregisterResource         *cuGraphicsUnregisterResource;
 extern tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArray;
 extern tcuGraphicsResourceSetMapFlags        *cuGraphicsResourceSetMapFlags;

@@ -197,6 +197,15 @@ struct ModelRunner {
     // Preprocess
     CUfunction preprocess_kernel = nullptr;
     CUstream stream = nullptr;
+    std::vector<cudaStream_t> aux_streams;
+
+    // Optional CUDA graph for replaying fixed-shape TensorRT inference.
+    CUgraphExec cuda_graph_exec = nullptr;
+    bool cuda_graph_ready = false;
+    int cuda_graph_warmup_remaining = 5;
+    bool cuda_graph_disabled = false;
+    bool cuda_graph_capture_logged = false;
+    bool cuda_graph_disable_logged = false;
 
     // Config
     OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
@@ -224,6 +233,7 @@ protected:
     bool input_bgr_order_ = false;
     CUmodule preprocess_module_ = nullptr;
     bool initialized_ = false;
+    bool use_cuda_graph_ = false;
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;
@@ -239,6 +249,11 @@ protected:
     bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model);
     bool runInference(ModelRunner& model);
     bool syncModel(ModelRunner& model);
+    bool enqueueInference(ModelRunner& model);
+    bool copyOutputsToHost(ModelRunner& model);
+    bool ensureCudaGraph(ModelRunner& model);
+    bool runCudaGraph(ModelRunner& model);
+    void disableCudaGraph(ModelRunner& model, const std::string& reason);
 
     void cleanupModel(ModelRunner& model);
     void cleanupAll();
