@@ -42,6 +42,28 @@ bool nodeWorkingIfExists(std::shared_ptr<NodeManager> nodes, const std::string& 
     return w && w->isWorking();
 }
 
+bool nodeConsumesEdge(const std::shared_ptr<NodeWrapper>& node, const std::string& edge_name) {
+    if (!node)
+        return false;
+    const auto& params = node->parameters();
+    if (!params.count("src"))
+        return false;
+    for (const auto& src_name : jsonToStringList(params["src"])) {
+        if (src_name == edge_name)
+            return true;
+    }
+    return false;
+}
+
+std::shared_ptr<NodeWrapper> workingConsumerForEdge(std::shared_ptr<NodeManager> nodes,
+                                                    const std::string& edge_name) {
+    for (const auto& [_, node] : nodes->allNodes()) {
+        if (node && node->isWorking() && nodeConsumesEdge(node, edge_name))
+            return node;
+    }
+    return nullptr;
+}
+
 bool setNodeObjectIfCreated(std::shared_ptr<NodeManager> nodes,
                             const std::string& node_name,
                             const std::string& key,
@@ -276,7 +298,24 @@ void MixerOrchestrator::stopGroup(const std::string& group_name) {
 void MixerOrchestrator::flushWipeEdges() {
     for (const auto& name : state_->wipe_flush_edges) {
         auto edge = nodes_->edges()->findAny(name);
-        if (edge) edge->clear();
+        if (!edge)
+            continue;
+
+        int occupied = edge->occupied();
+        if (occupied <= 0)
+            continue;
+
+        auto active_consumer = workingConsumerForEdge(nodes_, name);
+        if (active_consumer) {
+            logstream << "mixer: leaving active wipe edge " << name
+                      << " unflushed (" << occupied << " queued, consumer="
+                      << active_consumer->name() << ")";
+            continue;
+        }
+
+        logstream << "mixer: flushing stale wipe edge " << name
+                  << " (" << occupied << " queued)";
+        edge->clear();
     }
 }
 
