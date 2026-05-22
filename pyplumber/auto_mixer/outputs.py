@@ -244,7 +244,7 @@ def build_janus_rtp_output(
             "bufsize": video_bitrate,
             "g": 30,
             "bf": 0,
-            "preset": "p4",
+            "preset": "p6",
             "profile": "baseline",
             "level": "4.0",
             "tune": "ull",

@@ -57,7 +57,7 @@ class MuxOutputPolicyTest(unittest.TestCase):
         self.assertEqual("1000k", enc_options["bufsize"])
         self.assertEqual(30, enc_options["g"])
         self.assertEqual(0, enc_options["bf"])
-        self.assertEqual("p4", enc_options["preset"])
+        self.assertEqual("p6", enc_options["preset"])
         self.assertEqual("baseline", enc_options["profile"])
         self.assertEqual("4.0", enc_options["level"])
         self.assertEqual("ull", enc_options["tune"])
