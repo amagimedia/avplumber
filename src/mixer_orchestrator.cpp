@@ -932,17 +932,22 @@ void MixerOrchestrator::readyCutTask(
         int64_t earliest_switch_pts_ms,
         bool require_new_ready_frame) {
     constexpr int64_t kPollMs = 5;
-    constexpr int64_t kMaxWaitMs = 1500;
     int64_t waited_ms = 0;
-    while (waited_ms < kMaxWaitMs) {
+    while (true) {
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
             return;
         const bool time_ready = wallclock.pts() >= earliest_switch_pts_ms;
         bool edge_ready = !require_new_ready_frame;
         if (require_new_ready_frame) {
             auto edge = nodes->edges()->findAny(ready_edge_name);
-            if (!edge)
-                break;
+            if (!edge) {
+                logstream << "mixer ready cut: missing ready edge " << ready_edge_name
+                          << " for scene=" << new_pgm_scene;
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
+                    state->transition_mode = MixerState::TransitionMode::Idle;
+                return;
+            }
             av::Timestamp ts = edge->lastTS();
             edge_ready = ts.isValid() && (!ready_edge_initial_ts.isValid() || ts > ready_edge_initial_ts);
         }
@@ -1024,7 +1029,7 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     std::string ready_edge_name = firstDstEdgeName(nodes_, new_slot.post_otm_name);
     auto ready_edge = nodes_->edges()->findAny(ready_edge_name);
     av::Timestamp ready_edge_initial_ts = ready_edge ? ready_edge->lastTS() : NOTS;
-    postTransitionTask("mixer.cut.ready", 0,
+    postTransitionTask("mixer.cut.ready", T_cut - wallclock.pts(),
         [nodes = nodes_, state = state_, timeline = timeline_, transition_generation,
          pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts, T_cut, was_preloaded] {
             readyCutTask(nodes, state, timeline, transition_generation,
