@@ -35,9 +35,7 @@ There are only 2 slots - the minimum needed for video crossfade. If more than 2 
 
 5. **Cuts, fades, and wipes are only routing changes.** A cut schedules `out_sel.active` to the incoming direct branch. A fade temporarily creates `transition_cuda`, feeds both slot transition branches, then schedules `out_sel.active` through the transition output and finally to the incoming direct branch. A wipe routes final output through the pre-created wipe branch and performs the hidden cut while the wipe covers the frame.
 
-6. **Final output is normalized and encoded.** `wipe_base_fps`, `otm_final`, and `wipe_sel` produce `final_out`.
-
-In `sync_mixer.avplumber`, an optional HTML overlay layer then either bypasses directly to encode or feeds `html_overlay_filter`; `otm_html_overlay_src` prevents dmabuf frames from entering libavfilter framesync while overlay is disabled. This overlay is totally independent from `MixerOrchestrator` and is not a regular video input for the mixer, so scene changes using mixer commands do not affect it.
+6. **Final output is normalized and encoded.** `wipe_base_fps`, `otm_final`, and `wipe_sel` produce `final_out`. Post-mixer visual effects, if an application adds any, are outside `MixerOrchestrator` and are not controlled by the mixer commands or the TUI.
 
 Minimum node families needed for the mixer core: per-input `realtime`, `force_fps`, `one_to_many`, per-slot crop-scale `filter_video`, per-slot `cuda_rect_overlay`, post-slot `one_to_many`, main `source_switcher`, final wipe-path `one_to_many`/`source_switcher`, encoder/mux/output. Crossfade additionally needs dynamic `transition_cuda`; media wipe additionally needs the pre-created `mixer_wipe` group.
 
@@ -64,13 +62,11 @@ Output Layer (static)
                                                                                                      > source_switcher(wipe_sel) -> final_out
   [final_wipe_in] + wipe_chain(mixer_wipe) -> overlay_many_cuda -> [wipe_overlay_out] ---------------'
 
-Optional post-mixer overlay/output layer in `sync_mixer.avplumber`
-  final_out -> one_to_many(otm_html_overlay) -> [no_overlay] \
-                                                            > source_switcher(overlay_sel) -> enc_input_fps -> enc -> mux -> output
-  [pre_overlay] + HTML DMA-BUF source -> one_to_many(otm_html_overlay_src) -> overlay_many_cuda --'
+Encoder/output layer
+  final_out -> enc_input_fps -> enc -> mux -> output
 ```
 
-Nodes labeled "dynamic" are created and destroyed by the orchestrator during crossfade. The wipe subgraph (`mixer_wipe` group) is declared in the config but is not started with the rest of the graph; it is started/stopped around each wipe transition. The HTML overlay layer in `sync_mixer.avplumber` is outside `MixerOrchestrator` and is controlled directly by the TUI with `node.object.set`.
+Nodes labeled "dynamic" are created and destroyed by the orchestrator during crossfade. The wipe subgraph (`mixer_wipe` group) is declared in the config but is not started with the rest of the graph; it is started/stopped around each wipe transition.
 
 ### GPU-saving mechanisms
 
@@ -415,11 +411,9 @@ Returns a JSON array of all registered scene names, sorted alphabetically. Examp
 - Selecting a scene with `1`-`9` or a scene button sends `mixer.preview` so avplumber preloads the hidden PVW slot. Pressing `c`, `x`, or `w` sends `mixer.cut`, `mixer.fade`, or `mixer.wipe` for the selected scene.
 - After a take completes, the UI polls until `transition == "idle"` and then puts the previous PGM scene on the local PVW bus to mimic a production switcher bus swap.
 - `F1`-`F9` sends a direct `mixer.cut` to that scene, skipping the local preview selection.
-- The HTML overlay buttons are outside `MixerOrchestrator`. Enabling first opens the HTML-source gate (`otm_html_overlay_src outputs 1`) and prewarms both final-output legs (`otm_html_overlay outputs 3`), then selects `overlay_sel active 1` and settles on `otm_html_overlay outputs 2`. Disabling prewarms the direct leg, selects `overlay_sel active 0`, settles on `otm_html_overlay outputs 1`, and closes the HTML-source gate (`otm_html_overlay_src outputs 0`). Closing the source gate drains and drops dmabuf frames before they reach `html_overlay_filter`, avoiding libavfilter framesync buffering while bypassed.
-
 ## Example setup
 
-See `examples/sync_mixer.avplumber` for the current confirmed working setup. It contains three synchronized SRT sources, two local MP4 loop sources, the mixer core, a media wipe path, an optional HTML DMA-BUF overlay path, and the encoder/output chain. `examples/mixer.avplumber` is a smaller two-camera variant.
+See `examples/sync_mixer.avplumber` for the current confirmed working setup. It contains three synchronized SRT sources, two local MP4 loop sources, the mixer core, a media wipe path, and the encoder/output chain. `examples/mixer.avplumber` is a smaller two-camera variant.
 
 - The three SRT sources use `realtime(set_pts=true, team="sync_team")`, so their outputs are wall-clock aligned as a group. The MP4 loops use independent `realtime(set_pts=true)`.
 - Crop/scale `filter_video` nodes have `auto_restart: "on"` so `node.param.set` + `node.auto_restart` works
@@ -427,8 +421,6 @@ See `examples/sync_mixer.avplumber` for the current confirmed working setup. It 
 - Camera `one_to_many` `outputs=1` (bit 0 = slot A only) for initial PGM-on-A state
 - `mixer.init` declares `initial_pgm_scene: "fullsync1"` so the orchestrator knows what's on PGM before the first transition
 - `wipe_base_fps`, `wipe_rt_fps`, `wipe_tail_edge`, and `wipe_flush_edges` are part of the working wipe setup.
-- The optional HTML overlay path is controlled by `node.object.set` on `otm_html_overlay`, `otm_html_overlay_src`, and `overlay_sel`, not by mixer commands.
-
 Usage after startup (via TCP socket):
 
 ```

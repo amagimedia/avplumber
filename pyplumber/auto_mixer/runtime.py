@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from pyplumber.auto_switcher import AutoSwitcher
 
@@ -23,6 +23,7 @@ class AutoSwitchRuntime:
     switcher: AutoSwitcher
     auto_control_commands: AutoSwitchControlCommands | None
     program_scene_reader: MixerProgramSceneReader | None
+    rtcp_feedback_listener: Any | None = None
 
     def start_switcher(self, *, enabled: bool) -> None:
         if enabled:
@@ -35,6 +36,8 @@ class AutoSwitchRuntime:
             self.auto_control_commands.stop()
         if self.program_scene_reader is not None:
             self.program_scene_reader.close()
+        if self.rtcp_feedback_listener is not None:
+            self.rtcp_feedback_listener.stop()
 
 
 def start_graph_groups(avp, *, n_inputs: int, mixer, preheated_scenes) -> None:
@@ -78,10 +81,6 @@ def print_startup_summary(
             f"[auto_mixer] Genaro input detected: {config.genaro_input_index} "
             f"({input_basename(args.inputs[config.genaro_input_index])}) - {crop_mode}"
         )
-    if args.debug_mouth_roi_bboxes:
-        print("[auto_mixer] Debug mouth ROI and speaking status overlays enabled")
-    if args.html_overlay_socket:
-        print("[auto_mixer] HTML overlay graph enabled; starts off")
     if preheated_scenes:
         print(
             f"[auto_mixer] Preheated scene geometries enabled: "

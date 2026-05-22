@@ -28,7 +28,7 @@ The normal startup sequence is:
 1. Create `AutoMixerAVPlumber`, enable logging/control/Web UI registration, initialize CUDA.
 2. Build one input subgraph per URL.
 3. Build the `MixerGraphBuilder`, register scenes, and materialize mixer nodes.
-4. Add optional HTML overlay, recording output, and Janus RTP output.
+4. Add recording output and/or Janus RTP output.
 5. Add Python registry bridge nodes for audio and visual speech.
 6. Start input groups, optional preheat groups, mixer groups, and output group.
 7. Mark the control server ready and start `AutoSwitcher`.
@@ -74,7 +74,6 @@ inputs
   -> audio VAD metadata
   -> mixer sources/scenes
   -> C++ MixerOrchestrator controlled two-slot mixer
-  -> optional HTML overlay
   -> recording output and/or Janus RTP output
 
 Speaker registry
@@ -226,16 +225,23 @@ The policy thread controls the graph; it does not perform media processing.
 
 `pyplumber/auto_mixer/outputs.py` builds output-specific native node chains:
 
-- HTML overlay input from DMA-BUF, conversion to CUDA frames, overlay gating, and
-  final `source_switcher`.
 - Video normalization and encoding.
 - Audio normalization and encoding.
 - File/RTMP mux output.
 - Janus RTP video and optional audio output.
 
-The output layer is intentionally outside `MixerOrchestrator`. For example, the
-HTML overlay is toggled by direct node-object controls, while scene switching stays
-inside the mixer command surface.
+For Janus, the video branch is tuned for preview-style WebRTC delivery: 3 Mbit/s
+H.264 by default, 30-frame GOP, no B-frames, low-latency CBR, forced IDR keyframes,
+access-unit delimiters, and repeated SPS/PPS on keyframes via `dump_extra`. The
+graph also inserts `janus_force_keyframe`, which can be triggered with
+`node.object.set janus_force_keyframe trigger true` when an external RTCP feedback
+listener is added. The FFmpeg RTP URL includes the adjacent RTCP port so Janus can
+receive sender reports; PLI/FIR feedback still needs a listener that translates it
+into the keyframe trigger.
+
+The output layer is intentionally outside `MixerOrchestrator`: scene switching stays
+inside the mixer command surface, while encoders and muxers are regular output
+nodes.
 
 ## Control Surfaces
 
@@ -260,7 +266,7 @@ The graph is divided into groups:
 - `preheat_routers`: native routers feeding hot geometry slots.
 - `preheated_scene_geometry`: hot geometry filter nodes.
 - `mixer_a`, `mixer_b`, `mixer`: native mixer slot/output groups.
-- `output`: encoders, muxers, Janus RTP, and optional overlay chain.
+- `output`: encoders, muxers, and Janus RTP.
 
 `start_graph_groups()` starts them in dependency order with short startup gaps:
 inputs first, then preheat routers/geometries, then mixer groups, then output. This

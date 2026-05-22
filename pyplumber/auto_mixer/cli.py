@@ -60,7 +60,6 @@ Environment variables
 from __future__ import annotations
 
 import argparse
-import json
 import os
 
 from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
@@ -77,18 +76,19 @@ from .config import (
     JANUS_DEFAULT_HOST,
     JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
     JANUS_DEFAULT_VIDEO_PORT,
+    JANUS_DEFAULT_VIDEO_SSRC,
 )
 from .inputs import build_input_subgraph, default_face_engine
 from .native_exceptions import AutoMixerAVPlumber, NativeExceptionRegistry
 from .outputs import (
     build_audio_output,
-    build_html_overlay_output,
     build_janus_rtp_output,
     build_mux_output,
     build_video_output,
     output_format_for_url,
 )
 from .profiles.talkshow import RENE_INPUT_NAME
+from .rtcp_feedback import RtcpFeedbackListener
 from .run_config import derive_run_config
 from .runtime import (
     create_auto_switch_runtime,
@@ -111,6 +111,10 @@ from .shot_selector import (
     HistoryAwareShotSelector,
     profile_names,
 )
+
+
+def _parse_int_auto_base(value: str) -> int:
+    return int(value, 0)
 
 
 def main() -> None:
@@ -267,20 +271,6 @@ def main() -> None:
         help="Use dynamic mixer scene loading instead of geometry-preheated scene sources.",
     )
     parser.add_argument(
-        "--debug-mouth-roi-bboxes", action="store_true",
-        help="Draw mouth ROI boxes plus separate audio/video speaking labels into the output video.",
-    )
-    parser.add_argument(
-        "--html-overlay-socket",
-        default=os.environ.get("AVP_HTML_OVERLAY_SOCKET", ""),
-        help="Enable final Electron DMA-BUF overlay from this UNIX socket path (empty = disabled).",
-    )
-    parser.add_argument(
-        "--html-overlay-drm-device",
-        default=os.environ.get("AVP_HTML_OVERLAY_DRM_DEVICE", ""),
-        help="DRM render device used to attach a DRM hw_frames_ctx to the overlay source (empty = omit).",
-    )
-    parser.add_argument(
         "--static-genaro-face-crop", action="store_true",
         help="Use a centered static 9:16 crop for the Genaro input instead of face tracking.",
     )
@@ -325,8 +315,24 @@ def main() -> None:
         help=f"Janus H.264 bitrate in kbit/s (default: {JANUS_DEFAULT_VIDEO_BITRATE_KBPS})",
     )
     parser.add_argument(
+        "--janus-video-ssrc", default=JANUS_DEFAULT_VIDEO_SSRC, type=_parse_int_auto_base,
+        help=f"RTP SSRC for Janus H.264 video, decimal or 0x-prefixed (default: 0x{JANUS_DEFAULT_VIDEO_SSRC:x})",
+    )
+    parser.add_argument(
         "--janus-audio-bitrate", default="100k",
         help="Janus Opus audio bitrate (default: 100k)",
+    )
+    parser.add_argument(
+        "--disable-janus-rtcp-feedback", action="store_true",
+        help="Do not listen for Janus upstream RTCP PLI/FIR keyframe requests.",
+    )
+    parser.add_argument(
+        "--janus-rtcp-feedback-bind", default="0.0.0.0",
+        help="Local address for the Janus RTCP feedback listener (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--janus-rtcp-feedback-port", default=0, type=int,
+        help="Local UDP port for the Janus RTCP feedback listener (0 = auto-select).",
     )
     args = parser.parse_args()
 
@@ -346,13 +352,6 @@ def main() -> None:
     if args.webui_api:
         avp.registerWithWebUI(args.webui_api, args.instance_name, args.logfile)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
-    overlay_source_hwaccel = None
-    if args.html_overlay_socket and args.html_overlay_drm_device:
-        avp.executeCommandsFromString(
-            'hwaccel.init { "name": "@drm", "type": "drm", '
-            f'"device": {json.dumps(args.html_overlay_drm_device)} }}'
-        )
-        overlay_source_hwaccel = "@drm"
     avp.edges.planCapacity("*", 4)
 
     # ---- Per-input subgraphs ----
@@ -369,8 +368,6 @@ def main() -> None:
             silero_device=args.silero_device,
             silero_threshold=args.silero_threshold,
             static_face_crop=(args.static_genaro_face_crop and i == genaro_input_index),
-            debug_mouth_rois=args.debug_mouth_roi_bboxes,
-            speaker_registry=speaker_registry,
         )
         subgraphs.append(sg)
 
@@ -456,13 +453,6 @@ def main() -> None:
 
     mx.set_initial_scene(auto_initial_scene, slot="A")
     video_out_edge = mx.build()
-    if args.html_overlay_socket:
-        video_out_edge = build_html_overlay_output(
-            avp,
-            video_out_edge,
-            socket_path=args.html_overlay_socket,
-            source_hwaccel=overlay_source_hwaccel,
-        )
 
     # ---- Output routing ----
     if rene_input_index is None:
@@ -572,6 +562,24 @@ def main() -> None:
         native_exception_registry=native_exception_registry,
         auto_switch_scene=auto_switch_scene,
     )
+
+    if janus_enabled and not args.disable_janus_rtcp_feedback:
+        def _trigger_janus_keyframe(request: str) -> None:
+            try:
+                avp.executeCommandsFromString("node.object.set janus_force_keyframe trigger true")
+            except Exception as exc:
+                print(f"[rtcp] failed to trigger Janus keyframe for {request}: {exc}")
+
+        rtcp_feedback_listener = RtcpFeedbackListener(
+            bind_host=args.janus_rtcp_feedback_bind,
+            bind_port=args.janus_rtcp_feedback_port,
+            janus_host=args.janus_host,
+            janus_rtcp_port=args.janus_video_port + 1,
+            media_ssrc=args.janus_video_ssrc,
+            on_keyframe_request=_trigger_janus_keyframe,
+        )
+        rtcp_feedback_listener.start()
+        auto_runtime.rtcp_feedback_listener = rtcp_feedback_listener
 
     # Unlock the control server so remote clients can issue commands.
     avp.setReady()

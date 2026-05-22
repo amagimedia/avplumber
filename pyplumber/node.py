@@ -156,6 +156,10 @@ class ForceFPS(InternalNode):
     TYPE = "force_fps"
 
 
+class ForceKeyFrame(InternalNode):
+    TYPE = "force_keyframe"
+
+
 class Pause(InternalNode):
     TYPE = "pause"
 
@@ -253,6 +257,10 @@ class AssumeAudioFormat(InternalNode):
 
 class EncVideo(InternalNode):
     TYPE = "enc_video"
+
+
+class Bsf(InternalNode):
+    TYPE = "bsf"
 
 
 class Mux(InternalNode):
