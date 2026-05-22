@@ -18,7 +18,6 @@
 
   $: queueNameRaw = sourceOutput ?? targetInput ?? '';
   $: queueName = String(queueNameRaw).trim();
-  $: firstKey = $queueStatsByName && $queueStatsByName.size ? Array.from($queueStatsByName.keys())[0] : '';
   $: q =
     queueName
       ? $queueStatsByName.get(queueName) ||
@@ -39,13 +38,8 @@
           pps > 0 ? `, ${pps.toFixed(1)} pps` : ''
         }${fiqLine ? `\n${fiqLine}` : ''}`
       : queueName
-        ? `${queueName} (no stats; queues[0]=${JSON.stringify(firstKey)})`
+        ? queueName
         : '';
-  $: flowOn = pps > 0;
-  // Map packets/sec to animation duration (higher pps => faster movement).
-  // Tuned so ~60 pps => ~1s period, clamped for usability.
-  $: flowDuration = flowOn ? Math.max(0.25, Math.min(6, 60 / Math.max(pps, 0.1))) : 6;
-  $: flowOpacity = flowOn ? Math.max(0.45, Math.min(0.95, 0.45 + pps / 200)) : 0;
   $: hoverText =
     pct !== null
       ? `${fiq && fiq.min != null && fiq.max != null ? `min=${fiq.min} avg=${fiqAvg} max=${fiq.max}` : ''}${
@@ -137,24 +131,6 @@
     {/if}
   </path>
 
-  {#if flowOn}
-    <!-- Animated "dots" overlay: cheap dash animation along the same path -->
-    <path
-      d={path}
-      class="flow"
-      style={`--flow-duration: ${flowDuration}s; --flow-opacity: ${flowOpacity};`}
-    >
-      <!-- Use SVG SMIL animation (more reliable than CSS animations for SVG paths) -->
-      <animate
-        attributeName="stroke-dashoffset"
-        from="0"
-        to="-240"
-        dur={`${flowDuration}s`}
-        repeatCount="indefinite"
-      />
-    </path>
-  {/if}
-
   {#if hovered && pct !== null}
     <g transform={`translate(${mid.x}, ${mid.y})`}>
       <rect x={-hoverBadgeW / 2} y={hoverBadgeY} width={hoverBadgeW} height={hoverBadgeH} rx="7" ry="7" class="badge-bg" />
@@ -186,17 +162,6 @@
     cursor: default;
   }
 
-  .flow {
-    pointer-events: none;
-    /*stroke: rgba(56, 189, 248, var(--flow-opacity));*/
-    stroke: rgba(0, 0, 0, var(--flow-opacity));
-    stroke-width: 4;
-    stroke-linecap: round;
-    stroke-dasharray: 6 18;
-    stroke-dashoffset: 0;
-    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8));
-  }
-
   .badge-bg {
     fill: rgba(2, 6, 23, 0.9);
     stroke: rgba(229, 231, 235, 0.25);
@@ -225,5 +190,4 @@
     text-shadow: 0 0 2px #000;
   }
 </style>
-
 
