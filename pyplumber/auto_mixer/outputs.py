@@ -8,18 +8,14 @@ from pyplumber import AVPlumber
 from pyplumber.node import (
     AssumeAudioFormat,
     AssumeVideoFormat,
-    DrmPrimeToCuda,
+    Bsf,
     EncAudio,
     EncVideo,
-    FilterVideo,
     ForceFPS,
-    IpcDmabufSource,
+    ForceKeyFrame,
     Mux,
-    OneToMany,
     Output,
-    Realtime,
     ResampleAudio,
-    SourceSwitcher,
 )
 
 from .config import (
@@ -40,148 +36,11 @@ def output_format_for_url(url: str) -> str:
     return "flv" if url.startswith("rtmp://") else "mp4"
 
 
-def rtp_url(host: str, port: int) -> str:
-    return f"rtp://{host}:{port}?pkt_size={RTP_PKT_SIZE}"
-
-
-def build_html_overlay_output(
-    avp: AVPlumber,
-    video_edge: str,
-    *,
-    socket_path: str,
-    source_hwaccel: str | None = None,
-    group: str = "output",
-    source_group: str | None = None,
-) -> str:
-    """Overlay an Electron DMA-BUF page over the final mixed video.
-
-    The path starts off.  The TUI toggles it by controlling
-    otm_html_overlay, otm_html_overlay_src, and overlay_sel.
-    """
-    source_group = source_group or group
-    source_params = {
-        "name": "html_overlay_src",
-        "group": source_group,
-        "auto_restart": "on",
-        "dst": "html_dma",
-        "socket": socket_path,
-    }
-    if source_hwaccel:
-        source_params["hwaccel"] = source_hwaccel
-    avp.addNode(IpcDmabufSource(source_params))
-    avp.addNode(DrmPrimeToCuda({
-        "name": "html_to_cuda",
-        "group": source_group,
-        "auto_restart": "on",
-        "src": "html_dma",
-        "dst": "html_cuda",
-        "hwaccel": HWACCEL,
-    }))
-    avp.addNode(ForceFPS({
-        "name": "html_fps",
-        "fps": f"{FPS_NUM}/{FPS_DEN}",
-        "src": "html_cuda",
-        "dst": "html_cuda_fps",
-        "group": source_group,
-        "auto_restart": "on",
-    }))
-    avp.addNode(FilterVideo({
-        "name": "html_convert",
-        "src": "html_cuda_fps",
-        "dst": "html_overlay_yuva",
-        "graph": "convert_cuda=format=yuva420p",
-        "dst_width": CANVAS_W,
-        "dst_height": CANVAS_H,
-        "dst_pixel_format": "cuda",
-        "hwaccel": HWACCEL,
-        "group": source_group,
-        "auto_restart": "on",
-    }))
-    avp.addNode(Realtime({
-        "name": "html_overlay_rt",
-        "src": "html_overlay_yuva",
-        "dst": "html_overlay_rt",
-        "set_pts": True,
-        "group": source_group,
-        "auto_restart": "on",
-    }))
-    avp.addNode(AssumeVideoFormat({
-        "name": "html_overlay_assume",
-        "src": "html_overlay_rt",
-        "dst": "html_overlay_assumed",
-        "width": CANVAS_W,
-        "height": CANVAS_H,
-        "pixel_format": "cuda",
-        "real_pixel_format": "yuva420p",
-        "group": source_group,
-        "auto_restart": "on",
-    }))
-
-    avp.addNode(OneToMany({
-        "name": "otm_html_overlay",
-        "src": video_edge,
-        "dst": ["no_overlay", "pre_overlay"],
-        "outputs": 1,
-        "drop": True,
-        "group": group,
-    }))
-    avp.addNode(OneToMany({
-        "name": "otm_html_overlay_src",
-        "src": "html_overlay_assumed",
-        "dst": ["html_overlay_enabled"],
-        "outputs": 0,
-        "drop": True,
-        "group": source_group,
-    }))
-    avp.addNode(ForceFPS({
-        "name": "pre_overlay_fps",
-        "fps": f"{FPS_NUM}/{FPS_DEN}",
-        "src": "pre_overlay",
-        "dst": "pre_overlay_fps",
-        "group": group,
-    }))
-    avp.addNode(AssumeVideoFormat({
-        "name": "pre_overlay_assume",
-        "src": "pre_overlay_fps",
-        "dst": "pre_overlay_norm",
-        "width": CANVAS_W,
-        "height": CANVAS_H,
-        "pixel_format": "cuda",
-        "real_pixel_format": "nv12",
-        "group": group,
-        "auto_restart": "panic",
-    }))
-    avp.addNode(FilterVideo({
-        "name": "html_overlay_filter",
-        "src": ["pre_overlay_norm", "html_overlay_enabled"],
-        "dst": "post_overlay",
-        "graph": (
-            "[in0]scale_cuda=format=yuv420p[main];"
-            " [main][in1]overlay_many_cuda=inputs=2[blended];"
-            " [blended]scale_cuda=format=nv12"
-        ),
-        "dst_width": CANVAS_W,
-        "dst_height": CANVAS_H,
-        "dst_pixel_format": "cuda",
-        "hwaccel": HWACCEL,
-        "defer_preliminary_init": True,
-        "group": group,
-        "auto_restart": "on",
-    }))
-    avp.addNode(SourceSwitcher({
-        "name": "overlay_sel",
-        "src": ["no_overlay", "post_overlay"],
-        "dst": "video_output",
-        "active": 0,
-        "fallback_active": 0,
-        "fallback_when_active_missing": True,
-        # The overlay branch has an extra filter_video/framesync stage, so it can
-        # lag the direct branch by more than one frame around wipe/source switches.
-        # Wait through that normal skew before failing open to the no-overlay path.
-        "fallback_wait_ms": 100,
-        "group": group,
-    }))
-    return "video_output"
+def rtp_url(host: str, port: int, *, rtcp_port: int | None = None) -> str:
+    query = f"pkt_size={RTP_PKT_SIZE}"
+    if rtcp_port is not None:
+        query += f"&rtcp_port={rtcp_port}"
+    return f"rtp://{host}:{port}?{query}"
 
 
 def build_audio_output(
@@ -249,9 +108,13 @@ def build_video_output(
     group: str = "output",
     codec: str | None = None,
     options: dict | None = None,
+    force_keyframe_name: str | None = None,
+    keyframe_interval_sec: str | int | float | None = None,
+    repeat_keyframe_headers: bool = False,
 ) -> str:
     """Add fps-normalizer, format hint, encoder.  Returns encoded video edge."""
     fps_edge = f"{prefix}_mixer_norm_fps"
+    keyframe_edge = f"{prefix}_keyframe_marked"
     assumed_edge = f"{prefix}_mixer_norm"
     encoded_edge = f"{prefix}_v_enc"
     enc_options = {
@@ -272,9 +135,24 @@ def build_video_output(
         "group": group,
         "on_error": "panic",
     }))
+
+    format_source_edge = fps_edge
+    if force_keyframe_name or keyframe_interval_sec is not None:
+        keyframe_params = {
+            "name": force_keyframe_name or f"{prefix}_force_keyframe",
+            "src": fps_edge,
+            "dst": keyframe_edge,
+            "group": group,
+            "auto_restart": "panic",
+        }
+        if keyframe_interval_sec is not None:
+            keyframe_params["interval_sec"] = keyframe_interval_sec
+        avp.addNode(ForceKeyFrame(keyframe_params))
+        format_source_edge = keyframe_edge
+
     avp.addNode(AssumeVideoFormat({
         "name": f"{prefix}_assume_video",
-        "src": fps_edge,
+        "src": format_source_edge,
         "dst": assumed_edge,
         "width": CANVAS_W,
         "height": CANVAS_H,
@@ -293,6 +171,19 @@ def build_video_output(
         "on_error": "panic",
         "options": enc_options,
     }))
+
+    if repeat_keyframe_headers:
+        repeat_headers_edge = f"{prefix}_v_repeat_headers"
+        avp.addNode(Bsf({
+            "name": f"{prefix}_repeat_headers",
+            "src": encoded_edge,
+            "dst": repeat_headers_edge,
+            "bsf": "dump_extra=freq=keyframe",
+            "group": group,
+            "auto_restart": "panic",
+        }))
+        return repeat_headers_edge
+
     return encoded_edge
 
 
@@ -344,26 +235,46 @@ def build_janus_rtp_output(
         args,
         prefix="janus",
         codec=args.janus_video_codec,
+        force_keyframe_name="janus_force_keyframe",
+        keyframe_interval_sec="1/1",
+        repeat_keyframe_headers=True,
         options={
             "b": video_bitrate,
             "maxrate": video_bitrate,
             "bufsize": video_bitrate,
-            "g": 60,
+            "g": 30,
             "bf": 0,
-            "preset": "p3",
+            "preset": "p4",
             "profile": "baseline",
-            "tune": "ll",
+            "level": "4.0",
+            "tune": "ull",
+            "rc": "cbr",
+            "rc-lookahead": 0,
             "zerolatency": 1,
             "delay": 0,
+            "forced-idr": 1,
+            "no-scenecut": 1,
+            "strict_gop": 1,
+            "aud": 1,
+            "spatial-aq": 1,
+            "temporal-aq": 0,
         },
     )
     build_mux_output(
         avp,
         [video_enc_edge],
         mux_edge="janus_video_rtp_mux",
-        output_url=rtp_url(args.janus_host, args.janus_video_port),
+        output_url=rtp_url(
+            args.janus_host,
+            args.janus_video_port,
+            rtcp_port=args.janus_video_port + 1,
+        ),
         output_format="rtp",
-        options={"payload_type": args.janus_video_pt},
+        options={
+            "payload_type": args.janus_video_pt,
+            "rtpflags": "skip_rtcp",
+            "ssrc": args.janus_video_ssrc,
+        },
         restart_on_clean_finish=True,
     )
     if audio_edge is not None:
@@ -384,7 +295,11 @@ def build_janus_rtp_output(
             avp,
             [audio_enc_edge],
             mux_edge="janus_audio_rtp_mux",
-            output_url=rtp_url(args.janus_host, args.janus_audio_port),
+            output_url=rtp_url(
+                args.janus_host,
+                args.janus_audio_port,
+                rtcp_port=args.janus_audio_port + 1,
+            ),
             output_format="rtp",
             options={"payload_type": args.janus_audio_pt},
             restart_on_clean_finish=True,
