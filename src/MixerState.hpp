@@ -1,6 +1,7 @@
 #pragma once
 #include "instance_shared.hpp"
 #include "util.hpp"
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -67,6 +68,7 @@ struct MixerState : public InstanceShared<MixerState> {
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
+    std::atomic<uint64_t> transition_generation{0};
 
     struct SlotNodes {
         std::string compositor_name;   // "comp_a" / "comp_b"

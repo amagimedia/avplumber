@@ -325,6 +325,11 @@ public:
         logstream << "Closing server sockets";
         servers_.clear();
         if (manager_) {
+            auto schedulers = InstanceSharedObjects<MixerTransitionScheduler>::enumerate(manager_->instanceData());
+            for (auto& [_, scheduler] : schedulers) {
+                if (scheduler)
+                    scheduler->shutdown();
+            }
             logstream << "Shutting down NodeManager";
             manager_->shutdown();
         }
@@ -797,7 +802,8 @@ public:
         auto mixerOrchestrator = [this](const std::string& mixer_name) {
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
-            return MixerOrchestrator(manager_->shared_from_this(), state, tl);
+            auto scheduler = InstanceSharedObjects<MixerTransitionScheduler>::get(manager_->instanceData(), mixer_name);
+            return MixerOrchestrator(manager_->shared_from_this(), state, tl, scheduler);
         };
 
         auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
