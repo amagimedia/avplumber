@@ -27,8 +27,33 @@ class FakeMixer:
 
 
 class FakeEntry:
-    audio_event_pts_ms = 1000
-    audio_event_observed_ts = 9.0
+    def __init__(
+        self,
+        index=0,
+        *,
+        speaking=True,
+        visual_speaking=True,
+        level_db=-20.0,
+        since=0.0,
+    ):
+        self.index = index
+        self.speaking = speaking
+        self.visual_speaking = visual_speaking
+        self.level_db = level_db
+        self.audio_since = since
+        self.visual_since = since
+        self.combined_speaking_since = since if speaking and visual_speaking else None
+        self.last_change_ts = since
+        self.audio_event_pts_ms = 1000
+        self.audio_event_observed_ts = 9.0
+
+
+class FakeRegistry:
+    def __init__(self, entries):
+        self._entries = {entry.index: entry for entry in entries}
+
+    def get(self, index):
+        return self._entries.get(index)
 
 
 class AutoSwitcherWipeTest(unittest.TestCase):
@@ -91,6 +116,69 @@ class AutoSwitcherWipeTest(unittest.TestCase):
             [("wipe", "cam1", {"wipe_file": "alpha.mov", "start_pts_ms": 2600})],
             mixer.calls,
         )
+
+    def test_vad_only_priority_input_wins_before_audio_visual_candidates(self):
+        mixer = FakeMixer({"cam0", "cam1"})
+        registry = FakeRegistry([
+            FakeEntry(0, speaking=True, visual_speaking=True, level_db=-10.0),
+            FakeEntry(1, speaking=True, visual_speaking=False, level_db=-80.0),
+        ])
+        switcher = AutoSwitcher(
+            mixer=mixer,
+            registry=registry,
+            n_inputs=2,
+            scene_for_input=lambda i: f"cam{i}",
+            min_dwell_program_s=0.0,
+            min_dwell_speaking_s=0.0,
+            cooldown_s=0.0,
+            vad_only_priority_speaker_index=1,
+        )
+
+        switcher._tick_once()
+
+        self.assertEqual([("cut", "cam1", {"start_pts_ms": -1})], mixer.calls)
+
+    def test_audio_visual_candidates_choose_loudest_level(self):
+        mixer = FakeMixer({"cam0", "cam1"})
+        registry = FakeRegistry([
+            FakeEntry(0, speaking=True, visual_speaking=True, level_db=-12.0),
+            FakeEntry(1, speaking=True, visual_speaking=True, level_db=-8.0),
+        ])
+        switcher = AutoSwitcher(
+            mixer=mixer,
+            registry=registry,
+            n_inputs=2,
+            scene_for_input=lambda i: f"cam{i}",
+            min_dwell_program_s=0.0,
+            min_dwell_speaking_s=0.0,
+            cooldown_s=0.0,
+        )
+
+        switcher._tick_once()
+
+        self.assertEqual([("cut", "cam1", {"start_pts_ms": -1})], mixer.calls)
+
+    def test_special_speaker_must_clear_configured_db_margin(self):
+        mixer = FakeMixer({"cam0", "cam1"})
+        registry = FakeRegistry([
+            FakeEntry(0, speaking=True, visual_speaking=True, level_db=-10.0),
+            FakeEntry(1, speaking=True, visual_speaking=True, level_db=-12.0),
+        ])
+        switcher = AutoSwitcher(
+            mixer=mixer,
+            registry=registry,
+            n_inputs=2,
+            scene_for_input=lambda i: f"cam{i}",
+            min_dwell_program_s=0.0,
+            min_dwell_speaking_s=0.0,
+            cooldown_s=0.0,
+            special_speaker_index=0,
+            special_speaker_margin_db=3.0,
+        )
+
+        switcher._tick_once()
+
+        self.assertEqual([("cut", "cam1", {"start_pts_ms": -1})], mixer.calls)
 
 
 if __name__ == "__main__":

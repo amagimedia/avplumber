@@ -6,7 +6,7 @@ TUI_DIR = Path("tools/mixer_tui").resolve()
 if str(TUI_DIR) not in sys.path:
     sys.path.insert(0, str(TUI_DIR))
 
-from commands import auto_switch_set_command
+from commands import auto_switch_set_command, overlay_toggle_commands
 from state import parse_auto_switch_status, parse_mixer_status, parse_scene_list
 
 
@@ -52,14 +52,19 @@ def test_ai_transition_shortcut_is_not_swallowed_by_fade_input_focus():
 
 
 
-def test_tui_has_no_html_overlay_controls():
-    source = Path("tools/mixer_tui/mixer_tui.py").read_text(encoding="utf-8")
-    command_source = Path("tools/mixer_tui/commands.py").read_text(encoding="utf-8")
+def test_overlay_on_keeps_direct_branch_available_for_fail_open():
+    commands = overlay_toggle_commands(
+        enabled=True,
+        overlay_source_otm_name="src_otm",
+        overlay_otm_name="overlay_otm",
+        overlay_selector_name="overlay_sel",
+    )
 
-    assert "--overlay" not in source
-    assert "btn_overlay" not in source
-    assert "toggle_overlay" not in source
-    assert "overlay_toggle_commands" not in command_source
+    assert commands == [
+        "node.object.set src_otm outputs 1",
+        "node.object.set overlay_otm outputs 3",
+        "node.object.set overlay_sel active 1",
+    ]
 
 
 def test_auto_switch_set_command_uses_main_protocol_payload():
