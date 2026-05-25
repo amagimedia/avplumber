@@ -4,7 +4,6 @@
 * Don't assume the user is right, especially with *maybe*/*possibly*; point out a better solution if one exists.
 * When advising on architecture changes, don't assume a more recent idea is better. Be objective.
 
-
 # General guidelines
 
 ## Documentation & comments
@@ -23,7 +22,7 @@
 ## Framework changes
 * Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof.
 * Call out framework-wide behavior changes explicitly; don't make incidental edits during node/mixer work.
-* In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new 
+* In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new
 interface, new shared object etc., or improving existing ones.
 
 ## Writing new nodes
@@ -33,11 +32,13 @@ interface, new shared object etc., or improving existing ones.
 * See [developing_nodes.md](doc/developing_nodes.md) for structure and patterns.
 
 ## Before implementing
+* Think Before Coding: The agent must highlight ambiguities and ask clarifying questions instead of guessing
 * State assumptions explicitly; ask if uncertain.
 * Present multiple interpretations rather than picking silently.
 * Say so if a simpler approach exists. Push back when warranted.
 * If something is unclear, stop, name what's confusing, and ask.
-
+* Surgical Changes: Only modify exactly what is necessary. Avoid unnecessary refactors, unprompted cleanups, or touching unrelated files.
+* Verifiable Execution: Turn vague user requests into defined success criteria.
 
 # Agentic work guidelines
 
@@ -54,6 +55,7 @@ interface, new shared object etc., or improving existing ones.
 
 ## Build & test workflow
 * Don't build locally for x86/CUDA targets unless the host has the required hardware. Use a user-provided remote environment.
+* If `nvidia-smi` is unavailable locally, do not attempt CUDA, TensorRT, NVENC, Janus GPU, or neural build/run checks on localhost; use the configured SSH NVIDIA host instead.
 * Don't commit instance-specific build details (hostnames, IPs, SSH keys, CUDA/TensorRT paths).
 * CUDA/neural builds: preserve feature flags `CUDA`, `neural_net common`, `neural_net specific`, `NVCC/PTX`, `TensorRT`. Keep FRUC disabled unless testing frame interpolation.
 * pyplumber builds must use the same neural/CUDA/TensorRT feature set as the binary build.
@@ -79,7 +81,6 @@ Example `run.sh` for avplumber:
 ```
 LD_LIBRARY_PATH=/usr/local/lib ./avplumber --webui-api http://localhost:22222 --port 22422 -s examples/sync_mixer.avplumber
 ```
-
 
 # Domain-specific rules
 
