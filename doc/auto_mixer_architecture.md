@@ -227,7 +227,7 @@ The policy thread controls the graph; it does not perform media processing.
 
 - Video normalization and encoding.
 - Audio normalization and encoding.
-- File/RTMP mux output.
+- Recording mux output, limited to FLV or MPEG-TS. SRT output uses MPEG-TS.
 - Janus RTP video and optional audio output.
 
 For Janus, the video branch is tuned for preview-style WebRTC delivery: 3 Mbit/s
