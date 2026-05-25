@@ -32,6 +32,31 @@ services:
     depends_on:
       - janus
 
+  web-ui:
+    build:
+      context: ../../..
+      dockerfile: pyplumber/auto_mixer/docker/web-ui/Dockerfile
+    image: avplumber-auto-mixer-web-ui:${WEBUI_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEBUI_PORT: ${WEBUI_PORT:-22222}
+      AVPLUMBER_HOST: 127.0.0.1
+      AVPLUMBER_PORT: ${REMOTE_CONTROL_PORT:-7777}
+      AVPLUMBER_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
+    volumes:
+      - auto-mixer-logs:/var/log/avplumber:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const p=process.env.WEBUI_PORT||22222;fetch('http://127.0.0.1:'+p+'/api/instances').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
   wayland:
     build:
       context: .
@@ -123,6 +148,8 @@ services:
     depends_on:
       janus:
         condition: service_started
+      web-ui:
+        condition: service_healthy
       wayland:
         condition: service_healthy
       dma-browser:
@@ -134,6 +161,9 @@ services:
       AVP_WIPE_DIR: /media-wipes
       AVP_HTML_OVERLAY_DRM_DEVICE: ${HTML_OVERLAY_DRM_DEVICE:-/dev/dri/renderD128}
       AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-7777}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_INSTANCE_NAME: ${AUTO_MIXER_INSTANCE_NAME:-auto-mixer}
+      AVP_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
       NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
       XDG_RUNTIME_DIR: /run/avp-wayland
       WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
@@ -142,9 +172,11 @@ services:
       - ${FACE_ENGINE_CACHE_DIR:?set FACE_ENGINE_CACHE_DIR to a persistent face engine cache directory}:/models-cache
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
+      - auto-mixer-logs:/var/log/avplumber
       - ${MEDIA_INPUT_DIR:?set MEDIA_INPUT_DIR to the input media directory}:/media-inputs:ro
       - ${MEDIA_WIPE_DIR:?set MEDIA_WIPE_DIR to the media wipe directory}:/media-wipes:ro
 
 volumes:
+  auto-mixer-logs:
   dma-browser-sockets:
   wayland-runtime:
