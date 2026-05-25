@@ -94,6 +94,32 @@ prepare_face_engine() {
     echo "face_engine=${AVP_FACE_ENGINE}"
 }
 
+has_arg() {
+    local needle="$1"
+    shift
+    local arg
+    for arg in "$@"; do
+        [[ "${arg}" == "${needle}" || "${arg}" == "${needle}="* ]] && return 0
+    done
+    return 1
+}
+
+run_auto_mixer() {
+    local -a extra_args=()
+
+    if [[ -n "${AVP_WEBUI_API:-}" ]] && ! has_arg "--webui-api" "$@"; then
+        extra_args+=("--webui-api" "${AVP_WEBUI_API}")
+    fi
+    if [[ -n "${AVP_INSTANCE_NAME:-}" ]] && ! has_arg "--instance-name" "$@"; then
+        extra_args+=("--instance-name" "${AVP_INSTANCE_NAME}")
+    fi
+    if [[ -n "${AVP_LOGFILE:-}" ]] && ! has_arg "--logfile" "$@"; then
+        extra_args+=("--logfile" "${AVP_LOGFILE}")
+    fi
+
+    exec python3 -m pyplumber.auto_mixer.cli "$@" "${extra_args[@]}"
+}
+
 if [[ "$#" -eq 0 ]]; then
     exec python3 -m pyplumber.auto_mixer.cli --help
 fi
@@ -105,7 +131,7 @@ if [[ "${1:0:1}" == "-" ]]; then
             ;;
     esac
     prepare_face_engine
-    exec python3 -m pyplumber.auto_mixer.cli "$@"
+    run_auto_mixer "$@"
 fi
 
 exec "$@"

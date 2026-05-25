@@ -23,6 +23,9 @@ Inside the container the directory is mounted at `/media-wipes`; a relative
 Set `REMOTE_CONTROL_PORT` for the mixer/TUI control socket. The compose default
 is `7777`, and the auto-mixer container exports it as `AVP_REMOTE_CONTROL_PORT`
 so Docker runs start with TUI and auto-switch controls enabled by default.
+Set `WEBUI_PORT` for the avplumber Web UI. The compose default is `22222`.
+The auto-mixer container registers itself with `http://127.0.0.1:$WEBUI_PORT`
+by default, using `AUTO_MIXER_INSTANCE_NAME` and `AUTO_MIXER_LOGFILE`.
 Set `FACE_ENGINE_CACHE_DIR` to a persistent host directory for the generated
 TensorRT face engine and timing cache. Inside the container it is mounted at
 `/models-cache`, where `AVP_FACE_ENGINE` defaults to
@@ -42,14 +45,19 @@ source hwaccel context as the working host graph.
 Start support services:
 
 ```sh
-docker compose up -d janus janus-preview wayland dma-browser
+docker compose up -d janus janus-preview web-ui wayland dma-browser
 ```
+
+Open the Web UI from the VPN/browser host at `http://<host-ip>:22222/` unless
+`WEBUI_PORT` is changed. It uses the same main auto-mixer control port as the
+TUI, so the auto-mixer must have `REMOTE_CONTROL_PORT` enabled.
 
 Run the auto mixer with explicit CLI arguments. Pass `--html-overlay-url` only
 when the overlay is required; when omitted, the auto mixer skips the HTML
 overlay graph and does not consume `/tmp/dma-page/overlay.sock`. When the URL is
 provided, the overlay branch starts enabled and consumes the sidecar DMA-BUF
-socket by default.
+socket by default. The Docker entrypoint appends Web UI registration arguments
+from env unless they are supplied explicitly.
 
 ```sh
 set -a
