@@ -65,21 +65,25 @@ docker compose run --rm auto-mixer \
   --html-overlay-url "$HTML_OVERLAY_URL"
 ```
 
-Fedora Televisa 6-camera demo input set. Mount the real Televisa directory, not
-`/home/fedora/test-content/talkshow`, because that directory contains absolute
-symlinks that are broken inside the container.
+Six-camera demo runs should pass the media files explicitly in the order used by
+the role-index options. The example below uses generic camera filenames; adapt
+the paths and indexes for each input set. The role rules are not tied to names:
+`--program-audio-input` selects the audio source, `--special-speaker-index`
+gives one input a dB-margin rule, `--vad-only-priority-speaker-index` lets one
+input win from audio VAD without visual speech, and `--static-face-crop-input`
+uses a fixed face crop for that input.
 
 ```sh
-MEDIA_INPUT_DIR=/home/fedora/test-content/televisa \
-JANUS_HOST_IP=172.17.36.132 \
+MEDIA_INPUT_DIR=/path/to/media \
+JANUS_HOST_IP=<host-ip> \
 docker compose run --rm auto-mixer \
   --inputs \
-    /media-inputs/televisa-Rene_norm.ts \
-    /media-inputs/televisa-Sergio_norm.ts \
-    /media-inputs/televisa-Genaro_norm.ts \
-    /media-inputs/televisa-denise_norm.ts \
-    /media-inputs/televisa-Leo_norm.ts \
-    /media-inputs/televisa-Ray_norm.ts \
+    /media-inputs/cam0.ts \
+    /media-inputs/cam1.ts \
+    /media-inputs/cam2.ts \
+    /media-inputs/cam3.ts \
+    /media-inputs/cam4.ts \
+    /media-inputs/cam5.ts \
   --program-audio-input 0 \
   --special-speaker-index 0 \
   --special-speaker-margin-db 3.0 \
