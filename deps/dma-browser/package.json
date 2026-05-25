@@ -1,0 +1,41 @@
+{
+  "name": "dma-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic offscreen HTML page renderer with dmabuf + audio capture",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "npm run build && bin/run.sh",
+    "start:nvidia": "npm run build && DMA_BROWSER_FORCE_NVIDIA=1 bin/run.sh",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "rebuild:addons": "npm --prefix ./addons/fdpass run install",
+    "dist": "npm run build && electron-builder"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.1",
+    "fdpass": "file:./addons/fdpass"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/supertest": "^6.0.2",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "electron": "41.3.0",
+    "electron-builder": "^25.1.8",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.3.3",
+    "supertest": "^7.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

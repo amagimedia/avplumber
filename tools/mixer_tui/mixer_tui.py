@@ -20,6 +20,7 @@ Keyboard shortcuts:
     F1-F9      Direct CUT to scene N (skips preview step)
     t          Toggle direct scene-click cuts
     a          Cycle AI auto-switch transitions through CUT / FADE / WIPE
+    o          Toggle HTML overlay on/off
     c          CUT  (take preview to program, hard cut)
     x          X-FADE (crossfade preview to program at set frame count)
     w          WIPE (uses --wipe-file path if set, otherwise prompts)
@@ -56,6 +57,7 @@ from commands import (
     TAKE_COMMAND_PREFIXES,
     auto_switch_set_command,
     mixer_command,
+    overlay_toggle_commands,
 )
 from state import parse_auto_switch_status, parse_mixer_status, parse_scene_list
 from widgets import FadeFramesInput, SceneButton, WipeModal
@@ -65,6 +67,7 @@ from widgets import FadeFramesInput, SceneButton, WipeModal
 # Main application
 # ---------------------------------------------------------------------------
 
+OVERLAY_SETTLE_SECONDS = 0.2
 DEFAULT_FADE_FPS = 30.0
 DEFAULT_FADE_FRAMES = 15
 MAX_FADE_FRAMES = 300
@@ -247,6 +250,10 @@ Screen {
     margin-right: 1;
 }
 
+#btn_overlay {
+    margin-left: 1;
+}
+
 /* ── Connection status ── */
 #conn_status {
     height: 1;
@@ -278,6 +285,7 @@ class MixerTUI(App):
         Binding("d", "focus_duration", "Fade frames", show=False),
         Binding("a", "toggle_ai_transition_mode", "AI transition", show=False, priority=True),
         Binding("t", "toggle_direct_cut_mode", "Direct cuts", show=False),
+        Binding("o", "toggle_overlay", "Overlay", show=False),
         Binding("s", "refresh_status", "Refresh", show=False),
         # F1-F9: direct cut to scene (bound dynamically in on_key)
     ]
@@ -292,6 +300,7 @@ class MixerTUI(App):
 
     # Local PVW selection (TD's intent)
     pvw_selected: reactive[int] = reactive(-1, layout=True)
+    overlay_enabled: reactive[bool] = reactive(False, layout=True)
     direct_cut_mode: reactive[bool] = reactive(False, layout=True)
     auto_control_connected: reactive[bool] = reactive(False, layout=True)
     auto_transition_mode: reactive[str] = reactive("n/a", layout=True)
@@ -299,6 +308,9 @@ class MixerTUI(App):
     connected: reactive[bool] = reactive(False)
 
     def __init__(self, host: str, port: int, mixer: str,
+                 overlay_otm: str,
+                 overlay_source_otm: str,
+                 overlay_selector: str,
                  wipe_file: Optional[str] = None,
                  wipe_dir: Optional[str] = None,
                  fade_fps: float = DEFAULT_FADE_FPS,
@@ -309,12 +321,16 @@ class MixerTUI(App):
         self.fade_fps = fade_fps if fade_fps > 0 else DEFAULT_FADE_FPS
         self.default_fade_frames = min(MAX_FADE_FRAMES, max(1, int(fade_frames)))
         self.mixer_name = mixer
+        self.overlay_otm_name = overlay_otm
+        self.overlay_source_otm_name = overlay_source_otm
+        self.overlay_selector_name = overlay_selector
         self.wipe_file: Optional[str] = wipe_file
         self.wipe_dir: Optional[str] = wipe_dir
         self._conn = AvpConnection(host, port)
         self._pending_action: Optional[str] = None  # "cut" | "auto" | "wipe:<path>"
         self._auto_poll_counter = 0
         self._auto_duration_initialized = False
+        self._overlay_toggle_in_progress = False
         self._connection_timer = None
         self._poll_timer = None
         self._scene_timer = None
@@ -351,6 +367,7 @@ class MixerTUI(App):
             yield Button("Direct: OFF", id="btn_direct", variant="default")
             yield Button("AI: n/a", id="btn_ai_transition", variant="default")
             yield Button("⚙ Wipe file…", id="btn_change_wipe", variant="default")
+            yield Button("Overlay: OFF", id="btn_overlay", variant="warning")
 
     # ── On mount ────────────────────────────────────────────────────────────
 
@@ -483,6 +500,14 @@ class MixerTUI(App):
         pvw = self.query_one("#pvw_panel")
         pgm.set_class(busy, "transitioning")
         pvw.set_class(busy, "transitioning")
+
+    def watch_overlay_enabled(self, value: bool) -> None:
+        try:
+            button = self.query_one("#btn_overlay", Button)
+            button.label = "Overlay: ON" if value else "Overlay: OFF"
+            button.variant = "primary" if value else "warning"
+        except NoMatches:
+            pass
 
     def watch_direct_cut_mode(self, value: bool) -> None:
         try:
@@ -761,6 +786,12 @@ class MixerTUI(App):
             exit_on_error=False,
         )
 
+    def action_toggle_overlay(self) -> None:
+        if self._overlay_toggle_in_progress:
+            return
+        self._overlay_toggle_in_progress = True
+        self._set_overlay_enabled(not self.overlay_enabled)
+
     def action_toggle_direct_cut_mode(self) -> None:
         self.direct_cut_mode = not self.direct_cut_mode
 
@@ -835,6 +866,35 @@ class MixerTUI(App):
                 pass
 
     @work(thread=False)
+    async def _set_overlay_enabled(self, enabled: bool) -> None:
+        try:
+            if not self._conn.connected:
+                self.notify("Connection lost", severity="error")
+                return
+
+            commands = overlay_toggle_commands(
+                enabled=enabled,
+                overlay_source_otm_name=self.overlay_source_otm_name,
+                overlay_otm_name=self.overlay_otm_name,
+                overlay_selector_name=self.overlay_selector_name,
+            )
+
+            for i, cmd in enumerate(commands):
+                if i > 0:
+                    await asyncio.sleep(OVERLAY_SETTLE_SECONDS)
+                resp = await self._conn.command(cmd, raise_for_status=False)
+                if resp is None:
+                    self.notify("Connection lost", severity="error")
+                    return
+                if resp.code >= 400:
+                    self.notify(f"Overlay toggle failed: {resp.code} {resp.status}", severity="error")
+                    return
+
+            self.overlay_enabled = enabled
+        finally:
+            self._overlay_toggle_in_progress = False
+
+    @work(thread=False)
     async def _do_command(self, cmd: str) -> None:
         is_take = cmd.startswith(TAKE_COMMAND_PREFIXES)
         if is_take and self._mixer_take_in_progress():
@@ -904,6 +964,10 @@ class MixerTUI(App):
     def on_btn_change_wipe(self) -> None:
         self.action_change_wipe_path()
 
+    @on(Button.Pressed, "#btn_overlay")
+    def on_btn_overlay(self) -> None:
+        self.action_toggle_overlay()
+
     @on(Button.Pressed, "#btn_direct")
     def on_btn_direct(self) -> None:
         self.action_toggle_direct_cut_mode()
@@ -935,6 +999,9 @@ def main() -> None:
     parser.add_argument("--host", default="localhost", help="avplumber host (default: localhost)")
     parser.add_argument("--port", type=int, required=True, help="avplumber TCP control port")
     parser.add_argument("--mixer", default="mixer", help="mixer instance name (default: mixer)")
+    parser.add_argument("--overlay-otm", default="otm_html_overlay", help="overlay one_to_many node name")
+    parser.add_argument("--overlay-source-otm", default="otm_html_overlay_src", help="overlay source one_to_many node name")
+    parser.add_argument("--overlay-selector", default="overlay_sel", help="overlay source_switcher node name")
     parser.add_argument("--wipe-file", default=None, metavar="PATH",
                         help="default wipe file path; skips the prompt when set")
     parser.add_argument("--wipe-dir", default=os.environ.get("AVP_WIPE_DIR"), metavar="PATH",
@@ -949,6 +1016,9 @@ def main() -> None:
         host=args.host,
         port=args.port,
         mixer=args.mixer,
+        overlay_otm=args.overlay_otm,
+        overlay_source_otm=args.overlay_source_otm,
+        overlay_selector=args.overlay_selector,
         wipe_file=args.wipe_file,
         wipe_dir=args.wipe_dir,
         fade_fps=args.fade_fps,

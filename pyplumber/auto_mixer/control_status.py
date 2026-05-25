@@ -29,7 +29,7 @@ class MixerProgramSceneReader:
         self._file = None
         self._next_connect_ts = 0.0
 
-    def program_scene(self) -> Optional[str]:
+    def status(self) -> Optional[dict]:
         if not self._ensure_connected():
             return None
         try:
@@ -39,11 +39,17 @@ class MixerProgramSceneReader:
             if code != 201 or not content:
                 return None
             data = json.loads(content)
-            scene = data.get("pgm_scene")
-            return scene if isinstance(scene, str) and scene else None
+            return data if isinstance(data, dict) else None
         except Exception:
             self.close()
             return None
+
+    def program_scene(self) -> Optional[str]:
+        data = self.status()
+        if not data:
+            return None
+        scene = data.get("pgm_scene")
+        return scene if isinstance(scene, str) and scene else None
 
     def close(self) -> None:
         if self._file is not None:

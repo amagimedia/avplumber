@@ -1,0 +1,13 @@
+{
+  "name": "fdpass",
+  "version": "0.1.0",
+  "main": "index.js",
+  "gypfile": true,
+  "dependencies": {
+    "node-addon-api": "^7.1.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "scripts": {
+    "install": "node-gyp-build"
+  }
+}

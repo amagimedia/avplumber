@@ -13,14 +13,16 @@ Speech detection uses two complementary signals:
     that Mouth / Nose bounding boxes are available even though only the "face"
     label is used for viewport tracking.  Updates Speaker.visual_speaking via
     VisualSpeechRegistryNode.
-The AutoSwitcher triggers a scene change only when both signals are active.
+The AutoSwitcher triggers a scene change only when both signals are active,
+except for an optional configured VAD-only priority input. A configured special
+speaker input keeps the original lead-margin rule.
 
 All inputs are mixed on a 1080x1920 (9:16) canvas.
 
 Available scene types
 ---------------------
   full_face_{i}       Dominant-speaker 9:16 reframed portrait, full canvas.
-  videoconf_{i}       Dominant speaker 1:1 (static crop of 9:16) in the top
+  videoconf_{i}       Dominant speaker 1:1 square crop of 9:16 in the top
                       1080×1080 slot, up to 5 other cameras as portrait
                       thumbnails below — videoconference-style layout.
   vstack3_{a}_{b}_{c} Three 16:9 sources stacked vertically (3×1080×608).
@@ -60,6 +62,7 @@ Environment variables
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 from pyplumber.audio_vad import SileroVadRegistryBridge, Speaker, VisualSpeechRegistryNode
@@ -82,12 +85,11 @@ from .inputs import build_input_subgraph, default_face_engine
 from .native_exceptions import AutoMixerAVPlumber, NativeExceptionRegistry
 from .outputs import (
     build_audio_output,
+    build_html_overlay_output,
     build_janus_rtp_output,
     build_mux_output,
     build_video_output,
-    output_format_for_url,
 )
-from .profiles.talkshow import RENE_INPUT_NAME
 from .rtcp_feedback import RtcpFeedbackListener
 from .run_config import derive_run_config
 from .runtime import (
@@ -117,6 +119,17 @@ def _parse_int_auto_base(value: str) -> int:
     return int(value, 0)
 
 
+def _resolve_media_wipe_file(args: argparse.Namespace) -> None:
+    wipe_file = (args.auto_switch_wipe_file or "").strip()
+    media_wipe_dir = (args.media_wipe_dir or "").strip()
+    if not wipe_file or not media_wipe_dir:
+        return
+    if os.path.isabs(wipe_file) or "://" in wipe_file:
+        args.auto_switch_wipe_file = wipe_file
+        return
+    args.auto_switch_wipe_file = os.path.join(media_wipe_dir, wipe_file)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -125,7 +138,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        help="Output RTMP URL or file path. Optional when --janus-output or --janus-preview is set.",
+        help=(
+            "Output RTMP, SRT, FLV, or MPEG-TS URL/path. Optional when "
+            "--janus-output or --janus-preview is set."
+        ),
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=("mpegts", "flv"),
+        default=None,
+        help="Recording muxer format. Inferred from RTMP, SRT, .flv, or .ts when unset.",
     )
     parser.add_argument(
         "--face-engine",
@@ -150,6 +172,16 @@ def main() -> None:
         help="realtime sync_team name for live SRT sources (empty = independent)",
     )
     parser.add_argument(
+        "--program-audio-input",
+        default=None,
+        type=int,
+        metavar="INDEX",
+        help=(
+            "Input index used for program audio. Defaults to 0; "
+            "--talkshow-profile uses index 0 unless this is set."
+        ),
+    )
+    parser.add_argument(
         "--input-start-ts",
         help="Seek each input to this start timestamp (ms, MM:SS[.mmm], or HH:MM:SS[.mmm])",
     )
@@ -163,7 +195,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--fade", default=None, type=float,
-        help="Crossfade duration in seconds when auto-switch transitions use fade; overrides --fade-frames.",
+        help=(
+            "Crossfade duration in seconds when auto-switch transitions use fade; "
+            "overrides --fade-frames."
+        ),
     )
     parser.add_argument(
         "--fade-frames", default=15, type=int,
@@ -180,6 +215,35 @@ def main() -> None:
         help="Media wipe file used when automatic AI speaker switches use wipe.",
     )
     parser.add_argument(
+        "--media-wipe-dir",
+        default=os.environ.get("AVP_WIPE_DIR", ""),
+        help=(
+            "Directory mounted with selectable media wipe files. This exposes the "
+            "runtime path to operators; use --auto-switch-wipe-file to select a file."
+        ),
+    )
+    parser.add_argument(
+        "--html-overlay-url",
+        default="",
+        help=(
+            "HTML overlay URL rendered by the dma-browser sidecar. When set, the "
+            "auto mixer enables the HTML overlay path from --html-overlay-socket."
+        ),
+    )
+    parser.add_argument(
+        "--html-overlay-socket",
+        default="/tmp/dma-page/overlay.sock",
+        help="DMA-BUF socket produced by dma-browser for --html-overlay-url.",
+    )
+    parser.add_argument(
+        "--html-overlay-drm-device",
+        default=os.environ.get("AVP_HTML_OVERLAY_DRM_DEVICE", ""),
+        help=(
+            "DRM render device used to attach a DRM hw_frames_ctx to the overlay "
+            "source (empty = omit)."
+        ),
+    )
+    parser.add_argument(
         "--min-dwell", default=2.5, type=float,
         help="Minimum program dwell time in seconds before switching (default: 2.5)",
     )
@@ -193,7 +257,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--switch-margin-ms", default=100, type=int,
-        help="Minimum accepted lead time for explicitly scheduled mixer transitions (default: 100).",
+        help=(
+            "Minimum accepted lead time for explicitly scheduled mixer transitions "
+            "(default: 100)."
+        ),
     )
     parser.add_argument(
         "--silero-model",
@@ -218,8 +285,11 @@ def main() -> None:
         help="Deprecated; retained for CLI compatibility",
     )
     parser.add_argument(
-        "--remote-control-port", default=0, type=int, metavar="PORT",
-        help="TCP port for the avplumber remote control API (0 = disabled)",
+        "--remote-control-port",
+        default=int(os.environ.get("AVP_REMOTE_CONTROL_PORT", "0")),
+        type=int,
+        metavar="PORT",
+        help="TCP port for the avplumber remote control API (0 = disabled; env: AVP_REMOTE_CONTROL_PORT)",
     )
     parser.add_argument(
         "--logfile", default="",
@@ -241,7 +311,10 @@ def main() -> None:
         "--auto-switch-layout",
         choices=("videoconf", "full_face"),
         default="videoconf",
-        help="Scene family used by the fixed auto switcher and as profile fallback (default: videoconf)",
+        help=(
+            "Scene family used by the fixed auto switcher and as profile fallback "
+            "(default: videoconf)"
+        ),
     )
     parser.add_argument(
         "--auto-switch-shot-profile",
@@ -271,8 +344,50 @@ def main() -> None:
         help="Use dynamic mixer scene loading instead of geometry-preheated scene sources.",
     )
     parser.add_argument(
-        "--static-genaro-face-crop", action="store_true",
-        help="Use a centered static 9:16 crop for the Genaro input instead of face tracking.",
+        "--talkshow-profile",
+        action="store_true",
+        help=(
+            "Enable the default talk-show index roles: input 0 is program audio "
+            "and special speaker, input 1 is VAD-only priority, input 2 uses a "
+            "static face crop."
+        ),
+    )
+    parser.add_argument(
+        "--special-speaker-index",
+        default=None,
+        type=int,
+        metavar="INDEX",
+        help=(
+            "Input index that must clear --special-speaker-margin-db over the "
+            "next loudest audio+visual candidate before auto-switching."
+        ),
+    )
+    parser.add_argument(
+        "--special-speaker-margin-db",
+        default=3.0,
+        type=float,
+        help="Required lead for --special-speaker-index in dB (default: 3.0).",
+    )
+    parser.add_argument(
+        "--vad-only-priority-speaker-index",
+        default=None,
+        type=int,
+        metavar="INDEX",
+        help=(
+            "Input index that may auto-switch on audio VAD alone, before the "
+            "normal audio+visual loudest-speaker selection."
+        ),
+    )
+    parser.add_argument(
+        "--static-face-crop-input",
+        action="append",
+        default=[],
+        type=int,
+        metavar="INDEX",
+        help=(
+            "Input index whose 9:16 portrait source should use a centered static "
+            "crop instead of face tracking. May be repeated."
+        ),
     )
     parser.add_argument(
         "--janus-preview", action="store_true",
@@ -316,7 +431,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--janus-video-ssrc", default=JANUS_DEFAULT_VIDEO_SSRC, type=_parse_int_auto_base,
-        help=f"RTP SSRC for Janus H.264 video, decimal or 0x-prefixed (default: 0x{JANUS_DEFAULT_VIDEO_SSRC:x})",
+        help=(
+            "RTP SSRC for Janus H.264 video, decimal or 0x-prefixed "
+            f"(default: 0x{JANUS_DEFAULT_VIDEO_SSRC:x})"
+        ),
     )
     parser.add_argument(
         "--janus-audio-bitrate", default="100k",
@@ -335,13 +453,12 @@ def main() -> None:
         help="Local UDP port for the Janus RTCP feedback listener (0 = auto-select).",
     )
     args = parser.parse_args()
+    _resolve_media_wipe_file(args)
 
     run_config = derive_run_config(args, parser)
     n = run_config.n_inputs
     janus_enabled = run_config.janus_enabled
     record_enabled = run_config.record_enabled
-    rene_input_index = run_config.rene_input_index
-    genaro_input_index = run_config.genaro_input_index
     speaker_registry = Speaker()
     native_exception_registry = NativeExceptionRegistry()
 
@@ -352,6 +469,13 @@ def main() -> None:
     if args.webui_api:
         avp.registerWithWebUI(args.webui_api, args.instance_name, args.logfile)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    overlay_source_hwaccel = None
+    if args.html_overlay_url and args.html_overlay_drm_device:
+        avp.executeCommandsFromString(
+            'hwaccel.init { "name": "@drm", "type": "drm", '
+            f'"device": {json.dumps(args.html_overlay_drm_device)} }}'
+        )
+        overlay_source_hwaccel = "@drm"
     avp.edges.planCapacity("*", 4)
 
     # ---- Per-input subgraphs ----
@@ -367,7 +491,7 @@ def main() -> None:
             silero_repo=args.silero_repo,
             silero_device=args.silero_device,
             silero_threshold=args.silero_threshold,
-            static_face_crop=(args.static_genaro_face_crop and i == genaro_input_index),
+            static_face_crop=(i in run_config.static_face_crop_inputs),
         )
         subgraphs.append(sg)
 
@@ -454,12 +578,19 @@ def main() -> None:
     mx.set_initial_scene(auto_initial_scene, slot="A")
     video_out_edge = mx.build()
 
+    if args.html_overlay_url:
+        video_out_edge = build_html_overlay_output(
+            avp,
+            video_out_edge,
+            socket_path=args.html_overlay_socket,
+            source_hwaccel=overlay_source_hwaccel,
+        )
+
     # ---- Output routing ----
-    if rene_input_index is None:
-        parser.error(f'Program audio input "{RENE_INPUT_NAME}" was not found in --inputs.')
-    program_audio_edge = subgraphs[rene_input_index]["program_audio_edge"]
+    program_audio_input_index = run_config.program_audio_input_index
+    program_audio_edge = subgraphs[program_audio_input_index]["program_audio_edge"]
     for i, sg in enumerate(subgraphs):
-        if i == rene_input_index:
+        if i == program_audio_input_index:
             continue
         avp.addNode(NullSink({
             "name": f"program_audio_sink_{i}",
@@ -497,14 +628,22 @@ def main() -> None:
             janus_audio_edge = "program_audio_janus"
 
     if record_enabled:
-        audio_enc_edge = build_audio_output(avp, record_audio_edge, codec=args.audio_codec, prefix="program")
+        audio_enc_edge = build_audio_output(
+            avp,
+            record_audio_edge,
+            codec=args.audio_codec,
+            prefix="program",
+        )
         video_enc_edge = build_video_output(avp, record_video_edge, args, prefix="program")
+        record_output_format = run_config.record_output_format
+        if record_output_format is None:
+            raise RuntimeError("record output format was not derived")
         build_mux_output(
             avp,
             [video_enc_edge, audio_enc_edge],
             mux_edge="program_mux_out",
             output_url=args.output,
-            output_format=output_format_for_url(args.output),
+            output_format=record_output_format,
         )
 
     if janus_enabled:

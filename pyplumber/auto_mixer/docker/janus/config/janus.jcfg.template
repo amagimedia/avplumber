@@ -1,0 +1,22 @@
+general: {
+	configs_folder = "/opt/janus-avp/etc/janus"
+	plugins_folder = "/opt/janus-avp/lib/janus/plugins"
+	transports_folder = "/opt/janus-avp/lib/janus/transports"
+	events_folder = "/opt/janus-avp/lib/janus/events"
+	loggers_folder = "/opt/janus-avp/lib/janus/loggers"
+	log_to_stdout = true
+	debug_level = __JANUS_DEBUG_LEVEL__
+	interface = "__JANUS_HOST_IP__"
+	server_name = "avplumber-janus"
+}
+
+media: {
+	rtp_port_range = "__JANUS_RTP_PORT_RANGE__"
+	dtls_mtu = 1200
+	no_media_timer = 2
+}
+
+nat: {
+	ice_enforce_list = "__JANUS_HOST_IP__"
+	ice_ignore_list = "vmnet"
+}
