@@ -1,0 +1,25 @@
+general: {
+	events = true
+}
+
+avplumber-program: {
+	type = "rtp"
+	id = 1
+	description = "avplumber program WebRTC preview"
+	metadata = "{\"source\":\"avplumber\",\"video\":\"h264\",\"audio\":\"opus\"}"
+	audio = true
+	video = true
+	audioport = 5002
+	audiortcpport = 5003
+	audioiface = "127.0.0.1"
+	audiopt = 111
+	audiocodec = "opus"
+	audiofmtp = "stereo=1"
+	videoport = 5004
+	videortcpport = 5005
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=42e028;packetization-mode=1"
+	secret = "avpsecret"
+}

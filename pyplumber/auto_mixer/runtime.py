@@ -14,7 +14,6 @@ from .control_status import MixerProgramSceneReader
 from .inputs import input_basename
 from .native_exceptions import NativeExceptionRegistry
 from .preheated import PREHEATED_GROUP, PREHEATED_ROUTER_GROUP
-from .profiles.talkshow import RENE_REQUIRED_LEAD_DB
 from .run_config import AutoMixerRunConfig
 
 
@@ -65,21 +64,27 @@ def print_startup_summary(
 ) -> None:
     print(f"[auto_mixer] Graph started with {config.n_inputs} input(s) -> {', '.join(config.output_targets)}")
     print(f"[auto_mixer] Canvas: {CANVAS_W}x{CANVAS_H}, face engine: {args.face_engine}")
-    if config.sergio_input_index is not None:
+    print(
+        f"[auto_mixer] Program audio input: {config.program_audio_input_index} "
+        f"({input_basename(args.inputs[config.program_audio_input_index])})"
+    )
+    if config.talkshow_profile:
+        print("[auto_mixer] Talk-show index profile enabled")
+    if config.special_speaker_index is not None:
         print(
-            f"[auto_mixer] Sergio input detected: {config.sergio_input_index} "
-            f"({input_basename(args.inputs[config.sergio_input_index])})"
+            f"[auto_mixer] Special speaker input: {config.special_speaker_index} "
+            f"({input_basename(args.inputs[config.special_speaker_index])}), "
+            f"lead margin {config.special_speaker_margin_db:g} dB"
         )
-    if config.rene_input_index is not None:
+    if config.vad_only_priority_speaker_index is not None:
         print(
-            f"[auto_mixer] Rene input detected: {config.rene_input_index} "
-            f"({input_basename(args.inputs[config.rene_input_index])})"
+            f"[auto_mixer] VAD-only priority input: {config.vad_only_priority_speaker_index} "
+            f"({input_basename(args.inputs[config.vad_only_priority_speaker_index])})"
         )
-    if config.genaro_input_index is not None:
-        crop_mode = "static centered 9:16 crop" if args.static_genaro_face_crop else "face-tracked 9:16 crop"
+    for index in config.static_face_crop_inputs:
         print(
-            f"[auto_mixer] Genaro input detected: {config.genaro_input_index} "
-            f"({input_basename(args.inputs[config.genaro_input_index])}) - {crop_mode}"
+            f"[auto_mixer] Static face crop input: {index} "
+            f"({input_basename(args.inputs[index])})"
         )
     if preheated_scenes:
         print(
@@ -136,9 +141,9 @@ def create_auto_switch_runtime(
         min_dwell_program_s=args.min_dwell,
         min_active_level_db=MIN_ACTIVE_AUDIO_LEVEL_DBFS,
         switch_pts_lead_ms=run_config.switch_pts_lead_ms,
-        special_speaker_index=run_config.rene_input_index,
-        special_speaker_margin_db=RENE_REQUIRED_LEAD_DB,
-        vad_only_priority_speaker_index=run_config.sergio_input_index,
+        special_speaker_index=run_config.special_speaker_index,
+        special_speaker_margin_db=run_config.special_speaker_margin_db,
+        vad_only_priority_speaker_index=run_config.vad_only_priority_speaker_index,
         program_scene_getter=(
             program_scene_reader.program_scene if program_scene_reader is not None else None
         ),
@@ -162,6 +167,13 @@ def create_auto_switch_runtime(
     )
     if args.auto_switch_wipe_file:
         print(f"[auto_mixer] Auto-switch wipe file: {args.auto_switch_wipe_file}")
+    if getattr(args, "media_wipe_dir", ""):
+        print(f"[auto_mixer] Media wipe directory: {args.media_wipe_dir}")
+    if getattr(args, "html_overlay_url", ""):
+        print(
+            f"[auto_mixer] HTML overlay: {args.html_overlay_url} "
+            f"via {args.html_overlay_socket}"
+        )
     print(
         f"[auto_mixer] Fade duration: {args.fade_frames} frame(s) "
         f"at {FPS_NUM / FPS_DEN:g} fps ({args.fade:.3f}s)"

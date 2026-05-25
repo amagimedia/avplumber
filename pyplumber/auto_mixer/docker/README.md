@@ -1,0 +1,109 @@
+# Auto Mixer Docker Runtime
+
+This directory contains the Docker Compose stack for the auto mixer demo/runtime.
+Janus, the WebRTC preview page, the headless Wayland compositor, and the
+DMA-BUF HTML browser sidecar are support services for the auto mixer, so their
+Dockerfiles and config live here.
+
+Copy `.env.example` to `.env` and fill in host-local paths before building.
+The Compose file intentionally has no local placeholder bind-mount defaults for
+media, model, cache, or TensorRT paths; missing variables should fail fast
+instead of creating empty directories under this repo.
+`TENSORRT_CONTEXT` points at the directory containing the TensorRT archive;
+`TENSORRT_ARCHIVE` is the archive filename inside that directory.
+Set `JANUS_HOST_IP` to the address browsers use to reach the Docker host when
+using the Janus preview from another machine. Do not leave it at `127.0.0.1`
+for VPN/browser preview; WebRTC sessions may connect but will not receive media.
+Set `MEDIA_INPUT_DIR` to the host directory containing input media for
+file-based demo runs. Inside the container the directory is mounted at
+`/media-inputs`.
+Set `MEDIA_WIPE_DIR` to the host directory containing media wipe files.
+Inside the container the directory is mounted at `/media-wipes`; a relative
+`--auto-switch-wipe-file` is resolved under `--media-wipe-dir`.
+Set `REMOTE_CONTROL_PORT` for the mixer/TUI control socket. The compose default
+is `7777`, and the auto-mixer container exports it as `AVP_REMOTE_CONTROL_PORT`
+so Docker runs start with TUI and auto-switch controls enabled by default.
+Set `FACE_ENGINE_CACHE_DIR` to a persistent host directory for the generated
+TensorRT face engine and timing cache. Inside the container it is mounted at
+`/models-cache`, where `AVP_FACE_ENGINE` defaults to
+`/models-cache/face.fp16.plan`. Reusing this directory prevents rebuilding the
+plan on every container run.
+Set `HTML_OVERLAY_URL` when the browser sidecar should auto-open an HTML
+overlay. The sample value renders a 9:16 Singular overlay:
+
+```sh
+HTML_OVERLAY_URL=https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=9:16
+```
+Set `HTML_OVERLAY_DRM_DEVICE` to the render device visible inside the
+auto-mixer container. The default is `/dev/dri/renderD128`, and the compose file
+passes `/dev/dri` into the container so the auto mixer can create the same DRM
+source hwaccel context as the working host graph.
+
+Start support services:
+
+```sh
+docker compose up -d janus janus-preview wayland dma-browser
+```
+
+Run the auto mixer with explicit CLI arguments. Pass `--html-overlay-url` only
+when the overlay is required; when omitted, the auto mixer skips the HTML
+overlay graph and does not consume `/tmp/dma-page/overlay.sock`. When the URL is
+provided, the overlay branch starts enabled and consumes the sidecar DMA-BUF
+socket by default.
+
+```sh
+set -a
+. ./.env
+set +a
+
+docker compose build auto-mixer dma-browser
+docker compose run --rm auto-mixer \
+  --inputs /media-inputs/<input-0> /media-inputs/<input-1> \
+  --janus-output \
+  --janus-host 127.0.0.1 \
+  --media-wipe-dir /media-wipes \
+  --html-overlay-url "$HTML_OVERLAY_URL"
+```
+
+Fedora Televisa 6-camera demo input set. Mount the real Televisa directory, not
+`/home/fedora/test-content/talkshow`, because that directory contains absolute
+symlinks that are broken inside the container.
+
+```sh
+MEDIA_INPUT_DIR=/home/fedora/test-content/televisa \
+JANUS_HOST_IP=172.17.36.132 \
+docker compose run --rm auto-mixer \
+  --inputs \
+    /media-inputs/televisa-Rene_norm.ts \
+    /media-inputs/televisa-Sergio_norm.ts \
+    /media-inputs/televisa-Genaro_norm.ts \
+    /media-inputs/televisa-denise_norm.ts \
+    /media-inputs/televisa-Leo_norm.ts \
+    /media-inputs/televisa-Ray_norm.ts \
+  --program-audio-input 0 \
+  --special-speaker-index 0 \
+  --special-speaker-margin-db 3.0 \
+  --vad-only-priority-speaker-index 1 \
+  --static-face-crop-input 2 \
+  --auto-switch-transition wipe \
+  --auto-switch-wipe-file alpha_1773690550_12480_qtrle_argb.mov \
+  --janus-output \
+  --janus-host 127.0.0.1 \
+  --media-wipe-dir /media-wipes \
+  --html-overlay-url "$HTML_OVERLAY_URL"
+```
+
+The `wayland` service exposes `WAYLAND_DISPLAY=wayland-1` through the shared
+`wayland-runtime` volume. The `dma-browser` service shares that display and
+writes the overlay DMA-BUF socket to `/tmp/dma-page/overlay.sock` through the
+`dma-browser-sockets` volume, which the auto mixer mounts at the same path.
+The browser REST API is available on `http://127.0.0.1:9009/status` by default.
+
+For the VAAPI/NVIDIA path the browser defaults to a retained DMA-BUF pool of
+10 frames (`DMA_BROWSER_DMABUF_POOL_SIZE=10`) and enables the Chromium NVIDIA
+sync checks listed in `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES`.
+
+The current image still builds `face.fp16.plan` at auto-mixer startup when the
+cache directory is empty. The intended next step is to move that generation
+into the Docker build so a TensorRT plan failure fails image build, not runtime
+startup.

@@ -9,13 +9,19 @@ from pyplumber.node import (
     AssumeAudioFormat,
     AssumeVideoFormat,
     Bsf,
+    DrmPrimeToCuda,
     EncAudio,
     EncVideo,
+    FilterVideo,
     ForceFPS,
     ForceKeyFrame,
+    IpcDmabufSource,
     Mux,
+    OneToMany,
     Output,
+    Realtime,
     ResampleAudio,
+    SourceSwitcher,
 )
 
 from .config import (
@@ -30,10 +36,6 @@ from .config import (
     OPUS_SAMPLE_FORMAT,
     RTP_PKT_SIZE,
 )
-
-
-def output_format_for_url(url: str) -> str:
-    return "flv" if url.startswith("rtmp://") else "mp4"
 
 
 def rtp_url(host: str, port: int, *, rtcp_port: int | None = None) -> str:
@@ -185,6 +187,153 @@ def build_video_output(
         return repeat_headers_edge
 
     return encoded_edge
+
+
+def build_html_overlay_output(
+    avp: AVPlumber,
+    video_edge: str,
+    *,
+    socket_path: str,
+    source_hwaccel: str | None = None,
+    group: str = "output",
+    source_group: str | None = None,
+    start_enabled: bool = False,
+) -> str:
+    """Overlay a browser DMA-BUF page over the final mixed video.
+
+    This mirrors the known-good host auto-mixer overlay graph: a separately
+    drainable overlay source, a program-video gate, and a final selector. The
+    graph can start bypassed for TUI control, or enabled for Docker demos that
+    provide an overlay URL at startup.
+    """
+    source_group = source_group or group
+    video_outputs = 2 if start_enabled else 1
+    overlay_outputs = 1 if start_enabled else 0
+    selector_active = 1 if start_enabled else 0
+
+    source_params = {
+        "name": "html_overlay_src",
+        "group": source_group,
+        "auto_restart": "on",
+        "dst": "html_dma",
+        "socket": socket_path,
+    }
+    if source_hwaccel:
+        source_params["hwaccel"] = source_hwaccel
+    avp.addNode(IpcDmabufSource(source_params))
+    avp.addNode(DrmPrimeToCuda({
+        "name": "html_to_cuda",
+        "group": source_group,
+        "auto_restart": "on",
+        "src": "html_dma",
+        "dst": "html_cuda",
+        "hwaccel": HWACCEL,
+    }))
+    avp.addNode(ForceFPS({
+        "name": "html_fps",
+        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "src": "html_cuda",
+        "dst": "html_cuda_fps",
+        "group": source_group,
+        "auto_restart": "on",
+    }))
+    avp.addNode(FilterVideo({
+        "name": "html_convert",
+        "src": "html_cuda_fps",
+        "dst": "html_overlay_yuva",
+        "graph": "convert_cuda=format=yuva420p",
+        "dst_width": CANVAS_W,
+        "dst_height": CANVAS_H,
+        "dst_pixel_format": "cuda",
+        "hwaccel": HWACCEL,
+        "group": source_group,
+        "auto_restart": "on",
+    }))
+    avp.addNode(Realtime({
+        "name": "html_overlay_rt",
+        "src": "html_overlay_yuva",
+        "dst": "html_overlay_rt",
+        "set_pts": True,
+        "group": source_group,
+        "auto_restart": "on",
+    }))
+    avp.addNode(AssumeVideoFormat({
+        "name": "html_overlay_assume",
+        "src": "html_overlay_rt",
+        "dst": "html_overlay_assumed",
+        "width": CANVAS_W,
+        "height": CANVAS_H,
+        "pixel_format": "cuda",
+        "real_pixel_format": "yuva420p",
+        "group": source_group,
+        "auto_restart": "on",
+    }))
+
+    avp.addNode(OneToMany({
+        "name": "otm_html_overlay",
+        "src": video_edge,
+        "dst": ["no_overlay", "pre_overlay"],
+        "outputs": video_outputs,
+        "drop": True,
+        "group": group,
+    }))
+    avp.addNode(OneToMany({
+        "name": "otm_html_overlay_src",
+        "src": "html_overlay_assumed",
+        "dst": ["html_overlay_enabled"],
+        "outputs": overlay_outputs,
+        "drop": True,
+        "group": source_group,
+    }))
+    avp.addNode(ForceFPS({
+        "name": "pre_overlay_fps",
+        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "src": "pre_overlay",
+        "dst": "pre_overlay_fps",
+        "group": group,
+    }))
+    avp.addNode(AssumeVideoFormat({
+        "name": "pre_overlay_assume",
+        "src": "pre_overlay_fps",
+        "dst": "pre_overlay_norm",
+        "width": CANVAS_W,
+        "height": CANVAS_H,
+        "pixel_format": "cuda",
+        "real_pixel_format": "nv12",
+        "group": group,
+        "auto_restart": "panic",
+    }))
+    avp.addNode(FilterVideo({
+        "name": "html_overlay_filter",
+        "src": ["pre_overlay_norm", "html_overlay_enabled"],
+        "dst": "post_overlay",
+        "graph": (
+            "[in0]scale_cuda=format=yuv420p[main];"
+            " [main][in1]overlay_many_cuda=inputs=2[blended];"
+            " [blended]scale_cuda=format=nv12"
+        ),
+        "dst_width": CANVAS_W,
+        "dst_height": CANVAS_H,
+        "dst_pixel_format": "cuda",
+        "hwaccel": HWACCEL,
+        "defer_preliminary_init": True,
+        "group": group,
+        "auto_restart": "on",
+    }))
+    avp.addNode(SourceSwitcher({
+        "name": "overlay_sel",
+        "src": ["no_overlay", "post_overlay"],
+        "dst": "video_output",
+        "active": selector_active,
+        "fallback_active": 0,
+        "fallback_when_active_missing": True,
+        # The overlay branch has an extra filter_video/framesync stage, so it can
+        # lag the direct branch by more than one frame around wipe/source switches.
+        # Wait through that normal skew before failing open to the no-overlay path.
+        "fallback_wait_ms": 100,
+        "group": group,
+    }))
+    return "video_output"
 
 
 def build_mux_output(
