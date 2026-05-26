@@ -325,11 +325,7 @@ public:
         logstream << "Closing server sockets";
         servers_.clear();
         if (manager_) {
-            auto schedulers = InstanceSharedObjects<MixerTransitionScheduler>::enumerate(manager_->instanceData());
-            for (auto& [_, scheduler] : schedulers) {
-                if (scheduler)
-                    scheduler->shutdown();
-            }
+            InstanceSharedObjectsDestructors::callPreShutdownHooks(&manager_->instanceData());
             logstream << "Shutting down NodeManager";
             manager_->shutdown();
         }
