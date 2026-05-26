@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-class MixerTransitionScheduler : public InstanceShared<MixerTransitionScheduler> {
+class MixerTransitionScheduler : public InstanceShared<MixerTransitionScheduler>, public IShutdownable {
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
