@@ -151,15 +151,28 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         }
     }
 
-    std::vector<int> routesAt(const av::Timestamp& pts) const {
+    // Atomically resolve the route table for `pts` *and* publish it as the
+    // current effective table so per-output backward-PTS guards stay coherent.
+    // Returns the routes actually applied. Holding both locks for the whole
+    // window prevents the routesAt -> applyEffectiveRoutes race where a
+    // concurrent setObject("routes") could observe a stale effective_routes_
+    // and reset last_output_pts_ relative to a now-outdated baseline.
+    std::vector<int> resolveAndApplyRoutesAt(const av::Timestamp& pts) {
+        std::scoped_lock lock(routes_mutex_, stats_mutex_);
+        std::vector<int> resolved;
         if (pts.isValid()) {
             auto opt = tlGetRaw("routes", pts);
             if (opt) {
-                std::vector<int> base_routes = effectiveRoutes();
-                return parseRoutes(*opt, &base_routes);
+                resolved = parseRoutes(*opt, &effective_routes_);
             }
         }
-        return currentRoutes();
+        if (resolved.empty())
+            resolved = routes_;
+        if (effective_routes_ != resolved) {
+            resetOutputsForRouteChangesLocked(effective_routes_, resolved);
+            effective_routes_ = resolved;
+        }
+        return resolved;
     }
 
     void setRoutes(std::vector<int> routes) {
@@ -171,14 +184,6 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         }
         for (auto& edge : this->source_edges_)
             edge->producedEvent().signal();
-    }
-
-    void applyEffectiveRoutes(const std::vector<int>& routes) {
-        std::scoped_lock lock(routes_mutex_, stats_mutex_);
-        if (effective_routes_ == routes)
-            return;
-        resetOutputsForRouteChangesLocked(effective_routes_, routes);
-        effective_routes_ = routes;
     }
 
     void validateOutputLabels() {
@@ -205,62 +210,71 @@ class PreheatVideoRouter : public NodeMultiInput<av::VideoFrame>,
         if (this->source_edges_.empty())
             throw Error("preheat_video_router[" + label_ + "]: requires at least one input");
 
-        bool have_video_ref = false;
-        int ref_width = 0;
-        int ref_height = 0;
-        av::PixelFormat ref_pixel_format;
-        av::PixelFormat ref_real_pixel_format;
-        bool have_frame_rate_ref = false;
-        av::Rational ref_frame_rate{0, 1};
-        bool have_time_base_ref = false;
-        av::Rational ref_time_base{0, 1};
-
-        for (size_t input_index = 0; input_index < this->source_edges_.size(); ++input_index) {
-            auto video_src = findUpstreamInterfaceAt<IVideoFormatSource>(input_index);
-            if (video_src) {
-                if (!have_video_ref) {
-                    video_format_source_ = video_src;
-                    ref_width = video_src->width();
-                    ref_height = video_src->height();
-                    ref_pixel_format = video_src->pixelFormat();
-                    ref_real_pixel_format = video_src->realPixelFormat();
-                    have_video_ref = true;
-                } else if (video_src->width() != ref_width || video_src->height() != ref_height ||
-                        video_src->pixelFormat() != ref_pixel_format ||
-                        video_src->realPixelFormat() != ref_real_pixel_format) {
-                    throw Error("preheat_video_router[" + label_ + "]: input " +
-                                std::to_string(input_index) +
-                                " video format does not match the first input with video metadata");
-                }
+        // Three independent passes, one per aspect. Mismatch errors name both the
+        // offending input and the input that supplied the reference, since "the
+        // first input with metadata" can be a non-zero index when earlier inputs
+        // lack the interface.
+        size_t video_ref_idx = 0;
+        std::shared_ptr<IVideoFormatSource> video_ref;
+        for (size_t i = 0; i < this->source_edges_.size(); ++i) {
+            auto src = findUpstreamInterfaceAt<IVideoFormatSource>(i);
+            if (!src)
+                continue;
+            if (!video_ref) {
+                video_ref = src;
+                video_ref_idx = i;
+                video_format_source_ = src;
+                continue;
             }
-
-            auto frame_rate_src = findUpstreamInterfaceAt<IFrameRateSource>(input_index);
-            if (frame_rate_src) {
-                if (!have_frame_rate_ref) {
-                    frame_rate_source_ = frame_rate_src;
-                    ref_frame_rate = frame_rate_src->frameRate();
-                    have_frame_rate_ref = true;
-                } else if (frame_rate_src->frameRate() != ref_frame_rate) {
-                    throw Error("preheat_video_router[" + label_ + "]: input " +
-                                std::to_string(input_index) +
-                                " frame rate does not match the first input with frame-rate metadata");
-                }
-            }
-
-            auto time_base_src = findUpstreamInterfaceAt<ITimeBaseSource>(input_index);
-            if (time_base_src) {
-                if (!have_time_base_ref) {
-                    time_base_source_ = time_base_src;
-                    ref_time_base = time_base_src->timeBase();
-                    have_time_base_ref = true;
-                } else if (time_base_src->timeBase() != ref_time_base) {
-                    throw Error("preheat_video_router[" + label_ + "]: input " +
-                                std::to_string(input_index) +
-                                " timebase does not match the first input with timebase metadata");
-                }
+            if (src->width() != video_ref->width() || src->height() != video_ref->height() ||
+                src->pixelFormat() != video_ref->pixelFormat() ||
+                src->realPixelFormat() != video_ref->realPixelFormat()) {
+                throw Error("preheat_video_router[" + label_ + "]: input " +
+                            std::to_string(i) +
+                            " video format does not match input " +
+                            std::to_string(video_ref_idx));
             }
         }
 
+        size_t frame_rate_ref_idx = 0;
+        std::shared_ptr<IFrameRateSource> frame_rate_ref;
+        for (size_t i = 0; i < this->source_edges_.size(); ++i) {
+            auto src = findUpstreamInterfaceAt<IFrameRateSource>(i);
+            if (!src)
+                continue;
+            if (!frame_rate_ref) {
+                frame_rate_ref = src;
+                frame_rate_ref_idx = i;
+                frame_rate_source_ = src;
+                continue;
+            }
+            if (src->frameRate() != frame_rate_ref->frameRate()) {
+                throw Error("preheat_video_router[" + label_ + "]: input " +
+                            std::to_string(i) +
+                            " frame rate does not match input " +
+                            std::to_string(frame_rate_ref_idx));
+            }
+        }
+
+        size_t time_base_ref_idx = 0;
+        std::shared_ptr<ITimeBaseSource> time_base_ref;
+        for (size_t i = 0; i < this->source_edges_.size(); ++i) {
+            auto src = findUpstreamInterfaceAt<ITimeBaseSource>(i);
+            if (!src)
+                continue;
+            if (!time_base_ref) {
+                time_base_ref = src;
+                time_base_ref_idx = i;
+                time_base_source_ = src;
+                continue;
+            }
+            if (src->timeBase() != time_base_ref->timeBase()) {
+                throw Error("preheat_video_router[" + label_ + "]: input " +
+                            std::to_string(i) +
+                            " timebase does not match input " +
+                            std::to_string(time_base_ref_idx));
+            }
+        }
     }
 
     bool allInputsFinished() const {
@@ -361,8 +375,7 @@ public:
             return;
         }
 
-        std::vector<int> routes = routesAt(frame->pts());
-        applyEffectiveRoutes(routes);
+        std::vector<int> routes = resolveAndApplyRoutesAt(frame->pts());
         copyToRoutedOutputs(*frame, routes, srci);
         this->source_edges_[srci]->pop();
         {

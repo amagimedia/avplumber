@@ -45,6 +45,13 @@ protected:
         return true;
     }
 
+    // Coalescing semantics: any number of triggers received between two frames
+    // results in *one* forced keyframe. forced_generation_ is set to the latest
+    // requested value, so callers polling getObject("pending") cannot distinguish
+    // their individual trigger from triggers emitted by other clients in the
+    // same inter-frame window. This is intentional — emitting one keyframe per
+    // received trigger would let a misbehaving controller spike the bitrate
+    // arbitrarily.
     bool shouldForceTriggered() {
         const uint64_t requested = requested_generation_.load(std::memory_order_acquire);
         const uint64_t forced = forced_generation_.load(std::memory_order_acquire);
