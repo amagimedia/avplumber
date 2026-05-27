@@ -9,6 +9,7 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_SYNC=1
 DISCARD_LOCAL_CHANGES=0
 PRUNE_OLD_DOCKER=1
+PRUNE_BUILD_CACHE=0
 BUILD_SERVICES=(dma-browser auto-mixer)
 BRANCH="${AVP_GIT_BRANCH:-}"
 MIXER_ARGS=()
@@ -27,8 +28,10 @@ Options:
   --discard-local-changes
                        Reset tracked changes and remove untracked files before
                        checking out the target branch. The env file is kept.
-  --no-prune           Do not remove old project containers/images/build cache
-                       after a successful restart.
+  --no-prune           Do not remove old project containers/images or dangling
+                       image layers after a successful restart.
+  --prune-build-cache  Also remove Docker build cache after a successful
+                       restart. This saves disk but makes the next rebuild slow.
   --env-file PATH      Env file for docker compose and mixer-stack.sh.
                        Defaults to pyplumber/auto_mixer/docker/.env.
   -h, --help           Show this help.
@@ -203,7 +206,9 @@ prune_old_docker_state() {
   remove_old_project_containers "$project"
   remove_old_project_images
   docker_cmd image prune -f >/dev/null || true
-  docker_cmd builder prune -f >/dev/null || true
+  if ((PRUNE_BUILD_CACHE)); then
+    docker_cmd builder prune -f >/dev/null || true
+  fi
 }
 
 parse_args() {
@@ -229,6 +234,10 @@ parse_args() {
         ;;
       --no-prune)
         PRUNE_OLD_DOCKER=0
+        shift
+        ;;
+      --prune-build-cache)
+        PRUNE_BUILD_CACHE=1
         shift
         ;;
       --env-file)

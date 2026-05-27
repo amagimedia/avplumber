@@ -76,7 +76,8 @@ when the images should be rebuilt before launch.
 
 For deployment hosts, `rebuild-restart-stack.sh` can sync a configurable branch,
 rebuild the mixer images, recreate the stack, and prune old project containers,
-images, and builder cache:
+images, and dangling image layers while keeping Docker build cache for faster
+subsequent rebuilds:
 
 ```sh
 ./rebuild-restart-stack.sh --branch <branch>
@@ -84,7 +85,9 @@ images, and builder cache:
 
 Use `AVP_GIT_BRANCH=<branch>` instead of `--branch` when the branch belongs in
 the host-local `.env`. Add `--discard-local-changes` for disposable deployment
-worktrees, and `--no-prune` only when old images or build cache should be kept.
+worktrees, and `--no-prune` only when old images should be kept. Use
+`--prune-build-cache` only when reclaiming disk is more important than the next
+rebuild speed.
 
 Open the Web UI from the VPN/browser host at `http://<host-ip>:22222/` unless
 `WEBUI_PORT` is changed. It uses the same main auto-mixer control port as the
