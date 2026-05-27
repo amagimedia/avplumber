@@ -1,6 +1,6 @@
 # How to develop your own node for avplumber
 
-Before trying to understand this document or avplumber's source code, read all the [README](../README.md) (except node descriptions).
+Before trying to understand this document or avplumber's source code, read all the [README](../README.md).
 
 ## Directory structure
 
