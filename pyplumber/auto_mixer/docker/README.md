@@ -74,6 +74,18 @@ auto-mixer` for the runtime container, and `./mixer-stack.sh restart -- ...` to
 recreate the mixer with new arguments. Add `--build` to `start` or `restart`
 when the images should be rebuilt before launch.
 
+For deployment hosts, `rebuild-restart-stack.sh` can sync a configurable branch,
+rebuild the mixer images, recreate the stack, and prune old project containers,
+images, and builder cache:
+
+```sh
+./rebuild-restart-stack.sh --branch <branch>
+```
+
+Use `AVP_GIT_BRANCH=<branch>` instead of `--branch` when the branch belongs in
+the host-local `.env`. Add `--discard-local-changes` for disposable deployment
+worktrees, and `--no-prune` only when old images or build cache should be kept.
+
 Open the Web UI from the VPN/browser host at `http://<host-ip>:22222/` unless
 `WEBUI_PORT` is changed. It uses the same main auto-mixer control port as the
 TUI, so the auto-mixer must have `REMOTE_CONTROL_PORT` enabled.
