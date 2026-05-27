@@ -32,10 +32,10 @@ TensorRT face engine and timing cache. Inside the container it is mounted at
 `/models-cache/face.fp16.plan`. Reusing this directory prevents rebuilding the
 plan on every container run.
 Set `HTML_OVERLAY_URL` when the browser sidecar should auto-open an HTML
-overlay. The sample value renders a 9:16 Singular overlay:
+overlay. Keep deployment URLs in the host-local `.env`:
 
 ```sh
-HTML_OVERLAY_URL=https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=9:16
+HTML_OVERLAY_URL=https://example.invalid/overlay
 ```
 Set `HTML_OVERLAY_DRM_DEVICE` to the render device visible inside the
 auto-mixer container. The default is `/dev/dri/renderD128`, and the compose file
