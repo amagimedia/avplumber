@@ -48,6 +48,32 @@ Start support services:
 docker compose up -d janus janus-preview web-ui wayland dma-browser
 ```
 
+Or use the stack wrapper to start the support services, wait for health checks,
+and launch the auto mixer as a stable named container:
+
+```sh
+./mixer-stack.sh start -- \
+  --inputs /media-inputs/<input-0> /media-inputs/<input-1> \
+  --janus-output \
+  --janus-host 127.0.0.1 \
+  --media-wipe-dir /media-wipes \
+  --html-overlay-url "$HTML_OVERLAY_URL"
+```
+
+The wrapper reads `.env`, uses `AUTO_MIXER_CONTAINER` as the container name
+(`avp-auto-mixer` by default), and also accepts auto-mixer arguments from
+`AUTO_MIXER_ARGS` when no arguments are passed after `--`. Stop the whole stack
+with:
+
+```sh
+./mixer-stack.sh stop
+```
+
+Use `./mixer-stack.sh status` for service state, `./mixer-stack.sh logs
+auto-mixer` for the runtime container, and `./mixer-stack.sh restart -- ...` to
+recreate the mixer with new arguments. Add `--build` to `start` or `restart`
+when the images should be rebuilt before launch.
+
 Open the Web UI from the VPN/browser host at `http://<host-ip>:22222/` unless
 `WEBUI_PORT` is changed. It uses the same main auto-mixer control port as the
 TUI, so the auto-mixer must have `REMOTE_CONTROL_PORT` enabled.
