@@ -874,6 +874,7 @@ class MixerTUI(App):
 
             commands = overlay_toggle_commands(
                 enabled=enabled,
+                mixer_name=self.mixer_name,
                 overlay_source_otm_name=self.overlay_source_otm_name,
                 overlay_otm_name=self.overlay_otm_name,
                 overlay_selector_name=self.overlay_selector_name,

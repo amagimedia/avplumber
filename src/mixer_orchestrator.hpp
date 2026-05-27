@@ -30,6 +30,8 @@ class MixerOrchestrator {
 
     void setNodeObject(const std::string& node_name, const std::string& key, const Parameters& value);
     void postTransitionTask(std::string label, int64_t delay_ms, std::function<void()> task);
+    void publishRuntimeObject(const std::string& node_name, const std::string& key,
+                              const Parameters& value);
 
     /// Camera `one_to_many` uses `timeline` + `tlGetRaw`: stale `outputs` entries would override
     /// `node.object.set`. Clear prior `outputs` schedule, update atomically, then publish at current wallclock.
@@ -128,6 +130,7 @@ public:
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
               int64_t start_pts_ms = -1);
+    void setOverlayEnabled(bool enabled, int64_t ready_timeout_ms = -1);
 
     /// Returns the names of all registered scenes, sorted alphabetically.
     std::vector<std::string> sceneNames() const;

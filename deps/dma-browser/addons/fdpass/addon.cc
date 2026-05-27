@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "texinfo.h"
@@ -324,12 +325,25 @@ Napi::Value SetServerLogger(const Napi::CallbackInfo &info) {
   return env.Undefined();
 }
 
+Napi::Value MonotonicTimeNs(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  struct timespec ts;
+  if (::clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    Napi::Error::New(env, std::string("clock_gettime(CLOCK_MONOTONIC) failed: ") + std::strerror(errno))
+      .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+  return Napi::BigInt::New(env, ns);
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("createServer", Napi::Function::New(env, CreateServer));
   exports.Set("broadcastFd", Napi::Function::New(env, BroadcastFd));
   exports.Set("broadcastFdWithInfo", Napi::Function::New(env, BroadcastFd));
   exports.Set("closeServer", Napi::Function::New(env, CloseServer));
   exports.Set("setServerLogger", Napi::Function::New(env, SetServerLogger));
+  exports.Set("monotonicTimeNs", Napi::Function::New(env, MonotonicTimeNs));
   exports.Set("close", Napi::Function::New(env, Close));
   return exports;
 }

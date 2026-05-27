@@ -55,15 +55,14 @@ def test_ai_transition_shortcut_is_not_swallowed_by_fade_input_focus():
 def test_overlay_on_keeps_direct_branch_available_for_fail_open():
     commands = overlay_toggle_commands(
         enabled=True,
+        mixer_name="mixer",
         overlay_source_otm_name="src_otm",
         overlay_otm_name="overlay_otm",
         overlay_selector_name="overlay_sel",
     )
 
     assert commands == [
-        "node.object.set src_otm outputs 1",
-        "node.object.set overlay_otm outputs 3",
-        "node.object.set overlay_sel active 1",
+        'mixer.overlay {"mixer":"mixer","enabled":true,"source_otm":"src_otm","overlay_otm":"overlay_otm","selector":"overlay_sel"}',
     ]
 
 

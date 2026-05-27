@@ -223,7 +223,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
           pixelFormat,
           modifier: meta.modifierBig,
           offset: meta.offsetBig,
-          timestampNs: BigInt(Date.now()) * 1_000_000n,
+          timestampNs: fdpass.monotonicTimeNs(),
           frameNumber: this.nextFrameNumber++,
         });
 

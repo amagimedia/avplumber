@@ -9,6 +9,7 @@ const fdpass = vi.hoisted(() => ({
   broadcastFd: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   closeServer: vi.fn(),
   createServer: vi.fn().mockReturnValue(true),
+  monotonicTimeNs: vi.fn().mockReturnValue(93_000_000_000_000n),
   setServerLogger: vi.fn(),
 }));
 
@@ -73,6 +74,7 @@ describe('FrameCaptureChannel retained frame pool', () => {
     await Promise.resolve();
 
     expect(fdpass.broadcastFd).toHaveBeenCalledTimes(5);
+    expect(fdpass.monotonicTimeNs).toHaveBeenCalledTimes(5);
     expect(channel.getStats().txFrameCount).toBe(5);
     expect(frames[0]!.texture.release).toHaveBeenCalledTimes(1);
     expect(frames[1]!.texture.release).toHaveBeenCalledTimes(1);
