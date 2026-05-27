@@ -157,6 +157,8 @@ public:
             bool no_lock = false) {
         std::string normalized = command;
         strutils::toLowerInPlace(normalized);
+        if (commands_.count(normalized))
+            throw Error("command already registered: " + normalized);
         commands_[normalized] = [handler = std::move(handler)](ClientStream &cs, std::string &arg) {
             cs << handler(arg);
         };

@@ -58,8 +58,10 @@ public:
         {
             std::unique_lock<decltype(busy_)> lock(busy_);
             auto it = pre_shutdown_hooks_.find(instance);
-            if (it != pre_shutdown_hooks_.end())
-                hooks = it->second;
+            if (it != pre_shutdown_hooks_.end()) {
+                hooks = std::move(it->second);
+                pre_shutdown_hooks_.erase(it);
+            }
         }
         for (auto &fn: hooks) {
             fn();

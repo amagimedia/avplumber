@@ -15,7 +15,7 @@ const net = require('net');
 const WebSocket = require('ws');
 
 const HTTP_PORT = parseInt(process.env.WEBUI_PORT || process.env.PORT || '22222', 10);
-const AVP_HOST = process.env.AVPLUMBER_HOST || 'localhost';
+const AVP_HOST = process.env.AVPLUMBER_HOST || '127.0.0.1';
 const AVP_PORT = parseInt(process.env.AVPLUMBER_PORT || '0', 10);
 const LOG_FILE = process.env.AVPLUMBER_LOGFILE || process.env.LOG_FILE || '';
 
@@ -29,7 +29,7 @@ const HEARTBEAT_CLEANUP_INTERVAL_MS = 5000; // Check every 5 seconds
 
 function addInstance(def, usesHeartbeat = false) {
   if (!def) throw new Error('instance definition required');
-  const host = def.host || 'localhost';
+  const host = def.host || '127.0.0.1';
   const port = parseInt(def.port, 10);
   if (!port || Number.isNaN(port)) {
     throw new Error('valid port required');
@@ -56,7 +56,7 @@ function addInstance(def, usesHeartbeat = false) {
 
 function updateInstanceHeartbeat(def) {
   if (!def) throw new Error('instance definition required');
-  const host = def.host || 'localhost';
+  const host = def.host || '127.0.0.1';
   const port = parseInt(def.port, 10);
   if (!port || Number.isNaN(port)) {
     throw new Error('valid port required');
