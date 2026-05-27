@@ -59,6 +59,14 @@ class MixerOrchestrator {
     void publishRoutedRoutesForProgramOnly(bool pgm_is_slot_a, const SceneDefinition& scene,
                                            int64_t at_pts_ms, bool immediate);
 
+    /// Restore steady-state routing after a cut or crossfade has concluded.
+    /// Centralizes the per-source OTM masks, post-otm/compositor flips, and
+    /// source_switcher reset that cut+fade cleanup paths used to duplicate.
+    /// Caller must hold state_->mutex. Wipe end has different semantics
+    /// (timeline-driven, doesn't immediately mutate node objects) and uses
+    /// its own logic.
+    void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene);
+
     void ensureIdle() const;
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
@@ -69,9 +77,13 @@ class MixerOrchestrator {
 
     // Generic deferred cleanup: flip state + optionally delete nodes. The caller
     // schedules this for non-PTS-expressible work (node deletion and bookkeeping).
+    // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so
+    // any future scheduler-using helper called from this path won't blow up with
+    // "transition scheduler is not configured".
     static void deferredCleanup(std::shared_ptr<NodeManager> nodes,
                                  std::shared_ptr<MixerState> state,
                                  std::shared_ptr<SharedTimeline> timeline,
+                                 std::shared_ptr<MixerTransitionScheduler> scheduler,
                                  uint64_t transition_generation,
                                  bool new_pgm_is_slot_a,
                                  std::string new_pgm_scene,
@@ -79,6 +91,7 @@ class MixerOrchestrator {
     static void readyCutTask(std::shared_ptr<NodeManager> nodes,
                              std::shared_ptr<MixerState> state,
                              std::shared_ptr<SharedTimeline> timeline,
+                             std::shared_ptr<MixerTransitionScheduler> scheduler,
                              uint64_t transition_generation,
                              bool new_pgm_is_slot_a,
                              std::string new_pgm_scene,
@@ -92,6 +105,7 @@ class MixerOrchestrator {
     static void runWipeMidpointAndCleanup(std::shared_ptr<NodeManager> nodes,
                                           std::shared_ptr<MixerState> state,
                                           std::shared_ptr<SharedTimeline> timeline,
+                                          std::shared_ptr<MixerTransitionScheduler> scheduler,
                                           uint64_t transition_generation,
                                           std::string scene_name,
                                           bool new_pgm_is_slot_a,
@@ -99,6 +113,7 @@ class MixerOrchestrator {
     static int64_t prepareWipe(std::shared_ptr<NodeManager> nodes,
                                std::shared_ptr<MixerState> state,
                                std::shared_ptr<SharedTimeline> timeline,
+                               std::shared_ptr<MixerTransitionScheduler> scheduler,
                                uint64_t transition_generation,
                                std::string scene_name,
                                std::string wipe_file,

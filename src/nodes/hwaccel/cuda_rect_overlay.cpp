@@ -367,6 +367,14 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<bool> held_valid_;
     std::atomic<uint32_t> active_inputs_{~0u};
 
+    // Bound how long we will wait for every active layer to produce a fresh
+    // post-activation frame before emitting with whatever we have. <=0 disables
+    // the bound (the historical "wait forever" behavior). The mixer can stall
+    // indefinitely if one source is starved (e.g. a freshly switched router
+    // output that has not yet been wired) and no timeout is set.
+    int64_t warmup_timeout_ms_ = 0;
+    int64_t warmup_started_pts_ = -1;
+
     void freeHwContexts() {
         av_buffer_unref(&out_frames_ref_);
     }
@@ -785,14 +793,37 @@ public:
         // During slot warmup, do not emit a partial black composite just because
         // one input has produced an earlier PTS than the others.  Consume fresh
         // frames into held_ until every active layer has a post-activation frame.
+        // Once warmup_timeout_ms_ elapses without all layers caught up, fall through
+        // to render with whatever we have (missing layers stay black) so a stuck
+        // input can never park the compositor indefinitely.
+        bool any_missing = false;
         for (size_t i = 0; i < n; ++i) {
             if (!isActive(i) || input_eof_[i])
                 continue;
             if (!src_for_layer[i]) {
+                any_missing = true;
+                break;
+            }
+        }
+        if (any_missing) {
+            const int64_t now_ms = wallclock.pts();
+            if (warmup_timeout_ms_ <= 0) {
                 this->waitForInput();
                 return;
             }
+            if (warmup_started_pts_ < 0) {
+                warmup_started_pts_ = now_ms;
+                this->waitForInput();
+                return;
+            }
+            if (now_ms - warmup_started_pts_ < warmup_timeout_ms_) {
+                this->waitForInput();
+                return;
+            }
+            logstream << "cuda_rect_overlay: warmup timeout after "
+                      << (now_ms - warmup_started_pts_) << "ms; emitting partial composite";
         }
+        warmup_started_pts_ = -1;
 
         processComposite(min_ts, src_for_layer, meta_src);
     }
@@ -804,6 +835,7 @@ public:
             sent_eof_ = false;
             std::fill(input_eof_.begin(), input_eof_.end(), false);
             std::fill(held_valid_.begin(), held_valid_.end(), false);
+            warmup_started_pts_ = -1;
             for (auto& edge : this->source_edges_) {
                 edge->producedEvent().signal();
             }
@@ -860,6 +892,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     node->initTimeline(nci);
     if (params.count("active_inputs"))
         node->active_inputs_.store(parseBitmask(params["active_inputs"]), std::memory_order_relaxed);
+    node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
     return node;
 }
 

@@ -202,6 +202,13 @@ struct ModelRunner {
     // Optional CUDA graph for replaying fixed-shape TensorRT inference.
     CUgraphExec cuda_graph_exec = nullptr;
     bool cuda_graph_ready = false;
+    // Run this many regular enqueueInference iterations before the first graph
+    // capture, so TensorRT internal state (cudnn workspace, lazy kernels) is
+    // hot before stream-capture begins. Counts down once per inference and is
+    // never reset on input shape changes — fixed-shape only models, see
+    // ensureCudaGraph(). If a future change introduces dynamic shapes that
+    // re-instantiate the graph mid-stream, this should be re-set to the
+    // initial warmup count alongside clearing cuda_graph_ready.
     int cuda_graph_warmup_remaining = 5;
     bool cuda_graph_disabled = false;
     bool cuda_graph_capture_logged = false;
