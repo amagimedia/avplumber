@@ -48,6 +48,12 @@ public:
         std::unique_lock<decltype(busy_)> lock(busy_);
         destructors_[instance].push_back(destructor);
     }
+    // Hooks run in registration order. Since InstanceShared objects register
+    // their hook on first `get()`, ordering follows lazy creation order, which
+    // depends on the sequence of incoming control commands. Do not assume any
+    // particular ordering between two unrelated IShutdownable objects; if a
+    // future shared object needs to be torn down before another, introduce
+    // explicit priorities here.
     static void addPreShutdownHook(const InstanceData* instance, std::function<void()> hook) {
         std::unique_lock<decltype(busy_)> lock(busy_);
         pre_shutdown_hooks_[instance].push_back(std::move(hook));

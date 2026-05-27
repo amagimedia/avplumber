@@ -160,6 +160,43 @@ Parameters:
 
 Each `process()` call iterates all inputs once: for each input that has a frame, it peeks, forwards to output if `i == active`, and pops. One frame per input per tick, not a drain loop. In the mixer, non-active inputs typically have no data at all because their upstream `one_to_many` bitmask is cleared, so `peek()` returns null and they are skipped at zero cost.
 
+### `preheat_video_router`
+
+Video-only N-to-M router with a timeline-driven route table. Each output selects exactly one input (or black) per frame. Designed for the preheated mixer path where all inputs share the same wallclock-PTS grid and format.
+
+N inputs, M outputs: `av::VideoFrame`
+
+Parameters:
+
+- `labels` (list of strings, required) -- output names, one per `dst` edge. Used as human-readable route targets in `routes_named` objects and in log messages.
+- `routes` (array of ints or object, optional) -- initial route table. Two accepted formats:
+  - **Array** `[input_index, ...]` -- one entry per output in `dst` order. `-1` means black (no input).
+  - **Object** `{"label": input_index, ...}` -- partial update applied on top of a base table; only named outputs are changed. Requires a base table to already exist (used in `node.object.set` partial updates).
+  - Default: all outputs set to `-1` (black).
+- `enforce_monotonic_pts` (bool, default `true`) -- drop frames that would move an output's PTS backward. Intended for wallclock-PTS pipelines where route changes can introduce a brief camera-switch reorder.
+- `timeline` (string, optional) -- name of `SharedTimeline` instance-shared object. The `routes` key is resolved per frame, enabling PTS-synchronized route changes via `timeline.set` / `timeline.batch`.
+- `width`, `height`, `pixel_format`, `real_pixel_format`, `frame_rate`, `timebase` (optional) -- override the format metadata that this node reports to downstream nodes (e.g. encoders, filters). When omitted, metadata is forwarded from the upstream node on input 0.
+
+Runtime objects:
+
+- `node.object.set <name> routes [1, 0, -1]` -- update route table immediately (array or object form)
+- `node.object.get <name> routes` -- current route table as an integer array
+- `node.object.get <name> routes_named` -- current route table as `{"label": input_index}` object
+- `node.object.get <name> status` -- full diagnostics:
+  ```json
+  {
+    "routes": [1, 0, -1],
+    "routes_named": {"slot_a": 1, "slot_b": 0, "pvw": -1},
+    "labels": ["slot_a", "slot_b", "pvw"],
+    "frames_drained_per_input": [120, 115, 0],
+    "frames_enqueued_per_output": [115, 120, 0],
+    "frames_dropped_per_output": [0, 0, 0],
+    "backward_pts_drops_per_output": [0, 0, 0]
+  }
+  ```
+
+Multiple outputs may select the same input simultaneously (e.g. during a transition warmup when both PGM and PVW slots need the same camera). The router drains the input once and copies the frame reference to each matching output.
+
 ### `cuda_rect_overlay` extensions
 
 The compositor gained two new capabilities:
