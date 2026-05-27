@@ -12,9 +12,13 @@ from pyplumber.auto_mixer.outputs import (
 class FakeAVPlumber:
     def __init__(self):
         self.nodes = []
+        self.commands = []
 
     def addNode(self, node):
         self.nodes.append(node.parameters)
+
+    def executeCommandsFromString(self, commands):
+        self.commands.extend(line for line in commands.splitlines() if line.strip())
 
 
 class MuxOutputPolicyTest(unittest.TestCase):
@@ -42,6 +46,8 @@ class MuxOutputPolicyTest(unittest.TestCase):
         self.assertEqual("convert_cuda=format=yuva420p", by_name["html_convert"]["graph"])
 
         html_assume = by_name["html_overlay_assume"]
+        self.assertNotIn("html_overlay_rt", by_name)
+        self.assertEqual("html_overlay_yuva", html_assume["src"])
         self.assertEqual(CANVAS_W, html_assume["width"])
         self.assertEqual(CANVAS_H, html_assume["height"])
         self.assertEqual("yuva420p", html_assume["real_pixel_format"])
@@ -71,6 +77,10 @@ class MuxOutputPolicyTest(unittest.TestCase):
         self.assertEqual(0, selector["fallback_active"])
         self.assertTrue(selector["fallback_when_active_missing"])
         self.assertEqual(100, selector["fallback_wait_ms"])
+        self.assertTrue(selector["drop_non_monotonic"])
+        self.assertEqual([
+            'mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src","overlay_otm":"otm_html_overlay","selector":"overlay_sel","enabled":false}'
+        ], avp.commands)
 
     def test_html_overlay_graph_can_start_enabled_for_docker_url(self):
         avp = FakeAVPlumber()
@@ -84,10 +94,13 @@ class MuxOutputPolicyTest(unittest.TestCase):
 
         self.assertEqual("video_output", out_edge)
         by_name = {node["name"]: node for node in avp.nodes if "name" in node}
-        self.assertEqual(2, by_name["otm_html_overlay"]["outputs"])
+        self.assertEqual(3, by_name["otm_html_overlay"]["outputs"])
         self.assertEqual(1, by_name["otm_html_overlay_src"]["outputs"])
         self.assertEqual(1, by_name["overlay_sel"]["active"])
         self.assertNotIn("hwaccel", by_name["html_overlay_src"])
+        self.assertEqual([
+            'mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src","overlay_otm":"otm_html_overlay","selector":"overlay_sel","enabled":true}'
+        ], avp.commands)
 
     def test_mux_output_errors_panic_but_clean_finish_stops_by_default(self):
         avp = FakeAVPlumber()

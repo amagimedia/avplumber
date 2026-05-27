@@ -54,6 +54,10 @@ function setServerLogger(socketPath, callback) {
   return addon.setServerLogger(socketPath, callback);
 }
 
+function monotonicTimeNs() {
+  return addon.monotonicTimeNs();
+}
+
 function close() {
   if (typeof addon.close === 'function') addon.close();
 }
@@ -65,5 +69,6 @@ module.exports = {
   broadcastFd,
   closeServer,
   setServerLogger,
+  monotonicTimeNs,
   close,
 };

@@ -25,7 +25,7 @@ export const TEX_INFO_HEADER_BYTES = 48;
  *   12: u32 pixelFormat (FOURCC: 'BGRA' or 'RGBA')
  *   16: u64 modifier
  *   24: u64 offset
- *   32: u64 timestampNs   (nanoseconds since Unix epoch)
+ *   32: u64 timestampNs   (nanoseconds from CLOCK_MONOTONIC)
  *   40: u64 frameNumber
  *
  * Must remain wire-compatible with the consumer of `/tmp/dma-page/{id}.sock`.

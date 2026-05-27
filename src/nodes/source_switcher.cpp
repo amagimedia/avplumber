@@ -11,6 +11,8 @@ class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>
     int timeline_reference_input_ = -1;
     bool fallback_when_active_missing_ = true;
     int fallback_wait_ms_ = 0;
+    bool drop_non_monotonic_ = false;
+    uint64_t dropped_non_monotonic_ = 0;
     std::string label_;
     int last_selected_input_ = -1;
     av::Timestamp last_output_pts_ = NOTS;
@@ -31,6 +33,36 @@ class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>
 
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
+
+    bool putIfMonotonic(int input_index, T* data, bool fallback) {
+        av::Timestamp pts = data->pts();
+        if (drop_non_monotonic_ && last_output_pts_.isValid() && pts.isValid() && pts < last_output_pts_) {
+            dropped_non_monotonic_++;
+            if (dropped_non_monotonic_ <= 5 || dropped_non_monotonic_ % 30 == 0) {
+                logstream << "source_switcher[" << label_ << "]: dropping non-monotonic pts "
+                          << pts << " after " << last_output_pts_ << " on input " << input_index
+                          << " count=" << dropped_non_monotonic_;
+            }
+            return false;
+        }
+        if (input_index != last_selected_input_) {
+            if (fallback) {
+                logstream << "source_switcher[" << label_ << "]: selected fallback input "
+                          << input_index << " because active input has no usable frame";
+            } else {
+                logstream << "source_switcher[" << label_ << "]: selected input " << input_index
+                          << " at pts " << pts;
+            }
+        }
+        if (!drop_non_monotonic_ && last_output_pts_.isValid() && pts < last_output_pts_) {
+            logstream << "source_switcher[" << label_ << "]: output pts went backwards "
+                      << last_output_pts_ << " -> " << pts << " on input " << input_index;
+        }
+        last_selected_input_ = input_index;
+        last_output_pts_ = pts;
+        this->sink_->put(*data);
+        return true;
+    }
 
     virtual void process() override {
         if (this->findSourceWithData(0) < 0) {
@@ -75,34 +107,19 @@ public:
             if (!data) continue;
             int active = activeFor(i, data);
             if (i == active) {
-                if (i != last_selected_input_) {
-                    logstream << "source_switcher[" << label_ << "]: selected input " << i
-                              << " at pts " << data->pts();
-                }
-                if (last_output_pts_.isValid() && data->pts() < last_output_pts_) {
-                    logstream << "source_switcher[" << label_ << "]: output pts went backwards "
-                              << last_output_pts_ << " -> " << data->pts() << " on input " << i;
-                }
-                last_selected_input_ = i;
-                last_output_pts_ = data->pts();
-                this->sink_->put(*data);
-                output_count++;
+                if (putIfMonotonic(i, data, false))
+                    output_count++;
             }
         }
 
         if (output_count == 0 &&
             fallback_input_ >= 0 &&
             fallback_input_ < (int)this->source_edges_.size() &&
+            fallback_input_ != reference_active &&
             (fallback_when_active_missing_ || reference_active == fallback_input_)) {
             T* data = this->source_edges_[fallback_input_]->peek();
             if (data) {
-                if (fallback_input_ != last_selected_input_) {
-                    logstream << "source_switcher[" << label_ << "]: selected fallback input "
-                              << fallback_input_ << " because active input has no frame";
-                }
-                last_selected_input_ = fallback_input_;
-                last_output_pts_ = data->pts();
-                this->sink_->put(*data);
+                putIfMonotonic(fallback_input_, data, true);
             }
         }
 
@@ -120,6 +137,8 @@ public:
             for (auto& edge : this->source_edges_) {
                 edge->producedEvent().signal();
             }
+        } else if (key == "drop_non_monotonic") {
+            drop_non_monotonic_ = value.get<bool>();
         }
     }
 
@@ -181,6 +200,8 @@ public:
             r->fallback_when_active_missing_ = nci.params["fallback_when_active_missing"].get<bool>();
         if (nci.params.count("fallback_wait_ms"))
             r->fallback_wait_ms_ = nci.params["fallback_wait_ms"].get<int>();
+        if (nci.params.count("drop_non_monotonic"))
+            r->drop_non_monotonic_ = nci.params["drop_non_monotonic"].get<bool>();
         return r;
     }
 };

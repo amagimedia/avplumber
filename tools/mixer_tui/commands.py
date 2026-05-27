@@ -31,19 +31,16 @@ def auto_switch_set_command(
 def overlay_toggle_commands(
     *,
     enabled: bool,
+    mixer_name: str,
     overlay_source_otm_name: str,
     overlay_otm_name: str,
     overlay_selector_name: str,
 ) -> list[str]:
-    if enabled:
-        return [
-            f"node.object.set {overlay_source_otm_name} outputs 1",
-            f"node.object.set {overlay_otm_name} outputs 3",
-            f"node.object.set {overlay_selector_name} active 1",
-        ]
-    return [
-        f"node.object.set {overlay_otm_name} outputs 3",
-        f"node.object.set {overlay_selector_name} active 0",
-        f"node.object.set {overlay_otm_name} outputs 1",
-        f"node.object.set {overlay_source_otm_name} outputs 0",
-    ]
+    payload = {
+        "mixer": mixer_name,
+        "enabled": enabled,
+        "source_otm": overlay_source_otm_name,
+        "overlay_otm": overlay_otm_name,
+        "selector": overlay_selector_name,
+    }
+    return [f"mixer.overlay {json.dumps(payload, separators=(',', ':'))}"]

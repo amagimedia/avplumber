@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from pyplumber import AVPlumber
 from pyplumber.node import (
@@ -19,7 +20,6 @@ from pyplumber.node import (
     Mux,
     OneToMany,
     Output,
-    Realtime,
     ResampleAudio,
     SourceSwitcher,
 )
@@ -198,6 +198,7 @@ def build_html_overlay_output(
     group: str = "output",
     source_group: str | None = None,
     start_enabled: bool = False,
+    mixer_name: str = "mixer",
 ) -> str:
     """Overlay a browser DMA-BUF page over the final mixed video.
 
@@ -207,7 +208,7 @@ def build_html_overlay_output(
     provide an overlay URL at startup.
     """
     source_group = source_group or group
-    video_outputs = 2 if start_enabled else 1
+    video_outputs = 3 if start_enabled else 1
     overlay_outputs = 1 if start_enabled else 0
     selector_active = 1 if start_enabled else 0
 
@@ -249,17 +250,9 @@ def build_html_overlay_output(
         "group": source_group,
         "auto_restart": "on",
     }))
-    avp.addNode(Realtime({
-        "name": "html_overlay_rt",
-        "src": "html_overlay_yuva",
-        "dst": "html_overlay_rt",
-        "set_pts": True,
-        "group": source_group,
-        "auto_restart": "on",
-    }))
     avp.addNode(AssumeVideoFormat({
         "name": "html_overlay_assume",
-        "src": "html_overlay_rt",
+        "src": "html_overlay_yuva",
         "dst": "html_overlay_assumed",
         "width": CANVAS_W,
         "height": CANVAS_H,
@@ -331,8 +324,19 @@ def build_html_overlay_output(
         # lag the direct branch by more than one frame around wipe/source switches.
         # Wait through that normal skew before failing open to the no-overlay path.
         "fallback_wait_ms": 100,
+        "drop_non_monotonic": True,
         "group": group,
     }))
+    avp.executeCommandsFromString(
+        "mixer.overlay.init "
+        + json.dumps({
+            "mixer": mixer_name,
+            "source_otm": "otm_html_overlay_src",
+            "overlay_otm": "otm_html_overlay",
+            "selector": "overlay_sel",
+            "enabled": start_enabled,
+        }, separators=(",", ":"))
+    )
     return "video_output"
 
 

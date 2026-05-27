@@ -6,6 +6,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <iterator>
+#include <sstream>
 #include <thread>
 #include <chrono>
 #include <unordered_map>
@@ -117,6 +118,8 @@ constexpr int64_t kWipeSwitchGraceMs = 500;
 constexpr int64_t kFadeColdPrepMs = 700;
 constexpr int64_t kWipeReadyPollMs = 5;
 constexpr int64_t kWipeReadyTimeoutMs = 5000;
+constexpr int kOverlayDirectInput = 0;
+constexpr int kOverlayCompositedInput = 1;
 
 void resetInputIf(std::shared_ptr<NodeManager> nodes, const std::string& name) {
     if (name.empty())
@@ -239,6 +242,13 @@ struct WipeReadyResult {
     av::Timestamp ready_ts = NOTS;
 };
 
+struct OverlayReadyResult {
+    bool ready = false;
+    bool cancelled = false;
+    int64_t waited_ms = 0;
+    av::Timestamp ready_ts = NOTS;
+};
+
 WipeReadyResult waitForWipeOverlayReady(std::shared_ptr<NodeManager> nodes,
                                         const std::string& edge_name,
                                         av::Timestamp initial_ts,
@@ -255,6 +265,41 @@ WipeReadyResult waitForWipeOverlayReady(std::shared_ptr<NodeManager> nodes,
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kWipeReadyPollMs));
         result.waited_ms += kWipeReadyPollMs;
+    }
+    result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
+    return result;
+}
+
+bool overlayCommandCurrent(const std::shared_ptr<MixerState>& state, uint64_t generation) {
+    return state->overlay_generation.load(std::memory_order_acquire) == generation;
+}
+
+OverlayReadyResult waitForOverlayBranchReady(std::shared_ptr<NodeManager> nodes,
+                                             std::shared_ptr<MixerState> state,
+                                             uint64_t generation,
+                                             const std::string& edge_name,
+                                             av::Timestamp initial_ts,
+                                             av::Timestamp minimum_ts,
+                                             int64_t timeout_ms,
+                                             int64_t poll_ms) {
+    OverlayReadyResult result;
+    timeout_ms = std::max<int64_t>(0, timeout_ms);
+    poll_ms = std::max<int64_t>(1, poll_ms);
+    while (result.waited_ms < timeout_ms) {
+        if (!overlayCommandCurrent(state, generation)) {
+            result.cancelled = true;
+            return result;
+        }
+        av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
+        const bool fresh = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
+        const bool monotonic = !minimum_ts.isValid() || (ts.isValid() && !(ts < minimum_ts));
+        if (fresh && monotonic) {
+            result.ready = true;
+            result.ready_ts = ts;
+            return result;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+        result.waited_ms += poll_ms;
     }
     result.ready_ts = edgeLastTsIfExists(nodes, edge_name);
     return result;
@@ -464,6 +509,17 @@ void MixerOrchestrator::setNodeObject(const std::string& node_name, const std::s
     } catch (const std::exception& e) {
         throw Error("mixer: set " + node_name + "." + key + " failed: " + e.what());
     }
+}
+
+void MixerOrchestrator::publishRuntimeObject(const std::string& node_name,
+                                             const std::string& key,
+                                             const Parameters& value) {
+    timeline_->clearKey(node_name, key);
+    if (!setNodeObjectIfCreated(nodes_, node_name, key, value)) {
+        logstream << "mixer: queued " << node_name << "." << key
+                  << " for node not created yet";
+    }
+    timeline_->set(node_name, key, wallclock.pts(), value);
 }
 
 void MixerOrchestrator::publishCameraOtmOutputs(const std::string& otm_name, uint32_t mask) {
@@ -1458,6 +1514,108 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     prep_guard.release();
 }
 
+void MixerOrchestrator::setOverlayEnabled(bool enabled, int64_t ready_timeout_ms) {
+    std::string source_otm_name;
+    std::string overlay_otm_name;
+    std::string selector_name;
+    std::string candidate_edge_name;
+    std::string selector_output_edge_name;
+    av::Timestamp visible_ts = NOTS;
+    av::Timestamp initial_candidate_ts = NOTS;
+    uint64_t generation = 0;
+    int64_t timeout_ms = 0;
+    int64_t poll_ms = 0;
+    const int candidate_input = enabled ? kOverlayCompositedInput : kOverlayDirectInput;
+
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->overlay_source_otm_name.empty() ||
+            state_->overlay_otm_name.empty() ||
+            state_->overlay_selector_name.empty()) {
+            throw Error("mixer.overlay: overlay nodes are not configured");
+        }
+        source_otm_name = state_->overlay_source_otm_name;
+        overlay_otm_name = state_->overlay_otm_name;
+        selector_name = state_->overlay_selector_name;
+        timeout_ms = ready_timeout_ms >= 0 ? ready_timeout_ms : state_->overlay_ready_timeout_ms;
+        poll_ms = state_->overlay_ready_poll_ms;
+        generation = ++state_->overlay_generation;
+
+        selector_output_edge_name = firstDstEdgeName(nodes_, selector_name);
+        candidate_edge_name = edgeNameAt(nodes_, selector_name, "src", candidate_input);
+        visible_ts = edgeLastTsIfExists(nodes_, selector_output_edge_name);
+        initial_candidate_ts = edgeLastTsIfExists(nodes_, candidate_edge_name);
+
+        if (candidate_edge_name.empty()) {
+            throw Error("mixer.overlay: selector " + selector_name + " does not expose input " +
+                        std::to_string(candidate_input));
+        }
+
+        if (!setNodeObjectIfCreated(nodes_, selector_name, "drop_non_monotonic", Parameters(true))) {
+            logstream << "mixer.overlay: queued " << selector_name
+                      << ".drop_non_monotonic for node not created yet";
+        }
+
+        if (enabled) {
+            publishRuntimeObject(selector_name, "active", Parameters(kOverlayDirectInput));
+            publishRuntimeObject(source_otm_name, "outputs", Parameters(1u));
+            publishRuntimeObject(overlay_otm_name, "outputs", Parameters(3u));
+        } else {
+            // Keep both legs fed until the direct leg has caught up with the last
+            // visible frame. The selector flips only after the wait below.
+            publishRuntimeObject(overlay_otm_name, "outputs", Parameters(3u));
+        }
+
+        logstream << "mixer.overlay: armed " << (enabled ? "enable" : "disable")
+                  << " selector=" << selector_name
+                  << " candidate_edge=" << candidate_edge_name
+                  << " visible_ts=" << visible_ts
+                  << " initial_candidate_ts=" << initial_candidate_ts
+                  << " timeout_ms=" << timeout_ms;
+    }
+
+    OverlayReadyResult ready = waitForOverlayBranchReady(
+        nodes_, state_, generation, candidate_edge_name, initial_candidate_ts,
+        visible_ts, timeout_ms, poll_ms);
+    if (ready.cancelled) {
+        logstream << "mixer.overlay: " << (enabled ? "enable" : "disable")
+                  << " superseded before visible switch";
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!overlayCommandCurrent(state_, generation)) {
+            logstream << "mixer.overlay: " << (enabled ? "enable" : "disable")
+                      << " superseded before finalizing";
+            return;
+        }
+
+        if (!ready.ready) {
+            publishRuntimeObject(selector_name, "active", Parameters(kOverlayDirectInput));
+            publishRuntimeObject(overlay_otm_name, "outputs", Parameters(1u));
+            publishRuntimeObject(source_otm_name, "outputs", Parameters(0u));
+            state_->overlay_enabled = false;
+            std::ostringstream msg;
+            msg << "mixer.overlay: " << (enabled ? "overlay" : "direct")
+                << " branch did not reach monotonic PTS before timeout; edge="
+                << candidate_edge_name << " last_ts=" << ready.ready_ts;
+            throw Error(msg.str());
+        }
+
+        publishRuntimeObject(selector_name, "active", Parameters(candidate_input));
+        if (!enabled) {
+            publishRuntimeObject(overlay_otm_name, "outputs", Parameters(1u));
+            publishRuntimeObject(source_otm_name, "outputs", Parameters(0u));
+        }
+        state_->overlay_enabled = enabled;
+        logstream << "mixer.overlay: " << (enabled ? "enabled" : "disabled")
+                  << " waited_ms=" << ready.waited_ms
+                  << " ready_ts=" << ready.ready_ts
+                  << " visible_ts=" << visible_ts;
+    }
+}
+
 std::vector<std::string> MixerOrchestrator::sceneNames() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     std::vector<std::string> names;
@@ -1476,6 +1634,10 @@ Parameters MixerOrchestrator::status() const {
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
     s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
+    if (!state_->overlay_selector_name.empty()) {
+        s["overlay_enabled"] = state_->overlay_enabled;
+        s["overlay_selector"] = state_->overlay_selector_name;
+    }
     auto mode = state_->transition_mode.load();
     switch (mode) {
         case MixerState::TransitionMode::Idle: s["transition"] = "idle"; break;

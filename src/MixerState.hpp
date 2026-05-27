@@ -98,6 +98,17 @@ struct MixerState : public InstanceShared<MixerState> {
     // Prevents frames from a previous wipe run from bleeding into the next one.
     std::vector<std::string> wipe_flush_edges;
 
+    // Optional post-mixer HTML/DMA overlay path.  The native mixer.overlay
+    // command uses these static graph nodes to arm the hidden branch, wait for
+    // a monotonic candidate frame, and then switch the final selector.
+    std::string overlay_source_otm_name;  // e.g. "otm_html_overlay_src"
+    std::string overlay_otm_name;         // e.g. "otm_html_overlay"
+    std::string overlay_selector_name;    // e.g. "overlay_sel"
+    int64_t overlay_ready_timeout_ms = 1000;
+    int64_t overlay_ready_poll_ms = 5;
+    bool overlay_enabled = false;
+    std::atomic<uint64_t> overlay_generation{0};
+
     const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
     const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }
 
