@@ -887,6 +887,20 @@ Join metadata from an auxiliary stream into a primary stream by exact timestamp 
 
 Useful for running heavy processing (e.g. neural network inference) on downscaled frames and merge produced metadata back onto original-resolution frames.
 
+### `crop_metadata_cuda`
+
+Metadata-driven CUDA crop. Reads a bounding-box from per-frame metadata (e.g. produced by `cuda_infer_yolo`) and crops the frame to that region using an FFmpeg CUDA filter graph. Intended for reframing workflows such as face-detection crop.
+
+Requires `HAVE_CUDA=1`.
+
+1 input, 1 output: `av::VideoFrame` (CUDA)
+
+-   `metadata_key` (string, default `"reframer_bbox"`) - frame metadata key containing the crop coordinates. Expected value format: `{"x": 100, "y": 50, "w": 640, "h": 360}` (pixel coordinates in input frame space).
+-   `dst_width` (int) - fallback output width used when no valid metadata is present on a frame
+-   `dst_height` (int) - fallback output height used when no valid metadata is present on a frame
+-   `offset_log_path` (string, default `"reframer.log"`) - path to write per-frame crop offset log (for debugging)
+-   `debug_log_every_n` (int, default `0`) - if nonzero, log crop parameters every N frames to the avplumber log
+
 ### `force_keyframe`
 
 Set keyframe flag in frame to make encoder output keyframe. Unlike `-g`
@@ -894,8 +908,28 @@ encoder option in FFmpeg, works with non-integer FPS.
 
 1 input, 1 output: `av::VideoFrame`
 
--   `interval_sec` (int / float / string of rational) - keyframe
-    interval, in seconds
+-   `interval_sec` (int / float / string of rational) - optional, keyframe
+    interval, in seconds. If omitted, periodic forcing is disabled and the
+    node acts as a pass-through until triggered externally.
+
+Runtime control (via `node.object.set` / `node.object.get`):
+
+-   `node.object.set <name> trigger true` — request one keyframe on the next
+    processed frame (one-shot, edge-triggered). Also accepted as key `force`
+    or `request`.
+-   `node.object.get <name> status` — returns a JSON object:
+    ```json
+    {
+      "requested_generation": 3,
+      "forced_generation": 3,
+      "pending": false,
+      "triggered_frames": 2,
+      "periodic_frames": 60,
+      "interval_enabled": true
+    }
+    ```
+-   `node.object.get <name> pending` — bool, `true` if a trigger has been
+    requested but not yet applied to a frame.
 
 ### `enc_video`, `enc_audio`
 

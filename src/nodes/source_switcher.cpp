@@ -70,6 +70,13 @@ public:
             return;
         }
 
+        // The timeline reference input drives time for `active` lookups. The PTS of its
+        // currently-peeked frame is what we evaluate timeline entries at, so this input must
+        // keep producing frames (and being popped per-tick by the bottom of process()) for
+        // scheduled `active` switches to ever fire. If the chosen reference can starve while
+        // other inputs flow, configure it to a path that's always producing — typically the
+        // post-scene OTM that feeds this switcher's "direct" branch — or leave it at -1 and
+        // accept per-input timeline lookups instead.
         T* timeline_reference = nullptr;
         if (timeline_reference_input_ >= 0 &&
             timeline_reference_input_ < (int)this->source_edges_.size()) {

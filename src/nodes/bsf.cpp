@@ -88,6 +88,12 @@ public:
         upstreamEncoder("setOutput")->setOutput(stream, octx);
     }
 
+    // BSF init is deferred to openEncoder rather than the constructor: the
+    // upstream encoder must finish openEncoder() first so its codecParameters()
+    // (especially extradata) are populated; av_bsf_init then copies them into
+    // par_in. process() / flush() / setOutputPostOpen guard with
+    // ensureFilterReady() and will throw if a packet arrives before openEncoder
+    // ran. Don't call av_bsf_init from the ctor or you will get an empty extradata.
     virtual void openEncoder(av::Stream stream = av::Stream()) {
         std::shared_ptr<IEncoder> enc = upstreamEncoder("openEncoder");
         enc->openEncoder(stream);

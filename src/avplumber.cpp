@@ -1180,6 +1180,13 @@ class TcpControlServer: public ControlServerBase {
     ControlImpl &control_;
     boost::asio::io_service io_service_;
     tcp::acceptor acceptor_;
+    // clients_ is mutated only from the io_service thread (net_thread_):
+    // accept() inserts, Client::closeAndRemove() erases via the saved iterator.
+    // No mutex; if a future change ever calls into clients_ from another
+    // thread (e.g. an external "kick all clients" command), that path must
+    // post into io_service_ instead of touching clients_ directly.
+    // ~TcpControlServer joins net_thread_ before iterating clients_, so its
+    // post-join loop is safe.
     std::list<std::shared_ptr<Client>> clients_;
     std::thread net_thread_;
 

@@ -767,6 +767,47 @@ void MixerOrchestrator::initializeRoutedRoutes() {
         true);
 }
 
+void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
+                                                   const std::string& new_pgm_scene) {
+    const auto scene_it = state_->scenes.find(new_pgm_scene);
+    if (scene_it == state_->scenes.end())
+        return;
+
+    const SceneDefinition& scene = scene_it->second;
+    const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
+    const uint32_t active = state_->computeActiveInputsMask(scene);
+    const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
+    const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
+
+    // Source_switcher first: this is the only setting visible at the SDI output.
+    // Any short window between this and the OTM/compositor flips below would only
+    // surface if the new direct path were not already producing frames; in both
+    // callers (ready cut and deferred fade cleanup) it is.
+    timeline_->clearKey(state_->source_switcher_name, "active");
+    setNodeObject(state_->source_switcher_name, "active",
+                  Parameters(new_pgm_is_slot_a ? 0 : 1));
+
+    for (const auto& [src_name, info] : state_->sources) {
+        if (info.routed)
+            continue;
+        const bool in_scene = scene.sources.count(src_name) > 0;
+        const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
+        const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
+        timeline_->clearKey(info.otm_node_name, "outputs");
+        setNodeObjectIfCreated(nodes_, info.otm_node_name, "outputs", Parameters(mask));
+    }
+    publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
+
+    timeline_->clearKey(new_slot.post_otm_name, "outputs");
+    timeline_->clearKey(old_slot.post_otm_name, "outputs");
+    timeline_->clearKey(new_slot.compositor_name, "active_inputs");
+    timeline_->clearKey(old_slot.compositor_name, "active_inputs");
+    nodes_->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
+    nodes_->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
+    nodes_->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
+    nodes_->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
+}
+
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
     uint32_t active = state_->computeActiveInputsMask(scene);
     for (const auto& [src_name, info] : state_->sources) {
@@ -918,6 +959,7 @@ void MixerOrchestrator::deferredCleanup(
         std::shared_ptr<NodeManager> nodes,
         std::shared_ptr<MixerState> state,
         std::shared_ptr<SharedTimeline> timeline,
+        std::shared_ptr<MixerTransitionScheduler> scheduler,
         uint64_t transition_generation,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
@@ -937,36 +979,8 @@ void MixerOrchestrator::deferredCleanup(
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
     try {
-        const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
-        const auto scene_it = state->scenes.find(new_pgm_scene);
-        if (scene_it != state->scenes.end()) {
-            const SceneDefinition& scene = scene_it->second;
-            const uint32_t active = state->computeActiveInputsMask(scene);
-            for (const auto& [src_name, info] : state->sources) {
-                if (info.routed)
-                    continue;
-                const bool in_scene = scene.sources.count(src_name) > 0;
-                const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
-                const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
-                timeline->clearKey(info.otm_node_name, "outputs");
-                setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
-            }
-            MixerOrchestrator orch(nodes, state, timeline);
-            orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
-            const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
-            const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
-            timeline->clearKey(new_slot.post_otm_name, "outputs");
-            timeline->clearKey(old_slot.post_otm_name, "outputs");
-            timeline->clearKey(new_slot.compositor_name, "active_inputs");
-            timeline->clearKey(old_slot.compositor_name, "active_inputs");
-            timeline->clearKey(state->source_switcher_name, "active");
-            nodes->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
-            nodes->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
-            nodes->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
-            nodes->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
-            nodes->node(state->source_switcher_name)->setObject(
-                "active", Parameters(new_pgm_is_slot_a ? 0 : 1));
-        }
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
+        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
     }
@@ -980,6 +994,7 @@ void MixerOrchestrator::readyCutTask(
         std::shared_ptr<NodeManager> nodes,
         std::shared_ptr<MixerState> state,
         std::shared_ptr<SharedTimeline> timeline,
+        std::shared_ptr<MixerTransitionScheduler> scheduler,
         uint64_t transition_generation,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
@@ -1022,38 +1037,8 @@ void MixerOrchestrator::readyCutTask(
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
         return;
     try {
-        const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
-        const auto scene_it = state->scenes.find(new_pgm_scene);
-        if (scene_it != state->scenes.end()) {
-            const SceneDefinition& scene = scene_it->second;
-            const uint32_t active = state->computeActiveInputsMask(scene);
-            const auto& new_slot = new_pgm_is_slot_a ? state->slot_a : state->slot_b;
-            const auto& old_slot = new_pgm_is_slot_a ? state->slot_b : state->slot_a;
-
-            timeline->clearKey(state->source_switcher_name, "active");
-            nodes->node(state->source_switcher_name)->setObject(
-                "active", Parameters(new_pgm_is_slot_a ? 0 : 1));
-
-            for (const auto& [src_name, info] : state->sources) {
-                if (info.routed)
-                    continue;
-                const bool in_scene = scene.sources.count(src_name) > 0;
-                const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
-                const uint32_t mask = (in_scene && active_input) ? pgm_bit : 0u;
-                timeline->clearKey(info.otm_node_name, "outputs");
-                setNodeObjectIfCreated(nodes, info.otm_node_name, "outputs", Parameters(mask));
-            }
-            MixerOrchestrator orch(nodes, state, timeline);
-            orch.publishRoutedRoutesForProgramOnly(new_pgm_is_slot_a, scene, wallclock.pts(), true);
-            timeline->clearKey(new_slot.post_otm_name, "outputs");
-            timeline->clearKey(old_slot.post_otm_name, "outputs");
-            timeline->clearKey(new_slot.compositor_name, "active_inputs");
-            timeline->clearKey(old_slot.compositor_name, "active_inputs");
-            nodes->node(new_slot.post_otm_name)->setObject("outputs", Parameters(1u));
-            nodes->node(old_slot.post_otm_name)->setObject("outputs", Parameters(0u));
-            nodes->node(new_slot.compositor_name)->setObject("active_inputs", Parameters(active));
-            nodes->node(old_slot.compositor_name)->setObject("active_inputs", Parameters(0u));
-        }
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
+        orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
     } catch (const std::exception& e) {
         logstream << "mixer: ready cut error restoring routing: " << e.what();
     }
@@ -1086,9 +1071,10 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     auto ready_edge = nodes_->edges()->findAny(ready_edge_name);
     av::Timestamp ready_edge_initial_ts = ready_edge ? ready_edge->lastTS() : NOTS;
     postTransitionTask("mixer.cut.ready", T_cut - wallclock.pts(),
-        [nodes = nodes_, state = state_, timeline = timeline_, transition_generation,
-         pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts, T_cut, was_preloaded] {
-            readyCutTask(nodes, state, timeline, transition_generation,
+        [nodes = nodes_, state = state_, timeline = timeline_, scheduler = scheduler_,
+         transition_generation, pvw_is_slot_a, scene_name, ready_edge_name,
+         ready_edge_initial_ts, T_cut, was_preloaded] {
+            readyCutTask(nodes, state, timeline, scheduler, transition_generation,
                          pvw_is_slot_a, scene_name, ready_edge_name, ready_edge_initial_ts,
                          T_cut, !was_preloaded);
         });
@@ -1192,9 +1178,9 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     // 6. Deferred cleanup: delete transition node + flip state
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
     postTransitionTask("mixer.fade.cleanup", flip_delay,
-        [nodes = nodes_, state = state_, timeline = timeline_, transition_generation,
-         pvw_is_slot_a, scene_name, transition_node_name] {
-            deferredCleanup(nodes, state, timeline, transition_generation,
+        [nodes = nodes_, state = state_, timeline = timeline_, scheduler = scheduler_,
+         transition_generation, pvw_is_slot_a, scene_name, transition_node_name] {
+            deferredCleanup(nodes, state, timeline, scheduler, transition_generation,
                             pvw_is_slot_a, scene_name,
                             std::vector<std::string>{transition_node_name});
         });
@@ -1205,11 +1191,23 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 // runWipeMidpointAndCleanup:
 // Phase 1 (midpoint): PVW slot prep + timeline source_switcher (hidden under opaque wipe).
 // Phase 2 (end): routing cleanup, tear down wipe chain, flip state.
+//
+// The transition_mode stays at Wipe through Phase 2 — including the
+// EOF-drain wait, the kWipeOverlayTailMs grace, and the kWipeSwitchGraceMs
+// pause before group teardown. That window is typically ~500-1500ms after
+// the wipe pixels have visually finished, during which any new mixer.cut /
+// mixer.fade / mixer.wipe will reject with "transition already in progress".
+// This is intentional: tearing down the wipe subgraph concurrently with a
+// new transition's setup would race on shared nodes (wipe_sel, post_otm).
+// Controllers that want to react at the visual end of the wipe must retry
+// after this window — the public mixer.cut/fade/wipe entry points reject
+// (no auto-queueing) for the entire Phase 2 duration.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::runWipeMidpointAndCleanup(
         std::shared_ptr<NodeManager> nodes,
         std::shared_ptr<MixerState> state,
         std::shared_ptr<SharedTimeline> timeline,
+        std::shared_ptr<MixerTransitionScheduler> scheduler,
         uint64_t transition_generation,
         std::string scene_name,
         bool new_pgm_is_slot_a,
@@ -1223,7 +1221,7 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return;
-        MixerOrchestrator orch(nodes, state, timeline);
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
         // Reconfigure PVW slot for the target scene
         orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
@@ -1282,7 +1280,13 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
     if (hit_input_eof && !state->wipe_tail_edge.empty()) {
         constexpr int64_t kWipeDrainTimeoutMs = 1000;
         constexpr int64_t kWipeDrainPollMs = 10;
-        constexpr int64_t kWipeOverlayTailMs = 120; // ~3-4 frames @30fps
+        // Grace period for the overlay filter to emit any frames already buffered
+        // in its filter graph after `wipe_tail_edge` drained. 120ms is ~3-4 frames
+        // at 30fps and ~7-8 frames at 60fps; both are within the typical libavfilter
+        // internal queue depth. If a future wipe overlay graph buffers more (e.g.
+        // a multi-stage temporal filter), bump this together with kWipeDrainTimeoutMs.
+        // Going below ~80ms risks cutting tail blended frames at 30fps.
+        constexpr int64_t kWipeOverlayTailMs = 120;
         int64_t waited = 0;
         while (waited < kWipeDrainTimeoutMs) {
             if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
@@ -1301,7 +1305,7 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return;
-        MixerOrchestrator orch(nodes, state, timeline);
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
         int64_t Tw = wallclock.pts();
         if (!state->wipe_otm_name.empty()) {
@@ -1344,7 +1348,7 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return;
-        MixerOrchestrator orch(nodes, state, timeline);
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
         // Stop the pre-created wipe subgraph only after the direct-path switch
         // has had time to land on the frame timeline. Tearing it down at the
@@ -1378,6 +1382,7 @@ int64_t MixerOrchestrator::prepareWipe(
         std::shared_ptr<NodeManager> nodes,
         std::shared_ptr<MixerState> state,
         std::shared_ptr<SharedTimeline> timeline,
+        std::shared_ptr<MixerTransitionScheduler> scheduler,
         uint64_t transition_generation,
         std::string scene_name,
         std::string wipe_file,
@@ -1392,7 +1397,7 @@ int64_t MixerOrchestrator::prepareWipe(
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return -1;
-        MixerOrchestrator orch(nodes, state, timeline);
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
         overlay_edge_name = edgeNameAt(nodes, state->wipe_selector_name, "src", 1);
         overlay_initial_ts = edgeLastTsIfExists(nodes, overlay_edge_name);
@@ -1432,7 +1437,7 @@ int64_t MixerOrchestrator::prepareWipe(
         try {
             std::lock_guard<std::mutex> lock(state->mutex);
             if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) {
-                MixerOrchestrator orch(nodes, state, timeline);
+                MixerOrchestrator orch(nodes, state, timeline, scheduler);
                 int64_t Tw = wallclock.pts();
                 timeline->clearKey(state->wipe_otm_name, "outputs");
                 orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(1u));
@@ -1456,7 +1461,7 @@ int64_t MixerOrchestrator::prepareWipe(
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return -1;
-        MixerOrchestrator orch(nodes, state, timeline);
+        MixerOrchestrator orch(nodes, state, timeline, scheduler);
         int64_t T_visible = wallclock.pts();
         orch.setNodeObject(state->wipe_selector_name, "active", Parameters(1));    // wipe_overlay_out
         timeline->set(state->wipe_selector_name, "active", T_visible, Parameters(1));
@@ -1499,15 +1504,15 @@ void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& w
     postTransitionTask("mixer.wipe.prepare", T_start - now_ms,
         [scheduler = scheduler_, nodes = nodes_, state = state_, timeline = timeline_, transition_generation,
          scene_name, wipe_file, duration_sec, pvw_is_slot_a, T_start, midpoint_ms, remaining_ms] {
-            int64_t T_visible = prepareWipe(nodes, state, timeline, transition_generation,
+            int64_t T_visible = prepareWipe(nodes, state, timeline, scheduler, transition_generation,
                                             scene_name, wipe_file, duration_sec, pvw_is_slot_a,
                                             T_start);
             if (T_visible < 0)
                 return;
 
             scheduler->postAfter("mixer.wipe.midpoint", midpoint_ms,
-                [nodes, state, timeline, transition_generation, scene_name, pvw_is_slot_a, remaining_ms] {
-                    runWipeMidpointAndCleanup(nodes, state, timeline, transition_generation,
+                [nodes, state, timeline, scheduler, transition_generation, scene_name, pvw_is_slot_a, remaining_ms] {
+                    runWipeMidpointAndCleanup(nodes, state, timeline, scheduler, transition_generation,
                                               scene_name, pvw_is_slot_a, remaining_ms);
                 });
         });
