@@ -73,11 +73,12 @@ public:
         }
         r->team_ = InstanceSharedObjects<PauseControlTeam>::get(nci.instance, team);
         r->team_->addNode(std::weak_ptr<IInputReset>(r));
-        if (params.count("paused")) {
-            if (params["paused"].get<bool>()) {
-                r->team_->pause(false);
-                r->pass_single_ = true;
-            }
+        bool paused = params.count("paused") && params["paused"].get<bool>();
+        if (paused) {
+            r->team_->pause(false);
+            r->pass_single_ = true;
+        } else {
+            r->team_->resume();
         }
 
         if (edges.exists<av::VideoFrame>(params["src"])) {
