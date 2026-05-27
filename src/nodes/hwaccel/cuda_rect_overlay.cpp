@@ -364,6 +364,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
+    std::vector<bool> held_valid_;
     std::atomic<uint32_t> active_inputs_{~0u};
 
     void freeHwContexts() {
@@ -557,6 +558,7 @@ public:
 
         input_eof_.resize(default_layers_.size());
         held_.resize(default_layers_.size());
+        held_valid_.resize(default_layers_.size());
         this->auto_eof_ = false;
     }
 
@@ -721,7 +723,7 @@ public:
         for (size_t i = 0; i < n; ++i) {
             if (!isActive(i)) continue;
             if (input_eof_[i]) {
-                if (!held_[i].isNull())
+                if (held_valid_[i] && !held_[i].isNull())
                     src_for_layer[i] = &held_[i];
                 continue;
             }
@@ -739,7 +741,7 @@ public:
             if (p->pts() == min_ts)
                 src_for_layer[i] = p;
             else if (p->pts() > min_ts) {
-                if (!held_[i].isNull())
+                if (held_valid_[i] && !held_[i].isNull())
                     src_for_layer[i] = &held_[i];
             } else
                 need_wait = true;
@@ -776,7 +778,20 @@ public:
             av::VideoFrame consumed = *p;
             this->source_edges_[i]->pop();
             held_[i] = std::move(consumed);
+            held_valid_[i] = true;
             src_for_layer[i] = &held_[i];
+        }
+
+        // During slot warmup, do not emit a partial black composite just because
+        // one input has produced an earlier PTS than the others.  Consume fresh
+        // frames into held_ until every active layer has a post-activation frame.
+        for (size_t i = 0; i < n; ++i) {
+            if (!isActive(i) || input_eof_[i])
+                continue;
+            if (!src_for_layer[i]) {
+                this->waitForInput();
+                return;
+            }
         }
 
         processComposite(min_ts, src_for_layer, meta_src);
@@ -786,6 +801,12 @@ public:
         if (key == "active_inputs") {
             const uint32_t new_mask = parseBitmask(value);
             active_inputs_.store(new_mask, std::memory_order_relaxed);
+            sent_eof_ = false;
+            std::fill(input_eof_.begin(), input_eof_.end(), false);
+            std::fill(held_valid_.begin(), held_valid_.end(), false);
+            for (auto& edge : this->source_edges_) {
+                edge->producedEvent().signal();
+            }
         } else if (key == "layers") {
             auto new_layers = parseLayersArray(value);
             std::lock_guard<std::mutex> lock(layers_mutex_);

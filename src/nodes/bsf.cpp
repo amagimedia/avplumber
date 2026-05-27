@@ -8,60 +8,107 @@ protected:
     AVBSFContext* ctx_ = nullptr;
     AVCodecParameters* out_codecpar_ = nullptr;
     bool extradata_updated_ = false;
-public:
-    BitStreamFilterNode(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<av::Packet>> &&sink, const std::string filter_string): NodeSISO<av::Packet, av::Packet>(std::move(source), std::move(sink)) {
-        int ret;
-        ret = av_bsf_list_parse_str(filter_string.c_str(), &ctx_);
+    std::string filter_string_;
+
+    std::shared_ptr<IEncoder> upstreamEncoder(const std::string &call) {
+        std::shared_ptr<IEncoder> enc = findNodeUp<IEncoder>();
+        if (!enc) {
+            throw Error("Couldn't forward " + call + " call: No packets source above in chain");
+        }
+        return enc;
+    }
+
+    void initFilter(av::Stream &stream, std::shared_ptr<IEncoder> enc) {
+        if (ctx_) {
+            return;
+        }
+
+        int ret = av_bsf_list_parse_str(filter_string_.c_str(), &ctx_);
         if (ret < 0) {
             throw Error("Couldn't create BSF context: " + av::error2string(ret));
         }
-        
+
         std::shared_ptr<ITimeBaseSource> tbsrc = findNodeUp<ITimeBaseSource>();
         if (!tbsrc) {
             throw Error("No timebase source above in chain");
         }
         ctx_->time_base_in = tbsrc->timeBase();
-        
-        std::shared_ptr<IEncoder> enc = findNodeUp<IEncoder>();
-        if (!enc) {
-            throw Error("No packets source above in chain");
-        }
-        
-        ret = avcodec_parameters_copy(ctx_->par_in, enc->codecParameters());
+
+        AVCodecParameters *codecpar = enc->codecParameters();
+        ensureNotNull(codecpar, "bsf input codecpar null");
+        ret = avcodec_parameters_copy(ctx_->par_in, codecpar);
         if (ret < 0) {
             throw Error("Couldn't copy input parameters to BSF");
         }
-        
+
         ret = av_bsf_init(ctx_);
         if (ret < 0) {
-            throw Error("Couldn't initialize BSF context: " + std::to_string(ret));
+            throw Error("Couldn't initialize BSF context: " + av::error2string(ret));
         }
-    }
-    virtual av::Codec& encodingCodec() {
-        std::shared_ptr<IEncoder> enc = findNodeUp<IEncoder>();
-        if (!enc) {
-            throw Error("Couldn't forward encodingCodec() call: No packets source above in chain");
+
+        out_codecpar_ = stream.raw()->codecpar;
+        ret = avcodec_parameters_copy(out_codecpar_, ctx_->par_out);
+        if (ret < 0) {
+            throw Error("Couldn't copy output parameters from BSF");
         }
-        return enc->encodingCodec();
-    }
-    virtual AVCodecParameters* codecParameters() {
-        ensureNotNull(out_codecpar_, "out codecpar null");
-        return out_codecpar_;
-    }
-    virtual void setOutput(av::Stream &stream, av::FormatContext &octx) {
-        std::shared_ptr<IEncoder> enc = findNodeUp<IEncoder>();
-        if (!enc) {
-            throw Error("Couldn't forward setOutput call: No packets source above in chain");
-        }
-        enc->setOutput(stream, octx);
         stream.setTimeBase(ctx_->time_base_out);
     }
+
+    void ensureFilterReady() {
+        if (!ctx_) {
+            throw Error("BSF context is not initialized");
+        }
+    }
+
+public:
+    BitStreamFilterNode(
+        std::unique_ptr<Source<av::Packet>> &&source,
+        std::unique_ptr<Sink<av::Packet>> &&sink,
+        const std::string filter_string
+    ): NodeSISO<av::Packet, av::Packet>(std::move(source), std::move(sink)),
+       filter_string_(filter_string) {
+    }
+
+    ~BitStreamFilterNode() {
+        av_bsf_free(&ctx_);
+    }
+
+    virtual av::Codec& encodingCodec() {
+        return upstreamEncoder("encodingCodec")->encodingCodec();
+    }
+
+    virtual AVCodecParameters* codecParameters() {
+        if (out_codecpar_) {
+            return out_codecpar_;
+        }
+        return upstreamEncoder("codecParameters")->codecParameters();
+    }
+
+    virtual void setOutput(av::Stream &stream, av::FormatContext &octx) {
+        upstreamEncoder("setOutput")->setOutput(stream, octx);
+    }
+
+    virtual void openEncoder(av::Stream stream = av::Stream()) {
+        std::shared_ptr<IEncoder> enc = upstreamEncoder("openEncoder");
+        enc->openEncoder(stream);
+        if (!stream.isNull()) {
+            initFilter(stream, enc);
+        }
+    }
+
     virtual void setOutputPostOpen(av::Stream &stream, av::FormatContext &octx) {
+        upstreamEncoder("setOutputPostOpen")->setOutputPostOpen(stream, octx);
+        ensureFilterReady();
         out_codecpar_ = stream.raw()->codecpar;
-        avcodec_parameters_copy(out_codecpar_, ctx_->par_out);
+        int ret = avcodec_parameters_copy(out_codecpar_, ctx_->par_out);
+        if (ret < 0) {
+            throw Error("Couldn't copy output parameters from BSF");
+        }
         //out_codecpar_->codec_tag = 0;
     }
+
     virtual void process() {
+        ensureFilterReady();
         av::Packet* pktp = this->source_->peek();
         if (pktp!=nullptr) {
             //logstream << "in: Rescaling PTS " << pktp->pts() << " to tb " << av::Rational(ctx_->time_base_in);
@@ -74,7 +121,9 @@ public:
             outputPackets();
         }
     }
+
     virtual void flush() {
+        ensureFilterReady();
         av_bsf_send_packet(ctx_, nullptr);
         outputPackets();
         this->finished_ = true;

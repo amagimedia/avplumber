@@ -159,6 +159,14 @@ override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 
+ifeq ($(HAVE_CUDA),1)
+ifneq (,$(wildcard $(SRCDIR)/nodes/nvjpeg_enc.cpp))
+override LIBS_FLAGS += -lnvjpeg -lcudart
+endif
+else
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
+endif
+
 ifeq ($(NEURAL_NET_COMMON),1)
 override CXXFLAGS += -DHAVE_TENSORRT=1
 ifneq ($(strip $(TENSORRT_ROOT)),)

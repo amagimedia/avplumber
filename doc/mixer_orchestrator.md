@@ -35,9 +35,7 @@ There are only 2 slots - the minimum needed for video crossfade. If more than 2 
 
 5. **Cuts, fades, and wipes are only routing changes.** A cut schedules `out_sel.active` to the incoming direct branch. A fade temporarily creates `transition_cuda`, feeds both slot transition branches, then schedules `out_sel.active` through the transition output and finally to the incoming direct branch. A wipe routes final output through the pre-created wipe branch and performs the hidden cut while the wipe covers the frame.
 
-6. **Final output is normalized and encoded.** `wipe_base_fps`, `otm_final`, and `wipe_sel` produce `final_out`.
-
-In `sync_mixer.avplumber`, an optional HTML overlay layer then either bypasses directly to encode or feeds `html_overlay_filter`; `otm_html_overlay_src` prevents dmabuf frames from entering libavfilter framesync while overlay is disabled. This overlay is totally independent from `MixerOrchestrator` and is not a regular video input for the mixer, so scene changes using mixer commands do not affect it.
+6. **Final output is normalized and encoded.** `wipe_base_fps`, `otm_final`, and `wipe_sel` produce `final_out`. Post-mixer visual effects, if an application adds any, are outside `MixerOrchestrator` and are not controlled by the mixer commands or the TUI.
 
 Minimum node families needed for the mixer core: per-input `realtime`, `force_fps`, `one_to_many`, per-slot crop-scale `filter_video`, per-slot `cuda_rect_overlay`, post-slot `one_to_many`, main `source_switcher`, final wipe-path `one_to_many`/`source_switcher`, encoder/mux/output. Crossfade additionally needs dynamic `transition_cuda`; media wipe additionally needs the pre-created `mixer_wipe` group.
 
@@ -64,13 +62,11 @@ Output Layer (static)
                                                                                                      > source_switcher(wipe_sel) -> final_out
   [final_wipe_in] + wipe_chain(mixer_wipe) -> overlay_many_cuda -> [wipe_overlay_out] ---------------'
 
-Optional post-mixer overlay/output layer in `sync_mixer.avplumber`
-  final_out -> one_to_many(otm_html_overlay) -> [no_overlay] \
-                                                            > source_switcher(overlay_sel) -> enc_input_fps -> enc -> mux -> output
-  [pre_overlay] + HTML DMA-BUF source -> one_to_many(otm_html_overlay_src) -> overlay_many_cuda --'
+Encoder/output layer
+  final_out -> enc_input_fps -> enc -> mux -> output
 ```
 
-Nodes labeled "dynamic" are created and destroyed by the orchestrator during crossfade. The wipe subgraph (`mixer_wipe` group) is declared in the config but is not started with the rest of the graph; it is started/stopped around each wipe transition. The HTML overlay layer in `sync_mixer.avplumber` is outside `MixerOrchestrator` and is controlled directly by the TUI with `node.object.set`.
+Nodes labeled "dynamic" are created and destroyed by the orchestrator during crossfade. The wipe subgraph (`mixer_wipe` group) is declared in the config but is not started with the rest of the graph; it is started/stopped around each wipe transition.
 
 ### GPU-saving mechanisms
 
@@ -90,7 +86,7 @@ Nodes labeled "dynamic" are created and destroyed by the orchestrator during cro
 - 1 compositor kernel
 - 0 transition filter
 - PVW compositor, its crop/scale chains, and `transition_cuda` are all idle (no frames flowing, no GPU work)
-- Wipe subgraph (`mixer_wipe` group) is stopped: no threads running, no GPU work. `otm_final` outputs=1, so only `final_direct` is fed; `final_wipe_in` and `wipe_overlay_out` stay empty. `wipe_base_fps` normalizes the selected mixer output before the direct/wipe split, and `wipe_rt_fps` normalizes the wipe media leg so `wipe_overlay` receives matching 30fps grids on both inputs.
+- Wipe subgraph (`mixer_wipe` group) is stopped: no wipe node threads running, no GPU work. `otm_final` outputs=1, so only `final_direct` is fed; `final_wipe_in` and `wipe_overlay_out` stay empty. `wipe_base_fps` normalizes the selected mixer output before the direct/wipe split, and `wipe_rt_fps` normalizes the wipe media leg so `wipe_overlay` receives matching 30fps grids on both inputs.
 
 ## SharedTimeline
 
@@ -216,7 +212,7 @@ All graph mutations and timeline writes happen synchronously in the calling thre
 
 1. `ensureIdle()` -- reject if transition already in progress
 2. Set `transition_mode = Cut`
-3. `loadSceneIntoSlot(pvw_slot, scene_name)`:
+3. If the requested scene is not already preloaded in PVW, `loadSceneIntoSlot(pvw_slot, scene_name)`:
    - For each camera in scene: update the PVW crop/scale chain graph and restart that filter only if the graph string changed (PVW slot prep; not frame-critical to PGM air)
    - `node.object.set` compositor layers and `active_inputs`
    - Publish compositor `active_inputs` and **every** camera `one_to_many` `outputs` for the PVW slot bit to both the node atomics and the mixer timeline: clear prior `outputs` / `active_inputs` entries for those channels (so old `T_cleanup` values cannot win over `node.object.set`), then write current wallclock entries. Nodes that use `TimelineReader` for these keys would otherwise keep applying stale scheduled masks after a previous transition.
@@ -224,9 +220,9 @@ All graph mutations and timeline writes happen synchronously in the calling thre
 5. Write timeline at `T_cut`: source_switcher `active` = PVW direct index. When `start_pts_ms` is omitted or set to `-1`, this is `wallclock + 200ms`; otherwise it is the requested `start_pts_ms`.
 6. Write timeline at `T_cleanup = T_cut + 100ms`: camera OTM `outputs` converge to PVW-only for the new scene; old compositor `active_inputs` = 0; old slot post-OTM `outputs` = 0; new slot post-OTM `outputs` = 1.
 7. Reset both slot `force_fps` nodes (`norm_a`, `norm_b`) so an idle slot that has fallen behind does not emit a duplicate burst when selected.
-8. Spawn detached thread: sleep `T_cleanup - now + 300ms`, then flip `pgm_is_slot_a`, set `pgm_scene_name`, clear `pvw_scene_name`, set `transition_mode = Idle`.
+8. Schedule the ready-cut continuation on the mixer transition scheduler: once the incoming direct edge is ready and the requested switch time has arrived, flip `pgm_is_slot_a`, set `pgm_scene_name`, clear `pvw_scene_name`, and set `transition_mode = Idle`.
 
-The 200ms margin ensures all timeline entries are written before any node processes a frame at `T_cut`. The deferred cleanup thread exists because node deletion and internal bookkeeping flip cannot be expressed as timeline entries.
+The 200ms margin ensures all timeline entries are written before any node processes a frame at `T_cut`. The deferred continuation exists because internal bookkeeping cannot be expressed as timeline entries.
 
 ### Crossfade flow
 
@@ -236,12 +232,12 @@ The 200ms margin ensures all timeline entries are written before any node proces
 
 4. Create `transition_cuda` dynamically:
    ```
-   filter_video name=mixer_transition src=["scA_trans","scB_trans"] dst=trans_out
+   filter_video name=<out_sel>_transition src=[slot A post-OTM dst[1], slot B post-OTM dst[1]] dst=out_sel src[2]
      graph="transition_cuda=alpha='clip(n/FRAMES,0,1)':eval=frame"
    ```
    The `n` variable starts at 0 when the filter is created, producing a 0-to-1 ramp over `FRAMES = round(duration_sec * fps)` frames.
 
-   When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always `["scA_trans","scB_trans"]`; only the alpha expression direction changes.
+   When PVW is slot A (meaning slot A is the *incoming* scene), the expression is `clip(1-n/FRAMES,0,1)` so that the blend goes from showing slot B (the outgoing PGM) to showing slot A (the incoming scene). The src order is always slot A transition edge, then slot B transition edge; only the alpha expression direction changes.
 
 5. Write timeline at `T_prep = T_start - 200ms`: both post-scene otm `outputs` = `0b11` (direct + trans) to prime queues. For scheduled fades this prevents the `transition_cuda` frame counter from advancing long before the transition is visible.
 
@@ -258,7 +254,7 @@ The 200ms margin ensures all timeline entries are written before any node proces
    - All camera otm `outputs` converge to new-PGM-only bitmask
    - Old compositor `active_inputs` = 0
 
-9. Spawn detached thread: sleep, delete `mixer_transition` node, flip internal state.
+9. Schedule cleanup on the mixer transition scheduler: after the timeline entries have landed, delete `mixer_transition` and flip internal state.
 
 Between `T_prep` and `T_start`, `transition_cuda` warms up but `source_switcher` still reads the current PGM direct input (index 0 when PGM is slot A, index 1 when PGM is slot B). The first visible blend frame has alpha near 0, visually indistinguishable from the outgoing scene.
 
@@ -285,13 +281,13 @@ The `url` is empty in steady state. `otm_final` outputs=1, so `final_direct` is 
 
 1. Reset the pre-created `wipe_input` node object (via `stop(true)`) so that `createNode()` will pick up the updated `url` when the group starts.
 
-2. Set `wipe_input` `url` parameter to `wipe_file`, flush configured `wipe_flush_edges`, reset `wipe_base_fps`, then start the `mixer_wipe` group. For scheduled wipes this prep is delayed until `T_start - 200ms` so the wipe media begins near the requested visible start.
+2. Set `wipe_input` `url` parameter to `wipe_file`, flush configured `wipe_flush_edges`, reset `wipe_base_fps`, then start the `mixer_wipe` group on the owned mixer transition scheduler at the requested visible start time.
 
-3. Route output through wipe: timeline entries at `T_prep` / `T_start` -- `otm_final` `outputs` = 3 (both direct and wipe input), `wipe_sel` `active` = 1 (overlay).
+3. Route output into the hidden wipe branch first: at actual prep time, `otm_final` `outputs` = 3 (both direct and wipe input) while `wipe_sel` stays `active` = 0 (direct). The scheduler waits until the overlay output edge has produced a new frame and the requested visible time has arrived, then switches `wipe_sel` to `active` = 1 (overlay). If a first-use wipe is slow to decode/filter, the visible wipe start slips instead of switching to an unready overlay frame.
 
-4. Spawn background thread with two phases:
-   - **Midpoint** (`T_start + duration/2`): load target scene into PVW slot (immediate prep + camera `outputs` rewrite as in a cut), set the new slot post-OTM to direct-only, set the old slot post-OTM to idle, then timeline `source_switcher` `active` = PVW direct at current wallclock. This is hidden by the opaque midpoint of the wipe.
-   - **End**: wait until the planned wipe duration or until `wipe_input` reaches EOF. If EOF arrives early and `wipe_tail_edge` is configured, wait for that edge to drain (up to 1000ms) plus a short overlay tail grace (120ms). Then switch `otm_final` back to direct-only, switch `wipe_sel` back to direct, converge camera OTMs, and set old compositor `active_inputs` = 0. After an additional 250ms switch grace, stop `mixer_wipe`, flush `wipe_flush_edges`, and flip internal state.
+4. Schedule the midpoint and cleanup phases on the owned mixer transition scheduler:
+   - **Midpoint**: load target scene into PVW slot (immediate prep + camera `outputs` rewrite as in a cut), set the new slot post-OTM to direct-only, set the old slot post-OTM to idle, then timeline `source_switcher` `active` = PVW direct at current wallclock. This is posted only after the overlay is visible and runs after `duration/2`, so first-use prep latency does not eat into the visible wipe.
+   - **End**: wait until the planned wipe duration or until `wipe_input` reaches EOF. If EOF arrives early and `wipe_tail_edge` is configured, wait for that edge to drain (up to 1000ms) plus a short overlay tail grace (120ms). Then switch `otm_final` back to direct-only, switch `wipe_sel` back to direct, converge camera OTMs, and set old compositor `active_inputs` = 0. After an additional 500ms switch grace, stop `mixer_wipe`, flush `wipe_flush_edges`, and flip internal state.
 
 ## Timestamp flow
 
@@ -378,6 +374,12 @@ Hard cut. Required fields: `mixer` (string), `scene` (string). Optional fields: 
 
 Example: `mixer.cut {"mixer":"mixer","scene":"multiviewer"}`
 
+```mixer.preview <json_object>```
+
+Preload a scene into the hidden PVW slot without taking it to program. Required fields: `mixer` (string), `scene` (string). The next `mixer.cut` or `mixer.fade` to the same scene reuses the warmed slot instead of flushing/reloading it; a cut to that scene switches at its scheduled PTS instead of waiting for a new post-cut readiness frame.
+
+Example: `mixer.preview {"mixer":"mixer","scene":"multiviewer"}`
+
 ```mixer.fade <json_object>```
 
 Crossfade to scene. Required fields: `mixer` (string), `scene` (string). Optional fields: `duration_sec` (number, default `1.0`), `start_pts_ms` (int64, default `-1` = now + prep margin).
@@ -406,14 +408,12 @@ Returns a JSON array of all registered scene names, sorted alphabetically. Examp
 
 - It connects to the avplumber TCP control port and fetches scene names from `mixer.scenes <mixer_name>` on connect, then refreshes the list roughly every 10 seconds.
 - It polls `mixer.status <mixer_name>` every 500ms and treats any non-`idle` transition as busy; cut/fade/wipe commands are not sent while busy.
-- Preview is local UI state. Selecting a scene with `1`-`9` or a scene button does not send a preview command to avplumber. Pressing `c`, `x`, or `w` sends `mixer.cut`, `mixer.fade`, or `mixer.wipe` for the selected scene.
+- Selecting a scene with `1`-`9` or a scene button sends `mixer.preview` so avplumber preloads the hidden PVW slot. Pressing `c`, `x`, or `w` sends `mixer.cut`, `mixer.fade`, or `mixer.wipe` for the selected scene.
 - After a take completes, the UI polls until `transition == "idle"` and then puts the previous PGM scene on the local PVW bus to mimic a production switcher bus swap.
 - `F1`-`F9` sends a direct `mixer.cut` to that scene, skipping the local preview selection.
-- The HTML overlay buttons are outside `MixerOrchestrator`. Enabling first opens the HTML-source gate (`otm_html_overlay_src outputs 1`) and prewarms both final-output legs (`otm_html_overlay outputs 3`), then selects `overlay_sel active 1` and settles on `otm_html_overlay outputs 2`. Disabling prewarms the direct leg, selects `overlay_sel active 0`, settles on `otm_html_overlay outputs 1`, and closes the HTML-source gate (`otm_html_overlay_src outputs 0`). Closing the source gate drains and drops dmabuf frames before they reach `html_overlay_filter`, avoiding libavfilter framesync buffering while bypassed.
-
 ## Example setup
 
-See `examples/sync_mixer.avplumber` for the current confirmed working setup. It contains three synchronized SRT sources, two local MP4 loop sources, the mixer core, a media wipe path, an optional HTML DMA-BUF overlay path, and the encoder/output chain. `examples/mixer.avplumber` is a smaller two-camera variant.
+See `examples/sync_mixer.avplumber` for the current confirmed working setup. It contains three synchronized SRT sources, two local MP4 loop sources, the mixer core, a media wipe path, and the encoder/output chain. `examples/mixer.avplumber` is a smaller two-camera variant.
 
 - The three SRT sources use `realtime(set_pts=true, team="sync_team")`, so their outputs are wall-clock aligned as a group. The MP4 loops use independent `realtime(set_pts=true)`.
 - Crop/scale `filter_video` nodes have `auto_restart: "on"` so `node.param.set` + `node.auto_restart` works
@@ -421,8 +421,6 @@ See `examples/sync_mixer.avplumber` for the current confirmed working setup. It 
 - Camera `one_to_many` `outputs=1` (bit 0 = slot A only) for initial PGM-on-A state
 - `mixer.init` declares `initial_pgm_scene: "fullsync1"` so the orchestrator knows what's on PGM before the first transition
 - `wipe_base_fps`, `wipe_rt_fps`, `wipe_tail_edge`, and `wipe_flush_edges` are part of the working wipe setup.
-- The optional HTML overlay path is controlled by `node.object.set` on `otm_html_overlay`, `otm_html_overlay_src`, and `overlay_sel`, not by mixer commands.
-
 Usage after startup (via TCP socket):
 
 ```
@@ -438,6 +436,6 @@ timeline.dump mixer_tl
 - **Video only.** Audio mixing (crossfade audio during transitions) is not implemented. Audio should be handled separately.
 - **One transition at a time.** All transition commands (`cut`, `fade`, `wipe`) reject with an error if a transition is already in progress or already armed for the future.
 - **Fixed 2-slot architecture.** You cannot have more than 2 compositors. More scenes can be defined, but only 2 render simultaneously (PGM + PVW during transition).
-- **Wipe timing is partly sleep-based.** Wipe group prep, midpoint switch, cleanup, EOF polling, tail-drain polling, and group stop are driven by a detached thread and wallclock sleeps/polls, not purely by PTS-synchronized timeline entries. This is acceptable because the wipe video covers the midpoint switch; the cleanup path also waits for the wipe tail to drain when configured.
-- **Deferred cleanup uses detached threads.** The internal state flip and group stop after transitions happen on detached threads. If avplumber shuts down during a transition, these threads are abandoned.
+- **Wipe timing is partly scheduler-based.** Wipe group prep, midpoint switch, cleanup, EOF polling, tail-drain polling, and group stop are driven by the owned mixer transition scheduler and wallclock sleeps/polls, not purely by PTS-synchronized timeline entries. This is acceptable because the wipe video covers the midpoint switch; the cleanup path also waits for the wipe tail to drain when configured.
+- **Deferred cleanup uses the owned transition scheduler.** The internal state flip and group stop after transitions no longer use detached threads; pending tasks are dropped and the worker is joined when the scheduler is destroyed.
 - **Wipe subgraph must be declared.** The `mixer_wipe` group must be present in the avplumber config; `mixer.wipe` will not create that subgraph dynamically. In the current examples it has 7 nodes: `wipe_input`, `wipe_demux`, `wipe_dec`, `wipe_fmt`, `wipe_rt`, `wipe_rt_fps`, and `wipe_overlay`. The group must not be started by the config because the orchestrator manages its lifecycle.

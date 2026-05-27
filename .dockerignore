@@ -6,6 +6,7 @@ tmp/
 .codex
 .specify/
 .vscode/
+.rsync-backup-*/
 ffmpeg/
 *.log
 *.csv
@@ -18,6 +19,16 @@ deps/cpr/build/
 deps/cpr/nuget/build/
 deps/avcpp/build/
 deps/concurrentqueue/build/
+deps/dma-browser/node_modules/
+deps/dma-browser/dist/
+deps/dma-browser/addons/fdpass/build/
+deps/dma-browser/addons/fdpass/node_modules/
+pyplumber/auto_mixer/docker/media-inputs/*
+!pyplumber/auto_mixer/docker/media-inputs/.gitkeep
+pyplumber/auto_mixer/docker/media-wipes/*
+!pyplumber/auto_mixer/docker/media-wipes/.gitkeep
+pyplumber/auto_mixer/docker/face-engine-cache/*
+!pyplumber/auto_mixer/docker/face-engine-cache/.gitkeep
 deps/libklvanc/autom4te.cache/
 deps/libklvanc/src/.libs/
 deps/libklvanc/tools/.libs/

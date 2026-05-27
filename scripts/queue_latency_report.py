@@ -77,7 +77,7 @@ class SshQueueClient(QueueClient):
         remote_cmd = (
             "python3 - <<'PY'\n"
             "import socket\n"
-            f"s = socket.create_connection(('127.0.0.1', {self.port}), timeout={self.timeout})\n"
+            f"s = socket.create_connection(('localhost', {self.port}), timeout={self.timeout})\n"
             "s.sendall(b'queues.json\\nbye\\n\\n')\n"
             "data = b''\n"
             "while True:\n"
@@ -207,7 +207,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Measure queue-derived latency across avplumber graph stages by matching identical frame PTS values."
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Control API host for direct TCP probing.")
+    parser.add_argument("--host", default="localhost", help="Control API host for direct TCP probing.")
     parser.add_argument("--port", type=int, default=20200, help="Control API port.")
     parser.add_argument("--duration", type=float, default=3.0, help="Sampling duration in seconds.")
     parser.add_argument("--poll", type=float, default=0.005, help="Polling interval in seconds.")

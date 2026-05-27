@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import DockHost from './DockHost.svelte';
   import GraphPanel from './panels/GraphPanel.svelte';
   import NodesPanel from './panels/NodesPanel.svelte';
@@ -27,6 +27,7 @@
   let logs = [];
   let consoleLines = [];
   let autoRefreshQueues = true;
+  let autoRefreshQueuesUserSet = false;
   let autoRefreshMs = 1000;
   let autoRefreshISOs = true;
   let syncGroups = [];
@@ -43,6 +44,7 @@
     selectedNodeName = name ? String(name) : '';
   }
   function setAutoRefreshQueues(v) {
+    autoRefreshQueuesUserSet = true;
     autoRefreshQueues = !!v;
   }
 
@@ -110,16 +112,34 @@
 
   let nextId = 1;
   const pending = new Map();
+  const maxConsoleLines = 500;
+  const maxLogLines = 1000;
+  const logFlushMs = 250;
+  let pendingLogLines = [];
+  let logFlushTimer = null;
 
   function appendConsole(line) {
     if (!line) return;
-    consoleLines = [...consoleLines, line];
+    consoleLines = [...consoleLines, line].slice(-maxConsoleLines);
+  }
+
+  function flushPendingLogs() {
+    if (!pendingLogLines.length) {
+      logFlushTimer = null;
+      return;
+    }
+    hasReceivedLog = true;
+    logs = [...logs, ...pendingLogLines].slice(-maxLogLines);
+    pendingLogLines = [];
+    logFlushTimer = null;
   }
 
   function appendLog(line) {
     if (!line) return;
-    hasReceivedLog = true;
-    logs = [...logs, line];
+    pendingLogLines = [...pendingLogLines, line].slice(-maxLogLines);
+    if (!logFlushTimer) {
+      logFlushTimer = setTimeout(flushPendingLogs, logFlushMs);
+    }
   }
 
   // Keep a reactive derived string so the stats panel updates when stats arrive.
@@ -127,6 +147,9 @@
     currentInstanceId && statsByInstance[currentInstanceId]
       ? JSON.stringify(statsByInstance[currentInstanceId], null, 2)
       : '';
+  $: if (!autoRefreshQueuesUserSet && Array.isArray(queues) && queues.length >= 150) {
+    autoRefreshQueues = false;
+  }
 
   async function loadInstances() {
     try {
@@ -433,13 +456,6 @@
       refreshNodeObjects();
     }, nodeObjectsRefreshMs);
 
-    const tNodes = setInterval(() => {
-      if (!wsConnected) return;
-      if (!currentInstanceId) return;
-      // Nodes/topology change rarely, but refreshing periodically keeps preview accurate.
-      refreshNodes();
-    }, 10000);
-
     const tISOs = setInterval(() => {
       if (!autoRefreshISOs) return;
       if (!wsConnected) return;
@@ -451,9 +467,15 @@
     return () => {
       clearInterval(t);
       clearInterval(tObjects);
-      clearInterval(tNodes);
       clearInterval(tISOs);
     };
+  });
+
+  onDestroy(() => {
+    if (logFlushTimer) {
+      clearTimeout(logFlushTimer);
+      logFlushTimer = null;
+    }
   });
 
   $: {
@@ -803,5 +825,3 @@
     storageKey="avplumber.webui.dock.layout.v1"
   />
 </div>
-
-
