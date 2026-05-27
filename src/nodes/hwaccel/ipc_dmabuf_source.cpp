@@ -15,6 +15,7 @@ extern "C" {
 #include <cstring>
 #include <sys/stat.h>
 #include <time.h>
+#include <stdint.h>
 #include "../../hwaccel.hpp"
 
 #pragma pack(push, 1)
@@ -190,11 +191,60 @@ public:
 
 class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>, public IStoppable, public ReportsFinishByFlag, public IVideoFormatSource {
 protected:
+    static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
+    static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
+    static constexpr uint32_t BYTES_PER_PIXEL = 4;
+    static constexpr uint32_t MAX_DIMENSION = 16384;
+
     UnixFdpassClient receiver_;
     int width_ = 0;
     int height_ = 0;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
+
+    static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
+        switch (pixel_format) {
+            case PIX_FMT_RGBA: return AV_PIX_FMT_RGBA;
+            case PIX_FMT_BGRA: return AV_PIX_FMT_BGRA;
+            default: return AV_PIX_FMT_NONE;
+        }
+    }
+
+    static uint32_t drmFormatFromTexInfo(uint32_t pixel_format) {
+        switch (pixel_format) {
+            case PIX_FMT_RGBA: return DRM_FORMAT_ABGR8888;
+            case PIX_FMT_BGRA: return DRM_FORMAT_ARGB8888;
+            default: return 0;
+        }
+    }
+
+    static bool validateTexInfo(const TexInfo &ti, uint64_t &object_size) {
+        const AVPixelFormat sw_format = swFormatFromTexInfo(ti.pixel_format);
+        if (sw_format == AV_PIX_FMT_NONE) {
+            logstream << "ipc_dmabuf_source: unsupported pixel format " << ti.pixel_format;
+            return false;
+        }
+        if (ti.width == 0 || ti.height == 0 || ti.width > MAX_DIMENSION || ti.height > MAX_DIMENSION) {
+            logstream << "ipc_dmabuf_source: invalid dimensions " << ti.width << "x" << ti.height;
+            return false;
+        }
+        const uint64_t min_stride = (uint64_t)ti.width * BYTES_PER_PIXEL;
+        if (ti.stride < min_stride) {
+            logstream << "ipc_dmabuf_source: invalid stride " << ti.stride
+                      << " for width " << ti.width;
+            return false;
+        }
+        if (ti.height > 0 && ti.stride > (UINT64_MAX - ti.offset) / ti.height) {
+            logstream << "ipc_dmabuf_source: DMA-BUF size overflow";
+            return false;
+        }
+        object_size = ti.offset + (uint64_t)ti.stride * ti.height;
+        if (object_size == 0) {
+            logstream << "ipc_dmabuf_source: empty DMA-BUF object";
+            return false;
+        }
+        return true;
+    }
 public:
     using NodeSingleOutput::NodeSingleOutput;
     IPCDMABUFSource(std::unique_ptr<SinkType> &&sink, const std::string &sock_path):
@@ -215,8 +265,11 @@ public:
             return;
         }
 
-        static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
-        static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
+        uint64_t object_size = 0;
+        if (!validateTexInfo(ti, object_size)) {
+            close(dmabuf_fd);
+            return;
+        }
 
         // Ensure/refresh HW frames context for filters
         if (hwaccel_) {
@@ -233,8 +286,7 @@ public:
                 } else {
                     AVHWFramesContext *frmctx = (AVHWFramesContext *)(hw_frames_ctx_->data);
                     // Map source sw pixel format
-                    frmctx->sw_format = (ti.pixel_format == PIX_FMT_RGBA) ? AV_PIX_FMT_RGBA64LE :
-                                        (ti.pixel_format == PIX_FMT_BGRA) ? AV_PIX_FMT_BGRA64LE : AV_PIX_FMT_NONE;
+                    frmctx->sw_format = swFormatFromTexInfo(ti.pixel_format);
                     frmctx->width = ti.width;
                     frmctx->height = ti.height;
 
@@ -264,12 +316,11 @@ public:
 
         desc->nb_objects = 1;
         desc->objects[0].fd = dmabuf_fd;
-        desc->objects[0].size = ti.offset + ti.stride * ti.height;
+        desc->objects[0].size = object_size;
         desc->objects[0].format_modifier = ti.modifier;
 
         desc->nb_layers = 1;
-        desc->layers[0].format = (ti.pixel_format == PIX_FMT_RGBA) ? DRM_FORMAT_ABGR8888 :
-            (ti.pixel_format == PIX_FMT_BGRA) ? DRM_FORMAT_ARGB8888 : 0;
+        desc->layers[0].format = drmFormatFromTexInfo(ti.pixel_format);
         desc->layers[0].nb_planes = 1;
         desc->layers[0].planes[0].object_index = 0;
         desc->layers[0].planes[0].offset = ti.offset;

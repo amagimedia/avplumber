@@ -98,7 +98,9 @@ mixer.source mixer cam2 otm_cam2 1 cs_cam2_a cs_cam2_b
 
 # Define scenes (`sources`: logical name -> ffmpeg graph + compositor rect; omit a camera for off-air / dummy layer slot)
 mixer.scene mixer fullcam1 { "sources": { "cam1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
+mixer.scene mixer fullcam2 { "sources": { "cam2": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 } } }
 mixer.scene mixer pip { "sources": { "cam1": { "graph": "scale_cuda=w=1920:h=1080:interp_algo=lanczos", "dst_x": 0, "dst_y": 0 }, "cam2": { "graph": "scale_cuda=w=640:h=360:interp_algo=lanczos", "dst_x": 1280, "dst_y": 720 } } }
+
 
 # ============================================================
 # Start all groups

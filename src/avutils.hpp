@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <ctime>
 #include <thread>
 #include <avcpp/timestamp.h>
 #include <libavutil/rational.h>
@@ -27,18 +28,20 @@ uint64_t stringToChannelLayout(const std::string);
 
 class Wallclock {
 protected:
-    using Clock = std::chrono::steady_clock;
-    std::chrono::time_point<Clock> start;
-public:
     using TimeUnit = std::chrono::milliseconds;
-protected:
     static constexpr AVRational time_base = {TimeUnit::period::num, TimeUnit::period::den};
+
+    static AVTS monotonicMs() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<AVTS>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+    }
+
 public:
     Wallclock() {
-        start = Clock::now();
     }
     AVTS pts() {
-        return std::chrono::duration_cast<TimeUnit>(Clock::now()-start).count();
+        return monotonicMs();
     }
     av::Timestamp absolute_ts() {
         return av::Timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(), {1, 1000});

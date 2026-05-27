@@ -1,0 +1,16 @@
+appId: com.amagi.dma-browser
+productName: dma-browser
+directories:
+  buildResources: build
+  output: out
+files:
+  - dist/**
+  - addons/fdpass/**
+  - bin/run.sh
+  - package.json
+linux:
+  target:
+    - AppImage
+    - deb
+  category: AudioVideo
+  executableName: dma-browser

@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <type_traits>
 
 class InstanceData;
 
@@ -14,10 +15,19 @@ template<typename Child>
 class InstanceShared/*: public std::enable_shared_from_this<InstanceShared<Child>>*/ {
 };
 
+// Inherit this to opt into ordered teardown: shutdown() is called for every
+// InstanceShared object of this type before NodeManager tears down.
+class IShutdownable {
+public:
+    virtual void shutdown() = 0;
+    virtual ~IShutdownable() = default;
+};
+
 class InstanceSharedObjectsDestructors {
 private:
     friend class InstanceData;
     static std::unordered_map<const InstanceData*, std::list<std::function<void()>>> destructors_;
+    static std::unordered_map<const InstanceData*, std::list<std::function<void()>>> pre_shutdown_hooks_;
     static std::mutex busy_;
     static void callDestructors(const InstanceData* instance) {
         std::list<std::function<void()>> destructors;
@@ -37,6 +47,25 @@ public:
     static void addDestructor(const InstanceData* instance, std::function<void()> destructor) {
         std::unique_lock<decltype(busy_)> lock(busy_);
         destructors_[instance].push_back(destructor);
+    }
+    static void addPreShutdownHook(const InstanceData* instance, std::function<void()> hook) {
+        std::unique_lock<decltype(busy_)> lock(busy_);
+        pre_shutdown_hooks_[instance].push_back(std::move(hook));
+    }
+    // Call shutdown() on all IShutdownable instance-shared objects before NodeManager tears down.
+    static void callPreShutdownHooks(const InstanceData* instance) {
+        std::list<std::function<void()>> hooks;
+        {
+            std::unique_lock<decltype(busy_)> lock(busy_);
+            auto it = pre_shutdown_hooks_.find(instance);
+            if (it != pre_shutdown_hooks_.end()) {
+                hooks = std::move(it->second);
+                pre_shutdown_hooks_.erase(it);
+            }
+        }
+        for (auto &fn: hooks) {
+            fn();
+        }
     }
     // Explicitly destroy global (instance_ptr == nullptr) shared objects before
     // static teardown to avoid shutdown-order issues with external libraries.
@@ -90,6 +119,14 @@ public:
         std::shared_ptr<Object> &r = find(instance, id);
         if (!r) {
             r = SharedConstructorHelper::tryImplicitCreate<Object>(id);
+            if constexpr (std::is_base_of_v<IShutdownable, Object>) {
+                bool is_global = !id.empty() && id[0] == '@';
+                const InstanceData* instance_ptr = is_global ? nullptr : &instance;
+                std::weak_ptr<Object> wptr = r;
+                InstanceSharedObjectsDestructors::addPreShutdownHook(instance_ptr, [wptr] {
+                    if (auto p = wptr.lock()) p->shutdown();
+                });
+            }
         }
         return r;
     }
@@ -150,3 +187,4 @@ std::unordered_map<const InstanceData*, std::unordered_map<std::string, std::sha
 
 template<typename Object>
 std::mutex InstanceSharedObjects<Object>::busy_;
+

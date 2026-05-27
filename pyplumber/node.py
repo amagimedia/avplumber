@@ -156,6 +156,10 @@ class ForceFPS(InternalNode):
     TYPE = "force_fps"
 
 
+class ForceKeyFrame(InternalNode):
+    TYPE = "force_keyframe"
+
+
 class Pause(InternalNode):
     TYPE = "pause"
 
@@ -181,6 +185,14 @@ class ResampleAudio(InternalNode):
 
 class FilterVideo(InternalNode):
     TYPE = "filter_video"
+
+
+class IpcDmabufSource(InternalNode):
+    TYPE = "ipc_dmabuf_source"
+
+
+class DrmPrimeToCuda(InternalNode):
+    TYPE = "drm_prime_to_cuda"
 
 
 class Split(InternalNode):
@@ -223,6 +235,10 @@ class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
 
 
+class SmoothTimestamps(InternalNode):
+    TYPE = "smooth_timestamps"
+
+
 class SmoothCropViewport(InternalNode):
     TYPE = "smooth_crop_viewport"
 
@@ -235,8 +251,16 @@ class AssumeVideoFormat(InternalNode):
     TYPE = "assume_video_format"
 
 
+class AssumeAudioFormat(InternalNode):
+    TYPE = "assume_audio_format"
+
+
 class EncVideo(InternalNode):
     TYPE = "enc_video"
+
+
+class Bsf(InternalNode):
+    TYPE = "bsf"
 
 
 class Mux(InternalNode):
@@ -245,6 +269,25 @@ class Mux(InternalNode):
 
 class Output(InternalNode):
     TYPE = "output"
+
+class OneToMany(InternalNode):
+    TYPE = "one_to_many"
+class SourceSwitcher(InternalNode):
+    TYPE = "source_switcher"
+class PreheatVideoRouter(InternalNode):
+    TYPE = "preheat_video_router"
+class CudaRectOverlay(InternalNode):
+    TYPE = "cuda_rect_overlay"
+class Input(InternalNode):
+    TYPE = "input"
+class ResampleAudio(InternalNode):
+    TYPE = "resample_audio"
+class FilterAudio(InternalNode):
+    TYPE = "filter_audio"
+class EncAudio(InternalNode):
+    TYPE = "enc_audio"
+class WriteAudioEnvelope(InternalNode):
+    TYPE = "write_audio_envelope"
 
 
 class NullSink(InternalNode):

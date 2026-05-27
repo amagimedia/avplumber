@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "vitest/globals"],
+    "outDir": "./dist/tests",
+    "rootDir": ".",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo-tests",
+    "noEmit": true,
+    "composite": false
+  },
+  "include": ["tests/**/*.ts", "src/**/*.ts"]
+}

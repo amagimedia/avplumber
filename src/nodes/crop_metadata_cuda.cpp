@@ -6,7 +6,8 @@ extern "C" {
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
-    #include <libavutil/pixdesc.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 }
 
 class MetadataDrivenCudaCrop: public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -53,18 +54,51 @@ private:
         last_applied_y_ = INT_MIN;
     }
 
-    void captureInitialHWFramesCtxFromFrame(const av::VideoFrame &frm) {
-        const AVFrame *raw = frm.raw();
-        if (!initial_hw_frames_ctx_ && raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data) {
-            initial_hw_frames_ctx_ = av_buffer_ref(raw->hw_frames_ctx);
-        }
+    static bool hwFramesCtxSemanticallyEqual(const AVBufferRef *prev_ref, const AVBufferRef *cur_ref) {
+        if (!(prev_ref && prev_ref->data && cur_ref && cur_ref->data)) return false;
+
+        const AVHWFramesContext *prev = (const AVHWFramesContext *)prev_ref->data;
+        const AVHWFramesContext *cur = (const AVHWFramesContext *)cur_ref->data;
+
+        return cur->format == prev->format
+            && cur->sw_format == prev->sw_format
+            && cur->width == prev->width
+            && cur->height == prev->height
+            && cur->device_ref
+            && prev->device_ref
+            && cur->device_ref->data == prev->device_ref->data;
     }
 
-    bool hwFramesCtxChanged(const av::VideoFrame &frm) const {
+    bool refreshHWFramesCtxFromFrame(const av::VideoFrame &frm) {
         const AVFrame *raw = frm.raw();
         if (!(raw && raw->hw_frames_ctx && raw->hw_frames_ctx->data)) return false;
-        if (!initial_hw_frames_ctx_) return true;
-        return raw->hw_frames_ctx->data != initial_hw_frames_ctx_->data;
+
+        if (!initial_hw_frames_ctx_) {
+            initial_hw_frames_ctx_ = av_buffer_ref(raw->hw_frames_ctx);
+            if (!initial_hw_frames_ctx_) {
+                throw Error("crop_metadata_cuda: failed to reference input hw_frames_ctx");
+            }
+            return false;
+        }
+
+        if (hwFramesCtxSemanticallyEqual(initial_hw_frames_ctx_, raw->hw_frames_ctx)) {
+            return false;
+        }
+
+        const AVHWFramesContext *prev = (const AVHWFramesContext *)initial_hw_frames_ctx_->data;
+        const AVHWFramesContext *cur = (const AVHWFramesContext *)raw->hw_frames_ctx->data;
+        logstream << "crop_metadata_cuda: hw_frames_ctx changed (semantic mismatch:"
+                  << " fmt " << prev->format << "->" << cur->format
+                  << " sw_fmt " << prev->sw_format << "->" << cur->sw_format
+                  << " size " << prev->width << "x" << prev->height
+                  << "->" << cur->width << "x" << cur->height << ")";
+
+        av_buffer_unref(&initial_hw_frames_ctx_);
+        initial_hw_frames_ctx_ = av_buffer_ref(raw->hw_frames_ctx);
+        if (!initial_hw_frames_ctx_) {
+            throw Error("crop_metadata_cuda: failed to reference changed input hw_frames_ctx");
+        }
+        return true;
     }
 
     std::string buildSourceArgsString() const {
@@ -164,12 +198,6 @@ private:
 
         last_applied_x_ = last_crop_x_;
         last_applied_y_ = last_crop_y_;
-    }
-
-    bool inputChanged(const av::VideoFrame &frm) const {
-        return input_params_ != VideoParameters(frm)
-            || frm.timeBase() != timebase_
-            || hwFramesCtxChanged(frm);
     }
 
     bool loadCropMetadata(const av::VideoFrame &frm, Parameters &md_out) const {
@@ -412,8 +440,9 @@ public:
         updateDstDimensionsFromMetadata(md, vp.width, vp.height);
         const bool dst_changed = (dst_width_ != prev_dw || dst_height_ != prev_dh);
 
-        captureInitialHWFramesCtxFromFrame(frm);
-        if (inputChanged(frm) || dst_changed || !filter_graph_) {
+        const bool hw_frames_ctx_changed = refreshHWFramesCtxFromFrame(frm);
+        const bool input_changed = input_params_ != vp || frm.timeBase() != timebase_;
+        if (input_changed || hw_frames_ctx_changed || dst_changed || !filter_graph_) {
             input_params_ = vp;
             timebase_ = frm.timeBase();
             if (frame_rate_.getNumerator() == 0 || frame_rate_.getDenominator() == 0) {

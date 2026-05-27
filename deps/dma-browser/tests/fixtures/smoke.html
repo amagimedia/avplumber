@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>dma-browser smoke fixture</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #102030; color: #fff; font: 14px sans-serif; height: 100vh; overflow: hidden; }
+      #box { position: absolute; left: 0; top: 50%; width: 80px; height: 80px; background: linear-gradient(45deg, #f06, #06f); border-radius: 8px; transform: translateY(-50%); animation: slide 3s linear infinite; }
+      #label { position: absolute; left: 12px; top: 12px; opacity: 0.7; }
+      @keyframes slide {
+        0%   { left: 0; }
+        50%  { left: calc(100% - 80px); }
+        100% { left: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="label">dma-browser smoke</div>
+    <div id="box"></div>
+    <script>
+      // Drive a tiny WebGL context so the WebGLSyncInstaller path runs.
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      c.style.position = 'absolute'; c.style.right = '12px'; c.style.bottom = '12px';
+      document.body.appendChild(c);
+      const gl = c.getContext('webgl2') || c.getContext('webgl');
+      if (gl) {
+        const draw = (t) => {
+          const v = (Math.sin(t / 500) + 1) / 2;
+          gl.clearColor(v, 0.2, 1 - v, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          requestAnimationFrame(draw);
+        };
+        requestAnimationFrame(draw);
+      }
+    </script>
+  </body>
+</html>

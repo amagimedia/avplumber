@@ -549,6 +549,20 @@ PYBIND11_MODULE(_avplumber, m) {
         .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
         .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString)
         .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile)
+        .def("registerControlCommand", [](AVPlumber &avp, const std::string &command, py::function callback, bool no_lock) {
+            avp.registerControlCommand(command, [callback](const std::string &arg) -> std::string {
+                py::gil_scoped_acquire acquire;
+                try {
+                    py::object result = callback(py::str(arg));
+                    if (result.is_none()) {
+                        return "";
+                    }
+                    return py::str(result).cast<std::string>();
+                } catch (py::error_already_set &e) {
+                    throw std::runtime_error(e.what());
+                }
+            }, no_lock);
+        }, py::arg("command"), py::arg("callback"), py::arg("no_lock") = false)
         .def("setLogFile", &AVPlumber::setLogFile)
         .def("setLogCallback", [](AVPlumber &avp, py::function callback) {
             avp.setLogCallback([callback](const std::string &s) {
@@ -840,7 +854,7 @@ PYBIND11_MODULE(_avplumber, m) {
             }
             return out;
         })
-        .def_property_readonly("data", [](const av::AudioSamples& s) {
+        .def_property_readonly("planes", [](const av::AudioSamples& s) {
             py::list out;
             const int planes = audioPlaneCount(s);
             const size_t plane_size = audioPlaneSize(s);
@@ -862,6 +876,21 @@ PYBIND11_MODULE(_avplumber, m) {
                 AudioSamplesMetadataProxy(s, py::none()).assign(d);
             }
         )
+        .def("data", [](av::AudioSamples &s, int channel) -> py::bytes {
+            if (channel < 0 || static_cast<int>(s.channelsCount()) <= channel)
+                return py::bytes();
+            const uint8_t *ptr = s.data(channel);
+            if (!ptr) return py::bytes();
+            const AVFrame *raw = s.raw();
+            if (!raw) return py::bytes();
+            int bps = av_get_bytes_per_sample(static_cast<AVSampleFormat>(raw->format));
+            if (bps <= 0) return py::bytes();
+            return py::bytes(reinterpret_cast<const char*>(ptr),
+                             static_cast<size_t>(raw->nb_samples) * static_cast<size_t>(bps));
+        }, py::arg("channel") = 0, "Return raw PCM bytes for the given channel plane.")
+        .def_property_readonly("isComplete", [](const av::AudioSamples &s) -> bool {
+            return s.isComplete();
+        })
     ;
 
     py::class_<av::VideoFrame, std::shared_ptr<av::VideoFrame>>(m, "VideoFrame")
