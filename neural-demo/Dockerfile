@@ -118,6 +118,7 @@ RUN cd /tmp/ffmpeg \
         --enable-gnutls \
         --enable-libsrt \
         --enable-bsf=scte35ptsadjust \
+        --enable-bsf=dump_extra \
         --enable-bsf=h264_mp4toannexb \
         --enable-bsf=h264_redundant_pps \
         --enable-bsf=extract_extradata \
@@ -140,6 +141,7 @@ RUN cd /tmp/ffmpeg \
         --enable-protocol=rtsp \
         --enable-protocol=srt \
         --enable-muxer=flv \
+        --enable-muxer=rtp \
         --enable-muxer=rtp_mpegts \
         --enable-muxer=mpegts \
         --enable-muxer=mp4 \
@@ -181,6 +183,8 @@ RUN cd /tmp/ffmpeg \
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
     && /usr/local/bin/ffmpeg -hide_banner -protocols | grep -q '^  srt$' \
+    && /usr/local/bin/ffmpeg -hide_banner -muxers | grep -q ' rtp ' \
+    && /usr/local/bin/ffmpeg -hide_banner -bsfs | grep -q '^dump_extra$' \
     && ldd /usr/local/bin/ffmpeg | grep -q '/usr/local/lib/libavfilter'
 
 FROM base AS plan-builder

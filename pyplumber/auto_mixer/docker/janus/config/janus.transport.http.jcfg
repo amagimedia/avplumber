@@ -2,7 +2,7 @@ general: {
 	json = "compact"
 	base_path = "/janus"
 	http = true
-	port = 8088
+	port = __JANUS_HTTP_PORT__
 	ip = "0.0.0.0"
 	https = false
 }

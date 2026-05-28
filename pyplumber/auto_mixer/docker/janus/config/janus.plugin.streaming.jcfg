@@ -7,16 +7,16 @@ avplumber-program: {
 	id = 1
 	description = "avplumber program WebRTC preview"
 	metadata = "{\"source\":\"avplumber\",\"video\":\"h264\",\"audio\":\"opus\"}"
-	audio = true
+	audio = __JANUS_AUDIO_ENABLED__
 	video = true
-	audioport = 5002
-	audiortcpport = 5003
+	audioport = __JANUS_AUDIO_PORT__
+	audiortcpport = __JANUS_AUDIO_RTCP_PORT__
 	audioiface = "127.0.0.1"
 	audiopt = 111
 	audiocodec = "opus"
 	audiofmtp = "stereo=1"
-	videoport = 5004
-	videortcpport = 5005
+	videoport = __JANUS_VIDEO_PORT__
+	videortcpport = __JANUS_VIDEO_RTCP_PORT__
 	videoiface = "127.0.0.1"
 	videopt = 96
 	videocodec = "h264"

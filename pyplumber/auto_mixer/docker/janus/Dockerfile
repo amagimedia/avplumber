@@ -70,6 +70,4 @@ COPY janus/config/ /opt/janus-avp/etc/janus/
 COPY janus/janus-entrypoint.sh /usr/local/bin/janus-entrypoint
 RUN chmod +x /usr/local/bin/janus-entrypoint
 
-EXPOSE 8088/tcp 5002/udp 5003/udp 5004/udp 5005/udp
-
 ENTRYPOINT ["/usr/local/bin/janus-entrypoint"]

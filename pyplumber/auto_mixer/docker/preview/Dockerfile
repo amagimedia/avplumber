@@ -8,6 +8,4 @@ WORKDIR /srv/janus-preview
 COPY preview/index.html ./
 COPY preview/preview-server.py ./
 
-EXPOSE 8080/tcp
-
 CMD ["python3", "preview-server.py"]

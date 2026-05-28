@@ -50,6 +50,7 @@ NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
 ifeq ($(NEURAL_NET_SPECIFIC),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
+NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific/metadata_dump -maxdepth 1 -name '*.cpp')
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 endif
