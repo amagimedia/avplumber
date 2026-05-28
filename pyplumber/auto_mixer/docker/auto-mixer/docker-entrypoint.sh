@@ -116,6 +116,21 @@ run_auto_mixer() {
     if [[ -n "${AVP_LOGFILE:-}" ]] && ! has_arg "--logfile" "$@"; then
         extra_args+=("--logfile" "${AVP_LOGFILE}")
     fi
+    if [[ -n "${AVP_JANUS_HOST:-}" ]] && ! has_arg "--janus-host" "$@"; then
+        extra_args+=("--janus-host" "${AVP_JANUS_HOST}")
+    fi
+    if [[ -n "${AVP_JANUS_VIDEO_PORT:-}" ]] && ! has_arg "--janus-video-port" "$@"; then
+        extra_args+=("--janus-video-port" "${AVP_JANUS_VIDEO_PORT}")
+    fi
+    if [[ -n "${AVP_JANUS_AUDIO_PORT:-}" ]] && ! has_arg "--janus-audio-port" "$@"; then
+        extra_args+=("--janus-audio-port" "${AVP_JANUS_AUDIO_PORT}")
+    fi
+    if [[ -n "${AVP_JANUS_VIDEO_PT:-}" ]] && ! has_arg "--janus-video-pt" "$@"; then
+        extra_args+=("--janus-video-pt" "${AVP_JANUS_VIDEO_PT}")
+    fi
+    if [[ -n "${AVP_JANUS_VIDEO_SSRC:-}" ]] && ! has_arg "--janus-video-ssrc" "$@"; then
+        extra_args+=("--janus-video-ssrc" "${AVP_JANUS_VIDEO_SSRC}")
+    fi
 
     exec python3 -m pyplumber.auto_mixer.cli "$@" "${extra_args[@]}"
 }

@@ -1,9 +1,14 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import os
 import urllib.error
 import urllib.request
 
 
-JANUS_REST = "http://127.0.0.1:8088/janus"
+JANUS_REST = os.environ.get(
+    "JANUS_REST",
+    f"http://127.0.0.1:{os.environ.get('JANUS_HTTP_PORT', '8088')}/janus",
+)
+PREVIEW_PORT = int(os.environ.get("JANUS_PREVIEW_PORT", "8080"))
 
 
 class PreviewHandler(SimpleHTTPRequestHandler):
@@ -67,4 +72,4 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), PreviewHandler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", PREVIEW_PORT), PreviewHandler).serve_forever()

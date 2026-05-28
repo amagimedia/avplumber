@@ -1184,6 +1184,8 @@ public:
         // Dump file
         if (params.count("dump_file")) {
             r->dump_file_path_ = params["dump_file"].get<std::string>();
+        }
+        if (!r->dump_file_path_.empty()) {
             r->dump_file_.open(r->dump_file_path_, std::ios::out | std::ios::trunc);
             if (r->dump_file_.is_open()) {
                 r->dump_file_ << "frame,x,y,conf,source,dx,dy,dist\n";

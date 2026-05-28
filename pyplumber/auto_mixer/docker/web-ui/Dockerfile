@@ -12,6 +12,4 @@ RUN npm run build \
 ENV NODE_ENV=production
 ENV WEBUI_PORT=22222
 
-EXPOSE 22222
-
 CMD ["npm", "start"]

@@ -49,6 +49,13 @@ neural-demo/run-neural-demo.sh \
   --artifacts-dir /path/to/artifacts
 ```
 
+For Janus/WebRTC preview through the compose support stack, use the compose
+profile documented in
+`/home/jp/git/avplumber/pyplumber/auto_mixer/docker/README.md`. The entrypoint
+also accepts `AVP_OUTPUT=janus` directly; set `AVP_JANUS_VIDEO_PORT`,
+`AVP_JANUS_VIDEO_RTCP_PORT`, `AVP_WEBUI_API`, and `AVP_REMOTE_CONTROL_PORT`
+to match the stack.
+
 Use `tracker-cropped` when you want the alternative reframed output:
 
 ```bash
@@ -135,6 +142,9 @@ neural-demo/run-neural-demo.sh \
 - `--pip-input` is required when `--example tracker_compositor`.
 - `--artifacts-dir` mounts a host directory at `/run/avp/output` and is the
   place to persist sidecar files from live graphs, especially `metadata`.
+- Set `AVP_METADATA_DUMPS=0` to keep the `metadata_dump` node in the graph but
+  disable JSON/NDJSON sidecar file writes. This preserves the tactical-court
+  homography path.
 - In `live` mode, if `--output` is omitted, the demo streams to the default
   output URL above.
 - In `vod` mode, `--output` is required.
