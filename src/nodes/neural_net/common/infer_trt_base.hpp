@@ -189,7 +189,7 @@ struct ModelRunner {
     std::string input_tensor_name;
     nvinfer1::Dims input_dims{};
     nvinfer1::DataType input_dtype = nvinfer1::DataType::kFLOAT;
-    int input_w = 0, input_h = 0;
+    int input_w = 0, input_h = 0, input_c = 0;
 
     // Outputs (vector: detection has 1, segmentation has 2)
     std::vector<OutputTensor> outputs;
@@ -236,6 +236,7 @@ protected:
     TRTLogger trt_logger_;
     std::vector<ModelRunner> models_;
     int input_w_ = 0, input_h_ = 0;
+    int expected_input_channels_ = 3;
     nvinfer1::DataType input_dtype_ = nvinfer1::DataType::kFLOAT;
     bool input_bgr_order_ = false;
     CUmodule preprocess_module_ = nullptr;
@@ -250,6 +251,7 @@ protected:
     bool parseEngine(ModelRunner& model);
     bool allocateBindings(ModelRunner& model);
     bool ensureCompatibleInput(const ModelRunner& model, size_t model_index);
+    bool configureRunnerStream(ModelRunner& model);
     bool configureRunnerPreprocess(ModelRunner& model);
     bool ensureInitialized(const av::VideoFrame& frm);
 

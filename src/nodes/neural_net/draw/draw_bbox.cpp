@@ -2,6 +2,7 @@
 #include "draw_batch_shared.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -42,6 +43,7 @@ private:
     std::unordered_set<int> allowed_classes_;
     std::unordered_set<std::string> allowed_labels_;
     DrawColor default_color_{};
+    std::optional<DrawColor> predicted_color_;
     std::unordered_map<int, DrawColor> model_colors_;
     std::unordered_map<std::string, DrawColor> label_colors_;
     double model_content_width_ = 0.0;
@@ -61,6 +63,9 @@ private:
     }
 
     DrawColor resolveModelColor(const cuda_overlay::ParsedYoloDetection& det) const {
+        if (predicted_color_ && det.has_predicted && det.predicted) {
+            return *predicted_color_;
+        }
         if (!label_colors_.empty() && det.has_label) {
             const auto it = label_colors_.find(det.label);
             if (it != label_colors_.end()) {
@@ -474,6 +479,7 @@ public:
              double min_conf,
              std::unordered_set<int> allowed_classes,
              std::unordered_set<std::string> allowed_labels,
+             std::optional<DrawColor> predicted_color,
              std::unordered_map<int, DrawColor> model_colors,
              std::unordered_map<std::string, DrawColor> label_colors,
              double model_content_width,
@@ -491,6 +497,7 @@ public:
           min_conf_(min_conf),
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
+          predicted_color_(predicted_color),
           model_colors_(std::move(model_colors)),
           label_colors_(std::move(label_colors)),
           model_content_width_(model_content_width),
@@ -581,10 +588,19 @@ public:
                 label_colors[it.key()] = color;
             }
         }
+        std::optional<DrawColor> predicted_color;
+        if (params.count("predicted_color") && params["predicted_color"].is_string()) {
+            DrawColor color;
+            if (!cuda_overlay::tryParseNamedColor(params["predicted_color"].get<std::string>(), color)) {
+                throw Error("draw_bbox: predicted_color must be a named color");
+            }
+            predicted_color = color;
+        }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
             edges, params, std::move(metadata_keys), bbox_thickness, min_conf,
-            std::move(allowed_classes), std::move(allowed_labels), std::move(model_colors), std::move(label_colors),
+            std::move(allowed_classes), std::move(allowed_labels), predicted_color,
+            std::move(model_colors), std::move(label_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }
