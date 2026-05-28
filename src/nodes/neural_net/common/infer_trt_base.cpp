@@ -206,9 +206,10 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
 
         if (is_input) {
             ++input_count;
+            const int expected_c = expected_input_channels_;
             const bool is_image_input =
-                (dims.nbDims == 3 && dims.d[0] == 3) ||
-                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == 3);
+                (dims.nbDims == 3 && dims.d[0] == expected_c) ||
+                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == expected_c);
             if (model.input_tensor_name.empty()) {
                 model.input_tensor_name = tensor_name;
                 model.input_dims = dims;
@@ -248,14 +249,17 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
         return false;
     }
 
-    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == 3) {
+    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[0];
         model.input_h = model.input_dims.d[1];
         model.input_w = model.input_dims.d[2];
-    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == 3) {
+    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[1];
         model.input_h = model.input_dims.d[2];
         model.input_w = model.input_dims.d[3];
     } else {
-        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor for " << model.engine_path
+        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor with "
+                  << expected_input_channels_ << " channels for " << model.engine_path
                   << " (engine inputs: " << input_count << ")";
         return false;
     }
@@ -320,6 +324,10 @@ bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
         logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
         return false;
     }
+    return configureRunnerStream(model);
+}
+
+bool CudaInferTrtBase::configureRunnerStream(ModelRunner& model) {
     unsigned int stream_flags = use_cuda_graph_ ? kCudaStreamNonBlocking : kCudaStreamDefault;
     if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, stream_flags))) {
         logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
