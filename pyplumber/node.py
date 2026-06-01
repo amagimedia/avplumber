@@ -219,6 +219,10 @@ class PlayerTracker(InternalNode):
     TYPE = "player_tracker"
 
 
+class CudaSceneDiff(InternalNode):
+    TYPE = "cuda_scene_diff"
+
+
 class BallTracker(InternalNode):
     TYPE = "ball_tracker"
 
