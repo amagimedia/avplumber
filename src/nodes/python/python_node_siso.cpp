@@ -9,6 +9,18 @@ template<typename T>
 class PythonNodeSISO: public NodeSISO<T, T>, public IPythonNode {
 private:
     py::object python_node_;
+    bool stopped_ = false;
+
+    void callDoStopOnce() {
+        if (stopped_) {
+            return;
+        }
+        stopped_ = true;
+        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
+            throw Error("Python node is not set");
+        }
+        python_node_.attr("doStop")();
+    }
 
 public:
     using NodeSISO<T, T>::NodeSISO;
@@ -37,10 +49,7 @@ public:
         {
             py::gil_scoped_acquire gil;
             try {
-                if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-                    throw Error("Python node is not set");
-                }
-                python_node_.attr("doStop")();
+                callDoStopOnce();
             } catch (...) {
                 stop_error = std::current_exception();
             }
@@ -49,6 +58,14 @@ public:
         if (stop_error) {
             std::rethrow_exception(stop_error);
         }
+    }
+
+    void onEofConsumed() override {
+        {
+            py::gil_scoped_acquire gil;
+            callDoStopOnce();
+        }
+        NodeSISO<T, T>::onEofConsumed();
     }
 
     static std::shared_ptr<PythonNodeSISO> create(NodeCreationInfo &nci) {

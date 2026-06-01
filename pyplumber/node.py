@@ -271,6 +271,10 @@ class Bsf(InternalNode):
     TYPE = "bsf"
 
 
+class PacketRelay(InternalNode):
+    TYPE = "packet_relay"
+
+
 class Mux(InternalNode):
     TYPE = "mux"
 

@@ -179,7 +179,14 @@ public:
                 output_dims.push_back(ot.dims);
             }
 
-            DecodeParams dp{(int)mi, conf_thresh_, model.output_box_format, model.class_index_remap};
+            DecodeParams dp{
+                (int)mi,
+                conf_thresh_,
+                model.output_box_format,
+                model.class_index_remap,
+                model.nms_iou_thresh,
+                model.nms_class_agnostic
+            };
 
             if (model.task_type == TaskType::Detection && model.det_decoder) {
                 DetectionResult dr = model.det_decoder->decode(host_outputs, output_dims, dp);
@@ -525,6 +532,15 @@ public:
                     }
                     model.class_index_remap.push_back(cls_item.get<int>());
                 }
+            }
+            if (mp.count("nms_iou_thresh")) {
+                model.nms_iou_thresh = mp["nms_iou_thresh"].get<float>();
+                if (model.nms_iou_thresh < 0.0f || model.nms_iou_thresh > 1.0f) {
+                    throw Error("cuda_infer_yolo: nms_iou_thresh must be in [0,1]");
+                }
+            }
+            if (mp.count("nms_class_agnostic")) {
+                model.nms_class_agnostic = mp["nms_class_agnostic"].get<bool>();
             }
 
             int num_classes = -1;

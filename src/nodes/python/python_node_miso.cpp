@@ -9,6 +9,18 @@ template<typename T>
 class PythonNodeMISO: public NodeMultiInput<T>, public NodeSingleOutput<T>, public IPythonNode {
 private:
     py::object python_node_;
+    bool stopped_ = false;
+
+    void callDoStopOnce() {
+        if (stopped_) {
+            return;
+        }
+        stopped_ = true;
+        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
+            throw Error("Python node is not set");
+        }
+        python_node_.attr("doStop")();
+    }
 
 public:
     using NodeSingleOutput<T>::NodeSingleOutput;
@@ -36,10 +48,7 @@ public:
         {
             py::gil_scoped_acquire gil;
             try {
-                if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-                    throw Error("Python node is not set");
-                }
-                python_node_.attr("doStop")();
+                callDoStopOnce();
             } catch (...) {
                 stop_error = std::current_exception();
             }
@@ -48,6 +57,14 @@ public:
         if (stop_error) {
             std::rethrow_exception(stop_error);
         }
+    }
+
+    void onEofConsumed() override {
+        {
+            py::gil_scoped_acquire gil;
+            callDoStopOnce();
+        }
+        this->sink_->put(createEofMarker<T>());
     }
 
     static std::shared_ptr<PythonNodeMISO> create(NodeCreationInfo &nci) {

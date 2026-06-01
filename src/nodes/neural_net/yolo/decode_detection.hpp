@@ -4,6 +4,43 @@
 namespace yolo_base {
 
 class DetectionDecoder {
+    static float iou(const Detection& a, const Detection& b) {
+        float x1 = std::max(a.x1, b.x1);
+        float y1 = std::max(a.y1, b.y1);
+        float x2 = std::min(a.x2, b.x2);
+        float y2 = std::min(a.y2, b.y2);
+        float w = std::max(0.0f, x2 - x1);
+        float h = std::max(0.0f, y2 - y1);
+        float inter = w * h;
+        float area_a = std::max(0.0f, a.x2 - a.x1) * std::max(0.0f, a.y2 - a.y1);
+        float area_b = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
+        float uni = area_a + area_b - inter;
+        return uni > 0.0f ? inter / uni : 0.0f;
+    }
+
+    static void applyNms(std::vector<Detection>& dets, float iou_thresh, bool class_agnostic) {
+        if (iou_thresh <= 0.0f || dets.size() < 2) return;
+
+        std::sort(dets.begin(), dets.end(),
+            [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
+
+        std::vector<uint8_t> suppressed(dets.size(), 0);
+        std::vector<Detection> kept;
+        kept.reserve(dets.size());
+
+        for (size_t i = 0; i < dets.size(); ++i) {
+            if (suppressed[i]) continue;
+            kept.push_back(dets[i]);
+            for (size_t j = i + 1; j < dets.size(); ++j) {
+                if (suppressed[j]) continue;
+                if (!class_agnostic && dets[i].cls != dets[j].cls) continue;
+                if (iou(dets[i], dets[j]) > iou_thresh) suppressed[j] = 1;
+            }
+        }
+
+        dets = std::move(kept);
+    }
+
 public:
     DetectionResult decode(
         const std::vector<const float*>& host_outputs,
@@ -78,6 +115,8 @@ public:
 
             result.detections.push_back(det);
         }
+
+        applyNms(result.detections, params.nms_iou_thresh, params.nms_class_agnostic);
 
         return result;
     }
