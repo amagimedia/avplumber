@@ -203,6 +203,10 @@ class CudaInferYolo(InternalNode):
     TYPE = "cuda_infer_yolo"
 
 
+class TrackNetBall(InternalNode):
+    TYPE = "tracknet_ball"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 

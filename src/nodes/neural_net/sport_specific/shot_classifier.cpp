@@ -37,6 +37,7 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame>, public R
 
     // Hysteresis
     int min_stable_frames_ = 6;
+    int reuse_last_court_coverage_frames_ = 0;
 
     // Output
     std::string metadata_key_out_ = "camera_shot_info";
@@ -47,6 +48,9 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame>, public R
     std::string candidate_type_;
     int candidate_count_ = 0;
     uint64_t frame_counter_ = 0;
+    bool have_last_court_coverage_ = false;
+    float last_court_coverage_ = 0.0f;
+    uint64_t last_court_coverage_frame_ = 0;
 
     bool isValidWidePlayer(float bbox_h, float bbox_w, float frame_h) const {
         // Must be roughly upright, but allow slight camera tilt/perspective.
@@ -109,6 +113,9 @@ public:
             candidate_type_.clear();
             candidate_count_ = 0;
             frame_counter_ = 0;
+            have_last_court_coverage_ = false;
+            last_court_coverage_ = 0.0f;
+            last_court_coverage_frame_ = 0;
             this->sink_->put(frm);
             this->finished_ = true;
             return;
@@ -127,9 +134,11 @@ public:
 
         // === Step 1: Compute court coverage from seg mask ===
         std::vector<int> court_mask_indices;
+        bool have_seg_metadata = false;
         if (raw->metadata) {
             AVDictionaryEntry* entry = av_dict_get(raw->metadata, seg_metadata_key_.c_str(), nullptr, 0);
             if (entry && entry->value) {
+                have_seg_metadata = true;
                 try {
                     Parameters seg_md = Parameters::parse(entry->value);
                     if (seg_md.contains("detections") && seg_md["detections"].is_array()) {
@@ -149,6 +158,8 @@ public:
         }
 
         float court_coverage = 0.0f;
+        bool have_current_court_coverage = false;
+        bool reused_court_coverage = false;
         const AVFrameSideData* sd = av_frame_get_side_data(raw, yoloSegCpuSideDataType(seg_side_data_slot_));
         if (sd && sd->size >= 16 && !court_mask_indices.empty()) {
             const uint32_t* header = (const uint32_t*)sd->data;
@@ -169,7 +180,23 @@ public:
             }
             if (pixels_per_mask > 0) {
                 court_coverage = (float)court_pixels / (float)pixels_per_mask;
+                have_current_court_coverage = true;
             }
+        }
+        if (!have_current_court_coverage && have_seg_metadata) {
+            // A present segmentation metadata key means the model ran but found no
+            // usable court mask. Treat that as an authoritative zero.
+            have_current_court_coverage = true;
+        }
+        if (have_current_court_coverage) {
+            have_last_court_coverage_ = true;
+            last_court_coverage_ = court_coverage;
+            last_court_coverage_frame_ = frame_counter_;
+        } else if (reuse_last_court_coverage_frames_ > 0 && have_last_court_coverage_
+                   && frame_counter_ > last_court_coverage_frame_
+                   && frame_counter_ - last_court_coverage_frame_ <= (uint64_t)reuse_last_court_coverage_frames_) {
+            court_coverage = last_court_coverage_;
+            reused_court_coverage = true;
         }
 
         // === Step 2: Always count valid wide-shot-sized players ===
@@ -224,6 +251,10 @@ public:
         out_md["camera_shot_type"] = shot_type;
         out_md["camera_shot_transition"] = transition;
         out_md["court_coverage"] = court_coverage;
+        if (reused_court_coverage) {
+            out_md["court_coverage_cached"] = true;
+            out_md["court_coverage_age_frames"] = (int64_t)(frame_counter_ - last_court_coverage_frame_);
+        }
 
         std::string serialized = out_md.dump();
         av_dict_set(&frm.raw()->metadata, metadata_key_out_.c_str(), serialized.c_str(), 0);
@@ -231,6 +262,7 @@ public:
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "shot_classifier: frame=" << frame_counter_
                       << " court=" << (int)(court_coverage * 100) << "%"
+                      << (reused_court_coverage ? " cached" : "")
                       << " players=" << valid_players
                       << " raw=" << raw_type
                       << " camera_shot=" << shot_type
@@ -272,6 +304,9 @@ public:
         if (params.count("player_height_tolerance")) r->player_height_tolerance_ = params["player_height_tolerance"];
         if (params.count("player_min_aspect_ratio")) r->player_min_aspect_ratio_ = params["player_min_aspect_ratio"];
         if (params.count("min_stable_frames")) r->min_stable_frames_ = params["min_stable_frames"];
+        if (params.count("reuse_last_court_coverage_frames")) {
+            r->reuse_last_court_coverage_frames_ = params["reuse_last_court_coverage_frames"];
+        }
         if (params.count("metadata_key_out")) r->metadata_key_out_ = params["metadata_key_out"].get<std::string>();
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"];
 

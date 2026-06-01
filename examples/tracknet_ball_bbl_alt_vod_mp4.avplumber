@@ -26,10 +26,9 @@ node.add { "type": "join_metadata", "src": ["v_post_players", "v_post_seg"], "ds
 node.add { "type": "shot_classifier", "src": "v_players_court", "dst": "v_shot_classified", "group": "tracknet_vod", "seg_metadata_key": "yolo_seg", "player_metadata_key": "yolo_players", "player_labels": ["Player"], "court_class_indices": [0], "wide_court_threshold": 0.25, "closeup_court_threshold": 0.05, "ambiguous_min_players": 3, "high_player_override": 5, "player_height_fraction": 0.25, "player_height_tolerance": 0.45, "player_min_aspect_ratio": 0.75, "min_stable_frames": 3, "debug_log_every_n": 250 }
 node.add { "type": "null_sink<av::VideoFrame>", "src": "v_shot_classified", "group": "tracknet_vod", "name": "Shot_Metadata_Sink" }
 
-node.add { "type": "force_fps", "fps": "25/1", "group": "tracknet_vod", "src": "v_annotated_cuda", "dst": "v_output_fps" }
-node.add { "type": "force_keyframe", "interval_sec": "1/1", "group": "tracknet_vod", "src": "v_output_fps", "dst": "v_keyframed" }
+node.add { "type": "force_keyframe", "interval_sec": "1/1", "group": "tracknet_vod", "src": "v_annotated_cuda", "dst": "v_keyframed" }
 node.add { "type": "assume_video_format", "width": 1920, "height": 1080, "pixel_format": "cuda", "real_pixel_format": "nv12", "group": "tracknet_vod", "src": "v_keyframed", "dst": "v_preenc" }
-node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "tracknet_vod", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "8000k", "bufsize": "8000k", "rc": "cbr", "g": 30, "bf": 0, "preset": "p6", "profile": "high", "level": "4.0", "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0 } }
+node.add { "type": "enc_video", "src": "v_preenc", "dst": "v_outenc", "group": "tracknet_vod", "name": "Video_Encode_NVENC", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "b": "8000k", "maxrate": "8000k", "bufsize": "8000k", "rc": "cbr", "g": 30, "bf": 0, "preset": "p1", "profile": "high", "level": "4.0", "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 0, "temporal-aq": 0 } }
 node.add { "type": "mux", "src": ["v_outenc"], "dst": "mux_v", "group": "tracknet_vod", "ts_sort_wait": 0 }
 node.add { "type": "output", "format": "mp4", "url": "/artifacts/tracknet_ball_bbl_alt_vod.mp4", "src": "mux_v", "group": "tracknet_vod", "auto_restart": "exit", "on_error": "panic" }
 

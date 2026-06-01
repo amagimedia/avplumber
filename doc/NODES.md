@@ -792,6 +792,37 @@ Detection coordinates in metadata are emitted in model space (`coord_space = "mo
 Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
 - `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
 
+### `tracknet_ball`
+
+Run a TrackNet-style triplet model on CUDA NV12 frames using a prebuilt TensorRT engine.
+
+1 input: `av::VideoFrame` (expects CUDA frame, NV12 sw_format), 1 output: `av::VideoFrame`
+
+By default the node preserves the existing compact detection behavior and expects an output tensor compatible with `[x1, y1, x2, y2, score, visible]`. For VOD pipelines that keep Python postprocessing/tracking, `output_mode: "raw"` emits TensorRT output tensors as JSON metadata instead of requiring the compact detection contract. `output_mode: "srs_ball"` is an opt-in Sports-Reframing-Service compatibility path for TrackNet heatmap engines; it expects logits shaped `[1,3,H,W]` or `[3,H,W]`, runs the SRS connected-component postprocessor in C++, and emits normalized per-frame ball JSON.
+
+Parameters:
+- `engine` (string, required) - TensorRT engine path, or use `models[0].engine`
+- `metadata_key` / `metadata_key_detection` (string, optional, default `yolo_ball`) - compact detection metadata key
+- `output_mode` (string, optional, default `detection`) - `detection`, `raw`, `both`, `srs_ball`, or `srs_ball_and_raw`
+- `metadata_key_raw` / `raw_metadata_key` (string, optional, default `tracknet_raw`) - raw tensor metadata key
+- `metadata_key_srs` / `srs_metadata_key` (string, optional, default `tracknet_ball_srs`) - SRS-compatible ball metadata key
+- `triplet_alignment` (string, optional, default `center`, or `latest` for `srs_ball`) - `center` preserves the live/legacy buffering; `latest` emits each frame using triplets `[0,0,0]`, `[0,0,1]`, then `[t-2,t-1,t]`
+- `preprocess_mode` (string, optional, default `resize`, or `srs_affine` for `srs_ball`) - `resize` uses the legacy direct resize sampler; `srs_affine` matches SRS center-affine geometry before TrackNet normalization
+- `raw_output_max_elements_per_tensor` (int, optional, default `0`) - cap raw JSON values per tensor; `0` emits all values
+- `srs_channel` (int, optional, default `2`) - TrackNet heatmap channel consumed by the SRS-compatible postprocessor
+- `srs_score_threshold` (float, optional, default `0.5`) - post-sigmoid heatmap threshold for SRS-compatible connected components
+- `srs_use_hm_weight` (bool, optional, default `true`) - match SRS heatmap-weighted component center/score
+- `target_label` / `label` (string, optional, default `basketball`) - compact detection label
+- `conf_thresh` (float, optional, default `0.5`) - compact detection score threshold
+- `visible_thresh` (float, optional, default `0.5`) - compact detection visible threshold
+- `emit_invisible` (bool, optional, default `false`) - allow compact detections below `visible_thresh`
+- `output_model_width`, `output_model_height` (int, optional, default source frame size) - compact detection coordinate dimensions
+- `use_cuda_graph` (bool, optional, default `false`) - enable TensorRT CUDA graph replay when supported
+- `debug_log_metadata` (bool, optional, default `false`) - log compact metadata or raw metadata size periodically
+- `debug_log_every_n` (int, optional, default `0`) - debug log period
+
+Raw metadata schema is `tracknet_raw_outputs_v1` with input tensor info and an `outputs` array of `{name, dtype, dims, size, values}`. SRS-compatible metadata is a per-frame object shaped like `{"frame": N, "bboxes": [{"x": normalized_x, "y": normalized_y, "score": component_score}]}`; feed original decoded frames into this mode if the normalized coordinates must match source video geometry.
+
 ### `cuda_infer_rtdetr`
 
 Run RT-DETR object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).
