@@ -1,6 +1,6 @@
-# cuda_scene_diff
+# luma_diff
 
-Pass-through CUDA video node that computes lightweight luma scene-diff metrics on
+Pass-through CUDA video node that computes lightweight luma-difference metrics on
 consecutive frames and writes them to frame metadata.
 
 The node expects CUDA video frames with an 8-bit luma plane, typically produced by
@@ -33,3 +33,5 @@ only compact JSON metadata.
 ```
 
 `has_prev` is false for the first frame after node start or after a size change.
+
+`cuda_scene_diff` remains accepted as a legacy node type alias.

@@ -219,6 +219,10 @@ class PlayerTracker(InternalNode):
     TYPE = "player_tracker"
 
 
+class LumaDiff(InternalNode):
+    TYPE = "luma_diff"
+
+
 class CudaSceneDiff(InternalNode):
     TYPE = "cuda_scene_diff"
 

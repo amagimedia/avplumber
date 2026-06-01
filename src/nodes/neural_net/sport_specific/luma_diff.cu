@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-extern "C" __global__ void kSceneLumaDiffReduce(
+extern "C" __global__ void kLumaDiffReduce(
     const uint8_t* __restrict__ y_plane,
     int y_pitch_bytes,
     uint8_t* __restrict__ prev_y,

@@ -18,7 +18,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#include "../../../../objs/src/nodes/neural_net/sport_specific/scene_diff_cuda.ptx.h"
+#include "../../../../objs/src/nodes/neural_net/sport_specific/luma_diff.ptx.h"
 
 namespace {
 
@@ -30,13 +30,13 @@ int check_cu(CUresult err, const char* func) {
         cuGetErrorName(err, &err_name);
         cuGetErrorString(err, &err_string);
     }
-    logstream << "cuda_scene_diff: " << func << " failed: "
+    logstream << "luma_diff: " << func << " failed: "
               << (err_name ? err_name : "?") << ": "
               << (err_string ? err_string : "?");
     return -1;
 }
 
-#define SCENE_DIFF_CHECK_CU(x) check_cu((x), #x)
+#define LUMA_DIFF_CHECK_CU(x) check_cu((x), #x)
 
 bool isSupportedLumaCudaFormat(AVPixelFormat sw_fmt) {
     switch (sw_fmt) {
@@ -77,7 +77,7 @@ std::string jsonStringEscape(const std::string& value) {
 
 } // namespace
 
-class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
+class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string metadata_key_ = "scene_diff";
     bool strict_cuda_ = true;
     int debug_log_every_n_ = 0;
@@ -100,15 +100,15 @@ class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
 
     void releaseBuffers() {
         if (d_prev_y_) {
-            SCENE_DIFF_CHECK_CU(cuMemFree(d_prev_y_));
+            LUMA_DIFF_CHECK_CU(cuMemFree(d_prev_y_));
             d_prev_y_ = 0;
         }
         if (d_block_abs_) {
-            SCENE_DIFF_CHECK_CU(cuMemFree(d_block_abs_));
+            LUMA_DIFF_CHECK_CU(cuMemFree(d_block_abs_));
             d_block_abs_ = 0;
         }
         if (d_block_signed_) {
-            SCENE_DIFF_CHECK_CU(cuMemFree(d_block_signed_));
+            LUMA_DIFF_CHECK_CU(cuMemFree(d_block_signed_));
             d_block_signed_ = 0;
         }
         prev_w_ = 0;
@@ -128,26 +128,26 @@ class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     bool initCudaContextFromFrame(const av::VideoFrame& frm) {
         if (cu_ctx_) return true;
         if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
-            logstream << "cuda_scene_diff: missing hw_frames_ctx";
+            logstream << "luma_diff: missing hw_frames_ctx";
             return false;
         }
         AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
         if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
-            logstream << "cuda_scene_diff: missing device_ctx/hwctx in frame";
+            logstream << "luma_diff: missing device_ctx/hwctx in frame";
             return false;
         }
         cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
         if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) {
-            logstream << "cuda_scene_diff: missing CUDA context in frame";
+            logstream << "luma_diff: missing CUDA context in frame";
             return false;
         }
         cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
-        if (SCENE_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
+        if (LUMA_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
             return false;
         }
         stream_ = cuda_dev_ctx_->stream;
         if (!stream_) {
-            if (SCENE_DIFF_CHECK_CU(cuStreamCreate(&stream_, 0))) {
+            if (LUMA_DIFF_CHECK_CU(cuStreamCreate(&stream_, 0))) {
                 stream_ = nullptr;
                 return false;
             }
@@ -159,12 +159,12 @@ class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     bool loadKernel() {
         if (kernel_) return true;
         if (!cu_ctx_) return false;
-        if (SCENE_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
-        const std::string ptx(avpl_scene_diff_ptx, avpl_scene_diff_ptx + avpl_scene_diff_ptx_len);
-        if (SCENE_DIFF_CHECK_CU(cuModuleLoadDataEx(&cu_module_, ptx.c_str(), 0, nullptr, nullptr))) {
+        if (LUMA_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        const std::string ptx(avpl_luma_diff_ptx, avpl_luma_diff_ptx + avpl_luma_diff_ptx_len);
+        if (LUMA_DIFF_CHECK_CU(cuModuleLoadDataEx(&cu_module_, ptx.c_str(), 0, nullptr, nullptr))) {
             return false;
         }
-        if (SCENE_DIFF_CHECK_CU(cuModuleGetFunction(&kernel_, cu_module_, "kSceneLumaDiffReduce"))) {
+        if (LUMA_DIFF_CHECK_CU(cuModuleGetFunction(&kernel_, cu_module_, "kLumaDiffReduce"))) {
             return false;
         }
         return true;
@@ -177,9 +177,9 @@ class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         }
         releaseBuffers();
         const size_t pixels = (size_t)width * (size_t)height;
-        if (SCENE_DIFF_CHECK_CU(cuMemAlloc(&d_prev_y_, pixels))) return false;
-        if (SCENE_DIFF_CHECK_CU(cuMemAlloc(&d_block_abs_, (size_t)blocks * sizeof(float)))) return false;
-        if (SCENE_DIFF_CHECK_CU(cuMemAlloc(&d_block_signed_, (size_t)blocks * sizeof(float)))) return false;
+        if (LUMA_DIFF_CHECK_CU(cuMemAlloc(&d_prev_y_, pixels))) return false;
+        if (LUMA_DIFF_CHECK_CU(cuMemAlloc(&d_block_abs_, (size_t)blocks * sizeof(float)))) return false;
+        if (LUMA_DIFF_CHECK_CU(cuMemAlloc(&d_block_signed_, (size_t)blocks * sizeof(float)))) return false;
         prev_w_ = width;
         prev_h_ = height;
         block_capacity_ = blocks;
@@ -208,18 +208,18 @@ class CudaSceneDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
 public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
 
-    ~CudaSceneDiff() {
+    ~LumaDiff() {
         if (cu_ctx_) {
-            SCENE_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+            LUMA_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
         }
         releaseBuffers();
         if (owns_stream_ && stream_) {
-            SCENE_DIFF_CHECK_CU(cuStreamDestroy(stream_));
+            LUMA_DIFF_CHECK_CU(cuStreamDestroy(stream_));
             stream_ = nullptr;
             owns_stream_ = false;
         }
         if (cu_module_) {
-            SCENE_DIFF_CHECK_CU(cuModuleUnload(cu_module_));
+            LUMA_DIFF_CHECK_CU(cuModuleUnload(cu_module_));
             cu_module_ = nullptr;
         }
     }
@@ -241,7 +241,7 @@ public:
         AVFrame* raw = frm.raw();
         if (!raw || raw->format != AV_PIX_FMT_CUDA) {
             if (strict_cuda_) {
-                throw Error("cuda_scene_diff: input frame is not AV_PIX_FMT_CUDA");
+                throw Error("luma_diff: input frame is not AV_PIX_FMT_CUDA");
             }
             writeMetadata(frm, false, frm.width(), frm.height(), 0.0f, 0.0f, 0.0f, "skipped_non_cuda");
             this->sink_->put(frm);
@@ -253,7 +253,7 @@ public:
             std::ostringstream msg;
             msg << "unsupported_sw_format_" << (int)sw_fmt;
             if (strict_cuda_) {
-                throw Error("cuda_scene_diff: unsupported CUDA sw_format " + std::to_string((int)sw_fmt));
+                throw Error("luma_diff: unsupported CUDA sw_format " + std::to_string((int)sw_fmt));
             }
             writeMetadata(frm, false, frm.width(), frm.height(), 0.0f, 0.0f, 0.0f, msg.str());
             this->sink_->put(frm);
@@ -262,7 +262,7 @@ public:
 
         if (!raw->data[0] || raw->linesize[0] <= 0) {
             if (strict_cuda_) {
-                throw Error("cuda_scene_diff: invalid luma plane");
+                throw Error("luma_diff: invalid luma plane");
             }
             writeMetadata(frm, false, frm.width(), frm.height(), 0.0f, 0.0f, 0.0f, "invalid_luma_plane");
             this->sink_->put(frm);
@@ -271,7 +271,7 @@ public:
 
         if (!initCudaContextFromFrame(frm) || !loadKernel()) {
             if (strict_cuda_) {
-                throw Error("cuda_scene_diff: failed to initialize CUDA");
+                throw Error("luma_diff: failed to initialize CUDA");
             }
             writeMetadata(frm, false, frm.width(), frm.height(), 0.0f, 0.0f, 0.0f, "cuda_init_failed");
             this->sink_->put(frm);
@@ -285,7 +285,7 @@ public:
         const int blocks = std::max(1, std::min(1024, (pixels + threads - 1) / threads));
         if (!ensureBuffers(width, height, blocks)) {
             if (strict_cuda_) {
-                throw Error("cuda_scene_diff: failed to allocate buffers");
+                throw Error("luma_diff: failed to allocate buffers");
             }
             writeMetadata(frm, false, width, height, 0.0f, 0.0f, 0.0f, "buffer_alloc_failed");
             this->sink_->put(frm);
@@ -306,22 +306,22 @@ public:
             (void*)&d_block_signed_,
         };
         const unsigned int shared_bytes = (unsigned int)(threads * 2 * sizeof(float));
-        if (SCENE_DIFF_CHECK_CU(cuLaunchKernel(kernel_,
+        if (LUMA_DIFF_CHECK_CU(cuLaunchKernel(kernel_,
                                                (unsigned int)blocks, 1, 1,
                                                (unsigned int)threads, 1, 1,
                                                shared_bytes, stream_, args, nullptr))) {
-            throw Error("cuda_scene_diff: kernel launch failed");
+            throw Error("luma_diff: kernel launch failed");
         }
 
         std::vector<float> host_abs((size_t)blocks, 0.0f);
         std::vector<float> host_signed((size_t)blocks, 0.0f);
-        if (SCENE_DIFF_CHECK_CU(cuMemcpyDtoHAsync(host_abs.data(), d_block_abs_, host_abs.size() * sizeof(float),
+        if (LUMA_DIFF_CHECK_CU(cuMemcpyDtoHAsync(host_abs.data(), d_block_abs_, host_abs.size() * sizeof(float),
                                                   stream_)) ||
-            SCENE_DIFF_CHECK_CU(cuMemcpyDtoHAsync(host_signed.data(), d_block_signed_,
+            LUMA_DIFF_CHECK_CU(cuMemcpyDtoHAsync(host_signed.data(), d_block_signed_,
                                                   host_signed.size() * sizeof(float),
                                                   stream_)) ||
-            SCENE_DIFF_CHECK_CU(cuStreamSynchronize(stream_))) {
-            throw Error("cuda_scene_diff: failed to read metrics");
+            LUMA_DIFF_CHECK_CU(cuStreamSynchronize(stream_))) {
+            throw Error("luma_diff: failed to read metrics");
         }
 
         double sum_abs = 0.0;
@@ -341,7 +341,7 @@ public:
         writeMetadata(frm, has_prev != 0, width, height, mean_abs, mean_norm, mean_signed, "ok");
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            logstream << "cuda_scene_diff: frame=" << (frame_counter_ - 1)
+            logstream << "luma_diff: frame=" << (frame_counter_ - 1)
                       << " has_prev=" << has_prev
                       << " mean_abs=" << mean_abs
                       << " mean_norm=" << mean_norm
@@ -351,10 +351,10 @@ public:
         this->sink_->put(frm);
     }
 
-    static std::shared_ptr<CudaSceneDiff> create(NodeCreationInfo& nci) {
+    static std::shared_ptr<LumaDiff> create(NodeCreationInfo& nci) {
         EdgeManager& edges = nci.edges;
         const Parameters& params = nci.params;
-        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<CudaSceneDiff>(edges, params);
+        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<LumaDiff>(edges, params);
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("strict_cuda")) r->strict_cuda_ = params["strict_cuda"].get<bool>();
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
@@ -362,4 +362,5 @@ public:
     }
 };
 
-DECLNODE(cuda_scene_diff, CudaSceneDiff)
+DECLNODE(luma_diff, LumaDiff)
+DECLNODE_ALIAS(cuda_scene_diff, LumaDiff)
