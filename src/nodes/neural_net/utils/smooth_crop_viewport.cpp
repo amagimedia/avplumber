@@ -55,6 +55,8 @@ struct DetectionBox {
     int cls = -1;
     std::string label;
     bool has_label = false;
+    std::string source;
+    std::string target_role;
     double conf = 0.0;
     double x1 = 0.0, y1 = 0.0, x2 = 0.0, y2 = 0.0;
     int model_index = -1;
@@ -78,6 +80,14 @@ struct ViewportMeasurement {
     double mx = 0.0, my = 0.0;
     double ux1 = 0.0, uy1 = 0.0, ux2 = 0.0, uy2 = 0.0;
     bool has_union = false;
+    std::string source;
+    double source_alpha = 1.0;
+    double source_derivative_scale = 1.0;
+};
+
+struct SourceInertia {
+    double alpha = 1.0;
+    double derivative_scale = 1.0;
 };
 
 // Crop center (cx, cy) so fixed viewport [cx±half_w, cy±half_h] contains [ux1,ux2]×[uy1,uy2].
@@ -386,6 +396,15 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
     double hold_follow_deadband_px_ = 12.0;
     double hold_edge_release_px_per_s_ = 480.0;
     int hold_max_frames_ = 90;
+    bool source_inertia_enabled_ = false;
+    double ball_source_alpha_ = 1.0;
+    double handler_source_alpha_ = 0.70;
+    double probable_source_alpha_ = 0.45;
+    double held_source_alpha_ = 0.35;
+    double ball_derivative_scale_ = 1.15;
+    double handler_derivative_scale_ = 0.75;
+    double probable_derivative_scale_ = 0.45;
+    double held_derivative_scale_ = 0.35;
     bool latched_ = false;
     double latch_x_ = 0, latch_y_ = 0;
     int low_speed_frames_ = 0;
@@ -521,6 +540,10 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
                         det.label = item["label"].get<std::string>();
                         det.has_label = true;
                     }
+                    if (item.contains("source") && item["source"].is_string())
+                        det.source = item["source"].get<std::string>();
+                    if (item.contains("target_role") && item["target_role"].is_string())
+                        det.target_role = item["target_role"].get<std::string>();
                     if (!detAllowed(det))
                         continue;
                     if (coord_space == "model") {
@@ -547,6 +570,44 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
             }
         }
         return false;
+    }
+
+    SourceInertia sourceInertiaFor(std::string source) const {
+        if (!source_inertia_enabled_)
+            return {};
+        const std::string held_prefix = "held_";
+        const bool held = source.rfind(held_prefix, 0) == 0;
+        if (held)
+            source = source.substr(held_prefix.size());
+        SourceInertia out;
+        if (held) {
+            out.alpha = held_source_alpha_;
+            out.derivative_scale = held_derivative_scale_;
+        } else if (source == "ball") {
+            out.alpha = ball_source_alpha_;
+            out.derivative_scale = ball_derivative_scale_;
+        } else if (source == "confirmed_handler") {
+            out.alpha = handler_source_alpha_;
+            out.derivative_scale = handler_derivative_scale_;
+        } else if (source == "probable_handler") {
+            out.alpha = probable_source_alpha_;
+            out.derivative_scale = probable_derivative_scale_;
+        }
+        out.alpha = clampDouble(out.alpha, 0.0, 1.0);
+        out.derivative_scale = std::max(0.01, out.derivative_scale);
+        return out;
+    }
+
+    static std::string primarySource(const std::vector<DetectionBox> &dets) {
+        for (const auto &d : dets) {
+            if (d.target_role == "primary" && !d.source.empty())
+                return d.source;
+        }
+        for (const auto &d : dets) {
+            if (!d.source.empty())
+                return d.source;
+        }
+        return {};
     }
 
     bool metadataRequestsReset(const av::VideoFrame &frm) const {
@@ -662,6 +723,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
     }
 
     bool computeViewportMeasurement(const std::vector<DetectionBox> &dets, int fw, int fh, ViewportMeasurement &meas) const {
+        meas.source = primarySource(dets);
         if (viewport_fit_ != "contain")
             return computeFocus(dets, fw, fh, meas.mx, meas.my);
         std::vector<const DetectionBox *> sel;
@@ -818,20 +880,33 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         return false;
     }
 
-    void applyDerivativeLimits(double p_star_x, double p_star_y, double dt, double &ox, double &oy) {
+    std::vector<double> scaledDerivativeLimits(double scale) const {
+        std::vector<double> out = derivative_limit_by_order_;
+        if (!(scale > 0.0) || !std::isfinite(scale))
+            return out;
+        for (double &v : out) {
+            if (std::isfinite(v) && v > 0.0)
+                v *= scale;
+        }
+        return out;
+    }
+
+    void applyDerivativeLimits(double p_star_x, double p_star_y, double dt, const SourceInertia &inertia,
+                               double &ox, double &oy) {
         if (!anyDerivativeLimit()) {
             ox = p_star_x;
             oy = p_star_y;
             return;
         }
-        slew_x_.step(p_star_x, dt, derivative_limit_by_order_);
-        slew_y_.step(p_star_y, dt, derivative_limit_by_order_);
+        std::vector<double> limits = scaledDerivativeLimits(inertia.derivative_scale);
+        slew_x_.step(p_star_x, dt, limits);
+        slew_y_.step(p_star_y, dt, limits);
         ox = slew_x_.d[0];
         oy = slew_y_.d[0];
     }
 
     void runHoldAndDeriv(double meas_x, double meas_y, bool meas_valid, double lp_x, double lp_y, bool edge_pressure,
-                         double dt, double &out_x, double &out_y) {
+                         double dt, const SourceInertia &inertia, double &out_x, double &out_y) {
         double hx = lp_x, hy = lp_y;
 
         if (hold_enabled_) {
@@ -887,7 +962,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
             }
         }
 
-        applyDerivativeLimits(hx, hy, dt, out_x, out_y);
+        applyDerivativeLimits(hx, hy, dt, inertia, out_x, out_y);
     }
 
     std::pair<double, double> averageBufferedMeasurement(const BufSlot &out) const {
@@ -956,6 +1031,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         double mx = 0, my = 0;
         bool frame_det = false;
         ViewportMeasurement raw_meas;
+        SourceInertia source_inertia;
         if (current_frame_has_det && finitePos(agg_mx) && finitePos(agg_my)) {
             if (current_meas)
                 raw_meas = *current_meas;
@@ -969,7 +1045,12 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         SoftEdgeDebug soft_dbg;
         bool edge_pressure = false;
         if (frame_det) {
+            source_inertia = sourceInertiaFor(raw_meas.source);
             softenMeasurementTarget(raw_meas, fw, fh, mx, my, soft_dbg);
+            if (source_inertia_enabled_ && have_prev_output_ && source_inertia.alpha < 1.0) {
+                mx = prev_output_x_ + (mx - prev_output_x_) * source_inertia.alpha;
+                my = prev_output_y_ + (my - prev_output_y_) * source_inertia.alpha;
+            }
             edge_pressure = (soft_dbg.x.enabled && (soft_dbg.x.prev_outside || soft_dbg.x.compressed)) ||
                             (soft_dbg.y.enabled && (soft_dbg.y.prev_outside || soft_dbg.y.compressed));
         }
@@ -987,7 +1068,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         lowpass_->step(mx, my, meas_valid, dt, fw, fh, lost_center, lp_x, lp_y);
 
         double out_x = 0, out_y = 0;
-        runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, edge_pressure, dt, out_x, out_y);
+        runHoldAndDeriv(mx, my, meas_valid, lp_x, lp_y, edge_pressure, dt, source_inertia, out_x, out_y);
 
         {
             const double half_w = effective_viewport_dst_width_ * 0.5;
@@ -1011,6 +1092,9 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
                       << " latched=" << (latched_ ? 1 : 0)
                       << " reset=" << (reset_requested ? 1 : 0)
                       << " edge_pressure=" << (edge_pressure ? 1 : 0)
+                      << " source=" << raw_meas.source
+                      << " source_alpha=" << source_inertia.alpha
+                      << " source_deriv_scale=" << source_inertia.derivative_scale
                       << " raw=(" << raw_meas.mx << "," << raw_meas.my << ")"
                       << " softened=(" << mx << "," << my << ")";
             if (soft_dbg.x.enabled) {
@@ -1055,6 +1139,10 @@ public:
                        double hold_speed_px_per_s, int hold_min_frames, double hold_break_px,
                        double hold_latched_follow_px_per_s, double hold_follow_deadband_px,
                        double hold_edge_release_px_per_s, int hold_max_frames,
+                       bool source_inertia_enabled, double ball_source_alpha, double handler_source_alpha,
+                       double probable_source_alpha, double held_source_alpha,
+                       double ball_derivative_scale, double handler_derivative_scale,
+                       double probable_derivative_scale, double held_derivative_scale,
                        std::vector<double> derivative_limit_by_order, double viewport_marker_half_extent,
                        int viewport_dst_width, int viewport_dst_height, int lookahead_frames, int min_visible_frames,
                        int debug_log_every_n)
@@ -1074,6 +1162,11 @@ public:
           hold_latched_follow_px_per_s_(hold_latched_follow_px_per_s),
           hold_follow_deadband_px_(hold_follow_deadband_px),
           hold_edge_release_px_per_s_(hold_edge_release_px_per_s), hold_max_frames_(hold_max_frames),
+          source_inertia_enabled_(source_inertia_enabled),
+          ball_source_alpha_(ball_source_alpha), handler_source_alpha_(handler_source_alpha),
+          probable_source_alpha_(probable_source_alpha), held_source_alpha_(held_source_alpha),
+          ball_derivative_scale_(ball_derivative_scale), handler_derivative_scale_(handler_derivative_scale),
+          probable_derivative_scale_(probable_derivative_scale), held_derivative_scale_(held_derivative_scale),
           derivative_limit_by_order_(std::move(derivative_limit_by_order)),
           lookahead_frames_(lookahead_frames), min_visible_frames_(min_visible_frames),
           viewport_marker_half_extent_(viewport_marker_half_extent),
@@ -1222,6 +1315,23 @@ public:
         const double hold_follow_deadband = params.value("hold_follow_deadband_px", 12.0);
         const double hold_edge_release = params.value("hold_edge_release_px_per_s", 480.0);
         const int hold_max = (int)params.value("hold_max_frames", 90);
+        const bool source_inertia_enabled = params.value("source_inertia_enabled", false);
+        double ball_source_alpha = params.value("ball_source_alpha", 1.0);
+        double handler_source_alpha = params.value("handler_source_alpha", 0.70);
+        double probable_source_alpha = params.value("probable_source_alpha", 0.45);
+        double held_source_alpha = params.value("held_source_alpha", 0.35);
+        double ball_derivative_scale = params.value("ball_derivative_scale", 1.15);
+        double handler_derivative_scale = params.value("handler_derivative_scale", 0.75);
+        double probable_derivative_scale = params.value("probable_derivative_scale", 0.45);
+        double held_derivative_scale = params.value("held_derivative_scale", 0.35);
+        ball_source_alpha = clampDouble(ball_source_alpha, 0.0, 1.0);
+        handler_source_alpha = clampDouble(handler_source_alpha, 0.0, 1.0);
+        probable_source_alpha = clampDouble(probable_source_alpha, 0.0, 1.0);
+        held_source_alpha = clampDouble(held_source_alpha, 0.0, 1.0);
+        ball_derivative_scale = std::max(0.01, ball_derivative_scale);
+        handler_derivative_scale = std::max(0.01, handler_derivative_scale);
+        probable_derivative_scale = std::max(0.01, probable_derivative_scale);
+        held_derivative_scale = std::max(0.01, held_derivative_scale);
 
         std::vector<double> deriv_lim = parseDerivativeLimits(params);
         const double viewport_marker_half_extent = params.value("viewport_marker_half_extent", 1.0);
@@ -1249,6 +1359,8 @@ public:
             soft_edge_margin_y_px, soft_edge_lead_fraction, lost_target,
             std::move(lp), hold_enabled, hold_spd, hold_min, hold_break, hold_latched_follow,
             hold_follow_deadband, hold_edge_release, hold_max,
+            source_inertia_enabled, ball_source_alpha, handler_source_alpha, probable_source_alpha, held_source_alpha,
+            ball_derivative_scale, handler_derivative_scale, probable_derivative_scale, held_derivative_scale,
             std::move(deriv_lim),
             viewport_marker_half_extent, viewport_dst_width, viewport_dst_height, lookahead, min_visible, dbg);
     }
