@@ -243,6 +243,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libcurl \
         libwebp \
         openssl-libs \
+        python3 \
         srt \
     && dnf clean all
 
@@ -264,9 +265,10 @@ COPY --from=builder /build/avplumber /usr/local/bin/avplumber
 COPY ${PREBUILT_MODELS_DIR}/ /home/tensorrt/
 
 COPY neural-demo/entrypoint.sh /usr/local/bin/avp-neural-demo-entrypoint
+COPY neural-demo/janus_rtcp_feedback.py /usr/local/bin/avp-neural-demo-rtcp-feedback
 COPY neural-demo/templates /opt/avp-neural-demo/templates
 
-RUN chmod +x /usr/local/bin/avp-neural-demo-entrypoint \
+RUN chmod +x /usr/local/bin/avp-neural-demo-entrypoint /usr/local/bin/avp-neural-demo-rtcp-feedback \
     && mkdir -p /home/tensorrt /run/avp/input /run/avp/output /tmp/avp-sidecars /tmp/avp-rendered \
     && ldconfig
 

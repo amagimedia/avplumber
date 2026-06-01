@@ -89,6 +89,7 @@ output_url="${AVP_OUTPUT}"
 output_options="{}"
 keyframe_interval_sec="3/1"
 video_encoder_options='{ "b": "12000k", "maxrate": "12000k", "bufsize": "12000k", "rc": "cbr", "g": 75, "bf": 0, "preset": "p7", "profile": "high", "multipass": "disabled", "zerolatency": 1, "spatial_aq": 1, "temporal_aq": 1 }'
+janus_output=0
 
 if [[ "${AVP_MODE}" == "vod" ]]; then
     artifact_dir="$(dirname "${AVP_OUTPUT}")"
@@ -115,8 +116,9 @@ else
             output_url="rtp://${janus_host}:${janus_video_port}?pkt_size=${rtp_pkt_size}&rtcp_port=${janus_video_rtcp_port}"
             output_options="{\"payload_type\":${janus_video_pt},\"rtpflags\":\"skip_rtcp\",\"ssrc\":${janus_video_ssrc}}"
             keyframe_interval_sec="1/1"
-            video_bitrate="${AVP_JANUS_VIDEO_BITRATE:-8000k}"
-            video_encoder_options="{ \"b\": \"${video_bitrate}\", \"maxrate\": \"${video_bitrate}\", \"bufsize\": \"${video_bitrate}\", \"rc\": \"cbr\", \"g\": 30, \"bf\": 0, \"preset\": \"p6\", \"profile\": \"baseline\", \"level\": \"4.0\", \"tune\": \"ull\", \"rc-lookahead\": 0, \"zerolatency\": 1, \"delay\": 0, \"forced-idr\": 1, \"no-scenecut\": 1, \"strict_gop\": 1, \"aud\": 1, \"spatial-aq\": 1, \"temporal-aq\": 0 }"
+            video_bitrate="${AVP_JANUS_VIDEO_BITRATE:-4000k}"
+            video_encoder_options="{ \"b\": \"${video_bitrate}\", \"maxrate\": \"${video_bitrate}\", \"bufsize\": \"${video_bitrate}\", \"rc\": \"cbr\", \"g\": 25, \"bf\": 0, \"preset\": \"p6\", \"profile\": \"baseline\", \"level\": \"4.0\", \"tune\": \"ull\", \"rc-lookahead\": 0, \"zerolatency\": 1, \"delay\": 0, \"forced-idr\": 1, \"no-scenecut\": 1, \"strict_gop\": 1, \"aud\": 1, \"spatial-aq\": 1, \"temporal-aq\": 0 }"
+            janus_output=1
             ;;
         *) die "unsupported live output URL scheme for AVP_OUTPUT=${AVP_OUTPUT}; expected rtmp://, rtmps://, srt://, or janus" ;;
     esac
@@ -187,6 +189,7 @@ echo "output=${output_url}"
 echo "artifact_dir=${artifact_dir}"
 echo "models_dir=${MODEL_ROOT}"
 echo "models_status=ready"
+echo "video_encoder_options=${video_encoder_options}"
 
 avplumber_args=(/usr/local/bin/avplumber)
 if [[ -n "${AVP_LOGFILE:-}" ]]; then
@@ -201,6 +204,23 @@ if [[ -n "${AVP_WEBUI_API:-}" ]]; then
 fi
 if [[ -n "${AVP_INSTANCE_NAME:-}" ]]; then
     avplumber_args+=("--instance-name" "${AVP_INSTANCE_NAME}")
+fi
+
+if [[ "${janus_output}" == "1" ]] \
+    && [[ -n "${AVP_REMOTE_CONTROL_PORT:-}" && "${AVP_REMOTE_CONTROL_PORT}" != "0" ]] \
+    && ! is_false "${AVP_JANUS_RTCP_FEEDBACK:-1}"; then
+    /usr/local/bin/avp-neural-demo-rtcp-feedback \
+        --control-host "${AVP_REMOTE_CONTROL_HOST:-127.0.0.1}" \
+        --control-port "${AVP_REMOTE_CONTROL_PORT}" \
+        --janus-host "${janus_host}" \
+        --janus-rtcp-port "${janus_video_rtcp_port}" \
+        --media-ssrc "${janus_video_ssrc}" \
+        --bind-host "${AVP_JANUS_RTCP_FEEDBACK_BIND:-0.0.0.0}" \
+        --bind-port "${AVP_JANUS_RTCP_FEEDBACK_PORT:-0}" \
+        --force-keyframe-node "${AVP_JANUS_FORCE_KEYFRAME_NODE:-janus_force_keyframe}" &
+    echo "rtcp_feedback=enabled"
+elif [[ "${janus_output}" == "1" ]]; then
+    echo "rtcp_feedback=disabled"
 fi
 
 exec "${avplumber_args[@]}" -s "${rendered}"

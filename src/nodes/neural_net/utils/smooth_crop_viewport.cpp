@@ -411,6 +411,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         av::VideoFrame frm;
         ViewportMeasurement meas;
         bool valid = false;
+        bool reset = false;
     };
     std::deque<BufSlot> buffer_;
 
@@ -423,7 +424,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
     int last_logged_effective_viewport_width_ = -1;
     int last_logged_effective_viewport_height_ = -1;
 
-    void resetPipelineState() {
+    void resetSmoothingState() {
         if (lowpass_)
             lowpass_->reset();
         latched_ = false;
@@ -432,9 +433,13 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
         visible_streak_ = 0;
         have_prev_output_ = false;
         prev_output_x_ = prev_output_y_ = 0;
-        buffer_.clear();
         slew_x_.reset(0);
         slew_y_.reset(0);
+    }
+
+    void resetPipelineState() {
+        resetSmoothingState();
+        buffer_.clear();
     }
 
     int effectiveViewportWidth(int frame_width) const {
@@ -536,6 +541,25 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
                         out.push_back(det);
                 }
                 if (!out.empty())
+                    return true;
+            } catch (const std::exception &) {
+                continue;
+            }
+        }
+        return false;
+    }
+
+    bool metadataRequestsReset(const av::VideoFrame &frm) const {
+        const AVFrame *raw = frm.raw();
+        if (!raw || !raw->metadata)
+            return false;
+        for (const std::string &meta_key : metadata_keys_in_) {
+            AVDictionaryEntry *entry = av_dict_get(raw->metadata, meta_key.c_str(), nullptr, 0);
+            if (!entry || !entry->value)
+                continue;
+            try {
+                Parameters md = Parameters::parse(entry->value);
+                if (md.is_object() && md.value("reset", false))
                     return true;
             } catch (const std::exception &) {
                 continue;
@@ -895,6 +919,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
     }
 
     void processOneFrame(av::VideoFrame &frm, double agg_mx, double agg_my, bool current_frame_has_det,
+                         bool reset_requested,
                          const ViewportMeasurement *current_meas) {
         const int fw = frm.width();
         const int fh = frm.height();
@@ -920,6 +945,11 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
             }
             last_logged_effective_viewport_width_ = effective_viewport_dst_width_;
             last_logged_effective_viewport_height_ = effective_viewport_dst_height_;
+        }
+        if (reset_requested) {
+            resetSmoothingState();
+            slew_x_.reset(fw * 0.5);
+            slew_y_.reset(fh * 0.5);
         }
 
         std::vector<DetectionBox> dets;
@@ -979,6 +1009,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
             logstream << "smooth_crop_viewport: frame=" << frame_counter_ << " out=(" << out_x << "," << out_y << ")"
                       << " meas_valid=" << (meas_valid ? 1 : 0) << " streak=" << visible_streak_
                       << " latched=" << (latched_ ? 1 : 0)
+                      << " reset=" << (reset_requested ? 1 : 0)
                       << " edge_pressure=" << (edge_pressure ? 1 : 0)
                       << " raw=(" << raw_meas.mx << "," << raw_meas.my << ")"
                       << " softened=(" << mx << "," << my << ")";
@@ -1005,7 +1036,7 @@ class SmoothCropViewport : public NodeSISO<av::VideoFrame, av::VideoFrame>, publ
             buffer_.pop_front();
             const bool current_det = slot.valid;
             const auto [ax, ay] = averageBufferedMeasurement(slot);
-            processOneFrame(slot.frm, ax, ay, current_det, slot.valid ? &slot.meas : nullptr);
+            processOneFrame(slot.frm, ax, ay, current_det, slot.reset, slot.valid ? &slot.meas : nullptr);
             this->sink_->put(std::move(slot.frm));
         }
     }
@@ -1066,6 +1097,7 @@ public:
 
         BufSlot slot;
         slot.frm = std::move(frm);
+        slot.reset = metadataRequestsReset(slot.frm);
         std::vector<DetectionBox> dets;
         if (parseMetadata(slot.frm, dets) &&
             computeViewportMeasurement(dets, slot.frm.width(), slot.frm.height(), slot.meas)) {
@@ -1084,7 +1116,7 @@ public:
         const bool current_det = out.valid;
         const auto [ax, ay] = averageBufferedMeasurement(out);
 
-        processOneFrame(out.frm, ax, ay, current_det, out.valid ? &out.meas : nullptr);
+        processOneFrame(out.frm, ax, ay, current_det, out.reset, out.valid ? &out.meas : nullptr);
         this->sink_->put(std::move(out.frm));
     }
 

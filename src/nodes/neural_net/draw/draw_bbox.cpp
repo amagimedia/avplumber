@@ -44,6 +44,8 @@ private:
     std::unordered_set<std::string> allowed_labels_;
     DrawColor default_color_{};
     std::optional<DrawColor> predicted_color_;
+    bool predicted_only_ = false;
+    bool hide_predicted_ = false;
     std::unordered_map<int, DrawColor> model_colors_;
     std::unordered_map<std::string, DrawColor> label_colors_;
     double model_content_width_ = 0.0;
@@ -291,6 +293,9 @@ private:
         std::vector<cuda_overlay::ParsedYoloDetection> detections;
         cuda_overlay::parseYoloDetections(md, cfg, detections);
         for (const auto& det : detections) {
+            const bool is_predicted = det.has_predicted && det.predicted;
+            if (predicted_only_ && !is_predicted) continue;
+            if (hide_predicted_ && is_predicted) continue;
             BBox bbox;
             bbox.x1 = det.x1;
             bbox.y1 = det.y1;
@@ -480,6 +485,8 @@ public:
              std::unordered_set<int> allowed_classes,
              std::unordered_set<std::string> allowed_labels,
              std::optional<DrawColor> predicted_color,
+             bool predicted_only,
+             bool hide_predicted,
              std::unordered_map<int, DrawColor> model_colors,
              std::unordered_map<std::string, DrawColor> label_colors,
              double model_content_width,
@@ -498,6 +505,8 @@ public:
           allowed_classes_(std::move(allowed_classes)),
           allowed_labels_(std::move(allowed_labels)),
           predicted_color_(predicted_color),
+          predicted_only_(predicted_only),
+          hide_predicted_(hide_predicted),
           model_colors_(std::move(model_colors)),
           label_colors_(std::move(label_colors)),
           model_content_width_(model_content_width),
@@ -596,11 +605,16 @@ public:
             }
             predicted_color = color;
         }
+        const bool predicted_only = params.value("predicted_only", false);
+        const bool hide_predicted = params.value("hide_predicted", false);
+        if (predicted_only && hide_predicted) {
+            throw Error("draw_bbox: predicted_only and hide_predicted cannot both be true");
+        }
 
         return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DrawBBox>(
             edges, params, std::move(metadata_keys), bbox_thickness, min_conf,
             std::move(allowed_classes), std::move(allowed_labels), predicted_color,
-            std::move(model_colors), std::move(label_colors),
+            predicted_only, hide_predicted, std::move(model_colors), std::move(label_colors),
             model_content_width, model_content_height, model_content_offset_x, model_content_offset_y,
             upstream.input_params, upstream.frame_rate, upstream.timebase, debug_log_every_n);
     }
