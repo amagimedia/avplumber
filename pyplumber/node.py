@@ -195,6 +195,14 @@ class DrmPrimeToCuda(InternalNode):
     TYPE = "drm_prime_to_cuda"
 
 
+class CudaToEglImage(InternalNode):
+    TYPE = "cuda_to_egl_image"
+
+
+class MediaPipeFaceMeshGpu(InternalNode):
+    TYPE = "mediapipe_face_mesh_gpu"
+
+
 class Split(InternalNode):
     TYPE = "split"
 
