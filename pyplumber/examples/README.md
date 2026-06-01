@@ -42,6 +42,7 @@ Common environment variables:
 | `AVP_SILERO_REPO` | VAD, auto mixer | `torch.hub` repo or local checkout for Silero VAD. |
 | `AVP_MODELS_DIR` | `tracker-live.py` | TensorRT model directory for the basketball tracker. |
 | `AVP_BLAZEFACE_DIR` | `blazeface-node.py` | Directory for BlazeFace weights and anchors. |
+| `AVP_ULTRALYTICS_WEIGHTS` | `ultralytics-bytetrack.py` | Ultralytics `.pt` model path or model name. |
 
 Dependency groups:
 
@@ -65,6 +66,7 @@ Dependency groups:
 | CUDA frame memory access from PyTorch | `pytorch-cuda-node.py` |
 | torchvision object detection on CUDA frames | `torchvision-node.py` |
 | BlazeFace detector implemented in Python | `blazeface-node.py` |
+| Ultralytics Python inference plus ByteTrack | `ultralytics-bytetrack.py` |
 | TensorRT face-part detection and reframing | `face-detection.py` |
 | Mouth ROI derivation and visual debug output | `mouth-roi-visualization.py` |
 | Visual speech event extraction | `visual-speech-events.py` |
@@ -156,6 +158,24 @@ Useful knobs:
 
 - `AVP_BLAZEFACE_MIN_SCORE`: model score threshold. Defaults to `0.75`.
 - `AVP_BLAZEFACE_NMS`: non-maximum suppression threshold. Defaults to `0.3`.
+
+### `ultralytics-bytetrack.py`
+
+Runs `UltralyticsByteTrackNode`, a reusable Python node that performs both
+Ultralytics YOLO inference and Ultralytics ByteTrack tracking in one pass. The
+node attaches AVPlumber YOLO-style metadata to each frame so downstream graph
+nodes can consume tracked boxes.
+
+The example decodes to CPU `yuv420p`, scales to 1280x720, runs tracking, draws a
+track count with `drawtext`, and encodes the result with x264.
+
+Useful variables:
+
+- `AVP_ULTRALYTICS_WEIGHTS`: model path or name. Defaults to `yolo11n.pt`.
+- `AVP_ULTRALYTICS_DEVICE`: Ultralytics device, such as `0` or `cpu`.
+- `AVP_ULTRALYTICS_TARGET_LABELS`: comma-separated class labels. Defaults to
+  `person`.
+- `AVP_ULTRALYTICS_CONF`: confidence threshold. Defaults to `0.25`.
 
 ### `face-detection.py`
 
