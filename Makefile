@@ -150,7 +150,7 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_feet_seg.cu,avpl_player_feet_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_feet_seg.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_torso_seg.cu,avpl_player_torso_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_torso_seg.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/sport_specific/tracknet_ball.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/scene_diff_cuda.cu,avpl_scene_diff_ptx,objs/src/nodes/neural_net/sport_specific/scene_diff_cuda.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/sport_specific/luma_diff.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
