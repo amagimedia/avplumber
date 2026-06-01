@@ -88,6 +88,8 @@ struct DecodeParams {
     float conf_thresh;
     OutputBoxFormat box_format;
     const std::vector<int>& class_index_remap;
+    float nms_iou_thresh = 0.0f;
+    bool nms_class_agnostic = false;
 };
 
 // --- Utility functions ---
@@ -218,6 +220,8 @@ struct ModelRunner {
     OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
     TaskType task_type = TaskType::Detection;
     bool include_in_detection_metadata = true;
+    float nms_iou_thresh = 0.0f;
+    bool nms_class_agnostic = false;
     std::vector<std::string> class_names;
     std::vector<int> class_index_remap;
 
