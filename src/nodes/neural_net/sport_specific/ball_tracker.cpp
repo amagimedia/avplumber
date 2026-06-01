@@ -40,6 +40,7 @@ using ball_tracker_detail::checkCourtBoundsHorizontalOverlap;
 class BallTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 private:
     // Target filtering
+    std::string input_metadata_key_;
     std::string metadata_key_ = "yolo_detections";
     std::string target_label_ = "basketball";
     std::vector<std::string> target_labels_;
@@ -359,7 +360,8 @@ private:
             return false;
         }
 
-        AVDictionaryEntry* entry = av_dict_get(raw->metadata, metadata_key_.c_str(), nullptr, 0);
+        const std::string& input_key = input_metadata_key_.empty() ? metadata_key_ : input_metadata_key_;
+        AVDictionaryEntry* entry = av_dict_get(raw->metadata, input_key.c_str(), nullptr, 0);
         if (!entry || !entry->value) {
             forwardNoBall(frm, true);
             return false;
@@ -1096,6 +1098,7 @@ public:
         // Shot-aware mode handling
         if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         // Target filtering
+        if (params.count("input_metadata_key")) r->input_metadata_key_ = params["input_metadata_key"].get<std::string>();
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_label")) r->target_label_ = params["target_label"].get<std::string>();
         if (params.count("target_labels")) {
