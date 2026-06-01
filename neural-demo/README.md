@@ -171,6 +171,7 @@ needed.
 The ONNX archive should contain:
 
 - `ball_960x544.onnx`
+- `tracknet-ball/tracknetv2_basketball_float_512x288.onnx`
 - `basketball-players-full_960x544.onnx`
 - `court-segmentation_960x544.onnx`
 - `player-seg/player-seg_960x544.onnx`
@@ -188,6 +189,7 @@ Only enable OCR in a custom graph after measuring the target GPU; in the
 The final image must contain these generated files:
 
 - `ball_960x544.plan`
+- `tracknet-ball/tracknetv2_basketball_float_512x288.plan`
 - `court-segmentation_960x544.plan`
 - `basketball-players-full_960x544.plan`
 - `player-seg/player-seg_960x544.plan`

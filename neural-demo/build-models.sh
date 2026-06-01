@@ -98,6 +98,7 @@ build_engine() {
 mkdir -p "${MODEL_ROOT}"
 
 build_engine "ball_960x544.onnx" "ball_960x544.plan"
+build_engine "tracknet-ball/tracknetv2_basketball_float_512x288.onnx" "tracknet-ball/tracknetv2_basketball_float_512x288.plan"
 build_engine "basketball-players-full_960x544.onnx" "basketball-players-full_960x544.plan"
 build_engine "court-segmentation_960x544.onnx" "court-segmentation_960x544.plan"
 build_engine "player-seg/player-seg_960x544.onnx" "player-seg/player-seg_960x544.plan"
