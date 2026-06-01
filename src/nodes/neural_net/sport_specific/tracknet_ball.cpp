@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -50,6 +51,124 @@ std::string jsonStringParam(const Parameters& params, const char* key, const std
     return params[key].get<std::string>();
 }
 
+enum class TrackNetOutputMode {
+    Detection,
+    Raw,
+    Both,
+    SrsBall,
+    SrsBallAndRaw,
+};
+
+enum class TrackNetTripletAlignment {
+    Center,
+    Latest,
+};
+
+enum class TrackNetPreprocessMode {
+    Resize,
+    SrsAffine,
+};
+
+bool emitsDetectionMetadata(TrackNetOutputMode mode) {
+    return mode == TrackNetOutputMode::Detection || mode == TrackNetOutputMode::Both;
+}
+
+bool emitsRawMetadata(TrackNetOutputMode mode) {
+    return mode == TrackNetOutputMode::Raw || mode == TrackNetOutputMode::Both ||
+           mode == TrackNetOutputMode::SrsBallAndRaw;
+}
+
+bool emitsSrsBallMetadata(TrackNetOutputMode mode) {
+    return mode == TrackNetOutputMode::SrsBall || mode == TrackNetOutputMode::SrsBallAndRaw;
+}
+
+int inputChannels(const nvinfer1::Dims& dims) {
+    if (dims.nbDims == 3) return dims.d[0];
+    if (dims.nbDims == 4 && dims.d[0] == 1) return dims.d[1];
+    return 0;
+}
+
+bool setInputGeometryFromDims(ModelRunner& model, int expected_channels) {
+    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == expected_channels) {
+        model.input_h = model.input_dims.d[1];
+        model.input_w = model.input_dims.d[2];
+        return true;
+    }
+    if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 &&
+        model.input_dims.d[1] == expected_channels) {
+        model.input_h = model.input_dims.d[2];
+        model.input_w = model.input_dims.d[3];
+        return true;
+    }
+    return false;
+}
+
+TrackNetOutputMode parseOutputModeString(const std::string& mode) {
+    if (mode == "detection" || mode == "detections") return TrackNetOutputMode::Detection;
+    if (mode == "raw") return TrackNetOutputMode::Raw;
+    if (mode == "both" || mode == "detection_and_raw") return TrackNetOutputMode::Both;
+    if (mode == "srs_ball" || mode == "srs") return TrackNetOutputMode::SrsBall;
+    if (mode == "srs_ball_and_raw" || mode == "srs_and_raw") return TrackNetOutputMode::SrsBallAndRaw;
+    throw Error("tracknet_ball: output_mode must be 'detection', 'raw', 'both', 'srs_ball', or 'srs_ball_and_raw'");
+}
+
+TrackNetTripletAlignment parseTripletAlignmentString(const std::string& alignment) {
+    if (alignment == "center") return TrackNetTripletAlignment::Center;
+    if (alignment == "latest" || alignment == "vod_latest") return TrackNetTripletAlignment::Latest;
+    throw Error("tracknet_ball: triplet_alignment must be 'center' or 'latest'");
+}
+
+TrackNetPreprocessMode parsePreprocessModeString(const std::string& mode) {
+    if (mode == "resize" || mode == "scale") return TrackNetPreprocessMode::Resize;
+    if (mode == "srs_affine" || mode == "srs") return TrackNetPreprocessMode::SrsAffine;
+    throw Error("tracknet_ball: preprocess_mode must be 'resize' or 'srs_affine'");
+}
+
+std::string dtypeName(nvinfer1::DataType dtype) {
+    switch (dtype) {
+        case nvinfer1::DataType::kFLOAT: return "float32";
+        case nvinfer1::DataType::kHALF: return "float16";
+        case nvinfer1::DataType::kINT8: return "int8";
+        case nvinfer1::DataType::kINT32: return "int32";
+        case nvinfer1::DataType::kINT64: return "int64";
+        default: return "unknown";
+    }
+}
+
+Parameters dimsToJson(const nvinfer1::Dims& dims) {
+    Parameters out = Parameters::array();
+    for (int i = 0; i < dims.nbDims; ++i) {
+        out.push_back(dims.d[i]);
+    }
+    return out;
+}
+
+float sigmoidFloat(float v) {
+    if (!std::isfinite(v)) return 0.0f;
+    if (v >= 0.0f) {
+        const float z = std::exp(-v);
+        return 1.0f / (1.0f + z);
+    }
+    const float z = std::exp(v);
+    return z / (1.0f + z);
+}
+
+Parameters tensorValuesToJson(const std::vector<float>& values, int max_elements, size_t* emitted_count = nullptr,
+                              size_t* nonfinite_count = nullptr) {
+    const size_t limit = max_elements > 0 ? std::min(values.size(), (size_t)max_elements) : values.size();
+    Parameters out = Parameters::array();
+    for (size_t i = 0; i < limit; ++i) {
+        if (std::isfinite(values[i])) {
+            out.push_back(values[i]);
+        } else {
+            out.push_back(nullptr);
+            if (nonfinite_count) ++(*nonfinite_count);
+        }
+    }
+    if (emitted_count) *emitted_count += limit;
+    return out;
+}
+
 } // namespace
 
 class TrackNetBall : public NodeSISO<av::VideoFrame, av::VideoFrame>,
@@ -58,10 +177,19 @@ class TrackNetBall : public NodeSISO<av::VideoFrame, av::VideoFrame>,
                      public CudaInferTrtBase {
 protected:
     std::string metadata_key_detection_ = "yolo_ball";
+    std::string metadata_key_raw_ = "tracknet_raw";
+    std::string metadata_key_srs_ball_ = "tracknet_ball_srs";
     std::string target_label_ = "basketball";
+    TrackNetOutputMode output_mode_ = TrackNetOutputMode::Detection;
+    TrackNetTripletAlignment triplet_alignment_ = TrackNetTripletAlignment::Center;
+    TrackNetPreprocessMode preprocess_mode_ = TrackNetPreprocessMode::Resize;
     float conf_thresh_ = 0.5f;
     float visible_thresh_ = 0.5f;
+    float srs_score_threshold_ = 0.5f;
     bool emit_invisible_ = false;
+    bool srs_use_hm_weight_ = true;
+    int raw_output_max_elements_ = 0;
+    int srs_channel_ = 2;
     int output_model_width_ = 0;
     int output_model_height_ = 0;
     bool debug_log_metadata_ = false;
@@ -75,6 +203,7 @@ protected:
     AVPixelFormat source_sw_format_ = AV_PIX_FMT_NONE;
 
     int output_tensor_index_ = -1;
+    int srs_heatmap_tensor_index_ = -1;
     bool output_contract_validated_ = false;
     uint64_t frame_counter_ = 0;
     uint64_t infer_counter_ = 0;
@@ -86,9 +215,7 @@ protected:
 public:
     TrackNetBall(std::unique_ptr<Source<av::VideoFrame>> source,
                  std::unique_ptr<EdgeSink<av::VideoFrame>> sink)
-        : NodeSISO(std::move(source), std::move(sink)) {
-        expected_input_channels_ = 9;
-    }
+        : NodeSISO(std::move(source), std::move(sink)) {}
 
     ~TrackNetBall() {
         const uint64_t total = detected_frames_ + empty_frames_;
@@ -146,10 +273,17 @@ public:
             setBufferGeometry(frm);
         }
 
-        frame_buffer_.push_back(frm);
-        if (frame_buffer_.size() < 3) {
-            return;
+        if (triplet_alignment_ == TrackNetTripletAlignment::Latest) {
+            processLatestAlignedFrame(frm);
+        } else {
+            processCenterAlignedFrame(frm);
         }
+    }
+
+protected:
+    void processCenterAlignedFrame(const av::VideoFrame& frm) {
+        frame_buffer_.push_back(frm);
+        if (frame_buffer_.size() < 3) return;
 
         if (!first_boundary_emitted_) {
             this->sink_->put(frame_buffer_.front());
@@ -157,7 +291,7 @@ public:
         }
 
         av::VideoFrame& center = frame_buffer_[1];
-        if (!runTripletInference(frame_buffer_[0], center, frame_buffer_[2])) {
+        if (!runTripletInference(frame_buffer_[0], center, center, frame_buffer_[2])) {
             return;
         }
 
@@ -166,7 +300,27 @@ public:
         frame_buffer_.pop_front();
     }
 
-protected:
+    void processLatestAlignedFrame(const av::VideoFrame& frm) {
+        frame_buffer_.push_back(frm);
+
+        av::VideoFrame& latest = frame_buffer_.back();
+        if (frame_buffer_.size() == 1) {
+            if (!runTripletInference(latest, latest, latest, latest)) return;
+            this->sink_->put(latest);
+            return;
+        }
+
+        if (frame_buffer_.size() == 2) {
+            if (!runTripletInference(frame_buffer_[0], frame_buffer_[0], latest, latest)) return;
+            this->sink_->put(latest);
+            return;
+        }
+
+        if (!runTripletInference(frame_buffer_[0], frame_buffer_[1], latest, latest)) return;
+        this->sink_->put(latest);
+        frame_buffer_.pop_front();
+    }
+
     bool isSupportedCudaFrame(const av::VideoFrame& frm) {
         if (!frm.raw() || frm.raw()->format != AV_PIX_FMT_CUDA) {
             logstream << "tracknet_ball: non-CUDA frame, passing through";
@@ -203,6 +357,11 @@ protected:
     }
 
     void flushBufferedBoundaryFrames() {
+        if (triplet_alignment_ == TrackNetTripletAlignment::Latest) {
+            resetBufferedFrames();
+            return;
+        }
+
         if (frame_buffer_.empty()) {
             resetBufferedFrames();
             return;
@@ -238,14 +397,179 @@ protected:
     }
 
     bool configureTracknetPreprocess(ModelRunner& model) {
-        const char* kname = (model.input_dtype == nvinfer1::DataType::kHALF)
-            ? "kTrackNetNV12TripletToNCHW9_fp16"
-            : "kTrackNetNV12TripletToNCHW9_fp32";
+        const char* kname = nullptr;
+        if (preprocess_mode_ == TrackNetPreprocessMode::SrsAffine) {
+            kname = (model.input_dtype == nvinfer1::DataType::kHALF)
+                ? "kTrackNetNV12TripletToNCHW9SrsAffine_fp16"
+                : "kTrackNetNV12TripletToNCHW9SrsAffine_fp32";
+        } else {
+            kname = (model.input_dtype == nvinfer1::DataType::kHALF)
+                ? "kTrackNetNV12TripletToNCHW9_fp16"
+                : "kTrackNetNV12TripletToNCHW9_fp32";
+        }
         if (CUDA_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
             logstream << "tracknet_ball: failed to get preprocess kernel for " << model.engine_path;
             return false;
         }
-        return configureRunnerStream(model);
+        return configureTracknetStream(model);
+    }
+
+    bool configureTracknetStream(ModelRunner& model) {
+        constexpr unsigned int kCudaStreamDefault = 0x0;
+        constexpr unsigned int kCudaStreamNonBlocking = 0x1;
+        unsigned int stream_flags = use_cuda_graph_ ? kCudaStreamNonBlocking : kCudaStreamDefault;
+        if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, stream_flags))) {
+            logstream << "tracknet_ball: failed to create CUDA stream for " << model.engine_path;
+            return false;
+        }
+        if (use_cuda_graph_) {
+            int nb_aux_streams = model.trt_engine->getNbAuxStreams();
+            model.aux_streams.reserve((size_t)std::max(nb_aux_streams, 0));
+            for (int i = 0; i < nb_aux_streams; ++i) {
+                CUstream aux_stream = nullptr;
+                if (CUDA_CHECK_CU(cuStreamCreate(&aux_stream, kCudaStreamNonBlocking))) {
+                    logstream << "tracknet_ball: failed to create TensorRT aux stream for " << model.engine_path;
+                    return false;
+                }
+                model.aux_streams.push_back(reinterpret_cast<cudaStream_t>(aux_stream));
+            }
+        }
+        return true;
+    }
+
+    bool allocateTracknetBindings(ModelRunner& model) {
+        constexpr int kExpectedChannels = 9;
+        const int nb = model.trt_engine->getNbIOTensors();
+        if (nb <= 1) {
+            logstream << "tracknet_ball: engine has insufficient bindings for " << model.engine_path;
+            return false;
+        }
+
+        model.io_tensor_names.clear();
+        model.tensor_bytes.assign((size_t)nb, 0);
+        model.tensor_ptrs.assign((size_t)nb, 0);
+        model.tensor_index.clear();
+        model.input_tensor_name.clear();
+        model.outputs.clear();
+        int input_count = 0;
+        bool selected_triplet_input = false;
+
+        for (int i = 0; i < nb; ++i) {
+            const char* tensor_name_c = model.trt_engine->getIOTensorName(i);
+            if (!tensor_name_c) {
+                logstream << "tracknet_ball: null I/O tensor name";
+                return false;
+            }
+            const std::string tensor_name = tensor_name_c;
+            model.io_tensor_names.push_back(tensor_name);
+            model.tensor_index[tensor_name] = (size_t)i;
+
+            const auto mode = model.trt_engine->getTensorIOMode(tensor_name_c);
+            const bool is_input = (mode == nvinfer1::TensorIOMode::kINPUT);
+            nvinfer1::Dims dims = model.trt_engine->getTensorShape(tensor_name_c);
+            for (int d = 0; d < dims.nbDims; ++d) {
+                if (dims.d[d] <= 0) {
+                    logstream << "tracknet_ball: dynamic/invalid binding dims not supported for " << model.engine_path;
+                    return false;
+                }
+            }
+
+            const size_t vol = volume(dims);
+            const nvinfer1::DataType dt = model.trt_engine->getTensorDataType(tensor_name_c);
+            const size_t esz = elementSize(dt);
+            if (vol == 0 || esz == 0) {
+                logstream << "tracknet_ball: unsupported binding type/shape for " << model.engine_path;
+                return false;
+            }
+
+            CUdeviceptr ptr = 0;
+            const size_t bytes = vol * esz;
+            if (CUDA_CHECK_CU(cuMemAlloc(&ptr, bytes))) {
+                logstream << "tracknet_ball: cuMemAlloc failed for " << model.engine_path << " binding " << i;
+                return false;
+            }
+            if (CUDA_CHECK_CU(cuMemsetD8(ptr, 0, bytes))) {
+                logstream << "tracknet_ball: cuMemsetD8 failed for " << model.engine_path << " binding " << i;
+                return false;
+            }
+            model.tensor_bytes[(size_t)i] = bytes;
+            model.tensor_ptrs[(size_t)i] = ptr;
+
+            if (is_input) {
+                ++input_count;
+                const bool is_triplet_input =
+                    (dims.nbDims == 3 && dims.d[0] == kExpectedChannels) ||
+                    (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == kExpectedChannels);
+                if (model.input_tensor_name.empty()) {
+                    model.input_tensor_name = tensor_name;
+                    model.input_dims = dims;
+                }
+                if (is_triplet_input && !selected_triplet_input) {
+                    model.input_tensor_name = tensor_name;
+                    model.input_dims = dims;
+                    selected_triplet_input = true;
+                } else if (!is_triplet_input) {
+                    logstream << "tracknet_ball: auxiliary input tensor ignored for "
+                              << model.engine_path << ": " << tensor_name;
+                }
+            } else {
+                OutputTensor ot;
+                ot.name = tensor_name;
+                ot.dims = dims;
+                ot.dtype = dt;
+                ot.tensor_index = (size_t)i;
+                if (dt == nvinfer1::DataType::kFLOAT || dt == nvinfer1::DataType::kHALF) {
+                    ot.host_output.resize(vol);
+                    if (dt == nvinfer1::DataType::kHALF) {
+                        ot.host_output_half.resize(vol);
+                    }
+                } else if (dt == nvinfer1::DataType::kINT32) {
+                    ot.host_output.resize(vol);
+                    ot.host_output_i32.resize(vol);
+                } else if (dt == nvinfer1::DataType::kINT64) {
+                    ot.host_output.resize(vol);
+                    ot.host_output_i64.resize(vol);
+                }
+                model.outputs.push_back(std::move(ot));
+            }
+        }
+
+        if (model.input_tensor_name.empty() || model.outputs.empty()) {
+            logstream << "tracknet_ball: failed to identify input/output bindings for " << model.engine_path;
+            return false;
+        }
+        if (!setInputGeometryFromDims(model, kExpectedChannels) || model.input_h <= 0 || model.input_w <= 0) {
+            logstream << "tracknet_ball: expected CHW or NCHW input tensor with 9 channels for "
+                      << model.engine_path << " (engine inputs: " << input_count << ")";
+            return false;
+        }
+
+        for (const OutputTensor& ot : model.outputs) {
+            if (!(ot.dtype == nvinfer1::DataType::kFLOAT ||
+                  ot.dtype == nvinfer1::DataType::kHALF ||
+                  ot.dtype == nvinfer1::DataType::kINT32 ||
+                  ot.dtype == nvinfer1::DataType::kINT64)) {
+                logstream << "tracknet_ball: output datatype must be float/half/int32/int64 for "
+                          << model.engine_path << " tensor " << ot.name;
+                return false;
+            }
+        }
+
+        model.input_dtype = model.trt_engine->getTensorDataType(model.input_tensor_name.c_str());
+        if (!(model.input_dtype == nvinfer1::DataType::kFLOAT || model.input_dtype == nvinfer1::DataType::kHALF)) {
+            logstream << "tracknet_ball: input datatype must be float/half for " << model.engine_path;
+            return false;
+        }
+
+        for (size_t i = 0; i < model.io_tensor_names.size(); ++i) {
+            if (!model.trt_ctx->setTensorAddress(
+                    model.io_tensor_names[i].c_str(), reinterpret_cast<void*>(model.tensor_ptrs[i]))) {
+                logstream << "tracknet_ball: setTensorAddress failed for " << model.io_tensor_names[i]
+                          << " in " << model.engine_path;
+                return false;
+            }
+        }
+        return true;
     }
 
     bool ensureTracknetInitialized(const av::VideoFrame& frm) {
@@ -258,7 +582,7 @@ protected:
         if (!loadTracknetPreprocessModule()) return false;
 
         ModelRunner& model = models_[0];
-        if (!parseEngine(model) || !allocateBindings(model) ||
+        if (!parseEngine(model) || !allocateTracknetBindings(model) ||
             !ensureCompatibleInput(model, 0) || !configureTracknetPreprocess(model) ||
             !validateOutputContract(model)) {
             cleanupModel(model);
@@ -269,29 +593,96 @@ protected:
         return true;
     }
 
+    struct SrsCandidate {
+        float x = 0.0f;
+        float y = 0.0f;
+        float score = 0.0f;
+    };
+
+    bool getHeatmapShape(const OutputTensor& ot, int& channels, int& height, int& width) const {
+        channels = 0;
+        height = 0;
+        width = 0;
+        if (ot.dims.nbDims == 4 && ot.dims.d[0] == 1) {
+            channels = ot.dims.d[1];
+            height = ot.dims.d[2];
+            width = ot.dims.d[3];
+            return channels > 0 && height > 0 && width > 0;
+        }
+        if (ot.dims.nbDims == 3) {
+            channels = ot.dims.d[0];
+            height = ot.dims.d[1];
+            width = ot.dims.d[2];
+            return channels > 0 && height > 0 && width > 0;
+        }
+        return false;
+    }
+
     bool validateOutputContract(ModelRunner& model) {
-        if (model.input_c != 9 || model.input_w <= 0 || model.input_h <= 0) {
+        if (inputChannels(model.input_dims) != 9 || model.input_w <= 0 || model.input_h <= 0) {
             logstream << "tracknet_ball: engine must have NCHW input with 9 channels";
             return false;
         }
 
-        for (size_t i = 0; i < model.outputs.size(); ++i) {
-            const OutputTensor& ot = model.outputs[i];
-            if (volume(ot.dims) >= 6) {
-                output_tensor_index_ = (int)i;
-                output_contract_validated_ = true;
-                if (debug_log_metadata_) {
-                    logstream << "tracknet_ball: output tensor=" << ot.name
-                              << " dims=" << ot.dims.nbDims
-                              << " volume=" << volume(ot.dims)
-                              << " input=" << model.input_w << "x" << model.input_h;
+        output_tensor_index_ = -1;
+        srs_heatmap_tensor_index_ = -1;
+        if (emitsDetectionMetadata(output_mode_)) {
+            for (size_t i = 0; i < model.outputs.size(); ++i) {
+                const OutputTensor& ot = model.outputs[i];
+                if (volume(ot.dims) >= 6) {
+                    output_tensor_index_ = (int)i;
+                    if (debug_log_metadata_) {
+                        logstream << "tracknet_ball: detection output tensor=" << ot.name
+                                  << " dims=" << ot.dims.nbDims
+                                  << " volume=" << volume(ot.dims)
+                                  << " input=" << model.input_w << "x" << model.input_h;
+                    }
+                    break;
                 }
-                return true;
+            }
+
+            if (output_tensor_index_ < 0) {
+                logstream << "tracknet_ball: failed to find output tensor with [x1,y1,x2,y2,score,visible]";
+                return false;
             }
         }
 
-        logstream << "tracknet_ball: failed to find output tensor with [x1,y1,x2,y2,score,visible]";
-        return false;
+        if (emitsSrsBallMetadata(output_mode_)) {
+            for (size_t i = 0; i < model.outputs.size(); ++i) {
+                int channels = 0;
+                int heatmap_h = 0;
+                int heatmap_w = 0;
+                if (getHeatmapShape(model.outputs[i], channels, heatmap_h, heatmap_w) &&
+                    channels > srs_channel_) {
+                    srs_heatmap_tensor_index_ = (int)i;
+                    if (debug_log_metadata_) {
+                        logstream << "tracknet_ball: SRS heatmap output tensor=" << model.outputs[i].name
+                                  << " channels=" << channels
+                                  << " size=" << heatmap_w << "x" << heatmap_h
+                                  << " dtype=" << dtypeName(model.outputs[i].dtype);
+                    }
+                    break;
+                }
+            }
+
+            if (srs_heatmap_tensor_index_ < 0) {
+                logstream << "tracknet_ball: failed to find SRS heatmap output tensor with channel "
+                          << srs_channel_ << " (expected CHW or NCHW logits)";
+                return false;
+            }
+        }
+
+        if (debug_log_metadata_ && emitsRawMetadata(output_mode_)) {
+            for (const OutputTensor& ot : model.outputs) {
+                logstream << "tracknet_ball: raw output tensor=" << ot.name
+                          << " dims=" << ot.dims.nbDims
+                          << " volume=" << volume(ot.dims)
+                          << " dtype=" << dtypeName(ot.dtype);
+            }
+        }
+
+        output_contract_validated_ = true;
+        return true;
     }
 
     bool runTripletPreprocess(const av::VideoFrame& f0,
@@ -351,27 +742,244 @@ protected:
     }
 
     bool runTripletInference(const av::VideoFrame& f0,
-                             av::VideoFrame& center,
+                             const av::VideoFrame& f1,
+                             av::VideoFrame& output_frame,
                              const av::VideoFrame& f2) {
-        if (!output_contract_validated_ || output_tensor_index_ < 0) return false;
+        if (!output_contract_validated_) return false;
 
         ++infer_counter_;
         ModelRunner& model = models_[0];
-        if (!runTripletPreprocess(f0, center, f2, model)) return false;
+        if (!runTripletPreprocess(f0, f1, f2, model)) return false;
         // Keep TensorRT enqueue capture/replay behavior from the shared base.
         if (!runInference(model)) return false;
         if (!syncModel(model)) return false;
 
-        const int metadata_w = output_model_width_ > 0 ? output_model_width_ : center.width();
-        const int metadata_h = output_model_height_ > 0 ? output_model_height_ : center.height();
-        const std::string md = buildDetectionMetadata(model, metadata_w, metadata_h);
-        av_dict_set(&center.raw()->metadata, metadata_key_detection_.c_str(), md.c_str(), 0);
+        const int metadata_w = output_model_width_ > 0 ? output_model_width_ : output_frame.width();
+        const int metadata_h = output_model_height_ > 0 ? output_model_height_ : output_frame.height();
+        if (emitsDetectionMetadata(output_mode_)) {
+            const std::string md = buildDetectionMetadata(model, metadata_w, metadata_h);
+            av_dict_set(&output_frame.raw()->metadata, metadata_key_detection_.c_str(), md.c_str(), 0);
 
-        if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
-            (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            logstream << "tracknet_ball: frame=" << frame_counter_ << " " << md;
+            if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
+                (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "tracknet_ball: frame=" << frame_counter_ << " " << md;
+            }
+        }
+
+        if (emitsRawMetadata(output_mode_)) {
+            const std::string raw_md = buildRawMetadata(model, output_frame.width(), output_frame.height());
+            av_dict_set(&output_frame.raw()->metadata, metadata_key_raw_.c_str(), raw_md.c_str(), 0);
+
+            if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
+                (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "tracknet_ball: frame=" << frame_counter_
+                          << " raw_metadata_key=" << metadata_key_raw_
+                          << " raw_metadata_bytes=" << raw_md.size()
+                          << " outputs=" << model.outputs.size();
+            }
+        }
+        if (emitsSrsBallMetadata(output_mode_)) {
+            const std::string srs_md = buildSrsBallMetadata(model, output_frame.width(), output_frame.height());
+            av_dict_set(&output_frame.raw()->metadata, metadata_key_srs_ball_.c_str(), srs_md.c_str(), 0);
+
+            if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
+                (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
+                logstream << "tracknet_ball: frame=" << frame_counter_
+                          << " srs_metadata_key=" << metadata_key_srs_ball_
+                          << " " << srs_md;
+            }
         }
         return true;
+    }
+
+    std::string buildRawMetadata(const ModelRunner& model, int source_w, int source_h) {
+        Parameters j;
+        j["schema"] = "tracknet_raw_outputs_v1";
+        j["coord_space"] = "tensor";
+        j["source_width"] = source_w;
+        j["source_height"] = source_h;
+
+        Parameters input;
+        input["name"] = model.input_tensor_name;
+        input["dtype"] = dtypeName(model.input_dtype);
+        input["dims"] = dimsToJson(model.input_dims);
+        input["width"] = model.input_w;
+        input["height"] = model.input_h;
+        input["channels"] = inputChannels(model.input_dims);
+        j["input"] = input;
+
+        j["models"] = Parameters::array();
+        Parameters model_item;
+        model_item["model_index"] = 0;
+        model_item["engine"] = model.engine_path;
+        model_item["engine_name"] = model.engine_name;
+        j["models"].push_back(model_item);
+
+        size_t emitted_elements = 0;
+        size_t nonfinite_elements = 0;
+        size_t total_elements = 0;
+        j["outputs"] = Parameters::array();
+        for (const OutputTensor& ot : model.outputs) {
+            const size_t tensor_elements = ot.host_output.size();
+            total_elements += tensor_elements;
+
+            Parameters item;
+            item["name"] = ot.name;
+            item["dtype"] = dtypeName(ot.dtype);
+            item["dims"] = dimsToJson(ot.dims);
+            item["size"] = tensorElementsToJsonSize(tensor_elements);
+            item["values"] = tensorValuesToJson(
+                ot.host_output, raw_output_max_elements_, &emitted_elements, &nonfinite_elements);
+            if (raw_output_max_elements_ > 0 && tensor_elements > (size_t)raw_output_max_elements_) {
+                item["truncated"] = true;
+                item["emitted_size"] = raw_output_max_elements_;
+            }
+            j["outputs"].push_back(item);
+        }
+        j["output_count"] = model.outputs.size();
+        j["total_elements"] = tensorElementsToJsonSize(total_elements);
+        j["emitted_elements"] = tensorElementsToJsonSize(emitted_elements);
+        if (nonfinite_elements > 0) {
+            j["nonfinite_elements"] = tensorElementsToJsonSize(nonfinite_elements);
+            j["nonfinite_encoding"] = "null";
+        }
+        return j.dump();
+    }
+
+    std::vector<SrsCandidate> extractSrsCandidates(const ModelRunner& model, int source_w, int source_h) const {
+        std::vector<SrsCandidate> candidates;
+        if (source_w <= 0 || source_h <= 0) {
+            return candidates;
+        }
+        if (srs_heatmap_tensor_index_ < 0 || (size_t)srs_heatmap_tensor_index_ >= model.outputs.size()) {
+            return candidates;
+        }
+
+        const OutputTensor& ot = model.outputs[(size_t)srs_heatmap_tensor_index_];
+        int channels = 0;
+        int heatmap_h = 0;
+        int heatmap_w = 0;
+        if (!getHeatmapShape(ot, channels, heatmap_h, heatmap_w) || srs_channel_ < 0 || srs_channel_ >= channels) {
+            return candidates;
+        }
+
+        const size_t plane_size = (size_t)heatmap_w * (size_t)heatmap_h;
+        const size_t offset = (size_t)srs_channel_ * plane_size;
+        if (offset + plane_size > ot.host_output.size() || plane_size == 0) {
+            return candidates;
+        }
+
+        std::vector<float> heatmap(plane_size);
+        std::vector<uint8_t> active(plane_size, 0);
+        bool any_active = false;
+        for (size_t i = 0; i < plane_size; ++i) {
+            const float v = sigmoidFloat(ot.host_output[offset + i]);
+            heatmap[i] = v;
+            if (v > srs_score_threshold_) {
+                active[i] = 1;
+                any_active = true;
+            }
+        }
+        if (!any_active) {
+            return candidates;
+        }
+
+        std::vector<uint8_t> visited(plane_size, 0);
+        std::vector<int> stack;
+        stack.reserve(256);
+        const float src_scale = (float)std::max(source_w, source_h);
+        const float inv_factor = src_scale / (float)heatmap_w;
+        const float src_cx = 0.5f * (float)source_w;
+        const float src_cy = 0.5f * (float)source_h;
+        const float hm_cx = 0.5f * (float)heatmap_w;
+        const float hm_cy = 0.5f * (float)heatmap_h;
+
+        for (int start_y = 0; start_y < heatmap_h; ++start_y) {
+            for (int start_x = 0; start_x < heatmap_w; ++start_x) {
+                const int start_idx = start_y * heatmap_w + start_x;
+                if (!active[(size_t)start_idx] || visited[(size_t)start_idx]) continue;
+
+                stack.clear();
+                stack.push_back(start_idx);
+                visited[(size_t)start_idx] = 1;
+
+                float sum_w = 0.0f;
+                float sum_x = 0.0f;
+                float sum_y = 0.0f;
+                int count = 0;
+
+                while (!stack.empty()) {
+                    const int idx = stack.back();
+                    stack.pop_back();
+                    const int y = idx / heatmap_w;
+                    const int x = idx - y * heatmap_w;
+                    const float w = heatmap[(size_t)idx];
+
+                    if (srs_use_hm_weight_) {
+                        sum_w += w;
+                        sum_x += (float)x * w;
+                        sum_y += (float)y * w;
+                    } else {
+                        sum_x += (float)x;
+                        sum_y += (float)y;
+                    }
+                    ++count;
+
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        const int ny = y + dy;
+                        if (ny < 0 || ny >= heatmap_h) continue;
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (dx == 0 && dy == 0) continue;
+                            const int nx = x + dx;
+                            if (nx < 0 || nx >= heatmap_w) continue;
+                            const int nidx = ny * heatmap_w + nx;
+                            if (!active[(size_t)nidx] || visited[(size_t)nidx]) continue;
+                            visited[(size_t)nidx] = 1;
+                            stack.push_back(nidx);
+                        }
+                    }
+                }
+
+                if (count <= 0) continue;
+                const float denom = srs_use_hm_weight_ ? sum_w : (float)count;
+                if (denom <= 0.0f || !std::isfinite(denom)) continue;
+                const float hm_x = sum_x / denom;
+                const float hm_y = sum_y / denom;
+                const float src_x = (hm_x - hm_cx) * inv_factor + src_cx;
+                const float src_y = (hm_y - hm_cy) * inv_factor + src_cy;
+                const float score = srs_use_hm_weight_ ? sum_w : (float)count;
+                candidates.push_back({src_x, src_y, score});
+            }
+        }
+        return candidates;
+    }
+
+    std::string buildSrsBallMetadata(const ModelRunner& model, int source_w, int source_h) {
+        Parameters j;
+        j["frame"] = infer_counter_ > 0 ? (int64_t)(infer_counter_ - 1) : 0;
+        j["bboxes"] = Parameters::array();
+
+        const std::vector<SrsCandidate> candidates = extractSrsCandidates(model, source_w, source_h);
+        if (candidates.empty() || source_w <= 0 || source_h <= 0) {
+            return j.dump();
+        }
+
+        const SrsCandidate* best = nullptr;
+        for (const SrsCandidate& candidate : candidates) {
+            if (!best || candidate.score > best->score) {
+                best = &candidate;
+            }
+        }
+        if (!best) {
+            return j.dump();
+        }
+
+        Parameters bbox;
+        bbox["x"] = best->x / (float)source_w;
+        bbox["y"] = best->y / (float)source_h;
+        bbox["score"] = best->score;
+        j["bboxes"].push_back(bbox);
+        return j.dump();
     }
 
     std::string buildDetectionMetadata(const ModelRunner& model, int metadata_w, int metadata_h) {
@@ -462,6 +1070,12 @@ protected:
         return label;
     }
 
+    static int64_t tensorElementsToJsonSize(size_t value) {
+        return value > (size_t)std::numeric_limits<int64_t>::max()
+            ? std::numeric_limits<int64_t>::max()
+            : (int64_t)value;
+    }
+
 public:
     static std::shared_ptr<TrackNetBall> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -474,17 +1088,51 @@ public:
 
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key_detection", r->metadata_key_detection_);
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key", r->metadata_key_detection_);
+        r->metadata_key_raw_ = jsonStringParam(params, "metadata_key_raw", r->metadata_key_raw_);
+        r->metadata_key_raw_ = jsonStringParam(params, "raw_metadata_key", r->metadata_key_raw_);
+        r->metadata_key_srs_ball_ = jsonStringParam(params, "metadata_key_srs", r->metadata_key_srs_ball_);
+        r->metadata_key_srs_ball_ = jsonStringParam(params, "srs_metadata_key", r->metadata_key_srs_ball_);
+        r->output_mode_ = parseOutputModeString(jsonStringParam(params, "output_mode", "detection"));
+        const std::string default_alignment = emitsSrsBallMetadata(r->output_mode_) ? "latest" : "center";
+        r->triplet_alignment_ = parseTripletAlignmentString(
+            jsonStringParam(params, "triplet_alignment", default_alignment));
+        const std::string default_preprocess = emitsSrsBallMetadata(r->output_mode_) ? "srs_affine" : "resize";
+        r->preprocess_mode_ = parsePreprocessModeString(
+            jsonStringParam(params, "preprocess_mode", default_preprocess));
+        if (r->output_mode_ == TrackNetOutputMode::Raw && params.count("metadata_key") &&
+            !params.count("metadata_key_raw") && !params.count("raw_metadata_key")) {
+            r->metadata_key_raw_ = params["metadata_key"].get<std::string>();
+        }
+        if (emitsSrsBallMetadata(r->output_mode_) && params.count("metadata_key") &&
+            !params.count("metadata_key_srs") && !params.count("srs_metadata_key")) {
+            r->metadata_key_srs_ball_ = params["metadata_key"].get<std::string>();
+        }
         r->target_label_ = parseLabel(params);
         r->conf_thresh_ = jsonFloatParam(params, "conf_thresh", r->conf_thresh_);
         r->visible_thresh_ = jsonFloatParam(params, "visible_thresh", r->visible_thresh_);
+        r->srs_score_threshold_ = jsonFloatParam(params, "srs_score_threshold", r->srs_score_threshold_);
         r->emit_invisible_ = jsonBoolParam(params, "emit_invisible", r->emit_invisible_);
+        r->srs_use_hm_weight_ = jsonBoolParam(params, "srs_use_hm_weight", r->srs_use_hm_weight_);
         r->use_cuda_graph_ = jsonBoolParam(params, "use_cuda_graph", r->use_cuda_graph_);
         r->debug_log_metadata_ = jsonBoolParam(params, "debug_log_metadata", r->debug_log_metadata_);
         r->debug_log_every_n_ = jsonIntParam(params, "debug_log_every_n", r->debug_log_every_n_);
+        r->raw_output_max_elements_ = jsonIntParam(params, "raw_output_max_elements", r->raw_output_max_elements_);
+        r->raw_output_max_elements_ = jsonIntParam(
+            params, "raw_output_max_elements_per_tensor", r->raw_output_max_elements_);
+        r->srs_channel_ = jsonIntParam(params, "srs_channel", r->srs_channel_);
         r->output_model_width_ = jsonIntParam(params, "output_model_width", r->output_model_width_);
         r->output_model_height_ = jsonIntParam(params, "output_model_height", r->output_model_height_);
         if ((r->output_model_width_ < 0) || (r->output_model_height_ < 0)) {
             throw Error("tracknet_ball: output_model_width/output_model_height must be >= 0");
+        }
+        if (r->raw_output_max_elements_ < 0) {
+            throw Error("tracknet_ball: raw_output_max_elements must be >= 0");
+        }
+        if (r->srs_channel_ < 0) {
+            throw Error("tracknet_ball: srs_channel must be >= 0");
+        }
+        if (r->srs_score_threshold_ < 0.0f || r->srs_score_threshold_ > 1.0f) {
+            throw Error("tracknet_ball: srs_score_threshold must be between 0 and 1");
         }
 
         ModelRunner model;
