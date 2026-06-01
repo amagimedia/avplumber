@@ -68,6 +68,7 @@ grep -q ' overlay_many_cuda ' <<<"${ffmpeg_filters}" || die "patched FFmpeg filt
 
 required_models=(
     "${MODEL_ROOT}/ball_960x544.plan"
+    "${MODEL_ROOT}/tracknet-ball/tracknetv2_basketball_float_512x288.plan"
     "${MODEL_ROOT}/court-segmentation_960x544.plan"
     "${MODEL_ROOT}/basketball-players-full_960x544.plan"
     "${MODEL_ROOT}/player-seg/player-seg_960x544.plan"
