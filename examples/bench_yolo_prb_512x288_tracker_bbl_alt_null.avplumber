@@ -1,0 +1,16 @@
+queue.plan_capacity * 12
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input_rec", "url": "/home/fedora/bbl_alt.mp4", "dst": "in_v", "group": "bench", "name": "Input_BBL_Alt_VOD", "initial_timeout": 20, "timeout": 10, "loop": false, "stop_ts": "00:01:00.000", "on_error": "panic" }
+node.add { "type": "demux", "src": "in_v", "wait_for_keyframe": false, "routing": { "?v:0": "v_pkt" }, "group": "bench" }
+node.add { "type": "dec_video", "src": "v_pkt", "dst": "v_dec_cuda", "group": "bench", "name": "Video_Dec", "optional": true, "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+node.add { "type": "force_fps", "name": "Force_25fps", "fps": "25/1", "group": "bench", "src": "v_dec_cuda", "dst": "v_dec_25fps" }
+
+node.add { "type": "filter_video", "graph": "scale_cuda=w=512:h=288", "src": "v_dec_25fps", "dst": "v_yolo_512", "group": "bench", "name": "Scale_Yolo_512x288", "dst_width": 512, "dst_height": 288, "dst_pixel_format": "cuda", "hwaccel": "@gpu" }
+node.add { "type": "cuda_infer_yolo", "src": "v_yolo_512", "dst": "v_yolo_raw", "group": "bench", "name": "Yolo_Player_Referee_Ball_512x288", "input_format": "RGB", "conf_thresh": 0.25, "max_det": 80, "infer_every_n": 1, "metadata_key_detection": "yolo_player_referee_ball", "debug_log_metadata": true, "debug_log_every_n": 1, "mask_gpu_every_n": 0, "mask_cpu_every_n": 0, "models": [{ "engine": "/home/fedora/tensorrt/amagi_player_referee_ball/player_referee_ball_yolo_512x288_fp16_o3.plan", "task_type": "detection", "class_names": ["player", "referee", "ball"], "output_box_format": "end2end_xyxy" }] }
+node.add { "type": "ball_tracker", "src": "v_yolo_raw", "dst": "v_yolo_tracked", "group": "bench", "metadata_key": "yolo_player_referee_ball", "target_label": "ball", "min_conf": 0.25, "coast": true, "coast_max": 6, "coast_edge_jump_veto_enabled": true, "coast_edge_zone_rel": 0.14, "coast_edge_jump_rel": 0.18, "coast_edge_confirm_frames": 9, "debug_log_every_n": 0, "dump_file": "/home/fedora/avplumber/artifacts/yolo_512x288_tracker_analysis.csv" }
+
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_yolo_tracked", "group": "bench", "name": "Bench_Sink", "auto_restart": "exit" }
+
+group.start bench
