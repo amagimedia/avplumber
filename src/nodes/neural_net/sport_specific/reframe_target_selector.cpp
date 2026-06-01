@@ -31,7 +31,12 @@ class ReframeTargetSelector : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
     double min_probable_conf_ = 0.02;
     double scene_diff_mean_abs_reset_ = 60.0;
     double hold_conf_decay_ = 0.92;
+    double ball_target_weight_ = 0.75;
+    double handler_target_weight_ = 1.20;
+    double probable_target_weight_ = 0.80;
+    double min_context_score_ = 0.02;
     int hold_last_target_frames_ = 12;
+    int max_context_targets_ = 1;
     bool include_context_with_primary_ = true;
     bool require_wide_shot_ = true;
     int debug_log_every_n_ = 0;
@@ -47,6 +52,13 @@ class ReframeTargetSelector : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
     std::vector<DetectionBox> held_targets_;
     std::vector<std::string> held_sources_;
     int held_age_ = 0;
+
+    struct TargetCandidate {
+        DetectionBox box;
+        std::string source;
+        double source_weight = 1.0;
+        double weighted_score = 0.0;
+    };
 
     static bool bestByConf(const DetectionBox& a, const DetectionBox& b) {
         if (a.conf != b.conf) return a.conf < b.conf;
@@ -78,6 +90,77 @@ class ReframeTargetSelector : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
         return true;
     }
 
+    TargetCandidate makeCandidate(const DetectionBox& box,
+                                  const std::string& source,
+                                  double source_weight) const {
+        TargetCandidate c;
+        c.box = box;
+        c.source = source;
+        c.source_weight = std::max(0.0, source_weight);
+        c.weighted_score = box.conf * c.source_weight;
+        return c;
+    }
+
+    static bool betterCandidate(const TargetCandidate& a, const TargetCandidate& b) {
+        if (a.weighted_score != b.weighted_score) return a.weighted_score > b.weighted_score;
+        if (a.box.conf != b.box.conf) return a.box.conf > b.box.conf;
+        return a.source < b.source;
+    }
+
+    static bool sameTrackOrOverlap(const DetectionBox& a, const DetectionBox& b) {
+        if (a.has_track_id && b.has_track_id && a.track_id == b.track_id && a.label == b.label) return true;
+        const double ix1 = std::max(a.x1, b.x1);
+        const double iy1 = std::max(a.y1, b.y1);
+        const double ix2 = std::min(a.x2, b.x2);
+        const double iy2 = std::min(a.y2, b.y2);
+        const double iw = std::max(0.0, ix2 - ix1);
+        const double ih = std::max(0.0, iy2 - iy1);
+        const double inter = iw * ih;
+        if (!(inter > 0.0)) return false;
+        const double aa = std::max(0.0, a.x2 - a.x1) * std::max(0.0, a.y2 - a.y1);
+        const double ba = std::max(0.0, b.x2 - b.x1) * std::max(0.0, b.y2 - b.y1);
+        const double uni = aa + ba - inter;
+        return uni > 0.0 && inter / uni >= 0.80;
+    }
+
+    std::vector<TargetCandidate> selectWeightedTargets(const std::vector<TargetCandidate>& candidates,
+                                                       std::string& selected_source) const {
+        std::vector<TargetCandidate> sorted;
+        for (const auto& c : candidates) {
+            if (c.weighted_score > 0.0 && std::isfinite(c.weighted_score)) sorted.push_back(c);
+        }
+        std::sort(sorted.begin(), sorted.end(), betterCandidate);
+        if (sorted.empty()) return {};
+
+        std::vector<TargetCandidate> out;
+        out.push_back(sorted[0]);
+        selected_source = sorted[0].source;
+
+        if (!include_context_with_primary_ || max_context_targets_ <= 0) return out;
+        for (size_t i = 1; i < sorted.size() && (int)out.size() - 1 < max_context_targets_; ++i) {
+            if (sorted[i].weighted_score < min_context_score_) continue;
+            bool duplicate = false;
+            for (const auto& selected : out) {
+                if (sameTrackOrOverlap(selected.box, sorted[i].box)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) out.push_back(sorted[i]);
+        }
+        return out;
+    }
+
+    double sourceWeight(const std::string& source) const {
+        std::string src = source;
+        const std::string held_prefix = "held_";
+        if (src.rfind(held_prefix, 0) == 0) src = src.substr(held_prefix.size());
+        if (src == "ball") return ball_target_weight_;
+        if (src == "confirmed_handler") return handler_target_weight_;
+        if (src == "probable_handler") return probable_target_weight_;
+        return 1.0;
+    }
+
     void writeOutput(av::VideoFrame& frm,
                      double model_w,
                      double model_h,
@@ -86,10 +169,13 @@ class ReframeTargetSelector : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
                      const std::vector<std::string>& detection_sources,
                      bool reset) {
         Parameters out = avp_sport_reframe::emptyYoloMetadata(model_w, model_h);
-        out["strategy"] = "priority_with_context_and_hold";
+        out["strategy"] = "weighted_source_with_context_and_hold";
         out["selected_source"] = selected_source;
         out["target_count"] = selected.size();
         out["held_age_frames"] = held_age_;
+        out["ball_target_weight"] = ball_target_weight_;
+        out["handler_target_weight"] = handler_target_weight_;
+        out["probable_target_weight"] = probable_target_weight_;
         out["reset"] = reset;
         for (size_t i = 0; i < selected.size(); ++i) {
             const DetectionBox& d = selected[i];
@@ -102,6 +188,12 @@ class ReframeTargetSelector : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
             if (d.model_index >= 0) det["model_index"] = d.model_index;
             det["source"] = i < detection_sources.size() ? detection_sources[i] : selected_source;
             det["target_role"] = i == 0 ? "primary" : "context";
+            if (i < detection_sources.size()) {
+                const std::string& src = detection_sources[i];
+                const double weight = sourceWeight(src);
+                det["source_weight"] = weight;
+                det["weighted_score"] = d.conf * weight;
+            }
             out["detections"].push_back(det);
         }
         av_dict_set(&frm.raw()->metadata, output_metadata_key_.c_str(), out.dump().c_str(), 0);
@@ -195,38 +287,31 @@ public:
         if (reset) {
             clearHeldTargets();
             ++stat_none_;
-        } else if (have_ball) {
-            selected.push_back(ball);
-            sources.push_back("ball");
-            source = "ball";
-            ++stat_ball_;
-            if (include_context_with_primary_ && have_handler) {
-                selected.push_back(handler);
-                sources.push_back("confirmed_handler_context");
-                ++stat_context_;
-            } else if (include_context_with_primary_ && have_probable) {
-                selected.push_back(probable);
-                sources.push_back("probable_handler_context");
-                ++stat_context_;
-            }
-            rememberTargets(selected, sources);
-        } else if (have_handler) {
-            selected.push_back(handler);
-            sources.push_back("confirmed_handler");
-            source = "confirmed_handler";
-            ++stat_handler_;
-            rememberTargets(selected, sources);
-        } else if (have_probable) {
-            selected.push_back(probable);
-            sources.push_back("probable_handler");
-            source = "probable_handler";
-            ++stat_probable_;
-            rememberTargets(selected, sources);
-        } else if (heldTargets(selected, sources)) {
-            source = "held_last_target";
-            ++stat_held_;
         } else {
-            ++stat_none_;
+            std::vector<TargetCandidate> candidates;
+            if (have_ball) candidates.push_back(makeCandidate(ball, "ball", ball_target_weight_));
+            if (have_handler) candidates.push_back(makeCandidate(handler, "confirmed_handler", handler_target_weight_));
+            if (have_probable) candidates.push_back(makeCandidate(probable, "probable_handler", probable_target_weight_));
+
+            std::vector<TargetCandidate> weighted = selectWeightedTargets(candidates, source);
+            for (const auto& c : weighted) {
+                selected.push_back(c.box);
+                sources.push_back(c.source);
+            }
+            if (!selected.empty()) {
+                if (source == "ball") ++stat_ball_;
+                else if (source == "confirmed_handler") ++stat_handler_;
+                else if (source == "probable_handler") ++stat_probable_;
+                if (selected.size() > 1) stat_context_ += selected.size() - 1;
+                rememberTargets(selected, sources);
+            } else {
+                if (heldTargets(selected, sources)) {
+                    source = "held_last_target";
+                    ++stat_held_;
+                } else {
+                    ++stat_none_;
+                }
+            }
         }
 
         writeOutput(frm, model_w, model_h, selected, source, sources, reset);
@@ -239,7 +324,10 @@ public:
                       << " held_age=" << held_age_
                       << " ball=" << (have_ball ? 1 : 0)
                       << " handler=" << (have_handler ? 1 : 0)
-                      << " probable=" << (have_probable ? 1 : 0);
+                      << " probable=" << (have_probable ? 1 : 0)
+                      << " ball_score=" << (have_ball ? ball.conf * ball_target_weight_ : 0.0)
+                      << " handler_score=" << (have_handler ? handler.conf * handler_target_weight_ : 0.0)
+                      << " probable_score=" << (have_probable ? probable.conf * probable_target_weight_ : 0.0);
         }
 
         this->sink_->put(frm);
@@ -265,12 +353,22 @@ public:
         if (params.count("min_probable_conf")) r->min_probable_conf_ = params["min_probable_conf"].get<double>();
         if (params.count("scene_diff_mean_abs_reset")) r->scene_diff_mean_abs_reset_ = params["scene_diff_mean_abs_reset"].get<double>();
         if (params.count("hold_conf_decay")) r->hold_conf_decay_ = params["hold_conf_decay"].get<double>();
+        if (params.count("ball_target_weight")) r->ball_target_weight_ = params["ball_target_weight"].get<double>();
+        if (params.count("handler_target_weight")) r->handler_target_weight_ = params["handler_target_weight"].get<double>();
+        if (params.count("probable_target_weight")) r->probable_target_weight_ = params["probable_target_weight"].get<double>();
+        if (params.count("min_context_score")) r->min_context_score_ = params["min_context_score"].get<double>();
         if (params.count("hold_last_target_frames")) r->hold_last_target_frames_ = params["hold_last_target_frames"].get<int>();
+        if (params.count("max_context_targets")) r->max_context_targets_ = params["max_context_targets"].get<int>();
         if (params.count("include_context_with_primary")) r->include_context_with_primary_ = params["include_context_with_primary"].get<bool>();
         if (params.count("require_wide_shot")) r->require_wide_shot_ = params["require_wide_shot"].get<bool>();
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
         r->hold_conf_decay_ = avp_sport_reframe::clampDouble(r->hold_conf_decay_, 0.0, 1.0);
+        r->ball_target_weight_ = std::max(0.0, r->ball_target_weight_);
+        r->handler_target_weight_ = std::max(0.0, r->handler_target_weight_);
+        r->probable_target_weight_ = std::max(0.0, r->probable_target_weight_);
+        r->min_context_score_ = std::max(0.0, r->min_context_score_);
         r->hold_last_target_frames_ = std::max(0, r->hold_last_target_frames_);
+        r->max_context_targets_ = std::max(0, r->max_context_targets_);
         return r;
     }
 };
