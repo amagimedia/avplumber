@@ -21,25 +21,68 @@ from pyplumber.node import PythonNode
 
 class SceneDetector:
     """Base class for scene detectors. Subclasses implement specific algorithms."""
-    
-    def __init__(self, threshold: float, min_scene_len: int = 15, hist_bins: int = 256):
+
+    def __init__(self, threshold: float, min_scene_len: int = 15, hist_bins: int = 256,
+                 confirm_frames: int = 3):
         self.threshold = threshold
         self.min_scene_len = min_scene_len
         self.hist_bins = hist_bins
+        self.confirm_frames = confirm_frames
         self._frames_since_cut = 0
         self._last_state = None
-        
+        self._streak = 0  # consecutive over-threshold frames
+
     def reset(self):
         """Reset detector state."""
         self._frames_since_cut = 0
         self._last_state = None
-    
+        self._streak = 0
+
+    # Return values from _check_cut:
+    #   "no_cut"   — normal frame, forward immediately
+    #   "pending"  — streak started/continuing, buffer this frame
+    #   "confirm"  — streak complete, the cut is at the FIRST buffered frame
+    #   "abort"    — streak broke, flush buffered frames as normal (no cut)
+    CUT_NO     = "no_cut"
+    CUT_PEND   = "pending"
+    CUT_CONF   = "confirm"
+    CUT_ABORT  = "abort"
+
+    def _check_cut(self, over_threshold: bool) -> str:
+        """Apply confirm_frames debounce. Returns one of the CUT_* constants.
+
+        State frozen during streak so subsequent frames compare against the
+        pre-cut reference until confirmation or abort.
+        """
+        self._frames_since_cut += 1
+        if over_threshold and self._frames_since_cut > self.min_scene_len:
+            self._streak += 1
+            self._freeze_state = True
+            if self._streak >= self.confirm_frames:
+                self._streak = 0
+                self._frames_since_cut = 0
+                self._freeze_state = False
+                return self.CUT_CONF
+            return self.CUT_PEND
+        else:
+            if self._streak > 0:
+                # Was in a streak, now it broke
+                self._streak = 0
+                self._freeze_state = False
+                return self.CUT_ABORT
+            self._freeze_state = False
+            return self.CUT_NO
+
+    @property
+    def _should_update_state(self) -> bool:
+        return not getattr(self, '_freeze_state', False)
+
     def process_frame(self, y_plane_cuda) -> bool:
         """Process a frame and return True if scene cut detected.
-        
+
         Args:
             y_plane_cuda: cupy array of Y plane (luma) from NV12 CUDA frame
-            
+
         Returns:
             True if scene cut detected, False otherwise
         """
@@ -56,22 +99,16 @@ class HistogramDetector(SceneDetector):
     correlation between consecutive frames drops below threshold.
     """
     
-    def process_frame(self, y_plane_cuda, uv_plane_cuda=None) -> bool:
+    def process_frame(self, y_plane_cuda, uv_plane_cuda=None) -> str:
         hist = self._compute_histogram(y_plane_cuda)
-        
+        over = False
         if self._last_state is not None:
             corr = self._histogram_correlation(self._last_state, hist)
-            
-            # Low correlation = scene change
-            if corr < self.threshold and self._frames_since_cut >= self.min_scene_len:
-                self._last_state = hist
-                self._frames_since_cut = 0
-                return True
-            else:
-                self._frames_since_cut += 1
-        
-        self._last_state = hist
-        return False
+            over = corr < self.threshold
+        result = self._check_cut(over)
+        if self._should_update_state:
+            self._last_state = hist
+        return result
     
     def _compute_histogram(self, y_plane):
         """Compute normalized histogram on GPU."""
@@ -117,9 +154,9 @@ class ContentDetector(SceneDetector):
     def __init__(self, threshold: float = 27.0, min_scene_len: int = 15,
                  hist_bins: int = 256,
                  weights: tuple = (1.0, 1.0, 1.0),
-                 luma_only: bool = False):
+                 luma_only: bool = False, confirm_frames: int = 3):
         super().__init__(threshold=threshold, min_scene_len=min_scene_len,
-                         hist_bins=hist_bins)
+                         hist_bins=hist_bins, confirm_frames=confirm_frames)
         self._weights = weights
         self._luma_only = luma_only
         # _last_state holds per-channel histograms: list of 3 cupy arrays
@@ -128,16 +165,14 @@ class ContentDetector(SceneDetector):
     def process_frame(self, y_plane_cuda, uv_plane_cuda=None) -> bool:
         hists = self._compute_hsv_histograms(y_plane_cuda, uv_plane_cuda)
 
-        if self._last_state is not None and self._frames_since_cut >= self.min_scene_len:
+        over = False
+        if self._last_state is not None:
             score = self._content_score(self._last_state, hists)
+            over = score >= self.threshold
+        result = self._check_cut(over)
+        if self._should_update_state:
             self._last_state = hists
-            if score >= self.threshold:
-                self._frames_since_cut = 0
-                return True
-
-        self._frames_since_cut += 1
-        self._last_state = hists
-        return False
+        return result
 
     def _compute_hsv_histograms(self, y_plane, uv_plane):
         """Convert NV12 → HSV on GPU and return per-channel histograms."""
@@ -242,16 +277,15 @@ class AdaptiveDetector(ContentDetector):
     def __init__(self, adaptive_threshold: float = 3.0, min_scene_len: int = 15,
                  window_width: int = 2, min_content_val: float = 15.0,
                  hist_bins: int = 256, weights: tuple = (1.0, 1.0, 1.0),
-                 luma_only: bool = False):
-        # Pass a sky-high threshold so ContentDetector never fires on its own;
-        # we do the cut decision ourselves below.
+                 luma_only: bool = False, confirm_frames: int = 3):
         super().__init__(threshold=255.0, min_scene_len=0,
-                         hist_bins=hist_bins, weights=weights, luma_only=luma_only)
+                         hist_bins=hist_bins, weights=weights, luma_only=luma_only,
+                         confirm_frames=confirm_frames)
         self.adaptive_threshold = adaptive_threshold
         self.min_content_val = min_content_val
         self.window_width = window_width
-        self.min_scene_len = min_scene_len  # override parent's 0
-        self._score_buffer: list = []       # rolling window of raw content scores
+        self.min_scene_len = min_scene_len
+        self._score_buffer: list = []
         self._frame_no_global: int = 0
         self._last_cut_frame: int = 0
 
@@ -262,7 +296,6 @@ class AdaptiveDetector(ContentDetector):
             score = self._content_score(self._last_state, hists)
         else:
             score = 0.0
-        self._last_state = hists
 
         required = 1 + 2 * self.window_width
         self._score_buffer.append(score)
@@ -288,13 +321,15 @@ class AdaptiveDetector(ContentDetector):
         candidate_frame = self._frame_no_global - self.window_width - 1
         frames_since_cut = candidate_frame - self._last_cut_frame
 
-        if (adaptive_ratio >= self.adaptive_threshold
+        over = (adaptive_ratio >= self.adaptive_threshold
                 and target_score >= self.min_content_val
-                and frames_since_cut >= self.min_scene_len):
+                and frames_since_cut >= self.min_scene_len)
+        result = self._check_cut(over)
+        if self._should_update_state:
+            self._last_state = hists
+        if result == self.CUT_CONF:
             self._last_cut_frame = candidate_frame
-            return True
-
-        return False
+        return result
 
 
 class ThresholdDetector(SceneDetector):
@@ -314,28 +349,24 @@ class ThresholdDetector(SceneDetector):
     """
 
     def __init__(self, threshold: float = 12.0, min_scene_len: int = 15,
-                 hist_bins: int = 256, fade_bias: float = 0.0):
+                 hist_bins: int = 256, fade_bias: float = 0.0, confirm_frames: int = 3):
         super().__init__(threshold=threshold, min_scene_len=min_scene_len,
-                         hist_bins=hist_bins)
+                         hist_bins=hist_bins, confirm_frames=confirm_frames)
         self._fade_bias = fade_bias
         self._last_mean: Optional[float] = None
 
     def process_frame(self, y_plane_cuda, uv_plane_cuda=None) -> bool:
         mean_luma = float(cp.mean(y_plane_cuda))
         threshold = self.threshold + self._fade_bias
-        cut = False
-
-        if self._last_mean is not None and self._frames_since_cut >= self.min_scene_len:
+        over = False
+        if self._last_mean is not None:
             crossed_down = self._last_mean >= threshold > mean_luma
             crossed_up   = self._last_mean < threshold <= mean_luma
-            if crossed_down or crossed_up:
-                self._frames_since_cut = 0
-                self._last_mean = mean_luma
-                return True
-
-        self._frames_since_cut += 1
-        self._last_mean = mean_luma
-        return cut
+            over = crossed_down or crossed_up
+        result = self._check_cut(over)
+        if self._should_update_state:
+            self._last_mean = mean_luma
+        return result
 
 
 class CudaSceneDetectNode(PythonNode):
@@ -391,6 +422,7 @@ class CudaSceneDetectNode(PythonNode):
         luma_only = str(args.get("luma_only", "false")).lower() in ("1", "true", "yes")
         window_width = int(args.get("window_width", 2))
         min_content_val = float(args.get("min_content_val", 15.0))
+        confirm_frames = int(args.get("confirm_frames", 3))
         self._metadata_key = args.get("metadata_key", "")
         self._needs_uv = (detector_type in ("content", "adaptive") and not luma_only)
 
@@ -415,12 +447,14 @@ class CudaSceneDetectNode(PythonNode):
                 window_width=window_width,
                 min_content_val=min_content_val,
                 luma_only=luma_only,
+                confirm_frames=confirm_frames,
             )
         else:
             self._detector = detector_cls(
                 threshold=threshold,
                 min_scene_len=min_scene_len,
                 hist_bins=hist_bins,
+                confirm_frames=confirm_frames,
                 **extra
             )
         
@@ -429,13 +463,39 @@ class CudaSceneDetectNode(PythonNode):
         self._cuts: List[Tuple[int, float]] = []
         self._process_time_total = 0.0
         self._last_activity = time.monotonic()
+        self._pending_frames: list = []   # buffered frames during confirm streak
         
         thr_display = extra.get("adaptive_threshold", threshold)
         print(
             f"[CudaSceneDetect] initialized: type={detector_type}, "
             f"threshold={thr_display}, min_scene_len={min_scene_len}"
         )
+
+        # Warm up cupy JIT kernels now, during __init__, so the first real frame
+        # doesn't block for hundreds of ms inside process() and trigger a timeout.
+        if detector_type in ("content", "adaptive"):
+            self._warmup_cupy_hsv(hist_bins)
     
+    def _warmup_cupy_hsv(self, hist_bins: int):
+        """Trigger cupy JIT compilation for all HSV/histogram kernels during init."""
+        import numpy as np
+        try:
+            y  = cp.asarray(np.zeros((64, 64), dtype=np.uint8))
+            uv = cp.asarray(np.zeros((32, 64), dtype=np.uint8))
+            self._detector.process_frame(y, uv)
+            self._detector.reset() if hasattr(self._detector, 'reset') else None
+            # Reset any state left by the warmup
+            self._detector._last_state = None
+            self._detector._frames_since_cut = 0
+            if hasattr(self._detector, '_score_buffer'):
+                self._detector._score_buffer = []
+            if hasattr(self._detector, '_frame_no_global'):
+                self._detector._frame_no_global = 0
+                self._detector._last_cut_frame = 0
+            print("[CudaSceneDetect] cupy HSV kernels warmed up")
+        except Exception as e:
+            print(f"[CudaSceneDetect] warmup warning: {e}")
+
     def _nv12_cuda_to_luma_cupy(self, frame):
         """Extract Y plane from NV12 CUDA frame as cupy array."""
         height = int(frame.height)
@@ -530,33 +590,58 @@ class CudaSceneDetectNode(PythonNode):
         """Process one frame (called repeatedly by AVPlumber event loop)."""
         frame = self._src.tryGet(1000)
         if frame is None:
-            return  # No frame ready
-        
+            return
+
         self._last_activity = time.monotonic()
-        
         t0 = time.perf_counter()
-        
-        # Extract planes from NV12 CUDA frame
+
         y_plane = self._nv12_cuda_to_luma_cupy(frame)
         uv_plane = self._nv12_cuda_to_uv_cupy(frame) if self._needs_uv else None
+
+        result = self._detector.CUT_NO
         if y_plane is not None:
-            is_cut = self._detector.process_frame(y_plane, uv_plane)
-            
-            if is_cut:
-                seconds = self._frame_seconds(frame)
-                self._cuts.append((self._frame_no, seconds))
-                print(
-                    f"[CudaSceneDetect] scene change #{len(self._cuts)} "
-                    f"at frame {self._frame_no} ({seconds:.3f}s)"
-                )
-                sys.stdout.flush()
-        
+            result = self._detector.process_frame(y_plane, uv_plane)
+
         self._process_time_total += time.perf_counter() - t0
         self._frame_no += 1
-        
-        # Write metadata and forward
-        self._write_metadata(frame)
-        self._forward_if_configured(frame)
+
+        if result == self._detector.CUT_PEND:
+            # Hold this frame — streak is accumulating
+            self._pending_frames.append(frame)
+
+        elif result == self._detector.CUT_CONF:
+            # Cut confirmed: the cut happened at the FIRST pending frame
+            first = self._pending_frames[0] if self._pending_frames else frame
+            cut_frame_no = self._frame_no - len(self._pending_frames) - 1
+            seconds = self._frame_seconds(first)
+            self._cuts.append((cut_frame_no, seconds))
+            print(
+                f"[CudaSceneDetect] scene change #{len(self._cuts)} "
+                f"at frame {cut_frame_no} ({seconds:.3f}s)"
+            )
+            sys.stdout.flush()
+            # Flush all pending frames (metadata already updated above via _write_metadata)
+            for pf in self._pending_frames:
+                self._write_metadata(pf)
+                self._forward_if_configured(pf)
+            self._pending_frames = []
+            # Forward current frame too
+            self._write_metadata(frame)
+            self._forward_if_configured(frame)
+
+        elif result == self._detector.CUT_ABORT:
+            # Streak broke — flush buffered frames as normal (no cut)
+            for pf in self._pending_frames:
+                self._write_metadata(pf)
+                self._forward_if_configured(pf)
+            self._pending_frames = []
+            self._write_metadata(frame)
+            self._forward_if_configured(frame)
+
+        else:
+            # CUT_NO — forward immediately
+            self._write_metadata(frame)
+            self._forward_if_configured(frame)
     
     def idle_seconds(self) -> float:
         """Return seconds since last frame received."""
@@ -578,13 +663,19 @@ class CudaSceneDetectNode(PythonNode):
     
     def finalize(self):
         """Print summary when processing ends."""
+        # Flush any frames still buffered in a pending streak
+        for pf in self._pending_frames:
+            self._write_metadata(pf)
+            self._forward_if_configured(pf)
+        self._pending_frames = []
+
         stats = self.get_stats()
         
         print("\n=== CUDA Scene Detection Summary ===")
-        print(f"frames analyzed     : {stats[frames_analyzed]}")
-        print(f"scene changes       : {stats[scene_changes]}")
-        print(f"scenes              : {stats[scenes]}")
-        print(f"avg frame time      : {stats[avg_frame_time_ms]:.3f} ms")
+        print(f"frames analyzed     : {stats['frames_analyzed']}")
+        print(f"scene changes       : {stats['scene_changes']}")
+        print(f"scenes              : {stats['scenes']}")
+        print(f"avg frame time      : {stats['avg_frame_time_ms']:.3f} ms")
         
         if not self._cuts:
             return
