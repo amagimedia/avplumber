@@ -78,7 +78,7 @@ class PythonNode(NodeBase):
             self._src_data_type = args.get("src_data_type", "AudioSamples")
             self._dst_data_type = args.get("dst_data_type", "MetadataFrame")
 
-        params = args | { "type": self.TYPE }
+        params = args | { "type": self.TYPE, "type_python": self.__class__.__name__ }
         super().__init__(params)
         self._wrapper = None
 
