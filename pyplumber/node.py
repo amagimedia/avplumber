@@ -235,6 +235,10 @@ class CudaSceneDiff(InternalNode):
     TYPE = "cuda_scene_diff"
 
 
+class LumaSceneCut(InternalNode):
+    TYPE = "luma_scene_cut"
+
+
 class BallTracker(InternalNode):
     TYPE = "ball_tracker"
 
@@ -316,3 +320,23 @@ class WriteAudioEnvelope(InternalNode):
 
 class NullSink(InternalNode):
     TYPE = "null_sink"
+
+
+class SentinelVideo(InternalNode):
+    TYPE = "sentinel_video"
+
+
+class SentinelAudio(InternalNode):
+    TYPE = "sentinel_audio"
+
+
+class PictureBufferSink(InternalNode):
+    TYPE = "picture_buffer_sink"
+
+
+class FakeVideoFormat(InternalNode):
+    TYPE = "fake_video_format"
+
+
+class FakeAudioMetadata(InternalNode):
+    TYPE = "fake_audio_metadata"
