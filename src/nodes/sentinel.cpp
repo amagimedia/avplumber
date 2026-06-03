@@ -1037,6 +1037,18 @@ public:
         set_ts("input_ts", ts_in);
         set_ts("output_ts", ts_out);
         set_ts("wallclock_ts", ts_wallclock);
+
+        // Raw original (pre-correction) input PTS and its timebase, so downstream
+        // consumers can recover the input timing after the corrector overwrites
+        // frm.pts() with the zero-based output PTS. JSON: {"pts":<int>,"tb":[num,den]}.
+        if (ts_in.isValid()) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "{\"pts\":%lld,\"tb\":[%d,%d]}",
+                     (long long)ts_in.timestamp(),
+                     (int)ts_in.timebase().getNumerator(),
+                     (int)ts_in.timebase().getDenominator());
+            av_dict_set(&frame->metadata, "orig_pts", buf, 0);
+        }
     }
     template<typename ...Args> void setFrameTimestamps(Args...) {
         // NOOP
