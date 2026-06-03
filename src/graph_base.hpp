@@ -305,6 +305,19 @@ public:
             }
         });
     }
+    // Enqueue an EOF marker on every output edge. Enqueues directly (like
+    // stopSinks) rather than via put() because EOF markers carry no PTS.
+    void emitEof() {
+        OutputType eof = createEofMarker<OutputType>();
+        forEachOutput([&eof](Sink<OutputType>* sink_a) {
+            EdgeSink<OutputType>* sink = dynamic_cast<EdgeSink<OutputType>*>(sink_a);
+            if (sink) {
+                sink->edge()->enqueue(eof);
+            } else {
+                throw Error("emitEof called for node without edge sink!");
+            }
+        });
+    }
     virtual void start() override {
         forEachOutput([](Sink<OutputType> *sink) {
             auto edge_sink = dynamic_cast<EdgeSink<OutputType>*>(sink);
