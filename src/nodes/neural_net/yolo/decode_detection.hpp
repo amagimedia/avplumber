@@ -111,6 +111,7 @@ public:
             // Apply class index remapping
             if (det.cls >= 0 && (size_t)det.cls < params.class_index_remap.size()) {
                 det.cls = params.class_index_remap[(size_t)det.cls];
+                if (det.cls < 0) continue;
             }
 
             result.detections.push_back(det);
