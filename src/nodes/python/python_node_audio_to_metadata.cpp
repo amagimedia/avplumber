@@ -1,70 +1,29 @@
 #ifdef PYTHON_MODULE
 #include "../node_common.hpp"
-#include "../../graph_interfaces.hpp"
-#include <pybind11/gil.h>
-
-namespace py = pybind11;
+#include "python_node_mixin.hpp"
 
 class PythonNodeAudioToMetadata:
     public NodeSISO<av::AudioSamples, MetadataFrame>,
-    public IPythonNode,
+    public PythonNodeMixin,
     public IFlushable {
-private:
-    py::object python_node_;
-
-    void callIfPresent(const char* attr_name) {
-        py::gil_scoped_acquire gil;
-        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-            return;
-        }
-        if (py::hasattr(python_node_, attr_name)) {
-            python_node_.attr(attr_name)();
-        }
-    }
-
 public:
     using NodeSISO<av::AudioSamples, MetadataFrame>::NodeSISO;
 
-    ~PythonNodeAudioToMetadata() override {
-        py::gil_scoped_acquire gil;
-        python_node_ = py::object();
-    }
-
-    void set_python_node(py::object python_node) override {
-        py::gil_scoped_acquire gil;
-        python_node_ = std::move(python_node);
-    }
-
     void start() override {
         NodeSingleOutput<MetadataFrame>::start();
-        callIfPresent("doStart");
+        callOptional("doStart");
     }
 
     void process() override {
-        py::gil_scoped_acquire gil;
-        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-            throw Error("Python node is not set");
-        }
-        python_node_.attr("process")();
+        callProcess();
     }
 
     void flush() override {
-        callIfPresent("flush_open_segment");
+        callOptional("flush_open_segment");
     }
 
     void stop() override {
-        std::exception_ptr stop_error;
-        {
-            py::gil_scoped_acquire gil;
-            try {
-                if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-                    throw Error("Python node is not set");
-                }
-                python_node_.attr("doStop")();
-            } catch (...) {
-                stop_error = std::current_exception();
-            }
-        }
+        std::exception_ptr stop_error = captureStop();
         NodeSingleInput<av::AudioSamples>::stop();
         if (stop_error) {
             std::rethrow_exception(stop_error);
