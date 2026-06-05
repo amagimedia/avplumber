@@ -83,7 +83,7 @@ from pyplumber.node import (
     SmoothTimestamps,
 )
 from pyplumber.scene_detect import CudaSceneDetectNode
-from pyplumber.metadata_store import MetadataStoreNode
+from pyplumber.node import StoreMetadata
 from pyplumber.auto_mixer.config import (
     JANUS_DEFAULT_HOST,
     JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
@@ -386,7 +386,7 @@ def build_graph():
     }
     if METADATA_KAFKA and render_output:
         # Pass-through: reads detector output, forwards to JoinMetadata
-        nodes.append(MetadataStoreNode({
+        nodes.append(StoreMetadata({
             "src": "v_scene_overlay_md",
             "dst": "v_scene_md_stored",
             "group": "scene",
@@ -397,7 +397,7 @@ def build_graph():
         _meta_edge = "v_scene_md_stored"
     elif METADATA_KAFKA and not render_output:
         # Sink: reads detector pass-through, no downstream consumer
-        nodes.append(MetadataStoreNode({
+        nodes.append(StoreMetadata({
             "src": "v_detect_pass",
             "group": "scene",
             "name": "MetadataToKafka",

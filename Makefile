@@ -75,9 +75,10 @@ endif
 
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer_orchestrator.cpp
-DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
+DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/librdkafka/build/src/librdkafka.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz -lzstd -llz4
+override CXXFLAGS += -Ideps/librdkafka/src
 
 ifeq ($(HAVE_SCTE35),1)
 DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
@@ -296,6 +297,7 @@ clean_deps:
 	rm deps/cuda_loader/*.o || true
 	cd deps/libklvanc && git clean -xdf || true
 	cd deps/libklscte35 && git clean -xdf || true
+	rm -rf deps/librdkafka/build || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -314,6 +316,23 @@ deps/libklvanc/src/.libs/libklvanc.a:
 deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
 	cd deps/libklscte35 && git clean -xdf || true
 	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
+
+deps/librdkafka/build/src/librdkafka.a:
+	mkdir -p deps/librdkafka/build
+	cd deps/librdkafka/build && cmake \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DRDKAFKA_BUILD_STATIC=ON \
+		-DRDKAFKA_BUILD_TESTS=OFF \
+		-DRDKAFKA_BUILD_EXAMPLES=OFF \
+		-DWITH_SASL=OFF \
+		-DWITH_SSL=ON \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCMAKE_AR=`which gcc-ar` \
+		-DCMAKE_RANLIB=`which gcc-ranlib` \
+		.. && $(MAKE) rdkafka VERBOSE=1
+
+# store_metadata.cpp needs librdkafka headers
+objs/src/nodes/store_metadata.o: deps/librdkafka/build/src/librdkafka.a
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
