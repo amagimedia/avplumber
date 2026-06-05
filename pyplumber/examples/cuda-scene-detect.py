@@ -83,7 +83,7 @@ from pyplumber.node import (
     SmoothTimestamps,
 )
 from pyplumber.scene_detect import CudaSceneDetectNode
-from pyplumber.metadata_write import MetadataStoreNode
+from pyplumber.metadata_store import MetadataStoreNode
 from pyplumber.auto_mixer.config import (
     JANUS_DEFAULT_HOST,
     JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
