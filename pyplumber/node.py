@@ -340,3 +340,7 @@ class FakeVideoFormat(InternalNode):
 
 class FakeAudioMetadata(InternalNode):
     TYPE = "fake_audio_metadata"
+
+
+class StoreMetadata(InternalNode):
+    TYPE = "store_metadata"
