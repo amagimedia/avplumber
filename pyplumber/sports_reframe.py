@@ -58,6 +58,15 @@ def ratio_from_fps(value: str | int | None) -> str | None:
     return f"{fps}/1"
 
 
+def optional_fps_value(value: str | int | float | None) -> str | int | float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "off", "skip", "disable", "disabled"}:
+        return None
+    return value
+
+
 def _json_command(name: str, params: dict[str, Any]) -> str:
     return f"{name} {json.dumps(params, separators=(',', ':'))}"
 
@@ -302,8 +311,9 @@ def build_tracknet_raw_json_graph(
     output_mode: str = "detection",
     triplet_alignment: str = "latest",
     preprocess_mode: str | None = None,
-    sample_every_n: int = 1,
-    fps: str | int | None = "30/1",
+    auto_sample_min_fps: str | int | float | None = "50/1",
+    auto_sample_every_n: int = 2,
+    fps: str | int | None = None,
     tracknet_scale: tuple[int, int] | None = None,
     contract_width: int = 0,
     contract_height: int = 0,
@@ -410,29 +420,29 @@ def build_tracknet_raw_json_graph(
     resolved_preprocess_mode = preprocess_mode or (
         "srs_affine" if output_mode == "srs_ball" else "resize"
     )
+    resolved_auto_sample_min_fps = optional_fps_value(auto_sample_min_fps)
 
-    nodes.append(
-        TrackNetBall(
-            {
-                "name": "TrackNet_Ball",
-                "src": video_edge,
-                "dst": "v_tracknet_metadata",
-                "engine": str(engine_path),
-                "metadata_key": metadata_key,
-                "target_label": target_label,
-                "conf_thresh": conf_thresh,
-                "visible_thresh": visible_thresh,
-                "output_mode": output_mode,
-                "triplet_alignment": triplet_alignment,
-                "preprocess_mode": resolved_preprocess_mode,
-                "sample_every_n": sample_every_n,
-                "use_cuda_graph": use_cuda_graph,
-                "debug_log_metadata": debug_log_metadata,
-                "debug_log_every_n": debug_log_every_n,
-                "group": "analysis",
-            }
-        )
-    )
+    tracknet_params: dict[str, Any] = {
+        "name": "TrackNet_Ball",
+        "src": video_edge,
+        "dst": "v_tracknet_metadata",
+        "engine": str(engine_path),
+        "metadata_key": metadata_key,
+        "target_label": target_label,
+        "conf_thresh": conf_thresh,
+        "visible_thresh": visible_thresh,
+        "output_mode": output_mode,
+        "triplet_alignment": triplet_alignment,
+        "preprocess_mode": resolved_preprocess_mode,
+        "auto_sample_every_n": auto_sample_every_n,
+        "use_cuda_graph": use_cuda_graph,
+        "debug_log_metadata": debug_log_metadata,
+        "debug_log_every_n": debug_log_every_n,
+        "group": "analysis",
+    }
+    if resolved_auto_sample_min_fps is not None:
+        tracknet_params["auto_sample_min_fps"] = resolved_auto_sample_min_fps
+    nodes.append(TrackNetBall(tracknet_params))
 
     sink = TrackNetRawJsonSink(
         {
