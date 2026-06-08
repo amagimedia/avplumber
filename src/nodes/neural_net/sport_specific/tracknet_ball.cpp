@@ -194,6 +194,7 @@ protected:
     int output_model_height_ = 0;
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 0;
+    int sample_every_n_ = 1;
 
     std::deque<av::VideoFrame> frame_buffer_;
     bool first_boundary_emitted_ = false;
@@ -207,6 +208,7 @@ protected:
     bool output_contract_validated_ = false;
     uint64_t frame_counter_ = 0;
     uint64_t infer_counter_ = 0;
+    uint64_t skipped_sample_frames_ = 0;
     uint64_t detected_frames_ = 0;
     uint64_t empty_frames_ = 0;
     std::array<uint64_t, 10> conf_histogram_{};
@@ -223,7 +225,9 @@ public:
         logstream << "tracknet_ball: detection summary:"
                   << " detected frames: " << detected_frames_
                   << " / total inferred frames: " << total
-                  << " (" << (100.0 * (double)detected_frames_ / (double)std::max<uint64_t>(1, total)) << "%)";
+                  << " (" << (100.0 * (double)detected_frames_ / (double)std::max<uint64_t>(1, total)) << "%)"
+                  << ", sample_every_n: " << sample_every_n_
+                  << ", skipped sample frames: " << skipped_sample_frames_;
         logstream << "tracknet_ball: confidence histogram:";
         for (int i = 0; i < 10; ++i) {
             logstream << "  " << (i * 0.1) << "-" << ((i + 1) * 0.1) << ": "
@@ -257,6 +261,12 @@ public:
             return;
         }
 
+        if (!shouldSampleCurrentFrame()) {
+            ++skipped_sample_frames_;
+            this->sink_->put(frm);
+            return;
+        }
+
         if (!ensureTracknetInitialized(frm)) {
             return;
         }
@@ -281,6 +291,11 @@ public:
     }
 
 protected:
+    bool shouldSampleCurrentFrame() const {
+        return sample_every_n_ <= 1 ||
+               (((frame_counter_ > 0 ? frame_counter_ - 1 : 0) % (uint64_t)sample_every_n_) == 0);
+    }
+
     void processCenterAlignedFrame(const av::VideoFrame& frm) {
         frame_buffer_.push_back(frm);
         if (frame_buffer_.size() < 3) return;
@@ -1116,6 +1131,9 @@ public:
         r->use_cuda_graph_ = jsonBoolParam(params, "use_cuda_graph", r->use_cuda_graph_);
         r->debug_log_metadata_ = jsonBoolParam(params, "debug_log_metadata", r->debug_log_metadata_);
         r->debug_log_every_n_ = jsonIntParam(params, "debug_log_every_n", r->debug_log_every_n_);
+        r->sample_every_n_ = jsonIntParam(params, "sample_every_n", r->sample_every_n_);
+        r->sample_every_n_ = jsonIntParam(params, "tracknet_sample_every_n", r->sample_every_n_);
+        r->sample_every_n_ = jsonIntParam(params, "infer_every_n", r->sample_every_n_);
         r->raw_output_max_elements_ = jsonIntParam(params, "raw_output_max_elements", r->raw_output_max_elements_);
         r->raw_output_max_elements_ = jsonIntParam(
             params, "raw_output_max_elements_per_tensor", r->raw_output_max_elements_);
@@ -1127,6 +1145,12 @@ public:
         }
         if (r->raw_output_max_elements_ < 0) {
             throw Error("tracknet_ball: raw_output_max_elements must be >= 0");
+        }
+        if (r->sample_every_n_ < 1) {
+            throw Error("tracknet_ball: sample_every_n must be >= 1");
+        }
+        if (r->sample_every_n_ > 1 && r->triplet_alignment_ != TrackNetTripletAlignment::Latest) {
+            throw Error("tracknet_ball: sample_every_n > 1 currently requires triplet_alignment='latest'");
         }
         if (r->srs_channel_ < 0) {
             throw Error("tracknet_ball: srs_channel must be >= 0");

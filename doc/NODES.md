@@ -808,6 +808,7 @@ Parameters:
 - `metadata_key_srs` / `srs_metadata_key` (string, optional, default `tracknet_ball_srs`) - SRS-compatible ball metadata key
 - `triplet_alignment` (string, optional, default `center`, or `latest` for `srs_ball`) - `center` preserves the live/legacy buffering; `latest` emits each frame using triplets `[0,0,0]`, `[0,0,1]`, then `[t-2,t-1,t]`
 - `preprocess_mode` (string, optional, default `resize`, or `srs_affine` for `srs_ball`) - `resize` uses the legacy direct resize sampler; `srs_affine` matches SRS center-affine geometry before TrackNet normalization
+- `sample_every_n` / `tracknet_sample_every_n` / `infer_every_n` (int, optional, default `1`) - build TrackNet triplets from every Nth source frame while still passing every source frame through with its original PTS/timebase. Non-sampled frames do not receive TrackNet metadata. Values greater than `1` currently require `triplet_alignment: "latest"`.
 - `raw_output_max_elements_per_tensor` (int, optional, default `0`) - cap raw JSON values per tensor; `0` emits all values
 - `srs_channel` (int, optional, default `2`) - TrackNet heatmap channel consumed by the SRS-compatible postprocessor
 - `srs_score_threshold` (float, optional, default `0.5`) - post-sigmoid heatmap threshold for SRS-compatible connected components

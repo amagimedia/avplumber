@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-mode", default="detection", choices=["detection", "srs_ball"])
     parser.add_argument("--triplet-alignment", default="latest", choices=["latest", "center"])
     parser.add_argument("--preprocess-mode", default=None, choices=["resize", "srs_affine"])
+    parser.add_argument(
+        "--sample-every-n",
+        type=int,
+        default=1,
+        help="Run TrackNet on every Nth source frame while passing all frames through unchanged.",
+    )
     parser.add_argument("--fps", default="30/1", help="Processing FPS, or empty to skip force_fps.")
     parser.add_argument("--tracknet-scale", type=parse_size, default=None, metavar="WIDTHxHEIGHT")
     parser.add_argument("--contract-width", type=int, default=0)
@@ -115,6 +121,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--contract-width and --contract-height must be non-negative")
     if bool(args.contract_width) != bool(args.contract_height):
         parser.error("--contract-width and --contract-height must be provided together")
+    if args.sample_every_n < 1:
+        parser.error("--sample-every-n must be >= 1")
+    if args.sample_every_n > 1 and args.triplet_alignment != "latest":
+        parser.error("--sample-every-n > 1 requires --triplet-alignment latest")
     if args.run_ball_interpolation and args.service_repo is None:
         parser.error("--run-ball-interpolation requires --service-repo")
     return args
@@ -143,6 +153,7 @@ def main() -> None:
         output_mode=args.output_mode,
         triplet_alignment=args.triplet_alignment,
         preprocess_mode=args.preprocess_mode,
+        sample_every_n=args.sample_every_n,
         fps=args.fps,
         tracknet_scale=args.tracknet_scale,
         contract_width=args.contract_width,
