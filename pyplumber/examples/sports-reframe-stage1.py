@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="When auto sampling is active, run TrackNet on every Nth source frame.",
     )
+    parser.add_argument(
+        "--tracknet-sample-fill-mode",
+        default="hold",
+        choices=["none", "hold"],
+        help="Metadata fill mode for frames skipped by TrackNet auto sampling.",
+    )
     parser.add_argument("--fps", default="", help="Optional forced processing FPS; empty preserves source cadence.")
     parser.add_argument("--tracknet-scale", type=parse_size, default=None, metavar="WIDTHxHEIGHT")
     parser.add_argument("--contract-width", type=int, default=0)
@@ -166,6 +172,7 @@ def main() -> None:
         preprocess_mode=args.preprocess_mode,
         auto_sample_min_fps=args.tracknet_auto_sample_min_fps,
         auto_sample_every_n=args.tracknet_auto_sample_every_n,
+        sample_fill_mode=args.tracknet_sample_fill_mode,
         fps=args.fps,
         tracknet_scale=args.tracknet_scale,
         contract_width=args.contract_width,

@@ -810,6 +810,7 @@ Parameters:
 - `preprocess_mode` (string, optional, default `resize`, or `srs_affine` for `srs_ball`) - `resize` uses the legacy direct resize sampler; `srs_affine` matches SRS center-affine geometry before TrackNet normalization
 - `auto_sample_min_fps` / `tracknet_auto_sample_min_fps` / `auto_sample_fps_threshold` (number or ratio string, optional, default `0`) - enable automatic input-FPS-based TrackNet sampling at or above this FPS; `0` disables auto sampling. The node estimates FPS from incoming frame PTS and keeps every source frame on output with its original PTS/timebase.
 - `auto_sample_every_n` / `tracknet_auto_sample_every_n` / `auto_sample_divisor` (int, optional, default `1`) - when auto sampling is active, build TrackNet triplets from every Nth source frame. Non-sampled frames do not receive TrackNet metadata. Values greater than `1` require `triplet_alignment: "latest"`.
+- `sample_fill_mode` / `tracknet_sample_fill_mode` (string, optional, default `none`) - `none` leaves skipped frames without TrackNet metadata; `hold` copies the most recent inferred TrackNet metadata onto skipped frames.
 - `raw_output_max_elements_per_tensor` (int, optional, default `0`) - cap raw JSON values per tensor; `0` emits all values
 - `srs_channel` (int, optional, default `2`) - TrackNet heatmap channel consumed by the SRS-compatible postprocessor
 - `srs_score_threshold` (float, optional, default `0.5`) - post-sigmoid heatmap threshold for SRS-compatible connected components
