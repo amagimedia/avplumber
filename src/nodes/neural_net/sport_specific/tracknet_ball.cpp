@@ -46,6 +46,23 @@ bool jsonBoolParam(const Parameters& params, const char* key, bool fallback) {
     return params[key].get<bool>();
 }
 
+void rejectLegacySamplingParams(const Parameters& params) {
+    for (const char* key : {"sample_every_n", "tracknet_sample_every_n", "infer_every_n"}) {
+        if (params.count(key) && !params[key].is_null()) {
+            throw Error("tracknet_ball: legacy sample_every_n parameters were removed; "
+                        "use auto_sample_min_fps and auto_sample_every_n");
+        }
+    }
+}
+
+double jsonFpsParam(const Parameters& params, const char* key, double fallback) {
+    if (!params.count(key) || params[key].is_null()) return fallback;
+    const Parameters& value = params[key];
+    if (value.is_number()) return value.get<double>();
+    if (value.is_string()) return parseRatio(value.get<std::string>()).getDouble();
+    throw Error(std::string("tracknet_ball: ") + key + " must be a number or ratio string");
+}
+
 std::string jsonStringParam(const Parameters& params, const char* key, const std::string& fallback) {
     if (!params.count(key) || params[key].is_null()) return fallback;
     return params[key].get<std::string>();
@@ -194,7 +211,13 @@ protected:
     int output_model_height_ = 0;
     bool debug_log_metadata_ = false;
     int debug_log_every_n_ = 0;
-    int sample_every_n_ = 1;
+    double auto_sample_min_fps_ = 0.0;
+    int auto_sample_every_n_ = 1;
+    int active_sample_every_n_ = 1;
+    bool auto_sample_decided_ = false;
+    bool auto_sample_have_pts_ = false;
+    av::Timestamp auto_sample_prev_pts_;
+    double estimated_input_fps_ = 0.0;
 
     std::deque<av::VideoFrame> frame_buffer_;
     bool first_boundary_emitted_ = false;
@@ -226,7 +249,10 @@ public:
                   << " detected frames: " << detected_frames_
                   << " / total inferred frames: " << total
                   << " (" << (100.0 * (double)detected_frames_ / (double)std::max<uint64_t>(1, total)) << "%)"
-                  << ", sample_every_n: " << sample_every_n_
+                  << ", active_sample_every_n: " << active_sample_every_n_
+                  << ", auto_sample_min_fps: " << auto_sample_min_fps_
+                  << ", auto_sample_every_n: " << auto_sample_every_n_
+                  << ", estimated_input_fps: " << estimated_input_fps_
                   << ", skipped sample frames: " << skipped_sample_frames_;
         logstream << "tracknet_ball: confidence histogram:";
         for (int i = 0; i < 10; ++i) {
@@ -254,6 +280,7 @@ public:
         if (!frm) return;
 
         ++frame_counter_;
+        updateAutoSampling(frm);
 
         if (!isSupportedCudaFrame(frm)) {
             flushBufferedBoundaryFrames();
@@ -292,8 +319,32 @@ public:
 
 protected:
     bool shouldSampleCurrentFrame() const {
-        return sample_every_n_ <= 1 ||
-               (((frame_counter_ > 0 ? frame_counter_ - 1 : 0) % (uint64_t)sample_every_n_) == 0);
+        return active_sample_every_n_ <= 1 ||
+               (((frame_counter_ > 0 ? frame_counter_ - 1 : 0) % (uint64_t)active_sample_every_n_) == 0);
+    }
+
+    void updateAutoSampling(const av::VideoFrame& frm) {
+        if (auto_sample_decided_ || auto_sample_min_fps_ <= 0.0 || auto_sample_every_n_ <= 1) {
+            return;
+        }
+        const av::Timestamp pts = frm.pts();
+        if (!pts.isValid()) return;
+        if (!auto_sample_have_pts_) {
+            auto_sample_prev_pts_ = pts;
+            auto_sample_have_pts_ = true;
+            return;
+        }
+
+        const double delta_sec = (pts - auto_sample_prev_pts_).seconds();
+        auto_sample_prev_pts_ = pts;
+        if (!std::isfinite(delta_sec) || delta_sec <= 0.0) return;
+
+        estimated_input_fps_ = 1.0 / delta_sec;
+        active_sample_every_n_ = estimated_input_fps_ >= auto_sample_min_fps_ ? auto_sample_every_n_ : 1;
+        auto_sample_decided_ = true;
+        logstream << "tracknet_ball: auto sampling estimated_input_fps=" << estimated_input_fps_
+                  << " min_fps=" << auto_sample_min_fps_
+                  << " active_sample_every_n=" << active_sample_every_n_;
     }
 
     void processCenterAlignedFrame(const av::VideoFrame& frm) {
@@ -1131,9 +1182,13 @@ public:
         r->use_cuda_graph_ = jsonBoolParam(params, "use_cuda_graph", r->use_cuda_graph_);
         r->debug_log_metadata_ = jsonBoolParam(params, "debug_log_metadata", r->debug_log_metadata_);
         r->debug_log_every_n_ = jsonIntParam(params, "debug_log_every_n", r->debug_log_every_n_);
-        r->sample_every_n_ = jsonIntParam(params, "sample_every_n", r->sample_every_n_);
-        r->sample_every_n_ = jsonIntParam(params, "tracknet_sample_every_n", r->sample_every_n_);
-        r->sample_every_n_ = jsonIntParam(params, "infer_every_n", r->sample_every_n_);
+        rejectLegacySamplingParams(params);
+        r->auto_sample_min_fps_ = jsonFpsParam(params, "auto_sample_min_fps", r->auto_sample_min_fps_);
+        r->auto_sample_min_fps_ = jsonFpsParam(params, "tracknet_auto_sample_min_fps", r->auto_sample_min_fps_);
+        r->auto_sample_min_fps_ = jsonFpsParam(params, "auto_sample_fps_threshold", r->auto_sample_min_fps_);
+        r->auto_sample_every_n_ = jsonIntParam(params, "auto_sample_every_n", r->auto_sample_every_n_);
+        r->auto_sample_every_n_ = jsonIntParam(params, "tracknet_auto_sample_every_n", r->auto_sample_every_n_);
+        r->auto_sample_every_n_ = jsonIntParam(params, "auto_sample_divisor", r->auto_sample_every_n_);
         r->raw_output_max_elements_ = jsonIntParam(params, "raw_output_max_elements", r->raw_output_max_elements_);
         r->raw_output_max_elements_ = jsonIntParam(
             params, "raw_output_max_elements_per_tensor", r->raw_output_max_elements_);
@@ -1146,11 +1201,15 @@ public:
         if (r->raw_output_max_elements_ < 0) {
             throw Error("tracknet_ball: raw_output_max_elements must be >= 0");
         }
-        if (r->sample_every_n_ < 1) {
-            throw Error("tracknet_ball: sample_every_n must be >= 1");
+        if (r->auto_sample_min_fps_ < 0.0) {
+            throw Error("tracknet_ball: auto_sample_min_fps must be >= 0");
         }
-        if (r->sample_every_n_ > 1 && r->triplet_alignment_ != TrackNetTripletAlignment::Latest) {
-            throw Error("tracknet_ball: sample_every_n > 1 currently requires triplet_alignment='latest'");
+        if (r->auto_sample_every_n_ < 1) {
+            throw Error("tracknet_ball: auto_sample_every_n must be >= 1");
+        }
+        if (r->auto_sample_min_fps_ > 0.0 && r->auto_sample_every_n_ > 1 &&
+            r->triplet_alignment_ != TrackNetTripletAlignment::Latest) {
+            throw Error("tracknet_ball: auto sampling every N frames requires triplet_alignment='latest'");
         }
         if (r->srs_channel_ < 0) {
             throw Error("tracknet_ball: srs_channel must be >= 0");

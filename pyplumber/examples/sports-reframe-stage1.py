@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pyplumber.sports_reframe import (  # pyright: ignore[reportMissingImports]
+    optional_fps_value,
     parse_size,
     ratio_from_fps,
     run_tracknet_ball_to_raw_json,
@@ -86,12 +87,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--triplet-alignment", default="latest", choices=["latest", "center"])
     parser.add_argument("--preprocess-mode", default=None, choices=["resize", "srs_affine"])
     parser.add_argument(
-        "--sample-every-n",
-        type=int,
-        default=1,
-        help="Run TrackNet on every Nth source frame while passing all frames through unchanged.",
+        "--tracknet-auto-sample-min-fps",
+        default="50/1",
+        help="Enable TrackNet frame sampling at or above this input FPS; use off/none to disable.",
     )
-    parser.add_argument("--fps", default="30/1", help="Processing FPS, or empty to skip force_fps.")
+    parser.add_argument(
+        "--tracknet-auto-sample-every-n",
+        type=int,
+        default=2,
+        help="When auto sampling is active, run TrackNet on every Nth source frame.",
+    )
+    parser.add_argument("--fps", default="", help="Optional forced processing FPS; empty preserves source cadence.")
     parser.add_argument("--tracknet-scale", type=parse_size, default=None, metavar="WIDTHxHEIGHT")
     parser.add_argument("--contract-width", type=int, default=0)
     parser.add_argument("--contract-height", type=int, default=0)
@@ -121,10 +127,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--contract-width and --contract-height must be non-negative")
     if bool(args.contract_width) != bool(args.contract_height):
         parser.error("--contract-width and --contract-height must be provided together")
-    if args.sample_every_n < 1:
-        parser.error("--sample-every-n must be >= 1")
-    if args.sample_every_n > 1 and args.triplet_alignment != "latest":
-        parser.error("--sample-every-n > 1 requires --triplet-alignment latest")
+    args.tracknet_auto_sample_min_fps = optional_fps_value(args.tracknet_auto_sample_min_fps)
+    if args.tracknet_auto_sample_every_n < 1:
+        parser.error("--tracknet-auto-sample-every-n must be >= 1")
+    if (
+        args.tracknet_auto_sample_min_fps is not None
+        and args.tracknet_auto_sample_every_n > 1
+        and args.triplet_alignment != "latest"
+    ):
+        parser.error("--tracknet-auto-sample-every-n > 1 requires --triplet-alignment latest")
     if args.run_ball_interpolation and args.service_repo is None:
         parser.error("--run-ball-interpolation requires --service-repo")
     return args
@@ -153,7 +164,8 @@ def main() -> None:
         output_mode=args.output_mode,
         triplet_alignment=args.triplet_alignment,
         preprocess_mode=args.preprocess_mode,
-        sample_every_n=args.sample_every_n,
+        auto_sample_min_fps=args.tracknet_auto_sample_min_fps,
+        auto_sample_every_n=args.tracknet_auto_sample_every_n,
         fps=args.fps,
         tracknet_scale=args.tracknet_scale,
         contract_width=args.contract_width,
