@@ -86,6 +86,11 @@ enum class TrackNetPreprocessMode {
     SrsAffine,
 };
 
+enum class TrackNetSampleFillMode {
+    None,
+    Hold,
+};
+
 bool emitsDetectionMetadata(TrackNetOutputMode mode) {
     return mode == TrackNetOutputMode::Detection || mode == TrackNetOutputMode::Both;
 }
@@ -139,6 +144,12 @@ TrackNetPreprocessMode parsePreprocessModeString(const std::string& mode) {
     if (mode == "resize" || mode == "scale") return TrackNetPreprocessMode::Resize;
     if (mode == "srs_affine" || mode == "srs") return TrackNetPreprocessMode::SrsAffine;
     throw Error("tracknet_ball: preprocess_mode must be 'resize' or 'srs_affine'");
+}
+
+TrackNetSampleFillMode parseSampleFillModeString(const std::string& mode) {
+    if (mode == "none" || mode == "off" || mode == "disabled") return TrackNetSampleFillMode::None;
+    if (mode == "hold" || mode == "last" || mode == "copy_last") return TrackNetSampleFillMode::Hold;
+    throw Error("tracknet_ball: sample_fill_mode must be 'none' or 'hold'");
 }
 
 std::string dtypeName(nvinfer1::DataType dtype) {
@@ -200,6 +211,7 @@ protected:
     TrackNetOutputMode output_mode_ = TrackNetOutputMode::Detection;
     TrackNetTripletAlignment triplet_alignment_ = TrackNetTripletAlignment::Center;
     TrackNetPreprocessMode preprocess_mode_ = TrackNetPreprocessMode::Resize;
+    TrackNetSampleFillMode sample_fill_mode_ = TrackNetSampleFillMode::None;
     float conf_thresh_ = 0.5f;
     float visible_thresh_ = 0.5f;
     float srs_score_threshold_ = 0.5f;
@@ -218,6 +230,7 @@ protected:
     bool auto_sample_have_pts_ = false;
     av::Timestamp auto_sample_prev_pts_;
     double estimated_input_fps_ = 0.0;
+    std::map<std::string, std::string> last_tracknet_metadata_;
 
     std::deque<av::VideoFrame> frame_buffer_;
     bool first_boundary_emitted_ = false;
@@ -252,6 +265,7 @@ public:
                   << ", active_sample_every_n: " << active_sample_every_n_
                   << ", auto_sample_min_fps: " << auto_sample_min_fps_
                   << ", auto_sample_every_n: " << auto_sample_every_n_
+                  << ", sample_fill_mode: " << (sample_fill_mode_ == TrackNetSampleFillMode::Hold ? "hold" : "none")
                   << ", estimated_input_fps: " << estimated_input_fps_
                   << ", skipped sample frames: " << skipped_sample_frames_;
         logstream << "tracknet_ball: confidence histogram:";
@@ -290,6 +304,7 @@ public:
 
         if (!shouldSampleCurrentFrame()) {
             ++skipped_sample_frames_;
+            applyHeldMetadata(frm);
             this->sink_->put(frm);
             return;
         }
@@ -318,6 +333,19 @@ public:
     }
 
 protected:
+    void storeTracknetMetadata(const std::string& key, const std::string& value) {
+        last_tracknet_metadata_[key] = value;
+    }
+
+    void applyHeldMetadata(av::VideoFrame& frm) {
+        if (sample_fill_mode_ != TrackNetSampleFillMode::Hold || last_tracknet_metadata_.empty() || !frm.raw()) {
+            return;
+        }
+        for (const auto& [key, value] : last_tracknet_metadata_) {
+            av_dict_set(&frm.raw()->metadata, key.c_str(), value.c_str(), 0);
+        }
+    }
+
     bool shouldSampleCurrentFrame() const {
         return active_sample_every_n_ <= 1 ||
                (((frame_counter_ > 0 ? frame_counter_ - 1 : 0) % (uint64_t)active_sample_every_n_) == 0);
@@ -825,6 +853,7 @@ protected:
         if (emitsDetectionMetadata(output_mode_)) {
             const std::string md = buildDetectionMetadata(model, metadata_w, metadata_h);
             av_dict_set(&output_frame.raw()->metadata, metadata_key_detection_.c_str(), md.c_str(), 0);
+            storeTracknetMetadata(metadata_key_detection_, md);
 
             if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
                 (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
@@ -835,6 +864,7 @@ protected:
         if (emitsRawMetadata(output_mode_)) {
             const std::string raw_md = buildRawMetadata(model, output_frame.width(), output_frame.height());
             av_dict_set(&output_frame.raw()->metadata, metadata_key_raw_.c_str(), raw_md.c_str(), 0);
+            storeTracknetMetadata(metadata_key_raw_, raw_md);
 
             if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
                 (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
@@ -847,6 +877,7 @@ protected:
         if (emitsSrsBallMetadata(output_mode_)) {
             const std::string srs_md = buildSrsBallMetadata(model, output_frame.width(), output_frame.height());
             av_dict_set(&output_frame.raw()->metadata, metadata_key_srs_ball_.c_str(), srs_md.c_str(), 0);
+            storeTracknetMetadata(metadata_key_srs_ball_, srs_md);
 
             if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
                 (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
@@ -1165,6 +1196,11 @@ public:
         const std::string default_preprocess = emitsSrsBallMetadata(r->output_mode_) ? "srs_affine" : "resize";
         r->preprocess_mode_ = parsePreprocessModeString(
             jsonStringParam(params, "preprocess_mode", default_preprocess));
+        r->sample_fill_mode_ = parseSampleFillModeString(
+            jsonStringParam(params, "sample_fill_mode", "none"));
+        r->sample_fill_mode_ = parseSampleFillModeString(
+            jsonStringParam(params, "tracknet_sample_fill_mode",
+                            r->sample_fill_mode_ == TrackNetSampleFillMode::Hold ? "hold" : "none"));
         if (r->output_mode_ == TrackNetOutputMode::Raw && params.count("metadata_key") &&
             !params.count("metadata_key_raw") && !params.count("raw_metadata_key")) {
             r->metadata_key_raw_ = params["metadata_key"].get<std::string>();
