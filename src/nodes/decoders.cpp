@@ -1,5 +1,7 @@
 #include "node_common.hpp"
 #include <algorithm>
+#include <cerrno>
+#include <system_error>
 #include "../avutils.hpp"
 #include <avcpp/codeccontext.h>
 #include "../hwaccel.hpp"
@@ -44,6 +46,60 @@ protected:
         } else {
             return {};
         }
+    }
+    bool isDecoderAgain(const std::exception &e) const {
+        auto se = dynamic_cast<const std::system_error*>(&e);
+        return se && se->code().category() == av::ffmpeg_category() && se->code().value() == AVERROR(EAGAIN);
+    }
+    bool handleFrame(OutputFrame &frm, const av::Packet &pkt) {
+        if (!frm) {
+            return false;
+        }
+        if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
+            logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
+        }
+        last_pts_ = frm.pts();
+        bool put = true;
+        {
+            auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
+            if (discard_until_.isValid()) {
+                if (frm.pts() >= discard_until_) {
+                    logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
+                    discard_until_ = NOTS;
+                } else {
+                    put = false;
+                }
+            }
+        }
+        if (flush_magic_ && waiting_for_frame_ > 0) {
+            if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
+                logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
+                waiting_for_frame_ = 0;
+                put &= true;
+            } else {
+                waiting_for_frame_++;
+                put = false;
+            }
+            if (waiting_for_frame_ > 5) {
+                logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
+                waiting_for_frame_ = 0;
+                put &= true;
+            }
+        }
+        if (put) {
+            setFrameTimestamps(frm);
+            this->sink_->put(frm);
+        }
+        return true;
+    }
+    bool drainFrame(const av::Packet &blocked_pkt) {
+#if API_AVCODEC_NEW_INIT_PACKET
+        OutputFrame frm = dec_.decode(av::Packet{nullptr});
+        return handleFrame(frm, blocked_pkt);
+#else
+        (void)blocked_pkt;
+        return false;
+#endif
     }
 public:
     template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel):
@@ -220,10 +276,10 @@ public:
                 return;
             }
         }
-        // Dequeue into a local packet so we don't keep a raw pointer into the
-        // edge queue while concurrent flush/cleanup logic is running.
+        // Copy from the edge queue, but keep the packet queued until the
+        // decoder accepts it. FFmpeg send_packet(EAGAIN) means retry same input.
         av::Packet pkt;
-        if (!this->source_->tryGet(pkt, 0)) {
+        if (!this->source_->tryPeek(pkt, 0)) {
             //flush();
             return;
         }
@@ -232,51 +288,32 @@ public:
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() && !isEofMarker(pkt)) {
                 int iter = 0;
+                bool packet_consumed = false;
                 do {
                     iter++;
                     // not a flush packet
                     try {
                         OutputFrame frm = dec_.decode(pkt);
+                        packet_consumed = true;
                         dec_errors_ = 0;
 
-                        if (frm) {
-                            if (!pkt.isKeyPacket() && (last_pts_.isValid() && (last_pts_ > frm.pts()))) {
-                                logstream << "Warning: Got out of order frame from decoder: " << last_pts_ << " -> " << frm.pts();
-                            }
-                            last_pts_ = frm.pts();
-                            bool put = true;
-                            {
-                                auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
-                                if (discard_until_.isValid()) {
-                                    if (frm.pts() >= discard_until_) {
-                                        logstream << "pts " << frm.pts() << " reached discard_until " << discard_until_;
-                                        discard_until_ = NOTS;
-                                    } else {
-                                        put = false;
-                                    }
-                                }
-                            }
-                            if (flush_magic_ && waiting_for_frame_ > 0) {
-                                if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
-                                    logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
-                                    waiting_for_frame_ = 0;
-                                    put &= true;
-                                } else {
-                                    waiting_for_frame_++;
-                                    put = false;
-                                }
-                                if (waiting_for_frame_ > 5) {
-                                    logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
-                                    waiting_for_frame_ = 0;
-                                    put &= true;
-                                }
-                            }
-                            if (put) {
-                                setFrameTimestamps(frm);
-                                this->sink_->put(frm);
-                            }
-                        }
+                        handleFrame(frm, pkt);
                     } catch (std::exception &e) {
+                        if (isDecoderAgain(e)) {
+                            if (drainFrame(pkt)) {
+                                dec_errors_ = 0;
+                                if (packet_consumed) {
+                                    break;
+                                }
+                                return;
+                            }
+                            logstream << "Decode backpressure without drainable frame: " << e.what();
+                            if (packet_consumed) {
+                                break;
+                            }
+                            return;
+                        }
+                        packet_consumed = true;
                         dec_errors_++;
                         if (dec_errors_>200) {
                             throw;
@@ -285,7 +322,11 @@ public:
                     }
                     //if (!frm) this->finished_ = true;
                 } while (flush_magic_ && waiting_for_frame_ > 0);
+                if (packet_consumed) {
+                    this->source_->pop();
+                }
             } else {
+                this->source_->pop();
                 // this is flush packet
                 // so flush decoder
                 flush();
