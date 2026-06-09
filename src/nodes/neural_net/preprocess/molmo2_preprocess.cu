@@ -4,8 +4,6 @@
 // [frame, patch_y * patch_grid + patch_x, ((dy * patch_size + dx) * 3 + c)].
 
 #include <cuda_fp16.h>
-#include <cuda_runtime.h>
-#include <stdint.h>
 
 __device__ __forceinline__ int clamp_int(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -16,7 +14,7 @@ __device__ __forceinline__ float clamp01(float v) {
 }
 
 __device__ __forceinline__ void nv12_to_rgb709_limited(
-    uint8_t y8, uint8_t u8, uint8_t v8,
+    unsigned char y8, unsigned char u8, unsigned char v8,
     float& r, float& g, float& b)
 {
     const float y = (float)y8;
@@ -30,26 +28,26 @@ __device__ __forceinline__ void nv12_to_rgb709_limited(
 }
 
 __device__ __forceinline__ void sample_nv12_rgb(
-    const uint8_t* __restrict__ y_plane, size_t pitch_y,
-    const uint8_t* __restrict__ uv_plane, size_t pitch_uv,
+    const unsigned char* __restrict__ y_plane, int pitch_y,
+    const unsigned char* __restrict__ uv_plane, int pitch_uv,
     int width, int height, int x, int y,
     float& r, float& g, float& b)
 {
     x = clamp_int(x, 0, width - 1);
     y = clamp_int(y, 0, height - 1);
 
-    const uint8_t y8 = y_plane[(size_t)y * pitch_y + (size_t)x];
+    const unsigned char y8 = y_plane[y * pitch_y + x];
     const int uvx = x >> 1;
     const int uvy = y >> 1;
-    const uint8_t* uv_row = uv_plane + (size_t)uvy * pitch_uv;
-    const uint8_t u8 = uv_row[(size_t)(uvx << 1) + 0];
-    const uint8_t v8 = uv_row[(size_t)(uvx << 1) + 1];
+    const unsigned char* uv_row = uv_plane + uvy * pitch_uv;
+    const unsigned char u8 = uv_row[(uvx << 1) + 0];
+    const unsigned char v8 = uv_row[(uvx << 1) + 1];
     nv12_to_rgb709_limited(y8, u8, v8, r, g, b);
 }
 
 __device__ __forceinline__ void sample_nv12_rgb_bilinear(
-    const uint8_t* __restrict__ y_plane, size_t pitch_y,
-    const uint8_t* __restrict__ uv_plane, size_t pitch_uv,
+    const unsigned char* __restrict__ y_plane, int pitch_y,
+    const unsigned char* __restrict__ uv_plane, int pitch_uv,
     int width, int height, float sx, float sy,
     float& r, float& g, float& b)
 {
@@ -93,8 +91,8 @@ __device__ __forceinline__ int patch_packed_base_index(
 }
 
 extern "C" __global__ void kMolmo2PreprocessNV12_fp16(
-    const uint8_t* __restrict__ y_plane, size_t pitch_y,
-    const uint8_t* __restrict__ uv_plane, size_t pitch_uv,
+    const unsigned char* __restrict__ y_plane, int pitch_y,
+    const unsigned char* __restrict__ uv_plane, int pitch_uv,
     __half* __restrict__ out,
     int sample_index,
     int src_width, int src_height,
@@ -123,8 +121,8 @@ extern "C" __global__ void kMolmo2PreprocessNV12_fp16(
 }
 
 extern "C" __global__ void kMolmo2PreprocessNV12_fp32(
-    const uint8_t* __restrict__ y_plane, size_t pitch_y,
-    const uint8_t* __restrict__ uv_plane, size_t pitch_uv,
+    const unsigned char* __restrict__ y_plane, int pitch_y,
+    const unsigned char* __restrict__ uv_plane, int pitch_uv,
     float* __restrict__ out,
     int sample_index,
     int src_width, int src_height,

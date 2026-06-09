@@ -54,6 +54,7 @@ RUN mkdir -p \
         /models/huggingface
 
 COPY pyplumber/molmo_vllm.py /opt/avplumber/pyplumber/molmo_vllm.py
+COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
 COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
 COPY src/nodes/neural_net/preprocess/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
 COPY tests/test_molmo_vllm.py /opt/avplumber/tests/test_molmo_vllm.py

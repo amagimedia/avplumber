@@ -259,6 +259,10 @@ class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
 
 
+class DrawKeypoints(InternalNode):
+    TYPE = "draw_keypoints"
+
+
 class SmoothTimestamps(InternalNode):
     TYPE = "smooth_timestamps"
 
