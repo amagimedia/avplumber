@@ -29,7 +29,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
     && dnf -y install --setopt=install_weak_deps=False \
         cuda-cccl-13-0 \
-        libcurand-devel-13-0-0 \
+        libcurand-devel-13-0 \
         cuda-cudart-devel-13-0 \
         cuda-driver-devel-13-0 \
         cuda-nvcc-13-0 \
