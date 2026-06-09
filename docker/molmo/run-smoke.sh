@@ -12,6 +12,7 @@ python3 <<'PY'
 import json
 import shutil
 import subprocess
+import sysconfig
 from pathlib import Path
 
 print("== ffmpeg ==")
@@ -29,6 +30,10 @@ curand_h = Path("/usr/local/cuda-13.0/include/curand.h")
 if not curand_h.exists():
     raise SystemExit(f"missing CUDA cuRAND header: {curand_h}")
 print(f"curand.h={curand_h}")
+python_h = Path(sysconfig.get_config_var("INCLUDEPY")) / "Python.h"
+if not python_h.exists():
+    raise SystemExit(f"missing Python development header: {python_h}")
+print(f"Python.h={python_h}")
 
 print("== imports ==")
 import _avplumber  # noqa: F401
