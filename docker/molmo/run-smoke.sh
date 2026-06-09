@@ -40,6 +40,7 @@ print(f"cuda device={device_name} capability={capability}")
 
 print("== parser ==")
 from pyplumber.molmo_vllm import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
+from pyplumber.molmo_vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
 
 det_md, point_md, raw_md = parse_molmo_generated_text(
     json.dumps({"objects": [{"label": "ball", "confidence": 0.9, "bbox": [400, 400, 600, 600], "point": [500, 500]}]}),
@@ -52,6 +53,12 @@ assert raw_md["parse_status"] == "ok"
 assert det_md and det_md["detections"][0]["label"] == "ball"
 assert point_md and point_md["num_keypoints"] == 1
 print("parser ok")
+
+assert _format_molmo2_video_prompt("Point to the ball.").startswith("<|video|><|im_start|>user")
+metadata = _metadata_for_window(sample_count=4, frame_size=378, sample_fps=8)
+assert metadata["frames_indices"] == [0, 1, 2, 3]
+assert metadata["width"] == 378 and metadata["height"] == 378
+print("runner helpers ok")
 
 print("== node init ==")
 node = MolmoVllmAsync(

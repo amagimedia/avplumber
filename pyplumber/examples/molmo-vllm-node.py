@@ -2,8 +2,8 @@
 """CUDA Molmo/vLLM async node smoke-test graph.
 
 Default backend is ``mock`` so the graph can validate CUDA preprocessing,
-windowing, metadata projection, and CUDA overlays before the vLLM direct-tensor
-runner hook is installed.
+windowing, metadata projection, and CUDA overlays cheaply. Set
+``AVP_MOLMO_BACKEND=vllm`` for local Molmo2 inference.
 """
 
 from __future__ import annotations
@@ -148,9 +148,16 @@ nodes = [
             "visualize_ttl_frames": int(os.environ.get("AVP_MOLMO_VISUALIZE_TTL_FRAMES", "32")),
             "gpu_memory_utilization": float(os.environ.get("AVP_MOLMO_GPU_MEMORY_UTILIZATION", "0.75")),
             "max_model_len": int(os.environ.get("AVP_MOLMO_MAX_MODEL_LEN", "8192")),
+            "max_num_batched_tokens": int(os.environ.get("AVP_MOLMO_MAX_NUM_BATCHED_TOKENS", "8192")),
             "max_new_tokens": int(os.environ.get("AVP_MOLMO_MAX_NEW_TOKENS", "512")),
             "temperature": float(os.environ.get("AVP_MOLMO_TEMPERATURE", "0.0")),
             "tensor_dtype": os.environ.get("AVP_MOLMO_TENSOR_DTYPE", "fp16"),
+            "model_dtype": os.environ.get("AVP_MOLMO_MODEL_DTYPE", "float16"),
+            "mm_processor_cache_gb": float(os.environ.get("AVP_MOLMO_MM_PROCESSOR_CACHE_GB", "0")),
+            "cpu_offload_gb": float(os.environ.get("AVP_MOLMO_CPU_OFFLOAD_GB", "0")),
+            "tensor_parallel_size": int(os.environ.get("AVP_MOLMO_TENSOR_PARALLEL_SIZE", "1")),
+            "enforce_eager": _env_bool("AVP_MOLMO_ENFORCE_EAGER", True),
+            "seed": int(os.environ.get("AVP_MOLMO_SEED", "0")),
             "auto_restart": "group",
         }
     ),
