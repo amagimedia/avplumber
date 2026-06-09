@@ -26,10 +26,12 @@ import pyplumber  # noqa: F401
 import torch
 import cupy as cp
 import vllm
+import transformers
 
 print(f"torch={torch.__version__}")
 print(f"cupy={cp.__version__}")
 print(f"vllm={vllm.__version__}")
+print(f"transformers={transformers.__version__}")
 
 if not torch.cuda.is_available():
     raise SystemExit("torch CUDA is unavailable")
