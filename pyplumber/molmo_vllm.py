@@ -6,9 +6,10 @@ This module keeps the first AVP integration deliberately Python-side:
 * A CuPy RawModule kernel writes sampled frames into a torch CUDA tensor pool.
 * A background worker consumes completed window tensors and publishes metadata.
 
-The vLLM direct-tensor path is intentionally pluggable. The built-in ``mock``
-backend is useful for graph, CUDA preprocess, and visualization smoke tests
-before the local vLLM Molmo2 tensor-input hook is available.
+The built-in ``mock`` backend is useful for graph, CUDA preprocess, and
+visualization smoke tests. The ``vllm`` backend invokes the local vLLM Molmo2
+runner; today's public vLLM path consumes CPU video arrays, while the CUDA
+patch tensor path remains available for a future direct-tensor runner.
 """
 
 from __future__ import annotations
@@ -77,6 +78,9 @@ except ModuleNotFoundError as exc:
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+_NATIVE_POINT_TAG_RE = re.compile(r"<(?:points|tracks)\b(?P<attrs>[^>]*)/?>", re.IGNORECASE | re.DOTALL)
+_NATIVE_COORD_ATTR_RE = re.compile(r'\bcoords="(?P<coords>[0-9\t:;, .]+)"', re.IGNORECASE)
+_NATIVE_LABEL_ATTR_RE = re.compile(r'\b(?:alt|label|name)="(?P<label>[^"]+)"', re.IGNORECASE)
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -169,6 +173,100 @@ def _parse_object_label(obj: dict[str, Any], fallback_index: int) -> str:
     return label.strip()
 
 
+def _build_point_metadata(
+    points: list[tuple[float, float, float]],
+    *,
+    frame_size: int,
+) -> dict[str, Any] | None:
+    if not points:
+        return None
+
+    keypoints: list[float] = []
+    for px, py, conf in points:
+        keypoints.extend([px, py, conf])
+
+    return {
+        "schema": "pose_keypoints_v1",
+        "coord_space": "model",
+        "model_width": frame_size,
+        "model_height": frame_size,
+        "num_keypoints": len(keypoints) // 3,
+        "poses": [
+            {
+                "label": "molmo_points",
+                "conf": max(keypoints[2::3]) if len(keypoints) >= 3 else 1.0,
+                "keypoints": keypoints,
+            }
+        ],
+    }
+
+
+def _extract_native_molmo_points(
+    generated_text: str,
+    *,
+    frame_size: int,
+) -> tuple[list[tuple[float, float, float]], int]:
+    """Extract Molmo2 native ``<points>/<tracks coords="...">`` outputs.
+
+    Molmo2 VideoPoint commonly returns coordinates as text tags instead of
+    JSON. The coordinate payload uses 0..1000 coordinates and usually groups
+    per-frame tracks as ``frame_id object_id x y ...``. For visualization, keep
+    the latest point per object id across the generated window.
+    """
+
+    latest_by_id: dict[str, tuple[float, float, float, float]] = {}
+    anonymous: list[tuple[float, float, float]] = []
+    invalid = 0
+
+    for tag_match in _NATIVE_POINT_TAG_RE.finditer(generated_text):
+        attrs = tag_match.group("attrs")
+        coord_match = _NATIVE_COORD_ATTR_RE.search(attrs)
+        if coord_match is None:
+            invalid += 1
+            continue
+
+        label_match = _NATIVE_LABEL_ATTR_RE.search(attrs)
+        label_prefix = label_match.group("label").strip() if label_match else "molmo"
+        label_prefix = label_prefix or "molmo"
+
+        for segment in re.split(r"[\t:;,]+", coord_match.group("coords")):
+            numbers = re.findall(r"[0-9]+(?:\.[0-9]+)?", segment)
+            if len(numbers) < 3:
+                continue
+
+            if len(numbers) == 3:
+                frame_id = 0.0
+                triples = numbers
+            else:
+                frame_value = _coerce_float(numbers[0])
+                frame_id = frame_value if frame_value is not None else 0.0
+                triples = numbers[1:]
+
+            if len(triples) < 3:
+                invalid += 1
+                continue
+
+            for index in range(0, len(triples) - 2, 3):
+                object_id = triples[index]
+                px = _scale_1000_coord(triples[index + 1], frame_size)
+                py = _scale_1000_coord(triples[index + 2], frame_size)
+                if px is None or py is None:
+                    invalid += 1
+                    continue
+
+                if object_id:
+                    key = f"{label_prefix}:{object_id}"
+                    current = latest_by_id.get(key)
+                    if current is None or frame_id >= current[0]:
+                        latest_by_id[key] = (frame_id, px, py, 1.0)
+                else:
+                    anonymous.append((px, py, 1.0))
+
+    points = [(px, py, conf) for _, px, py, conf in latest_by_id.values()]
+    points.extend(anonymous)
+    return points, invalid
+
+
 def parse_molmo_generated_text(
     generated_text: str,
     *,
@@ -198,6 +296,18 @@ def parse_molmo_generated_text(
         raw_md["latency_ms"] = round(float(latency_ms), 3)
 
     if parsed is None:
+        native_points, invalid_native_count = _extract_native_molmo_points(
+            generated_text,
+            frame_size=frame_size,
+        )
+        if native_points:
+            raw_md["parse_status"] = "native_points"
+            raw_md["object_count"] = len(native_points)
+            raw_md["invalid_object_count"] = invalid_native_count
+            raw_md["detection_count"] = 0
+            raw_md["point_count"] = len(native_points)
+            return None, _build_point_metadata(native_points, frame_size=frame_size), raw_md
+
         return None, None, raw_md
 
     objects = parsed.get("objects", [])
@@ -269,22 +379,10 @@ def parse_molmo_generated_text(
             "detections": detections,
         }
 
-    point_md = None
-    if keypoints:
-        point_md = {
-            "schema": "pose_keypoints_v1",
-            "coord_space": "model",
-            "model_width": frame_size,
-            "model_height": frame_size,
-            "num_keypoints": len(keypoints) // 3,
-            "poses": [
-                {
-                    "label": "molmo_points",
-                    "conf": max(keypoints[2::3]) if len(keypoints) >= 3 else 1.0,
-                    "keypoints": keypoints,
-                }
-            ],
-        }
+    points = []
+    for index in range(0, len(keypoints), 3):
+        points.append((keypoints[index], keypoints[index + 1], keypoints[index + 2]))
+    point_md = _build_point_metadata(points, frame_size=frame_size)
 
     return det_md, point_md, raw_md
 
@@ -622,6 +720,38 @@ class MolmoVllmAsync(PythonNode):
                     "max_model_len": self.max_model_len,
                     "max_num_seqs": self.max_num_seqs,
                     "max_num_batched_tokens": self.max_num_batched_tokens,
+                    "frame_size": self.frame_size,
+                    "patch_size": self.patch_size,
+                    "sample_fps": self.sample_fps,
+                    "model_dtype": str(self._args.get("model_dtype", "float16")),
+                    "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
+                    "cpu_offload_gb": float(self._args.get("cpu_offload_gb", 0)),
+                    "tensor_parallel_size": int(self._args.get("tensor_parallel_size", 1)),
+                    "enforce_eager": bool(self._args.get("enforce_eager", True)),
+                    "seed": int(self._args.get("seed", 0)),
+                }
+            )
+        elif self.backend == "vllm":
+            from pyplumber.molmo_vllm_runner import VllmMolmo2VideoRunner
+
+            self._runner = VllmMolmo2VideoRunner(
+                {
+                    "model_id": self.model_id,
+                    "max_new_tokens": self.max_new_tokens,
+                    "temperature": self.temperature,
+                    "gpu_memory_utilization": self.gpu_memory_utilization,
+                    "max_model_len": self.max_model_len,
+                    "max_num_seqs": self.max_num_seqs,
+                    "max_num_batched_tokens": self.max_num_batched_tokens,
+                    "frame_size": self.frame_size,
+                    "patch_size": self.patch_size,
+                    "sample_fps": self.sample_fps,
+                    "model_dtype": str(self._args.get("model_dtype", "float16")),
+                    "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
+                    "cpu_offload_gb": float(self._args.get("cpu_offload_gb", 0)),
+                    "tensor_parallel_size": int(self._args.get("tensor_parallel_size", 1)),
+                    "enforce_eager": bool(self._args.get("enforce_eager", True)),
+                    "seed": int(self._args.get("seed", 0)),
                 }
             )
         else:
