@@ -26,6 +26,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         curl \
         dnf-plugins-core \
         gcc-c++ \
+        python3-devel \
     && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
     && dnf -y install --setopt=install_weak_deps=False \
         cuda-cccl-13-0 \
