@@ -30,6 +30,7 @@ from pyplumber.node import (
     InputRec,
     Mux,
     Output,
+    RealtimeVideoFrame,
 )
 
 
@@ -45,6 +46,7 @@ OUTPUT_URL = os.environ.get("AVP_OUTPUT", "molmo-vllm-node.mp4")
 OUTPUT_FORMAT = os.environ.get("AVP_OUTPUT_FORMAT", "mp4")
 WIDTH = int(os.environ.get("AVP_WIDTH", "1280"))
 HEIGHT = int(os.environ.get("AVP_HEIGHT", "720"))
+USE_REALTIME = _env_bool("AVP_USE_REALTIME", False)
 
 MOLMO_BACKEND = os.environ.get("AVP_MOLMO_BACKEND", "mock")
 MOLMO_STRICT = _env_bool("AVP_MOLMO_STRICT", False)
@@ -93,10 +95,26 @@ nodes = [
             "hwaccel_only_for_codecs": ["h264", "hevc"],
         }
     ),
+    RealtimeVideoFrame(
+        {
+            "src": "v_dec_cuda",
+            "dst": "v_rt_cuda",
+            "group": "g1",
+            "name": "Realtime_Input",
+            "auto_restart": "group",
+            "team": "molmo-sync",
+            "negative_time_tolerance": 0.007,
+            "jitter_margin": 0,
+            "discontinuity_threshold": 3,
+            "set_pts": True,
+        }
+    )
+    if USE_REALTIME
+    else None,
     FilterVideo(
         {
             "graph": f"scale_cuda=w={WIDTH}:h={HEIGHT}",
-            "src": "v_dec_cuda",
+            "src": "v_rt_cuda" if USE_REALTIME else "v_dec_cuda",
             "dst": "v_scaled_cuda",
             "group": "g1",
             "name": "Scale_For_Molmo",
@@ -234,7 +252,8 @@ nodes = [
 ]
 
 for node in nodes:
-    avp.addNode(node)
+    if node is not None:
+        avp.addNode(node)
 
 print(
     "Starting Molmo/vLLM example:",
