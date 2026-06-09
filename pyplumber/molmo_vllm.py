@@ -350,7 +350,7 @@ class _MolmoPreprocessor:
         code = kernel_path.read_text(encoding="utf-8")
         self.module = self.cp.RawModule(
             code=code,
-            options=("--std=c++14",),
+            options=self._raw_module_options(),
             name_expressions=(
                 "kMolmo2PreprocessNV12_fp16",
                 "kMolmo2PreprocessNV12_fp32",
@@ -358,6 +358,14 @@ class _MolmoPreprocessor:
         )
         kernel_name = "kMolmo2PreprocessNV12_fp16" if dtype_name == "fp16" else "kMolmo2PreprocessNV12_fp32"
         self.kernel = self.module.get_function(kernel_name)
+
+    def _raw_module_options(self) -> tuple[str, ...]:
+        include_dirs = (
+            "/usr/local/cuda/include",
+            "/usr/local/cuda-13.0/include",
+            "/usr/local/cuda-13.0/targets/x86_64-linux/include",
+        )
+        return ("--std=c++14",) + tuple(f"-I{path}" for path in include_dirs if Path(path).exists())
 
     def _torch_dtype(self) -> Any:
         if self.dtype_name == "fp16":
