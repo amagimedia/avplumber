@@ -41,6 +41,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip uv \
         "${CUPY_PACKAGE}" \
         --torch-backend=auto \
         --extra-index-url "${TORCH_INDEX_URL}" \
+    && python3 -m pip install --no-cache-dir --force-reinstall --no-deps "${TRANSFORMERS_PACKAGE}" \
     && if [ -n "${PIP_EXTRA_PACKAGES}" ]; then \
         uv pip install --system --index-strategy unsafe-best-match ${PIP_EXTRA_PACKAGES}; \
     fi \
