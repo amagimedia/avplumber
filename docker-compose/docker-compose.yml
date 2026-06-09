@@ -280,6 +280,45 @@ services:
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
 
+  molmo-smoke:
+    profiles:
+      - molmo
+    build:
+      context: ..
+      dockerfile: docker/molmo/Dockerfile
+      args:
+        AVP_BASE_IMAGE: ${MOLMO_AVP_BASE_IMAGE:-fanpulse-recorder:latest}
+        TORCH_INDEX_URL: ${MOLMO_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}
+        VLLM_PACKAGE: ${MOLMO_VLLM_PACKAGE:-vllm==0.22.1}
+        CUPY_PACKAGE: ${MOLMO_CUPY_PACKAGE:-cupy-cuda13x==14.1.1}
+        PIP_EXTRA_PACKAGES: ${MOLMO_PIP_EXTRA_PACKAGES:-}
+    image: ${MOLMO_IMAGE:-avplumber-molmo-test}:${MOLMO_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: "no"
+    gpus: all
+    ipc: host
+    shm_size: 4gb
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      <<: *gpu-env
+      HF_HOME: /models/huggingface
+      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/lib64:/usr/local/cuda-13.0/targets/x86_64-linux/lib}
+      AVP_INPUT: /media/input
+      AVP_OUTPUT: /artifacts/molmo-smoke.ts
+      AVP_OUTPUT_FORMAT: ${AVP_OUTPUT_FORMAT:-mpegts}
+      AVP_MOLMO_RUN_GRAPH: ${AVP_MOLMO_RUN_GRAPH:-0}
+      AVP_MOLMO_GRAPH_TIMEOUT: ${AVP_MOLMO_GRAPH_TIMEOUT:-45}
+      AVP_MOLMO_BACKEND: ${AVP_MOLMO_BACKEND:-mock}
+      AVP_MOLMO_STRICT: ${AVP_MOLMO_STRICT:-true}
+      AVP_MOLMO_SAMPLE_FPS: ${AVP_MOLMO_SAMPLE_FPS:-8}
+      AVP_MOLMO_WINDOW_FRAMES: ${AVP_MOLMO_WINDOW_FRAMES:-4}
+      AVP_MOLMO_WINDOW_STRIDE: ${AVP_MOLMO_WINDOW_STRIDE:-4}
+    volumes:
+      - ${MOLMO_SMOKE_INPUT:-./empty/media/.gitkeep}:/media/input:ro
+      - ${MOLMO_ARTIFACT_DIR:-./artifacts/molmo}:/artifacts
+      - ${MOLMO_HF_CACHE:-./artifacts/huggingface}:/models/huggingface
+
 volumes:
   dma-browser-sockets:
   runner-logs:
