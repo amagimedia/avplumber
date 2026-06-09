@@ -6,6 +6,7 @@ FROM ${AVP_BASE_IMAGE}
 ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
 ARG VLLM_PACKAGE=vllm==0.22.1
+ARG TRANSFORMERS_PACKAGE=transformers==4.57.1
 ARG CUPY_PACKAGE=cupy-cuda13x==14.1.1
 ARG PIP_EXTRA_PACKAGES=
 
@@ -36,6 +37,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 RUN python3 -m pip install --no-cache-dir --upgrade pip uv \
     && uv pip install --system --index-strategy unsafe-best-match \
         "${VLLM_PACKAGE}" \
+        "${TRANSFORMERS_PACKAGE}" \
         "${CUPY_PACKAGE}" \
         --torch-backend=auto \
         --extra-index-url "${TORCH_INDEX_URL}" \
