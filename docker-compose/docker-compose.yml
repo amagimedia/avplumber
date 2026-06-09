@@ -303,6 +303,7 @@ services:
     environment:
       <<: *gpu-env
       HF_HOME: /models/huggingface
+      VLLM_ENABLE_V1_MULTIPROCESSING: ${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/lib64:/usr/local/cuda-13.0/targets/x86_64-linux/lib}
       AVP_INPUT: /media/input
       AVP_OUTPUT: /artifacts/molmo-smoke.ts

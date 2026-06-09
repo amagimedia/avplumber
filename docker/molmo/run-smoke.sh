@@ -10,6 +10,7 @@ export PYTHONPATH="${PYTHONPATH:-/opt/avplumber}"
 
 python3 <<'PY'
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,11 @@ for filter_name in ("scale_cuda", "overlay_many_cuda"):
     if filter_name not in filters:
         raise SystemExit(f"missing FFmpeg CUDA filter: {filter_name}")
     print(f"filter ok: {filter_name}")
+
+nvcc = shutil.which("nvcc")
+if not nvcc:
+    raise SystemExit("missing CUDA compiler: nvcc")
+print(f"nvcc={nvcc}")
 
 print("== imports ==")
 import _avplumber  # noqa: F401
