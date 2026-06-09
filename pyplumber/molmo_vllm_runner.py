@@ -82,7 +82,7 @@ class VllmMolmo2VideoRunner:
         if self._llm is not None:
             return
 
-        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         from vllm import LLM, SamplingParams
 

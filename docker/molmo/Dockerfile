@@ -7,6 +7,8 @@ ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedor
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
 ARG VLLM_PACKAGE=vllm==0.22.1
 ARG TRANSFORMERS_PACKAGE=transformers==4.57.1
+ARG HF_HUB_PACKAGE=huggingface-hub==0.36.2
+ARG TOKENIZERS_PACKAGE=tokenizers==0.22.2
 ARG CUPY_PACKAGE=cupy-cuda13x==14.1.1
 ARG PIP_EXTRA_PACKAGES=
 
@@ -23,11 +25,13 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         ca-certificates \
         curl \
         dnf-plugins-core \
+        gcc-c++ \
     && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
     && dnf -y install --setopt=install_weak_deps=False \
         cuda-cccl-13-0 \
         cuda-cudart-devel-13-0 \
         cuda-driver-devel-13-0 \
+        cuda-nvcc-13-0 \
         cuda-nvrtc-devel-13-0 \
         libnvjitlink-devel-13-0 \
         libnvptxcompiler-13-0 \
@@ -41,7 +45,10 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip uv \
         "${CUPY_PACKAGE}" \
         --torch-backend=auto \
         --extra-index-url "${TORCH_INDEX_URL}" \
-    && python3 -m pip install --no-cache-dir --force-reinstall --no-deps "${TRANSFORMERS_PACKAGE}" \
+    && python3 -m pip install --no-cache-dir --force-reinstall \
+        "${TRANSFORMERS_PACKAGE}" \
+        "${HF_HUB_PACKAGE}" \
+        "${TOKENIZERS_PACKAGE}" \
     && if [ -n "${PIP_EXTRA_PACKAGES}" ]; then \
         uv pip install --system --index-strategy unsafe-best-match ${PIP_EXTRA_PACKAGES}; \
     fi \
