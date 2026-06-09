@@ -25,6 +25,10 @@ nvcc = shutil.which("nvcc")
 if not nvcc:
     raise SystemExit("missing CUDA compiler: nvcc")
 print(f"nvcc={nvcc}")
+curand_h = Path("/usr/local/cuda-13.0/include/curand.h")
+if not curand_h.exists():
+    raise SystemExit(f"missing CUDA cuRAND header: {curand_h}")
+print(f"curand.h={curand_h}")
 
 print("== imports ==")
 import _avplumber  # noqa: F401
