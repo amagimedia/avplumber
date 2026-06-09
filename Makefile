@@ -46,6 +46,15 @@ SRCDIR = src
 
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp')
+
+# Out-of-tree nodes:
+# Downstream projects can inject extra node sources via
+# EXTRA_NODES_SRC without forking. generate_node_list is path-agnostic, so DECLNODE()
+# macros there are picked up automatically. EXTRA_NODES_INCLUDES adds -I flags so the
+# extra files can resolve upstream headers like 'node_common.hpp'.
+NODES_SRC += $(EXTRA_NODES_SRC)
+override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
+
 # Python node sources are needed in the node list/factories only for the python_module goal.
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
