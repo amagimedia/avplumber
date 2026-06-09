@@ -6,6 +6,8 @@ HAVE_DRM = 0
 # Optional bundled deps/features
 # - HAVE_SCTE35 controls whether we build/link libklvanc + libklscte35 and enable the SCTE-35 parser node.
 HAVE_SCTE35 = 1
+# - HAVE_KAFKA controls whether we build/link librdkafka (+ lz4/zstd) and enable the store_metadata node.
+HAVE_KAFKA = 0
 # Build NvOFFRUC-based frame interpolation node (requires CUDA + Optical_Flow_SDK_5.0.7 headers at build time,
 # and libNvOFFRUC.so available at runtime)
 HAVE_NVOF_FRUC ?= 1
@@ -75,10 +77,18 @@ endif
 
 nodes_list_file = graph_factory.generated.cpp
 CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer_orchestrator.cpp
-DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a deps/librdkafka/build/src/librdkafka.a
+DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
-LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz -lzstd -llz4
-override CXXFLAGS += -Ideps/librdkafka/src
+LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
+
+ifeq ($(HAVE_KAFKA),1)
+DEPS_LIBS += deps/librdkafka/build/src/librdkafka.a
+override CXXFLAGS += -Ideps/librdkafka/src -DHAVE_KAFKA=1
+override LIBS_FLAGS += -lzstd -llz4
+else
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/store_metadata.cpp,$(NODES_SRC))
+override CXXFLAGS += -DHAVE_KAFKA=0
+endif
 
 ifeq ($(HAVE_SCTE35),1)
 DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
@@ -331,8 +341,10 @@ deps/librdkafka/build/src/librdkafka.a:
 		-DCMAKE_RANLIB=`which gcc-ranlib` \
 		.. && $(MAKE) rdkafka VERBOSE=1
 
+ifeq ($(HAVE_KAFKA),1)
 # store_metadata.cpp needs librdkafka headers
 objs/src/nodes/store_metadata.o: deps/librdkafka/build/src/librdkafka.a
+endif
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
