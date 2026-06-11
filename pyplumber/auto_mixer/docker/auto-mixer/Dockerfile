@@ -36,6 +36,8 @@ RUN dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
         libdrm-devel \
         libtool \
         libwebp-devel \
+        libzstd-devel \
+        lz4-devel \
         make \
         mesa-libEGL-devel \
         mesa-libGLES-devel \
@@ -264,6 +266,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libcurl \
         libdrm \
         libwebp \
+        libzstd \
+        lz4-libs \
         mesa-libEGL \
         mesa-libGLES \
         mesa-libGL \

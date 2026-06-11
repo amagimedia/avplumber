@@ -2,7 +2,16 @@ name: ${COMPOSE_PROJECT_NAME:-avplumber-compose}
 
 x-gpu-env: &gpu-env
   NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
   NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
 
 services:
   janus:
@@ -76,11 +85,11 @@ services:
       dockerfile: wayland/Dockerfile
     image: ${WAYLAND_IMAGE:-avplumber-wayland}:${WAYLAND_IMAGE_TAG:-latest}
     restart: unless-stopped
-    gpus: all
+    deploy: *gpu-deploy
     security_opt:
       - seccomp:unconfined
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     privileged: true
     environment:
       <<: *gpu-env
@@ -107,7 +116,7 @@ services:
       dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
     image: ${DMA_BROWSER_IMAGE:-avplumber-dma-browser}:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
-    gpus: all
+    deploy: *gpu-deploy
     shm_size: 1gb
     depends_on:
       wayland:
@@ -115,8 +124,8 @@ services:
     security_opt:
       - seccomp:unconfined
     devices:
-      - /dev/dri:/dev/dri
-    privileged: true
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    privileged: false
     environment:
       <<: *gpu-env
       XDG_RUNTIME_DIR: /run/avp-wayland
@@ -133,6 +142,7 @@ services:
       DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
       DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1080x1920,1920x1080,1280x720}
       DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+      DMA_BROWSER_RENDER_NODE: ${DMA_BROWSER_RENDER_NODE:-}
       DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks}
       LIBVA_DRIVER_NAME: nvidia
       NVD_BACKEND: direct
@@ -149,9 +159,9 @@ services:
     image: ${AVP_RUNNER_IMAGE:-avplumber-neural-demo:latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -190,9 +200,9 @@ services:
     image: ${NEURAL_DEMO_IMAGE:-avplumber-neural-demo:latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -233,9 +243,9 @@ services:
     image: ${AUTO_MIXER_IMAGE:-avplumber-auto-mixer}:${AUTO_MIXER_IMAGE_TAG:-latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -279,6 +289,64 @@ services:
       - runner-logs:/var/log/avplumber
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
+
+  molmo-smoke:
+    profiles:
+      - molmo
+    build:
+      context: ..
+      dockerfile: docker/molmo/Dockerfile
+      args:
+        AVP_BASE_IMAGE: ${MOLMO_AVP_BASE_IMAGE:-fanpulse-recorder:latest}
+        TORCH_INDEX_URL: ${MOLMO_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}
+        VLLM_PACKAGE: ${MOLMO_VLLM_PACKAGE:-vllm==0.22.1}
+        CUPY_PACKAGE: ${MOLMO_CUPY_PACKAGE:-cupy-cuda13x==14.1.1}
+        PIP_EXTRA_PACKAGES: ${MOLMO_PIP_EXTRA_PACKAGES:-}
+    image: ${MOLMO_IMAGE:-avplumber-molmo-test}:${MOLMO_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: "no"
+    deploy: *gpu-deploy
+    ipc: host
+    shm_size: 4gb
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    environment:
+      <<: *gpu-env
+      HF_HOME: /models/huggingface
+      VLLM_ENABLE_V1_MULTIPROCESSING: ${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
+      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/lib64:/usr/local/cuda-13.0/targets/x86_64-linux/lib}
+      AVP_INPUT: /media/input
+      AVP_OUTPUT: /artifacts/molmo-smoke.ts
+      AVP_OUTPUT_FORMAT: ${AVP_OUTPUT_FORMAT:-mpegts}
+      AVP_MOLMO_RUN_GRAPH: ${AVP_MOLMO_RUN_GRAPH:-0}
+      AVP_MOLMO_GRAPH_TIMEOUT: ${AVP_MOLMO_GRAPH_TIMEOUT:-45}
+      AVP_MOLMO_MODEL_ID: ${AVP_MOLMO_MODEL_ID:-allenai/Molmo2-VideoPoint-4B}
+      AVP_MOLMO_PROMPT: ${AVP_MOLMO_PROMPT:-Find people, vehicles, balls, and important objects. Return JSON only with objects containing label, confidence, bbox, and point. Coordinates must be integers from 0 to 1000 relative to the image.}
+      AVP_MOLMO_SIDECAR_URL: ${AVP_MOLMO_SIDECAR_URL:-}
+      AVP_MOLMO_SIDECAR_URLS: ${AVP_MOLMO_SIDECAR_URLS:-}
+      AVP_MOLMO_MAX_INFLIGHT: ${AVP_MOLMO_MAX_INFLIGHT:-}
+      AVP_MOLMO_WINDOW_QUEUE_SIZE: ${AVP_MOLMO_WINDOW_QUEUE_SIZE:-1}
+      AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS: ${AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS:-}
+      AVP_MOLMO_RESULT_POLICY: ${AVP_MOLMO_RESULT_POLICY:-hold_latest}
+      AVP_MOLMO_BACKEND: ${AVP_MOLMO_BACKEND:-mock}
+      AVP_MOLMO_STRICT: ${AVP_MOLMO_STRICT:-true}
+      AVP_MOLMO_SAMPLE_FPS: ${AVP_MOLMO_SAMPLE_FPS:-8}
+      AVP_MOLMO_WINDOW_FRAMES: ${AVP_MOLMO_WINDOW_FRAMES:-4}
+      AVP_MOLMO_WINDOW_STRIDE: ${AVP_MOLMO_WINDOW_STRIDE:-4}
+      AVP_MOLMO_MODEL_DTYPE: ${AVP_MOLMO_MODEL_DTYPE:-float16}
+      AVP_MOLMO_MAX_MODEL_LEN: ${AVP_MOLMO_MAX_MODEL_LEN:-4096}
+      AVP_MOLMO_MAX_NUM_BATCHED_TOKENS: ${AVP_MOLMO_MAX_NUM_BATCHED_TOKENS:-8192}
+      AVP_MOLMO_MAX_NEW_TOKENS: ${AVP_MOLMO_MAX_NEW_TOKENS:-256}
+      AVP_MOLMO_GPU_MEMORY_UTILIZATION: ${AVP_MOLMO_GPU_MEMORY_UTILIZATION:-0.85}
+      AVP_MOLMO_MM_PROCESSOR_CACHE_GB: ${AVP_MOLMO_MM_PROCESSOR_CACHE_GB:-0}
+      AVP_MOLMO_CPU_OFFLOAD_GB: ${AVP_MOLMO_CPU_OFFLOAD_GB:-0}
+      AVP_MOLMO_TENSOR_PARALLEL_SIZE: ${AVP_MOLMO_TENSOR_PARALLEL_SIZE:-1}
+      AVP_MOLMO_ENFORCE_EAGER: ${AVP_MOLMO_ENFORCE_EAGER:-true}
+      AVP_MOLMO_SEED: ${AVP_MOLMO_SEED:-0}
+    volumes:
+      - ${MOLMO_SMOKE_INPUT:-./empty/media/.gitkeep}:/media/input:ro
+      - ${MOLMO_ARTIFACT_DIR:-./artifacts/molmo}:/artifacts
+      - ${MOLMO_HF_CACHE:-./artifacts/huggingface}:/models/huggingface
 
 volumes:
   dma-browser-sockets:
