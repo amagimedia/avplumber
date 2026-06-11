@@ -254,6 +254,21 @@ def test_sidecar_runner_posts_encoded_window(monkeypatch):
     assert sent["max_new_tokens"] == 64
 
 
+def test_sidecar_runner_uses_configured_urls_round_robin():
+    runner = molmo_transformers_sidecar.SidecarMolmo2VideoRunner(
+        {
+            "sidecar_urls": [
+                "http://127.0.0.1:8765/generate",
+                "http://127.0.0.1:8766/generate",
+            ],
+        }
+    )
+
+    assert runner._next_url() == "http://127.0.0.1:8765/generate"
+    assert runner._next_url() == "http://127.0.0.1:8766/generate"
+    assert runner._next_url() == "http://127.0.0.1:8765/generate"
+
+
 def _molmo_node_for_private_tests():
     node = object.__new__(molmo_vllm.MolmoVllmAsync)
     node.visualize_ttl_frames = 30
@@ -263,12 +278,20 @@ def _molmo_node_for_private_tests():
     node.result_policy = "hold_latest"
     node.debug_log_every_n = 0
     node.delayed_track_hold_seconds = 0.0
+    node.worker_join_timeout_ms = 2000
+    node.max_inflight = 1
+    node.blocking_visualization = False
     node._delayed_frames = deque()
+    node._completed_delayed_jobs = {}
+    node._next_delayed_sequence = 1
+    node._active_jobs = 0
     node._eof_flushed = False
     node._frame_index = 0
     node.metadata_key_detections = "molmo_detections"
     node.metadata_key_points = "molmo_points"
     node.metadata_key_raw = "molmo_raw"
+    node._lock = threading.RLock()
+    node._condition = threading.Condition(node._lock)
     return node
 
 
@@ -441,6 +464,78 @@ def test_delayed_tracks_hold_seconds_persists_nearby_frames():
     assert "molmo_points" not in frames[2].metadata
 
 
+def test_async_delayed_tracks_drain_completed_jobs_in_sequence_order():
+    node = _molmo_node_for_private_tests()
+    node.result_policy = "delayed_tracks"
+    node.max_inflight = 2
+
+    class Frame:
+        def __init__(self, index):
+            self.index = index
+            self.metadata = {}
+
+    class Dst:
+        def __init__(self):
+            self.frames = []
+
+        def enqueue(self, frame):
+            self.frames.append(frame)
+
+    frames = [Frame(1), Frame(2)]
+    node._dst = Dst()
+    node._delayed_frames.extend(
+        [
+            molmo_vllm._BufferedFrame(frame=frames[0], seconds=10.0, frame_index=1),
+            molmo_vllm._BufferedFrame(frame=frames[1], seconds=11.0, frame_index=2),
+        ]
+    )
+
+    def job(sequence, frame_index):
+        return molmo_vllm._WindowJob(
+            sequence=sequence,
+            buffer=None,
+            prompt="track",
+            prompt_id="track",
+            sample_count=1,
+            start_pts=str(frame_index),
+            end_pts=str(frame_index),
+            start_seconds=float(9 + frame_index),
+            end_seconds=float(9 + frame_index),
+            start_frame_index=frame_index,
+            end_frame_index=frame_index,
+            video_inputs={},
+            enqueue_time=0.0,
+        )
+
+    def result(frame_index, x):
+        return molmo_vllm._MolmoResult(
+            detection_json=None,
+            points_json=None,
+            raw_json='{"parse_status":"native_points"}',
+            end_seconds=float(9 + frame_index),
+            expires_seconds=float(9 + frame_index),
+            end_frame_index=frame_index,
+            expires_frame_index=frame_index,
+            timed_points=(
+                molmo_vllm._TimedPoint(time_seconds=0.0, object_id="track:1", x=x, y=120.0),
+            ),
+        )
+
+    node._completed_delayed_jobs[2] = (job(2, 2), result(2, 200.0))
+    node._drain_completed_delayed_jobs()
+
+    assert node._dst.frames == []
+    assert node._next_delayed_sequence == 1
+
+    node._completed_delayed_jobs[1] = (job(1, 1), result(1, 100.0))
+    node._drain_completed_delayed_jobs()
+
+    assert node._dst.frames == frames
+    assert "molmo_points" in frames[0].metadata
+    assert "molmo_points" in frames[1].metadata
+    assert node._next_delayed_sequence == 3
+
+
 def test_delayed_tracks_completes_window_synchronously():
     node = _molmo_node_for_private_tests()
     node.result_policy = "delayed_tracks"
@@ -469,8 +564,8 @@ def test_delayed_tracks_stop_flushes_buffered_tail_frames():
     node._condition = threading.Condition(threading.RLock())
     node._current_buffer = None
     node._current_sample_count = 0
-    node._pending_job = None
-    node._worker = None
+    node._pending_jobs = deque()
+    node._workers = []
 
     class Frame:
         def __init__(self, index):

@@ -310,6 +310,14 @@ services:
       AVP_OUTPUT_FORMAT: ${AVP_OUTPUT_FORMAT:-mpegts}
       AVP_MOLMO_RUN_GRAPH: ${AVP_MOLMO_RUN_GRAPH:-0}
       AVP_MOLMO_GRAPH_TIMEOUT: ${AVP_MOLMO_GRAPH_TIMEOUT:-45}
+      AVP_MOLMO_MODEL_ID: ${AVP_MOLMO_MODEL_ID:-allenai/Molmo2-VideoPoint-4B}
+      AVP_MOLMO_PROMPT: ${AVP_MOLMO_PROMPT:-Find people, vehicles, balls, and important objects. Return JSON only with objects containing label, confidence, bbox, and point. Coordinates must be integers from 0 to 1000 relative to the image.}
+      AVP_MOLMO_SIDECAR_URL: ${AVP_MOLMO_SIDECAR_URL:-}
+      AVP_MOLMO_SIDECAR_URLS: ${AVP_MOLMO_SIDECAR_URLS:-}
+      AVP_MOLMO_MAX_INFLIGHT: ${AVP_MOLMO_MAX_INFLIGHT:-}
+      AVP_MOLMO_WINDOW_QUEUE_SIZE: ${AVP_MOLMO_WINDOW_QUEUE_SIZE:-1}
+      AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS: ${AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS:-}
+      AVP_MOLMO_RESULT_POLICY: ${AVP_MOLMO_RESULT_POLICY:-hold_latest}
       AVP_MOLMO_BACKEND: ${AVP_MOLMO_BACKEND:-mock}
       AVP_MOLMO_STRICT: ${AVP_MOLMO_STRICT:-true}
       AVP_MOLMO_SAMPLE_FPS: ${AVP_MOLMO_SAMPLE_FPS:-8}

@@ -87,6 +87,17 @@ def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        value = value.replace(";", ",")
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    raise TypeError(f"expected string or list, got {type(value).__name__}")
+
+
 def _coerce_float(value: Any) -> float | None:
     try:
         out = float(value)
@@ -672,18 +683,27 @@ class MolmoVllmAsync(PythonNode):
         self.window_frames = int(params.get("window_frames", 16))
         self.window_stride = int(params.get("window_stride", self.window_frames))
         self.window_queue_size = int(params.get("window_queue_size", 1))
-        self.max_inflight = int(params.get("max_inflight", 1))
+        self.sidecar_urls = _string_list(params.get("sidecar_urls"))
+        max_inflight_param = params.get("max_inflight")
+        self.max_inflight = (
+            int(max_inflight_param) if max_inflight_param not in (None, "") else max(1, len(self.sidecar_urls))
+        )
         self.visualize_ttl_frames = int(params.get("visualize_ttl_frames", self.window_frames))
         ttl_seconds_param = params.get("visualize_ttl_seconds")
         self.visualize_ttl_seconds = None if ttl_seconds_param in (None, "") else float(ttl_seconds_param)
         self.blocking_visualization = bool(params.get("blocking_visualization", False))
-        self.worker_join_timeout_ms = int(params.get("worker_join_timeout_ms", 2000))
+        result_policy_param = str(params.get("result_policy", "hold_latest")).lower()
+        default_worker_join_ms = 300000 if result_policy_param == "delayed_tracks" else 2000
+        worker_join_timeout_param = params.get("worker_join_timeout_ms", default_worker_join_ms)
+        self.worker_join_timeout_ms = int(
+            default_worker_join_ms if worker_join_timeout_param in (None, "") else worker_join_timeout_param
+        )
         self.fallback_input_fps = float(params.get("fallback_input_fps", 30.0))
 
         self.metadata_key_detections = str(params.get("metadata_key_detections", "molmo_detections"))
         self.metadata_key_points = str(params.get("metadata_key_points", "molmo_points"))
         self.metadata_key_raw = str(params.get("metadata_key_raw", "molmo_raw"))
-        self.result_policy = str(params.get("result_policy", "hold_latest")).lower()
+        self.result_policy = result_policy_param
         self.debug_log_every_n = int(params.get("debug_log_every_n", 0))
         self.delayed_track_hold_seconds = float(params.get("delayed_track_hold_seconds", 0.0))
 
@@ -720,11 +740,14 @@ class MolmoVllmAsync(PythonNode):
         self._condition = threading.Condition(self._lock)
         self._stop_event = threading.Event()
         self._free_buffers: deque[_TensorBuffer] = deque()
-        self._pending_job: _WindowJob | None = None
+        self._pending_jobs: deque[_WindowJob] = deque()
+        self._active_jobs = 0
         self._latest_result: _MolmoResult | None = None
+        self._completed_delayed_jobs: dict[int, tuple[_WindowJob, _MolmoResult]] = {}
+        self._next_delayed_sequence = 1
         self._delayed_frames: deque[_BufferedFrame] = deque()
         self._eof_flushed = False
-        self._worker: threading.Thread | None = None
+        self._workers: list[threading.Thread] = []
 
         self._init_runtime()
 
@@ -747,8 +770,8 @@ class MolmoVllmAsync(PythonNode):
             raise ValueError("phase 1 supports tumbling windows only: window_stride must equal window_frames")
         if self.window_queue_size < 0:
             raise ValueError("window_queue_size must be non-negative")
-        if self.max_inflight != 1:
-            raise ValueError("phase 1 supports max_inflight=1")
+        if self.max_inflight <= 0:
+            raise ValueError("max_inflight must be positive")
         if self.visualize_ttl_frames < 0:
             raise ValueError("visualize_ttl_frames must be non-negative")
         if self.visualize_ttl_seconds is not None and self.visualize_ttl_seconds < 0:
@@ -779,6 +802,8 @@ class MolmoVllmAsync(PythonNode):
                     "frame_size": self.frame_size,
                     "patch_size": self.patch_size,
                     "sample_fps": self.sample_fps,
+                    "sidecar_url": str(self._args.get("sidecar_url", "")),
+                    "sidecar_urls": self.sidecar_urls,
                     "model_dtype": str(self._args.get("model_dtype", "float16")),
                     "prompt_style": str(self._args.get("prompt_style", "")),
                     "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
@@ -803,6 +828,8 @@ class MolmoVllmAsync(PythonNode):
                     "frame_size": self.frame_size,
                     "patch_size": self.patch_size,
                     "sample_fps": self.sample_fps,
+                    "sidecar_url": str(self._args.get("sidecar_url", "")),
+                    "sidecar_urls": self.sidecar_urls,
                     "model_dtype": str(self._args.get("model_dtype", "float16")),
                     "prompt_style": str(self._args.get("prompt_style", "")),
                     "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
@@ -850,8 +877,14 @@ class MolmoVllmAsync(PythonNode):
                 self._free_buffers.append(self._preprocessor.make_buffer(index))
 
             self._available = True
-            self._worker = threading.Thread(target=self._worker_main, name="MolmoVllmAsyncWorker", daemon=True)
-            self._worker.start()
+            for index in range(self.max_inflight):
+                worker = threading.Thread(
+                    target=self._worker_main,
+                    name=f"MolmoVllmAsyncWorker-{index}",
+                    daemon=True,
+                )
+                self._workers.append(worker)
+                worker.start()
         except Exception as exc:
             self._available = False
             self._unavailable_reason = f"{type(exc).__name__}: {exc}"
@@ -906,9 +939,11 @@ class MolmoVllmAsync(PythonNode):
 
     def _enqueue_job(self, job: _WindowJob) -> None:
         with self._condition:
-            if self._pending_job is not None:
-                self._release_buffer(self._pending_job.buffer)
-            self._pending_job = job
+            pending_capacity = max(1, self.window_queue_size)
+            while len(self._pending_jobs) >= pending_capacity:
+                dropped = self._pending_jobs.popleft()
+                self._release_buffer(dropped.buffer)
+            self._pending_jobs.append(job)
             self._condition.notify()
 
     def _finish_current_job(self) -> _WindowJob | None:
@@ -1068,19 +1103,26 @@ class MolmoVllmAsync(PythonNode):
     def _worker_main(self) -> None:
         while not self._stop_event.is_set():
             with self._condition:
-                while self._pending_job is None and not self._stop_event.is_set():
+                while not self._pending_jobs and not self._stop_event.is_set():
                     self._condition.wait(timeout=0.1)
                 if self._stop_event.is_set():
                     break
-                job = self._pending_job
-                self._pending_job = None
+                job = self._pending_jobs.popleft()
+                self._active_jobs += 1
 
             if job is None:
                 continue
 
-            result = self._execute_job(job)
-            with self._lock:
-                self._latest_result = result
+            try:
+                result = self._execute_job(job)
+                with self._lock:
+                    self._latest_result = result
+                    if self.result_policy == "delayed_tracks":
+                        self._completed_delayed_jobs[job.sequence] = (job, result)
+            finally:
+                with self._condition:
+                    self._active_jobs -= 1
+                    self._condition.notify_all()
 
     def _attach_unavailable(self, frame: Any) -> None:
         if self.strict_zero_copy:
@@ -1234,6 +1276,32 @@ class MolmoVllmAsync(PythonNode):
                 buffered.frame.metadata[self.metadata_key_points] = result.points_json
                 buffered.frame.metadata[self.metadata_key_raw] = result.raw_json
 
+    def _delayed_tracks_async_enabled(self) -> bool:
+        return self.result_policy == "delayed_tracks" and not self.blocking_visualization and self.max_inflight > 1
+
+    def _drain_completed_delayed_jobs(self) -> None:
+        while True:
+            with self._lock:
+                completed = self._completed_delayed_jobs.pop(self._next_delayed_sequence, None)
+            if completed is None:
+                return
+            job, result = completed
+            self._attach_delayed_track_result(job, result)
+            self._flush_delayed_frames(job.end_frame_index)
+            self._next_delayed_sequence += 1
+
+    def _wait_for_delayed_jobs(self) -> None:
+        deadline = time.perf_counter() + max(0.0, self.worker_join_timeout_ms / 1000.0)
+        while True:
+            self._drain_completed_delayed_jobs()
+            with self._condition:
+                if not self._pending_jobs and self._active_jobs == 0:
+                    return
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    return
+                self._condition.wait(timeout=min(0.1, remaining))
+
     def _flush_delayed_frames(self, through_frame_index: int | None = None) -> None:
         while self._delayed_frames:
             if through_frame_index is not None and self._delayed_frames[0].frame_index > through_frame_index:
@@ -1246,6 +1314,9 @@ class MolmoVllmAsync(PythonNode):
             return
         job = self._finish_current_job()
         if job is None:
+            return
+        if self._delayed_tracks_async_enabled():
+            self._enqueue_job(job)
             return
         result = self._execute_job(job)
         self._attach_delayed_track_result(job, result)
@@ -1267,6 +1338,12 @@ class MolmoVllmAsync(PythonNode):
             job = self._process_sample(frame, frame_seconds)
 
         if job is None:
+            self._drain_completed_delayed_jobs()
+            return
+
+        if self._delayed_tracks_async_enabled():
+            self._enqueue_job(job)
+            self._drain_completed_delayed_jobs()
             return
 
         result = self._execute_job(job)
@@ -1280,6 +1357,9 @@ class MolmoVllmAsync(PythonNode):
             return
         if self.result_policy == "delayed_tracks":
             self._flush_partial_delayed_window()
+            if self._delayed_tracks_async_enabled():
+                self._wait_for_delayed_jobs()
+                self._drain_completed_delayed_jobs()
             self._flush_delayed_frames()
         self._eof_flushed = True
 
@@ -1329,11 +1409,12 @@ class MolmoVllmAsync(PythonNode):
                 self._release_buffer(self._current_buffer)
                 self._current_buffer = None
                 self._current_sample_count = 0
-            if self._pending_job is not None:
-                self._release_buffer(self._pending_job.buffer)
-                self._pending_job = None
+            while self._pending_jobs:
+                self._release_buffer(self._pending_jobs.popleft().buffer)
+            self._completed_delayed_jobs.clear()
             self._condition.notify_all()
-        if self._worker is not None:
-            self._worker.join(timeout=max(0.0, self.worker_join_timeout_ms / 1000.0))
-            self._worker = None
+        join_deadline = time.perf_counter() + max(0.0, self.worker_join_timeout_ms / 1000.0)
+        for worker in self._workers:
+            worker.join(timeout=max(0.0, join_deadline - time.perf_counter()))
+        self._workers.clear()
         self._delayed_frames.clear()

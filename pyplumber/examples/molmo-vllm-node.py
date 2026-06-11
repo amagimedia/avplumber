@@ -41,6 +41,26 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def _env_list(name: str) -> list[str]:
+    value = os.environ.get(name, "")
+    value = value.replace(";", ",")
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    return int(value)
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
 INPUT_URL = os.environ.get("AVP_INPUT", "input.mp4")
 OUTPUT_URL = os.environ.get("AVP_OUTPUT", "molmo-vllm-node.mp4")
 OUTPUT_FORMAT = os.environ.get("AVP_OUTPUT_FORMAT", "mp4")
@@ -59,6 +79,10 @@ MOLMO_BACKEND = os.environ.get("AVP_MOLMO_BACKEND", "mock")
 MOLMO_STRICT = _env_bool("AVP_MOLMO_STRICT", False)
 MOLMO_RUNNER_FACTORY = os.environ.get("AVP_MOLMO_RUNNER_FACTORY", "")
 MOLMO_MODEL_ID = os.environ.get("AVP_MOLMO_MODEL_ID", "allenai/Molmo2-VideoPoint-4B")
+MOLMO_SIDECAR_URLS = _env_list("AVP_MOLMO_SIDECAR_URLS")
+if not MOLMO_SIDECAR_URLS and os.environ.get("AVP_MOLMO_SIDECAR_URL"):
+    MOLMO_SIDECAR_URLS = [os.environ["AVP_MOLMO_SIDECAR_URL"]]
+MOLMO_MAX_INFLIGHT = _env_int("AVP_MOLMO_MAX_INFLIGHT", max(1, len(MOLMO_SIDECAR_URLS)))
 MOLMO_PROMPT = os.environ.get(
     "AVP_MOLMO_PROMPT",
     "Find people, vehicles, balls, and important objects. Return JSON only with objects containing label, confidence, bbox, and point. Coordinates must be integers from 0 to 1000 relative to the image.",
@@ -142,6 +166,8 @@ nodes = [
             "strict_zero_copy": MOLMO_STRICT,
             "runner_factory": MOLMO_RUNNER_FACTORY,
             "model_id": MOLMO_MODEL_ID,
+            "sidecar_url": os.environ.get("AVP_MOLMO_SIDECAR_URL", ""),
+            "sidecar_urls": MOLMO_SIDECAR_URLS,
             "prompt": MOLMO_PROMPT,
             "prompt_style": os.environ.get("AVP_MOLMO_PROMPT_STYLE", ""),
             "prompt_id": "example_objects",
@@ -151,11 +177,12 @@ nodes = [
             "sample_fps": float(os.environ.get("AVP_MOLMO_SAMPLE_FPS", "8")),
             "window_frames": int(os.environ.get("AVP_MOLMO_WINDOW_FRAMES", "16")),
             "window_stride": int(os.environ.get("AVP_MOLMO_WINDOW_STRIDE", os.environ.get("AVP_MOLMO_WINDOW_FRAMES", "16"))),
-            "window_queue_size": 1,
-            "max_inflight": 1,
+            "window_queue_size": int(os.environ.get("AVP_MOLMO_WINDOW_QUEUE_SIZE", "1")),
+            "max_inflight": MOLMO_MAX_INFLIGHT,
             "visualize_ttl_frames": int(os.environ.get("AVP_MOLMO_VISUALIZE_TTL_FRAMES", "32")),
             "visualize_ttl_seconds": os.environ.get("AVP_MOLMO_VISUALIZE_TTL_SECONDS"),
             "blocking_visualization": _env_bool("AVP_MOLMO_BLOCKING_VISUALIZATION", False),
+            "worker_join_timeout_ms": _env_optional_int("AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS"),
             "gpu_memory_utilization": float(os.environ.get("AVP_MOLMO_GPU_MEMORY_UTILIZATION", "0.75")),
             "max_model_len": int(os.environ.get("AVP_MOLMO_MAX_MODEL_LEN", "8192")),
             "max_num_batched_tokens": int(os.environ.get("AVP_MOLMO_MAX_NUM_BATCHED_TOKENS", "8192")),
