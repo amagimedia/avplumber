@@ -40,6 +40,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def _string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        value = value.replace(";", ",")
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    raise TypeError(f"expected string or list, got {type(value).__name__}")
+
+
 def _encode_request(
     *,
     prompt: str,
@@ -157,7 +168,19 @@ class SidecarMolmo2VideoRunner:
         self.patch_size = _get_int(config, "patch_size", 14)
         self.sample_fps = _get_float(config, "sample_fps", 0.5)
         self.max_new_tokens = _get_int(config, "max_new_tokens", 512)
-        self.url = os.environ.get("AVP_MOLMO_SIDECAR_URL", "http://127.0.0.1:8765/generate")
+        configured_urls = _string_list(config.get("sidecar_urls"))
+        env_urls = _string_list(os.environ.get("AVP_MOLMO_SIDECAR_URLS"))
+        single_url = str(
+            config.get("sidecar_url")
+            or os.environ.get("AVP_MOLMO_SIDECAR_URL")
+            or "http://127.0.0.1:8765/generate"
+        ).strip()
+        self.urls = configured_urls or env_urls or [single_url]
+        if not self.urls:
+            raise ValueError("at least one Molmo sidecar URL is required")
+        self.url = self.urls[0]
+        self._url_index = 0
+        self._url_lock = Lock()
         self.timeout_seconds = _get_float(
             config,
             "sidecar_timeout_seconds",
@@ -165,9 +188,16 @@ class SidecarMolmo2VideoRunner:
         )
         self.compressed = _env_bool("AVP_MOLMO_SIDECAR_COMPRESS", False)
 
+    def _next_url(self) -> str:
+        with self._url_lock:
+            url = self.urls[self._url_index % len(self.urls)]
+            self._url_index += 1
+            return url
+
     def _post(self, body: bytes) -> dict[str, Any]:
+        url = self._next_url()
         request = urllib.request.Request(
-            self.url,
+            url,
             data=body,
             method="POST",
             headers={"Content-Type": "application/octet-stream"},
