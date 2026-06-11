@@ -64,7 +64,7 @@ References:
 Add:
 
 ```text
-/home/jp/git/avplumber/pyplumber/molmo_vllm.py
+/home/jp/git/avplumber/pyplumber/molmo/vllm.py
 ```
 
 Primary class:
@@ -541,7 +541,7 @@ Reference:
 Phase 1:
 
 ```text
-/home/jp/git/avplumber/pyplumber/molmo_vllm.py
+/home/jp/git/avplumber/pyplumber/molmo/vllm.py
 /home/jp/git/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
 /home/jp/git/avplumber/pyplumber/examples/molmo-vllm-node.py
 ```
