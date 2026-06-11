@@ -2,7 +2,16 @@ name: ${COMPOSE_PROJECT_NAME:-avplumber-compose}
 
 x-gpu-env: &gpu-env
   NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
   NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
 
 services:
   janus:
@@ -76,11 +85,11 @@ services:
       dockerfile: wayland/Dockerfile
     image: ${WAYLAND_IMAGE:-avplumber-wayland}:${WAYLAND_IMAGE_TAG:-latest}
     restart: unless-stopped
-    gpus: all
+    deploy: *gpu-deploy
     security_opt:
       - seccomp:unconfined
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     privileged: true
     environment:
       <<: *gpu-env
@@ -107,7 +116,7 @@ services:
       dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
     image: ${DMA_BROWSER_IMAGE:-avplumber-dma-browser}:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
-    gpus: all
+    deploy: *gpu-deploy
     shm_size: 1gb
     depends_on:
       wayland:
@@ -115,8 +124,8 @@ services:
     security_opt:
       - seccomp:unconfined
     devices:
-      - /dev/dri:/dev/dri
-    privileged: true
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    privileged: false
     environment:
       <<: *gpu-env
       XDG_RUNTIME_DIR: /run/avp-wayland
@@ -133,6 +142,7 @@ services:
       DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
       DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1080x1920,1920x1080,1280x720}
       DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+      DMA_BROWSER_RENDER_NODE: ${DMA_BROWSER_RENDER_NODE:-}
       DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks}
       LIBVA_DRIVER_NAME: nvidia
       NVD_BACKEND: direct
@@ -149,9 +159,9 @@ services:
     image: ${AVP_RUNNER_IMAGE:-avplumber-neural-demo:latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -190,9 +200,9 @@ services:
     image: ${NEURAL_DEMO_IMAGE:-avplumber-neural-demo:latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -233,9 +243,9 @@ services:
     image: ${AUTO_MIXER_IMAGE:-avplumber-auto-mixer}:${AUTO_MIXER_IMAGE_TAG:-latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     depends_on:
       janus:
         condition: service_started
@@ -295,11 +305,11 @@ services:
     image: ${MOLMO_IMAGE:-avplumber-molmo-test}:${MOLMO_IMAGE_TAG:-latest}
     network_mode: host
     restart: "no"
-    gpus: all
+    deploy: *gpu-deploy
     ipc: host
     shm_size: 4gb
     devices:
-      - /dev/dri:/dev/dri
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
     environment:
       <<: *gpu-env
       HF_HOME: /models/huggingface
