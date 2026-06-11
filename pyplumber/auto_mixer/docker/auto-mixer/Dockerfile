@@ -260,7 +260,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         ca-certificates \
         curl \
         findutils \
-        git \
         gnutls \
         libcurl \
         libdrm \
