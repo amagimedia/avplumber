@@ -10,6 +10,7 @@ ARG TRANSFORMERS_PACKAGE=transformers==4.57.1
 ARG HF_HUB_PACKAGE=huggingface-hub==0.36.2
 ARG TOKENIZERS_PACKAGE=tokenizers==0.22.2
 ARG CUPY_PACKAGE=cupy-cuda13x==14.1.1
+ARG ACCELERATE_PACKAGE=accelerate==1.13.0
 ARG PIP_EXTRA_PACKAGES=
 
 USER root
@@ -40,21 +41,22 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         libnvvm-13-0 \
     && dnf clean all
 
-RUN python3 -m pip install --no-cache-dir --upgrade pip uv \
+RUN /usr/bin/python3 -m pip install --no-cache-dir --upgrade pip uv \
     && uv pip install --system --index-strategy unsafe-best-match \
         "${VLLM_PACKAGE}" \
         "${TRANSFORMERS_PACKAGE}" \
         "${CUPY_PACKAGE}" \
+        "${ACCELERATE_PACKAGE}" \
         --torch-backend=auto \
         --extra-index-url "${TORCH_INDEX_URL}" \
-    && python3 -m pip install --no-cache-dir --force-reinstall \
+    && /usr/bin/python3 -m pip install --no-cache-dir --force-reinstall \
         "${TRANSFORMERS_PACKAGE}" \
         "${HF_HUB_PACKAGE}" \
         "${TOKENIZERS_PACKAGE}" \
     && if [ -n "${PIP_EXTRA_PACKAGES}" ]; then \
         uv pip install --system --index-strategy unsafe-best-match ${PIP_EXTRA_PACKAGES}; \
     fi \
-    && python3 -m pip cache purge || true \
+    && /usr/bin/python3 -m pip cache purge || true \
     && rm -rf /root/.cache/pip /root/.cache/uv
 
 RUN mkdir -p \
@@ -67,6 +69,8 @@ RUN mkdir -p \
 
 COPY pyplumber/molmo_vllm.py /opt/avplumber/pyplumber/molmo_vllm.py
 COPY pyplumber/molmo_vllm_runner.py /opt/avplumber/pyplumber/molmo_vllm_runner.py
+COPY pyplumber/molmo_transformers_runner.py /opt/avplumber/pyplumber/molmo_transformers_runner.py
+COPY pyplumber/molmo_transformers_sidecar.py /opt/avplumber/pyplumber/molmo_transformers_sidecar.py
 COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
 COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
 COPY src/nodes/neural_net/preprocess/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
