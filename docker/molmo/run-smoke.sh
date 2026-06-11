@@ -7,8 +7,9 @@ export HF_HOME="${HF_HOME:-/models/huggingface}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/lib64:/usr/local/cuda-13.0/targets/x86_64-linux/lib}"
 export PATH="/usr/local/bin:/usr/local/cuda-13.0/bin:${PATH}"
 export PYTHONPATH="${PYTHONPATH:-/opt/avplumber}"
+python_bin="${AVP_MOLMO_PYTHON:-/usr/bin/python3}"
 
-python3 <<'PY'
+"${python_bin}" <<'PY'
 import json
 import shutil
 import subprocess
@@ -147,7 +148,7 @@ if [[ "${AVP_MOLMO_RUN_GRAPH:-0}" == "1" ]]; then
     timeout_seconds="${AVP_MOLMO_GRAPH_TIMEOUT:-45}"
 
     set +e
-    timeout "${timeout_seconds}" python3 /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
+    timeout "${timeout_seconds}" "${python_bin}" /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
     status=$?
     set -e
 

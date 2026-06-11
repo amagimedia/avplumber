@@ -201,21 +201,19 @@ def _build_point_metadata(
     }
 
 
-def _extract_native_molmo_points(
+def _extract_native_molmo_timed_points(
     generated_text: str,
     *,
     frame_size: int,
-) -> tuple[list[tuple[float, float, float]], int]:
+) -> tuple[list[_TimedPoint], int]:
     """Extract Molmo2 native ``<points>/<tracks coords="...">`` outputs.
 
     Molmo2 VideoPoint commonly returns coordinates as text tags instead of
-    JSON. The coordinate payload uses 0..1000 coordinates and usually groups
-    per-frame tracks as ``frame_id object_id x y ...``. For visualization, keep
-    the latest point per object id across the generated window.
+    JSON. The coordinate payload uses 0..1000 coordinates and commonly groups
+    tracks as ``time_seconds object_id x y ...``.
     """
 
-    latest_by_id: dict[str, tuple[float, float, float, float]] = {}
-    anonymous: list[tuple[float, float, float]] = []
+    points: list[_TimedPoint] = []
     invalid = 0
 
     for tag_match in _NATIVE_POINT_TAG_RE.finditer(generated_text):
@@ -234,15 +232,14 @@ def _extract_native_molmo_points(
             if len(numbers) < 3:
                 continue
 
-            if len(numbers) == 3:
+            if len(numbers) % 3 == 0:
                 frame_id = 0.0
                 triples = numbers
-            else:
+            elif (len(numbers) - 1) % 3 == 0:
                 frame_value = _coerce_float(numbers[0])
                 frame_id = frame_value if frame_value is not None else 0.0
                 triples = numbers[1:]
-
-            if len(triples) < 3:
+            else:
                 invalid += 1
                 continue
 
@@ -254,17 +251,38 @@ def _extract_native_molmo_points(
                     invalid += 1
                     continue
 
-                if object_id:
-                    key = f"{label_prefix}:{object_id}"
-                    current = latest_by_id.get(key)
-                    if current is None or frame_id >= current[0]:
-                        latest_by_id[key] = (frame_id, px, py, 1.0)
-                else:
-                    anonymous.append((px, py, 1.0))
+                points.append(
+                    _TimedPoint(
+                        time_seconds=frame_id,
+                        object_id=f"{label_prefix}:{object_id}" if object_id else label_prefix,
+                        x=px,
+                        y=py,
+                        conf=1.0,
+                    )
+                )
 
-    points = [(px, py, conf) for _, px, py, conf in latest_by_id.values()]
-    points.extend(anonymous)
     return points, invalid
+
+
+def _extract_native_molmo_points(
+    generated_text: str,
+    *,
+    frame_size: int,
+) -> tuple[list[tuple[float, float, float]], int]:
+    """Return one display point per object from native Molmo point output."""
+
+    timed_points, invalid = _extract_native_molmo_timed_points(
+        generated_text,
+        frame_size=frame_size,
+    )
+
+    latest_by_id: dict[str, _TimedPoint] = {}
+    for point in timed_points:
+        current = latest_by_id.get(point.object_id)
+        if current is None or point.time_seconds >= current.time_seconds:
+            latest_by_id[point.object_id] = point
+
+    return [(point.x, point.y, point.conf) for point in latest_by_id.values()], invalid
 
 
 def parse_molmo_generated_text(
@@ -388,10 +406,26 @@ def parse_molmo_generated_text(
 
 
 @dataclass
+class _TimedPoint:
+    time_seconds: float
+    object_id: str
+    x: float
+    y: float
+    conf: float = 1.0
+
+
+@dataclass
 class _TensorBuffer:
     index: int
     tensor: Any
     cupy_view: Any
+
+
+@dataclass
+class _BufferedFrame:
+    frame: Any
+    seconds: float | None
+    frame_index: int
 
 
 @dataclass
@@ -420,6 +454,7 @@ class _MolmoResult:
     expires_seconds: float | None
     end_frame_index: int
     expires_frame_index: int
+    timed_points: tuple[_TimedPoint, ...] = ()
 
 
 class _MolmoPreprocessor:
@@ -639,12 +674,18 @@ class MolmoVllmAsync(PythonNode):
         self.window_queue_size = int(params.get("window_queue_size", 1))
         self.max_inflight = int(params.get("max_inflight", 1))
         self.visualize_ttl_frames = int(params.get("visualize_ttl_frames", self.window_frames))
+        ttl_seconds_param = params.get("visualize_ttl_seconds")
+        self.visualize_ttl_seconds = None if ttl_seconds_param in (None, "") else float(ttl_seconds_param)
+        self.blocking_visualization = bool(params.get("blocking_visualization", False))
         self.worker_join_timeout_ms = int(params.get("worker_join_timeout_ms", 2000))
         self.fallback_input_fps = float(params.get("fallback_input_fps", 30.0))
 
         self.metadata_key_detections = str(params.get("metadata_key_detections", "molmo_detections"))
         self.metadata_key_points = str(params.get("metadata_key_points", "molmo_points"))
         self.metadata_key_raw = str(params.get("metadata_key_raw", "molmo_raw"))
+        self.result_policy = str(params.get("result_policy", "hold_latest")).lower()
+        self.debug_log_every_n = int(params.get("debug_log_every_n", 0))
+        self.delayed_track_hold_seconds = float(params.get("delayed_track_hold_seconds", 0.0))
 
         self.max_new_tokens = int(params.get("max_new_tokens", 512))
         self.temperature = float(params.get("temperature", 0.0))
@@ -670,6 +711,9 @@ class MolmoVllmAsync(PythonNode):
         self._current_start_pts = ""
         self._current_start_seconds: float | None = None
         self._current_start_frame_index = 0
+        self._current_end_pts = ""
+        self._current_end_seconds: float | None = None
+        self._current_end_frame_index = 0
         self._sequence = 0
 
         self._lock = threading.RLock()
@@ -678,6 +722,8 @@ class MolmoVllmAsync(PythonNode):
         self._free_buffers: deque[_TensorBuffer] = deque()
         self._pending_job: _WindowJob | None = None
         self._latest_result: _MolmoResult | None = None
+        self._delayed_frames: deque[_BufferedFrame] = deque()
+        self._eof_flushed = False
         self._worker: threading.Thread | None = None
 
         self._init_runtime()
@@ -703,8 +749,18 @@ class MolmoVllmAsync(PythonNode):
             raise ValueError("window_queue_size must be non-negative")
         if self.max_inflight != 1:
             raise ValueError("phase 1 supports max_inflight=1")
+        if self.visualize_ttl_frames < 0:
+            raise ValueError("visualize_ttl_frames must be non-negative")
+        if self.visualize_ttl_seconds is not None and self.visualize_ttl_seconds < 0:
+            raise ValueError("visualize_ttl_seconds must be non-negative")
+        if self.fallback_input_fps <= 0:
+            raise ValueError("fallback_input_fps must be positive")
         if self.backend not in ("vllm", "mock"):
             raise ValueError("backend must be vllm or mock")
+        if self.result_policy not in ("hold_latest", "no_hold", "delayed_tracks"):
+            raise ValueError("result_policy must be hold_latest, no_hold, or delayed_tracks")
+        if self.delayed_track_hold_seconds < 0:
+            raise ValueError("delayed_track_hold_seconds must be non-negative")
 
     def _init_runtime(self) -> None:
         if self.backend == "mock":
@@ -724,6 +780,7 @@ class MolmoVllmAsync(PythonNode):
                     "patch_size": self.patch_size,
                     "sample_fps": self.sample_fps,
                     "model_dtype": str(self._args.get("model_dtype", "float16")),
+                    "prompt_style": str(self._args.get("prompt_style", "")),
                     "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
                     "cpu_offload_gb": float(self._args.get("cpu_offload_gb", 0)),
                     "tensor_parallel_size": int(self._args.get("tensor_parallel_size", 1)),
@@ -747,6 +804,7 @@ class MolmoVllmAsync(PythonNode):
                     "patch_size": self.patch_size,
                     "sample_fps": self.sample_fps,
                     "model_dtype": str(self._args.get("model_dtype", "float16")),
+                    "prompt_style": str(self._args.get("prompt_style", "")),
                     "mm_processor_cache_gb": float(self._args.get("mm_processor_cache_gb", 0)),
                     "cpu_offload_gb": float(self._args.get("cpu_offload_gb", 0)),
                     "tensor_parallel_size": int(self._args.get("tensor_parallel_size", 1)),
@@ -811,6 +869,12 @@ class MolmoVllmAsync(PythonNode):
         except Exception:
             return None
 
+    def _is_eof_frame(self, frame: Any) -> bool:
+        try:
+            return int(frame.pts.timestamp) <= -9223372036854775800
+        except Exception:
+            return False
+
     def _frame_pts_string(self, frame: Any) -> str:
         try:
             return str(frame.pts)
@@ -847,14 +911,46 @@ class MolmoVllmAsync(PythonNode):
             self._pending_job = job
             self._condition.notify()
 
-    def _process_sample(self, frame: Any, frame_seconds: float | None) -> None:
+    def _finish_current_job(self) -> _WindowJob | None:
+        if self._current_buffer is None or self._current_sample_count <= 0 or self._preprocessor is None:
+            return None
+
+        self._preprocessor.synchronize()
+        self._sequence += 1
+        video_inputs = self._preprocessor.build_video_inputs(self._current_sample_count)
+        job = _WindowJob(
+            sequence=self._sequence,
+            buffer=self._current_buffer,
+            prompt=self.prompt,
+            prompt_id=self.prompt_id,
+            sample_count=self._current_sample_count,
+            start_pts=self._current_start_pts,
+            end_pts=self._current_end_pts,
+            start_seconds=self._current_start_seconds,
+            end_seconds=self._current_end_seconds,
+            start_frame_index=self._current_start_frame_index,
+            end_frame_index=self._current_end_frame_index,
+            video_inputs=video_inputs,
+            enqueue_time=time.perf_counter(),
+        )
+        self._current_buffer = None
+        self._current_sample_count = 0
+        self._current_start_pts = ""
+        self._current_start_seconds = None
+        self._current_start_frame_index = 0
+        self._current_end_pts = ""
+        self._current_end_seconds = None
+        self._current_end_frame_index = 0
+        return job
+
+    def _process_sample(self, frame: Any, frame_seconds: float | None) -> _WindowJob | None:
         if not self._available or self._preprocessor is None:
-            return
+            return None
 
         if self._current_buffer is None:
             self._current_buffer = self._acquire_buffer()
             if self._current_buffer is None:
-                return
+                return None
             self._current_sample_count = 0
             self._current_start_pts = self._frame_pts_string(frame)
             self._current_start_seconds = frame_seconds
@@ -867,35 +963,22 @@ class MolmoVllmAsync(PythonNode):
             self._release_buffer(self._current_buffer)
             self._current_buffer = None
             self._current_sample_count = 0
-            return
+            return None
 
         self._current_sample_count += 1
+        self._current_end_pts = self._frame_pts_string(frame)
+        self._current_end_seconds = frame_seconds
+        self._current_end_frame_index = self._frame_index
         if self._current_sample_count < self.window_frames:
-            return
+            return None
 
-        self._preprocessor.synchronize()
-        self._sequence += 1
-        end_pts = self._frame_pts_string(frame)
-        assert self._current_buffer is not None
-        video_inputs = self._preprocessor.build_video_inputs(self._current_sample_count)
-        job = _WindowJob(
-            sequence=self._sequence,
-            buffer=self._current_buffer,
-            prompt=self.prompt,
-            prompt_id=self.prompt_id,
-            sample_count=self._current_sample_count,
-            start_pts=self._current_start_pts,
-            end_pts=end_pts,
-            start_seconds=self._current_start_seconds,
-            end_seconds=frame_seconds,
-            start_frame_index=self._current_start_frame_index,
-            end_frame_index=self._frame_index,
-            video_inputs=video_inputs,
-            enqueue_time=time.perf_counter(),
-        )
-        self._current_buffer = None
-        self._current_sample_count = 0
+        job = self._finish_current_job()
+        if job is None:
+            return None
+        if self.blocking_visualization or self.result_policy == "delayed_tracks":
+            return job
         self._enqueue_job(job)
+        return None
 
     def _run_backend(self, job: _WindowJob) -> str:
         runner = self._runner
@@ -906,6 +989,81 @@ class MolmoVllmAsync(PythonNode):
         if callable(runner):
             return str(runner(job))
         raise TypeError("Molmo runner must be callable or expose generate(job)")
+
+    def _ttl_seconds(self) -> float:
+        if self.visualize_ttl_seconds is not None:
+            return float(self.visualize_ttl_seconds)
+        return float(self.visualize_ttl_frames) / self.fallback_input_fps
+
+    def _execute_job(self, job: _WindowJob) -> _MolmoResult:
+        latency_start = time.perf_counter()
+        timed_points: tuple[_TimedPoint, ...] = ()
+        generated_text = ""
+        try:
+            generated_text = self._run_backend(job)
+            latency_ms = (time.perf_counter() - latency_start) * 1000.0
+            native_timed_points, _ = _extract_native_molmo_timed_points(
+                generated_text,
+                frame_size=self.frame_size,
+            )
+            timed_points = tuple(native_timed_points)
+            det_md, point_md, raw_md = parse_molmo_generated_text(
+                generated_text,
+                frame_size=self.frame_size,
+                prompt_id=job.prompt_id,
+                window_start_pts=job.start_pts,
+                window_end_pts=job.end_pts,
+                latency_ms=latency_ms,
+            )
+        except Exception as exc:
+            det_md = None
+            point_md = None
+            raw_md = {
+                "schema": "molmo_raw_v1",
+                "prompt_id": job.prompt_id,
+                "window_start_pts": job.start_pts,
+                "window_end_pts": job.end_pts,
+                "generated_text": "",
+                "parse_status": "backend_error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        finally:
+            self._release_buffer(job.buffer)
+
+        expires_seconds = None
+        if job.end_seconds is not None:
+            expires_seconds = job.end_seconds + self._ttl_seconds()
+
+        if self.debug_log_every_n > 0 and job.sequence % self.debug_log_every_n == 0:
+            print(
+                "molmo_vllm_result",
+                _json_dumps(
+                    {
+                        "sequence": job.sequence,
+                        "sample_count": job.sample_count,
+                        "start_seconds": job.start_seconds,
+                        "end_seconds": job.end_seconds,
+                        "timed_point_count": len(timed_points),
+                        "has_points_json": point_md is not None,
+                        "latency_ms": raw_md.get("latency_ms"),
+                        "parse_status": raw_md.get("parse_status"),
+                        "error": raw_md.get("error"),
+                        "generated_text": generated_text,
+                    }
+                ),
+                flush=True,
+            )
+
+        return _MolmoResult(
+            detection_json=_json_dumps(det_md) if det_md else None,
+            points_json=_json_dumps(point_md) if point_md else None,
+            raw_json=_json_dumps(raw_md),
+            end_seconds=job.end_seconds,
+            expires_seconds=expires_seconds,
+            end_frame_index=job.end_frame_index,
+            expires_frame_index=job.end_frame_index + self.visualize_ttl_frames,
+            timed_points=timed_points,
+        )
 
     def _worker_main(self) -> None:
         while not self._stop_event.is_set():
@@ -920,46 +1078,7 @@ class MolmoVllmAsync(PythonNode):
             if job is None:
                 continue
 
-            latency_start = time.perf_counter()
-            try:
-                generated_text = self._run_backend(job)
-                latency_ms = (time.perf_counter() - latency_start) * 1000.0
-                det_md, point_md, raw_md = parse_molmo_generated_text(
-                    generated_text,
-                    frame_size=self.frame_size,
-                    prompt_id=job.prompt_id,
-                    window_start_pts=job.start_pts,
-                    window_end_pts=job.end_pts,
-                    latency_ms=latency_ms,
-                )
-            except Exception as exc:
-                det_md = None
-                point_md = None
-                raw_md = {
-                    "schema": "molmo_raw_v1",
-                    "prompt_id": job.prompt_id,
-                    "window_start_pts": job.start_pts,
-                    "window_end_pts": job.end_pts,
-                    "generated_text": "",
-                    "parse_status": "backend_error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            finally:
-                self._release_buffer(job.buffer)
-
-            expires_seconds = None
-            if job.end_seconds is not None:
-                expires_seconds = job.end_seconds + (float(self.visualize_ttl_frames) / self.sample_fps)
-
-            result = _MolmoResult(
-                detection_json=_json_dumps(det_md) if det_md else None,
-                points_json=_json_dumps(point_md) if point_md else None,
-                raw_json=_json_dumps(raw_md),
-                end_seconds=job.end_seconds,
-                expires_seconds=expires_seconds,
-                end_frame_index=job.end_frame_index,
-                expires_frame_index=job.end_frame_index + self.visualize_ttl_frames,
-            )
+            result = self._execute_job(job)
             with self._lock:
                 self._latest_result = result
 
@@ -974,29 +1093,207 @@ class MolmoVllmAsync(PythonNode):
         }
         frame.metadata[self.metadata_key_raw] = _json_dumps(payload)
 
-    def _attach_cached_result(self, frame: Any, frame_seconds: float | None) -> None:
-        with self._lock:
-            result = self._latest_result
-        if result is None:
-            return
-
-        fresh = False
+    def _result_is_fresh(self, result: _MolmoResult, frame_seconds: float | None) -> bool:
         if frame_seconds is not None and result.end_seconds is not None and result.expires_seconds is not None:
-            fresh = result.end_seconds <= frame_seconds <= result.expires_seconds
-        else:
-            fresh = result.end_frame_index <= self._frame_index <= result.expires_frame_index
-        if not fresh:
-            return
+            return result.end_seconds <= frame_seconds <= result.expires_seconds
+        return result.end_frame_index <= self._frame_index <= result.expires_frame_index
 
+    def _attach_result(self, frame: Any, result: _MolmoResult) -> None:
         if result.detection_json:
             frame.metadata[self.metadata_key_detections] = result.detection_json
         if result.points_json:
             frame.metadata[self.metadata_key_points] = result.points_json
         frame.metadata[self.metadata_key_raw] = result.raw_json
 
+    def _attach_cached_result(self, frame: Any, frame_seconds: float | None) -> None:
+        with self._lock:
+            result = self._latest_result
+        if result is None:
+            return
+
+        if not self._result_is_fresh(result, frame_seconds):
+            return
+
+        self._attach_result(frame, result)
+
+    def _nearest_delayed_frame(
+        self,
+        *,
+        target_seconds: float | None,
+        target_frame_index: int,
+        max_seconds_error: float,
+    ) -> _BufferedFrame | None:
+        best: _BufferedFrame | None = None
+        best_error = float("inf")
+        for buffered in self._delayed_frames:
+            if target_seconds is not None and buffered.seconds is not None:
+                error = abs(buffered.seconds - target_seconds)
+                if error > max_seconds_error:
+                    continue
+            else:
+                error = abs(buffered.frame_index - target_frame_index)
+
+            if error < best_error:
+                best = buffered
+                best_error = error
+        return best
+
+    def _delayed_frames_near_target(
+        self,
+        *,
+        target_seconds: float | None,
+        target_frame_index: int,
+        max_seconds_error: float,
+    ) -> list[tuple[_BufferedFrame, float]]:
+        if self.delayed_track_hold_seconds <= 0:
+            buffered = self._nearest_delayed_frame(
+                target_seconds=target_seconds,
+                target_frame_index=target_frame_index,
+                max_seconds_error=max_seconds_error,
+            )
+            if buffered is None:
+                return []
+            if target_seconds is not None and buffered.seconds is not None:
+                return [(buffered, abs(buffered.seconds - target_seconds))]
+            return [(buffered, float(abs(buffered.frame_index - target_frame_index)))]
+
+        max_frame_error = max(1, int(round(self.delayed_track_hold_seconds * self.fallback_input_fps / 2.0)))
+        max_time_error = max(max_seconds_error, self.delayed_track_hold_seconds / 2.0)
+        matches: list[tuple[_BufferedFrame, float]] = []
+        for buffered in self._delayed_frames:
+            if target_seconds is not None and buffered.seconds is not None:
+                error = abs(buffered.seconds - target_seconds)
+                if error <= max_time_error:
+                    matches.append((buffered, error))
+            else:
+                frame_error = abs(buffered.frame_index - target_frame_index)
+                if frame_error <= max_frame_error:
+                    matches.append((buffered, float(frame_error)))
+
+        return matches
+
+    def _attach_delayed_track_result(self, job: _WindowJob, result: _MolmoResult) -> None:
+        points_by_frame_object: dict[int, dict[str, tuple[float, float, float, float]]] = {}
+        raw_frame_index = job.end_frame_index
+        max_seconds_error = max(0.075, 0.5 / max(self.fallback_input_fps, 0.001))
+
+        for point in result.timed_points:
+            target_seconds = None
+            if job.start_seconds is not None:
+                target_seconds = job.start_seconds + point.time_seconds
+            target_frame_index = job.start_frame_index + int(round(point.time_seconds * self.fallback_input_fps))
+            matches = self._delayed_frames_near_target(
+                target_seconds=target_seconds,
+                target_frame_index=target_frame_index,
+                max_seconds_error=max_seconds_error,
+            )
+            for buffered, error in matches:
+                frame_points = points_by_frame_object.setdefault(buffered.frame_index, {})
+                current = frame_points.get(point.object_id)
+                if current is None or error < current[3]:
+                    frame_points[point.object_id] = (point.x, point.y, point.conf, error)
+                raw_frame_index = buffered.frame_index
+
+        points_by_frame: dict[int, list[tuple[float, float, float]]] = {
+            frame_index: [(x, y, conf) for x, y, conf, _error in points_by_object.values()]
+            for frame_index, points_by_object in points_by_frame_object.items()
+        }
+
+        if self.debug_log_every_n > 0 and job.sequence % self.debug_log_every_n == 0:
+            print(
+                "molmo_vllm_delayed_attach",
+                _json_dumps(
+                    {
+                        "sequence": job.sequence,
+                        "timed_point_count": len(result.timed_points),
+                        "hold_seconds": self.delayed_track_hold_seconds,
+                        "matched_frame_count": len(points_by_frame),
+                        "matched_frame_indices": sorted(points_by_frame.keys()),
+                    }
+                ),
+                flush=True,
+            )
+
+        for buffered in self._delayed_frames:
+            points = points_by_frame.get(buffered.frame_index)
+            if points:
+                point_md = _build_point_metadata(points, frame_size=self.frame_size)
+                if point_md is not None:
+                    buffered.frame.metadata[self.metadata_key_points] = _json_dumps(point_md)
+                buffered.frame.metadata[self.metadata_key_raw] = result.raw_json
+            elif buffered.frame_index == raw_frame_index:
+                buffered.frame.metadata[self.metadata_key_raw] = result.raw_json
+
+        if not result.timed_points and result.points_json:
+            buffered = self._nearest_delayed_frame(
+                target_seconds=job.end_seconds,
+                target_frame_index=job.end_frame_index,
+                max_seconds_error=max_seconds_error,
+            )
+            if buffered is not None:
+                buffered.frame.metadata[self.metadata_key_points] = result.points_json
+                buffered.frame.metadata[self.metadata_key_raw] = result.raw_json
+
+    def _flush_delayed_frames(self, through_frame_index: int | None = None) -> None:
+        while self._delayed_frames:
+            if through_frame_index is not None and self._delayed_frames[0].frame_index > through_frame_index:
+                break
+            buffered = self._delayed_frames.popleft()
+            self._dst.enqueue(buffered.frame)
+
+    def _flush_partial_delayed_window(self) -> None:
+        if self.result_policy != "delayed_tracks" or self._current_buffer is None or self._current_sample_count <= 0:
+            return
+        job = self._finish_current_job()
+        if job is None:
+            return
+        result = self._execute_job(job)
+        self._attach_delayed_track_result(job, result)
+        with self._lock:
+            self._latest_result = result
+        self._flush_delayed_frames(job.end_frame_index)
+
+    def _process_delayed_tracks(self, frame: Any, frame_seconds: float | None) -> None:
+        self._delayed_frames.append(
+            _BufferedFrame(
+                frame=frame,
+                seconds=frame_seconds,
+                frame_index=self._frame_index,
+            )
+        )
+
+        job = None
+        if self._should_sample(frame_seconds):
+            job = self._process_sample(frame, frame_seconds)
+
+        if job is None:
+            return
+
+        result = self._execute_job(job)
+        self._attach_delayed_track_result(job, result)
+        with self._lock:
+            self._latest_result = result
+        self._flush_delayed_frames(job.end_frame_index)
+
+    def _flush_eof_delayed_tracks(self) -> None:
+        if self._eof_flushed:
+            return
+        if self.result_policy == "delayed_tracks":
+            self._flush_partial_delayed_window()
+            self._flush_delayed_frames()
+        self._eof_flushed = True
+
     def process(self) -> None:
+        wait_peek = getattr(self._src, "wait_peek", None)
+        if callable(wait_peek):
+            next_frame = wait_peek(-1)
+            if self._is_eof_frame(next_frame):
+                self._flush_eof_delayed_tracks()
+                return
+
         frame = self._src.get()
-        if not frame:
+        if not frame or self._is_eof_frame(frame):
+            self._flush_eof_delayed_tracks()
             return
 
         self._frame_index += 1
@@ -1007,15 +1304,31 @@ class MolmoVllmAsync(PythonNode):
             self._dst.enqueue(frame)
             return
 
-        if self._should_sample(frame_seconds):
-            self._process_sample(frame, frame_seconds)
+        if self.result_policy == "delayed_tracks":
+            self._process_delayed_tracks(frame, frame_seconds)
+            return
 
-        self._attach_cached_result(frame, frame_seconds)
+        job = None
+        if self._should_sample(frame_seconds):
+            job = self._process_sample(frame, frame_seconds)
+
+        if job is not None:
+            result = self._execute_job(job)
+            self._attach_result(frame, result)
+            with self._lock:
+                self._latest_result = result
+        elif self.result_policy == "hold_latest":
+            self._attach_cached_result(frame, frame_seconds)
         self._dst.enqueue(frame)
 
     def doStop(self) -> None:
+        self._flush_eof_delayed_tracks()
         self._stop_event.set()
         with self._condition:
+            if self._current_buffer is not None:
+                self._release_buffer(self._current_buffer)
+                self._current_buffer = None
+                self._current_sample_count = 0
             if self._pending_job is not None:
                 self._release_buffer(self._pending_job.buffer)
                 self._pending_job = None
@@ -1023,3 +1336,4 @@ class MolmoVllmAsync(PythonNode):
         if self._worker is not None:
             self._worker.join(timeout=max(0.0, self.worker_join_timeout_ms / 1000.0))
             self._worker = None
+        self._delayed_frames.clear()
