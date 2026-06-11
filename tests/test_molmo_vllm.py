@@ -7,8 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "pyplumber" / "molmo_vllm.py"
-sys.path.insert(0, str(MODULE_PATH.parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+MODULE_PATH = REPO_ROOT / "pyplumber" / "molmo" / "vllm.py"
 SPEC = importlib.util.spec_from_file_location("molmo_vllm_for_tests", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 molmo_vllm = importlib.util.module_from_spec(SPEC)
@@ -16,14 +18,16 @@ sys.modules[SPEC.name] = molmo_vllm
 SPEC.loader.exec_module(molmo_vllm)
 parse_molmo_generated_text = molmo_vllm.parse_molmo_generated_text
 
-RUNNER_MODULE_PATH = Path(__file__).resolve().parents[1] / "pyplumber" / "molmo_vllm_runner.py"
+RUNNER_MODULE_PATH = REPO_ROOT / "pyplumber" / "molmo" / "vllm_runner.py"
 RUNNER_SPEC = importlib.util.spec_from_file_location("molmo_vllm_runner_for_tests", RUNNER_MODULE_PATH)
 assert RUNNER_SPEC is not None and RUNNER_SPEC.loader is not None
 molmo_vllm_runner = importlib.util.module_from_spec(RUNNER_SPEC)
 sys.modules[RUNNER_SPEC.name] = molmo_vllm_runner
 RUNNER_SPEC.loader.exec_module(molmo_vllm_runner)
 
-TRANSFORMERS_RUNNER_MODULE_PATH = Path(__file__).resolve().parents[1] / "pyplumber" / "molmo_transformers_runner.py"
+TRANSFORMERS_RUNNER_MODULE_PATH = (
+    REPO_ROOT / "pyplumber" / "molmo" / "transformers_runner.py"
+)
 TRANSFORMERS_RUNNER_SPEC = importlib.util.spec_from_file_location(
     "molmo_transformers_runner_for_tests",
     TRANSFORMERS_RUNNER_MODULE_PATH,
@@ -33,7 +37,7 @@ molmo_transformers_runner = importlib.util.module_from_spec(TRANSFORMERS_RUNNER_
 sys.modules[TRANSFORMERS_RUNNER_SPEC.name] = molmo_transformers_runner
 TRANSFORMERS_RUNNER_SPEC.loader.exec_module(molmo_transformers_runner)
 
-SIDECAR_MODULE_PATH = Path(__file__).resolve().parents[1] / "pyplumber" / "molmo_transformers_sidecar.py"
+SIDECAR_MODULE_PATH = REPO_ROOT / "pyplumber" / "molmo" / "transformers_sidecar.py"
 sys.path.insert(0, str(SIDECAR_MODULE_PATH.parent))
 SIDECAR_SPEC = importlib.util.spec_from_file_location("molmo_transformers_sidecar_for_tests", SIDECAR_MODULE_PATH)
 assert SIDECAR_SPEC is not None and SIDECAR_SPEC.loader is not None

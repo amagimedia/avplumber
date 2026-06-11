@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 try:
-    from pyplumber.molmo_transformers_runner import (
+    from pyplumber.molmo.transformers_runner import (
         TransformersMolmo2VideoRunner,
         _get_float,
         _get_int,
@@ -24,7 +24,7 @@ try:
         window_to_video_array,
     )
 except ModuleNotFoundError:
-    from molmo_transformers_runner import (  # type: ignore
+    from transformers_runner import (  # type: ignore
         TransformersMolmo2VideoRunner,
         _get_float,
         _get_int,

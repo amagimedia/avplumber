@@ -814,7 +814,7 @@ class MolmoVllmAsync(PythonNode):
                 }
             )
         elif self.backend == "vllm":
-            from pyplumber.molmo_vllm_runner import VllmMolmo2VideoRunner
+            from pyplumber.molmo.vllm_runner import VllmMolmo2VideoRunner
 
             self._runner = VllmMolmo2VideoRunner(
                 {

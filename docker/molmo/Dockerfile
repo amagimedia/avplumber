@@ -62,15 +62,17 @@ RUN /usr/bin/python3 -m pip install --no-cache-dir --upgrade pip uv \
 RUN mkdir -p \
         /opt/avp-molmo \
         /opt/avplumber/pyplumber/examples \
+        /opt/avplumber/pyplumber/molmo \
         /opt/avplumber/src/nodes/neural_net/preprocess \
         /opt/avplumber/tests \
         /artifacts \
         /models/huggingface
 
-COPY pyplumber/molmo_vllm.py /opt/avplumber/pyplumber/molmo_vllm.py
-COPY pyplumber/molmo_vllm_runner.py /opt/avplumber/pyplumber/molmo_vllm_runner.py
-COPY pyplumber/molmo_transformers_runner.py /opt/avplumber/pyplumber/molmo_transformers_runner.py
-COPY pyplumber/molmo_transformers_sidecar.py /opt/avplumber/pyplumber/molmo_transformers_sidecar.py
+COPY pyplumber/molmo/__init__.py /opt/avplumber/pyplumber/molmo/__init__.py
+COPY pyplumber/molmo/vllm.py /opt/avplumber/pyplumber/molmo/vllm.py
+COPY pyplumber/molmo/vllm_runner.py /opt/avplumber/pyplumber/molmo/vllm_runner.py
+COPY pyplumber/molmo/transformers_runner.py /opt/avplumber/pyplumber/molmo/transformers_runner.py
+COPY pyplumber/molmo/transformers_sidecar.py /opt/avplumber/pyplumber/molmo/transformers_sidecar.py
 COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
 COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
 COPY src/nodes/neural_net/preprocess/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu

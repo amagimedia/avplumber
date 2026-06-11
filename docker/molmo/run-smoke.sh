@@ -57,8 +57,8 @@ capability = torch.cuda.get_device_capability(0)
 print(f"cuda device={device_name} capability={capability}")
 
 print("== parser ==")
-from pyplumber.molmo_vllm import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
-from pyplumber.molmo_vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
+from pyplumber.molmo.vllm import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
+from pyplumber.molmo.vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
 
 det_md, point_md, raw_md = parse_molmo_generated_text(
     json.dumps({"objects": [{"label": "ball", "confidence": 0.9, "bbox": [400, 400, 600, 600], "point": [500, 500]}]}),
