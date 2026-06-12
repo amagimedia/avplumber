@@ -83,6 +83,14 @@ _NATIVE_COORD_ATTR_RE = re.compile(r'\bcoords="(?P<coords>[0-9\t:;, .]+)"', re.I
 _NATIVE_LABEL_ATTR_RE = re.compile(r'\b(?:alt|label|name)="(?P<label>[^"]+)"', re.IGNORECASE)
 
 
+def _find_repo_file(relative_path: str, start: Path) -> Path:
+    for parent in (start, *start.parents):
+        candidate = parent / relative_path
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(f"missing repository file: {relative_path}")
+
+
 def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -505,6 +513,7 @@ class _MolmoPreprocessor:
 
     def _raw_module_options(self) -> tuple[str, ...]:
         include_dirs = (
+            str(self.kernel_path.parent),
             "/usr/local/cuda/include",
             "/usr/local/cuda-13.0/include",
             "/usr/local/cuda-13.0/targets/x86_64-linux/include",
@@ -855,10 +864,10 @@ class MolmoVllmAsync(PythonNode):
             if not torch.cuda.is_available():
                 raise RuntimeError("torch CUDA is unavailable")
 
-            repo_root = Path(__file__).resolve().parents[1]
-            kernel_path = repo_root / "src" / "nodes" / "neural_net" / "preprocess" / "molmo2_preprocess.cu"
-            if not kernel_path.exists():
-                raise RuntimeError(f"missing CUDA preprocess source: {kernel_path}")
+            kernel_path = _find_repo_file(
+                "src/nodes/neural_net/preprocess/molmo2_preprocess.cu",
+                Path(__file__).resolve(),
+            )
 
             self._torch = torch
             self._cp = cupy
