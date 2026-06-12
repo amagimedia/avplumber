@@ -63,6 +63,7 @@ RUN mkdir -p \
         /opt/avp-molmo \
         /opt/avplumber/pyplumber/examples \
         /opt/avplumber/pyplumber/molmo \
+        /opt/avplumber/pyplumber/qwen \
         /opt/avplumber/src/nodes/neural_net/preprocess \
         /opt/avplumber/tests \
         /artifacts \
@@ -73,10 +74,16 @@ COPY pyplumber/molmo/vllm.py /opt/avplumber/pyplumber/molmo/vllm.py
 COPY pyplumber/molmo/vllm_runner.py /opt/avplumber/pyplumber/molmo/vllm_runner.py
 COPY pyplumber/molmo/transformers_runner.py /opt/avplumber/pyplumber/molmo/transformers_runner.py
 COPY pyplumber/molmo/transformers_sidecar.py /opt/avplumber/pyplumber/molmo/transformers_sidecar.py
+COPY pyplumber/qwen/__init__.py /opt/avplumber/pyplumber/qwen/__init__.py
+COPY pyplumber/qwen/vl.py /opt/avplumber/pyplumber/qwen/vl.py
+COPY pyplumber/qwen/transformers_runner.py /opt/avplumber/pyplumber/qwen/transformers_runner.py
 COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
 COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
+COPY src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh /opt/avplumber/src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh
 COPY src/nodes/neural_net/preprocess/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
+COPY src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu
 COPY tests/test_molmo_vllm.py /opt/avplumber/tests/test_molmo_vllm.py
+COPY tests/test_qwen_vl.py /opt/avplumber/tests/test_qwen_vl.py
 COPY docker/molmo/run-smoke.sh /opt/avp-molmo/run-smoke.sh
 
 RUN chmod +x /opt/avp-molmo/run-smoke.sh \

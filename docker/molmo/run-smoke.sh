@@ -59,6 +59,7 @@ print(f"cuda device={device_name} capability={capability}")
 print("== parser ==")
 from pyplumber.molmo.vllm import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
 from pyplumber.molmo.vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
+from pyplumber.qwen.vl import QwenVlAsync, _Qwen3Preprocessor, parse_qwen_generated_text
 
 det_md, point_md, raw_md = parse_molmo_generated_text(
     json.dumps({"objects": [{"label": "ball", "confidence": 0.9, "bbox": [400, 400, 600, 600], "point": [500, 500]}]}),
@@ -70,6 +71,18 @@ det_md, point_md, raw_md = parse_molmo_generated_text(
 assert raw_md["parse_status"] == "ok"
 assert det_md and det_md["detections"][0]["label"] == "ball"
 assert point_md and point_md["num_keypoints"] == 1
+
+qwen_det_md, qwen_point_md, qwen_raw_md = parse_qwen_generated_text(
+    json.dumps([{"label": "ball", "confidence": 0.9, "bbox_2d": [400, 400, 600, 600], "point_2d": [500, 500]}]),
+    model_width=800,
+    model_height=448,
+    prompt_id="smoke",
+    window_start_pts="0",
+    window_end_pts="1",
+)
+assert qwen_raw_md["parse_status"] == "ok"
+assert qwen_det_md and qwen_det_md["detections"][0]["label"] == "ball"
+assert qwen_point_md and qwen_point_md["num_keypoints"] == 1
 print("parser ok")
 
 assert _format_molmo2_video_prompt("Point to the ball.").startswith("<|video|><|im_start|>user")
@@ -94,6 +107,22 @@ node = MolmoVllmAsync(
 assert node._available
 node.doStop()
 print("mock strict node ok")
+
+qwen_node = QwenVlAsync(
+    {
+        "src": "video_in",
+        "dst": "video_out",
+        "backend": "mock",
+        "strict_zero_copy": True,
+        "window_frames": 1,
+        "window_stride": 1,
+        "window_queue_size": 0,
+        "visualize_ttl_frames": 1,
+    }
+)
+assert qwen_node._available
+qwen_node.doStop()
+print("qwen mock strict node ok")
 
 print("== preprocess kernel ==")
 kernel_path = Path("/opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu")
@@ -133,6 +162,34 @@ max_value = float(tensor.max().item())
 if min_value < -1.1 or max_value > 1.1:
     raise SystemExit(f"preprocess tensor outside normalized range: {min_value}..{max_value}")
 print(f"preprocess ok: shape={tuple(tensor.shape)} range={min_value:.4f}..{max_value:.4f}")
+
+qwen_kernel_path = Path("/opt/avplumber/src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu")
+qwen_pre = _Qwen3Preprocessor(
+    torch_mod=torch,
+    cupy_mod=cp,
+    target_height=448,
+    target_width=800,
+    patch_size=16,
+    temporal_patch_size=2,
+    merge_size=2,
+    window_frames=1,
+    dtype_name="fp16",
+    kernel_path=qwen_kernel_path,
+)
+qwen_buffer = qwen_pre.make_buffer(0)
+qwen_pre.preprocess_frame(frame, qwen_buffer, 0)
+qwen_pre.synchronize()
+
+qwen_tensor = qwen_buffer.tensor
+assert tuple(qwen_tensor.shape) == (1, 3, 448, 800)
+if not bool(torch.isfinite(qwen_tensor).all().item()):
+    raise SystemExit("qwen preprocess tensor contains non-finite values")
+
+qwen_min_value = float(qwen_tensor.min().item())
+qwen_max_value = float(qwen_tensor.max().item())
+if qwen_min_value < -1.1 or qwen_max_value > 1.1:
+    raise SystemExit(f"qwen preprocess tensor outside normalized range: {qwen_min_value}..{qwen_max_value}")
+print(f"qwen preprocess ok: shape={tuple(qwen_tensor.shape)} range={qwen_min_value:.4f}..{qwen_max_value:.4f}")
 
 torch.cuda.synchronize()
 print("molmo docker smoke ok")
