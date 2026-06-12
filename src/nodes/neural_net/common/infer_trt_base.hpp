@@ -246,6 +246,7 @@ protected:
     CUmodule preprocess_module_ = nullptr;
     bool initialized_ = false;
     bool use_cuda_graph_ = false;
+    bool debug_init_timing_ = false;
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;

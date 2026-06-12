@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -40,7 +41,29 @@ struct PlayerDot {
     int id = -1;
     std::string team;
     bool has_ball = false;
+    bool fallback = false;
     Point2D foot;
+};
+
+struct BBox {
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double x2 = 0.0;
+    double y2 = 0.0;
+    bool valid = false;
+};
+
+struct PlayerRef {
+    int track_id = -1;
+    std::string team;
+    BBox bbox;
+};
+
+struct TeamCandidate {
+    int index = -1;
+    std::string team;
+    BBox bbox;
+    bool torso = false;
 };
 
 struct ProjectedPlayerDot {
@@ -55,6 +78,13 @@ struct PlayerRenderState {
     int seen_frames = 0;
     int missed_frames = 0;
     bool visible = false;
+    // alpha-beta filter on COURT coordinates (ft): players move smoothly at
+    // human speeds; per-frame foot/H noise does not. Velocity is per frame.
+    double cx_ft = 0.0;
+    double cy_ft = 0.0;
+    double vx_ft = 0.0;
+    double vy_ft = 0.0;
+    int innov_streak = 0;
 };
 
 struct TrailPoint {
@@ -104,11 +134,69 @@ bool parsePointArray(const Parameters& arr, Point2D& out) {
     return std::isfinite(out.x) && std::isfinite(out.y);
 }
 
+bool parseBBox(const Parameters& det, BBox& out) {
+    if (!det.contains("xyxy") || !det["xyxy"].is_array() || det["xyxy"].size() < 4) return false;
+    out.x1 = det["xyxy"][0].get<double>();
+    out.y1 = det["xyxy"][1].get<double>();
+    out.x2 = det["xyxy"][2].get<double>();
+    out.y2 = det["xyxy"][3].get<double>();
+    out.valid = std::isfinite(out.x1) && std::isfinite(out.y1) &&
+                std::isfinite(out.x2) && std::isfinite(out.y2) &&
+                out.x2 > out.x1 && out.y2 > out.y1;
+    return out.valid;
+}
+
+double bboxCenterDistance(const BBox& a, const BBox& b) {
+    const double acx = (a.x1 + a.x2) * 0.5;
+    const double acy = (a.y1 + a.y2) * 0.5;
+    const double bcx = (b.x1 + b.x2) * 0.5;
+    const double bcy = (b.y1 + b.y2) * 0.5;
+    return std::hypot(acx - bcx, acy - bcy);
+}
+
+double bboxIou(const BBox& a, const BBox& b) {
+    const double ix1 = std::max(a.x1, b.x1);
+    const double iy1 = std::max(a.y1, b.y1);
+    const double ix2 = std::min(a.x2, b.x2);
+    const double iy2 = std::min(a.y2, b.y2);
+    const double iw = std::max(0.0, ix2 - ix1);
+    const double ih = std::max(0.0, iy2 - iy1);
+    const double inter = iw * ih;
+    const double area_a = (a.x2 - a.x1) * (a.y2 - a.y1);
+    const double area_b = (b.x2 - b.x1) * (b.y2 - b.y1);
+    const double denom = area_a + area_b - inter;
+    return denom > 0.0 ? inter / denom : 0.0;
+}
+
+double bboxWidth(const BBox& b) {
+    return std::max(1.0, b.x2 - b.x1);
+}
+
+double bboxHeight(const BBox& b) {
+    return std::max(1.0, b.y2 - b.y1);
+}
+
+std::string teamFromDetection(const Parameters& det) {
+    if (det.contains("team_ab") && det["team_ab"].is_string()) {
+        const std::string team = det["team_ab"].get<std::string>();
+        if (team == "A" || team == "B") return team;
+    }
+    if (det.contains("team") && det["team"].is_number()) {
+        const int team = det["team"].get<int>();
+        if (team == 0) return "A";
+        if (team == 1) return "B";
+    }
+    return std::string();
+}
+
 } // namespace
 
 class DrawTacticalCourt : public CudaOverlayBase {
     std::string calib_metadata_key_ = "court_calib";
     std::string feet_metadata_key_ = "player_feet";
+    std::string player_metadata_key_ = "yolo_players";
+    std::string player_seg_metadata_key_ = "yolo_players_seg";
+    std::string torso_metadata_key_ = "yolo_players_torso_seg";
     int panel_width_ = 360;
     int panel_height_ = 220;
     int padding_left_ = 28;
@@ -120,12 +208,26 @@ class DrawTacticalCourt : public CudaOverlayBase {
     int max_player_dots_ = 10;
     bool show_trails_ = false;
     bool show_unknown_players_ = false;
+    bool use_fallback_feet_ = false;
     double min_foot_confidence_ = 0.15;
     int overlay_hold_frames_ = 30;
     int player_min_seen_frames_ = 2;
     int player_hold_frames_ = 8;
-    double player_smoothing_alpha_ = 0.35;
-    double player_max_jump_px_ = 46.0;
+    double dot_alpha_ = 0.4;
+    double dot_beta_ = 0.12;
+    double dot_gate_ft_ = 3.0;
+    double dot_fallback_trust_ = 0.45;
+    std::ofstream dot_log_;
+
+    void logDot(int id, const PlayerRenderState& state,
+                double raw_x_ft, double raw_y_ft, const PlayerDot& player) {
+        dot_log_ << "{\"frame\":" << frame_counter_
+                 << ",\"id\":" << id
+                 << ",\"team\":\"" << state.team << "\""
+                 << ",\"x\":" << state.cx_ft << ",\"y\":" << state.cy_ft
+                 << ",\"rx\":" << raw_x_ft << ",\"ry\":" << raw_y_ft
+                 << ",\"fb\":" << (player.fallback ? 1 : 0) << "}\n";
+    }
     float background_opacity_ = 0.58f;
     int debug_log_every_n_ = 0;
 
@@ -135,7 +237,7 @@ class DrawTacticalCourt : public CudaOverlayBase {
     DrawColor hoop_color_{156, 44, 200};
     DrawColor team_a_color_{169, 166, 16};
     DrawColor team_b_color_{173, 42, 26};
-    DrawColor unknown_color_{200, 128, 128};
+    DrawColor unknown_color_{81, 90, 240};
 
     CUdeviceptr d_points_ = 0;
     size_t d_points_capacity_ = 0;
@@ -197,11 +299,15 @@ class DrawTacticalCourt : public CudaOverlayBase {
         Parameters md;
         if (!readMetadata(frm.raw(), calib_metadata_key_, md)) return false;
         if (!md.value("valid", false)) return false;
-        if (!md.contains("h") || !md["h"].is_array() || md["h"].size() < 9) return false;
-        for (int i = 0; i < 9; ++i) {
+        if (!md.contains("h") || !md["h"].is_array() || md["h"].size() < 8) return false;
+        for (int i = 0; i < 8; ++i) {
             mapper.source_to_court[i] = md["h"][(size_t)i].get<double>();
             if (!std::isfinite(mapper.source_to_court[i])) return false;
         }
+        mapper.source_to_court[8] = md["h"].size() >= 9
+            ? md["h"][(size_t)8].get<double>()
+            : 1.0;
+        if (!std::isfinite(mapper.source_to_court[8])) return false;
         mapper.source_w = md.value("source_w", (double)frm.width());
         mapper.source_h = md.value("source_h", (double)frm.height());
         if (mapper.source_w <= 1.0 || mapper.source_h <= 1.0) return false;
@@ -211,6 +317,94 @@ class DrawTacticalCourt : public CudaOverlayBase {
         mapper.court_w = geom.court_w;
         mapper.court_h = geom.court_h;
         return true;
+    }
+
+    void parsePlayerRefs(const av::VideoFrame& frm,
+                         std::unordered_map<int, std::string>& teams,
+                         std::unordered_map<int, PlayerRef>& refs_by_index,
+                         std::unordered_map<int, PlayerRef>& refs_by_track) const {
+        teams.clear();
+        refs_by_index.clear();
+        refs_by_track.clear();
+        if (player_metadata_key_.empty()) return;
+        Parameters md;
+        if (!readMetadata(frm.raw(), player_metadata_key_, md)) return;
+        if (!md.contains("detections") || !md["detections"].is_array()) return;
+        for (int i = 0; i < (int)md["detections"].size(); ++i) {
+            const auto& det = md["detections"][(size_t)i];
+            if (!det.is_object()) continue;
+            PlayerRef ref;
+            ref.track_id = det.value("track_id", -1);
+            ref.team = teamFromDetection(det);
+            parseBBox(det, ref.bbox);
+            if (ref.bbox.valid) refs_by_index[i] = ref;
+            if (ref.track_id >= 0 && ref.bbox.valid) refs_by_track[ref.track_id] = ref;
+            const int track_id = det.value("track_id", -1);
+            if (track_id < 0) continue;
+            if (!ref.team.empty()) teams[track_id] = ref.team;
+        }
+    }
+
+    void parseTeamCandidates(const av::VideoFrame& frm,
+                             const std::string& key,
+                             bool torso,
+                             std::vector<TeamCandidate>& candidates,
+                             std::unordered_map<int, std::string>* teams_by_index = nullptr) const {
+        if (teams_by_index) teams_by_index->clear();
+        if (key.empty()) return;
+        Parameters md;
+        if (!readMetadata(frm.raw(), key, md)) return;
+        if (!md.contains("detections") || !md["detections"].is_array()) return;
+        for (int i = 0; i < (int)md["detections"].size(); ++i) {
+            const auto& det = md["detections"][(size_t)i];
+            if (!det.is_object()) continue;
+            const std::string team = teamFromDetection(det);
+            if (team.empty()) continue;
+            if (teams_by_index) (*teams_by_index)[i] = team;
+            TeamCandidate candidate;
+            candidate.index = i;
+            candidate.team = team;
+            candidate.torso = torso;
+            if (parseBBox(det, candidate.bbox)) candidates.push_back(candidate);
+        }
+    }
+
+    std::string spatialTeamForFoot(const Point2D& model_foot,
+                                   const PlayerRef* player_ref,
+                                   const std::vector<TeamCandidate>& candidates) const {
+        std::string best_team;
+        double best_score = std::numeric_limits<double>::max();
+
+        for (const auto& candidate : candidates) {
+            if (!candidate.bbox.valid) continue;
+            double score = std::numeric_limits<double>::max();
+
+            if (player_ref && player_ref->bbox.valid) {
+                const double iou = bboxIou(player_ref->bbox, candidate.bbox);
+                const double center_dist = bboxCenterDistance(player_ref->bbox, candidate.bbox);
+                const double close_dist = candidate.torso ? 90.0 : 70.0;
+                const double min_iou = candidate.torso ? 0.01 : 0.04;
+                if (iou < min_iou && center_dist > close_dist) continue;
+                score = center_dist - iou * 280.0 + (candidate.torso ? 12.0 : 0.0);
+            } else if (!candidate.torso) {
+                const double x_margin = std::max(8.0, bboxWidth(candidate.bbox) * 0.12);
+                const double y_margin = std::max(16.0, bboxHeight(candidate.bbox) * 0.15);
+                const bool x_ok = model_foot.x >= candidate.bbox.x1 - x_margin &&
+                                  model_foot.x <= candidate.bbox.x2 + x_margin;
+                const bool y_ok = model_foot.y >= candidate.bbox.y1 - y_margin &&
+                                  model_foot.y <= candidate.bbox.y2 + y_margin;
+                if (!x_ok || !y_ok) continue;
+                const double cx = (candidate.bbox.x1 + candidate.bbox.x2) * 0.5;
+                score = std::fabs(model_foot.y - candidate.bbox.y2) +
+                        std::fabs(model_foot.x - cx) * 0.15;
+            }
+
+            if (score < best_score) {
+                best_score = score;
+                best_team = candidate.team;
+            }
+        }
+        return best_team;
     }
 
     void parsePlayers(const av::VideoFrame& frm, std::vector<PlayerDot>& players) const {
@@ -223,17 +417,54 @@ class DrawTacticalCourt : public CudaOverlayBase {
         if (mw <= 1.0 || mh <= 1.0) return;
         const double sx = (double)frm.width() / mw;
         const double sy = (double)frm.height() / mh;
+        std::unordered_map<int, std::string> player_teams;
+        std::unordered_map<int, PlayerRef> player_refs_by_index;
+        std::unordered_map<int, PlayerRef> player_refs_by_track;
+        parsePlayerRefs(frm, player_teams, player_refs_by_index, player_refs_by_track);
+        std::unordered_map<int, std::string> player_seg_teams;
+        std::vector<TeamCandidate> team_candidates;
+        parseTeamCandidates(frm, player_seg_metadata_key_, false, team_candidates, &player_seg_teams);
+        parseTeamCandidates(frm, torso_metadata_key_, true, team_candidates);
         for (const auto& det : md["detections"]) {
             if (!det.is_object()) continue;
-            if (!det.value("valid", false)) continue;
-            if (det.value("conf", 0.0) < min_foot_confidence_) continue;
+            const bool valid = det.value("valid", false);
+            const std::string source = det.value("source", std::string());
+            const bool fallback = use_fallback_feet_ && source == "bbox_bottom_fallback";
+            if (!valid && !fallback) continue;
+            if (valid && det.value("conf", 0.0) < min_foot_confidence_) continue;
             if (!det.contains("foot_point")) continue;
             PlayerDot dot;
-            if (!parsePointArray(det["foot_point"], dot.foot)) continue;
-            dot.foot.x *= sx;
-            dot.foot.y *= sy;
+            Point2D model_foot;
+            if (!parsePointArray(det["foot_point"], model_foot)) continue;
+            dot.foot.x = model_foot.x * sx;
+            dot.foot.y = model_foot.y * sy;
+            dot.fallback = fallback || !valid;
             dot.id = det.value("track_id", -1);
-            dot.team = det.value("team_ab", std::string());
+            dot.team = teamFromDetection(det);
+            if (dot.team.empty()) {
+                const int source_det_index = det.value("source_det_index", -1);
+                const auto it = player_seg_teams.find(source_det_index);
+                if (it != player_seg_teams.end()) dot.team = it->second;
+            }
+            const PlayerRef* player_ref = nullptr;
+            const int source_player_index = det.value("source_player_index", -1);
+            auto player_it = player_refs_by_index.find(source_player_index);
+            if (player_it != player_refs_by_index.end()) {
+                player_ref = &player_it->second;
+            } else if (dot.id >= 0) {
+                auto track_it = player_refs_by_track.find(dot.id);
+                if (track_it != player_refs_by_track.end()) player_ref = &track_it->second;
+            }
+            if (dot.team.empty()) {
+                dot.team = spatialTeamForFoot(model_foot, player_ref, team_candidates);
+            }
+            if (dot.team.empty() && player_ref && !player_ref->team.empty()) {
+                dot.team = player_ref->team;
+            }
+            if (dot.team.empty() && dot.id >= 0) {
+                const auto it = player_teams.find(dot.id);
+                if (it != player_teams.end()) dot.team = it->second;
+            }
             players.push_back(dot);
         }
     }
@@ -245,7 +476,8 @@ class DrawTacticalCourt : public CudaOverlayBase {
         };
     }
 
-    bool sourcePointToPanel(const Point2D& src, const CourtMapper& mapper, Point2D& out) const {
+    bool sourcePointToCourtFt(const Point2D& src, const CourtMapper& mapper,
+                              double& x_ft, double& y_ft) const {
         const double x = src.x / mapper.source_w;
         const double y = src.y / mapper.source_h;
         const double* h = mapper.source_to_court;
@@ -254,9 +486,21 @@ class DrawTacticalCourt : public CudaOverlayBase {
         const double cx = (h[0] * x + h[1] * y + h[2]) / den;
         const double cy = (h[3] * x + h[4] * y + h[5]) / den;
         if (!std::isfinite(cx) || !std::isfinite(cy)) return false;
-        if (cx < -0.05 || cx > 1.05 || cy < -0.05 || cy > 1.05) return false;
-        const double x_ft = clampDouble(cx * 94.0, 0.0, 94.0);
-        const double y_ft = clampDouble(cy * 50.0, 0.0, 50.0);
+        // in-court validation: a projection far outside the court is a bad
+        // measurement (wrong H frame / foot glitch) — REJECT it so the
+        // track filter coasts, instead of clamping it onto the boundary
+        // (the "dots stuck on the court edge" artifact). Slightly outside
+        // is legitimate (throw-ins, baseline plays) and kept unclamped.
+        x_ft = cx * 94.0;
+        y_ft = cy * 50.0;
+        if (x_ft < -2.0 || x_ft > 96.0 || y_ft < -2.0 || y_ft > 52.0)
+            return false;
+        return true;
+    }
+
+    bool sourcePointToPanel(const Point2D& src, const CourtMapper& mapper, Point2D& out) const {
+        double x_ft = 0.0, y_ft = 0.0;
+        if (!sourcePointToCourtFt(src, mapper, x_ft, y_ft)) return false;
         out = courtFtToPanel(x_ft, y_ft, mapper);
         return std::isfinite(out.x) && std::isfinite(out.y);
     }
@@ -346,7 +590,11 @@ class DrawTacticalCourt : public CudaOverlayBase {
         appendCourtSegment(base, 17.0, ft_line, 17.0, mapper, color, radius, points);
         appendCourtSegment(base, 33.0, ft_line, 33.0, mapper, color, radius, points);
         appendCourtSegment(ft_line, 17.0, ft_line, 33.0, mapper, color, radius, points);
-        appendCourtArc(ft_line, 25.0, 6.0, -M_PI / 2.0, M_PI / 2.0, mapper, color, radius, points);
+        if (left) {
+            appendCourtArc(ft_line, 25.0, 6.0, -M_PI / 2.0, M_PI / 2.0, mapper, color, radius, points);
+        } else {
+            appendCourtArc(ft_line, 25.0, 6.0, M_PI / 2.0, 3.0 * M_PI / 2.0, mapper, color, radius, points);
+        }
     }
 
     void appendCourtModel(const CourtMapper& mapper, std::vector<TacticalPoint>& points) const {
@@ -509,43 +757,73 @@ class DrawTacticalCourt : public CudaOverlayBase {
         };
 
         for (const PlayerDot& player : players) {
-            Point2D projected;
-            if (!sourcePointToPanel(player.foot, mapper, projected)) continue;
+            double mx = 0.0, my = 0.0;
+            if (!sourcePointToCourtFt(player.foot, mapper, mx, my)) continue;
+            Point2D projected = courtFtToPanel(mx, my, mapper);
+            if (!std::isfinite(projected.x) || !std::isfinite(projected.y)) continue;
 
             ProjectedPlayerDot item{player, projected};
             if (player.id >= 0) {
                 observed_ids.insert(player.id);
                 PlayerRenderState& state = player_states_[player.id];
-                Point2D stable = projected;
 
-                if (state.seen_frames > 0) {
-                    const double jump = std::hypot(projected.x - state.projected.x,
-                                                   projected.y - state.projected.y);
-                    const bool hold_jump = state.visible &&
-                                           player_hold_frames_ > 0 &&
-                                           player_max_jump_px_ > 0.0 &&
-                                           jump > player_max_jump_px_ &&
-                                           state.missed_frames < player_hold_frames_;
-                    if (hold_jump) {
-                        stable = state.projected;
-                        ++state.missed_frames;
-                    } else {
-                        const double alpha = clampDouble(player_smoothing_alpha_, 0.0, 1.0);
-                        stable = state.projected * (1.0 - alpha) + projected * alpha;
-                        state.missed_frames = 0;
-                    }
+                if (state.seen_frames == 0) {
+                    state.cx_ft = mx;
+                    state.cy_ft = my;
+                    state.vx_ft = state.vy_ft = 0.0;
+                    state.innov_streak = 0;
+                    state.missed_frames = 0;
                 } else {
+                    // alpha-beta in court feet: constant-velocity predict,
+                    // innovation-gate teleports (re-id / foot glitch / bad H
+                    // frame), trust fallback (bbox-bottom) measurements less.
+                    const double px = state.cx_ft + state.vx_ft;
+                    const double py = state.cy_ft + state.vy_ft;
+                    const double ix = mx - px;
+                    const double iy = my - py;
+                    const double innov = std::hypot(ix, iy);
+                    if (dot_gate_ft_ > 0.0 && innov > dot_gate_ft_) {
+                        ++state.innov_streak;
+                        if (state.innov_streak >= 4) {
+                            // persisted: a real relocation (track re-id) — snap
+                            state.cx_ft = mx;
+                            state.cy_ft = my;
+                            state.vx_ft = state.vy_ft = 0.0;
+                            state.innov_streak = 0;
+                        } else {
+                            // outlier: trust the prediction this frame
+                            state.cx_ft = px;
+                            state.cy_ft = py;
+                            state.vx_ft *= 0.9;
+                            state.vy_ft *= 0.9;
+                        }
+                    } else {
+                        state.innov_streak = 0;
+                        const double trust = player.fallback ? dot_fallback_trust_ : 1.0;
+                        const double a = clampDouble(dot_alpha_ * trust, 0.0, 1.0);
+                        const double b = dot_beta_ * trust;
+                        state.cx_ft = px + a * ix;
+                        state.cy_ft = py + a * iy;
+                        state.vx_ft = state.vx_ft * 0.8 + b * ix;
+                        state.vy_ft = state.vy_ft * 0.8 + b * iy;
+                        // human sprint ~ 1.2 ft/frame at 25 fps
+                        state.vx_ft = clampDouble(state.vx_ft, -1.5, 1.5);
+                        state.vy_ft = clampDouble(state.vy_ft, -1.5, 1.5);
+                    }
                     state.missed_frames = 0;
                 }
 
-                state.projected = stable;
-                state.team = player.team;
+                state.projected = courtFtToPanel(state.cx_ft, state.cy_ft, mapper);
+                if (!player.team.empty()) state.team = player.team;
                 state.has_ball = player.has_ball;
                 state.seen_frames = std::min(state.seen_frames + 1, 1000000);
                 state.visible = state.seen_frames >= std::max(1, player_min_seen_frames_);
+                if (dot_log_.is_open()) {
+                    logDot(player.id, state, mx, my, player);
+                }
                 if (!state.visible) continue;
 
-                item.projected = stable;
+                item.projected = state.projected;
             }
 
             addProjected(item);
@@ -559,6 +837,13 @@ class DrawTacticalCourt : public CudaOverlayBase {
 
             if (state.visible && state.missed_frames < player_hold_frames_) {
                 ++state.missed_frames;
+                // brief velocity coast, decaying to a stop — a frozen dot
+                // mid-stride reads as a glitch, a runaway one is worse
+                state.cx_ft = clampDouble(state.cx_ft + state.vx_ft, -2.0, 96.0);
+                state.cy_ft = clampDouble(state.cy_ft + state.vy_ft, -2.0, 52.0);
+                state.vx_ft *= 0.82;
+                state.vy_ft *= 0.82;
+                state.projected = courtFtToPanel(state.cx_ft, state.cy_ft, mapper);
                 PlayerDot held;
                 held.id = id;
                 held.team = state.team;
@@ -650,6 +935,23 @@ class DrawTacticalCourt : public CudaOverlayBase {
 
         std::vector<PlayerDot> players;
         parsePlayers(input, players);
+        for (auto& player : players) {
+            if (!player.team.empty() || player.id < 0) continue;
+            const auto it = player_states_.find(player.id);
+            if (it != player_states_.end() &&
+                !it->second.team.empty() &&
+                it->second.missed_frames <= player_hold_frames_) {
+                player.team = it->second.team;
+            }
+        }
+        int team_a_players = 0;
+        int team_b_players = 0;
+        int unknown_players = 0;
+        for (const auto& player : players) {
+            if (player.team == "A") ++team_a_players;
+            else if (player.team == "B") ++team_b_players;
+            else ++unknown_players;
+        }
 
         std::vector<TacticalPoint> points;
         points.reserve(1200);
@@ -663,6 +965,9 @@ class DrawTacticalCourt : public CudaOverlayBase {
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "draw_tactical_court: frame=" << frame_counter_
                       << " players=" << players.size()
+                      << " team_a=" << team_a_players
+                      << " team_b=" << team_b_players
+                      << " unknown=" << unknown_players
                       << " points=" << points.size()
                       << " hoop_on_left=" << (mapper.hoop_on_left ? 1 : 0)
                       << " cached_age=" << cached_overlay_age_;
@@ -687,6 +992,9 @@ public:
 
         r->calib_metadata_key_ = params.value("calib_metadata_key", std::string("court_calib"));
         r->feet_metadata_key_ = params.value("feet_metadata_key", std::string("player_feet"));
+        r->player_metadata_key_ = params.value("player_metadata_key", std::string("yolo_players"));
+        r->player_seg_metadata_key_ = params.value("player_seg_metadata_key", std::string("yolo_players_seg"));
+        r->torso_metadata_key_ = params.value("torso_metadata_key", std::string("yolo_players_torso_seg"));
         r->panel_width_ = params.value("panel_width", 360);
         r->panel_height_ = params.value("panel_height", 220);
         r->padding_left_ = params.value("padding_left", 28);
@@ -698,12 +1006,19 @@ public:
         r->max_player_dots_ = params.value("max_player_dots", 10);
         r->show_trails_ = params.value("show_trails", false);
         r->show_unknown_players_ = params.value("show_unknown_players", false);
+        r->use_fallback_feet_ = params.value("use_fallback_feet", false);
         r->min_foot_confidence_ = params.value("min_foot_confidence", 0.15);
         r->overlay_hold_frames_ = params.value("overlay_hold_frames", 30);
         r->player_min_seen_frames_ = params.value("player_min_seen_frames", 2);
         r->player_hold_frames_ = params.value("player_hold_frames", 8);
-        r->player_smoothing_alpha_ = params.value("player_smoothing_alpha", 0.35);
-        r->player_max_jump_px_ = params.value("player_max_jump_px", 46.0);
+        r->dot_alpha_ = params.value("dot_alpha", 0.4);
+        r->dot_beta_ = params.value("dot_beta", 0.12);
+        r->dot_gate_ft_ = params.value("dot_gate_ft", 3.0);
+        r->dot_fallback_trust_ = params.value("dot_fallback_trust", 0.45);
+        const std::string dot_log_path = params.value("dot_log", std::string());
+        if (!dot_log_path.empty()) {
+            r->dot_log_.open(dot_log_path);
+        }
         r->background_opacity_ = params.value("background_opacity", 0.58f);
         r->debug_log_every_n_ = params.value("debug_log_every_n", 0);
 
@@ -719,7 +1034,7 @@ public:
         parse_color("hoop_color", "orange", r->hoop_color_);
         parse_color("team_a_color", "light_blue", r->team_a_color_);
         parse_color("team_b_color", "green", r->team_b_color_);
-        parse_color("unknown_color", "light_gray", r->unknown_color_);
+        parse_color("unknown_color", "red", r->unknown_color_);
 
         return r;
     }

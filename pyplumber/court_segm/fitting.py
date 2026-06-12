@@ -1,10 +1,9 @@
-"""Per-frame fitting: segment assignment, sector consensus, PTZ refine.
+"""Per-frame fitting: segment assignment, PTZ refine, and line snaps.
 
 Takes boundary/edge evidence (source px or normalized) plus a camera prior
 and produces a polished 3-DOF (pan, tilt, focal) physical camera. All the
-robustness machinery against segmentation spillover lives here: the
-fit-independent sector-consensus vote, the degraded (arc-free, rim-anchored)
-mode, and the bounded least-squares refine.
+runtime polish machinery lives here: bounded least-squares refine, optional
+mask-boundary snap, and optional luma-ridge snap.
 
 Point counts here are small (<=300 boundary points + <=120 edge points per
 LM iteration) — this module stays on the CPU in the realtime port.
@@ -16,13 +15,230 @@ from scipy.spatial import cKDTree
 
 from pyplumber.court_segm.geometry import (
     COURT_W, COURT_H, HOOP_X, ARC_R, CORNER_LAT,
-    SEG_FAR_STRAIGHT, SEG_ARC, SEG_NEAR_STRAIGHT, SEG_BASELINE,
-    _MODEL_LABELS, _apply_h,
+    SEG_ARC, _MODEL_LABELS, _apply_h,
 )
 
 
 class FittingMixin:
-    """Consensus filtering + PTZ least-squares refine for CourtCalibrationNode."""
+    """PTZ least-squares and snap helpers for CourtCalibrationNode."""
+
+    # luma-snap tuning: ridge search half-width (model px), peak contrast
+    # over the local median, minimum surviving samples, pre-fit sanity (px)
+    _SNAP_SEARCH = 12
+    _SNAP_CONTRAST = 18.0
+    _SNAP_MIN_PTS = 12
+    _SNAP_MAX_MED_PX = 11.0
+    # internal target-curve labels for the luma snap
+    _SNAP_ARC = 0
+    _SNAP_SIDE = 1
+    _SNAP_BASE = 2
+
+    def _luma_ridge_targets(self, h8, hoop_on_left, luma):
+        """Project the model arc + far sideline into the luma plane, find the
+        nearest painted-line ridge along each local normal (same detector as
+        the offline ridge_eval), and return (targets_norm, labels) in source-
+        normalized coords. The luma plane is the model-input frame; content
+        geometry comes from the mask_* letterbox params. Pure function of its
+        arguments (called from BOTH the solver worker and the wrapper's
+        per-frame tracker thread)."""
+        if luma is None:
+            return None, None, None
+        lh, lw = luma.shape
+        try:
+            hm = np.array([[h8[0], h8[1], h8[2]],
+                           [h8[3], h8[4], h8[5]],
+                           [h8[6], h8[7], 1.0]])
+            hi = np.linalg.inv(hm)
+        except np.linalg.LinAlgError:
+            return None, None, None
+        theta = np.arcsin(CORNER_LAT / ARC_R)
+        ts = np.linspace(-theta, theta, 60)
+        hx = HOOP_X if hoop_on_left else COURT_W - HOOP_X
+        bx = 0.0 if hoop_on_left else COURT_W
+        sgn = 1.0 if hoop_on_left else -1.0
+        arc = np.stack([hx + sgn * ARC_R * np.cos(ts),
+                        25.0 + ARC_R * np.sin(ts)], axis=1)
+        # near-side arc (court y > 38) is occluded by the courtside crowd
+        arc = arc[arc[:, 1] <= 38.0]
+        line = np.linspace(4.0, COURT_W - 4.0, 50)
+        far = np.stack([line, np.zeros_like(line)], axis=1)
+        bl = np.linspace(2.0, 40.0, 30)
+        base = np.stack([np.full_like(bl, bx), bl], axis=1)
+        sr = self._SNAP_SEARCH
+        ss = np.arange(-sr, sr + 1, dtype=float)
+        targets, labels, pre_px = [], [], []
+        for pts_ft, lab in ((arc, self._SNAP_ARC), (far, self._SNAP_SIDE),
+                            (base, self._SNAP_BASE)):
+            pn = pts_ft / np.array([COURT_W, COURT_H])
+            q = (hi @ np.hstack([pn, np.ones((len(pn), 1))]).T).T
+            with np.errstate(divide="ignore", invalid="ignore"):
+                xyn = q[:, :2] / q[:, 2:3]
+            lx = xyn[:, 0] * self.mask_content_w + self.mask_pad_x
+            ly = xyn[:, 1] * self.mask_content_h + self.mask_pad_y
+            ok = (np.isfinite(lx) & np.isfinite(ly)
+                  & (lx >= sr + 2) & (lx < lw - sr - 2)
+                  & (ly >= sr + 2) & (ly < lh - sr - 2))
+            # normals from curve neighbors (central difference)
+            tx = np.gradient(lx)
+            ty = np.gradient(ly)
+            nrm = np.hypot(tx, ty)
+            ok &= np.isfinite(nrm) & (nrm > 1e-3)
+            if not ok.any():
+                continue
+            nx = np.where(ok, -ty / np.maximum(nrm, 1e-9), 0.0)
+            ny = np.where(ok, tx / np.maximum(nrm, 1e-9), 0.0)
+            idx = np.nonzero(ok)[0]
+            sx = (lx[idx, None] + nx[idx, None] * ss).astype(int)
+            sy = (ly[idx, None] + ny[idx, None] * ss).astype(int)
+            prof = luma[sy, sx].astype(np.float32)
+            base = np.median(prof, axis=1, keepdims=True)
+            inner = prof[:, 1:-1]
+            peaks = ((inner - base >= self._SNAP_CONTRAST)
+                     & (inner >= prof[:, :-2]) & (inner >= prof[:, 2:]))
+            # nearest qualifying ridge to the projected point, per sample
+            offmag = np.where(peaks, np.abs(ss[1:-1])[None, :], np.inf)
+            k = np.argmin(offmag, axis=1)
+            rows = np.isfinite(offmag[np.arange(len(k)), k])
+            if not rows.any():
+                continue
+            off = ss[1:-1][k[rows]]
+            ri = idx[rows]
+            rx = lx[ri] + nx[ri] * off
+            ry = ly[ri] + ny[ri] * off
+            txn = (rx - self.mask_pad_x) / self.mask_content_w
+            tyn = (ry - self.mask_pad_y) / self.mask_content_h
+            targets.append(np.stack([txn, tyn], axis=1))
+            labels.append(np.full(len(txn), lab, dtype=int))
+            pre_px.extend(np.abs(off).tolist())
+        if not targets:
+            return None, None, None
+        return np.vstack(targets), np.concatenate(labels), pre_px
+
+    def _boundary_snap(self, prm, w, h, hoop_on_left, pts_px, span_scale=0.5):
+        """Track-mode fit of the locked camera to the SEG-MASK BOUNDARY —
+        the boundary between the court and 3-pt segmentation classes, often
+        pixel-perfect while luma ridges capture the wrong painted line. Bounded (pan, tilt, F)
+        LM on boundary points segment-assigned under the lock prior; arc
+        evidence required; never regresses."""
+        if prm is None or pts_px is None or len(pts_px) < 30:
+            return prm, 0
+        prm = np.asarray(prm, dtype=float)
+        h8 = self._ptz_to_h8(tuple(prm), w, h)
+        if h8 is None:
+            return prm, 0
+        pn = np.asarray(pts_px, dtype=float) / np.array([w, h], dtype=float)
+        sel, lab = self._assign_segments(h8, pn, 6.0, hoop_on_left)
+        if sel is None or len(sel) < 30 or int((lab == SEG_ARC).sum()) < 15:
+            return prm, 0
+        if len(sel) > 150:
+            idx = np.linspace(0, len(sel) - 1, 150).astype(int)
+            sel, lab = sel[idx], lab[idx]
+        scale = np.array([COURT_W, COURT_H])
+
+        def resid(v):
+            h8v = self._ptz_to_h8((v[0], v[1], v[2],
+                                   prm[3], prm[4], prm[5]), w, h)
+            if h8v is None:
+                return np.full(len(sel), 10.0)
+            proj = _apply_h(h8v, sel) * scale
+            return self._curve_residuals_ft(proj, lab, hoop_on_left)
+
+        span = np.array([0.02, 0.015, 0.04 * prm[2]]) * float(span_scale)
+        lo = np.maximum(prm[:3] - span, self._PTZ_LO)
+        hi_b = np.minimum(prm[:3] + span, self._PTZ_HI)
+        pre = float(np.median(np.abs(resid(prm[:3]))))
+        try:
+            sol = least_squares(resid, prm[:3], loss="soft_l1", f_scale=0.5,
+                                max_nfev=15, method="trf", bounds=(lo, hi_b))
+        except Exception:
+            return prm, 0
+        post = float(np.median(np.abs(resid(sol.x))))
+        if not np.isfinite(post) or post >= pre or post > 1.0:
+            return prm, 0
+        out = prm.copy()
+        out[:3] = sol.x
+        return out, len(sel)
+
+    def _luma_snap(self, prm, w, h, hoop_on_left, luma, span_scale=1.0):
+        """Final painted-line polish: bounded (pan, tilt, F) LM against luma
+        ridge targets. The segmentation masks quantize at proto resolution
+        (~8 px at 1080p); the painted lines in the luma plane do not — this
+        is the step that breaks the mask-quantization accuracy floor.
+        Returns (prm, n_targets_used); on any gate failure returns the input
+        camera unchanged (never regresses)."""
+        if prm is None or luma is None:
+            return prm, 0
+        prm = np.asarray(prm, dtype=float)
+        h8 = self._ptz_to_h8(tuple(prm), w, h)
+        if h8 is None:
+            return prm, 0
+        tn, labels, pre = self._luma_ridge_targets(h8, hoop_on_left, luma)
+        if tn is None or len(tn) < self._SNAP_MIN_PTS:
+            self._fail("luma_few")
+            return prm, 0
+        if len(pre) < 10 or float(np.median(pre)) > self._SNAP_MAX_MED_PX:
+            # ridges too far from the projection: wrong lines / bad frame —
+            # do not let the snap chase them
+            self._fail("luma_far")
+            return prm, 0
+        # Each painted line pins specific camera DOF: the arc constrains all
+        # three; the (near-horizontal) far sideline only tilt; the (near-
+        # vertical) baseline only pan. Players usually occlude the arc, so
+        # boundary-only frames still snap — with exactly the DOF their
+        # evidence can support, never more.
+        arc_m = labels == self._SNAP_ARC
+        side_m = labels == self._SNAP_SIDE
+        base_m = labels == self._SNAP_BASE
+        na, ns, nb = int(arc_m.sum()), int(side_m.sum()), int(base_m.sum())
+        if na >= 10:
+            free = [0, 1, 2]
+        elif nb >= 8 and ns >= 8:
+            free = [0, 1]
+        elif ns >= 12:
+            free = [1]
+        elif nb >= 12:
+            free = [0]
+        else:
+            self._fail("luma_few")
+            return prm, 0
+        scale = np.array([COURT_W, COURT_H])
+        hx = HOOP_X if hoop_on_left else COURT_W - HOOP_X
+        bx = 0.0 if hoop_on_left else COURT_W
+
+        def resid(v):
+            p3 = prm[:3].copy()
+            p3[free] = v
+            h8v = self._ptz_to_h8((p3[0], p3[1], p3[2],
+                                   prm[3], prm[4], prm[5]), w, h)
+            if h8v is None:
+                return np.full(len(tn), 10.0)
+            proj = _apply_h(h8v, tn) * scale
+            X = np.where(np.isfinite(proj[:, 0]), proj[:, 0], 1e6)
+            Y = np.where(np.isfinite(proj[:, 1]), proj[:, 1], 1e6)
+            r = np.empty(len(tn))
+            r[arc_m] = np.hypot(X[arc_m] - hx, Y[arc_m] - 25.0) - ARC_R
+            r[side_m] = Y[side_m]
+            r[base_m] = X[base_m] - bx
+            return np.clip(np.where(np.isfinite(r), r, 30.0), -30.0, 30.0)
+
+        span = np.array([0.02, 0.015, 0.04 * prm[2]]) * float(span_scale)
+        lo = np.maximum(prm[:3] - span, self._PTZ_LO)[free]
+        hi_b = np.minimum(prm[:3] + span, self._PTZ_HI)[free]
+        pre_med = float(np.median(np.abs(resid(prm[:3][free]))))
+        try:
+            sol = least_squares(resid, prm[:3][free], loss="soft_l1",
+                                f_scale=0.5, max_nfev=20, method="trf",
+                                bounds=(lo, hi_b))
+        except Exception:
+            return prm, 0
+        post_med = float(np.median(np.abs(resid(sol.x))))
+        if not np.isfinite(post_med) or post_med >= pre_med \
+                or post_med > 1.0:
+            self._fail("luma_worse")
+            return prm, 0
+        out = prm.copy()
+        out[np.asarray(free)] = sol.x
+        return out, len(tn)
 
     # Physical-camera bounds for the per-frame PTZ refine (pan, tilt, focal):
     # real broadcast ranges, same envelope as the template grid.
@@ -55,100 +271,9 @@ class FittingMixin:
         md, _ = cKDTree(proj[ok]).query(self._model_pts[hoop_on_left][::4])
         return float(np.median(d)), float(np.mean(md < 2.0))
 
-    def _consensus_filter(self, h8_prior, tpl_pts, w, h, hoop_on_left):
-        """Drop spatially-coherent spillover lumps from the 3-pt boundary.
-
-        Projects ALL boundary points through the prior (template-match)
-        homography, labels them by nearest model segment, and bins them
-        along each segment (arc: 5 deg of hoop angle; straights/baseline:
-        5 ft). A bin whose median signed offset from its analytic curve
-        deviates from that segment's own consensus (median of bin medians)
-        by more than sector_outlier_ft is a segmentation lump: flood edges
-        and bulges are contiguous, so whole-bin voting separates them from
-        the painted line far more reliably than per-point trimming, and is
-        symmetric (catches inward flood edges and outward bulges alike).
-        Per-segment consensus also cancels the prior's own quantization
-        bias. Classification uses only the prior, never the fit being
-        produced — no circular adopt-if-better guard needed.
-        Returns (kept_pts, arc_drop_fraction, degraded); degraded means the
-        arc was majority-contaminated and fully dropped (kept_pts then holds
-        only straights/baseline; the caller must anchor scale on the rim).
-        kept_pts is None when nothing trustworthy remains."""
-        norm = np.array([w, h], dtype=float)
-        scale = np.array([COURT_W, COURT_H])
-        tp = tpl_pts / norm
-        proj = _apply_h(h8_prior, tp) * scale
-        ok = np.isfinite(proj).all(axis=1)
-        if ok.sum() < 30:
-            return None, 1.0, True
-        d, idx = self._model_trees[hoop_on_left].query(
-            np.where(ok[:, None], proj, 0.0))
-        labels = _MODEL_LABELS[idx]
-        assigned = ok & (d < 15.0)
-        hx = HOOP_X if hoop_on_left else COURT_W - HOOP_X
-        X = np.where(ok, proj[:, 0], 0.0)
-        Y = np.where(ok, proj[:, 1], 0.0)
-        dx = X - hx if hoop_on_left else hx - X  # mirrored: arc spans dx>0
-        dy = Y - 25.0
-        base_sign = 1.0 if hoop_on_left else -1.0
-        base_x = 0.0 if hoop_on_left else COURT_W
-
-        dropped = np.zeros(len(tp), dtype=bool)
-
-        def vote(seg_mask, offs, coords, width):
-            if seg_mask.sum() < 6:
-                return
-            sub = np.nonzero(seg_mask)[0]
-            b = np.floor(coords[sub] / width).astype(int)
-            uniq = np.unique(b)
-            meds = np.array([np.median(offs[sub[b == u]]) for u in uniq])
-            # Max-coverage consensus: the offset window of width 2*thr that
-            # holds the most bins. A plain median-of-medians sits BETWEEN the
-            # clusters at ~50/50 contamination (or under a depth-warped
-            # prior) and drops both sides, true arc included; the densest
-            # window finds the majority cluster itself.
-            thr = self.sector_outlier_ft
-            sm = np.sort(meds)
-            best_n, lo_i, hi_i = 0, 0, 0
-            j = 0
-            for i in range(len(sm)):
-                while sm[i] - sm[j] > 2.0 * thr:
-                    j += 1
-                if i - j + 1 > best_n:
-                    best_n, lo_i, hi_i = i - j + 1, j, i
-            consensus = 0.5 * (sm[lo_i] + sm[hi_i])
-            bad = uniq[np.abs(meds - consensus) > thr]
-            if len(bad):
-                dropped[sub[np.isin(b, bad)]] = True
-
-        arc_mask = assigned & (labels == SEG_ARC) & (dx > 0)
-        vote(arc_mask, np.hypot(dx, dy) - ARC_R,
-             np.degrees(np.arctan2(dy, np.maximum(dx, 1e-9))), 5.0)
-        vote(assigned & (labels == SEG_FAR_STRAIGHT),
-             Y - (25.0 - CORNER_LAT), X, 5.0)
-        vote(assigned & (labels == SEG_NEAR_STRAIGHT),
-             Y - (25.0 + CORNER_LAT), X, 5.0)
-        vote(assigned & (labels == SEG_BASELINE),
-             base_sign * (X - base_x), Y, 5.0)
-
-        arc_total = int(arc_mask.sum())
-        arc_drop = float((dropped & arc_mask).sum()) / max(1, arc_total)
-        # Majority-contaminated arc (uniform flood): no per-bin majority vote
-        # can recover the painted arc, so drop ALL arc points — the surviving
-        # straights/baseline plus the rim anchor still pin a degraded 3-DOF
-        # fit. This is what keeps a sane steady arc through the flood eras
-        # instead of publishing a flood-shaped one.
-        degraded = arc_total < 5 or arc_drop > self.sector_max_drop
-        if degraded:
-            dropped = dropped | arc_mask
-        keep = ~dropped
-        if keep.sum() < 40:
-            return None, arc_drop, degraded
-        return tpl_pts[keep], arc_drop, degraded
-
     def _refine_ptz(self, prm, tpl_pts, top_pts, w, h, hoop_on_left,
                     hoop_norm=None, anchor_repeats=4, fit_rig=False,
-                    bot_pts=None):
+                    bot_pts=None, radii=(15.0, 6.0)):
         """Polish the template camera against the painted curves in PTZ space.
 
         Optimizes only (pan, tilt, focal) through `_ptz_to_h8`, rig position
@@ -208,7 +333,10 @@ class FittingMixin:
         # Two assignment passes: loose radius under the template init, tight
         # after the first fit improved the camera.
         has_anchor = hoop_exp is not None
-        for radius in (15.0, 6.0):
+        # warm-seeded callers pass radii=(6.0,) — the coarse pass exists to
+        # absorb template-grid quantization, which a fresh previous-frame
+        # camera does not have; skipping it halves the per-frame LM cost
+        for radius in radii:
             h8c = self._ptz_to_h8(params_of(x), w, h)
             if h8c is None:
                 return None, None, None
@@ -216,12 +344,8 @@ class FittingMixin:
             if pts is None:
                 self._fail(f"ptz_segments_r{int(radius)}")
                 return None, None, None
-            # Without arc support the rim anchor must supply absolute scale;
-            # with it, straights+baseline+sideline+rim still pin 3 DOF (the
-            # degraded flood-era fit). Require two evidence groups then — the
-            # far sideline counts as one (rescue fits run on baseline edge +
-            # sideline + rim alone when the 3-pt mask has collapsed, with as
-            # few as 10 boundary points).
+            # Without arc support the rim anchor must supply absolute scale.
+            # Require two evidence groups then; the far sideline counts as one.
             n_seg = len(np.unique(labels)) + (1 if sp is not None else 0)
             min_pts = 30 if hoop_exp is None else 10
             if len(pts) < min_pts \
@@ -229,6 +353,14 @@ class FittingMixin:
                         and (hoop_exp is None or n_seg < 2)):
                 self._fail(f"ptz_segments_r{int(radius)}")
                 return None, None, None
+            # Evidence checks above run on the full set; the LM itself needs
+            # far fewer points — residual evaluation cost is linear in them
+            # and dominates the solve (profiled ~40 evals/solve). A 3-DOF
+            # camera is overdetermined a hundredfold either way.
+            # precision-first (user directive): 250 points per LM iteration
+            if len(pts) > 250:
+                idx = np.linspace(0, len(pts) - 1, 250).astype(int)
+                pts, labels = pts[idx], labels[idx]
 
             def residuals(xv, pts=pts, labels=labels):
                 h8v = self._ptz_to_h8(params_of(xv), w, h)
@@ -257,11 +389,10 @@ class FittingMixin:
                     # residual saturates and pulls LESS; repetition keeps each
                     # copy in the quadratic regime (same trick as the depth
                     # anchors in the earlier PTZ work). The caller sets the
-                    # repeat count: high for degraded (arc-free) fits where
-                    # the rim is the only absolute scale, low when clean arc
-                    # evidence exists — the analytic rim point carries a few
-                    # ft of rig-height uncertainty and must not out-pull the
-                    # painted line (it remains enforced as a GATE either way).
+                    # repeat count: high for arc-free fits where the rim is
+                    # the only absolute scale, low when clean arc evidence
+                    # exists. The analytic rim point carries a few ft of
+                    # rig-height uncertainty and remains a gate either way.
                     res.append(np.repeat(hr, anchor_repeats))
                 return np.concatenate(res)
 

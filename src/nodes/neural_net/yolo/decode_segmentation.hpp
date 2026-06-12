@@ -80,32 +80,6 @@ public:
     ) {
         SegmentationResult result;
         if (host_outputs.size() < 2 || !host_outputs[0] || !host_outputs[1]) return result;
-        auto log_ctx = [&](const char* stage, CUdeviceptr ptr = 0) {
-            if (!cuCtxGetCurrent) return;
-            CUcontext current = nullptr;
-            CUcontext stream_ctx = nullptr;
-            CUresult err = cuCtxGetCurrent(&current);
-            if (err != CUDA_SUCCESS) {
-                CUDA_CHECK_CU(err);
-                return;
-            }
-            if (cuStreamGetCtx) {
-                CUresult stream_err = cuStreamGetCtx(stream, &stream_ctx);
-                if (stream_err != CUDA_SUCCESS) {
-                    CUDA_CHECK_CU(stream_err);
-                }
-            }
-            logstream << "cuda_infer_yolo: seg_ctx"
-                      << " stage=" << stage
-                      << " current=" << (void*)current
-                      << " decoder=" << (void*)cu_ctx_
-                      << " stream_ctx=" << (void*)stream_ctx
-                      << " stream=" << (void*)stream
-                      << " scratch=" << (void*)(uintptr_t)gpu_mask_scratch_
-                      << " coeff=" << (void*)(uintptr_t)gpu_coeff_buf_
-                      << " proto=" << (void*)(uintptr_t)gpu_proto_buf_
-                      << " ptr=" << (void*)(uintptr_t)ptr;
-        };
 
         const float* out0 = host_outputs[0];
         const nvinfer1::Dims& d = output_dims[0];
@@ -234,7 +208,6 @@ public:
         if (CUDA_CHECK_CU(cuLaunchKernel(mask_assemble_kernel_, gridX, gridY, gridZ, 32, 8, 1, 0, stream, mask_args, nullptr)))
             return result;
         if (CUDA_CHECK_CU(cuStreamSynchronize(stream))) {
-            log_ctx("after_mask_assemble_sync_failed");
             return result;
         }
 
@@ -242,19 +215,15 @@ public:
         // Switching contexts here can make the subsequent output allocation/copy invalid.
         // 5. GPU path: wrap assembled masks in AVBufferRef
         if (emit_gpu_mask) {
-            log_ctx("before_gpu_output");
             size_t mask_bytes = (size_t)num_dets * proto_h_ * proto_w_ * sizeof(float);
             CUdeviceptr gpu_out = 0;
             if (CUDA_CHECK_CU(cuMemAlloc(&gpu_out, mask_bytes))) {
                 // continue without GPU mask
             } else {
-                log_ctx("after_gpu_out_alloc", gpu_out);
                 if (CUDA_CHECK_CU(cuMemcpyDtoDAsync(gpu_out, gpu_mask_scratch_, mask_bytes, stream))) {
-                    log_ctx("gpu_copy_failed", gpu_out);
                     CUDA_CHECK_CU(cuMemFree(gpu_out));
                 } else {
                     if (CUDA_CHECK_CU(cuStreamSynchronize(stream))) {
-                        log_ctx("gpu_copy_sync_failed", gpu_out);
                         CUDA_CHECK_CU(cuMemFree(gpu_out));
                         gpu_out = 0;
                     }

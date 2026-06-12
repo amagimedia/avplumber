@@ -37,6 +37,11 @@ inline bool yoloSegIsManagedSideDataType(AVFrameSideDataType type) {
     return value >= first && value < last_exclusive;
 }
 
+// Packed uint8 luma plane of the model-input frame (e.g. 960x544), attached
+// by court_seg_evidence_cuda for the calibration solver's painted-line snap.
+// Layout: 16-byte header {w, h, 0, 0} (uint32) followed by w*h bytes.
+static const AVFrameSideDataType AV_FRAME_DATA_COURT_LUMA = (AVFrameSideDataType)0x4C554D41;
+
 // Header for GPU mask side data (lives in CPU memory, gpu_ptr is a CUdeviceptr)
 struct GpuMaskSideDataHeader {
     uint64_t gpu_ptr;

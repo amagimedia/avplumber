@@ -2,6 +2,7 @@
 #include "../yolo/decode_detection.hpp"
 #include "../yolo/decode_segmentation.hpp"
 #include "../yolo/decode_pose.hpp"
+#include <chrono>
 #include <mutex>
 
 // PTX blob for NV12->NCHW preprocess kernel.
@@ -350,10 +351,13 @@ bool CudaInferTrtBase::configureRunnerStream(ModelRunner& model) {
 
 bool CudaInferTrtBase::ensureInitialized(const av::VideoFrame& frm) {
     if (initialized_) return true;
+    const auto init_start = std::chrono::steady_clock::now();
     if (!initCudaContextFromFrame(frm)) return false;
     if (!loadPreprocessModule()) return false;
+    const auto after_cuda = std::chrono::steady_clock::now();
     for (size_t i = 0; i < models_.size(); ++i) {
         ModelRunner& model = models_[i];
+        const auto model_start = std::chrono::steady_clock::now();
         if (!parseEngine(model) || !allocateBindings(model) ||
             !ensureCompatibleInput(model, i) || !configureRunnerPreprocess(model)) {
             // Rollback: clean up models 0..i
@@ -362,8 +366,25 @@ bool CudaInferTrtBase::ensureInitialized(const av::VideoFrame& frm) {
             }
             return false;
         }
+        if (debug_init_timing_) {
+            const auto model_end = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(
+                model_end - model_start).count();
+            logstream << "cuda_infer_yolo: init_timing model="
+                      << model.engine_name << " ms=" << ms;
+        }
     }
     initialized_ = true;
+    if (debug_init_timing_) {
+        const auto init_end = std::chrono::steady_clock::now();
+        const double cuda_ms = std::chrono::duration<double, std::milli>(
+            after_cuda - init_start).count();
+        const double total_ms = std::chrono::duration<double, std::milli>(
+            init_end - init_start).count();
+        logstream << "cuda_infer_yolo: init_timing total_ms=" << total_ms
+                  << " cuda_preprocess_ms=" << cuda_ms
+                  << " models=" << models_.size();
+    }
     return true;
 }
 

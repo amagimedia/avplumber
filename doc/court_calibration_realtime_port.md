@@ -68,6 +68,11 @@ components. Replace the KDTree segment assignment with closed-form distances
 to the four analytic curves (faster on CPU too). Test stub:
 `<path>/cupy_test.py`.
 
+2026-06-11 (later still): K1-K4 implemented in `pyplumber/court_segm/cuda.py`
+(CuPy RawKernels + cuBLAS GEMM; numpy fallback via `AVP_NO_CUPY=1`). Parity
+and per-op timings: `python -m pyplumber.court_segm.cuda_bench`. See
+`doc/court_calibration_cuda_shaders.md` for measured results.
+
 ## CUDA rewrite priority (by pixels touched × calls per clip, t66/t67 counters)
 
 All functions below now live in `pyplumber/court_segm/`. "Calls" are from

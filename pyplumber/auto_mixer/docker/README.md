@@ -180,8 +180,8 @@ startup.
 
 The same compose stack can run the Dockerized basketball neural demo with Janus
 preview and Web UI registration. Build the neural-demo image first with
-`/home/jp/git/avplumber/neural-demo/build-neural-demo-image.sh`, then configure
-these host-local values in `.env`:
+`neural-demo/build-neural-demo-image.sh`, then configure these host-local
+values in `.env`:
 
 ```sh
 NEURAL_DEMO_IMAGE=avplumber-neural-demo:latest
@@ -201,7 +201,6 @@ docker compose --profile neural up -d janus janus-preview web-ui neural-demo
 
 The neural demo sends video-only RTP to the configured Janus video ports and
 registers its avplumber control port with the Web UI. Its visual court,
-player, torso, feet, ball, and tactical-court overlays are rendered by CUDA
-nodes in the graph; the DMA browser sidecar is not required for those overlays.
-`NEURAL_DEMO_METADATA_DUMPS=0` disables JSON/NDJSON sidecar writes while keeping
-the `metadata_dump` node active for the tactical-court homography path.
+player, torso, feet, and ball overlays are rendered by CUDA nodes in the graph;
+the DMA browser sidecar is not required for those overlays.
+`NEURAL_DEMO_METADATA_DUMPS=0` disables JSON/NDJSON sidecar writes.

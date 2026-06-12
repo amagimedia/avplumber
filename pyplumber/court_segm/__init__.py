@@ -6,8 +6,8 @@ functional (and planned C++/CUDA port) boundaries:
 - geometry: court model constants, homography helpers, physical PTZ camera
 - evidence: masks/metadata -> fit-ready points (per-pixel heavy; CUDA candidates)
 - matching: pre-rendered PTZ template grid + IoU camera search
-- fitting:  segment assignment, sector consensus, PTZ least-squares refine
-- temporal: ByteTrack-style PTZ filter, zones, publish/hold/rescue paths
+- fitting:  segment assignment, PTZ least-squares refine, boundary/luma snaps
+- temporal: calibration metadata publishing and debug-overlay helpers
 
 The node class lives in pyplumber/court_calibration.py and composes the
 mixins defined here.

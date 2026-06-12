@@ -1,9 +1,8 @@
 """Evidence extraction from segmentation masks and detection metadata.
 
-Everything that turns raw YOLO outputs (seg mask planes, player/hoop boxes,
-court-pose keypoints) into fit-ready evidence: cleaned class masks, the
-synthetic 3-pt mask from the floor hole, spillover reconciliation, boundary
-and edge point extraction, and the player-scale physics check.
+Everything that turns raw YOLO outputs (seg mask planes plus player/hoop
+boxes) into fit-ready evidence: cleaned class masks, the synthetic 3-pt mask
+from the floor hole, boundary/edge point extraction, and the close-up guard.
 
 This module owns nearly all of the per-pixel CPU work (272x272 mask grids
 every frame) — the top CUDA/CuPy port candidates live here; see
@@ -14,14 +13,12 @@ import json
 import struct
 
 import numpy as np
-from scipy import ndimage
 from skimage.measure import find_contours
 
-from pyplumber.court_segm.geometry import (
-    COURT_W, COURT_H, _POSE_CANON, _apply_h,
-)
+from pyplumber.court_segm import cuda as _gpu
 
 AV_FRAME_DATA_YOLO_SEG_MASKS = 0x59534D00
+AV_FRAME_DATA_COURT_LUMA = 0x4C554D41
 
 
 class EvidenceMixin:
@@ -45,84 +42,27 @@ class EvidenceMixin:
             return arr.reshape(num, h, w)
         return None
 
+    def _read_luma(self, frame):
+        """Packed uint8 luma plane of the model-input frame, attached by
+        court_seg_evidence_cuda (emit_luma) — painted-line snap evidence."""
+        for sd in frame.side_data:
+            if int(sd.type) != AV_FRAME_DATA_COURT_LUMA:
+                continue
+            data = bytes(sd.data)
+            if len(data) < 16:
+                return None
+            w, h, _, _ = struct.unpack_from("<IIII", data, 0)
+            if w == 0 or h == 0 or len(data) < 16 + w * h:
+                return None
+            return np.frombuffer(data, dtype=np.uint8, count=w * h,
+                                 offset=16).reshape(h, w)
+        return None
+
     def _read_json(self, frame, key):
         try:
             return json.loads(frame.metadata[key])
         except Exception:
             return None
-
-    def _parse_mid_pose(self, frame):
-        """Confident MID-COURT pose keypoints only (quarter marks + center
-        line x sidelines): (img_norm Nx2, court_norm Nx2) or (None, None).
-        Used exclusively in mid-pan mode where the alternative is an
-        unobservable pan — never at the court ends, which the segmentation
-        machinery serves with far better precision."""
-        md = self._read_json(frame, self.pose_metadata_key)
-        if not md or not md.get("poses"):
-            return None, None
-        pose = max(md["poses"], key=lambda q: q.get("conf", 0.0))
-        kpts = pose.get("keypoints", [])
-        if len(kpts) < 36:
-            return None, None
-        mw = md.get("model_width", 960.0)
-        mh = md.get("model_height", 544.0)
-        img, court = [], []
-        for i in (3, 4, 5, 6, 7, 8):
-            x, y, c = kpts[3 * i:3 * i + 3]
-            if c < 0.25:
-                continue
-            img.append((x / mw, y / mh))
-            court.append(_POSE_CANON[i] / np.array([COURT_W, COURT_H]))
-        if not img:
-            return None, None
-        return np.array(img), np.array(court)
-
-    PLAYER_HEIGHT_FT = 6.2
-
-    def _players_scale_ratio(self, frame, prm, w, h):
-        """Median ratio of detected player bbox heights to the height a
-        ~6 ft person must subtend under the camera at each bbox's floor
-        position. A wrong-scale fit (misclassified close-up) is off by 2-10x
-        coherently — regardless of which evidence path produced it. None if
-        too few usable players."""
-        md = self._read_json(frame, self.player_metadata_key)
-        if not md:
-            return None
-        h8 = self._ptz_to_h8(tuple(prm), w, h)
-        if h8 is None:
-            return None
-        mw_ = md.get("model_width", 960.0)
-        mh_ = md.get("model_height", 544.0)
-        ratios = []
-        n_out = 0
-        for det in md.get("detections", []):
-            if det.get("label") not in ("Player", "Ref") or "xyxy" not in det:
-                continue
-            x1, y1, x2, y2 = det["xyxy"]
-            foot = np.array([[(x1 + x2) * 0.5 / mw_, y2 / mh_]])
-            c = _apply_h(h8, foot)[0]
-            if not np.all(np.isfinite(c)):
-                n_out += 1
-                continue
-            X, Y = c[0] * COURT_W, c[1] * COURT_H
-            if not (-5.0 <= X <= COURT_W + 5.0 and -5.0 <= Y <= COURT_H + 8.0):
-                # people standing nowhere near the court under this camera —
-                # itself evidence the camera is wrong (do not silently skip)
-                n_out += 1
-                continue
-            pr = self._ptz_project(prm, np.array(
-                [[X, Y, 0.0], [X, Y, self.PLAYER_HEIGHT_FT]]), w, h)
-            if not np.isfinite(pr).all():
-                continue
-            exp_h = pr[0, 1] - pr[1, 1]
-            det_h = (y2 - y1) / mh_
-            if exp_h > 0.02 and det_h > 0.02:
-                ratios.append(det_h / exp_h)
-        if n_out >= 3 and n_out > len(ratios):
-            return 0.0  # sentinel: majority of people land off-court
-        if len(ratios) < 3:
-            return None
-        return float(np.median(ratios))
 
     def _max_player_height_frac(self, frame):
         """Tallest Player/Ref bbox as a fraction of the model frame height."""
@@ -170,68 +110,7 @@ class EvidenceMixin:
         Non-destructive: float values inside the kept+filled region are
         preserved for sub-pixel contour interpolation; everything else is 0.
         """
-        binm = m >= self.mask_threshold
-        if not binm.any():
-            return m
-        lbl, n = ndimage.label(binm)
-        if n > 1:
-            sizes = ndimage.sum(binm, lbl, index=np.arange(1, n + 1))
-            binm = lbl == (int(np.argmax(sizes)) + 1)
-        filled = ndimage.binary_fill_holes(binm)
-        out = m.copy()
-        # drop above-threshold specks / extra components outside the kept blob
-        out[(m >= self.mask_threshold) & ~filled] = np.float32(0.0)
-        # raise filled-in court-bleed holes above threshold; sub-threshold
-        # anti-aliased boundary pixels are left untouched so find_contours
-        # keeps its sub-pixel 0.5-crossing accuracy at the painted edge.
-        out[filled & (m < self.mask_threshold)] = np.float32(self.mask_threshold + 0.25)
-        return out
-
-    def _reconcile_spillover(self, tpl, court, prior_h8, w, h):
-        """Move court-class activation that falls inside the reprojected 3-pt
-        region back into the 3-pt mask.
-
-        Inside the painted arc only the 3-pt region is physically possible, so
-        any `basketball-court` evidence there is segmentation spillover. Project
-        each mask pixel forward through the prior homography (source-norm ->
-        court-feet) and test analytic membership with `_inside_tpl_region` (the
-        same test the templates use). Court activation inside that region is
-        reclassified: added to the 3-pt mask, removed from the court mask. This
-        recovers 3-pt area the court class stole (clean_tpl_mask can only fill
-        already-enclosed holes), rescuing frames that would otherwise collapse
-        to region_small. Returns possibly-updated (tpl, court); a None prior or
-        a degenerate projection is a no-op so the frame is never regressed.
-        """
-        if prior_h8 is None or tpl is None or court is None:
-            return tpl, court
-        mh, mw = tpl.shape
-        if court.shape != tpl.shape:
-            return tpl, court
-        # normalized-source pixel grid (mask resolution), projected to court ft
-        xn, _ = self._mask_idx_to_norm(np.arange(mw), np.zeros(mw), mw, mh)
-        _, yn = self._mask_idx_to_norm(np.zeros(mh), np.arange(mh), mw, mh)
-        gy, gx = np.meshgrid(yn, xn, indexing="ij")
-        pix = np.stack([gx.ravel(), gy.ravel()], axis=1)
-        c = _apply_h(prior_h8, pix) * np.array([COURT_W, COURT_H])
-        X = np.where(np.isfinite(c[:, 0]), c[:, 0], 1e6).reshape(mh, mw)
-        Y = np.where(np.isfinite(c[:, 1]), c[:, 1], 1e6).reshape(mh, mw)
-        inside = (self._inside_region_inset(X, Y, self.reconcile_margin_ft)
-                  & (X >= 0) & (X <= COURT_W) & (Y >= 0) & (Y <= COURT_H))
-        if not inside.any():
-            return tpl, court
-        # Spillover is court activation inside the arc WHERE the 3-pt class did
-        # NOT fire. Both classes legitimately co-activate on the same floor, so
-        # gating on tpl-absent isolates the pathological flood (3-pt collapsed,
-        # court bled in) and makes this a strict no-op wherever the 3-pt mask is
-        # healthy. That is why frames with good raw detections are left exactly
-        # as detected -- only collapsed regions are rescued.
-        spill = (inside & (court >= self.mask_threshold)
-                 & (tpl < self.mask_threshold))
-        if not spill.any():
-            return tpl, court
-        tpl = np.maximum(tpl, np.where(spill, court, np.float32(0.0)))
-        court = np.where(spill, np.float32(0.0), court)
-        return tpl, court
+        return _gpu.clean_region_mask(m, self.mask_threshold)
 
     def _class_planes(self, frame, masks):
         """Returns (court mask, list of 3pt-region masks)."""
@@ -281,33 +160,9 @@ class EvidenceMixin:
         border or one-sided). Returns a synthetic float mask or None."""
         if court is None:
             return None
-        binm = court >= self.mask_threshold
-        if binm.mean() < 0.08:
-            return None
-        closed = binm.copy()
-        closed[0, :] = True
-        closed[-1, :] = True
-        closed[:, 0] = True
-        closed[:, -1] = True
-        holes = ndimage.binary_fill_holes(closed) & ~closed & ~binm
-        if not holes.any():
-            return None
-        lbl, n = ndimage.label(holes)
-        out = np.zeros_like(court)
-        found = False
-        for i in range(1, n + 1):
-            comp = lbl == i
-            if comp.mean() < self.min_region_area:
-                continue
-            ring = ndimage.binary_dilation(comp) & ~comp
-            nr = int(ring.sum())
-            if nr == 0 or float((ring & binm).sum()) / nr < 0.5:
-                continue  # bounded by border/crowd, not by court
-            out[comp] = np.float32(self.mask_threshold + 0.25)
-            found = True
-        if not found:
-            return None
-        return self._clean_region_mask(out)
+        out = _gpu.synth_holes(court, self.mask_threshold,
+                               self.min_region_area)
+        return self._clean_region_mask(out) if out is not None else None
 
     def _pick_tpl(self, tpls, hoop, w, h):
         """Both 3-pt regions can be visible in a wide shot; the model is one
@@ -354,18 +209,17 @@ class EvidenceMixin:
 
     # --- boundary / edge point extraction ------------------------------------
 
-    def _tpl_boundary_points(self, tpl, w, h):
-        """Sub-pixel boundary of the 3-pt region in source px, border-clipped."""
-        contours = find_contours(tpl, self.mask_threshold)
+    def _mask_boundary_points(self, mask, w, h, min_longest=40, min_len=20):
+        contours = find_contours(mask, self.mask_threshold)
         if not contours:
             return None
         contours.sort(key=len, reverse=True)
-        if len(contours[0]) < 40:
+        if len(contours[0]) < min_longest:
             return None
-        mh, mw = tpl.shape
+        mh, mw = mask.shape
         all_pts = []
         for c in contours:
-            if len(c) < 20:
+            if len(c) < min_len:
                 continue
             keep = (
                 (c[:, 1] > self.border_margin_px)
@@ -380,6 +234,19 @@ class EvidenceMixin:
         if not all_pts:
             return None
         return np.vstack(all_pts)
+
+    def _tpl_boundary_points(self, tpl, w, h):
+        """Sub-pixel boundary of the 3-pt region in source px, border-clipped."""
+        return self._mask_boundary_points(tpl, w, h)
+
+    def _court_boundary_points(self, court, w, h):
+        """Court/non-court contour in source px.
+
+        This includes the visible 3pt hole boundary even when that region is
+        open/clipped and cannot be synthesized as a filled template mask.
+        """
+        return self._mask_boundary_points(court, w, h, min_longest=30,
+                                          min_len=12)
 
     def _baseline_edge_points(self, court, w, h, hoop_on_left):
         """Per-row extreme x of the court mask on the hoop side = the visible

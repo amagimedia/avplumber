@@ -72,9 +72,6 @@ required_models=(
     "${MODEL_ROOT}/court-segmentation_960x544.plan"
     "${MODEL_ROOT}/basketball-players-full_960x544.plan"
     "${MODEL_ROOT}/player-seg/player-seg_960x544.plan"
-    "${MODEL_ROOT}/pose-small/pose-small.plan"
-    "${MODEL_ROOT}/pose-small/pose-small_960x544.plan"
-    "${MODEL_ROOT}/court-pose-4/court-pose.plan"
 )
 
 for path in "${required_models[@]}"; do

@@ -17,6 +17,7 @@ class ShotClassifier : public NodeSISO<av::VideoFrame, av::VideoFrame>, public R
 
     // Seg mask config
     std::string seg_metadata_key_ = "yolo_seg";
+    std::string seg_evidence_metadata_key_ = "court_seg_evidence";
     int seg_side_data_slot_ = 0;
     float seg_mask_threshold_ = 0.5f;
     std::unordered_set<int> court_class_indices_ = {0, 1}; // "three point line" + "basketball-court"
@@ -183,6 +184,25 @@ public:
                 have_current_court_coverage = true;
             }
         }
+        if (!have_current_court_coverage && raw->metadata && !court_mask_indices.empty()) {
+            AVDictionaryEntry* evidence_entry = av_dict_get(raw->metadata, seg_evidence_metadata_key_.c_str(), nullptr, 0);
+            if (evidence_entry && evidence_entry->value) {
+                try {
+                    Parameters evidence = Parameters::parse(evidence_entry->value);
+                    if (evidence.contains("coverages") && evidence["coverages"].is_array()) {
+                        const auto& coverages = evidence["coverages"];
+                        double coverage_sum = 0.0;
+                        for (int mi : court_mask_indices) {
+                            if (mi >= 0 && (size_t)mi < coverages.size()) {
+                                coverage_sum += coverages[(size_t)mi].get<double>();
+                            }
+                        }
+                        court_coverage = (float)coverage_sum;
+                        have_current_court_coverage = true;
+                    }
+                } catch (...) {}
+            }
+        }
         if (!have_current_court_coverage && have_seg_metadata) {
             // A present segmentation metadata key means the model ran but found no
             // usable court mask. Treat that as an authoritative zero.
@@ -279,6 +299,7 @@ public:
         r->auto_eof_ = false;
 
         if (params.count("seg_metadata_key")) r->seg_metadata_key_ = params["seg_metadata_key"].get<std::string>();
+        if (params.count("seg_evidence_metadata_key")) r->seg_evidence_metadata_key_ = params["seg_evidence_metadata_key"].get<std::string>();
         if (params.count("seg_side_data_slot")) {
             r->seg_side_data_slot_ = params["seg_side_data_slot"].get<int>();
             if (!yoloSegIsValidSlot(r->seg_side_data_slot_)) {

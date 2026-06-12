@@ -106,6 +106,7 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     int min_pixels_ = 10;
     float player_iou_threshold_ = 0.10f;
     float fallback_center_distance_px_ = 60.0f;
+    bool emit_unmatched_player_fallbacks_ = false;
     int initial_capacity_ = 32;
     int debug_log_every_n_ = 0;
 
@@ -344,6 +345,56 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         return !packed.empty();
     }
 
+    bool packedMatchesPlayer(const PackedDetection& item, const PlayerDet& p) const {
+        if (p.track_id >= 0 && item.track_id == p.track_id) return true;
+        const float iou = boxIou((float)item.x1, (float)item.y1, (float)item.x2, (float)item.y2,
+                                 p.x1, p.y1, p.x2, p.y2);
+        if (iou > player_iou_threshold_) return true;
+        return centerDistance((float)item.x1, (float)item.y1, (float)item.x2, (float)item.y2,
+                              p.x1, p.y1, p.x2, p.y2) < fallback_center_distance_px_;
+    }
+
+    void appendUnmatchedPlayerFallbacks(Parameters& out_md,
+                                        const std::vector<PlayerDet>& players,
+                                        const std::vector<PackedDetection>& packed) const {
+        if (!emit_unmatched_player_fallbacks_) return;
+        if (!out_md.contains("detections") || !out_md["detections"].is_array()) return;
+
+        for (int i = 0; i < (int)players.size(); ++i) {
+            const PlayerDet& p = players[(size_t)i];
+            if (p.x2 <= p.x1 || p.y2 <= p.y1) continue;
+
+            bool matched = false;
+            for (const auto& item : packed) {
+                if (packedMatchesPlayer(item, p)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) continue;
+
+            const double foot_x = ((double)p.x1 + (double)p.x2) * 0.5;
+            const double foot_y = (double)p.y2;
+            Parameters det = Parameters::object();
+            det["label"] = "feet";
+            det["cls"] = 0;
+            det["conf"] = 0.0;
+            det["source"] = "bbox_bottom_fallback";
+            det["valid"] = false;
+            det["xyxy"] = Parameters::array({round3(foot_x), round3(foot_y), round3(foot_x), round3(foot_y)});
+            det["foot_point"] = Parameters::array({round3(foot_x), round3(foot_y)});
+            det["left_point"] = Parameters::array({round3((double)p.x1), round3(foot_y)});
+            det["right_point"] = Parameters::array({round3((double)p.x2), round3(foot_y)});
+            det["centroid"] = Parameters::array({round3(foot_x), round3(((double)p.y1 + (double)p.y2) * 0.5)});
+            det["pixels"] = 0;
+            det["source_det_index"] = -1;
+            det["source_player_index"] = i;
+            if (p.track_id >= 0) det["track_id"] = p.track_id;
+            if (!p.team_ab.empty() && p.team_ab != "?") det["team_ab"] = p.team_ab;
+            out_md["detections"].push_back(det);
+        }
+    }
+
     double confidenceFor(const PackedDetection& p, int count,
                          double min_x, double max_x, double min_y, double max_y,
                          int model_w, int model_h) const {
@@ -389,16 +440,17 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         for (int i = 0; i < (int)packed.size(); ++i) {
             const PackedDetection& p = packed[(size_t)i];
             const int c = count[(size_t)i];
-            const bool valid = c > 0 &&
-                               min_x100[(size_t)i] != INT_MAX && min_y100[(size_t)i] != INT_MAX &&
-                               max_x100[(size_t)i] != INT_MIN && max_y100[(size_t)i] != INT_MIN;
+            const bool mask_has_pixels = c > 0 &&
+                                         min_x100[(size_t)i] != INT_MAX && min_y100[(size_t)i] != INT_MAX &&
+                                         max_x100[(size_t)i] != INT_MIN && max_y100[(size_t)i] != INT_MIN;
+            const bool reliable_mask = mask_has_pixels && c >= min_pixels_;
 
             const double fallback_x = ((double)p.x1 + (double)p.x2) * 0.5;
             const double fallback_y = (double)p.y2;
 
             double min_x = fallback_x, max_x = fallback_x, min_y = fallback_y, max_y = fallback_y;
             double foot_x = fallback_x, foot_y = fallback_y, centroid_x = fallback_x, centroid_y = fallback_y;
-            if (valid) {
+            if (reliable_mask) {
                 min_x = (double)min_x100[(size_t)i] / 100.0;
                 max_x = (double)max_x100[(size_t)i] / 100.0;
                 min_y = (double)min_y100[(size_t)i] / 100.0;
@@ -409,15 +461,15 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
                 centroid_y = (double)sum_y100[(size_t)i] / (double)c / 100.0;
             }
 
-            const double conf = valid ?
+            const double conf = reliable_mask ?
                 confidenceFor(p, c, min_x, max_x, min_y, max_y, model_w, model_h) : 0.0;
 
             Parameters det = Parameters::object();
             det["label"] = "feet";
             det["cls"] = 0;
             det["conf"] = round3(conf);
-            det["source"] = valid ? "player_seg_bottom_contact_band" : "bbox_bottom_fallback";
-            det["valid"] = valid && c >= min_pixels_;
+            det["source"] = reliable_mask ? "player_seg_bottom_contact_band" : "bbox_bottom_fallback";
+            det["valid"] = reliable_mask;
             det["xyxy"] = Parameters::array({round3(min_x), round3(min_y), round3(max_x), round3(max_y)});
             det["foot_point"] = Parameters::array({round3(foot_x), round3(foot_y)});
             det["left_point"] = Parameters::array({round3(min_x), round3(foot_y)});
@@ -430,7 +482,7 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
             if (!p.team_ab.empty() && p.team_ab != "?") det["team_ab"] = p.team_ab;
             const double bw = std::max(1.0, (double)(p.x2 - p.x1));
             const double bh = std::max(1.0, (double)(p.y2 - p.y1));
-            if (valid) {
+            if (reliable_mask) {
                 det["width_ratio"] = round3(std::max(0.0, max_x - min_x) / bw);
                 det["height_ratio"] = round3(std::max(0.0, max_y - min_y) / bh);
                 det["bottom_gap_ratio"] = round3(clamp01(((double)p.y2 - max_y) / bh));
@@ -439,6 +491,21 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         }
 
         return out_md;
+    }
+
+    void attachFallbackOnlyMetadata(av::VideoFrame& frm,
+                                    const std::vector<PlayerDet>& players,
+                                    double model_w,
+                                    double model_h) const {
+        Parameters out_md = Parameters::object();
+        out_md["schema"] = "player_feet_seg_v1";
+        out_md["mode"] = "tracked_bbox_fallback";
+        out_md["coord_space"] = "model";
+        out_md["model_width"] = model_w;
+        out_md["model_height"] = model_h;
+        out_md["detections"] = Parameters::array();
+        appendUnmatchedPlayerFallbacks(out_md, players, {});
+        av_dict_set(&frm.raw()->metadata, output_metadata_key_.c_str(), out_md.dump().c_str(), 0);
     }
 
 public:
@@ -476,35 +543,57 @@ public:
             return;
         }
 
+        Parameters player_md;
+        std::vector<PlayerDet> players;
+        double player_model_w = (double)frm.width();
+        double player_model_h = (double)frm.height();
+        if (readMetadata(raw, player_metadata_key_, player_md)) {
+            parsePlayers(player_md, players);
+            player_model_w = player_md.value("model_width", player_model_w);
+            player_model_h = player_md.value("model_height", player_model_h);
+        }
+
         const AVFrameSideData* sd = av_frame_get_side_data(raw, yoloSegGpuSideDataType(input_side_data_slot_));
         if (!sd || !sd->buf || sd->buf->size < (int)sizeof(GpuMaskSideDataHeader)) {
-            attachEmptyMetadata(frm);
+            if (emit_unmatched_player_fallbacks_ && !players.empty()) {
+                attachFallbackOnlyMetadata(frm, players, player_model_w, player_model_h);
+            } else {
+                attachEmptyMetadata(frm);
+            }
             this->sink_->put(frm);
             return;
         }
 
         Parameters seg_md;
         if (!readMetadata(raw, metadata_key_, seg_md)) {
-            attachEmptyMetadata(frm);
+            if (emit_unmatched_player_fallbacks_ && !players.empty()) {
+                attachFallbackOnlyMetadata(frm, players, player_model_w, player_model_h);
+            } else {
+                attachEmptyMetadata(frm);
+            }
             this->sink_->put(frm);
             return;
         }
 
-        Parameters player_md;
-        std::vector<PlayerDet> players;
-        if (readMetadata(raw, player_metadata_key_, player_md)) parsePlayers(player_md, players);
-
         const auto* header = (const GpuMaskSideDataHeader*)sd->buf->data;
         const CUdeviceptr gpu_masks = (CUdeviceptr)header->gpu_ptr;
         if (!gpu_masks || header->num_masks == 0 || header->proto_w == 0 || header->proto_h == 0) {
-            attachEmptyMetadata(frm);
+            if (emit_unmatched_player_fallbacks_ && !players.empty()) {
+                attachFallbackOnlyMetadata(frm, players, player_model_w, player_model_h);
+            } else {
+                attachEmptyMetadata(frm);
+            }
             this->sink_->put(frm);
             return;
         }
 
         std::vector<PackedDetection> packed;
         if (!packDetections(seg_md, players, packed)) {
-            attachEmptyMetadata(frm);
+            if (emit_unmatched_player_fallbacks_ && !players.empty()) {
+                attachFallbackOnlyMetadata(frm, players, player_model_w, player_model_h);
+            } else {
+                attachEmptyMetadata(frm);
+            }
             this->sink_->put(frm);
             return;
         }
@@ -656,6 +745,7 @@ public:
         Parameters out_md = buildOutputMetadata(packed, h_count, h_sum_x100, h_sum_y100,
                                                 h_min_x100, h_max_x100, h_min_y100, h_max_y100,
                                                 model_w, model_h);
+        appendUnmatchedPlayerFallbacks(out_md, players, packed);
 
         auto* header_out = (GpuMaskSideDataHeader*)av_malloc(sizeof(GpuMaskSideDataHeader));
         auto* release = (GpuMaskRelease*)av_malloc(sizeof(GpuMaskRelease));
@@ -703,6 +793,7 @@ public:
             }
             logstream << "player_feet_seg: frame=" << frame_counter_
                       << " feet=" << num_dets
+                      << " metadata_feet=" << out_md["detections"].size()
                       << " valid=" << valid_count
                       << " input_slot=" << input_side_data_slot_
                       << " output_slot=" << output_side_data_slot_
@@ -748,6 +839,7 @@ public:
         if (params.count("min_pixels")) r->min_pixels_ = std::max(1, params["min_pixels"].get<int>());
         if (params.count("player_iou_threshold")) r->player_iou_threshold_ = params["player_iou_threshold"].get<float>();
         if (params.count("fallback_center_distance_px")) r->fallback_center_distance_px_ = params["fallback_center_distance_px"].get<float>();
+        if (params.count("emit_unmatched_player_fallbacks")) r->emit_unmatched_player_fallbacks_ = params["emit_unmatched_player_fallbacks"].get<bool>();
         if (params.count("initial_capacity")) r->initial_capacity_ = params["initial_capacity"].get<int>();
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
         return r;

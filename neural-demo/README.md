@@ -38,7 +38,7 @@ the underlying models are detecting and tracking.
 
 Use `metadata` for the full basketball analytics demo. This graph adds player
 masks, torso masks, feet masks, team classification, possession and shot
-metadata, the tactical court panel, and JSON/NDJSON sidecar dumps:
+metadata, and JSON/NDJSON sidecar dumps:
 
 ```bash
 neural-demo/run-neural-demo.sh \
@@ -51,7 +51,7 @@ neural-demo/run-neural-demo.sh \
 
 For Janus/WebRTC preview through the compose support stack, use the compose
 profile documented in
-`/home/jp/git/avplumber/pyplumber/auto_mixer/docker/README.md`. The entrypoint
+`pyplumber/auto_mixer/docker/README.md`. The entrypoint
 also accepts `AVP_OUTPUT=janus` directly; set `AVP_JANUS_VIDEO_PORT`,
 `AVP_JANUS_VIDEO_RTCP_PORT`, `AVP_WEBUI_API`, and `AVP_REMOTE_CONTROL_PORT`
 to match the stack.
@@ -127,9 +127,9 @@ neural-demo/run-neural-demo.sh \
   the models behave.
 - `--example metadata` is the full live basketball analytics graph. It includes
   player segmentation, torso and feet masks, torso-based team classification,
-  possession and shot event metadata, metadata dumps, and the tactical court
-  panel driven by court/pose homography. The committed live template does not
-  run scoreboard OCR because it can push the T4 live graph below realtime.
+  possession and shot event metadata, and metadata dumps. The committed live
+  template does not run scoreboard OCR because it can push the T4 live graph
+  below realtime.
 - `--example tracker-cropped` uses the same model stack but outputs the cropped
   reframed version instead.
 - `--example tracker_compositor` uses the drawn tracker output as the main
@@ -143,8 +143,7 @@ neural-demo/run-neural-demo.sh \
 - `--artifacts-dir` mounts a host directory at `/run/avp/output` and is the
   place to persist sidecar files from live graphs, especially `metadata`.
 - Set `AVP_METADATA_DUMPS=0` to keep the `metadata_dump` node in the graph but
-  disable JSON/NDJSON sidecar file writes. This preserves the tactical-court
-  homography path.
+  disable JSON/NDJSON sidecar file writes.
 - In `live` mode, if `--output` is omitted, the demo streams to the default
   output URL above.
 - In `vod` mode, `--output` is required.
@@ -175,8 +174,6 @@ The ONNX archive should contain:
 - `basketball-players-full_960x544.onnx`
 - `court-segmentation_960x544.onnx`
 - `player-seg/player-seg_960x544.onnx`
-- `pose-small/pose-small_960x544.onnx`
-- `court-pose-4/court-pose.onnx`
 
 Scoreboard OCR is optional. If the ONNX archive also contains
 `en-ppocr-v4-rec/en_PP-OCRv3_rec.onnx` and
@@ -193,9 +190,6 @@ The final image must contain these generated files:
 - `court-segmentation_960x544.plan`
 - `basketball-players-full_960x544.plan`
 - `player-seg/player-seg_960x544.plan`
-- `pose-small/pose-small.plan`
-- `pose-small/pose-small_960x544.plan`
-- `court-pose-4/court-pose.plan`
 
 The TensorRT archive path is required and is not hardcoded in the Dockerfile.
 The archive should contain:

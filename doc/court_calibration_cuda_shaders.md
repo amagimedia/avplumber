@@ -1,6 +1,12 @@
 # Court calibration: CUDA shaders to implement
 
-Status: spec only, 2026-06-11 — no kernels written yet (user decision).
+Status: IMPLEMENTED 2026-06-11 in `pyplumber/court_segm/cuda.py` (K1-K4 as
+CuPy RawKernels; K5 stays CPU, K6 stays numpy — see notes in each section).
+CuPy + a CUDA device are REQUIRED — the numpy per-pixel path was removed
+(user decision 2026-06-11); the pre-port implementations live in git
+history. Parity + per-op timings:
+`python -m pyplumber.court_segm.cuda_bench` (T4: K1 8.5x, K2 3.4x, K3 2.6x,
+full `_lines_h` 20.4 ms -> 5.9 ms).
 Companion to `doc/court_calibration_realtime_port.md` (throughput analysis,
 validated CuPy timings, division-of-labor). Python sources live in
 `pyplumber/court_segm/` after the module split.

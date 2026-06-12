@@ -18,15 +18,6 @@ CORNER_LAT = 22.0
 JUNCTION_X = HOOP_X + math.sqrt(ARC_R * ARC_R - CORNER_LAT * CORNER_LAT)  # ~14.19
 
 
-# Canonical court positions of the 12-keypoint court pose model (ft).
-_POSE_CANON = np.array([
-    (0.0, 0.0), (0.0, 25.0), (0.0, 50.0),
-    (23.5, 0.0), (23.5, 50.0),
-    (47.0, 0.0), (47.0, 50.0),
-    (70.5, 0.0), (70.5, 50.0),
-    (94.0, 0.0), (94.0, 25.0), (94.0, 50.0),
-])
-
 # Boundary segment labels of the 3-pt region.
 SEG_FAR_STRAIGHT = 0
 SEG_ARC = 1
@@ -223,7 +214,10 @@ class GeometryMixin:
         cross = []
         for i in range(4):
             a, b, c = xy[i], xy[(i + 1) % 4], xy[(i + 2) % 4]
-            cross.append(np.cross(b - a, c - b))
+            # scalar 2D cross; np.cross spends ~100us/call in axis plumbing
+            # and this runs ~100x per solve inside the LM loop
+            cross.append((b[0] - a[0]) * (c[1] - b[1])
+                         - (b[1] - a[1]) * (c[0] - b[0]))
         return all(v > 0 for v in cross) or all(v < 0 for v in cross)
 
     @staticmethod

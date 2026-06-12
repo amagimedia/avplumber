@@ -102,10 +102,6 @@ build_engine "tracknet-ball/tracknetv2_basketball_float_512x288.onnx" "tracknet-
 build_engine "basketball-players-full_960x544.onnx" "basketball-players-full_960x544.plan"
 build_engine "court-segmentation_960x544.onnx" "court-segmentation_960x544.plan"
 build_engine "player-seg/player-seg_960x544.onnx" "player-seg/player-seg_960x544.plan"
-build_engine "pose-small/pose-small_960x544.onnx" "pose-small/pose-small_960x544.plan"
-build_engine "court-pose-4/court-pose.onnx" "court-pose-4/court-pose.plan"
-
-ln -sf "pose-small_960x544.plan" "${MODEL_ROOT}/pose-small/pose-small.plan"
 
 ocr_onnx="$(find_model "en-ppocr-v4-rec/en_PP-OCRv3_rec.onnx")"
 ocr_keys="$(find_model "en-ppocr-v4-rec/en_dict.txt")"
