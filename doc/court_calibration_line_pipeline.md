@@ -21,8 +21,8 @@ The demo path is `pyplumber/examples/tactical_view.py`.
    - `court_seg_evidence` metadata for shot classification.
 4. `CourtCalibrationNode` consumes frame metadata and side-data, publishes
    `court_calib`, `court_proj`, and `court_evidence`.
-5. `draw_keypoints` draws `court_proj` in magenta and `court_evidence` in
-   green. These are debug overlays only.
+5. `draw_keypoints` draws `court_proj` in magenta and `court_evidence` in red.
+   These are debug overlays only.
 6. `draw_tactical_court` consumes `court_calib.h` and player feet metadata,
    draws the larger tactical panel, and filters player dots in court feet.
 
@@ -48,7 +48,7 @@ Published metadata:
 
 - `court_calib`: source-frame to court homography and diagnostics.
 - `court_proj`: projected model court points for magenta debug visualization.
-- `court_evidence`: current-frame arc evidence points for green debug
+- `court_evidence`: current-frame arc evidence points for red debug
   visualization.
 
 `court_calib.h` is the real product. `court_proj` is generated from that same
@@ -241,7 +241,7 @@ Display smoothing knobs:
 The smoothing does not change `court_calib.h` and does not affect the tactical
 view. It only reduces flicker in the magenta debug overlay.
 
-`court_evidence` is the green source-frame evidence overlay. It shows sampled
+`court_evidence` is the red source-frame evidence overlay. It shows sampled
 arc evidence points from the current segmentation masks. It is not a model
 projection.
 
