@@ -10,26 +10,8 @@ on:
     - cron: '27 22 * * 4'
 
 jobs:
-  create-matrix:
-    runs-on: ubuntu-latest
-    permissions:      
-      security-events: write
-      packages: read
-      actions: read
-      contents: read
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.languages }}
-    steps:
-      - name: Get languages from repo
-        id: set-matrix
-        uses: amagimedia/set-codeql-language-matrix@main
-        with:
-          access-token: ${{ secrets.GITHUB_TOKEN }}
-          endpoint: ${{ github.event.repository.languages_url }}
   analyze:
     name: Analyze
-    if: ${{ needs.create-matrix.outputs.matrix != '' && needs.create-matrix.outputs.matrix != '[]' }}
-    needs: create-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -40,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: ${{ fromJSON(needs.create-matrix.outputs.matrix || '[]') }}
+        language: ["c-cpp", "javascript-typescript", "python"]
 
     steps:
     - name: Checkout repository
