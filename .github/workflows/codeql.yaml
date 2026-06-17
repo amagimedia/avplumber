@@ -17,7 +17,9 @@ jobs:
     permissions:
       actions: read
       contents: read
+      id-token: write
       security-events: write
+
 
     strategy:
       fail-fast: false
@@ -29,13 +31,59 @@ jobs:
       uses: actions/checkout@v6
 
     - name: Get Mint token for security-events
-      id: mint-token
-      uses: amagimedia/mint/action/github@main
-      with:
-        token_name: code-scan-public-repo-write
+      run: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Required inputs
+        TOKEN_NAME="${TOKEN_NAME:-code-scan-public-repo-write}"
+        BROKER_URL="${BROKER_URL:-https://github.mint.int.amagi.com}"
+        ODIN_AUDIENCE="${ODIN_AUDIENCE:-github.mint.int.amagi.com}"
+
+        # These are provided automatically in GitHub Actions
+        # You must run this inside a workflow job
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "ERROR: ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN must be set." >&2
+          echo "This script is intended to run inside GitHub Actions." >&2
+          exit 1
+        fi
+
+        echo "Step 1/3: Fetch GitHub OIDC token from Actions"
+        GITHUB_OIDC_TOKEN="$(curl -fsSL \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}" \
+          | jq -r '.value')"
+
+        echo "Step 2/3: Exchange GitHub OIDC token for Odin token"
+        ODIN_TOKEN="$(curl -fsSL \
+          -H "X-Amagi-Odin-Subject-Token: ${GITHUB_OIDC_TOKEN}" \
+          -H "X-Amagi-Odin-Audience: ${ODIN_AUDIENCE}" \
+          "https://auth.int.amagi.com/token" \
+          | jq -r '.access_token')"
+
+        echo "Step 3/3: Request scoped GitHub token from broker"
+        TOKEN_RESPONSE="$(curl -fsSL \
+          -X POST \
+          -H "X-Amagi-Odin-Token: ${ODIN_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{\"token_name\": \"${TOKEN_NAME}\"}" \
+          "${BROKER_URL}/token")"
+
+        GITHUB_APP_TOKEN="$(echo "${TOKEN_RESPONSE}" | jq -r '.token')"
+
+        echo
+        echo "Token response:"
+        echo "${TOKEN_RESPONSE}" | jq
+
+        echo
+        echo "Exporting GITHUB_APP_TOKEN for the current shell session"
+        export GITHUB_APP_TOKEN="${GITHUB_APP_TOKEN}"
+        echo "::add-mask::$GITHUB_APP_TOKEN"
+        echo "GITHUB_APP_TOKEN=$GITHUB_APP_TOKEN" >> "$GITHUB_ENV"
+        echo "GITHUB_APP_TOKEN is now set"
     
     - name: Install cmake
-      if: ${{ matrix.language == 'cpp' }}
+      if: ${{ matrix.language == 'c-cpp' }}
       run: |
         apt-get update -y
         apt-get install -y cmake
@@ -47,11 +95,11 @@ jobs:
         queries: security-extended
 
     - name: Build with CMake
-      if: ${{ matrix.language == 'cpp' }}
+      if: ${{ matrix.language == 'c-cpp' }}
       run: make -j`nproc`
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
-        token: ${{ steps.mint-token.outputs }}
+        token: ${{ env.GITHUB_APP_TOKEN }}
