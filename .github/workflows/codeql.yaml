@@ -27,6 +27,12 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
+
+    - name: Get Mint token for security-events
+      id: mint-token
+      uses: amagimedia/mint/action/github@main
+      with:
+        token_name: code-scan-public-repo-write
     
     - name: Install cmake
       if: ${{ matrix.language == 'cpp' }}
@@ -42,9 +48,10 @@ jobs:
 
     - name: Build with CMake
       if: ${{ matrix.language == 'cpp' }}
-      run: make -j`nproc` HAVE_CUDA=1 HAVE_DRM=1 HAVE_NVCC=1
+      run: make -j`nproc`
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
+        token: ${{ steps.mint-token.outputs }}
