@@ -11,7 +11,7 @@ on:
 
 jobs:
   create-matrix:
-    runs-on: amagi-amd64-small
+    runs-on: ubuntu-latest
     permissions:      
       security-events: write
       packages: read
@@ -30,7 +30,7 @@ jobs:
     name: Analyze
     if: ${{ needs.create-matrix.outputs.matrix != '' && needs.create-matrix.outputs.matrix != '[]' }}
     needs: create-matrix
-    runs-on: amagi-amd64
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       actions: read
