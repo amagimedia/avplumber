@@ -1,0 +1,68 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "main"]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [ "main" ]
+  schedule:
+    - cron: '27 22 * * 4'
+
+jobs:
+  create-matrix:
+    runs-on: amagi-amd64-small
+    permissions:      
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.languages }}
+    steps:
+      - name: Get languages from repo
+        id: set-matrix
+        uses: amagimedia/set-codeql-language-matrix@main
+        with:
+          access-token: ${{ secrets.GITHUB_TOKEN }}
+          endpoint: ${{ github.event.repository.languages_url }}
+  analyze:
+    name: Analyze
+    if: ${{ needs.create-matrix.outputs.matrix != '' && needs.create-matrix.outputs.matrix != '[]' }}
+    needs: create-matrix
+    runs-on: amagi-amd64
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.create-matrix.outputs.matrix || '[]') }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    
+    - name: Install cmake
+      if: ${{ matrix.language == 'cpp' }}
+      run: |
+        apt-get update -y
+        apt-get install -y cmake
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: ${{ matrix.language }}
+        queries: security-extended
+
+    - name: Build with CMake
+      if: ${{ matrix.language == 'cpp' }}
+      run: make -j`nproc` HAVE_CUDA=1 HAVE_DRM=1 HAVE_NVCC=1
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:${{matrix.language}}"
