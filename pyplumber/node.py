@@ -211,6 +211,10 @@ class TrackNetBall(InternalNode):
     TYPE = "tracknet_ball"
 
 
+class DoctrOcr(InternalNode):
+    TYPE = "doctr_ocr"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 

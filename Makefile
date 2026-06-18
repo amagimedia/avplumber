@@ -159,9 +159,11 @@ ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/doctr_ocr.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_preprocess.cu,avpl_doctr_preprocess_ptx,objs/src/nodes/neural_net/ocr/doctr_ocr.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu,avpl_reframer_ptx,objs/src/nodes/neural_net/utils/amagi_reframer.o))
 endif
 
@@ -171,6 +173,9 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_feet_s
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_torso_seg.cu,avpl_player_torso_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_torso_seg.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/sport_specific/tracknet_ball.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/sport_specific/luma_diff.o))
+ifneq (,$(wildcard $(SRCDIR)/nodes/neural_net/sport_specific/court_seg_evidence_cuda.cu))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/court_seg_evidence_cuda.cu,avpl_court_seg_evidence_cuda_ptx,objs/src/nodes/neural_net/sport_specific/court_seg_evidence_cuda.o))
+endif
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
