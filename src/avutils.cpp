@@ -1,5 +1,7 @@
 #include "avutils.hpp"
 #include "util.hpp"
+#include <cstring>
+#include <cctype>
 #include <avcpp/channellayout.h>
 #include "hwaccel/EglImageFrame.hpp"
 
@@ -76,6 +78,50 @@ uint64_t stringToChannelLayout(const std::string s) {
 #else
     return av_get_channel_layout(s.c_str());
 #endif
+}
+
+int64_t parseIso8601ToMs(const std::string &iso) {
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+
+    const char *fmt = "%Y-%m-%dT%H:%M:%S";
+    const char *ptr = strptime(iso.c_str(), fmt, &tm);
+    if (!ptr) {
+        throw std::runtime_error("parseIso8601ToMs: cannot parse ISO 8601 date string: " + iso);
+    }
+
+    int64_t tz_offset = 0;
+    if (*ptr == 'Z' || *ptr == '\0') {
+        if (*ptr == 'Z' && *(ptr + 1) != '\0') {
+            throw std::runtime_error("parseIso8601ToMs: trailing characters after Z: " + iso);
+        }
+    } else if (*ptr == '+' || *ptr == '-') {
+        int sign = (*ptr == '+') ? 1 : -1;
+        const char *off = ptr + 1;
+        if (std::isdigit(off[0]) && std::isdigit(off[1])) {
+            int64_t hz = (off[0] - '0') * 10 + (off[1] - '0');
+            off += 2;
+            if (*off == ':') ++off;
+            int64_t mz = 0;
+            if (std::isdigit(off[0]) && std::isdigit(off[1])) {
+                mz = (off[0] - '0') * 10 + (off[1] - '0');
+                off += 2;
+            }
+            tz_offset = sign * (hz * 60 + mz) * 60;
+        }
+        if (*off != '\0') {
+            throw std::runtime_error("parseIso8601ToMs: trailing characters after TZ offset: " + iso);
+        }
+    } else {
+        throw std::runtime_error("parseIso8601ToMs: unexpected character after time: " + iso);
+    }
+
+    // timegm interprets tm as UTC.
+    time_t epoch = timegm(&tm);
+    if (epoch < 0) {
+        throw std::runtime_error("parseIso8601ToMs: timegm failed for: " + iso);
+    }
+    return static_cast<int64_t>(epoch) * 1000 - tz_offset * 1000;
 }
 
 bool isEofMarker(const av::Packet& p)
