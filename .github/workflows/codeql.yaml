@@ -12,7 +12,7 @@ on:
 jobs:
   analyze:
     name: Analyze
-    runs-on: ubuntu-latest
+    runs-on: shubham-local-ubuntu
     timeout-minutes: 30
     permissions:
       actions: read
@@ -29,38 +29,7 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
-
-    - name: Get Mint token for security-events
-      run: |
-        # 1. Get the GitHub OIDC token from the Actions runtime
-        GITHUB_OIDC_TOKEN=$(curl -sf \
-          -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL" \
-          | jq -r '.value')
-
-        # 2. Exchange the GitHub OIDC token for an Odin token
-        ODIN_TOKEN=$(curl -sf \
-          -X GET \
-          -H "X-Amagi-Odin-Subject-Token: $GITHUB_OIDC_TOKEN" \
-          -H "X-Amagi-Odin-Audience: github.mint.int.amagi.com" \
-          "https://auth.int.amagi.com/token" \
-          | jq -r '.access_token')
-
-        # 3. Call Mint to get a scoped GitHub token
-        MINT_GITHUB_APP_TOKEN=$(curl -sf \
-          -X POST \
-          -H "X-Amagi-Odin-Token: $ODIN_TOKEN" \
-          -H "Content-Type: application/json" \
-          -d '{"token_name": "code-scan-public-repo-write"}' \
-          "https://github.mint.int.amagi.com/token" \
-          | jq -r '.token')
-                
-        echo "Exporting MINT_GITHUB_APP_TOKEN for the current shell session"
-        export MINT_GITHUB_APP_TOKEN="${MINT_GITHUB_APP_TOKEN}"
-        echo "::add-mask::$MINT_GITHUB_APP_TOKEN"
-        echo "MINT_GITHUB_APP_TOKEN=$MINT_GITHUB_APP_TOKEN" >> "$GITHUB_ENV"
-        echo "MINT_GITHUB_APP_TOKEN is now set"
-    
+        
     - name: Install cmake
       if: ${{ matrix.language == 'c-cpp' }}
       run: |
@@ -81,4 +50,3 @@ jobs:
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
-        token: ${{ env.MINT_GITHUB_APP_TOKEN }}
