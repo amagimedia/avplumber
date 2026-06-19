@@ -32,55 +32,34 @@ jobs:
 
     - name: Get Mint token for security-events
       run: |
-        #!/usr/bin/env bash
-        set -euo pipefail
+        # 1. Get the GitHub OIDC token from the Actions runtime
+        GITHUB_OIDC_TOKEN=$(curl -sf \
+          -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL" \
+          | jq -r '.value')
 
-        # Required inputs
-        TOKEN_NAME="${TOKEN_NAME:-code-scan-public-repo-write}"
-        BROKER_URL="${BROKER_URL:-https://github.mint.int.amagi.com}"
-        ODIN_AUDIENCE="${ODIN_AUDIENCE:-github.mint.int.amagi.com}"
-
-        # These are provided automatically in GitHub Actions
-        # You must run this inside a workflow job
-        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-          echo "ERROR: ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN must be set." >&2
-          echo "This script is intended to run inside GitHub Actions." >&2
-          exit 1
-        fi
-
-        echo "Step 1/3: Fetch GitHub OIDC token from Actions"
-        GITHUB_OIDC_TOKEN="$(curl -fsSL \
-          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL}" \
-          | jq -r '.value')"
-
-        echo "Step 2/3: Exchange GitHub OIDC token for Odin token"
-        ODIN_TOKEN="$(curl -fsSL \
-          -H "X-Amagi-Odin-Subject-Token: ${GITHUB_OIDC_TOKEN}" \
-          -H "X-Amagi-Odin-Audience: ${ODIN_AUDIENCE}" \
+        # 2. Exchange the GitHub OIDC token for an Odin token
+        ODIN_TOKEN=$(curl -sf \
+          -X GET \
+          -H "X-Amagi-Odin-Subject-Token: $GITHUB_OIDC_TOKEN" \
+          -H "X-Amagi-Odin-Audience: github.mint.int.amagi.com" \
           "https://auth.int.amagi.com/token" \
-          | jq -r '.access_token')"
+          | jq -r '.access_token')
 
-        echo "Step 3/3: Request scoped GitHub token from broker"
-        TOKEN_RESPONSE="$(curl -fsSL \
+        # 3. Call Mint to get a scoped GitHub token
+        MINT_GITHUB_APP_TOKEN=$(curl -sf \
           -X POST \
-          -H "X-Amagi-Odin-Token: ${ODIN_TOKEN}" \
+          -H "X-Amagi-Odin-Token: $ODIN_TOKEN" \
           -H "Content-Type: application/json" \
-          -d "{\"token_name\": \"${TOKEN_NAME}\"}" \
-          "${BROKER_URL}/token")"
-
-        GITHUB_APP_TOKEN="$(echo "${TOKEN_RESPONSE}" | jq -r '.token')"
-
-        echo
-        echo "Token response:"
-        echo "${TOKEN_RESPONSE}" | jq
-
-        echo
-        echo "Exporting GITHUB_APP_TOKEN for the current shell session"
-        export GITHUB_APP_TOKEN="${GITHUB_APP_TOKEN}"
-        echo "::add-mask::$GITHUB_APP_TOKEN"
-        echo "GITHUB_APP_TOKEN=$GITHUB_APP_TOKEN" >> "$GITHUB_ENV"
-        echo "GITHUB_APP_TOKEN is now set"
+          -d '{"token_name": "code-scan-public-repo-write"}' \
+          "https://github.mint.int.amagi.com/token" \
+          | jq -r '.token')
+                
+        echo "Exporting MINT_GITHUB_APP_TOKEN for the current shell session"
+        export MINT_GITHUB_APP_TOKEN="${MINT_GITHUB_APP_TOKEN}"
+        echo "::add-mask::$MINT_GITHUB_APP_TOKEN"
+        echo "MINT_GITHUB_APP_TOKEN=$MINT_GITHUB_APP_TOKEN" >> "$GITHUB_ENV"
+        echo "MINT_GITHUB_APP_TOKEN is now set"
     
     - name: Install cmake
       if: ${{ matrix.language == 'c-cpp' }}
@@ -102,4 +81,4 @@ jobs:
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
-        token: ${{ env.GITHUB_APP_TOKEN }}
+        token: ${{ env.MINT_GITHUB_APP_TOKEN }}
