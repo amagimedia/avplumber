@@ -30,3 +30,6 @@
 	path = deps/pybind11_json
 	url = https://github.com/pybind/pybind11_json
 	branch = master
+[submodule "deps/librdkafka"]
+	path = deps/librdkafka
+	url = https://github.com/confluentinc/librdkafka.git

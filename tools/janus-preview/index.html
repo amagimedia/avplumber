@@ -12,7 +12,6 @@
       --line: #303742;
       --text: #eef2f6;
       --muted: #9ba7b4;
-      --accent: #2fb47c;
       --danger: #e35d5d;
     }
 
@@ -30,84 +29,19 @@
 
     main {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: 1fr auto;
       min-height: 100vh;
     }
 
-    header,
     footer {
       display: flex;
       align-items: center;
       gap: 12px;
       padding: 12px 16px;
+      border-top: 1px solid var(--line);
       border-color: var(--line);
       background: var(--panel);
-    }
-
-    header {
-      border-bottom: 1px solid var(--line);
-      flex-wrap: wrap;
-    }
-
-    footer {
-      border-top: 1px solid var(--line);
       color: var(--muted);
-    }
-
-    h1 {
-      margin: 0 12px 0 0;
-      font-size: 16px;
-      font-weight: 650;
-    }
-
-    label {
-      display: grid;
-      gap: 4px;
-      min-width: 180px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    input {
-      min-width: 0;
-      height: 34px;
-      padding: 6px 9px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #0c0e12;
-      color: var(--text);
-      font: inherit;
-    }
-
-    #serverUrl {
-      width: min(420px, 60vw);
-    }
-
-    #mountpointId {
-      width: 110px;
-    }
-
-    button {
-      height: 34px;
-      padding: 0 12px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #232a33;
-      color: var(--text);
-      font: inherit;
-      cursor: pointer;
-    }
-
-    button.primary {
-      border-color: #27875f;
-      background: var(--accent);
-      color: #06100b;
-      font-weight: 650;
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: default;
     }
 
     .stage {
@@ -119,7 +53,7 @@
     video {
       width: 100%;
       height: 100%;
-      max-height: calc(100vh - 118px);
+      max-height: calc(100vh - 45px);
       object-fit: contain;
       background: #050607;
     }
@@ -135,22 +69,8 @@
 </head>
 <body>
   <main>
-    <header>
-      <h1>avplumber Janus Preview</h1>
-      <label>
-        Janus API
-        <input id="serverUrl" autocomplete="off">
-      </label>
-      <label>
-        Mountpoint
-        <input id="mountpointId" type="number" min="1" value="1">
-      </label>
-      <button id="connectButton" class="primary">Connect</button>
-      <button id="disconnectButton" disabled>Disconnect</button>
-    </header>
-
     <section class="stage">
-      <video id="preview" autoplay playsinline controls></video>
+      <video id="preview" autoplay playsinline controls muted></video>
     </section>
 
     <footer>
@@ -159,10 +79,8 @@
   </main>
 
   <script>
-    const serverUrl = document.getElementById("serverUrl");
-    const mountpointId = document.getElementById("mountpointId");
-    const connectButton = document.getElementById("connectButton");
-    const disconnectButton = document.getElementById("disconnectButton");
+    const MOUNTPOINT_ID = 1;
+    const serverUrl = `${location.protocol}//${location.hostname}:8088/janus`;
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
 
@@ -171,10 +89,10 @@
     let peer = null;
     let pollAbort = null;
     let keepaliveTimer = null;
+    let retryTimer = null;
     let transactionId = 0;
+    let connecting = false;
     let stopping = false;
-
-    serverUrl.value = `${location.protocol}//${location.hostname}:8088/janus`;
 
     function transaction() {
       transactionId += 1;
@@ -187,7 +105,7 @@
     }
 
     async function post(path, body) {
-      const response = await fetch(`${serverUrl.value.replace(/\/$/, "")}${path}`, {
+      const response = await fetch(`${serverUrl.replace(/\/$/, "")}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ transaction: transaction(), ...body }),
@@ -225,8 +143,15 @@
     async function startPeerConnection(offer) {
       peer = new RTCPeerConnection({ iceServers: [] });
       peer.ontrack = event => {
-        preview.srcObject = event.streams[0];
-        preview.play().catch(error => setStatus(error.message, true));
+        const [stream] = event.streams;
+        if (preview.srcObject !== stream) {
+          preview.srcObject = stream;
+        }
+        preview.play().catch(error => {
+          if (error.name !== "AbortError") {
+            setStatus(error.message, true);
+          }
+        });
       };
       peer.onicecandidate = event => {
         sendTrickle(event.candidate).catch(error => setStatus(error.message, true));
@@ -260,7 +185,7 @@
       pollAbort = new AbortController();
       while (!stopping && sessionId) {
         const rid = Date.now();
-        const url = `${serverUrl.value.replace(/\/$/, "")}/${sessionId}?rid=${rid}&maxev=1`;
+        const url = `${serverUrl.replace(/\/$/, "")}/${sessionId}?rid=${rid}&maxev=1`;
         const response = await fetch(url, { signal: pollAbort.signal });
         if (!response.ok) {
           throw new Error(`Poll HTTP ${response.status}`);
@@ -274,33 +199,45 @@
       }
     }
 
+    function scheduleReconnect(message) {
+      window.clearTimeout(retryTimer);
+      setStatus(`${message}; retrying`, true);
+      retryTimer = window.setTimeout(connect, 2000);
+    }
+
+    async function recover(error) {
+      if (stopping) return;
+      const message = error?.message || "Connection failed";
+      await disconnect(false);
+      scheduleReconnect(message);
+    }
+
     async function connect() {
-      connectButton.disabled = true;
-      disconnectButton.disabled = false;
+      if (sessionId || connecting) return;
+      connecting = true;
       stopping = false;
       try {
         setStatus("Creating Janus session");
         await createSession();
         pollEvents().catch(error => {
-          if (!stopping) setStatus(error.message, true);
+          recover(error);
         });
         setStatus("Attaching streaming plugin");
         await attachStreamingPlugin();
         setStatus("Requesting stream");
         await post(`/${sessionId}/${handleId}`, {
           janus: "message",
-          body: { request: "watch", id: Number(mountpointId.value) },
+          body: { request: "watch", id: MOUNTPOINT_ID },
         });
       } catch (error) {
-        setStatus(error.message, true);
-        await disconnect();
+        await recover(error);
+      } finally {
+        connecting = false;
       }
     }
 
-    async function disconnect() {
+    async function disconnect(showIdle = true) {
       stopping = true;
-      connectButton.disabled = false;
-      disconnectButton.disabled = true;
       if (pollAbort) pollAbort.abort();
       window.clearInterval(keepaliveTimer);
       keepaliveTimer = null;
@@ -315,14 +252,24 @@
       } finally {
         sessionId = null;
         handleId = null;
-        setStatus("Idle");
+        if (showIdle) setStatus("Idle");
       }
     }
 
-    connectButton.addEventListener("click", connect);
-    disconnectButton.addEventListener("click", disconnect);
+    function start() {
+      setStatus("Auto connecting");
+      connect();
+    }
+
+    if (document.readyState === "loading") {
+      window.addEventListener("DOMContentLoaded", start, { once: true });
+    } else {
+      start();
+    }
+
     window.addEventListener("beforeunload", () => {
       stopping = true;
+      window.clearTimeout(retryTimer);
       if (pollAbort) pollAbort.abort();
       if (peer) peer.close();
     });

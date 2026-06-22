@@ -170,6 +170,7 @@ protected:
         return std::unique_lock<decltype(busy_)>(busy_);
     }
 private:
+    void reportException(const std::string &message);
     void sort();
     bool doWithNodes(std::function<void(NodeWrapper&)> cb, const bool retry_single, const std::string &operation_desc);
     void stopNodesInternal();

@@ -100,6 +100,9 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     float foot_x_margin_rel_ = 0.02f;
     float foot_y_start_rel_ = 0.70f;
     float foot_y_end_margin_rel_ = 0.00f;
+    float foot_band_height_rel_ = 0.06f;
+    float foot_min_band_px_ = 3.0f;
+    float foot_max_band_px_ = 12.0f;
     int min_pixels_ = 10;
     float player_iou_threshold_ = 0.10f;
     float fallback_center_distance_px_ = 60.0f;
@@ -109,9 +112,11 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
     CUcontext cu_ctx_ = nullptr;
     CUmodule cu_module_ = nullptr;
-    CUfunction kernel_ = nullptr;
+    CUfunction find_bottom_kernel_ = nullptr;
+    CUfunction mask_stats_kernel_ = nullptr;
     CUdeviceptr d_bboxes_ = 0;
     CUdeviceptr d_plane_indices_ = 0;
+    CUdeviceptr d_bottom_y100_ = 0;
     CUdeviceptr d_count_ = 0;
     CUdeviceptr d_sum_x100_ = 0;
     CUdeviceptr d_sum_y100_ = 0;
@@ -174,6 +179,7 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         FEET_SEG_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
         if (d_bboxes_) { FEET_SEG_CHECK_CU(cuMemFree(d_bboxes_)); d_bboxes_ = 0; }
         if (d_plane_indices_) { FEET_SEG_CHECK_CU(cuMemFree(d_plane_indices_)); d_plane_indices_ = 0; }
+        if (d_bottom_y100_) { FEET_SEG_CHECK_CU(cuMemFree(d_bottom_y100_)); d_bottom_y100_ = 0; }
         if (d_count_) { FEET_SEG_CHECK_CU(cuMemFree(d_count_)); d_count_ = 0; }
         if (d_sum_x100_) { FEET_SEG_CHECK_CU(cuMemFree(d_sum_x100_)); d_sum_x100_ = 0; }
         if (d_sum_y100_) { FEET_SEG_CHECK_CU(cuMemFree(d_sum_y100_)); d_sum_y100_ = 0; }
@@ -196,13 +202,14 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
     }
 
     bool loadKernel() {
-        if (cu_module_ && kernel_) return true;
+        if (cu_module_ && find_bottom_kernel_ && mask_stats_kernel_) return true;
         if (!cu_ctx_) return false;
         if (FEET_SEG_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
         const std::string ptx_str(avpl_player_feet_seg_ptx,
                                   avpl_player_feet_seg_ptx + avpl_player_feet_seg_ptx_len);
         if (FEET_SEG_CHECK_CU(cuModuleLoadDataEx(&cu_module_, ptx_str.c_str(), 0, nullptr, nullptr))) return false;
-        if (FEET_SEG_CHECK_CU(cuModuleGetFunction(&kernel_, cu_module_, "kPlayerFeetSegMaskAndStats"))) return false;
+        if (FEET_SEG_CHECK_CU(cuModuleGetFunction(&find_bottom_kernel_, cu_module_, "kPlayerFeetSegFindBottom"))) return false;
+        if (FEET_SEG_CHECK_CU(cuModuleGetFunction(&mask_stats_kernel_, cu_module_, "kPlayerFeetSegMaskAndStats"))) return false;
         return true;
     }
 
@@ -214,6 +221,7 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
         if (FEET_SEG_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
         if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_bboxes_, (size_t)next * 4u * sizeof(int)))) return false;
         if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_plane_indices_, (size_t)next * sizeof(int)))) return false;
+        if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_bottom_y100_, (size_t)next * sizeof(int)))) return false;
         if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_count_, (size_t)next * sizeof(int)))) return false;
         if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_sum_x100_, (size_t)next * sizeof(int)))) return false;
         if (FEET_SEG_CHECK_CU(cuMemAlloc(&d_sum_y100_, (size_t)next * sizeof(int)))) return false;
@@ -369,9 +377,13 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
                                    int model_w, int model_h) const {
         Parameters out_md = Parameters::object();
         out_md["schema"] = "player_feet_seg_v1";
+        out_md["mode"] = "bottom_contact_band";
         out_md["coord_space"] = "model";
         out_md["model_width"] = model_w;
         out_md["model_height"] = model_h;
+        out_md["foot_band_height_rel"] = round3(foot_band_height_rel_);
+        out_md["foot_min_band_px"] = round3(foot_min_band_px_);
+        out_md["foot_max_band_px"] = round3(foot_max_band_px_);
         out_md["detections"] = Parameters::array();
 
         for (int i = 0; i < (int)packed.size(); ++i) {
@@ -404,7 +416,7 @@ class PlayerFeetSeg : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Re
             det["label"] = "feet";
             det["cls"] = 0;
             det["conf"] = round3(conf);
-            det["source"] = valid ? "player_seg_bottom_mask" : "bbox_bottom_fallback";
+            det["source"] = valid ? "player_seg_bottom_contact_band" : "bbox_bottom_fallback";
             det["valid"] = valid && c >= min_pixels_;
             det["xyxy"] = Parameters::array({round3(min_x), round3(min_y), round3(max_x), round3(max_y)});
             det["foot_point"] = Parameters::array({round3(foot_x), round3(foot_y)});
@@ -443,6 +455,8 @@ public:
         if (cu_module_) {
             FEET_SEG_CHECK_CU(cuModuleUnload(cu_module_));
             cu_module_ = nullptr;
+            find_bottom_kernel_ = nullptr;
+            mask_stats_kernel_ = nullptr;
         }
     }
 
@@ -534,6 +548,7 @@ public:
 
         if (FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_bboxes_, host_bboxes.data(), host_bboxes.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
             FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_plane_indices_, host_plane_indices.data(), host_plane_indices.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
+            FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_bottom_y100_, max_init.data(), max_init.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
             FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_count_, zero.data(), zero.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
             FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_sum_x100_, zero.data(), zero.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
             FEET_SEG_CHECK_CU(cuMemcpyHtoDAsync(d_sum_y100_, zero.data(), zero.size() * sizeof(int), cuda_dev_ctx_->stream)) ||
@@ -560,7 +575,30 @@ public:
         const unsigned int block_y = 16;
         const unsigned int grid_x = ((unsigned int)proto_w + block_x - 1) / block_x;
         const unsigned int grid_y = ((unsigned int)proto_h + block_y - 1) / block_y;
-        void* args[] = {
+        void* bottom_args[] = {
+            (void*)&gpu_masks,
+            (void*)&proto_w, (void*)&proto_h,
+            (void*)&model_w, (void*)&model_h,
+            (void*)&d_bboxes_,
+            (void*)&d_plane_indices_,
+            (void*)&num_dets,
+            (void*)&mask_threshold_,
+            (void*)&foot_x_margin_rel_,
+            (void*)&foot_y_start_rel_,
+            (void*)&foot_y_end_margin_rel_,
+            (void*)&d_bottom_y100_
+        };
+
+        if (FEET_SEG_CHECK_CU(cuLaunchKernel(find_bottom_kernel_,
+                                            grid_x, grid_y, (unsigned int)num_dets,
+                                            block_x, block_y, 1,
+                                            0, cuda_dev_ctx_->stream, bottom_args, nullptr))) {
+            FEET_SEG_CHECK_CU(cuMemFree(out_masks));
+            this->sink_->put(frm);
+            return;
+        }
+
+        void* mask_args[] = {
             (void*)&gpu_masks,
             (void*)&out_masks,
             (void*)&proto_w, (void*)&proto_h,
@@ -572,6 +610,10 @@ public:
             (void*)&foot_x_margin_rel_,
             (void*)&foot_y_start_rel_,
             (void*)&foot_y_end_margin_rel_,
+            (void*)&foot_band_height_rel_,
+            (void*)&foot_min_band_px_,
+            (void*)&foot_max_band_px_,
+            (void*)&d_bottom_y100_,
             (void*)&d_count_,
             (void*)&d_sum_x100_,
             (void*)&d_sum_y100_,
@@ -581,10 +623,10 @@ public:
             (void*)&d_max_y100_
         };
 
-        if (FEET_SEG_CHECK_CU(cuLaunchKernel(kernel_,
+        if (FEET_SEG_CHECK_CU(cuLaunchKernel(mask_stats_kernel_,
                                             grid_x, grid_y, (unsigned int)num_dets,
                                             block_x, block_y, 1,
-                                            0, cuda_dev_ctx_->stream, args, nullptr))) {
+                                            0, cuda_dev_ctx_->stream, mask_args, nullptr))) {
             FEET_SEG_CHECK_CU(cuMemFree(out_masks));
             this->sink_->put(frm);
             return;
@@ -664,6 +706,8 @@ public:
                       << " valid=" << valid_count
                       << " input_slot=" << input_side_data_slot_
                       << " output_slot=" << output_side_data_slot_
+                      << " band_rel=" << foot_band_height_rel_
+                      << " band_px=[" << foot_min_band_px_ << "," << foot_max_band_px_ << "]"
                       << " proto=" << proto_w << "x" << proto_h;
         }
 
@@ -696,6 +740,11 @@ public:
         if (params.count("foot_x_margin_rel")) r->foot_x_margin_rel_ = params["foot_x_margin_rel"].get<float>();
         if (params.count("foot_y_start_rel")) r->foot_y_start_rel_ = params["foot_y_start_rel"].get<float>();
         if (params.count("foot_y_end_margin_rel")) r->foot_y_end_margin_rel_ = params["foot_y_end_margin_rel"].get<float>();
+        if (params.count("foot_band_height_rel")) r->foot_band_height_rel_ = params["foot_band_height_rel"].get<float>();
+        if (params.count("foot_min_band_px")) r->foot_min_band_px_ = params["foot_min_band_px"].get<float>();
+        if (params.count("foot_max_band_px")) r->foot_max_band_px_ = params["foot_max_band_px"].get<float>();
+        r->foot_band_height_rel_ = std::max(0.0f, r->foot_band_height_rel_);
+        r->foot_min_band_px_ = std::max(0.0f, r->foot_min_band_px_);
         if (params.count("min_pixels")) r->min_pixels_ = std::max(1, params["min_pixels"].get<int>());
         if (params.count("player_iou_threshold")) r->player_iou_threshold_ = params["player_iou_threshold"].get<float>();
         if (params.count("fallback_center_distance_px")) r->fallback_center_distance_px_ = params["fallback_center_distance_px"].get<float>();

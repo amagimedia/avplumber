@@ -78,7 +78,7 @@ class PythonNode(NodeBase):
             self._src_data_type = args.get("src_data_type", "AudioSamples")
             self._dst_data_type = args.get("dst_data_type", "MetadataFrame")
 
-        params = args | { "type": self.TYPE }
+        params = args | { "type": self.TYPE, "type_python": self.__class__.__name__ }
         super().__init__(params)
         self._wrapper = None
 
@@ -156,6 +156,10 @@ class ForceFPS(InternalNode):
     TYPE = "force_fps"
 
 
+class ForceKeyFrame(InternalNode):
+    TYPE = "force_keyframe"
+
+
 class Pause(InternalNode):
     TYPE = "pause"
 
@@ -183,6 +187,18 @@ class FilterVideo(InternalNode):
     TYPE = "filter_video"
 
 
+class IpcDmabufSource(InternalNode):
+    TYPE = "ipc_dmabuf_source"
+
+
+class DrmPrimeToCuda(InternalNode):
+    TYPE = "drm_prime_to_cuda"
+
+
+class CudaToEglImage(InternalNode):
+    TYPE = "cuda_to_egl_image"
+
+
 class Split(InternalNode):
     TYPE = "split"
 
@@ -199,6 +215,10 @@ class MediaPipeFaceMeshGpu(InternalNode):
     TYPE = "mediapipe_face_mesh_gpu"
 
 
+class TrackNetBall(InternalNode):
+    TYPE = "tracknet_ball"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
@@ -209,6 +229,18 @@ class ShotClassifier(InternalNode):
 
 class PlayerTracker(InternalNode):
     TYPE = "player_tracker"
+
+
+class LumaDiff(InternalNode):
+    TYPE = "luma_diff"
+
+
+class CudaSceneDiff(InternalNode):
+    TYPE = "cuda_scene_diff"
+
+
+class LumaSceneCut(InternalNode):
+    TYPE = "luma_scene_cut"
 
 
 class BallTracker(InternalNode):
@@ -229,6 +261,10 @@ class DrawBBox(InternalNode):
 
 class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
+
+
+class DrawKeypoints(InternalNode):
+    TYPE = "draw_keypoints"
 
 
 class SmoothTimestamps(InternalNode):
@@ -255,6 +291,14 @@ class EncVideo(InternalNode):
     TYPE = "enc_video"
 
 
+class Bsf(InternalNode):
+    TYPE = "bsf"
+
+
+class PacketRelay(InternalNode):
+    TYPE = "packet_relay"
+
+
 class Mux(InternalNode):
     TYPE = "mux"
 
@@ -266,6 +310,8 @@ class OneToMany(InternalNode):
     TYPE = "one_to_many"
 class SourceSwitcher(InternalNode):
     TYPE = "source_switcher"
+class PreheatVideoRouter(InternalNode):
+    TYPE = "preheat_video_router"
 class CudaRectOverlay(InternalNode):
     TYPE = "cuda_rect_overlay"
 class Input(InternalNode):
@@ -282,3 +328,27 @@ class WriteAudioEnvelope(InternalNode):
 
 class NullSink(InternalNode):
     TYPE = "null_sink"
+
+
+class SentinelVideo(InternalNode):
+    TYPE = "sentinel_video"
+
+
+class SentinelAudio(InternalNode):
+    TYPE = "sentinel_audio"
+
+
+class PictureBufferSink(InternalNode):
+    TYPE = "picture_buffer_sink"
+
+
+class FakeVideoFormat(InternalNode):
+    TYPE = "fake_video_format"
+
+
+class FakeAudioMetadata(InternalNode):
+    TYPE = "fake_audio_metadata"
+
+
+class StoreMetadata(InternalNode):
+    TYPE = "store_metadata"

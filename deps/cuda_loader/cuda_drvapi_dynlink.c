@@ -150,6 +150,12 @@ tcuStreamQuery                        *cuStreamQuery;
 tcuStreamSynchronize                  *cuStreamSynchronize;
 tcuStreamDestroy                      *cuStreamDestroy;
 tcuStreamGetCtx                       *cuStreamGetCtx;
+tcuStreamBeginCapture                 *cuStreamBeginCapture;
+tcuStreamEndCapture                   *cuStreamEndCapture;
+tcuGraphInstantiate                   *cuGraphInstantiate;
+tcuGraphLaunch                        *cuGraphLaunch;
+tcuGraphExecDestroy                   *cuGraphExecDestroy;
+tcuGraphDestroy                       *cuGraphDestroy;
 tcuGraphicsUnregisterResource         *cuGraphicsUnregisterResource;
 tcuGraphicsSubResourceGetMappedArray  *cuGraphicsSubResourceGetMappedArray;
 tcuGraphicsResourceGetMappedPointer   *cuGraphicsResourceGetMappedPointer;
@@ -356,6 +362,7 @@ static CUresult LOAD_LIBRARY(CUDADRIVER *pInstance)
 #define GET_PROC(name)          GET_PROC_REQUIRED(name)
 #define GET_PROC_V2(name)       GET_PROC_EX_V2(name,name,1)
 #define GET_PROC_V3(name)       GET_PROC_EX_V3(name,name,1)
+#define GET_PROC_OPTIONAL_V2(name) GET_PROC_EX_V2(name,name,0)
 
 // changed name from cuInit -> cuInit_drvapi to avoid symbol collision
 CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
@@ -590,6 +597,16 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuSurfObjectCreate);
         GET_PROC(cuSurfObjectDestroy);
         GET_PROC(cuProfilerStop);
+    }
+
+    if (driverVer >= 10000)
+    {
+        GET_PROC_OPTIONAL_V2(cuStreamBeginCapture);
+        GET_PROC_OPTIONAL(cuStreamEndCapture);
+        GET_PROC_OPTIONAL(cuGraphInstantiate);
+        GET_PROC_OPTIONAL(cuGraphLaunch);
+        GET_PROC_OPTIONAL(cuGraphExecDestroy);
+        GET_PROC_OPTIONAL(cuGraphDestroy);
     }
 
     if (driverVer >= 3010)

@@ -2,27 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 from pyplumber import AVPlumber
-from pyplumber.audio_vad import Speaker
 from pyplumber.mouth_tracker import FaceAnchoredMouthTrackerNode
 from pyplumber.node import (
-    AssumeVideoFormat,
     CropMetadataCuda,
     CudaInferYolo,
     DecAudio,
     DecVideo,
     Demux,
-    DrawBBox,
-    DrawBBoxLabels,
     FilterVideo,
     ForceFPS,
     InputRec,
     JoinMetadata,
     PlayerTracker,
+    PythonNode,
     Realtime,
     ResampleAudio,
     SmoothCropViewport,
@@ -51,17 +49,30 @@ from .config import (
     VAD_SAMPLE_RATE,
     VIEWPORT_METADATA_KEY,
 )
-from .debug_overlay import (
-    DEBUG_AUDIO_SPEAKING_LABELS,
-    DEBUG_MOUTH_LABEL_COLORS,
-    DEBUG_MOUTH_LABELS,
-    DEBUG_VIDEO_SPEAKING_LABELS,
-    SpeakingStatusLabelNode,
-    StaticViewportMetadataNode,
-    VS_MOUTH_KEY_PREFIX,
-    VS_SPEAKING_LABEL_KEY_PREFIX,
-    VS_VISUAL_KEY_PREFIX,
-)
+
+
+VS_MOUTH_KEY_PREFIX = "vs_mouth_rois"
+VS_VISUAL_KEY_PREFIX = "vs_visual_speech"
+
+
+class StaticViewportMetadataNode(PythonNode):
+    """Attach fixed crop dimensions so CropMetadataCuda uses its center fallback."""
+
+    def __init__(self, args: dict):
+        super().__init__({"data_type": "VideoFrame"} | args)
+        p = self.parameters
+        self.metadata_key = str(p["metadata_key"])
+        self._metadata_json = json.dumps({
+            "viewport_dst_width": int(p["viewport_dst_width"]),
+            "viewport_dst_height": int(p["viewport_dst_height"]),
+        }, sort_keys=True)
+
+    def process(self):
+        frame = self._src.get()
+        if frame is None:
+            return
+        frame.metadata[self.metadata_key] = self._metadata_json
+        self._dst.enqueue(frame)
 
 
 def input_basename(url: str) -> str:
@@ -80,7 +91,7 @@ def find_named_input(inputs: list[str], name: str) -> int | None:
 
 
 def default_face_engine() -> str:
-    """Resolve the face TRT engine used by local dev images and remote test hosts."""
+    """Resolve the face TRT engine from explicit config or packaged defaults."""
     env_engine = os.environ.get("AVP_FACE_ENGINE")
     if env_engine:
         return env_engine
@@ -97,8 +108,6 @@ def default_face_engine() -> str:
         ])
     candidates.extend([
         Path("/opt/tly/engines/yolo_face.plan"),
-        Path("/home/fedora/models/face-recognition-1.2/face-recognition_960x544.plan"),
-        Path("/home/user/tensorrt/face-recognition-1.2/face-recognition_960x544.plan"),
     ])
 
     for candidate in candidates:
@@ -117,6 +126,7 @@ def build_input_subgraph(
     idx: int,
     url: str,
     face_engine: str,
+    face_use_cuda_graph: bool = False,
     input_start_ts: str | None = None,
     sync_team: str = "",
     silero_model: str | None = None,
@@ -124,8 +134,6 @@ def build_input_subgraph(
     silero_device: str = "cpu",
     silero_threshold: float = 0.5,
     static_face_crop: bool = False,
-    debug_mouth_rois: bool = False,
-    speaker_registry: Speaker | None = None,
 ) -> dict:
     """Build decode + face-detection + audio chain for one input.
 
@@ -206,7 +214,7 @@ def build_input_subgraph(
         "dst": f"v{idx}_yolo_in",
         "graph": (
             f"scale_cuda=w={FACE_MODEL_W}:h={FACE_MODEL_CONTENT_H},"
-            f"pad_cuda={FACE_MODEL_W}:{FACE_MODEL_H}:0:2"
+            f"pad_cuda=w={FACE_MODEL_W}:h={FACE_MODEL_H}:x=0:y=2"
         ),
         "hwaccel": HWACCEL,
         "group": g,
@@ -217,6 +225,7 @@ def build_input_subgraph(
         "src": f"v{idx}_yolo_in",
         "dst": f"v{idx}_yolo_raw",
         "metadata_key_detection": FACE_METADATA_KEY,
+        "use_cuda_graph": face_use_cuda_graph,
         "models": [{
             "engine": face_engine,
             "task_type": "detection",
@@ -230,13 +239,10 @@ def build_input_subgraph(
     # PlayerTracker tracks only Face but preserves non-target detections as
     # passthrough metadata; the visual-speech branch still needs the unmodified
     # output for raw Mouth/Nose detections.
-    yolo_split_dsts = [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"]
-    if debug_mouth_rois:
-        yolo_split_dsts.append(f"v{idx}_yolo_for_debug")
     avp.addNode(Split({
         "name": f"split_yolo_{idx}",
         "src": f"v{idx}_yolo_raw",
-        "dst": yolo_split_dsts,
+        "dst": [f"v{idx}_yolo_for_tracker", f"v{idx}_yolo_for_vs"],
         "drop": True,
         "group": g,
     }))
@@ -286,9 +292,6 @@ def build_input_subgraph(
     # falls back to geometric estimation, still providing a motion signal.
     mouth_key = f"{VS_MOUTH_KEY_PREFIX}_{idx}"
     vs_key = f"{VS_VISUAL_KEY_PREFIX}_{idx}"
-    speaking_label_key = f"{VS_SPEAKING_LABEL_KEY_PREFIX}_{idx}"
-    vs_gate_dst = f"v{idx}_vs_out_raw" if debug_mouth_rois else f"v{idx}_vs_out"
-    debug_visual_edge = vs_gate_dst
     avp.addNode(JoinMetadata({
         "name": f"join_vs_{idx}",
         "src": [f"v{idx}_fullres_vs", f"v{idx}_yolo_for_vs"],
@@ -311,7 +314,7 @@ def build_input_subgraph(
     avp.addNode(VisualSpeechGateNode({
         "name": f"vs_gate_{idx}",
         "src": f"v{idx}_vs_mouth",
-        "dst": vs_gate_dst,
+        "dst": f"v{idx}_vs_out",
         "group": g,
         "source": f"input_{idx}",
         "mouth_metadata_key": mouth_key,
@@ -320,125 +323,11 @@ def build_input_subgraph(
         "run_in_wrapper_thread": True,
         "auto_restart": "group",
     }))
-    if debug_mouth_rois:
-        debug_visual_edge = f"v{idx}_vs_debug"
-        avp.addNode(Split({
-            "name": f"split_vs_debug_{idx}",
-            "src": vs_gate_dst,
-            "dst": [f"v{idx}_vs_out", debug_visual_edge],
-            "drop": True,
-            "group": g,
-        }))
-
-    # ---- Optional visible mouth ROI debug overlay ----
-    visible_src_edge = f"v{idx}_smooth"
-    if debug_mouth_rois:
-        avp.addNode(JoinMetadata({
-            "name": f"join_mouth_debug_{idx}",
-            "src": [f"v{idx}_smooth", f"v{idx}_yolo_for_debug"],
-            "dst": f"v{idx}_debug_mouth_md",
-            "group": g,
-            "auto_restart": "group",
-        }))
-        avp.addNode(AssumeVideoFormat({
-            "name": f"assume_debug_mouth_{idx}",
-            "src": f"v{idx}_debug_mouth_md",
-            "dst": f"v{idx}_debug_mouth_fmt",
-            "width": 1920,
-            "height": 1080,
-            "pixel_format": "cuda",
-            "real_pixel_format": "nv12",
-            "group": g,
-            "auto_restart": "group",
-        }))
-        avp.addNode(DrawBBox({
-            "name": f"draw_mouth_debug_boxes_{idx}",
-            "src": f"v{idx}_debug_mouth_fmt",
-            "dst": f"v{idx}_debug_mouth_boxes",
-            "group": g,
-            "metadata_key": FACE_METADATA_KEY,
-            "bbox_thickness": 4,
-            "min_conf": 0.0,
-            "allowed_labels": DEBUG_MOUTH_LABELS,
-            "label_colors": DEBUG_MOUTH_LABEL_COLORS,
-            "model_content_width": FACE_MODEL_W,
-            "model_content_height": FACE_MODEL_H,
-            "model_content_offset_x": 0,
-            "model_content_offset_y": 0,
-            "width": 1920,
-            "height": 1080,
-            "pixel_format": "cuda",
-            "real_pixel_format": "nv12",
-            "debug_log_every_n": 300,
-            "auto_restart": "group",
-        }))
-        if speaker_registry is None:
-            raise ValueError("speaker_registry is required when debug_mouth_rois is enabled")
-        avp.addNode(SpeakingStatusLabelNode({
-            "name": f"speaking_label_metadata_{idx}",
-            "src": f"v{idx}_debug_mouth_boxes",
-            "dst": f"v{idx}_debug_speaking_md",
-            "group": g,
-            "visual_metadata_key": vs_key,
-            "viewport_metadata_key": VIEWPORT_METADATA_KEY,
-            "output_metadata_key": speaking_label_key,
-            "model_width": FACE_MODEL_W,
-            "model_height": FACE_MODEL_H,
-            "static_face_crop": static_face_crop,
-            "auto_restart": "group",
-        }, index=idx, registry=speaker_registry))
-        avp.addNode(DrawBBoxLabels({
-            "name": f"draw_video_speaking_debug_label_{idx}",
-            "src": f"v{idx}_debug_speaking_md",
-            "dst": f"v{idx}_debug_video_speaking_label",
-            "group": g,
-            "metadata_key": speaking_label_key,
-            "label_template": "{label}",
-            "allowed_labels": DEBUG_VIDEO_SPEAKING_LABELS,
-            "min_conf": 0.0,
-            "model_content_width": FACE_MODEL_W,
-            "model_content_height": FACE_MODEL_H,
-            "model_content_offset_x": 0,
-            "model_content_offset_y": 0,
-            "width": 1920,
-            "height": 1080,
-            "pixel_format": "cuda",
-            "real_pixel_format": "nv12",
-            "text_color": "white",
-            "background_color": "green",
-            "font_scale": 1,
-            "debug_log_every_n": 300,
-            "auto_restart": "group",
-        }))
-        avp.addNode(DrawBBoxLabels({
-            "name": f"draw_audio_speaking_debug_label_{idx}",
-            "src": f"v{idx}_debug_video_speaking_label",
-            "dst": f"v{idx}_debug_speaking_labels",
-            "group": g,
-            "metadata_key": speaking_label_key,
-            "label_template": "{label}",
-            "allowed_labels": DEBUG_AUDIO_SPEAKING_LABELS,
-            "min_conf": 0.0,
-            "model_content_width": FACE_MODEL_W,
-            "model_content_height": FACE_MODEL_H,
-            "model_content_offset_x": 0,
-            "model_content_offset_y": 0,
-            "width": 1920,
-            "height": 1080,
-            "pixel_format": "cuda",
-            "real_pixel_format": "nv12",
-            "text_color": "white",
-            "background_color": "light_blue",
-            "font_scale": 1,
-            "debug_log_every_n": 300,
-            "auto_restart": "group",
-        }))
-        visible_src_edge = f"v{idx}_debug_speaking_labels"
 
     # ---- Split visible full-res output into: orig leg + crop-input leg ----
     avp.addNode(Split({
         "name": f"split_legs_{idx}",
-        "src": visible_src_edge,
+        "src": f"v{idx}_smooth",
         "dst": [f"v{idx}_orig_raw", f"v{idx}_for_crop"],
         "drop": True,
         "group": g,

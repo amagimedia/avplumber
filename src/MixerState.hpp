@@ -1,6 +1,7 @@
 #pragma once
 #include "instance_shared.hpp"
 #include "util.hpp"
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,6 +25,8 @@ struct SceneDefinition {
     std::string name;
     /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
     std::unordered_map<std::string, SourceLayout> sources;
+    /// Logical routed source name -> router input index selected by this scene.
+    std::unordered_map<std::string, int> routes;
     std::vector<SceneControl> controls;
     int width = 1920;
     int height = 1080;
@@ -43,19 +46,29 @@ struct MixerState : public InstanceShared<MixerState> {
         std::string otm_node_name;          // "otm_cam1"
         int input_index;                    // index within compositor src array
         std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
+        bool routed = false;
+        std::string router_node_name;
+        std::string route_output_label_a;
+        std::string route_output_label_b;
+        int route_output_a = -1;
+        int route_output_b = -1;
     };
     std::unordered_map<std::string, SourceInfo> sources;
 
     std::unordered_map<std::string, SceneDefinition> scenes;
+    std::unordered_map<std::string, int> router_output_counts;
+    std::unordered_map<std::string, std::vector<int>> router_routes;
 
     bool pgm_is_slot_a = true;
     std::string pgm_scene_name;
     std::string pvw_scene_name;
 
     int fps_num = 30, fps_den = 1;
+    int64_t switch_margin_ms = 100;
 
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
+    std::atomic<uint64_t> transition_generation{0};
 
     struct SlotNodes {
         std::string compositor_name;   // "comp_a" / "comp_b"
@@ -84,6 +97,17 @@ struct MixerState : public InstanceShared<MixerState> {
     // Edges to flush before each wipe starts and after each wipe stops.
     // Prevents frames from a previous wipe run from bleeding into the next one.
     std::vector<std::string> wipe_flush_edges;
+
+    // Optional post-mixer HTML/DMA overlay path.  The native mixer.overlay
+    // command uses these static graph nodes to arm the hidden branch, wait for
+    // a monotonic candidate frame, and then switch the final selector.
+    std::string overlay_source_otm_name;  // e.g. "otm_html_overlay_src"
+    std::string overlay_otm_name;         // e.g. "otm_html_overlay"
+    std::string overlay_selector_name;    // e.g. "overlay_sel"
+    int64_t overlay_ready_timeout_ms = 1000;
+    int64_t overlay_ready_poll_ms = 5;
+    bool overlay_enabled = false;
+    std::atomic<uint64_t> overlay_generation{0};
 
     const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
     const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }

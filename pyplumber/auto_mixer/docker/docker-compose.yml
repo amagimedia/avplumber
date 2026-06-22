@@ -1,0 +1,234 @@
+name: ${COMPOSE_PROJECT_NAME:-avplumber-auto-mixer}
+
+services:
+  janus:
+    build:
+      context: .
+      dockerfile: janus/Dockerfile
+      args:
+        JANUS_REF: ${JANUS_REF:-v1.4.1}
+    image: avplumber-auto-mixer-janus:${JANUS_IMAGE_TAG:-v1.4.1}
+    network_mode: host
+    restart: unless-stopped
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      JANUS_HOST_IP: ${JANUS_HOST_IP:-127.0.0.1}
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_AUDIO_ENABLED: ${JANUS_AUDIO_ENABLED:-true}
+      JANUS_AUDIO_PORT: ${JANUS_AUDIO_PORT:-5002}
+      JANUS_AUDIO_RTCP_PORT: ${JANUS_AUDIO_RTCP_PORT:-5003}
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-20000-20100}
+      JANUS_DEBUG_LEVEL: ${JANUS_DEBUG_LEVEL:-4}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  janus-preview:
+    build:
+      context: .
+      dockerfile: preview/Dockerfile
+    image: avplumber-auto-mixer-janus-preview:${JANUS_PREVIEW_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - janus
+    environment:
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+
+  web-ui:
+    build:
+      context: ../../..
+      dockerfile: pyplumber/auto_mixer/docker/web-ui/Dockerfile
+    image: avplumber-auto-mixer-web-ui:${WEBUI_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEBUI_PORT: ${WEBUI_PORT:-22222}
+      AVPLUMBER_HOST: 127.0.0.1
+      AVPLUMBER_PORT: ${REMOTE_CONTROL_PORT:-7777}
+      AVPLUMBER_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
+    volumes:
+      - auto-mixer-logs:/var/log/avplumber:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const p=process.env.WEBUI_PORT||22222;fetch('http://127.0.0.1:'+p+'/api/instances').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  wayland:
+    build:
+      context: .
+      dockerfile: wayland/Dockerfile
+    image: avplumber-auto-mixer-wayland:${WAYLAND_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    gpus: all
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - /dev/dri:/dev/dri
+    privileged: true
+    environment:
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      WLR_BACKENDS: headless
+      WLR_LIBINPUT_NO_DEVICES: "1"
+      WLR_NO_HARDWARE_CURSORS: "1"
+      WLR_RENDERER: ${WLR_RENDERER:-gles2}
+      WLR_RENDER_DRM_DEVICE: ${WLR_RENDER_DRM_DEVICE:-/dev/dri/renderD128}
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+    healthcheck:
+      test: ["CMD-SHELL", "socat -u OPEN:/dev/null UNIX-CONNECT:$${XDG_RUNTIME_DIR:-/run/avp-wayland}/$${WAYLAND_DISPLAY:-wayland-1}"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dma-browser:
+    build:
+      context: ../../..
+      dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
+    image: avplumber-auto-mixer-dma-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    gpus: all
+    shm_size: 1gb
+    depends_on:
+      wayland:
+        condition: service_healthy
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - /dev/dri:/dev/dri
+    privileged: true
+    environment:
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+      DMA_BROWSER_FORCE_NVIDIA: "1"
+      DMA_BROWSER_REST_HOST: 0.0.0.0
+      DMA_BROWSER_REST_PORT: "9009"
+      DMA_BROWSER_SOCKET_DIR: /tmp/dma-page
+      DMA_BROWSER_AUTO_OPEN_ID: overlay
+      DMA_BROWSER_AUTO_OPEN_URL: ${HTML_OVERLAY_URL:-}
+      DMA_BROWSER_AUTO_OPEN_WIDTH: ${HTML_OVERLAY_WIDTH:-1080}
+      DMA_BROWSER_AUTO_OPEN_HEIGHT: ${HTML_OVERLAY_HEIGHT:-1920}
+      DMA_BROWSER_AUTO_OPEN_FPS: ${HTML_OVERLAY_FPS:-30}
+      DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
+      DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1080x1920,1920x1080,1280x720}
+      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks}
+      LIBVA_DRIVER_NAME: nvidia
+      NVD_BACKEND: direct
+      NVD_LOG: ${NVD_LOG:-0}
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+    ports:
+      - "${DMA_BROWSER_REST_PORT:-9009}:9009"
+
+  auto-mixer:
+    profiles:
+      - run
+    build:
+      context: ../../..
+      dockerfile: pyplumber/auto_mixer/docker/auto-mixer/Dockerfile
+      additional_contexts:
+        tensorrt: ${TENSORRT_CONTEXT:?set TENSORRT_CONTEXT to the directory containing the TensorRT archive}
+      args:
+        TENSORRT_ARCHIVE: ${TENSORRT_ARCHIVE:?set TENSORRT_ARCHIVE to the archive filename inside TENSORRT_CONTEXT}
+    image: avplumber-auto-mixer:${AUTO_MIXER_IMAGE_TAG:-latest}
+    network_mode: host
+    gpus: all
+    devices:
+      - /dev/dri:/dev/dri
+    depends_on:
+      janus:
+        condition: service_started
+      web-ui:
+        condition: service_healthy
+      wayland:
+        condition: service_healthy
+      dma-browser:
+        condition: service_healthy
+    environment:
+      AVP_MODEL_DIR: /models
+      AVP_FACE_ENGINE: /models-cache/face.fp16.plan
+      AVP_TENSORRT_TIMING_CACHE: /models-cache/tensorrt.timing.cache
+      AVP_WIPE_DIR: /media-wipes
+      AVP_HTML_OVERLAY_DRM_DEVICE: ${HTML_OVERLAY_DRM_DEVICE:-/dev/dri/renderD128}
+      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-7777}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_INSTANCE_NAME: ${AUTO_MIXER_INSTANCE_NAME:-auto-mixer}
+      AVP_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
+      AVP_JANUS_HOST: ${AUTO_MIXER_JANUS_HOST:-127.0.0.1}
+      AVP_JANUS_AUDIO_PORT: ${JANUS_AUDIO_PORT:-5002}
+      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
+      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+    volumes:
+      - ${FACE_ONNX:?set FACE_ONNX to the face ONNX model path}:/models/face.onnx:ro
+      - ${FACE_ENGINE_CACHE_DIR:?set FACE_ENGINE_CACHE_DIR to a persistent face engine cache directory}:/models-cache
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+      - auto-mixer-logs:/var/log/avplumber
+      - ${MEDIA_INPUT_DIR:?set MEDIA_INPUT_DIR to the input media directory}:/media-inputs:ro
+      - ${MEDIA_WIPE_DIR:?set MEDIA_WIPE_DIR to the media wipe directory}:/media-wipes:ro
+
+  neural-demo:
+    profiles:
+      - neural
+    image: ${NEURAL_DEMO_IMAGE:-avplumber-neural-demo:latest}
+    network_mode: host
+    gpus: all
+    devices:
+      - /dev/dri:/dev/dri
+    depends_on:
+      janus:
+        condition: service_started
+      web-ui:
+        condition: service_healthy
+    environment:
+      AVP_EXAMPLE: ${NEURAL_DEMO_EXAMPLE:-metadata}
+      AVP_MODE: ${NEURAL_DEMO_MODE:-live}
+      AVP_INPUT: /run/avp/input/input
+      AVP_OUTPUT: ${NEURAL_DEMO_OUTPUT:-janus}
+      AVP_ARTIFACT_DIR: /run/avp/output
+      AVP_METADATA_DUMPS: ${NEURAL_DEMO_METADATA_DUMPS:-0}
+      AVP_JANUS_HOST: ${NEURAL_DEMO_JANUS_HOST:-127.0.0.1}
+      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      AVP_JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
+      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
+      AVP_JANUS_VIDEO_BITRATE: ${NEURAL_DEMO_JANUS_VIDEO_BITRATE:-4000k}
+      AVP_JANUS_RTCP_FEEDBACK: ${NEURAL_DEMO_JANUS_RTCP_FEEDBACK:-1}
+      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-7777}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_INSTANCE_NAME: ${NEURAL_DEMO_INSTANCE_NAME:-neural-demo}
+      AVP_LOGFILE: ${NEURAL_DEMO_LOGFILE:-/var/log/avplumber/neural-demo.log}
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+    volumes:
+      - ${NEURAL_DEMO_INPUT:-/dev/null}:/run/avp/input/input:ro
+      - ${NEURAL_DEMO_ARTIFACT_DIR:-/tmp/avplumber-neural-demo-artifacts}:/run/avp/output
+      - neural-demo-logs:/var/log/avplumber
+
+volumes:
+  auto-mixer-logs:
+  dma-browser-sockets:
+  neural-demo-logs:
+  wayland-runtime:

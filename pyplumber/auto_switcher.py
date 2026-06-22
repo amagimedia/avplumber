@@ -252,12 +252,11 @@ class AutoSwitcher:
                 if not wipe_file:
                     raise RuntimeError("auto-switch wipe_file is not set")
                 if start_pts_ms is None:
-                    self._mixer.wipe(scene, wipe_file=wipe_file, duration_sec=fade_duration)
+                    self._mixer.wipe(scene, wipe_file=wipe_file)
                 else:
                     self._mixer.wipe(
                         scene,
                         wipe_file=wipe_file,
-                        duration_sec=fade_duration,
                         start_pts_ms=start_pts_ms,
                     )
             else:
@@ -274,7 +273,7 @@ class AutoSwitcher:
             return False
         print(
             f"[auto_switcher] {transition_mode} to {scene}"
-            f"{f' duration={fade_duration:.3f}s' if transition_mode in ('fade', 'wipe') else ''}"
+            f"{f' duration={fade_duration:.3f}s' if transition_mode == 'fade' else ''}"
             f"{f' at pts={start_pts_ms}ms' if start_pts_ms is not None else ''}",
             flush=True,
         )

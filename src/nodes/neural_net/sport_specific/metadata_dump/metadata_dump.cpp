@@ -1798,6 +1798,16 @@ public:
     }
 };
 
+class MetadataDumpAll : public MetadataDump {
+public:
+    using MetadataDump::MetadataDump;
+    static std::shared_ptr<MetadataDumpAll> create(NodeCreationInfo& nci) {
+        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<MetadataDumpAll>(nci.edges, nci.params);
+        r->applyParams(nci.params);
+        return r;
+    }
+};
+
 // Three sibling sink nodes. Each runs the same per-frame engine
 // independently (state machines are deterministic), and each writes only
 // its slice of the eight output files.
@@ -1841,3 +1851,4 @@ public:
 DECLNODE(metadata_dump_frame, MetadataDumpFrame)
 DECLNODE(metadata_dump_events, MetadataDumpEvents)
 DECLNODE(metadata_dump_possessions, MetadataDumpPossessions)
+DECLNODE(metadata_dump, MetadataDumpAll)

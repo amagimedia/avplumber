@@ -1,7 +1,6 @@
 #include "avplumber.hpp"
 
 #include <list>
-#include <limits>
 #include <fstream>
 #include <iostream>
 #include <atomic>
@@ -152,6 +151,22 @@ private:
 
 public:
     std::shared_ptr<NodeManager> manager() { return manager_; }
+    void registerCommand(
+            const std::string& command,
+            std::function<std::string(const std::string&)> handler,
+            bool no_lock = false) {
+        std::string normalized = command;
+        strutils::toLowerInPlace(normalized);
+        if (commands_.count(normalized))
+            throw Error("command already registered: " + normalized);
+        commands_[normalized] = [handler = std::move(handler)](ClientStream &cs, std::string &arg) {
+            cs << handler(arg);
+        };
+        if (no_lock)
+            no_lock_commands_.insert(normalized);
+        else
+            no_lock_commands_.erase(normalized);
+    }
     void lockOrNot(bool do_lock, std::function<void()> whattodo) {
         if (do_lock) {
             // locks should be no longer necessary
@@ -312,6 +327,7 @@ public:
         logstream << "Closing server sockets";
         servers_.clear();
         if (manager_) {
+            InstanceSharedObjectsDestructors::callPreShutdownHooks(&manager_->instanceData());
             logstream << "Shutting down NodeManager";
             manager_->shutdown();
         }
@@ -784,7 +800,8 @@ public:
         auto mixerOrchestrator = [this](const std::string& mixer_name) {
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
-            return MixerOrchestrator(manager_->shared_from_this(), state, tl);
+            auto scheduler = InstanceSharedObjects<MixerTransitionScheduler>::get(manager_->instanceData(), mixer_name);
+            return MixerOrchestrator(manager_->shared_from_this(), state, tl, scheduler);
         };
 
         auto mixerJsonRequest = [](const std::string& command, const std::string& arg) {
@@ -802,6 +819,34 @@ public:
             ss >> mixer_name >> src_name >> otm_node >> input_index >> cs_a >> cs_b;
             auto orch = mixerOrchestrator(mixer_name);
             orch.defineSource(src_name, otm_node, input_index, cs_a, cs_b);
+        };
+
+        // mixer.routed_source {"mixer":"...","name":"...","router":"...","input_index":0,
+        //                      "route_label_a":"...","route_label_b":"...",
+        //                      "cs_node_a":"...","cs_node_b":"..."}
+        commands_["mixer.routed_source"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            std::string trimmed = strutils::trim(arg);
+            std::string mixer_name, src_name, router_node, route_label_a, route_label_b, cs_a, cs_b;
+            int input_index;
+            if (!trimmed.empty() && trimmed[0] == '{') {
+                json req = mixerJsonRequest("mixer.routed_source", arg);
+                mixer_name = req.at("mixer").get<std::string>();
+                src_name = req.at("name").get<std::string>();
+                router_node = req.at("router").get<std::string>();
+                input_index = req.at("input_index").get<int>();
+                route_label_a = req.at("route_label_a").get<std::string>();
+                route_label_b = req.at("route_label_b").get<std::string>();
+                cs_a = req.at("cs_node_a").get<std::string>();
+                cs_b = req.at("cs_node_b").get<std::string>();
+            } else {
+                std::stringstream ss(arg);
+                int route_out_a, route_out_b;
+                ss >> mixer_name >> src_name >> router_node >> input_index >> route_out_a >> route_out_b >> cs_a >> cs_b;
+                route_label_a = std::to_string(route_out_a);
+                route_label_b = std::to_string(route_out_b);
+            }
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.defineRoutedSource(src_name, router_node, input_index, route_label_a, route_label_b, cs_a, cs_b);
         };
 
         // mixer.scene <mixer_name> <scene_name> <json_definition>
@@ -846,9 +891,29 @@ public:
                     def.controls.push_back(std::move(sc));
                 }
             }
+            if (jdef.contains("routes")) {
+                if (!jdef["routes"].is_object())
+                    throw Error("mixer.scene: routes must be an object");
+                for (auto it = jdef["routes"].begin(); it != jdef["routes"].end(); ++it)
+                    def.routes[it.key()] = it.value().get<int>();
+            }
 
             auto orch = mixerOrchestrator(mixer_name);
             orch.defineScene(scene_name, def);
+        };
+
+        // mixer.init_routes {"mixer":"..."}
+        commands_["mixer.init_routes"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            std::string trimmed = strutils::trim(arg);
+            std::string mixer_name;
+            if (!trimmed.empty() && trimmed[0] == '{') {
+                json req = mixerJsonRequest("mixer.init_routes", arg);
+                mixer_name = req.at("mixer").get<std::string>();
+            } else {
+                mixer_name = trimmed;
+            }
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.initializeRoutedRoutes();
         };
 
         // mixer.preview {"mixer":"mixer","scene":"scene_name"}
@@ -899,6 +964,46 @@ public:
             orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
         };
 
+        // mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src",
+        //                     "overlay_otm":"otm_html_overlay","selector":"overlay_sel"}
+        commands_["mixer.overlay.init"] = [this, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.overlay.init", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
+            state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
+            state->overlay_selector_name = req.at("selector").get<std::string>();
+            state->overlay_enabled = req.value("enabled", false);
+            if (req.contains("ready_timeout_ms"))
+                state->overlay_ready_timeout_ms = req.at("ready_timeout_ms").get<int64_t>();
+            if (req.contains("ready_poll_ms"))
+                state->overlay_ready_poll_ms = req.at("ready_poll_ms").get<int64_t>();
+            if (state->overlay_ready_timeout_ms < 0)
+                throw Error("mixer.overlay.init: ready_timeout_ms must be >= 0");
+            if (state->overlay_ready_poll_ms <= 0)
+                throw Error("mixer.overlay.init: ready_poll_ms must be > 0");
+        };
+
+        // mixer.overlay {"mixer":"mixer","enabled":true,"ready_timeout_ms":1000}
+        commands_["mixer.overlay"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.overlay", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            bool enabled = req.at("enabled").get<bool>();
+            int64_t ready_timeout_ms = req.value("ready_timeout_ms", int64_t(-1));
+            if (req.contains("source_otm") || req.contains("overlay_otm") || req.contains("selector")) {
+                if (!req.contains("source_otm") || !req.contains("overlay_otm") || !req.contains("selector"))
+                    throw Error("mixer.overlay: source_otm, overlay_otm, and selector must be provided together");
+                auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->overlay_source_otm_name = req.at("source_otm").get<std::string>();
+                state->overlay_otm_name = req.at("overlay_otm").get<std::string>();
+                state->overlay_selector_name = req.at("selector").get<std::string>();
+            }
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.setOverlayEnabled(enabled, ready_timeout_ms);
+        };
+
         // mixer.status <mixer_name>
         commands_["mixer.status"] = [this, mixerOrchestrator](ClientStream &cs, std::string &arg) {
             std::string mixer_name = strutils::trim(arg);
@@ -932,6 +1037,11 @@ public:
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();
             if (cfg.contains("fps_num")) state->fps_num = cfg["fps_num"].get<int>();
             if (cfg.contains("fps_den")) state->fps_den = cfg["fps_den"].get<int>();
+            if (cfg.contains("switch_margin_ms")) {
+                state->switch_margin_ms = cfg["switch_margin_ms"].get<int64_t>();
+                if (state->switch_margin_ms < 0)
+                    throw Error("mixer.init: switch_margin_ms must be >= 0");
+            }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
             if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
@@ -1070,6 +1180,13 @@ class TcpControlServer: public ControlServerBase {
     ControlImpl &control_;
     boost::asio::io_service io_service_;
     tcp::acceptor acceptor_;
+    // clients_ is mutated only from the io_service thread (net_thread_):
+    // accept() inserts, Client::closeAndRemove() erases via the saved iterator.
+    // No mutex; if a future change ever calls into clients_ from another
+    // thread (e.g. an external "kick all clients" command), that path must
+    // post into io_service_ instead of touching clients_ directly.
+    // ~TcpControlServer joins net_thread_ before iterating clients_, so its
+    // post-join loop is safe.
     std::list<std::shared_ptr<Client>> clients_;
     std::thread net_thread_;
 
@@ -1415,6 +1532,13 @@ void AVPlumber::executeCommandsFromString(const std::string script) {
     impl_->readExecCommands(iss, std::cout, true);
 }
 
+void AVPlumber::registerControlCommand(
+        const std::string& command,
+        std::function<std::string(const std::string&)> handler,
+        bool no_lock) {
+    impl_->registerCommand(command, std::move(handler), no_lock);
+}
+
 void AVPlumber::setLogFile(const std::string path) {
     if (path.empty()) {
         current_thread.logger = default_logger;
@@ -1433,6 +1557,14 @@ void AVPlumber::setLogCallback(std::function<void(const std::string &)> callback
     } else {
         current_thread.logger = default_logger;
     }
+}
+
+void AVPlumber::setExceptionCallback(std::function<void(const std::string&, const std::string&, const std::string&)> callback) {
+    auto mngr = manager();
+    if (!mngr) {
+        return;
+    }
+    mngr->instanceData().setExceptionCallback(std::move(callback));
 }
 
 void AVPlumber::setReady() {

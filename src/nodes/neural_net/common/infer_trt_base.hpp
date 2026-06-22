@@ -88,6 +88,8 @@ struct DecodeParams {
     float conf_thresh;
     OutputBoxFormat box_format;
     const std::vector<int>& class_index_remap;
+    float nms_iou_thresh = 0.0f;
+    bool nms_class_agnostic = false;
 };
 
 // --- Utility functions ---
@@ -189,7 +191,7 @@ struct ModelRunner {
     std::string input_tensor_name;
     nvinfer1::Dims input_dims{};
     nvinfer1::DataType input_dtype = nvinfer1::DataType::kFLOAT;
-    int input_w = 0, input_h = 0;
+    int input_w = 0, input_h = 0, input_c = 0;
 
     // Outputs (vector: detection has 1, segmentation has 2)
     std::vector<OutputTensor> outputs;
@@ -197,11 +199,29 @@ struct ModelRunner {
     // Preprocess
     CUfunction preprocess_kernel = nullptr;
     CUstream stream = nullptr;
+    std::vector<cudaStream_t> aux_streams;
+
+    // Optional CUDA graph for replaying fixed-shape TensorRT inference.
+    CUgraphExec cuda_graph_exec = nullptr;
+    bool cuda_graph_ready = false;
+    // Run this many regular enqueueInference iterations before the first graph
+    // capture, so TensorRT internal state (cudnn workspace, lazy kernels) is
+    // hot before stream-capture begins. Counts down once per inference and is
+    // never reset on input shape changes — fixed-shape only models, see
+    // ensureCudaGraph(). If a future change introduces dynamic shapes that
+    // re-instantiate the graph mid-stream, this should be re-set to the
+    // initial warmup count alongside clearing cuda_graph_ready.
+    int cuda_graph_warmup_remaining = 5;
+    bool cuda_graph_disabled = false;
+    bool cuda_graph_capture_logged = false;
+    bool cuda_graph_disable_logged = false;
 
     // Config
     OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
     TaskType task_type = TaskType::Detection;
     bool include_in_detection_metadata = true;
+    float nms_iou_thresh = 0.0f;
+    bool nms_class_agnostic = false;
     std::vector<std::string> class_names;
     std::vector<int> class_index_remap;
 
@@ -220,10 +240,12 @@ protected:
     TRTLogger trt_logger_;
     std::vector<ModelRunner> models_;
     int input_w_ = 0, input_h_ = 0;
+    int expected_input_channels_ = 3;
     nvinfer1::DataType input_dtype_ = nvinfer1::DataType::kFLOAT;
     bool input_bgr_order_ = false;
     CUmodule preprocess_module_ = nullptr;
     bool initialized_ = false;
+    bool use_cuda_graph_ = false;
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;
@@ -233,12 +255,18 @@ protected:
     bool parseEngine(ModelRunner& model);
     bool allocateBindings(ModelRunner& model);
     bool ensureCompatibleInput(const ModelRunner& model, size_t model_index);
+    bool configureRunnerStream(ModelRunner& model);
     bool configureRunnerPreprocess(ModelRunner& model);
     bool ensureInitialized(const av::VideoFrame& frm);
 
     bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model);
     bool runInference(ModelRunner& model);
     bool syncModel(ModelRunner& model);
+    bool enqueueInference(ModelRunner& model);
+    bool copyOutputsToHost(ModelRunner& model);
+    bool ensureCudaGraph(ModelRunner& model);
+    bool runCudaGraph(ModelRunner& model);
+    void disableCudaGraph(ModelRunner& model, const std::string& reason);
 
     void cleanupModel(ModelRunner& model);
     void cleanupAll();

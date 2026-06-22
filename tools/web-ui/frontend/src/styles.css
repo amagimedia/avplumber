@@ -361,6 +361,19 @@ pre {
   padding: 4px 6px;
   font-size: 0.95em;
   line-height: 1.1;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.rete-wrap .node .input-title,
+.rete-wrap .node .output-title,
+.rete-wrap .rete-node .input-title,
+.rete-wrap .rete-node .output-title {
+  max-width: calc(100% - 40px);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.15;
 }
 
 .rete-wrap .node .content,
@@ -379,6 +392,3 @@ pre {
   font-size: 0.9em;
   line-height: 1.1;
 }
-
-
-

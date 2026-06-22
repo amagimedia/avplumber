@@ -2,11 +2,18 @@
 #include "../yolo/decode_detection.hpp"
 #include "../yolo/decode_segmentation.hpp"
 #include "../yolo/decode_pose.hpp"
+#include <mutex>
 
 // PTX blob for NV12->NCHW preprocess kernel.
 #include "../../../../objs/src/nodes/neural_net/preprocess/nv12_to_nchw.ptx.h"
 
 namespace yolo_base {
+
+namespace {
+std::mutex g_cuda_graph_capture_mutex;
+constexpr unsigned int kCudaStreamDefault = 0x0;
+constexpr unsigned int kCudaStreamNonBlocking = 0x1;
+}
 
 void DetectionDecoderDeleter::operator()(DetectionDecoder* p) const { delete p; }
 void SegmentationDecoderDeleter::operator()(SegmentationDecoder* p) const { delete p; }
@@ -38,6 +45,14 @@ void CudaInferTrtBase::cleanupModel(ModelRunner& model) {
     // Sync stream before destroying anything
     if (model.stream) {
         CUDA_CHECK_CU(cuStreamSynchronize(model.stream));
+        if (model.cuda_graph_exec && cuGraphExecDestroy) {
+            CUDA_CHECK_CU(cuGraphExecDestroy(model.cuda_graph_exec));
+            model.cuda_graph_exec = nullptr;
+        }
+        for (cudaStream_t aux_stream : model.aux_streams) {
+            CUDA_CHECK_CU(cuStreamDestroy(reinterpret_cast<CUstream>(aux_stream)));
+        }
+        model.aux_streams.clear();
         CUDA_CHECK_CU(cuStreamDestroy(model.stream));
         model.stream = nullptr;
     }
@@ -191,9 +206,10 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
 
         if (is_input) {
             ++input_count;
+            const int expected_c = expected_input_channels_;
             const bool is_image_input =
-                (dims.nbDims == 3 && dims.d[0] == 3) ||
-                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == 3);
+                (dims.nbDims == 3 && dims.d[0] == expected_c) ||
+                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == expected_c);
             if (model.input_tensor_name.empty()) {
                 model.input_tensor_name = tensor_name;
                 model.input_dims = dims;
@@ -233,14 +249,17 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
         return false;
     }
 
-    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == 3) {
+    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[0];
         model.input_h = model.input_dims.d[1];
         model.input_w = model.input_dims.d[2];
-    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == 3) {
+    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[1];
         model.input_h = model.input_dims.d[2];
         model.input_w = model.input_dims.d[3];
     } else {
-        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor for " << model.engine_path
+        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor with "
+                  << expected_input_channels_ << " channels for " << model.engine_path
                   << " (engine inputs: " << input_count << ")";
         return false;
     }
@@ -305,9 +324,26 @@ bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
         logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
         return false;
     }
-    if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, 0))) {
+    return configureRunnerStream(model);
+}
+
+bool CudaInferTrtBase::configureRunnerStream(ModelRunner& model) {
+    unsigned int stream_flags = use_cuda_graph_ ? kCudaStreamNonBlocking : kCudaStreamDefault;
+    if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, stream_flags))) {
         logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
         return false;
+    }
+    if (use_cuda_graph_) {
+        int nb_aux_streams = model.trt_engine->getNbAuxStreams();
+        model.aux_streams.reserve((size_t)std::max(nb_aux_streams, 0));
+        for (int i = 0; i < nb_aux_streams; ++i) {
+            CUstream aux_stream = nullptr;
+            if (CUDA_CHECK_CU(cuStreamCreate(&aux_stream, kCudaStreamNonBlocking))) {
+                logstream << "cuda_infer_yolo: failed to create TensorRT aux stream for " << model.engine_path;
+                return false;
+            }
+            model.aux_streams.push_back(reinterpret_cast<cudaStream_t>(aux_stream));
+        }
     }
     return true;
 }
@@ -371,11 +407,18 @@ bool CudaInferTrtBase::runPreprocessNV12(const av::VideoFrame& frm, ModelRunner&
     return true;
 }
 
-bool CudaInferTrtBase::runInference(ModelRunner& model) {
+bool CudaInferTrtBase::enqueueInference(ModelRunner& model) {
+    if (!model.aux_streams.empty()) {
+        model.trt_ctx->setAuxStreams(model.aux_streams.data(), (int32_t)model.aux_streams.size());
+    }
     if (!model.trt_ctx->enqueueV3(reinterpret_cast<cudaStream_t>(model.stream))) {
         logstream << "cuda_infer_yolo: enqueueV3 failed for " << model.engine_name;
         return false;
     }
+    return true;
+}
+
+bool CudaInferTrtBase::copyOutputsToHost(ModelRunner& model) {
     for (OutputTensor& ot : model.outputs) {
         size_t idx = ot.tensor_index;
         size_t bytes = model.tensor_bytes[idx];
@@ -394,6 +437,109 @@ bool CudaInferTrtBase::runInference(ModelRunner& model) {
         }
     }
     return true;
+}
+
+void CudaInferTrtBase::disableCudaGraph(ModelRunner& model, const std::string& reason) {
+    model.cuda_graph_disabled = true;
+    if (!model.cuda_graph_disable_logged) {
+        logstream << "cuda_infer_yolo: CUDA graph disabled for " << model.engine_name
+                  << ": " << reason << "; falling back to normal TensorRT enqueue";
+        model.cuda_graph_disable_logged = true;
+    }
+}
+
+bool CudaInferTrtBase::ensureCudaGraph(ModelRunner& model) {
+    if (model.cuda_graph_ready) return true;
+    if (model.cuda_graph_disabled) return false;
+
+    if (!cuStreamBeginCapture || !cuStreamEndCapture || !cuGraphInstantiate ||
+        !cuGraphLaunch || !cuGraphExecDestroy || !cuGraphDestroy) {
+        disableCudaGraph(model, "CUDA graph driver APIs are unavailable");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_cuda_graph_capture_mutex);
+    if (model.cuda_graph_ready || model.cuda_graph_disabled) return model.cuda_graph_ready;
+
+    if (CUDA_CHECK_CU(cuStreamSynchronize(model.stream))) {
+        disableCudaGraph(model, "stream synchronize before capture failed");
+        return false;
+    }
+
+    CUresult res = cuStreamBeginCapture(model.stream, CU_STREAM_CAPTURE_MODE_RELAXED);
+    if (res != CUDA_SUCCESS) {
+        disableCudaGraph(model, "cuStreamBeginCapture failed");
+        return false;
+    }
+
+    CUgraph graph = nullptr;
+    if (!model.aux_streams.empty()) {
+        model.trt_ctx->setAuxStreams(model.aux_streams.data(), (int32_t)model.aux_streams.size());
+    }
+    if (!model.trt_ctx->enqueueV3(reinterpret_cast<cudaStream_t>(model.stream))) {
+        CUresult end_res = cuStreamEndCapture(model.stream, &graph);
+        if (end_res == CUDA_SUCCESS && graph) {
+            CUDA_CHECK_CU(cuGraphDestroy(graph));
+        }
+        disableCudaGraph(model, "enqueueV3 failed during capture");
+        return false;
+    }
+
+    res = cuStreamEndCapture(model.stream, &graph);
+    if (res != CUDA_SUCCESS || !graph) {
+        disableCudaGraph(model, "cuStreamEndCapture failed");
+        return false;
+    }
+
+    CUgraphExec graph_exec = nullptr;
+    CUgraphNode error_node = nullptr;
+    char log_buffer[1024] = {};
+    res = cuGraphInstantiate(&graph_exec, graph, &error_node, log_buffer, sizeof(log_buffer));
+    CUDA_CHECK_CU(cuGraphDestroy(graph));
+    if (res != CUDA_SUCCESS || !graph_exec) {
+        std::string reason = "cuGraphInstantiate failed";
+        if (log_buffer[0] != '\0') {
+            reason += ": ";
+            reason += log_buffer;
+        }
+        disableCudaGraph(model, reason);
+        return false;
+    }
+
+    model.cuda_graph_exec = graph_exec;
+    model.cuda_graph_ready = true;
+    if (!model.cuda_graph_capture_logged) {
+        logstream << "cuda_infer_yolo: CUDA graph captured for " << model.engine_name;
+        model.cuda_graph_capture_logged = true;
+    }
+    return true;
+}
+
+bool CudaInferTrtBase::runCudaGraph(ModelRunner& model) {
+    if (!model.cuda_graph_ready || !model.cuda_graph_exec) return false;
+    CUresult res = cuGraphLaunch(model.cuda_graph_exec, model.stream);
+    if (res != CUDA_SUCCESS) {
+        disableCudaGraph(model, "cuGraphLaunch failed");
+        return false;
+    }
+    return true;
+}
+
+bool CudaInferTrtBase::runInference(ModelRunner& model) {
+    if (use_cuda_graph_ && !model.cuda_graph_disabled) {
+        if (model.cuda_graph_warmup_remaining > 0) {
+            --model.cuda_graph_warmup_remaining;
+            return enqueueInference(model) && copyOutputsToHost(model);
+        }
+        if (!model.cuda_graph_ready) {
+            ensureCudaGraph(model);
+        }
+        if (model.cuda_graph_ready && runCudaGraph(model)) {
+            return copyOutputsToHost(model);
+        }
+    }
+
+    return enqueueInference(model) && copyOutputsToHost(model);
 }
 
 bool CudaInferTrtBase::syncModel(ModelRunner& model) {

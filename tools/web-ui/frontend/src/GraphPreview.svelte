@@ -11,6 +11,7 @@
   export let nodes = [];
   export let queues = [];
   export let selectedNodeName = '';
+  export let liveQueueStats = true;
 
   const dispatch = createEventDispatcher();
 
@@ -26,7 +27,7 @@
 
   let error = '';
   let lastGraphKey = '';
-  let allowProgrammaticTranslate = false;
+  let lastPublishedQueueStatsMode = '';
 
   // Maps used for efficient queue-fill updates (no rebuild).
   const nodeByName = new Map(); // name -> ClassicPreset.Node
@@ -492,9 +493,7 @@
     for (let l = 0; l <= maxLevel; l++) {
       const arr = groups.get(l) || [];
       for (const n of arr) {
-        allowProgrammaticTranslate = true;
         await area.translate(n.id, { x: xOffset[l], y: topsById.get(n.id) || 0 });
-        allowProgrammaticTranslate = false;
       }
     }
 
@@ -516,7 +515,7 @@
 
     await editor.clear();
 
-    const queueStats = indexQueues(queues);
+    const queueStats = liveQueueStats ? indexQueues(queues) : new Map();
 
     // 1) Create nodes with ports (queue names are port keys)
     for (const n of nodes || []) {
@@ -590,42 +589,36 @@
 
   async function updateQueueFills() {
     if (!area) return;
-    const queueStats = indexQueues(queues);
+    const queueStats = liveQueueStats ? indexQueues(queues) : new Map();
+    const nodeIdsToUpdate = new Set();
 
     for (const [qName, out] of outputsByQueue.entries()) {
       const q = queueStats.get(qName);
-      out.label = queueFillLabel(qName, q);
+      const nextLabel = queueFillLabel(qName, q);
+      if (out.label === nextLabel) continue;
+      out.label = nextLabel;
 
       const nodeId = nodeIdByQueue.get(qName);
       if (nodeId) {
-        // Re-render node to refresh port labels.
-        // (Connection labels/colors could be added later via custom connection component.)
-        area.update('node', nodeId).catch(() => {});
+        nodeIdsToUpdate.add(nodeId);
       }
     }
 
-    // Update connection fill metadata and rerender connections (for hover highlight/labels)
-    if (editor && area) {
-      for (const c of editor.getConnections()) {
-        const qName = c.__queueName || c.sourceOutput || c.targetInput;
-        const q = qName ? queueStats.get(qName) : null;
-        const pct = q && q.capacity > 0 ? q.occupied / q.capacity : null;
-        const pps = q && typeof q.pps === 'number' && Number.isFinite(q.pps) ? q.pps : null;
-        // eslint-disable-next-line no-param-reassign
-        c.__queueName = qName;
-        // eslint-disable-next-line no-param-reassign
-        c.__fillPct = typeof pct === 'number' && Number.isFinite(pct) ? pct : null;
-        // eslint-disable-next-line no-param-reassign
-        c.__pps = pps;
-        // eslint-disable-next-line no-param-reassign
-        c.__fillText =
-          qName && q && q.capacity > 0
-            ? `${qName}: ${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)${
-                pps !== null ? `, ${pps.toFixed(1)} pps` : ''
-              }`
-            : qName || '';
-        area.update('connection', c.id).catch(() => {});
-      }
+    for (const nodeId of nodeIdsToUpdate) {
+      area.update('node', nodeId).catch(() => {});
+    }
+  }
+
+  function publishQueueStats() {
+    if (liveQueueStats) {
+      lastPublishedQueueStatsMode = 'live';
+      queueStatsByName.set(indexQueues(queues));
+      return;
+    }
+
+    if (lastPublishedQueueStatsMode !== 'off') {
+      lastPublishedQueueStatsMode = 'off';
+      queueStatsByName.set(new Map());
     }
   }
 
@@ -654,16 +647,6 @@
       area.use(render);
       area.use(arrange);
 
-      // Make graph read-only: block node dragging/translating initiated by pointer interactions.
-      // We still allow pan/zoom and programmatic translations used by our layout.
-      area.addPipe((context) => {
-        if (!context || typeof context !== 'object' || !('type' in context)) return context;
-        if (context.type === 'nodetranslate' && !allowProgrammaticTranslate) {
-          return undefined; // stop
-        }
-        return context;
-      });
-
       await rebuildGraph();
     } catch (e) {
       error = String(e && e.message ? e.message : e);
@@ -680,6 +663,7 @@
     editor = null;
     area = null;
     arrange = null;
+    queueStatsByName.set(new Map());
   });
 
   // Rebuild when topology changes (nodes/src/dst changes)
@@ -694,6 +678,8 @@
   // Update labels when queue fill changes
   $: {
     // Trigger on any queues array assignment
+    queues;
+    liveQueueStats;
     updateQueueFills();
   }
 
@@ -705,7 +691,9 @@
   // Always publish queue stats to the store (even before Rete `area` is ready),
   // so the custom connection component can render reactively.
   $: {
-    queueStatsByName.set(indexQueues(queues));
+    queues;
+    liveQueueStats;
+    publishQueueStats();
   }
 </script>
 
@@ -757,5 +745,3 @@
     box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.75);
   }
 </style>
-
-

@@ -39,7 +39,7 @@ git am /path/to/avplumber/deps/ffmpeg-patches/*.patch
 
 Host validation path:
 
-- `/home/fedora/clean-ffmpeg`
+- `<ffmpeg-checkout>`
 
 Install prefix used by the current validation plan:
 
@@ -47,9 +47,8 @@ Install prefix used by the current validation plan:
 
 ## Configure Contract
 
-Validation is expected to use the exact host configure line captured in:
-
-- `docs/superpowers/specs/2026-04-12-ffmpeg-public-patch-stack-design.md`
+Validation is expected to use the exact configure line from the host custom
+FFmpeg install being compared.
 
 The goal is parity with the current custom FFmpeg install at:
 

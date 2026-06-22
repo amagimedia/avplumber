@@ -1,0 +1,354 @@
+name: ${COMPOSE_PROJECT_NAME:-avplumber-compose}
+
+x-gpu-env: &gpu-env
+  NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+  NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
+services:
+  janus:
+    build:
+      context: ../pyplumber/auto_mixer/docker
+      dockerfile: janus/Dockerfile
+      args:
+        JANUS_REF: ${JANUS_REF:-v1.4.1}
+    image: ${JANUS_IMAGE:-avplumber-janus}:${JANUS_IMAGE_TAG:-v1.4.1}
+    network_mode: host
+    restart: unless-stopped
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      JANUS_HOST_IP: ${JANUS_HOST_IP:-127.0.0.1}
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_AUDIO_ENABLED: ${JANUS_AUDIO_ENABLED:-true}
+      JANUS_AUDIO_PORT: ${JANUS_AUDIO_PORT:-5002}
+      JANUS_AUDIO_RTCP_PORT: ${JANUS_AUDIO_RTCP_PORT:-5003}
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-20000-20100}
+      JANUS_DEBUG_LEVEL: ${JANUS_DEBUG_LEVEL:-4}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  janus-preview:
+    build:
+      context: ../pyplumber/auto_mixer/docker
+      dockerfile: preview/Dockerfile
+    image: ${JANUS_PREVIEW_IMAGE:-avplumber-janus-preview}:${JANUS_PREVIEW_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - janus
+    environment:
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+
+  web-ui:
+    build:
+      context: ..
+      dockerfile: pyplumber/auto_mixer/docker/web-ui/Dockerfile
+    image: ${WEB_UI_IMAGE:-avplumber-web-ui}:${WEBUI_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEBUI_PORT: ${WEBUI_PORT:-22222}
+      AVPLUMBER_HOST: 127.0.0.1
+      AVPLUMBER_PORT: ${REMOTE_CONTROL_PORT:-22422}
+      AVPLUMBER_LOGFILE: ${AVP_LOGFILE:-/var/log/avplumber/avplumber.log}
+    volumes:
+      - runner-logs:/var/log/avplumber:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const p=process.env.WEBUI_PORT||22222;fetch('http://127.0.0.1:'+p+'/api/instances').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  wayland:
+    build:
+      context: ../pyplumber/auto_mixer/docker
+      dockerfile: wayland/Dockerfile
+    image: ${WAYLAND_IMAGE:-avplumber-wayland}:${WAYLAND_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    deploy: *gpu-deploy
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    privileged: true
+    environment:
+      <<: *gpu-env
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      WLR_BACKENDS: headless
+      WLR_LIBINPUT_NO_DEVICES: "1"
+      WLR_NO_HARDWARE_CURSORS: "1"
+      WLR_RENDERER: ${WLR_RENDERER:-gles2}
+      WLR_RENDER_DRM_DEVICE: ${WLR_RENDER_DRM_DEVICE:-/dev/dri/renderD128}
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+    healthcheck:
+      test: ["CMD-SHELL", "socat -u OPEN:/dev/null UNIX-CONNECT:$${XDG_RUNTIME_DIR:-/run/avp-wayland}/$${WAYLAND_DISPLAY:-wayland-1}"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dma-browser:
+    build:
+      context: ..
+      dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
+    image: ${DMA_BROWSER_IMAGE:-avplumber-dma-browser}:${DMA_BROWSER_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    deploy: *gpu-deploy
+    shm_size: 1gb
+    depends_on:
+      wayland:
+        condition: service_healthy
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    privileged: false
+    environment:
+      <<: *gpu-env
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      DMA_BROWSER_FORCE_NVIDIA: "1"
+      DMA_BROWSER_REST_HOST: 0.0.0.0
+      DMA_BROWSER_REST_PORT: ${DMA_BROWSER_REST_PORT:-9009}
+      DMA_BROWSER_SOCKET_DIR: /tmp/dma-page
+      DMA_BROWSER_AUTO_OPEN_ID: overlay
+      DMA_BROWSER_AUTO_OPEN_URL: ${HTML_OVERLAY_URL:-}
+      DMA_BROWSER_AUTO_OPEN_WIDTH: ${HTML_OVERLAY_WIDTH:-1080}
+      DMA_BROWSER_AUTO_OPEN_HEIGHT: ${HTML_OVERLAY_HEIGHT:-1920}
+      DMA_BROWSER_AUTO_OPEN_FPS: ${HTML_OVERLAY_FPS:-30}
+      DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
+      DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1080x1920,1920x1080,1280x720}
+      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+      DMA_BROWSER_RENDER_NODE: ${DMA_BROWSER_RENDER_NODE:-}
+      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks}
+      LIBVA_DRIVER_NAME: nvidia
+      NVD_BACKEND: direct
+      NVD_LOG: ${NVD_LOG:-0}
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+    ports:
+      - "${DMA_BROWSER_REST_PORT:-9009}:9009"
+
+  runner:
+    profiles:
+      - script
+    image: ${AVP_RUNNER_IMAGE:-avplumber-neural-demo:latest}
+    network_mode: host
+    restart: "no"
+    deploy: *gpu-deploy
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    depends_on:
+      janus:
+        condition: service_started
+      web-ui:
+        condition: service_healthy
+      wayland:
+        condition: service_healthy
+      dma-browser:
+        condition: service_healthy
+    entrypoint: ["/opt/avp-compose-runner/run-avplumber-script.sh"]
+    environment:
+      <<: *gpu-env
+      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/targets/x86_64-linux/lib}
+      AVP_SCRIPT: /run/avp/script.avplumber
+      AVP_SCRIPT_FILE: ${AVP_SCRIPT_FILE:-}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-22422}
+      AVP_INSTANCE_NAME: ${AVP_INSTANCE_NAME:-script-runner}
+      AVP_LOGFILE: ${AVP_LOGFILE:-/var/log/avplumber/script-runner.log}
+      AVP_EXTRA_ARGS: ${AVP_EXTRA_ARGS:-}
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+    volumes:
+      - ./scripts/run-avplumber-script.sh:/opt/avp-compose-runner/run-avplumber-script.sh:ro
+      - ${AVP_SCRIPT_FILE:-./empty/script.avplumber}:/run/avp/script.avplumber:ro
+      - ${AVP_MEDIA_DIR:-./empty/media}:/media:ro
+      - ${AVP_MODELS_DIR:-./empty/models}:/models:ro
+      - ${AVP_ARTIFACT_DIR:-./artifacts}:/artifacts
+      - runner-logs:/var/log/avplumber
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+
+  neural-demo:
+    profiles:
+      - neural
+    image: ${NEURAL_DEMO_IMAGE:-avplumber-neural-demo:latest}
+    network_mode: host
+    restart: "no"
+    deploy: *gpu-deploy
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    depends_on:
+      janus:
+        condition: service_started
+      web-ui:
+        condition: service_healthy
+    environment:
+      <<: *gpu-env
+      AVP_EXAMPLE: ${NEURAL_DEMO_EXAMPLE:-metadata}
+      AVP_MODE: ${NEURAL_DEMO_MODE:-live}
+      AVP_INPUT: /run/avp/input/input
+      AVP_OUTPUT: ${NEURAL_DEMO_OUTPUT:-janus}
+      AVP_ARTIFACT_DIR: /run/avp/output
+      AVP_METADATA_DUMPS: ${NEURAL_DEMO_METADATA_DUMPS:-0}
+      AVP_JANUS_HOST: ${NEURAL_DEMO_JANUS_HOST:-127.0.0.1}
+      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      AVP_JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
+      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
+      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-22422}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_INSTANCE_NAME: ${NEURAL_DEMO_INSTANCE_NAME:-neural-demo}
+      AVP_LOGFILE: ${NEURAL_DEMO_LOGFILE:-/var/log/avplumber/neural-demo.log}
+    volumes:
+      - ${NEURAL_DEMO_INPUT:-/dev/null}:/run/avp/input/input:ro
+      - ${NEURAL_DEMO_ARTIFACT_DIR:-./artifacts/neural-demo}:/run/avp/output
+      - runner-logs:/var/log/avplumber
+
+  auto-mixer:
+    profiles:
+      - auto-mixer
+    build:
+      context: ..
+      dockerfile: pyplumber/auto_mixer/docker/auto-mixer/Dockerfile
+      additional_contexts:
+        tensorrt: ${TENSORRT_CONTEXT:-./empty/tensorrt}
+      args:
+        TENSORRT_ARCHIVE: ${TENSORRT_ARCHIVE:-tensorrt-minimal-with-tools.tgz}
+    image: ${AUTO_MIXER_IMAGE:-avplumber-auto-mixer}:${AUTO_MIXER_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: "no"
+    deploy: *gpu-deploy
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    depends_on:
+      janus:
+        condition: service_started
+      web-ui:
+        condition: service_healthy
+      wayland:
+        condition: service_healthy
+      dma-browser:
+        condition: service_healthy
+    entrypoint: ["/opt/avp-compose-runner/run-auto-mixer.sh"]
+    environment:
+      <<: *gpu-env
+      AVP_MODEL_DIR: /models
+      AVP_FACE_ENGINE: /models-cache/face.fp16.plan
+      AVP_TENSORRT_TIMING_CACHE: /models-cache/tensorrt.timing.cache
+      AVP_WIPE_DIR: /media-wipes
+      AVP_HTML_OVERLAY_DRM_DEVICE: ${HTML_OVERLAY_DRM_DEVICE:-/dev/dri/renderD128}
+      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-22422}
+      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
+      AVP_INSTANCE_NAME: ${AUTO_MIXER_INSTANCE_NAME:-auto-mixer}
+      AVP_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
+      AVP_JANUS_HOST: ${AUTO_MIXER_JANUS_HOST:-127.0.0.1}
+      AVP_JANUS_AUDIO_PORT: ${JANUS_AUDIO_PORT:-5002}
+      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
+      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      AUTO_MIXER_INPUTS: ${AUTO_MIXER_INPUTS:-/media-inputs/*}
+      AUTO_MIXER_OUTPUT: ${AUTO_MIXER_OUTPUT:-janus}
+      AUTO_MIXER_ARGS: ${AUTO_MIXER_ARGS:-}
+      AUTO_MIXER_TALKSHOW_PROFILE: ${AUTO_MIXER_TALKSHOW_PROFILE:-1}
+      AUTO_MIXER_INPUT_START_TS: ${AUTO_MIXER_INPUT_START_TS:-}
+      AUTO_MIXER_HTML_OVERLAY_URL: ${HTML_OVERLAY_URL:-}
+    volumes:
+      - ./scripts/run-auto-mixer.sh:/opt/avp-compose-runner/run-auto-mixer.sh:ro
+      - ${FACE_ONNX:-./empty/face.onnx}:/models/face.onnx:ro
+      - ${FACE_ENGINE_CACHE_DIR:-./artifacts/model-cache}:/models-cache
+      - ${MEDIA_INPUT_DIR:-./empty/media}:/media-inputs:ro
+      - ${MEDIA_WIPE_DIR:-./empty/media}:/media-wipes:ro
+      - runner-logs:/var/log/avplumber
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+
+  molmo-smoke:
+    profiles:
+      - molmo
+    build:
+      context: ..
+      dockerfile: docker/molmo/Dockerfile
+      args:
+        AVP_BASE_IMAGE: ${MOLMO_AVP_BASE_IMAGE:-fanpulse-recorder:latest}
+        TORCH_INDEX_URL: ${MOLMO_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}
+        VLLM_PACKAGE: ${MOLMO_VLLM_PACKAGE:-vllm==0.22.1}
+        CUPY_PACKAGE: ${MOLMO_CUPY_PACKAGE:-cupy-cuda13x==14.1.1}
+        PIP_EXTRA_PACKAGES: ${MOLMO_PIP_EXTRA_PACKAGES:-}
+    image: ${MOLMO_IMAGE:-avplumber-molmo-test}:${MOLMO_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: "no"
+    deploy: *gpu-deploy
+    ipc: host
+    shm_size: 4gb
+    devices:
+      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
+    environment:
+      <<: *gpu-env
+      HF_HOME: /models/huggingface
+      VLLM_ENABLE_V1_MULTIPROCESSING: ${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
+      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/lib64:/usr/local/cuda-13.0/targets/x86_64-linux/lib}
+      AVP_INPUT: /media/input
+      AVP_OUTPUT: /artifacts/molmo-smoke.ts
+      AVP_OUTPUT_FORMAT: ${AVP_OUTPUT_FORMAT:-mpegts}
+      AVP_MOLMO_RUN_GRAPH: ${AVP_MOLMO_RUN_GRAPH:-0}
+      AVP_MOLMO_GRAPH_TIMEOUT: ${AVP_MOLMO_GRAPH_TIMEOUT:-45}
+      AVP_MOLMO_MODEL_ID: ${AVP_MOLMO_MODEL_ID:-allenai/Molmo2-VideoPoint-4B}
+      AVP_MOLMO_PROMPT: ${AVP_MOLMO_PROMPT:-Find people, vehicles, balls, and important objects. Return JSON only with objects containing label, confidence, bbox, and point. Coordinates must be integers from 0 to 1000 relative to the image.}
+      AVP_MOLMO_SIDECAR_URL: ${AVP_MOLMO_SIDECAR_URL:-}
+      AVP_MOLMO_SIDECAR_URLS: ${AVP_MOLMO_SIDECAR_URLS:-}
+      AVP_MOLMO_MAX_INFLIGHT: ${AVP_MOLMO_MAX_INFLIGHT:-}
+      AVP_MOLMO_WINDOW_QUEUE_SIZE: ${AVP_MOLMO_WINDOW_QUEUE_SIZE:-1}
+      AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS: ${AVP_MOLMO_WORKER_JOIN_TIMEOUT_MS:-}
+      AVP_MOLMO_RESULT_POLICY: ${AVP_MOLMO_RESULT_POLICY:-hold_latest}
+      AVP_MOLMO_BACKEND: ${AVP_MOLMO_BACKEND:-mock}
+      AVP_MOLMO_STRICT: ${AVP_MOLMO_STRICT:-true}
+      AVP_MOLMO_SAMPLE_FPS: ${AVP_MOLMO_SAMPLE_FPS:-8}
+      AVP_MOLMO_WINDOW_FRAMES: ${AVP_MOLMO_WINDOW_FRAMES:-4}
+      AVP_MOLMO_WINDOW_STRIDE: ${AVP_MOLMO_WINDOW_STRIDE:-4}
+      AVP_MOLMO_MODEL_DTYPE: ${AVP_MOLMO_MODEL_DTYPE:-float16}
+      AVP_MOLMO_MAX_MODEL_LEN: ${AVP_MOLMO_MAX_MODEL_LEN:-4096}
+      AVP_MOLMO_MAX_NUM_BATCHED_TOKENS: ${AVP_MOLMO_MAX_NUM_BATCHED_TOKENS:-8192}
+      AVP_MOLMO_MAX_NEW_TOKENS: ${AVP_MOLMO_MAX_NEW_TOKENS:-256}
+      AVP_MOLMO_GPU_MEMORY_UTILIZATION: ${AVP_MOLMO_GPU_MEMORY_UTILIZATION:-0.85}
+      AVP_MOLMO_MM_PROCESSOR_CACHE_GB: ${AVP_MOLMO_MM_PROCESSOR_CACHE_GB:-0}
+      AVP_MOLMO_CPU_OFFLOAD_GB: ${AVP_MOLMO_CPU_OFFLOAD_GB:-0}
+      AVP_MOLMO_TENSOR_PARALLEL_SIZE: ${AVP_MOLMO_TENSOR_PARALLEL_SIZE:-1}
+      AVP_MOLMO_ENFORCE_EAGER: ${AVP_MOLMO_ENFORCE_EAGER:-true}
+      AVP_MOLMO_SEED: ${AVP_MOLMO_SEED:-0}
+    volumes:
+      - ${MOLMO_SMOKE_INPUT:-./empty/media/.gitkeep}:/media/input:ro
+      - ${MOLMO_ARTIFACT_DIR:-./artifacts/molmo}:/artifacts
+      - ${MOLMO_HF_CACHE:-./artifacts/huggingface}:/models/huggingface
+
+volumes:
+  dma-browser-sockets:
+  runner-logs:
+  wayland-runtime:

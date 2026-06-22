@@ -179,7 +179,14 @@ public:
                 output_dims.push_back(ot.dims);
             }
 
-            DecodeParams dp{(int)mi, conf_thresh_, model.output_box_format, model.class_index_remap};
+            DecodeParams dp{
+                (int)mi,
+                conf_thresh_,
+                model.output_box_format,
+                model.class_index_remap,
+                model.nms_iou_thresh,
+                model.nms_class_agnostic
+            };
 
             if (model.task_type == TaskType::Detection && model.det_decoder) {
                 DetectionResult dr = model.det_decoder->decode(host_outputs, output_dims, dp);
@@ -446,6 +453,7 @@ public:
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];
         if (params.count("max_det")) r->max_det_ = params["max_det"];
         if (params.count("infer_every_n")) r->infer_every_n_ = params["infer_every_n"];
+        if (params.count("use_cuda_graph")) r->use_cuda_graph_ = params["use_cuda_graph"];
         if (params.count("metadata_key_detection")) r->metadata_key_detection_ = params["metadata_key_detection"].get<std::string>();
         if (params.count("metadata_key_segmentation")) r->metadata_key_segmentation_ = params["metadata_key_segmentation"].get<std::string>();
         if (params.count("metadata_key_pose")) r->metadata_key_pose_ = params["metadata_key_pose"].get<std::string>();
@@ -524,6 +532,15 @@ public:
                     }
                     model.class_index_remap.push_back(cls_item.get<int>());
                 }
+            }
+            if (mp.count("nms_iou_thresh")) {
+                model.nms_iou_thresh = mp["nms_iou_thresh"].get<float>();
+                if (model.nms_iou_thresh < 0.0f || model.nms_iou_thresh > 1.0f) {
+                    throw Error("cuda_infer_yolo: nms_iou_thresh must be in [0,1]");
+                }
+            }
+            if (mp.count("nms_class_agnostic")) {
+                model.nms_class_agnostic = mp["nms_class_agnostic"].get<bool>();
             }
 
             int num_classes = -1;
