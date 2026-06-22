@@ -126,6 +126,47 @@ tracking and inference nodes.
 Set `AVP_MODELS_DIR` to the directory containing the expected TensorRT `.plan`
 files before running it.
 
+### `mediapipe-face-landmarker.py`
+
+End-to-end GPU face mesh pipeline using the `mediapipe_face_mesh_gpu` C++ node and a Python
+`FaceMeshOverlayNode` that draws landmark dots zero-copy on the NV12 luma plane via CuPy.
+
+Requires avplumber built with `HAVE_MEDIAPIPE=1 HAVE_GL=1 HAVE_CUDA=1` (use `Dockerfile.mediapipe`).
+At runtime `libavp_mediapipe_face_mesh.so` and `libnvrtc.so` must be on `LD_LIBRARY_PATH`.
+
+Pipeline:
+```
+InputRec → Demux → DecVideo(cuvid) → Realtime → FilterVideo(scale_cuda)
+  → Split → CudaToEglImage → MediaPipeFaceMeshGpu(face_md)
+           ↘ FaceMeshOverlayNode(reads face_md, draws dots) → AssumeVideoFormat
+  → EncVideo(h264_nvenc) → Mux → Output
+```
+
+Environment variables (in addition to the common ones):
+
+| Variable | Default | Description |
+|---|---|---|
+| `AVP_FACE_DOT_RADIUS` | `2` | Landmark dot radius in pixels |
+| `AVP_FACE_DOT_LUMA` | `235` | Luma brightness of dots (0–255) |
+| `AVP_FACE_MAX_FACES` | `4` | Maximum faces to track |
+| `AVP_FACE_WITH_ATTENTION` | `true` | Use attention landmark model (478 points vs 468) |
+| `AVP_FACE_INFER_EVERY_N` | `1` | Run inference every N frames |
+| `AVP_FACE_RESOURCE_ROOT` | auto | MediaPipe model resource directory |
+| `AVP_FACE_METADATA_KEY` | `face_landmarks_v1` | Metadata key for landmark data |
+| `AVP_FACE_DEBUG_LOG_EVERY_N` | `1` | C++ node log frequency (0 = off) |
+
+Run via Docker (recommended):
+```bash
+docker run --rm --gpus all --network host \
+  -v /path/to/test-content:/content:ro \
+  -v /path/to/nvrtc/lib:/opt/nvrtc:ro \
+  -e AVP_INPUT=/content/video.ts \
+  -e AVP_OUTPUT=/output/out.ts \
+  -e AVP_OUTPUT_FORMAT=mpegts \
+  -e LD_LIBRARY_PATH=/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/targets/x86_64-linux/lib:/opt/avplumber/deps/mediapipe-face-mesh/lib:/opt/nvrtc \
+  avp-mediapipe:latest
+```
+
 ## Writing Your Own `PythonNode`
 
 Custom nodes subclass `PythonNode` and implement `process()`. A typical node

@@ -85,6 +85,8 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
 -   HAVE_MEDIAPIPE=1: enable MediaPipe GPU face mesh sidecar node (`mediapipe_face_mesh_gpu`). Requires `HAVE_GL=1`. By default this runs `scripts/build_mediapipe_face_mesh.sh` to clone a pinned MediaPipe source tree and build only the AVP face-mesh bridge.
     -   The MediaPipe bridge build expects Bazel/Bazelisk, `git`, `pkg-config`, and OpenCV development files (`opencv-devel` on Fedora, providing `opencv4.pc`).
+    -   **Docker build**: `Dockerfile.mediapipe` builds a self-contained image with the MediaPipe bridge, models, and pyplumber. Build it with `docker build -f Dockerfile.mediapipe -t avp-mediapipe:latest .` from the repo root on an x86 GPU host.
+    -   **Runtime**: `libavp_mediapipe_face_mesh.so` must be on `LD_LIBRARY_PATH`. The CuPy overlay node also requires `libnvrtc.so` at runtime (NVIDIA Runtime Compilation); on hosts that have CUDA toolkit installed it is typically under `/usr/local/cuda/lib64/`. When running via Docker with `--gpus all`, mount or install `libnvrtc.so` inside the container and add its path to `LD_LIBRARY_PATH`.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
@@ -1244,7 +1246,30 @@ Parameters:
 -   `speaking_stop_open_ratio` (float, default `0.030`) - mouth-open ratio below which visual-speaking can stop
 -   `speaking_start_confirm_frames` (int, default `2`) - consecutive frames required to emit `started_speaking`
 -   `speaking_stop_confirm_frames` (int, default `5`) - consecutive frames required to emit `stopped_speaking`
--   `debug_log_every_n` (int, default `0`) - log status periodically
+-   `debug_log_every_n` (int, default `0`) - if non-zero, log inference status every N frames (face count, mouth open ratio, head pose, speaking state)
+
+The metadata emitted per frame under `metadata_key` has the following structure:
+```json
+{
+  "version": 1,
+  "source": "mediapipe_face_mesh_gpu",
+  "status": "ok",
+  "pts": 8036,
+  "timebase": {"num": 1, "den": 1000},
+  "width": 960, "height": 540,
+  "faces": [
+    {
+      "id": 0,
+      "landmark_count": 478,
+      "landmarks": [[x, y, z], ...],
+      "head_pose": {"available": true, "yaw_deg": 12.5, "pitch_deg": -15.3, "roll_deg": -13.4},
+      "mouth": {"available": true, "open_ratio": 0.003, "motion_score": 0.001, "speaking": false}
+    }
+  ],
+  "events": []
+}
+```
+`status` is `"ok"` when faces were detected, `"no_face"` when the graph ran but found nothing, `"skipped"` for frames dropped by `infer_every_n`, or `"error:<msg>"` on inference failure.
 
 ### `drm_prime_to_cuda`
 

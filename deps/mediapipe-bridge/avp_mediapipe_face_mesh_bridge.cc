@@ -4,6 +4,7 @@
 #include "avp_mediapipe_face_mesh_bridge.h"
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -69,6 +71,43 @@ static std::string join_path(const std::string& root, const std::string& path) {
 	return root + "/" + path;
 }
 
+// Headless EGL initialization: pick the first EGL device (NVIDIA GPU) so that
+// eglGetDisplay(EGL_DEFAULT_DISPLAY) inside MediaPipe returns a usable display.
+// On bare-metal headless servers EGL_DEFAULT_DISPLAY returns EGL_NO_DISPLAY or
+// a display with zero configs.  eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT)
+// correctly selects the GPU device.
+static void ensure_headless_egl() {
+	// Only try if the extension is available
+	auto eglQueryDevicesEXT_fn = reinterpret_cast<
+		EGLBoolean (*)(EGLint, EGLDeviceEXT*, EGLint*)>(
+			eglGetProcAddress("eglQueryDevicesEXT"));
+	auto eglGetPlatformDisplayEXT_fn = reinterpret_cast<
+		EGLDisplay (*)(EGLenum, void*, const EGLint*)>(
+			eglGetProcAddress("eglGetPlatformDisplayEXT"));
+	if (!eglQueryDevicesEXT_fn || !eglGetPlatformDisplayEXT_fn) return;
+
+	EGLint num_devices = 0;
+	eglQueryDevicesEXT_fn(0, nullptr, &num_devices);
+	if (num_devices <= 0) return;
+
+	std::vector<EGLDeviceEXT> devices(num_devices);
+	eglQueryDevicesEXT_fn(num_devices, devices.data(), &num_devices);
+
+	// Try each device; use the first that initialises successfully
+	for (int i = 0; i < num_devices; ++i) {
+		EGLDisplay dpy = eglGetPlatformDisplayEXT_fn(
+			EGL_PLATFORM_DEVICE_EXT, devices[i], nullptr);
+		if (dpy == EGL_NO_DISPLAY) continue;
+		EGLint major = 0, minor = 0;
+		if (eglInitialize(dpy, &major, &minor) == EGL_TRUE) {
+			// Success — this display will now be returned by eglGetDisplay(EGL_DEFAULT_DISPLAY)
+			// because most GLVND implementations remember the last initialised display.
+			// We deliberately do NOT call eglTerminate so the context stays alive.
+			return;
+		}
+	}
+}
+
 static void configure_resource_root(const char* root_ptr) {
 	if (!root_ptr || root_ptr[0] == '\0') return;
 	const std::string root(root_ptr);
@@ -93,6 +132,7 @@ public:
 		  use_prev_landmarks_(config.use_prev_landmarks != 0) {}
 
 	absl::Status start(const AvpMpFaceMeshConfig& config) {
+		ensure_headless_egl();
 		configure_resource_root(config.resource_root);
 
 		gl_egl_image_target_texture_ =
@@ -234,8 +274,9 @@ private:
 					return absl::OkStatus();
 				}).IgnoreError();
 			};
+			// ImageToTensorCalculator supports kBGRA32; kRGBA32 is reported as unsupported.
 			auto wrapped = mediapipe::GlTextureBuffer::Wrap(
-				GL_TEXTURE_2D, tex, width, height, mediapipe::GpuBufferFormat::kRGBA32, gl_context_, std::move(cleanup));
+				GL_TEXTURE_2D, tex, width, height, mediapipe::GpuBufferFormat::kBGRA32, gl_context_, std::move(cleanup));
 			if (!wrapped) {
 				glBindTexture(GL_TEXTURE_2D, 0);
 				glDeleteTextures(1, &tex);
