@@ -1,0 +1,52 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "develop"]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [ "develop" ]
+  schedule:
+    - cron: '27 22 * * 4'
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: shubham-local-ubuntu
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["c-cpp", "javascript-typescript", "python"]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+        
+    - name: Install cmake
+      if: ${{ matrix.language == 'c-cpp' }}
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y cmake
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: ${{ matrix.language }}
+        queries: security-extended
+
+    - name: Build with CMake
+      if: ${{ matrix.language == 'c-cpp' }}
+      run: make -j`nproc`
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:${{matrix.language}}"
