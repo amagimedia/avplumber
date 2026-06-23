@@ -29,10 +29,18 @@ constexpr int kRecBatch = 24;
 constexpr int kRecH = 32;
 constexpr int kRecW = 128;
 
+// doctr's VOCABS["french"], verbatim and EXACTLY 126 codepoints. This is the vocab
+// the recognizer ONNX (PARSeq) was trained/exported with: its inference head emits
+// 127 classes = these 126 chars (indices 0..125) plus <eos> at index 126. The vocab
+// must match byte-for-byte or the tail indices (currency/accents) decode to the wrong
+// glyph and the <eos> stop index drifts. NOTE: doctr's french has NO space between the
+// "~" punctuation block and the "°" currency block — an extra space here shifts every
+// later index by one and makes <eos> unreachable (the whole string decodes as garbage
+// after the real word). Keep this in sync with doctr.datasets.VOCABS["french"].
 const std::string kFrenchVocab =
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     R"(!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~)"
-    " " "°£€¥¢฿"
+    "°£€¥¢฿"
     "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ";
 
 std::vector<std::string> splitUtf8Codepoints(const std::string& text) {
@@ -314,7 +322,22 @@ std::pair<std::string, float> decodeParseq(const float* logits, int steps, int c
     std::string text;
     float conf_sum = 0.0f;
     int conf_n = 0;
+    // PARSeq inference head emits |vocab| + 1 classes: vocab tokens at indices
+    // [0, eos) and the <eos> stop token at index eos == |vocab|. Decoding stops at
+    // the first <eos>; anything after it is padding the model is free to fill with
+    // noise (this is what produced the repeated-glyph garbage tail when eos was
+    // mis-set to an unreachable index). One-time guard: if the runtime class count
+    // disagrees with the vocab, the vocab is out of sync with the engine.
     const int eos = (int)kFrenchTokens.size();
+    if (classes != eos + 1) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            logstream << "DoctrOcr: recognizer emits " << classes << " classes but vocab "
+                      << "implies " << (eos + 1) << " (|vocab|=" << eos << " + <eos>); "
+                      << "kFrenchVocab is out of sync with the model — decode will be wrong";
+        }
+    }
     for (int t = 0; t < steps; ++t) {
         const float* row = logits + t * classes;
         int best = 0;
