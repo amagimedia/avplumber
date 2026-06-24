@@ -279,7 +279,7 @@ public:
         // Copy from the edge queue, but keep the packet queued until the
         // decoder accepts it. FFmpeg send_packet(EAGAIN) means retry same input.
         av::Packet pkt;
-        if (!this->source_->tryPeek(pkt, 0)) {
+        if (!this->source_->tryPeek(pkt)) {
             //flush();
             return;
         }
