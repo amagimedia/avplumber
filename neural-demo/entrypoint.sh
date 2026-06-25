@@ -223,4 +223,43 @@ elif [[ "${janus_output}" == "1" ]]; then
     echo "rtcp_feedback=disabled"
 fi
 
+# --- CUDA JIT cache: persist + pre-warm ---------------------------------------
+# ffmpeg's CUDA filters embed PTX and JIT to SASS at runtime. scale_cuda's kernel
+# is large (~5.6s ptxas JIT on first use, *independent of -gencode arch* -- verified
+# empirically), and a container's default ~/.nv/ComputeCache is ephemeral, so it
+# re-JITs on every start. If that JIT happened once the live input is flowing, the
+# input queue would back up for ~5.6s and the output would stall.
+#
+# Fix: (1) point the JIT cache at /cuda-cache, a persistent (volume-mounted) dir;
+# (2) warm every CUDA filter the templates use HERE, on a synthetic lavfi source,
+# *synchronously before we exec avplumber* -- i.e. before any real input is opened.
+# The cache is keyed by the PTX module hash (not resolution/params), so a 256x256
+# warm-up makes avplumber's real scale_cuda init a ~0.48s cache hit. On later starts
+# the volume is already populated, so even this warm-up returns in ~0.5s.
+export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-/cuda-cache}"
+export CUDA_CACHE_MAXSIZE="${CUDA_CACHE_MAXSIZE:-1073741824}"   # 1 GiB
+mkdir -p "${CUDA_CACHE_PATH}" 2>/dev/null || true
+if ! is_false "${AVP_CUDA_PREWARM:-1}"; then
+    prewarm_arch="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')"
+    prewarm_pre="$(find "${CUDA_CACHE_PATH}" -type f 2>/dev/null | wc -l)"
+    echo "cuda_prewarm=start arch=${prewarm_arch:-unknown} cache=${CUDA_CACHE_PATH} cache_files_before=${prewarm_pre}"
+    prewarm_t0="$(date +%s.%N)"
+    # (1) scale_cuda + crop_cuda + pad_cuda -- single input; scale_cuda dominates the JIT.
+    timeout 120 /usr/local/bin/ffmpeg -hide_banner -loglevel error \
+        -init_hw_device cuda=cu:0 -filter_hw_device cu \
+        -f lavfi -i testsrc2=s=256x256:r=1 \
+        -vf 'format=yuv420p,hwupload_cuda,scale_cuda=w=240:h=240:format=nv12,crop_cuda=w=200:h=200:x=8:y=8,pad_cuda=w=256:h=256:x=8:y=8' \
+        -frames:v 1 -f null - >/dev/null 2>&1 \
+        || echo "cuda_prewarm=warn (scale/crop/pad warm returned nonzero; continuing)"
+    # (2) overlay_many_cuda -- two inputs; main=yuv420p, overlay=yuva420p.
+    timeout 120 /usr/local/bin/ffmpeg -hide_banner -loglevel error \
+        -init_hw_device cuda=cu:0 -filter_hw_device cu \
+        -f lavfi -i testsrc2=s=256x256:r=1 -f lavfi -i testsrc2=s=256x256:r=1 \
+        -filter_complex '[0:v]format=yuv420p,hwupload_cuda[a];[1:v]format=yuva420p,hwupload_cuda[b];[a][b]overlay_many_cuda=inputs=2[o]' \
+        -map '[o]' -frames:v 1 -f null - >/dev/null 2>&1 \
+        || echo "cuda_prewarm=warn (overlay_many warm returned nonzero; continuing)"
+    prewarm_post="$(find "${CUDA_CACHE_PATH}" -type f 2>/dev/null | wc -l)"
+    echo "cuda_prewarm=done seconds=$(awk "BEGIN{printf \"%.1f\", $(date +%s.%N)-${prewarm_t0}}") cache_files_after=${prewarm_post}"
+fi
+
 exec "${avplumber_args[@]}" -s "${rendered}"
