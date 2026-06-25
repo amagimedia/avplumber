@@ -180,7 +180,6 @@ RUN cd /tmp/ffmpeg \
         --enable-parser=opus \
         --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
         --nvcc=/usr/local/cuda-13.0/bin/nvcc \
-        --nvccflags="-gencode arch=compute_120,code=sm_120 -gencode arch=compute_120,code=compute_120 -O2" \
     || { cat /tmp/ffmpeg/ffbuild/config.log; exit 1; } \
     && cd /tmp/ffmpeg \
     && make -j"$(nproc)" \
