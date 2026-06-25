@@ -30,8 +30,8 @@ require_env AVP_EXAMPLE
 require_env AVP_MODE
 
 case "${AVP_EXAMPLE}" in
-    tracker|metadata|tracker-cropped|tracker_compositor) ;;
-    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, metadata, tracker-cropped, or tracker_compositor" ;;
+    tracker|tracker-autoflip|metadata|tracker-cropped|tracker_compositor) ;;
+    *) die "unsupported AVP_EXAMPLE=${AVP_EXAMPLE}; expected tracker, tracker-autoflip, metadata, tracker-cropped, or tracker_compositor" ;;
 esac
 
 case "${AVP_MODE}" in

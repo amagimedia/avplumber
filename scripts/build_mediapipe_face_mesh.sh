@@ -29,9 +29,11 @@ fi
 # Copy bridge sources into the mediapipe tree as package avp_bridge/
 BRIDGE_PKG="$MEDIAPIPE_SRC_DIR/avp_bridge"
 mkdir -p "$BRIDGE_PKG"
-cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_mesh_bridge.cc" "$BRIDGE_PKG/"
-cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_mesh_bridge.h"  "$BRIDGE_PKG/"
-cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/BUILD.bazel"                        "$BRIDGE_PKG/BUILD"
+cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_mesh_bridge.cc"      "$BRIDGE_PKG/"
+cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_mesh_bridge.h"       "$BRIDGE_PKG/"
+cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_detection_bridge.cc" "$BRIDGE_PKG/"
+cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/avp_mediapipe_face_detection_bridge.h"  "$BRIDGE_PKG/"
+cp "$MEDIAPIPE_BRIDGE_SOURCE_DIR/BUILD.bazel"                            "$BRIDGE_PKG/BUILD"
 
 # Write .bazelrc additions — pin Python to 3.12 (v0.10.35 has no 3.13 lock file)
 # and configure headless GPU (EGL, no X11)
@@ -150,8 +152,9 @@ BAZEL_BUILD_FLAGS=(
 )
 [ -n "$BAZEL_COPTS" ] && BAZEL_BUILD_FLAGS+=($BAZEL_COPTS)
 
-# Build the bridge .so
-bazel build "${BAZEL_BUILD_FLAGS[@]}" //avp_bridge:libavp_mediapipe_face_mesh.so
+# Build combined GPU bridge (face mesh + face detection in one .so)
+bazel build "${BAZEL_BUILD_FLAGS[@]}" \
+    //avp_bridge:libavp_mediapipe_gpu.so
 
 # Also build the face_landmark + face_detection filegroups explicitly so their
 # tflite files materialise in bazel-bin at mediapipe/modules/... paths.
@@ -172,7 +175,7 @@ bazel build "${BAZEL_BUILD_FLAGS[@]}" \
 # Install — query bazel-bin for the same compilation_mode used above (opt)
 BAZEL_BIN=$(bazel info --compilation_mode=opt bazel-bin)
 mkdir -p "$MEDIAPIPE_INSTALL_DIR/lib"
-cp -v "$BAZEL_BIN/avp_bridge/libavp_mediapipe_face_mesh.so" \
+cp -v "$BAZEL_BIN/avp_bridge/libavp_mediapipe_gpu.so" \
       "$MEDIAPIPE_INSTALL_DIR/lib/"
 
 # Install model files.
@@ -250,6 +253,6 @@ if [ "$COUNT" -eq 0 ]; then
 fi
 
 echo "=== MediaPipe bridge build complete ==="
-echo "  Library: $MEDIAPIPE_INSTALL_DIR/lib/libavp_mediapipe_face_mesh.so"
+echo "  Library: $MEDIAPIPE_INSTALL_DIR/lib/libavp_mediapipe_gpu.so"
 
 touch "$MEDIAPIPE_INSTALL_DIR/.avp-face-mesh-built"

@@ -215,6 +215,14 @@ class MediaPipeFaceMeshGpu(InternalNode):
     TYPE = "mediapipe_face_mesh_gpu"
 
 
+class MediaPipeFaceDetectionGpu(InternalNode):
+    TYPE = "mediapipe_face_detection_gpu"
+
+
+class MediaPipeAutoflipCropMetadata(InternalNode):
+    TYPE = "mediapipe_autoflip_crop_metadata"
+
+
 class TrackNetBall(InternalNode):
     TYPE = "tracknet_ball"
 

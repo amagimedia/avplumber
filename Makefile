@@ -17,12 +17,14 @@ OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 HAVE_NVCC = 0
 HAVE_TENSORRT = 0
 HAVE_MEDIAPIPE ?= 0
+HAVE_MEDIAPIPE_AUTOFLIP ?= 0
 MEDIAPIPE_AUTO_BUILD ?= 1
 MEDIAPIPE_REPO_URL ?= https://github.com/google-ai-edge/mediapipe.git
 MEDIAPIPE_REV ?= v0.10.35
 MEDIAPIPE_BRIDGE_SOURCE_DIR ?= deps/mediapipe-bridge
 MEDIAPIPE_SRC_DIR ?= deps/mediapipe-src
 MEDIAPIPE_INSTALL_DIR ?= deps/mediapipe-face-mesh
+MEDIAPIPE_AUTOFLIP_INSTALL_DIR ?= deps/mediapipe-autoflip
 # Build neural_net nodes except sport_specific (draw, yolo/rtdetr, preprocess, utils)
 NEURAL_NET_COMMON ?= 0
 # Build neural_net sport-specific nodes
@@ -153,18 +155,34 @@ ifeq ($(HAVE_MEDIAPIPE),1)
 ifneq ($(HAVE_GL),1)
 $(error HAVE_MEDIAPIPE=1 requires HAVE_GL=1)
 endif
-MEDIAPIPE_BRIDGE_LIB := $(MEDIAPIPE_INSTALL_DIR)/lib/libavp_mediapipe_face_mesh.so
+MEDIAPIPE_GPU_LIB := $(MEDIAPIPE_INSTALL_DIR)/lib/libavp_mediapipe_gpu.so
 MEDIAPIPE_RESOURCE_ROOT ?= $(abspath $(MEDIAPIPE_INSTALL_DIR)/share)
 NODES_SRC += $(SRCDIR)/nodes/mediapipe/mediapipe_face_mesh_gpu.cpp
+NODES_SRC += $(SRCDIR)/nodes/mediapipe/mediapipe_face_detection_gpu.cpp
 override CXXFLAGS += -DHAVE_MEDIAPIPE=1 -I$(MEDIAPIPE_BRIDGE_SOURCE_DIR) -DAVP_MEDIAPIPE_DEFAULT_RESOURCE_ROOT=\"$(MEDIAPIPE_RESOURCE_ROOT)\" $(MEDIAPIPE_CXXFLAGS)
 override LIBS_FLAGS += -Wl,-rpath,$(abspath $(MEDIAPIPE_INSTALL_DIR)/lib) $(MEDIAPIPE_LIBS)
 ifeq ($(MEDIAPIPE_AUTO_BUILD),1)
-DEPS_LIBS += $(MEDIAPIPE_BRIDGE_LIB)
-$(MEDIAPIPE_BRIDGE_LIB): $(MEDIAPIPE_INSTALL_DIR)/.avp-face-mesh-built
+DEPS_LIBS += $(MEDIAPIPE_GPU_LIB)
+$(MEDIAPIPE_GPU_LIB): $(MEDIAPIPE_INSTALL_DIR)/.avp-face-mesh-built
 $(MEDIAPIPE_INSTALL_DIR)/.avp-face-mesh-built: scripts/build_mediapipe_face_mesh.sh $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/BUILD.bazel $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/avp_mediapipe_face_mesh_bridge.cc $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/avp_mediapipe_face_mesh_bridge.h
 	MEDIAPIPE_REPO_URL="$(MEDIAPIPE_REPO_URL)" MEDIAPIPE_REV="$(MEDIAPIPE_REV)" MEDIAPIPE_BRIDGE_SOURCE_DIR="$(abspath $(MEDIAPIPE_BRIDGE_SOURCE_DIR))" MEDIAPIPE_SRC_DIR="$(abspath $(MEDIAPIPE_SRC_DIR))" MEDIAPIPE_INSTALL_DIR="$(abspath $(MEDIAPIPE_INSTALL_DIR))" ./scripts/build_mediapipe_face_mesh.sh
 else
-override LIBS_FLAGS += -L$(abspath $(MEDIAPIPE_INSTALL_DIR)/lib) -lavp_mediapipe_face_mesh
+override LIBS_FLAGS += -L$(abspath $(MEDIAPIPE_INSTALL_DIR)/lib) -lavp_mediapipe_gpu
+endif
+endif
+
+ifeq ($(HAVE_MEDIAPIPE_AUTOFLIP),1)
+MEDIAPIPE_AUTOFLIP_BRIDGE_LIB := $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/lib/libavp_mediapipe_autoflip.so
+NODES_SRC += $(SRCDIR)/nodes/mediapipe/mediapipe_autoflip_crop_metadata.cpp
+override CXXFLAGS += -DHAVE_MEDIAPIPE_AUTOFLIP=1 -I$(MEDIAPIPE_BRIDGE_SOURCE_DIR)
+override LIBS_FLAGS += -Wl,-rpath,$(abspath $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/lib) -L$(abspath $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/lib) -lavp_mediapipe_autoflip -lopencv_core -lopencv_imgproc
+ifeq ($(MEDIAPIPE_AUTO_BUILD),1)
+DEPS_LIBS += $(MEDIAPIPE_AUTOFLIP_BRIDGE_LIB)
+$(MEDIAPIPE_AUTOFLIP_BRIDGE_LIB): $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/.avp-autoflip-built
+$(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/.avp-autoflip-built: scripts/build_mediapipe_autoflip.sh $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/BUILD.bazel $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/avp_mediapipe_autoflip_bridge.cc $(MEDIAPIPE_BRIDGE_SOURCE_DIR)/avp_mediapipe_autoflip_bridge.h
+	MEDIAPIPE_REPO_URL="$(MEDIAPIPE_REPO_URL)" MEDIAPIPE_REV="$(MEDIAPIPE_REV)" MEDIAPIPE_BRIDGE_SOURCE_DIR="$(abspath $(MEDIAPIPE_BRIDGE_SOURCE_DIR))" MEDIAPIPE_SRC_DIR="$(abspath $(MEDIAPIPE_SRC_DIR))" MEDIAPIPE_INSTALL_DIR="$(abspath $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR))" ./scripts/build_mediapipe_autoflip.sh
+else
+override LIBS_FLAGS += -L$(abspath $(MEDIAPIPE_AUTOFLIP_INSTALL_DIR)/lib) -lavp_mediapipe_autoflip
 endif
 endif
 

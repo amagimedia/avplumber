@@ -1,11 +1,13 @@
 # Dockerfile.mediapipe
-# Builds avplumber python module with MediaPipe face mesh GPU support (C++ bridge via Bazel).
+# Builds avplumber python module with MediaPipe GPU bridges (face mesh + face detection)
+# and the CPU-only AutoFlip KinematicPathSolver bridge.
 #
 # Strategy:
 #   - Switch to Python 3.12 (v0.10.35 has no hermetic Python 3.13 lock files)
 #   - Install Bazel via Bazelisk
-#   - Build MediaPipe bridge (libavp_mediapipe_face_mesh.so) from source
-#   - Build avplumber python module with HAVE_MEDIAPIPE=1
+#   - Build GPU bridges (face mesh + face detection) via build_mediapipe_face_mesh.sh
+#   - Build CPU autoflip bridge via build_mediapipe_autoflip.sh
+#   - Build avplumber python module with HAVE_MEDIAPIPE=1 HAVE_MEDIAPIPE_AUTOFLIP=1
 #
 # Build (run from repo root on remote):
 #   docker build -f Dockerfile.mediapipe -t avp-mediapipe:latest .
@@ -19,7 +21,6 @@
 FROM avp-builder:courtsegm AS builder
 
 # ── Switch default python3 to 3.12 (needed by Bazel hermetic Python rules) ────
-# Install python3.12 and point python3 / python3-config at it.
 RUN dnf -y install \
         python3.12 python3.12-devel \
         java-21-openjdk-headless \
@@ -33,7 +34,7 @@ RUN dnf -y install \
     && python3 --version \
     && python3-config --extension-suffix
 
-# ── Install Bazelisk (auto-installs correct Bazel version from .bazelversion) ──
+# ── Install Bazelisk ──────────────────────────────────────────────────────────
 RUN curl -fsSL -o /usr/local/bin/bazel \
         https://github.com/bazelbuild/bazelisk/releases/download/v1.23.0/bazelisk-linux-amd64 \
     && chmod +x /usr/local/bin/bazel \
@@ -45,31 +46,40 @@ COPY deps/       deps/
 COPY src/        src/
 COPY scripts/    scripts/
 COPY generate_node_list Makefile ./
-# .git is needed for git describe in build date
 COPY .git/       .git/
 
-RUN chmod +x scripts/build_mediapipe_face_mesh.sh && \
+RUN chmod +x scripts/build_mediapipe_face_mesh.sh \
+             scripts/build_mediapipe_autoflip.sh && \
     git config --global --add safe.directory /build/avplumber
 
-# ── Build MediaPipe bridge ─────────────────────────────────────────────────────
-# This clones mediapipe v0.10.35 (~400 MB) and builds ~4700 Bazel targets.
-# Estimated time: 15-30 min first run; incremental rebuilds reuse the Bazel cache.
-# --mount=type=cache persists Bazel's action + CAS cache across docker builds.
+# ── Build GPU bridges (face mesh + face detection) ────────────────────────────
+# Clones mediapipe v0.10.35 (~400 MB), builds ~4700+ Bazel targets.
+# Bazel cache is shared across docker builds via --mount=type=cache.
 RUN --mount=type=cache,target=/root/.cache/bazel,id=bazel-mediapipe-cache \
     MEDIAPIPE_BRIDGE_SOURCE_DIR=/build/avplumber/deps/mediapipe-bridge \
     MEDIAPIPE_SRC_DIR=/build/avplumber/deps/mediapipe-src \
     MEDIAPIPE_INSTALL_DIR=/build/avplumber/deps/mediapipe-face-mesh \
     ./scripts/build_mediapipe_face_mesh.sh
 
-# ── Build avplumber python module with HAVE_MEDIAPIPE=1 ───────────────────────
+# ── Build CPU autoflip bridge (KinematicPathSolver) ───────────────────────────
+# Reuses the existing mediapipe clone; builds only CPU quality targets.
+RUN --mount=type=cache,target=/root/.cache/bazel,id=bazel-mediapipe-cache \
+    MEDIAPIPE_BRIDGE_SOURCE_DIR=/build/avplumber/deps/mediapipe-bridge \
+    MEDIAPIPE_SRC_DIR=/build/avplumber/deps/mediapipe-src \
+    MEDIAPIPE_INSTALL_DIR=/build/avplumber/deps/mediapipe-autoflip \
+    ./scripts/build_mediapipe_autoflip.sh
+
+# ── Build avplumber python module ─────────────────────────────────────────────
 RUN make -j$(nproc) python_module \
         HAVE_MEDIAPIPE=1 HAVE_GL=1 \
+        HAVE_MEDIAPIPE_AUTOFLIP=1 \
         NEURAL_NET_COMMON=1 NEURAL_NET_SPECIFIC=1 \
         HAVE_CUDA=1 HAVE_NVOF_FRUC=0 HAVE_NVCC=1 \
         NVCC=/usr/local/cuda-13.0/bin/nvcc \
         TENSORRT_ROOT=/opt/tensorrt \
         MEDIAPIPE_SRC_DIR=/build/avplumber/deps/mediapipe-src \
         MEDIAPIPE_INSTALL_DIR=/build/avplumber/deps/mediapipe-face-mesh \
+        MEDIAPIPE_AUTOFLIP_INSTALL_DIR=/build/avplumber/deps/mediapipe-autoflip \
         "CXXFLAGS+=-I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include" \
         "LFLAGS+=-L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib" \
     && ls -lh _avplumber*.so
@@ -86,21 +96,26 @@ RUN dnf -y install mesa-libEGL mesa-libGLES python3.12 python3.12-devel \
 
 COPY --from=builder /build/avplumber/_avplumber.cpython-312-x86_64-linux-gnu.so \
                     /opt/avplumber/
-COPY --from=builder /build/avplumber/deps/mediapipe-face-mesh/lib/libavp_mediapipe_face_mesh.so \
+COPY --from=builder /build/avplumber/deps/mediapipe-face-mesh/lib/libavp_mediapipe_gpu.so \
                     /opt/avplumber/deps/mediapipe-face-mesh/lib/
+COPY --from=builder /build/avplumber/deps/mediapipe-autoflip/lib/libavp_mediapipe_autoflip.so \
+                    /opt/avplumber/deps/mediapipe-autoflip/lib/
 COPY --from=builder /build/avplumber/deps/mediapipe-face-mesh/share/ \
                     /opt/avplumber/deps/mediapipe-face-mesh/share/
 COPY pyplumber/ /opt/avplumber/pyplumber/
 
-# The _avplumber.so has RPATH /build/avplumber/deps/mediapipe-face-mesh/lib/ baked in at build time.
-# Symlink that path to where the .so actually lives in the runtime image.
-RUN mkdir -p /build/avplumber/deps/mediapipe-face-mesh && \
+# The _avplumber.so has RPATH baked in for both bridge lib dirs at build time.
+# Symlink the build-time paths to where the .so files actually live at runtime.
+RUN mkdir -p /build/avplumber/deps/mediapipe-face-mesh \
+             /build/avplumber/deps/mediapipe-autoflip && \
     ln -s /opt/avplumber/deps/mediapipe-face-mesh/lib \
-          /build/avplumber/deps/mediapipe-face-mesh/lib
+          /build/avplumber/deps/mediapipe-face-mesh/lib && \
+    ln -s /opt/avplumber/deps/mediapipe-autoflip/lib \
+          /build/avplumber/deps/mediapipe-autoflip/lib
 
 ENV PYTHONPATH=/opt/avplumber
-ENV LD_LIBRARY_PATH=/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/targets/x86_64-linux/lib:/opt/avplumber/deps/mediapipe-face-mesh/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib:/opt/tensorrt/lib:/usr/local/cuda-13.0/targets/x86_64-linux/lib:/opt/avplumber/deps/mediapipe-face-mesh/lib:/opt/avplumber/deps/mediapipe-autoflip/lib
 ENV AVP_FACE_RESOURCE_ROOT=/opt/avplumber/deps/mediapipe-face-mesh/share
 
 WORKDIR /opt/avplumber
-ENTRYPOINT ["python3.12", "pyplumber/examples/mediapipe-face-landmarker.py"]
+ENTRYPOINT ["python3.12", "pyplumber/examples/mediapipe-autoflip.py"]

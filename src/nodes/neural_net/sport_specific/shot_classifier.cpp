@@ -170,12 +170,15 @@ public:
 
             const float* mask_data = (const float*)(sd->data + 16);
 
+            // Count pixels where ANY court class exceeds threshold (union, not sum).
             size_t court_pixels = 0;
-            for (int mi : court_mask_indices) {
-                if ((uint32_t)mi >= num_masks) continue;
-                const float* mask = mask_data + (size_t)mi * pixels_per_mask;
-                for (size_t p = 0; p < pixels_per_mask; p++) {
-                    if (mask[p] >= seg_mask_threshold_) court_pixels++;
+            for (size_t p = 0; p < pixels_per_mask; p++) {
+                for (int mi : court_mask_indices) {
+                    if ((uint32_t)mi >= num_masks) continue;
+                    if (mask_data[(size_t)mi * pixels_per_mask + p] >= seg_mask_threshold_) {
+                        court_pixels++;
+                        break;
+                    }
                 }
             }
             if (pixels_per_mask > 0) {

@@ -1,10 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
+# Combined GPU bridge: face mesh + face detection in a single .so to avoid
+# duplicate protobuf extension registration (ODR violation) when both are loaded.
 cc_binary(
-    name = "libavp_mediapipe_face_mesh.so",
+    name = "libavp_mediapipe_gpu.so",
     srcs = [
         "avp_mediapipe_face_mesh_bridge.cc",
         "avp_mediapipe_face_mesh_bridge.h",
+        "avp_mediapipe_face_detection_bridge.cc",
+        "avp_mediapipe_face_detection_bridge.h",
     ],
     copts = [
         "-DMESA_EGL_NO_X11_HEADERS",
@@ -18,17 +22,36 @@ cc_binary(
     linkstatic = 1,
     deps = [
         "//mediapipe/framework:calculator_graph",
+        "//mediapipe/framework/formats:detection_cc_proto",
         "//mediapipe/framework/formats:landmark_cc_proto",
+        "//mediapipe/framework/formats:location_data_cc_proto",
         "//mediapipe/framework/deps:file_helpers",
         "//mediapipe/gpu:gl_context",
         "//mediapipe/gpu:gl_texture_buffer",
         "//mediapipe/gpu:gpu_buffer",
         "//mediapipe/gpu:gpu_buffer_format",
         "//mediapipe/gpu:gpu_shared_data_internal",
+        "//mediapipe/modules/face_detection:face_detection_short_range_gpu",
         "//mediapipe/modules/face_landmark:face_landmark_front_gpu",
         "//mediapipe/util:resource_util_custom",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_binary(
+    name = "libavp_mediapipe_autoflip.so",
+    srcs = [
+        "avp_mediapipe_autoflip_bridge.cc",
+        "avp_mediapipe_autoflip_bridge.h",
+    ],
+    linkshared = 1,
+    linkstatic = 1,
+    deps = [
+        "//mediapipe/examples/desktop/autoflip/quality:kinematic_path_solver",
+        "//mediapipe/examples/desktop/autoflip/quality:frame_crop_region_computer",
+        "//mediapipe/examples/desktop/autoflip:autoflip_messages_cc_proto",
+        "@com_google_absl//absl/status",
     ],
 )
