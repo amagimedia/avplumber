@@ -18,7 +18,7 @@ from pathlib import Path
 
 print("== ffmpeg ==")
 filters = subprocess.check_output(["ffmpeg", "-hide_banner", "-filters"], stderr=subprocess.STDOUT, text=True)
-for filter_name in ("scale_cuda", "overlay_many_cuda"):
+for filter_name in ("scale_cuda", "scale_npp", "overlay_many_cuda"):
     if filter_name not in filters:
         raise SystemExit(f"missing FFmpeg CUDA filter: {filter_name}")
     print(f"filter ok: {filter_name}")

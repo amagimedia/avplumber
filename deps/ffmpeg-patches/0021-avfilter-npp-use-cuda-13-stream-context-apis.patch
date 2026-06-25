@@ -1,0 +1,306 @@
+From 30b851f13d97bad9b0b28e7310122d914ac6fc1d Mon Sep 17 00:00:00 2001
+From: avplumber builder <build@avplumber.local>
+Date: Thu, 25 Jun 2026 23:30:36 +0200
+Subject: [PATCH] avfilter/npp: use CUDA 13 stream context APIs
+
+---
+ libavfilter/cuda/npp_compat.h  | 65 ++++++++++++++++++++++++++++++++++
+ libavfilter/vf_scale_npp.c     | 56 ++++++++++++++++++++---------
+ libavfilter/vf_sharpen_npp.c   | 12 +++++--
+ libavfilter/vf_transpose_npp.c | 35 ++++++++++++------
+ 4 files changed, 140 insertions(+), 28 deletions(-)
+ create mode 100644 libavfilter/cuda/npp_compat.h
+
+diff --git a/libavfilter/cuda/npp_compat.h b/libavfilter/cuda/npp_compat.h
+new file mode 100644
+index 0000000..bf5d73e
+--- /dev/null
++++ b/libavfilter/cuda/npp_compat.h
+@@ -0,0 +1,65 @@
++/*
++ * CUDA NPP compatibility helpers.
++ *
++ * This file is part of FFmpeg.
++ */
++
++#ifndef AVFILTER_CUDA_NPP_COMPAT_H
++#define AVFILTER_CUDA_NPP_COMPAT_H
++
++#include <string.h>
++
++#include <nppdefs.h>
++
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++
++#ifndef CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK
++#define CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK ((CUdevice_attribute)1)
++#endif
++#ifndef CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
++#define CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK ((CUdevice_attribute)8)
++#endif
++#ifndef CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR
++#define CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR ((CUdevice_attribute)39)
++#endif
++
++static inline int ff_npp_get_stream_context(void *logctx, AVCUDADeviceContext *device_hwctx,
++                                            NppStreamContext *npp_ctx)
++{
++    CudaFunctions *cu = device_hwctx->internal->cuda_dl;
++    CUdevice dev = device_hwctx->internal->cuda_device;
++    int value;
++    int ret;
++
++    memset(npp_ctx, 0, sizeof(*npp_ctx));
++    npp_ctx->hStream = (cudaStream_t)device_hwctx->stream;
++    npp_ctx->nCudaDeviceId = dev;
++
++#define GET_NPP_DEVICE_ATTR(dst, attr) do {                                      \
++        ret = FF_CUDA_CHECK_DL(logctx, cu,                                       \
++                               cu->cuDeviceGetAttribute(&(dst), (attr), dev));   \
++        if (ret < 0)                                                             \
++            return ret;                                                          \
++    } while (0)
++
++    GET_NPP_DEVICE_ATTR(npp_ctx->nMultiProcessorCount,
++                        CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT);
++    GET_NPP_DEVICE_ATTR(npp_ctx->nMaxThreadsPerMultiProcessor,
++                        CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR);
++    GET_NPP_DEVICE_ATTR(npp_ctx->nMaxThreadsPerBlock,
++                        CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK);
++    GET_NPP_DEVICE_ATTR(value,
++                        CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK);
++    npp_ctx->nSharedMemPerBlock = value;
++    GET_NPP_DEVICE_ATTR(npp_ctx->nCudaDevAttrComputeCapabilityMajor,
++                        CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR);
++    GET_NPP_DEVICE_ATTR(npp_ctx->nCudaDevAttrComputeCapabilityMinor,
++                        CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
++
++#undef GET_NPP_DEVICE_ATTR
++
++    return 0;
++}
++
++#endif /* AVFILTER_CUDA_NPP_COMPAT_H */
+diff --git a/libavfilter/vf_scale_npp.c b/libavfilter/vf_scale_npp.c
+index 0c38987..f90b291 100644
+--- a/libavfilter/vf_scale_npp.c
++++ b/libavfilter/vf_scale_npp.c
+@@ -36,6 +36,7 @@
+ #include "libavutil/pixdesc.h"
+ 
+ #include "avfilter.h"
++#include "cuda/npp_compat.h"
+ #include "filters.h"
+ #include "formats.h"
+ #include "scale_eval.h"
+@@ -708,14 +709,22 @@ static int nppscale_deinterleave(AVFilterContext *ctx, NPPScaleStageContext *sta
+                                  AVFrame *out, AVFrame *in)
+ {
+     AVHWFramesContext *in_frames_ctx = (AVHWFramesContext*)in->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = in_frames_ctx->device_ctx->hwctx;
++    NppStreamContext npp_ctx;
+     NppStatus err;
++    int ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     switch (in_frames_ctx->sw_format) {
+     case AV_PIX_FMT_NV12:
+-        err = nppiYCbCr420_8u_P2P3R(in->data[0], in->linesize[0],
+-                                    in->data[1], in->linesize[1],
+-                                    out->data, out->linesize,
+-                                    (NppiSize){ in->width, in->height });
++        err = nppiYCbCr420_8u_P2P3R_Ctx(in->data[0], in->linesize[0],
++                                        in->data[1], in->linesize[1],
++                                        out->data, out->linesize,
++                                        (NppiSize){ in->width, in->height },
++                                        npp_ctx);
+         break;
+     default:
+         return AVERROR_BUG;
+@@ -731,9 +740,16 @@ static int nppscale_deinterleave(AVFilterContext *ctx, NPPScaleStageContext *sta
+ static int nppscale_resize(AVFilterContext *ctx, NPPScaleStageContext *stage,
+                            AVFrame *out, AVFrame *in)
+ {
++    AVHWFramesContext *in_frames_ctx = (AVHWFramesContext*)in->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = in_frames_ctx->device_ctx->hwctx;
+     NPPScaleContext *s = ctx->priv;
++    NppStreamContext npp_ctx;
+     NppStatus err;
+-    int i;
++    int i, ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     for (i = 0; i < FF_ARRAY_ELEMS(stage->planes_in) && i < FF_ARRAY_ELEMS(in->data) && in->data[i]; i++) {
+         int iw = stage->planes_in[i].width;
+@@ -741,12 +757,12 @@ static int nppscale_resize(AVFilterContext *ctx, NPPScaleStageContext *stage,
+         int ow = stage->planes_out[i].width;
+         int oh = stage->planes_out[i].height;
+ 
+-        err = nppiResizeSqrPixel_8u_C1R(in->data[i], (NppiSize){ iw, ih },
+-                                        in->linesize[i], (NppiRect){ 0, 0, iw, ih },
+-                                        out->data[i], out->linesize[i],
+-                                        (NppiRect){ 0, 0, ow, oh },
+-                                        (double)ow / iw, (double)oh / ih,
+-                                        0.0, 0.0, s->interp_algo);
++        err = nppiResizeSqrPixel_8u_C1R_Ctx(in->data[i], (NppiSize){ iw, ih },
++                                            in->linesize[i], (NppiRect){ 0, 0, iw, ih },
++                                            out->data[i], out->linesize[i],
++                                            (NppiRect){ 0, 0, ow, oh },
++                                            (double)ow / iw, (double)oh / ih,
++                                            0.0, 0.0, s->interp_algo, npp_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP resize error: %d\n", err);
+             return AVERROR_UNKNOWN;
+@@ -760,15 +776,23 @@ static int nppscale_interleave(AVFilterContext *ctx, NPPScaleStageContext *stage
+                                AVFrame *out, AVFrame *in)
+ {
+     AVHWFramesContext *out_frames_ctx = (AVHWFramesContext*)out->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = out_frames_ctx->device_ctx->hwctx;
++    NppStreamContext npp_ctx;
+     NppStatus err;
++    int ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     switch (out_frames_ctx->sw_format) {
+     case AV_PIX_FMT_NV12:
+-        err = nppiYCbCr420_8u_P3P2R((const uint8_t**)in->data,
+-                                    in->linesize,
+-                                    out->data[0], out->linesize[0],
+-                                    out->data[1], out->linesize[1],
+-                                    (NppiSize){ in->width, in->height });
++        err = nppiYCbCr420_8u_P3P2R_Ctx((const uint8_t**)in->data,
++                                        in->linesize,
++                                        out->data[0], out->linesize[0],
++                                        out->data[1], out->linesize[1],
++                                        (NppiSize){ in->width, in->height },
++                                        npp_ctx);
+         break;
+     default:
+         return AVERROR_BUG;
+diff --git a/libavfilter/vf_sharpen_npp.c b/libavfilter/vf_sharpen_npp.c
+index 4989126..da086fb 100644
+--- a/libavfilter/vf_sharpen_npp.c
++++ b/libavfilter/vf_sharpen_npp.c
+@@ -24,6 +24,7 @@
+ #include <nppi.h>
+ #include <nppi_filtering_functions.h>
+ 
++#include "cuda/npp_compat.h"
+ #include "filters.h"
+ #include "libavutil/pixdesc.h"
+ #include "libavutil/cuda_check.h"
+@@ -157,17 +158,24 @@ static int nppsharpen_sharpen(AVFilterContext* ctx, AVFrame* out, AVFrame* in)
+ {
+     FilterLink *inl = ff_filter_link(ctx->inputs[0]);
+     AVHWFramesContext* in_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = in_ctx->device_ctx->hwctx;
+     NPPSharpenContext* s = ctx->priv;
+ 
+     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(in_ctx->sw_format);
++    NppStreamContext npp_ctx;
++    int ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     for (int i = 0; i < FF_ARRAY_ELEMS(in->data) && in->data[i]; i++) {
+         int ow = AV_CEIL_RSHIFT(in->width, (i == 1 || i == 2) ? desc->log2_chroma_w : 0);
+         int oh = AV_CEIL_RSHIFT(in->height, (i == 1 || i == 2) ? desc->log2_chroma_h : 0);
+ 
+-        NppStatus err = nppiFilterSharpenBorder_8u_C1R(
++        NppStatus err = nppiFilterSharpenBorder_8u_C1R_Ctx(
+             in->data[i], in->linesize[i], (NppiSize){ow, oh}, (NppiPoint){0, 0},
+-            out->data[i], out->linesize[i], (NppiSize){ow, oh}, s->border_type);
++            out->data[i], out->linesize[i], (NppiSize){ow, oh}, s->border_type, npp_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP sharpen error: %d\n", err);
+             return AVERROR_EXTERNAL;
+diff --git a/libavfilter/vf_transpose_npp.c b/libavfilter/vf_transpose_npp.c
+index 1706267..e24dc53 100644
+--- a/libavfilter/vf_transpose_npp.c
++++ b/libavfilter/vf_transpose_npp.c
+@@ -29,6 +29,7 @@
+ #include "libavutil/pixdesc.h"
+ 
+ #include "avfilter.h"
++#include "cuda/npp_compat.h"
+ #include "filters.h"
+ #include "formats.h"
+ #include "video.h"
+@@ -292,9 +293,16 @@ static int npptranspose_config_props(AVFilterLink *outlink)
+ static int npptranspose_rotate(AVFilterContext *ctx, NPPTransposeStageContext *stage,
+                                AVFrame *out, AVFrame *in)
+ {
++    AVHWFramesContext *in_frames_ctx = (AVHWFramesContext*)in->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = in_frames_ctx->device_ctx->hwctx;
+     NPPTransposeContext *s = ctx->priv;
++    NppStreamContext npp_ctx;
+     NppStatus err;
+-    int i;
++    int i, ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     for (i = 0; i < FF_ARRAY_ELEMS(stage->planes_in) && i < FF_ARRAY_ELEMS(in->data) && in->data[i]; i++) {
+         int iw = stage->planes_in[i].width;
+@@ -309,11 +317,11 @@ static int npptranspose_rotate(AVFilterContext *ctx, NPPTransposeStageContext *s
+         int shiftw = (s->dir == NPP_TRANSPOSE_CLOCK  || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? ow - 1 : 0;
+         int shifth = (s->dir == NPP_TRANSPOSE_CCLOCK || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? oh - 1 : 0;
+ 
+-        err = nppiRotate_8u_C1R(in->data[i], (NppiSize){ iw, ih },
+-                                in->linesize[i], (NppiRect){ 0, 0, iw, ih },
+-                                out->data[i], out->linesize[i],
+-                                (NppiRect){ 0, 0, ow, oh },
+-                                angle, shiftw, shifth, NPPI_INTER_NN);
++        err = nppiRotate_8u_C1R_Ctx(in->data[i], (NppiSize){ iw, ih },
++                                    in->linesize[i], (NppiRect){ 0, 0, iw, ih },
++                                    out->data[i], out->linesize[i],
++                                    (NppiRect){ 0, 0, ow, oh },
++                                    angle, shiftw, shifth, NPPI_INTER_NN, npp_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP rotate error: %d\n", err);
+             return AVERROR_UNKNOWN;
+@@ -326,16 +334,23 @@ static int npptranspose_rotate(AVFilterContext *ctx, NPPTransposeStageContext *s
+ static int npptranspose_transpose(AVFilterContext *ctx, NPPTransposeStageContext *stage,
+                                   AVFrame *out, AVFrame *in)
+ {
++    AVHWFramesContext *in_frames_ctx = (AVHWFramesContext*)in->hw_frames_ctx->data;
++    AVCUDADeviceContext *device_hwctx = in_frames_ctx->device_ctx->hwctx;
++    NppStreamContext npp_ctx;
+     NppStatus err;
+-    int i;
++    int i, ret;
++
++    ret = ff_npp_get_stream_context(ctx, device_hwctx, &npp_ctx);
++    if (ret < 0)
++        return ret;
+ 
+     for (i = 0; i < FF_ARRAY_ELEMS(stage->planes_in) && i < FF_ARRAY_ELEMS(in->data) && in->data[i]; i++) {
+         int iw = stage->planes_in[i].width;
+         int ih = stage->planes_in[i].height;
+ 
+-        err = nppiTranspose_8u_C1R(in->data[i], in->linesize[i],
+-                                   out->data[i], out->linesize[i],
+-                                   (NppiSize){ iw, ih });
++        err = nppiTranspose_8u_C1R_Ctx(in->data[i], in->linesize[i],
++                                       out->data[i], out->linesize[i],
++                                       (NppiSize){ iw, ih }, npp_ctx);
+         if (err != NPP_SUCCESS) {
+             av_log(ctx, AV_LOG_ERROR, "NPP transpose error: %d\n", err);
+             return AVERROR_UNKNOWN;
+-- 
+2.54.0
+
