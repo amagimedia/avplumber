@@ -60,7 +60,9 @@ ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
 ifeq ($(NEURAL_NET_SPECIFIC),1)
-NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp')
+# cuda_camera_motion.cpp is gated separately (needs the NVOF dense headers); exclude
+# it from the blanket glob so the default build does not require the SDK.
+NODES_SRC += $(filter-out $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp,$(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp'))
 NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific/metadata_dump -maxdepth 1 -name '*.cpp')
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
@@ -211,6 +213,21 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/nvof/nvof_fruc.cpp
 override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface
 else
 override CXXFLAGS += -DHAVE_NVOF_FRUC=0
+endif
+endif
+
+# CudaCameraMotion node — NVOF dense optical-flow camera path (Phase 2).
+# Built when HAVE_NVOF=1 + CUDA + the dense-API headers are vendored. Links the
+# driver-provided libnvidia-opticalflow; needs the sport_specific node infra.
+HAVE_NVOF ?= 0
+NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET_SPECIFIC),111)
+ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
+NODES_SRC += $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp
+override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
+override LIBS_FLAGS += -lnvidia-opticalflow
+else
+$(warning HAVE_NVOF=1 but dense headers missing at $(NVOF_DENSE_HEADERS); skipping cuda_camera_motion)
 endif
 endif
 
