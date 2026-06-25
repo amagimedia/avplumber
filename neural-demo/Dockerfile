@@ -47,6 +47,7 @@ RUN dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
         cuda-driver-devel-13-0 \
         cuda-cccl-13-0 \
         cuda-culibos-devel-13-0 \
+        libnpp-devel-13-0 \
         libnvjpeg-devel-13-0 \
         libnvptxcompiler-13-0 \
         libnvvm-13-0 \
@@ -83,6 +84,7 @@ RUN cd /tmp/ffmpeg \
         --pkgconfigdir=/usr/local/lib/pkgconfig \
         --enable-gpl \
         --enable-nonfree \
+        --enable-libnpp \
         --extra-ldflags=-lm \
         --extra-ldflags=-ldl \
         --enable-pthreads \
@@ -155,6 +157,7 @@ RUN cd /tmp/ffmpeg \
         --enable-demuxer=aac \
         --enable-filter=aformat \
         --enable-filter=aresample \
+        --enable-filter=scale_npp \
         --enable-encoder=aac \
         --enable-encoder=ac3 \
         --enable-encoder=mp2 \
@@ -177,6 +180,7 @@ RUN cd /tmp/ffmpeg \
         --enable-parser=opus \
         --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
         --nvcc=/usr/local/cuda-13.0/bin/nvcc \
+        --nvccflags="-gencode arch=compute_120,code=sm_120 -gencode arch=compute_120,code=compute_120 -O2" \
     || { cat /tmp/ffmpeg/ffbuild/config.log; exit 1; } \
     && cd /tmp/ffmpeg \
     && make -j"$(nproc)" \
@@ -184,10 +188,12 @@ RUN cd /tmp/ffmpeg \
     && ldconfig
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
+    && /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' scale_npp ' \
     && /usr/local/bin/ffmpeg -hide_banner -protocols | grep -q '^  srt$' \
     && /usr/local/bin/ffmpeg -hide_banner -muxers | grep -q ' rtp ' \
     && /usr/local/bin/ffmpeg -hide_banner -bsfs | grep -q '^dump_extra$' \
-    && ldd /usr/local/bin/ffmpeg | grep -q '/usr/local/lib/libavfilter'
+    && ldd /usr/local/bin/ffmpeg | grep -q '/usr/local/lib/libavfilter' \
+    && ldd /usr/local/bin/ffmpeg | grep -q 'libnpp'
 
 FROM base AS plan-builder
 
@@ -290,6 +296,7 @@ COPY --from=builder /usr/local/lib/libpostproc.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libswresample.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libswscale.so* /usr/local/lib/
 COPY --from=builder /usr/local/cuda-13.0/targets/x86_64-linux/lib/libcudart.so* /usr/local/cuda-13.0/targets/x86_64-linux/lib/
+COPY --from=builder /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnpp*.so* /usr/local/cuda-13.0/targets/x86_64-linux/lib/
 COPY --from=builder /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvjpeg.so* /usr/local/cuda-13.0/targets/x86_64-linux/lib/
 COPY --from=builder /opt/tensorrt/lib/libnvinfer.so* /opt/tensorrt/lib/
 COPY --from=builder /opt/tensorrt/lib/libnvinfer_plugin.so* /opt/tensorrt/lib/
@@ -302,8 +309,10 @@ COPY neural-demo/templates /opt/avp-neural-demo/templates
 
 RUN chmod +x /usr/local/bin/avp-neural-demo-entrypoint /usr/local/bin/avp-neural-demo-rtcp-feedback \
     && mkdir -p /home/tensorrt /run/avp/input /run/avp/output /tmp/avp-sidecars /tmp/avp-rendered \
+    && printf '%s\n' /usr/local/lib /usr/local/cuda-13.0/targets/x86_64-linux/lib /opt/tensorrt/lib > /etc/ld.so.conf.d/avp-local.conf \
     && ldconfig
 
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda-13.0/targets/x86_64-linux/lib:/opt/tensorrt/lib
 ENV PATH=/usr/local/bin:${PATH}
 
 ENTRYPOINT ["/usr/local/bin/avp-neural-demo-entrypoint"]

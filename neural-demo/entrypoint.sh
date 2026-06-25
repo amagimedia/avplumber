@@ -65,6 +65,7 @@ fi
 
 ffmpeg_filters="$("/usr/local/bin/ffmpeg" -hide_banner -filters 2>/dev/null)"
 grep -q ' overlay_many_cuda ' <<<"${ffmpeg_filters}" || die "patched FFmpeg filter overlay_many_cuda is missing"
+grep -q ' scale_npp ' <<<"${ffmpeg_filters}" || die "patched FFmpeg filter scale_npp is missing"
 
 required_models=(
     "${MODEL_ROOT}/ball_960x544.plan"
