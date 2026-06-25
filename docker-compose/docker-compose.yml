@@ -4,6 +4,10 @@ x-gpu-env: &gpu-env
   NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
   CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
   NVIDIA_DRIVER_CAPABILITIES: graphics,utility,compute,video
+  # Persist ffmpeg's CUDA PTX->SASS JIT cache (scale_cuda's ~5s first JIT) on the
+  # cuda-jit-cache volume so it survives restarts; entrypoint pre-warms it once.
+  CUDA_CACHE_PATH: ${CUDA_CACHE_PATH:-/cuda-cache}
+  CUDA_CACHE_MAXSIZE: ${CUDA_CACHE_MAXSIZE:-1073741824}
 
 x-gpu-deploy: &gpu-deploy
   resources:
@@ -191,6 +195,7 @@ services:
       - ${AVP_MODELS_DIR:-./empty/models}:/models:ro
       - ${AVP_ARTIFACT_DIR:-./artifacts}:/artifacts
       - runner-logs:/var/log/avplumber
+      - cuda-jit-cache:/cuda-cache
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
 
@@ -229,6 +234,7 @@ services:
       - ${NEURAL_DEMO_INPUT:-/dev/null}:/run/avp/input/input:ro
       - ${NEURAL_DEMO_ARTIFACT_DIR:-./artifacts/neural-demo}:/run/avp/output
       - runner-logs:/var/log/avplumber
+      - cuda-jit-cache:/cuda-cache
 
   auto-mixer:
     profiles:
@@ -287,6 +293,7 @@ services:
       - ${MEDIA_INPUT_DIR:-./empty/media}:/media-inputs:ro
       - ${MEDIA_WIPE_DIR:-./empty/media}:/media-wipes:ro
       - runner-logs:/var/log/avplumber
+      - cuda-jit-cache:/cuda-cache
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
 
@@ -351,4 +358,5 @@ services:
 volumes:
   dma-browser-sockets:
   runner-logs:
+  cuda-jit-cache:
   wayland-runtime:
