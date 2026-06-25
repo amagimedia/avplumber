@@ -235,6 +235,10 @@ class CudaSceneDiff(InternalNode):
     TYPE = "cuda_scene_diff"
 
 
+class CudaCameraMotion(InternalNode):
+    TYPE = "cuda_camera_motion"
+
+
 class LumaSceneCut(InternalNode):
     TYPE = "luma_scene_cut"
 
