@@ -383,22 +383,57 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     bool initialized_ = false;
     std::string node_label_ = "<unnamed>";
     std::shared_ptr<HWAccelDevice> debug_hwaccel_;
+    bool preinitialized_from_hwaccel_ = false;
+    bool frame_context_checked_ = false;
+    bool last_context_reinit_ = false;
+    bool last_context_match_ = false;
+    int64_t last_context_init_ms_ = 0;
     DoctrLogger logger_;
     TrtRunner det_;
     TrtRunner rec_;
 
-    bool initFromFrame(const av::VideoFrame& frm) {
-        if (initialized_) return true;
+    bool frameCudaContext(const av::VideoFrame& frm, CUcontext& ctx, AVCUDADeviceContext** dev_ctx = nullptr) const {
+        ctx = nullptr;
+        if (dev_ctx) *dev_ctx = nullptr;
         if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
-            logstream << "doctr_ocr: missing CUDA hw frame context";
             return false;
         }
         AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-        cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+        if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) return false;
+        AVCUDADeviceContext* cuda_dev_ctx = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+        if (!cuda_dev_ctx || !cuda_dev_ctx->cuda_ctx) return false;
+        ctx = cuda_dev_ctx->cuda_ctx;
+        if (dev_ctx) *dev_ctx = cuda_dev_ctx;
+        return true;
+    }
+
+    bool initContextFromHWAccel() {
+        if (!debug_hwaccel_ || !debug_hwaccel_->deviceContext() || !debug_hwaccel_->deviceContext()->data) return false;
+        AVHWDeviceContext* devctx = (AVHWDeviceContext*)debug_hwaccel_->deviceContext()->data;
+        if (!devctx || devctx->type != AV_HWDEVICE_TYPE_CUDA || !devctx->hwctx) return false;
+        cuda_dev_ctx_ = (AVCUDADeviceContext*)devctx->hwctx;
         if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) return false;
         cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
         if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
-        yolo_base::logCudaContextPointers("doctr_ocr", node_label_, frm, cu_ctx_, debug_hwaccel_);
+        return true;
+    }
+
+    void cleanupContextBoundState() {
+        if (cu_ctx_) CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
+        det_.cleanup();
+        rec_.cleanup();
+        if (d_boxes_) { CUDA_CHECK_CU(cuMemFree(d_boxes_)); d_boxes_ = 0; }
+        if (preprocess_module_) { CUDA_CHECK_CU(cuModuleUnload(preprocess_module_)); preprocess_module_ = nullptr; }
+        cuda_dev_ctx_ = nullptr;
+        cu_ctx_ = nullptr;
+        initialized_ = false;
+        preinitialized_from_hwaccel_ = false;
+        frame_context_checked_ = false;
+    }
+
+    bool initInCurrentContext() {
+        if (!cu_ctx_) return false;
+        if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
         const std::string ptx(avpl_doctr_preprocess_ptx, avpl_doctr_preprocess_ptx + avpl_doctr_preprocess_ptx_len);
         if (CUDA_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, ptx.c_str(), 0, nullptr, nullptr))) return false;
         if (CUDA_CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, "kNV12_doctr_crop_resize_pad_f32"))) return false;
@@ -409,6 +444,85 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         if (!rec_.init(logger_, kRecBatch, 3, kRecH, kRecW)) return false;
         initialized_ = true;
         return true;
+    }
+
+    bool preinitFromHWAccel() {
+        auto init_start = std::chrono::steady_clock::now();
+        bool ok = initContextFromHWAccel() && initInCurrentContext();
+        auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - init_start).count();
+        if (!ok) {
+            cleanupContextBoundState();
+        } else {
+            preinitialized_from_hwaccel_ = true;
+            frame_context_checked_ = false;
+        }
+        logstream << "neural_preinit"
+                  << " status=" << (ok ? "ok" : "error")
+                  << " type=doctr_ocr"
+                  << " node=" << node_label_
+                  << " preinit=1"
+                  << " init_ms=" << init_ms
+                  << " cuda_ctx=" << (const void*)cu_ctx_;
+        return ok;
+    }
+
+    bool initFromFrame(const av::VideoFrame& frm) {
+        last_context_reinit_ = false;
+        last_context_match_ = false;
+        last_context_init_ms_ = 0;
+        if (initialized_) {
+            if (preinitialized_from_hwaccel_ && !frame_context_checked_) {
+                CUcontext frame_ctx = nullptr;
+                AVCUDADeviceContext* frame_dev_ctx = nullptr;
+                bool have_frame_ctx = frameCudaContext(frm, frame_ctx, &frame_dev_ctx);
+                last_context_match_ = have_frame_ctx && frame_ctx == cu_ctx_;
+                if (last_context_match_) {
+                    frame_context_checked_ = true;
+                    logstream << "neural_context_check"
+                              << " status=ok type=doctr_ocr"
+                              << " node=" << node_label_
+                              << " preinit=1 match=1 reinit=0"
+                              << " frame_cuda_ctx=" << (const void*)frame_ctx
+                              << " init_cuda_ctx=" << (const void*)cu_ctx_;
+                    return true;
+                }
+
+                auto init_start = std::chrono::steady_clock::now();
+                cleanupContextBoundState();
+                bool ok = false;
+                if (have_frame_ctx) {
+                    cuda_dev_ctx_ = frame_dev_ctx;
+                    cu_ctx_ = frame_ctx;
+                    ok = initInCurrentContext();
+                }
+                last_context_init_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - init_start).count();
+                last_context_reinit_ = true;
+                frame_context_checked_ = ok;
+                logstream << "neural_context_check"
+                          << " status=" << (ok ? "ok" : "error")
+                          << " type=doctr_ocr"
+                          << " node=" << node_label_
+                          << " preinit=1 match=0 reinit=1"
+                          << " reinit_ms=" << last_context_init_ms_
+                          << " frame_cuda_ctx=" << (const void*)frame_ctx
+                          << " init_cuda_ctx=" << (const void*)cu_ctx_;
+                return ok;
+            }
+            return true;
+        }
+        CUcontext frame_ctx = nullptr;
+        AVCUDADeviceContext* frame_dev_ctx = nullptr;
+        if (!frameCudaContext(frm, frame_ctx, &frame_dev_ctx)) {
+            logstream << "doctr_ocr: missing CUDA hw frame context";
+            return false;
+        }
+        cuda_dev_ctx_ = frame_dev_ctx;
+        cu_ctx_ = frame_ctx;
+        if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        yolo_base::logCudaContextPointers("doctr_ocr", node_label_, frm, cu_ctx_, debug_hwaccel_);
+        return initInCurrentContext();
     }
 
     void launchPreprocess(const av::VideoFrame& frm, TrtRunner& runner, const std::vector<int>& boxes,
@@ -443,11 +557,7 @@ public:
     using NodeSISO<av::VideoFrame, av::VideoFrame>::NodeSISO;
 
     ~DoctrOcr() override {
-        if (cu_ctx_) CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
-        det_.cleanup();
-        rec_.cleanup();
-        if (d_boxes_) { CUDA_CHECK_CU(cuMemFree(d_boxes_)); d_boxes_ = 0; }
-        if (preprocess_module_) { CUDA_CHECK_CU(cuModuleUnload(preprocess_module_)); preprocess_module_ = nullptr; }
+        cleanupContextBoundState();
     }
 
     void process() override {
@@ -463,6 +573,10 @@ public:
         }
 
         auto t0 = std::chrono::steady_clock::now();
+        int64_t process_init_ms = 0;
+        bool process_reinit = false;
+        bool process_context_match = false;
+        bool process_preinit = preinitialized_from_hwaccel_;
         if (!initialized_) {
             auto init_start = std::chrono::steady_clock::now();
             bool ok = initFromFrame(frm);
@@ -483,11 +597,16 @@ public:
                 this->sink_->put(frm);
                 return;
             }
+            process_init_ms = init_ms;
         } else if (!initFromFrame(frm)) {
             Parameters out = emptyPayload(true, "init_failed");
             av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), out.dump().c_str(), 0);
             this->sink_->put(frm);
             return;
+        } else {
+            process_init_ms = last_context_init_ms_;
+            process_reinit = last_context_reinit_;
+            process_context_match = last_context_match_;
         }
         if (cu_ctx_) cuCtxSetCurrent(cu_ctx_);
         const int W = frm.raw()->width;
@@ -583,6 +702,18 @@ public:
                       << " texts=[" << texts << "]"
                       << " elapsed_ms=" << ms;
         }
+        if (sample_counter_ == 1 || process_init_ms > 0 || process_reinit) {
+            logstream << "neural_process"
+                      << " status=ok"
+                      << " type=doctr_ocr"
+                      << " node=" << node_label_
+                      << " frame=" << frame_counter_
+                      << " preinit=" << (process_preinit ? 1 : 0)
+                      << " context_match=" << (process_context_match ? 1 : 0)
+                      << " reinit=" << (process_reinit ? 1 : 0)
+                      << " init_ms=" << process_init_ms
+                      << " process_ms=" << (int64_t)ms;
+        }
         this->sink_->put(frm);
     }
 
@@ -609,6 +740,9 @@ public:
         if (p.count("reco_conf_thresh")) r->reco_conf_thresh_ = p["reco_conf_thresh"].get<float>();
         if (p.count("edge_margin_px")) r->edge_margin_px_ = std::max(0, p["edge_margin_px"].get<int>());
         if (p.count("debug_log_every_n")) r->debug_log_every_n_ = std::max(0, p["debug_log_every_n"].get<int>());
+        if (r->debug_hwaccel_) {
+            r->preinitFromHWAccel();
+        }
         return r;
     }
 };

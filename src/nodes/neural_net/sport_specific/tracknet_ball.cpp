@@ -294,6 +294,11 @@ public:
             return;
         }
         if (!frm) return;
+        auto process_start = std::chrono::steady_clock::now();
+        int64_t process_init_ms = 0;
+        bool process_reinit = false;
+        bool process_context_match = false;
+        bool process_preinit = wasPreinitializedFromHWAccel();
 
         ++frame_counter_;
         updateAutoSampling(frm);
@@ -327,8 +332,13 @@ public:
             if (!ok) {
                 return;
             }
+            process_init_ms = init_ms;
         } else if (!ensureTracknetInitialized(frm)) {
             return;
+        } else {
+            process_init_ms = lastContextInitMs();
+            process_reinit = lastContextReinitialized();
+            process_context_match = lastContextMatched();
         }
 
         if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
@@ -347,6 +357,20 @@ public:
             processLatestAlignedFrame(frm);
         } else {
             processCenterAlignedFrame(frm);
+        }
+        auto process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - process_start).count();
+        if (frame_counter_ == 1 || process_init_ms > 0 || process_reinit) {
+            logstream << "neural_process"
+                      << " status=ok"
+                      << " type=tracknet_ball"
+                      << " node=" << node_label_
+                      << " frame=" << frame_counter_
+                      << " preinit=" << (process_preinit ? 1 : 0)
+                      << " context_match=" << (process_context_match ? 1 : 0)
+                      << " reinit=" << (process_reinit ? 1 : 0)
+                      << " init_ms=" << process_init_ms
+                      << " process_ms=" << process_ms;
         }
     }
 
@@ -684,13 +708,18 @@ protected:
         return true;
     }
 
-    bool ensureTracknetInitialized(const av::VideoFrame& frm) {
-        if (initialized_) return true;
+    void resetTracknetContextBoundState() {
+        output_tensor_index_ = -1;
+        srs_heatmap_tensor_index_ = -1;
+        output_contract_validated_ = false;
+        resetContextBoundState();
+    }
+
+    bool initializeTracknetInCurrentContext() {
         if (models_.size() != 1) {
             logstream << "tracknet_ball: requires exactly one TensorRT engine";
             return false;
         }
-        if (!initCudaContextFromFrame(frm)) return false;
         if (!loadTracknetPreprocessModule()) return false;
 
         ModelRunner& model = models_[0];
@@ -703,6 +732,80 @@ protected:
 
         initialized_ = true;
         return true;
+    }
+
+    bool preinitializeTracknetFromHWAccel() {
+        auto init_start = std::chrono::steady_clock::now();
+        bool ok = false;
+        if (debug_hwaccel_ && initCudaContextFromHWAccel(debug_hwaccel_)) {
+            ok = initializeTracknetInCurrentContext();
+        }
+        auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - init_start).count();
+        if (!ok) {
+            resetTracknetContextBoundState();
+        } else {
+            preinitialized_from_hwaccel_ = true;
+            frame_context_checked_ = false;
+        }
+        logstream << "neural_preinit"
+                  << " status=" << (ok ? "ok" : "error")
+                  << " type=tracknet_ball"
+                  << " node=" << node_label_
+                  << " preinit=1"
+                  << " init_ms=" << init_ms
+                  << " cuda_ctx=" << (const void*)cu_ctx_
+                  << " models=" << models_.size();
+        return ok;
+    }
+
+    bool ensureTracknetInitialized(const av::VideoFrame& frm) {
+        last_context_reinit_ = false;
+        last_context_match_ = false;
+        last_context_init_ms_ = 0;
+        if (initialized_) {
+            if (preinitialized_from_hwaccel_ && !frame_context_checked_) {
+                CUcontext frame_ctx = nullptr;
+                AVCUDADeviceContext* frame_dev_ctx = nullptr;
+                bool have_frame_ctx = frameCudaContext(frm, frame_ctx, &frame_dev_ctx);
+                last_context_match_ = have_frame_ctx && frame_ctx == cu_ctx_;
+                if (last_context_match_) {
+                    frame_context_checked_ = true;
+                    logstream << "neural_context_check"
+                              << " status=ok type=tracknet_ball"
+                              << " node=" << node_label_
+                              << " preinit=1 match=1 reinit=0"
+                              << " frame_cuda_ctx=" << (const void*)frame_ctx
+                              << " init_cuda_ctx=" << (const void*)cu_ctx_;
+                    return true;
+                }
+
+                auto init_start = std::chrono::steady_clock::now();
+                resetTracknetContextBoundState();
+                bool ok = false;
+                if (have_frame_ctx) {
+                    cuda_dev_ctx_ = frame_dev_ctx;
+                    cu_ctx_ = frame_ctx;
+                    ok = CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_)) == 0 && initializeTracknetInCurrentContext();
+                }
+                last_context_init_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - init_start).count();
+                last_context_reinit_ = true;
+                frame_context_checked_ = ok;
+                logstream << "neural_context_check"
+                          << " status=" << (ok ? "ok" : "error")
+                          << " type=tracknet_ball"
+                          << " node=" << node_label_
+                          << " preinit=1 match=0 reinit=1"
+                          << " reinit_ms=" << last_context_init_ms_
+                          << " frame_cuda_ctx=" << (const void*)frame_ctx
+                          << " init_cuda_ctx=" << (const void*)cu_ctx_;
+                return ok;
+            }
+            return true;
+        }
+        if (!initCudaContextFromFrame(frm)) return false;
+        return initializeTracknetInCurrentContext();
     }
 
     struct SrsCandidate {
@@ -1283,6 +1386,9 @@ public:
         model.engine_name = std::filesystem::path(model.engine_path).filename().string();
         model.class_names.push_back(r->target_label_);
         r->models_.push_back(std::move(model));
+        if (debug_hwaccel) {
+            r->preinitializeTracknetFromHWAccel();
+        }
 
         return r;
     }

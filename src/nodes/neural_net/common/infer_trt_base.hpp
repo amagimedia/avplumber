@@ -255,18 +255,28 @@ protected:
     std::shared_ptr<HWAccelDevice> debug_hwaccel_;
     std::string cuda_context_log_type_ = "cuda_infer_trt";
     std::string cuda_context_log_node_ = "<unnamed>";
+    bool preinitialized_from_hwaccel_ = false;
+    bool frame_context_checked_ = false;
+    bool last_context_reinit_ = false;
+    bool last_context_match_ = false;
+    int64_t last_context_init_ms_ = 0;
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;
 
     bool initCudaContextFromFrame(const av::VideoFrame& frm);
+    bool initCudaContextFromHWAccel(const std::shared_ptr<HWAccelDevice>& hwaccel);
+    bool frameCudaContext(const av::VideoFrame& frm, CUcontext& ctx, AVCUDADeviceContext** dev_ctx = nullptr) const;
     bool loadPreprocessModule();
     bool parseEngine(ModelRunner& model);
     bool allocateBindings(ModelRunner& model);
     bool ensureCompatibleInput(const ModelRunner& model, size_t model_index);
     bool configureRunnerStream(ModelRunner& model);
     bool configureRunnerPreprocess(ModelRunner& model);
+    bool initializeModelsInCurrentContext();
+    void resetContextBoundState();
     bool ensureInitialized(const av::VideoFrame& frm);
+    bool preinitializeFromHWAccel();
 
     bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model);
     bool runInference(ModelRunner& model);
@@ -287,6 +297,10 @@ public:
     void setCudaContextDebugInfo(const std::string& node_type,
                                  const std::string& node_label,
                                  std::shared_ptr<HWAccelDevice> hwaccel);
+    bool wasPreinitializedFromHWAccel() const { return preinitialized_from_hwaccel_; }
+    bool lastContextReinitialized() const { return last_context_reinit_; }
+    bool lastContextMatched() const { return last_context_match_; }
+    int64_t lastContextInitMs() const { return last_context_init_ms_; }
 };
 
 } // namespace yolo_base
