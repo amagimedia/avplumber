@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <map>
 #include <sstream>
 #include "../common/infer_trt_base.hpp"
@@ -67,6 +68,7 @@ protected:
     std::map<int, uint64_t> detection_count_histogram_;
     std::array<uint64_t, 10> conf_histogram_{}; // buckets: [0.0,0.1), [0.1,0.2), ... [0.9,1.0]
     bool seg_decoders_initialized_ = false;
+    std::string node_label_ = "<unnamed>";
 
 public:
     CudaInferYolo(std::unique_ptr<Source<av::VideoFrame>> source,
@@ -125,7 +127,23 @@ public:
             sink_->put(frm);
             return;
         }
-        if (!ensureInitialized(frm)) {
+        if (!initialized_) {
+            auto init_start = std::chrono::steady_clock::now();
+            bool ok = ensureInitialized(frm);
+            auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+            logstream << "neural_node_init"
+                      << " status=" << (ok ? "ok" : "error")
+                      << " type=cuda_infer_yolo"
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << init_ms
+                      << " frame=" << frame_counter_
+                      << " models=" << models_.size();
+            if (!ok) {
+                return;
+            }
+        } else if (!ensureInitialized(frm)) {
             return;
         }
         // Initialize segmentation decoders after engine loading (needs output tensor dims)
@@ -448,6 +466,7 @@ public:
 
         auto r = std::make_shared<CudaInferYolo>(
             src->makeSource(), dst->makeSink(), std::move(sink_seg));
+        r->node_label_ = params.value("name", std::string("<unnamed>"));
 
         // Parse global params
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];

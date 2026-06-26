@@ -381,6 +381,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     CUfunction preprocess_kernel_ = nullptr;
     CUdeviceptr d_boxes_ = 0;
     bool initialized_ = false;
+    std::string node_label_ = "<unnamed>";
     DoctrLogger logger_;
     TrtRunner det_;
     TrtRunner rec_;
@@ -460,7 +461,27 @@ public:
         }
 
         auto t0 = std::chrono::steady_clock::now();
-        if (!initFromFrame(frm)) {
+        if (!initialized_) {
+            auto init_start = std::chrono::steady_clock::now();
+            bool ok = initFromFrame(frm);
+            auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+            logstream << "neural_node_init"
+                      << " status=" << (ok ? "ok" : "error")
+                      << " type=doctr_ocr"
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << init_ms
+                      << " frame=" << frame_counter_
+                      << " detector=\"" << detector_engine_ << "\""
+                      << " recognizer=\"" << recognizer_engine_ << "\"";
+            if (!ok) {
+                Parameters out = emptyPayload(true, "init_failed");
+                av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), out.dump().c_str(), 0);
+                this->sink_->put(frm);
+                return;
+            }
+        } else if (!initFromFrame(frm)) {
             Parameters out = emptyPayload(true, "init_failed");
             av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), out.dump().c_str(), 0);
             this->sink_->put(frm);
@@ -568,6 +589,7 @@ public:
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<DoctrOcr>(nci.edges, p);
         if (!p.count("detector_engine")) throw Error("doctr_ocr: detector_engine param required");
         if (!p.count("recognizer_engine")) throw Error("doctr_ocr: recognizer_engine param required");
+        r->node_label_ = p.value("name", std::string("<unnamed>"));
         r->detector_engine_ = p["detector_engine"].get<std::string>();
         r->recognizer_engine_ = p["recognizer_engine"].get<std::string>();
         if (p.count("metadata_key")) r->metadata_key_ = p["metadata_key"].get<std::string>();
