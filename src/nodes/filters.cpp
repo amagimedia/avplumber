@@ -10,6 +10,7 @@ extern "C" {
 #include "../audio_parameters.hpp"
 #include "../hwaccel.hpp"
 #include <avcpp/channellayout.h>
+#include <chrono>
 
 template<typename T> struct FilterMediaSpecific {
 };
@@ -291,6 +292,7 @@ protected:
     const AVFilterContext* out_ctx_ = nullptr;
     TSEqualizer eq_;
     std::string graph_desc_;
+    std::string node_label_ = "<unnamed>";
     bool do_shift_ = true;
     bool defer_preliminary_init_ = false;
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -350,7 +352,7 @@ protected:
         sinks_.resize(this->sink_edges_.size());
         input_eof_.resize(this->source_edges_.size(), false);
     }
-    bool maybeInitFilterGraph() {
+    bool maybeInitFilterGraph(bool frame_waiting = false) {
         if (filter_graph_ != nullptr) {
             freeFilterGraph();
         }
@@ -361,7 +363,21 @@ protected:
                 return false;
             }
         }
-        
+
+        auto init_start = std::chrono::steady_clock::now();
+        auto elapsed_ms = [&init_start]() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+        };
+        auto log_init = [this, frame_waiting](const char* status, int64_t init_ms) {
+            logstream << "filter_graph_init"
+                      << " status=" << status
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << (frame_waiting ? init_ms : 0)
+                      << " graph=\"" << graph_desc_ << "\"";
+        };
+
         filter_graph_ = avfilter_graph_alloc();
         
         AVFilterInOut* inputs = nullptr;
@@ -370,6 +386,7 @@ protected:
         int ret;
         ret = avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), &inputs, &outputs);
         if (ret < 0) {
+            log_init("error_parse", elapsed_ms());
             throw Error("Couldn't parse filter graph");
         }
         
@@ -432,10 +449,12 @@ protected:
         
         ret = avfilter_graph_config(filter_graph_, nullptr);
         if (ret < 0) {
+            log_init("error_config", elapsed_ms());
             throw Error("avfilter_graph_config error");
         }
         for (Port &port: sinks_) {
             if (!port.checkSinkFilterMediaType()) {
+                log_init("error_output_media_type", elapsed_ms());
                 freeFilterGraph();
                 throw Error("Filter outputs invalid media type");
             }
@@ -443,9 +462,11 @@ protected:
         if (sinks_.size()==1) {
             out_ctx_ = sinks_[0].getFilterContext();
         } else {
+            log_init("error_output_count", elapsed_ms());
             freeFilterGraph();
             throw Error("Exactly one destination is needed");
         }
+        log_init("ok", elapsed_ms());
         return true;
     }
     void preliminaryInit() {
@@ -465,7 +486,7 @@ protected:
             typename MediaSpecific::Parameters params = MediaSpecific::parametersFromNodeInterface(*mdsrc);
             sources_[i].checkParameters(params, nullptr, tbsrc->timeBase(), edge);
         }
-        maybeInitFilterGraph();
+        maybeInitFilterGraph(false);
     }
     bool allInputsEof() const {
         for (bool e : input_eof_) {
@@ -592,7 +613,7 @@ public:
                 }
                 source_port.captureInitialHWFramesCtxFromFrame(*frmin);
                 if (filter_graph_==nullptr) {
-                    maybeInitFilterGraph();
+                    maybeInitFilterGraph(true);
                 }
                 if (filter_graph_!=nullptr) {
                     if (do_shift_) {
@@ -623,7 +644,7 @@ public:
                             }
                             p2.captureInitialHWFramesCtxFromFrame(*f2);
                             if (filter_graph_==nullptr) {
-                                maybeInitFilterGraph();
+                                maybeInitFilterGraph(true);
                             }
                             if (filter_graph_==nullptr)
                                 continue;
@@ -665,7 +686,7 @@ public:
                             sources_[i].captureInitialHWFramesCtxFromFrame(*fi);
                         }
                     }
-                    maybeInitFilterGraph();
+                    maybeInitFilterGraph(true);
                     if (filter_graph_ == nullptr) {
                         this->waitForInput();
                     }
@@ -693,6 +714,7 @@ public:
             shift = params["shift"].get<bool>();
         }
         std::shared_ptr<Child> result = std::make_shared<Child>(graph_desc, shift);
+        result->node_label_ = params.value("name", std::string("<unnamed>"));
         if (params.count("defer_preliminary_init")==1) {
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
