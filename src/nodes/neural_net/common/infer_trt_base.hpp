@@ -43,6 +43,12 @@ inline int check_cu(CUresult err, const char *func) {
 }
 #define CUDA_CHECK_CU(x) yolo_base::check_cu((x), #x)
 
+void logCudaContextPointers(const char* node_type,
+                            const std::string& node_label,
+                            const av::VideoFrame& frm,
+                            CUcontext frame_cu_ctx,
+                            const std::shared_ptr<HWAccelDevice>& hwaccel);
+
 // --- TensorRT logger ---
 class TRTLogger : public nvinfer1::ILogger {
 public:
@@ -246,6 +252,9 @@ protected:
     CUmodule preprocess_module_ = nullptr;
     bool initialized_ = false;
     bool use_cuda_graph_ = false;
+    std::shared_ptr<HWAccelDevice> debug_hwaccel_;
+    std::string cuda_context_log_type_ = "cuda_infer_trt";
+    std::string cuda_context_log_node_ = "<unnamed>";
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;
@@ -275,6 +284,9 @@ protected:
 
 public:
     virtual ~CudaInferTrtBase();
+    void setCudaContextDebugInfo(const std::string& node_type,
+                                 const std::string& node_label,
+                                 std::shared_ptr<HWAccelDevice> hwaccel);
 };
 
 } // namespace yolo_base

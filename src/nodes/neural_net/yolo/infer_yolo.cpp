@@ -467,6 +467,11 @@ public:
         auto r = std::make_shared<CudaInferYolo>(
             src->makeSource(), dst->makeSink(), std::move(sink_seg));
         r->node_label_ = params.value("name", std::string("<unnamed>"));
+        std::shared_ptr<HWAccelDevice> debug_hwaccel;
+        if (params.count("hwaccel")) {
+            debug_hwaccel = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        }
+        r->setCudaContextDebugInfo("cuda_infer_yolo", r->node_label_, debug_hwaccel);
 
         // Parse global params
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];

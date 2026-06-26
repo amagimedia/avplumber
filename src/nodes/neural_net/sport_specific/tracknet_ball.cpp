@@ -1201,6 +1201,11 @@ public:
 
         auto r = std::make_shared<TrackNetBall>(src->makeSource(), dst->makeSink());
         r->node_label_ = params.value("name", std::string("<unnamed>"));
+        std::shared_ptr<HWAccelDevice> debug_hwaccel;
+        if (params.count("hwaccel")) {
+            debug_hwaccel = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        }
+        r->setCudaContextDebugInfo("tracknet_ball", r->node_label_, debug_hwaccel);
 
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key_detection", r->metadata_key_detection_);
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key", r->metadata_key_detection_);

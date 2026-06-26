@@ -3,6 +3,7 @@
 #include "../yolo/decode_segmentation.hpp"
 #include "../yolo/decode_pose.hpp"
 #include <mutex>
+#include <utility>
 
 // PTX blob for NV12->NCHW preprocess kernel.
 #include "../../../../objs/src/nodes/neural_net/preprocess/nv12_to_nchw.ptx.h"
@@ -24,8 +25,61 @@ ModelRunner::~ModelRunner() = default;
 ModelRunner::ModelRunner(ModelRunner&&) noexcept = default;
 ModelRunner& ModelRunner::operator=(ModelRunner&&) noexcept = default;
 
+void logCudaContextPointers(const char* node_type,
+                            const std::string& node_label,
+                            const av::VideoFrame& frm,
+                            CUcontext frame_cu_ctx,
+                            const std::shared_ptr<HWAccelDevice>& hwaccel) {
+    AVBufferRef* frame_hw_frames_ref = frm.raw() ? frm.raw()->hw_frames_ctx : nullptr;
+    AVHWFramesContext* frame_hw_frames_ctx =
+        (frame_hw_frames_ref && frame_hw_frames_ref->data)
+            ? (AVHWFramesContext*)frame_hw_frames_ref->data
+            : nullptr;
+    AVHWDeviceContext* frame_device_ctx =
+        frame_hw_frames_ctx ? frame_hw_frames_ctx->device_ctx : nullptr;
+
+    AVBufferRef* hwaccel_device_ref = hwaccel ? hwaccel->deviceContext() : nullptr;
+    AVHWDeviceContext* hwaccel_device_ctx =
+        (hwaccel_device_ref && hwaccel_device_ref->data)
+            ? (AVHWDeviceContext*)hwaccel_device_ref->data
+            : nullptr;
+    AVCUDADeviceContext* hwaccel_cuda_dev_ctx =
+        (hwaccel_device_ctx && hwaccel_device_ctx->type == AV_HWDEVICE_TYPE_CUDA)
+            ? (AVCUDADeviceContext*)hwaccel_device_ctx->hwctx
+            : nullptr;
+    CUcontext hwaccel_cu_ctx =
+        hwaccel_cuda_dev_ctx ? hwaccel_cuda_dev_ctx->cuda_ctx : nullptr;
+
+    CUcontext current_cu_ctx = nullptr;
+    const bool current_ok =
+        cuCtxGetCurrent && (cuCtxGetCurrent(&current_cu_ctx) == CUDA_SUCCESS);
+
+    logstream << "neural_cuda_context"
+              << " type=" << (node_type ? node_type : "<unknown>")
+              << " node=" << node_label
+              << " frame_hw_frames_ref=" << (const void*)frame_hw_frames_ref
+              << " frame_hw_frames_ctx=" << (const void*)frame_hw_frames_ctx
+              << " frame_device_ref=" << (const void*)(frame_hw_frames_ctx ? frame_hw_frames_ctx->device_ref : nullptr)
+              << " frame_device_ctx=" << (const void*)frame_device_ctx
+              << " frame_cuda_ctx=" << (const void*)frame_cu_ctx
+              << " current_cuda_ctx=" << (current_ok ? (const void*)current_cu_ctx : nullptr)
+              << " current_match_frame=" << (current_ok && current_cu_ctx == frame_cu_ctx ? 1 : 0)
+              << " hwaccel_device_ref=" << (const void*)hwaccel_device_ref
+              << " hwaccel_device_ctx=" << (const void*)hwaccel_device_ctx
+              << " hwaccel_cuda_ctx=" << (const void*)hwaccel_cu_ctx
+              << " hwaccel_match_frame=" << (hwaccel_cu_ctx && hwaccel_cu_ctx == frame_cu_ctx ? 1 : 0);
+}
+
 CudaInferTrtBase::~CudaInferTrtBase() {
     cleanupAll();
+}
+
+void CudaInferTrtBase::setCudaContextDebugInfo(const std::string& node_type,
+                                               const std::string& node_label,
+                                               std::shared_ptr<HWAccelDevice> hwaccel) {
+    cuda_context_log_type_ = node_type;
+    cuda_context_log_node_ = node_label;
+    debug_hwaccel_ = std::move(hwaccel);
 }
 
 void CudaInferTrtBase::cleanupAll() {
@@ -96,6 +150,11 @@ bool CudaInferTrtBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
         logstream << "cuda_infer_yolo: cuCtxSetCurrent failed";
         return false;
     }
+    logCudaContextPointers(cuda_context_log_type_.c_str(),
+                           cuda_context_log_node_,
+                           frm,
+                           cu_ctx_,
+                           debug_hwaccel_);
     return true;
 }
 
