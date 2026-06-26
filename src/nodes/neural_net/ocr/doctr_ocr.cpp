@@ -382,6 +382,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     CUdeviceptr d_boxes_ = 0;
     bool initialized_ = false;
     std::string node_label_ = "<unnamed>";
+    std::shared_ptr<HWAccelDevice> debug_hwaccel_;
     DoctrLogger logger_;
     TrtRunner det_;
     TrtRunner rec_;
@@ -397,6 +398,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) return false;
         cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
         if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        yolo_base::logCudaContextPointers("doctr_ocr", node_label_, frm, cu_ctx_, debug_hwaccel_);
         const std::string ptx(avpl_doctr_preprocess_ptx, avpl_doctr_preprocess_ptx + avpl_doctr_preprocess_ptx_len);
         if (CUDA_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, ptx.c_str(), 0, nullptr, nullptr))) return false;
         if (CUDA_CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, "kNV12_doctr_crop_resize_pad_f32"))) return false;
@@ -590,6 +592,9 @@ public:
         if (!p.count("detector_engine")) throw Error("doctr_ocr: detector_engine param required");
         if (!p.count("recognizer_engine")) throw Error("doctr_ocr: recognizer_engine param required");
         r->node_label_ = p.value("name", std::string("<unnamed>"));
+        if (p.count("hwaccel")) {
+            r->debug_hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, p["hwaccel"]);
+        }
         r->detector_engine_ = p["detector_engine"].get<std::string>();
         r->recognizer_engine_ = p["recognizer_engine"].get<std::string>();
         if (p.count("metadata_key")) r->metadata_key_ = p["metadata_key"].get<std::string>();
