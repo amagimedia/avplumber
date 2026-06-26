@@ -127,6 +127,14 @@ std::vector<Region> buildRegions(int W, int H, int region_height, int max_region
     return out;
 }
 
+int autoRegionHeight(int W, int H) {
+    // The detector input is 768x200. Region width is frame_width/2.5, so choose
+    // a source crop height that preserves that aspect ratio before resize.
+    int region_w = std::max(1, (int)std::floor((double)W / 2.5));
+    int h = (int)std::lround((double)region_w * (double)kDetH / (double)kDetW);
+    return std::max(1, std::min(h, H));
+}
+
 class DoctrLogger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
@@ -365,7 +373,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     float target_fps_ = 5.0f;
     double input_fps_ = 25.0;
     int sample_every_n_ = 5;
-    int region_height_ = 200;
+    int region_height_ = 0;
     int max_regions_ = 4;
     int max_boxes_ = 24;
     float det_bin_thresh_ = 0.1f;
@@ -611,7 +619,8 @@ public:
         if (cu_ctx_) cuCtxSetCurrent(cu_ctx_);
         const int W = frm.raw()->width;
         const int H = frm.raw()->height;
-        std::vector<Region> regions = buildRegions(W, H, region_height_, std::min(max_regions_, kDetBatch));
+        int effective_region_height = region_height_ > 0 ? region_height_ : autoRegionHeight(W, H);
+        std::vector<Region> regions = buildRegions(W, H, effective_region_height, std::min(max_regions_, kDetBatch));
         std::vector<int> det_boxes;
         det_boxes.reserve((size_t)kDetBatch * 4);
         for (int i = 0; i < kDetBatch; ++i) {
@@ -732,7 +741,7 @@ public:
         if (p.count("target_fps")) r->target_fps_ = std::max(0.1f, p["target_fps"].get<float>());
         if (p.count("input_fps")) r->input_fps_ = parseFps(p["input_fps"].get<std::string>());
         r->sample_every_n_ = std::max(1, (int)std::lround(r->input_fps_ / std::max(0.1f, r->target_fps_)));
-        if (p.count("region_height")) r->region_height_ = std::max(1, p["region_height"].get<int>());
+        if (p.count("region_height")) r->region_height_ = std::max(0, p["region_height"].get<int>());
         if (p.count("max_regions")) r->max_regions_ = std::max(1, std::min(kDetBatch, p["max_regions"].get<int>()));
         if (p.count("max_boxes")) r->max_boxes_ = std::max(1, std::min(kRecBatch, p["max_boxes"].get<int>()));
         if (p.count("det_bin_thresh")) r->det_bin_thresh_ = p["det_bin_thresh"].get<float>();
