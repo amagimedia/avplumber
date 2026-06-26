@@ -4,13 +4,20 @@
 // Modeled on luma_diff.cpp: grabs the CUDA context/stream from the incoming
 // AV_PIX_FMT_CUDA frame, keeps the previous frame's luma in an NVOF input
 // buffer, runs dense optical flow between (prev -> cur), reduces the flow grid
-// to a global median horizontal component (tx, in pixels), and writes
+// to a masked-median horizontal component (tx, in pixels), and writes
 // {tx, nvof_cost, has_prev, ...} into frame metadata.
 //
-// Phase 2b: GLOBAL median over the whole grid (no ball/player masking yet — that
-// is Phase 2c via a .cu reduction kernel). The contract consumed downstream
-// (Sports-Reframing-Service camera_motion.py) is just per-frame tx, so this
-// already produces a usable, if unmasked, camera path.
+// Reduction: median of background flowx, excluding cells covered by ball/player
+// boxes (read from frame metadata, margin-grown) so tx reflects camera motion;
+// global-median fallback when too few background cells survive. The contract
+// consumed downstream (Sports-Reframing-Service camera_motion.py) is just
+// per-frame tx.
+//
+// The same single pass over the grid also emits diagnostic scalars for studying
+// scene-cut vs. camera-pan separation offline: flow_mag_min (p5 background cell
+// |flow|), flow_mag_mean, bg_cell_frac (surviving background cells / total), and
+// tx_mad (spread of background flowx about tx). Additive metadata; tx and the
+// downstream contract are unchanged.
 //
 // The NVOF dense engine ships with the driver (libnvidia-opticalflow.so);
 // headers are vendored in deps/Optical_Flow_SDK_5.0.7. Built only when
@@ -30,6 +37,7 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -270,18 +278,52 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return boxes;
     }
 
-    // Median of background flowx (px). Cells whose center falls inside any mask
-    // box (grown by margin) are excluded. Falls back to all cells if masking
-    // would leave too few samples.
-    float maskedMedianTx(const std::vector<std::array<float,4>>& boxes) {
+    // Per-frame reduction results over the NVOF grid. tx is the camera signal
+    // consumed downstream; the rest are diagnostic scalars (Phase 2 "cheap wins")
+    // for offline study of scene-cut vs. pan separation. All derived in one pass
+    // over the same coarse grid already in host memory.
+    struct CameraMotionStats {
+        float tx = 0.0f;            // masked median of background flowx (px)
+        float tx_mad = 0.0f;        // median abs deviation of background flowx about tx (px)
+        float flow_mag_min = 0.0f;  // low-percentile (p5) background cell |flow| (px)
+        float flow_mag_mean = 0.0f; // mean background cell |flow| (px)
+        float bg_cell_frac = 0.0f;  // surviving background cells / total grid cells
+        bool  masked_used = false;  // true if the masked set was used (else global fallback)
+    };
+
+    static float percentileSorted(std::vector<float>& v, float pct) {
+        if (v.empty()) return 0.0f;
+        size_t k = (size_t)(pct * (float)(v.size() - 1));
+        if (k >= v.size()) k = v.size() - 1;
+        std::nth_element(v.begin(), v.begin() + k, v.end());
+        return v[k];
+    }
+
+    static float medianSorted(std::vector<float>& v) {
+        if (v.empty()) return 0.0f;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    }
+
+    // Reduce the flow grid to tx (masked median flowx) plus diagnostic scalars.
+    // Cells whose center falls inside any mask box (grown by margin) are excluded
+    // so tx/diagnostics reflect BACKGROUND (camera) motion. Falls back to all
+    // cells if masking would leave too few samples.
+    CameraMotionStats reduceGrid(const std::vector<std::array<float,4>>& boxes) {
         const size_t n = (size_t)grid_w_ * grid_h_;
-        std::vector<float> fg; fg.reserve(n);
-        std::vector<float> all; all.reserve(n);
+        std::vector<float> fg_fx; fg_fx.reserve(n);   // background flowx
+        std::vector<float> fg_mag; fg_mag.reserve(n); // background |flow|
+        std::vector<float> all_fx; all_fx.reserve(n);
+        std::vector<float> all_mag; all_mag.reserve(n);
         const float m = mask_margin_frac_;
         for (int gy = 0; gy < grid_h_; ++gy) {
             for (int gx = 0; gx < grid_w_; ++gx) {
-                const float fx = host_grid_[(size_t)gy * grid_w_ + gx].flowx / 32.0f;
-                all.push_back(fx);
+                const NV_OF_FLOW_VECTOR& v = host_grid_[(size_t)gy * grid_w_ + gx];
+                const float fx = v.flowx / 32.0f;
+                const float fy = v.flowy / 32.0f;
+                const float mag = std::sqrt(fx * fx + fy * fy);
+                all_fx.push_back(fx);
+                all_mag.push_back(mag);
                 // Cell center in normalized coords.
                 const float cxn = ((gx + 0.5f) * grid_size_) / (float)of_w_;
                 const float cyn = ((gy + 0.5f) * grid_size_) / (float)of_h_;
@@ -293,23 +335,44 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
                         masked = true; break;
                     }
                 }
-                if (!masked) fg.push_back(fx);
+                if (!masked) { fg_fx.push_back(fx); fg_mag.push_back(mag); }
             }
         }
-        std::vector<float>& use = (fg.size() >= 8) ? fg : all;
-        if (use.empty()) return 0.0f;
-        std::nth_element(use.begin(), use.begin() + use.size()/2, use.end());
-        return use[use.size()/2];
+
+        CameraMotionStats s;
+        if (n == 0) return s;
+        s.masked_used = (fg_fx.size() >= 8);
+        std::vector<float>& use_fx = s.masked_used ? fg_fx : all_fx;
+        std::vector<float>& use_mag = s.masked_used ? fg_mag : all_mag;
+        s.bg_cell_frac = (float)fg_fx.size() / (float)n;
+        if (use_fx.empty()) return s;
+
+        s.tx = medianSorted(use_fx);
+        // MAD about tx: spread of background flowx (agreement of cells).
+        std::vector<float> dev; dev.reserve(use_fx.size());
+        for (float fx : use_fx) dev.push_back(std::fabs(fx - s.tx));
+        s.tx_mad = medianSorted(dev);
+        // Magnitude stats: min (p5, robust) and mean over the used cell set.
+        double mag_sum = 0.0;
+        for (float mg : use_mag) mag_sum += (double)mg;
+        s.flow_mag_mean = (float)(mag_sum / (double)use_mag.size());
+        s.flow_mag_min = percentileSorted(use_mag, 0.05f);
+        return s;
     }
 
-    void writeMetadata(av::VideoFrame& frm, bool has_prev, float tx, float cost, const std::string& status) {
+    void writeMetadata(av::VideoFrame& frm, bool has_prev, const CameraMotionStats& s,
+                       float cost, const std::string& status) {
         std::ostringstream md;
         md.precision(6);
         md << "{"
            << "\"frame_index\":" << (frame_counter_ > 0 ? frame_counter_ - 1 : 0) << ","
            << "\"has_prev\":" << (has_prev ? "true" : "false") << ","
-           << "\"tx\":" << tx << ","
+           << "\"tx\":" << s.tx << ","
            << "\"nvof_cost\":" << cost << ","
+           << "\"tx_mad\":" << s.tx_mad << ","
+           << "\"flow_mag_min\":" << s.flow_mag_min << ","
+           << "\"flow_mag_mean\":" << s.flow_mag_mean << ","
+           << "\"bg_cell_frac\":" << s.bg_cell_frac << ","
            << "\"status\":\"" << status << "\""
            << "}";
         av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), md.str().c_str(), 0);
@@ -339,22 +402,22 @@ public:
         AVFrame* raw = frm.raw();
         if (!raw || raw->format != AV_PIX_FMT_CUDA) {
             if (strict_cuda_) throw Error("cuda_camera_motion: input frame is not AV_PIX_FMT_CUDA");
-            writeMetadata(frm, false, 0.0f, 0.0f, "skipped_non_cuda");
+            writeMetadata(frm, false, CameraMotionStats{}, 0.0f, "skipped_non_cuda");
             this->sink_->put(frm); return;
         }
         if (!isSupportedCudaFormat(hwSwFormat(frm))) {
             if (strict_cuda_) throw Error("cuda_camera_motion: unsupported CUDA sw_format");
-            writeMetadata(frm, false, 0.0f, 0.0f, "unsupported_sw_format");
+            writeMetadata(frm, false, CameraMotionStats{}, 0.0f, "unsupported_sw_format");
             this->sink_->put(frm); return;
         }
         if (!raw->data[0] || raw->linesize[0] <= 0) {
             if (strict_cuda_) throw Error("cuda_camera_motion: invalid luma plane");
-            writeMetadata(frm, false, 0.0f, 0.0f, "invalid_luma_plane");
+            writeMetadata(frm, false, CameraMotionStats{}, 0.0f, "invalid_luma_plane");
             this->sink_->put(frm); return;
         }
         if (!initCudaContextFromFrame(frm) || !initOF() || !ensureSession(frm.width(), frm.height())) {
             if (strict_cuda_) throw Error("cuda_camera_motion: failed to initialize NVOF");
-            writeMetadata(frm, false, 0.0f, 0.0f, "nvof_init_failed");
+            writeMetadata(frm, false, CameraMotionStats{}, 0.0f, "nvof_init_failed");
             this->sink_->put(frm); return;
         }
 
@@ -373,7 +436,7 @@ public:
             }
             CCM_CHECK_CU(cuStreamSynchronize(stream_));
             have_prev_ = true;
-            writeMetadata(frm, false, 0.0f, 0.0f, "ok");
+            writeMetadata(frm, false, CameraMotionStats{}, 0.0f, "ok");
             this->sink_->put(frm);
             return;
         }
@@ -390,17 +453,19 @@ public:
         }
         if (!downloadGrid()) throw Error("cuda_camera_motion: flow download failed");
 
-        // Masked median flowx (px): exclude cells covered by ball/player boxes so
-        // tx reflects background (camera) motion. Falls back to global median if
-        // too few background cells. cost = mean NVOF cost over the grid.
+        // Reduce the flow grid: tx (masked median flowx, px) reflects background
+        // (camera) motion — cells covered by ball/player boxes are excluded, with
+        // global fallback when too few background cells. The same pass yields the
+        // diagnostic scalars (flow_mag_min/mean, bg_cell_frac, tx_mad).
+        // cost = mean NVOF cost over the grid.
         const size_t n = (size_t)grid_w_ * grid_h_;
         const std::vector<std::array<float,4>> mask_boxes = collectMaskBoxes(raw);
-        const float tx = maskedMedianTx(mask_boxes);
+        const CameraMotionStats stats = reduceGrid(mask_boxes);
         double cost_sum = 0.0;
         for (size_t i = 0; i < n; ++i) cost_sum += (double)host_cost_[i];
         const float cost = n ? (float)(cost_sum / (double)n) : 0.0f;
 
-        writeMetadata(frm, true, tx, cost, "ok");
+        writeMetadata(frm, true, stats, cost, "ok");
 
         // Current becomes the reference for the next frame.
         if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
@@ -410,7 +475,10 @@ public:
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "cuda_camera_motion: frame=" << (frame_counter_ - 1)
-                      << " tx=" << tx << " cost=" << cost
+                      << " tx=" << stats.tx << " cost=" << cost
+                      << " mag_min=" << stats.flow_mag_min
+                      << " mag_mean=" << stats.flow_mag_mean
+                      << " bg_frac=" << stats.bg_cell_frac
                       << " grid=" << grid_w_ << "x" << grid_h_;
         }
 
