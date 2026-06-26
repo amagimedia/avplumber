@@ -115,6 +115,11 @@ public:
             return;
         }
         if (!frm) return;
+        auto process_start = std::chrono::steady_clock::now();
+        int64_t process_init_ms = 0;
+        bool process_reinit = false;
+        bool process_context_match = false;
+        bool process_preinit = wasPreinitializedFromHWAccel();
 
         ++frame_counter_;
         if (infer_every_n_ > 1 && (frame_counter_ % (uint64_t)infer_every_n_) != 0) {
@@ -143,8 +148,13 @@ public:
             if (!ok) {
                 return;
             }
+            process_init_ms = init_ms;
         } else if (!ensureInitialized(frm)) {
             return;
+        } else {
+            process_init_ms = lastContextInitMs();
+            process_reinit = lastContextReinitialized();
+            process_context_match = lastContextMatched();
         }
         // Initialize segmentation decoders after engine loading (needs output tensor dims)
         if (!seg_decoders_initialized_) {
@@ -410,6 +420,20 @@ public:
         }
 
         sink_->put(frm);
+        auto process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - process_start).count();
+        if (frame_counter_ == 1 || process_init_ms > 0 || process_reinit) {
+            logstream << "neural_process"
+                      << " status=ok"
+                      << " type=cuda_infer_yolo"
+                      << " node=" << node_label_
+                      << " frame=" << frame_counter_
+                      << " preinit=" << (process_preinit ? 1 : 0)
+                      << " context_match=" << (process_context_match ? 1 : 0)
+                      << " reinit=" << (process_reinit ? 1 : 0)
+                      << " init_ms=" << process_init_ms
+                      << " process_ms=" << process_ms;
+        }
     }
 
     std::string buildDetectionMetadata(const std::vector<Detection>& dets) const {
@@ -587,6 +611,9 @@ public:
             }
 
             r->models_.push_back(std::move(model));
+        }
+        if (debug_hwaccel) {
+            r->preinitializeFromHWAccel();
         }
 
         return r;
