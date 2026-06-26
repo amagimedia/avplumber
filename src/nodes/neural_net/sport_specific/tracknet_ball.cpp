@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -249,6 +250,7 @@ protected:
     uint64_t empty_frames_ = 0;
     std::array<uint64_t, 10> conf_histogram_{};
     std::map<int, uint64_t> detection_count_histogram_;
+    std::string node_label_ = "<unnamed>";
 
 public:
     TrackNetBall(std::unique_ptr<Source<av::VideoFrame>> source,
@@ -309,7 +311,23 @@ public:
             return;
         }
 
-        if (!ensureTracknetInitialized(frm)) {
+        if (!initialized_) {
+            auto init_start = std::chrono::steady_clock::now();
+            bool ok = ensureTracknetInitialized(frm);
+            auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+            logstream << "neural_node_init"
+                      << " status=" << (ok ? "ok" : "error")
+                      << " type=tracknet_ball"
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << init_ms
+                      << " frame=" << frame_counter_
+                      << " models=" << models_.size();
+            if (!ok) {
+                return;
+            }
+        } else if (!ensureTracknetInitialized(frm)) {
             return;
         }
 
@@ -1182,6 +1200,7 @@ public:
         std::shared_ptr<Edge<av::VideoFrame>> dst = edges.find<av::VideoFrame>(params["dst"]);
 
         auto r = std::make_shared<TrackNetBall>(src->makeSource(), dst->makeSink());
+        r->node_label_ = params.value("name", std::string("<unnamed>"));
 
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key_detection", r->metadata_key_detection_);
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key", r->metadata_key_detection_);
