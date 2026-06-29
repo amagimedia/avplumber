@@ -220,12 +220,24 @@ endif
 # Built when HAVE_NVOF=1 + CUDA + the dense-API headers are vendored. Links the
 # driver-provided libnvidia-opticalflow; needs the sport_specific node infra.
 HAVE_NVOF ?= 0
+HAVE_OPENCV ?= 0
 NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET_SPECIFIC),111)
 ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
 NODES_SRC += $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
 override LIBS_FLAGS += -lnvidia-opticalflow
+ifeq ($(HAVE_OPENCV),1)
+OPENCV4_CFLAGS := $(shell pkg-config --cflags opencv4 2>/dev/null)
+OPENCV4_LIBS := $(shell pkg-config --libs opencv4 2>/dev/null)
+ifeq ($(strip $(OPENCV4_CFLAGS)$(OPENCV4_LIBS)),)
+$(error HAVE_OPENCV=1 but pkg-config opencv4 is unavailable)
+endif
+override CXXFLAGS += -DHAVE_OPENCV=1 $(OPENCV4_CFLAGS)
+override LIBS_FLAGS += $(OPENCV4_LIBS)
+else
+override CXXFLAGS += -DHAVE_OPENCV=0
+endif
 else
 $(warning HAVE_NVOF=1 but dense headers missing at $(NVOF_DENSE_HEADERS); skipping cuda_camera_motion)
 endif

@@ -1,16 +1,15 @@
-// CudaCameraMotion — per-frame horizontal camera translation (tx) via the
-// NVIDIA Optical Flow (NVOF) dense engine.
+// CudaCameraMotion — per-frame camera motion via the NVIDIA Optical Flow
+// (NVOF) dense engine.
 //
 // Modeled on luma_diff.cpp: grabs the CUDA context/stream from the incoming
 // AV_PIX_FMT_CUDA frame, keeps the previous frame's luma in an NVOF input
 // buffer, runs dense optical flow between (prev -> cur), reduces the flow grid
-// to a global median horizontal component (tx, in pixels), and writes
-// {tx, nvof_cost, has_prev, ...} into frame metadata.
+// to background motion statistics, optionally fits a full 2x3 affine with
+// OpenCV, and writes {tx, ty, affine_2x3, nvof_cost, has_prev, ...} into frame
+// metadata.
 //
-// Phase 2b: GLOBAL median over the whole grid (no ball/player masking yet — that
-// is Phase 2c via a .cu reduction kernel). The contract consumed downstream
-// (Sports-Reframing-Service camera_motion.py) is just per-frame tx, so this
-// already produces a usable, if unmasked, camera path.
+// When HAVE_OPENCV=0, affine_2x3 falls back to a translation-only matrix built
+// from the masked median tx so existing deployments keep the old behavior.
 //
 // The NVOF dense engine ships with the driver (libnvidia-opticalflow.so);
 // headers are vendored in deps/Optical_Flow_SDK_5.0.7. Built only when
@@ -31,12 +30,19 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "nvOpticalFlowCommon.h"
 #include "nvOpticalFlowCuda.h"
+
+#if HAVE_OPENCV
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
+#endif
 
 namespace {
 
@@ -79,7 +85,41 @@ bool isSupportedCudaFormat(AVPixelFormat sw_fmt) {
 } // namespace
 
 class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
-    std::string metadata_key_ = "srs_camera_motion";
+    struct FlowCell {
+        float x = 0.0f;
+        float y = 0.0f;
+        float dx = 0.0f;
+        float dy = 0.0f;
+        float mag = 0.0f;
+    };
+
+    struct MotionSummary {
+        std::vector<FlowCell> cells;
+        float tx_median = 0.0f;
+        float tx_mad = 0.0f;
+        float flow_mag_min = 0.0f;
+        float flow_mag_mean = 0.0f;
+        float bg_cell_frac = 0.0f;
+        int bg_cell_count = 0;
+        int total_cell_count = 0;
+        bool used_mask_fallback = false;
+    };
+
+    struct AffineSummary {
+        double m00 = 1.0;
+        double m01 = 0.0;
+        double m02 = 0.0;
+        double m10 = 0.0;
+        double m11 = 1.0;
+        double m12 = 0.0;
+        bool valid = false;
+        int point_count = 0;
+        int inlier_count = 0;
+        double inlier_frac = 0.0;
+        double residual_px = 0.0;
+    };
+
+    std::string metadata_key_ = "camera_motion";
     bool strict_cuda_ = true;
     int debug_log_every_n_ = 0;
     int grid_size_ = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
@@ -270,18 +310,30 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return boxes;
     }
 
-    // Median of background flowx (px). Cells whose center falls inside any mask
-    // box (grown by margin) are excluded. Falls back to all cells if masking
-    // would leave too few samples.
-    float maskedMedianTx(const std::vector<std::array<float,4>>& boxes) {
+    static float medianInPlace(std::vector<float>& vals) {
+        if (vals.empty()) return 0.0f;
+        const size_t mid = vals.size() / 2;
+        std::nth_element(vals.begin(), vals.begin() + mid, vals.end());
+        return vals[mid];
+    }
+
+    MotionSummary summarizeMotion(const std::vector<std::array<float,4>>& boxes) {
+        MotionSummary s;
         const size_t n = (size_t)grid_w_ * grid_h_;
-        std::vector<float> fg; fg.reserve(n);
-        std::vector<float> all; all.reserve(n);
+        std::vector<FlowCell> bg; bg.reserve(n);
+        std::vector<FlowCell> all; all.reserve(n);
         const float m = mask_margin_frac_;
         for (int gy = 0; gy < grid_h_; ++gy) {
             for (int gx = 0; gx < grid_w_; ++gx) {
-                const float fx = host_grid_[(size_t)gy * grid_w_ + gx].flowx / 32.0f;
-                all.push_back(fx);
+                const NV_OF_FLOW_VECTOR& v = host_grid_[(size_t)gy * grid_w_ + gx];
+                FlowCell cell;
+                cell.x = (gx + 0.5f) * (float)grid_size_;
+                cell.y = (gy + 0.5f) * (float)grid_size_;
+                cell.dx = v.flowx / 32.0f;
+                cell.dy = v.flowy / 32.0f;
+                cell.mag = std::sqrt(cell.dx * cell.dx + cell.dy * cell.dy);
+                all.push_back(cell);
+
                 // Cell center in normalized coords.
                 const float cxn = ((gx + 0.5f) * grid_size_) / (float)of_w_;
                 const float cyn = ((gy + 0.5f) * grid_size_) / (float)of_h_;
@@ -293,23 +345,109 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
                         masked = true; break;
                     }
                 }
-                if (!masked) fg.push_back(fx);
+                if (!masked) bg.push_back(cell);
             }
         }
-        std::vector<float>& use = (fg.size() >= 8) ? fg : all;
-        if (use.empty()) return 0.0f;
-        std::nth_element(use.begin(), use.begin() + use.size()/2, use.end());
-        return use[use.size()/2];
+
+        s.total_cell_count = (int)all.size();
+        s.bg_cell_count = (int)bg.size();
+        s.bg_cell_frac = all.empty() ? 0.0f : (float)bg.size() / (float)all.size();
+        s.used_mask_fallback = bg.size() < 8 && !all.empty();
+        s.cells = s.used_mask_fallback ? all : bg;
+        if (s.cells.empty()) return s;
+
+        std::vector<float> txs;
+        txs.reserve(s.cells.size());
+        double mag_sum = 0.0;
+        float mag_min = std::numeric_limits<float>::max();
+        for (const FlowCell& cell : s.cells) {
+            txs.push_back(cell.dx);
+            mag_sum += cell.mag;
+            mag_min = std::min(mag_min, cell.mag);
+        }
+        s.tx_median = medianInPlace(txs);
+        s.flow_mag_min = (mag_min == std::numeric_limits<float>::max()) ? 0.0f : mag_min;
+        s.flow_mag_mean = (float)(mag_sum / (double)s.cells.size());
+
+        std::vector<float> abs_dev;
+        abs_dev.reserve(s.cells.size());
+        for (const FlowCell& cell : s.cells) {
+            abs_dev.push_back(std::fabs(cell.dx - s.tx_median));
+        }
+        s.tx_mad = medianInPlace(abs_dev);
+        return s;
     }
 
-    void writeMetadata(av::VideoFrame& frm, bool has_prev, float tx, float cost, const std::string& status) {
+    AffineSummary estimateAffine(const MotionSummary& motion) {
+        AffineSummary a;
+        a.m02 = motion.tx_median;
+        a.point_count = (int)motion.cells.size();
+#if HAVE_OPENCV
+        if (motion.cells.size() < 8) return a;
+
+        std::vector<cv::Point2f> src;
+        std::vector<cv::Point2f> dst;
+        src.reserve(motion.cells.size());
+        dst.reserve(motion.cells.size());
+        for (const FlowCell& cell : motion.cells) {
+            src.emplace_back(cell.x, cell.y);
+            dst.emplace_back(cell.x + cell.dx, cell.y + cell.dy);
+        }
+
+        cv::Mat inliers;
+        cv::Mat M = cv::estimateAffine2D(src, dst, inliers, cv::RANSAC, 2.0);
+        if (M.empty()) return a;
+        if (M.type() != CV_64F) M.convertTo(M, CV_64F);
+
+        a.m00 = M.at<double>(0, 0);
+        a.m01 = M.at<double>(0, 1);
+        a.m02 = M.at<double>(0, 2);
+        a.m10 = M.at<double>(1, 0);
+        a.m11 = M.at<double>(1, 1);
+        a.m12 = M.at<double>(1, 2);
+        a.valid = true;
+
+        double residual_sum = 0.0;
+        for (int i = 0; i < inliers.rows; ++i) {
+            if (!inliers.at<uint8_t>(i, 0)) continue;
+            ++a.inlier_count;
+            const FlowCell& cell = motion.cells[(size_t)i];
+            const double px = a.m00 * cell.x + a.m01 * cell.y + a.m02;
+            const double py = a.m10 * cell.x + a.m11 * cell.y + a.m12;
+            const double ex = px - (cell.x + cell.dx);
+            const double ey = py - (cell.y + cell.dy);
+            residual_sum += std::sqrt(ex * ex + ey * ey);
+        }
+        a.inlier_frac = a.point_count > 0 ? (double)a.inlier_count / (double)a.point_count : 0.0;
+        a.residual_px = a.inlier_count > 0 ? residual_sum / (double)a.inlier_count : 0.0;
+#endif
+        return a;
+    }
+
+    void writeMetadata(av::VideoFrame& frm, bool has_prev, const MotionSummary& motion,
+                       const AffineSummary& affine, float cost, const std::string& status) {
         std::ostringstream md;
         md.precision(6);
         md << "{"
            << "\"frame_index\":" << (frame_counter_ > 0 ? frame_counter_ - 1 : 0) << ","
            << "\"has_prev\":" << (has_prev ? "true" : "false") << ","
-           << "\"tx\":" << tx << ","
+           << "\"tx\":" << affine.m02 << ","
+           << "\"ty\":" << affine.m12 << ","
+           << "\"affine_2x3\":[["
+           << affine.m00 << "," << affine.m01 << "," << affine.m02 << "],["
+           << affine.m10 << "," << affine.m11 << "," << affine.m12 << "]],"
+           << "\"affine_valid\":" << (affine.valid ? "true" : "false") << ","
+           << "\"affine_point_count\":" << affine.point_count << ","
+           << "\"affine_inlier_count\":" << affine.inlier_count << ","
+           << "\"affine_inlier_frac\":" << affine.inlier_frac << ","
+           << "\"affine_residual_px\":" << affine.residual_px << ","
            << "\"nvof_cost\":" << cost << ","
+           << "\"flow_mag_min\":" << motion.flow_mag_min << ","
+           << "\"flow_mag_mean\":" << motion.flow_mag_mean << ","
+           << "\"bg_cell_frac\":" << motion.bg_cell_frac << ","
+           << "\"tx_mad\":" << motion.tx_mad << ","
+           << "\"tx_median\":" << motion.tx_median << ","
+           << "\"mask_fallback\":" << (motion.used_mask_fallback ? "true" : "false") << ","
            << "\"status\":\"" << status << "\""
            << "}";
         av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), md.str().c_str(), 0);
@@ -339,22 +477,22 @@ public:
         AVFrame* raw = frm.raw();
         if (!raw || raw->format != AV_PIX_FMT_CUDA) {
             if (strict_cuda_) throw Error("cuda_camera_motion: input frame is not AV_PIX_FMT_CUDA");
-            writeMetadata(frm, false, 0.0f, 0.0f, "skipped_non_cuda");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "skipped_non_cuda");
             this->sink_->put(frm); return;
         }
         if (!isSupportedCudaFormat(hwSwFormat(frm))) {
             if (strict_cuda_) throw Error("cuda_camera_motion: unsupported CUDA sw_format");
-            writeMetadata(frm, false, 0.0f, 0.0f, "unsupported_sw_format");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "unsupported_sw_format");
             this->sink_->put(frm); return;
         }
         if (!raw->data[0] || raw->linesize[0] <= 0) {
             if (strict_cuda_) throw Error("cuda_camera_motion: invalid luma plane");
-            writeMetadata(frm, false, 0.0f, 0.0f, "invalid_luma_plane");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "invalid_luma_plane");
             this->sink_->put(frm); return;
         }
         if (!initCudaContextFromFrame(frm) || !initOF() || !ensureSession(frm.width(), frm.height())) {
             if (strict_cuda_) throw Error("cuda_camera_motion: failed to initialize NVOF");
-            writeMetadata(frm, false, 0.0f, 0.0f, "nvof_init_failed");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "nvof_init_failed");
             this->sink_->put(frm); return;
         }
 
@@ -373,7 +511,7 @@ public:
             }
             CCM_CHECK_CU(cuStreamSynchronize(stream_));
             have_prev_ = true;
-            writeMetadata(frm, false, 0.0f, 0.0f, "ok");
+            writeMetadata(frm, false, MotionSummary{}, AffineSummary{}, 0.0f, "ok");
             this->sink_->put(frm);
             return;
         }
@@ -390,17 +528,17 @@ public:
         }
         if (!downloadGrid()) throw Error("cuda_camera_motion: flow download failed");
 
-        // Masked median flowx (px): exclude cells covered by ball/player boxes so
-        // tx reflects background (camera) motion. Falls back to global median if
-        // too few background cells. cost = mean NVOF cost over the grid.
+        // Background flow cells exclude ball/player boxes. If too few remain,
+        // use all cells to keep metadata populated.
         const size_t n = (size_t)grid_w_ * grid_h_;
         const std::vector<std::array<float,4>> mask_boxes = collectMaskBoxes(raw);
-        const float tx = maskedMedianTx(mask_boxes);
+        const MotionSummary motion = summarizeMotion(mask_boxes);
+        const AffineSummary affine = estimateAffine(motion);
         double cost_sum = 0.0;
         for (size_t i = 0; i < n; ++i) cost_sum += (double)host_cost_[i];
         const float cost = n ? (float)(cost_sum / (double)n) : 0.0f;
 
-        writeMetadata(frm, true, tx, cost, "ok");
+        writeMetadata(frm, true, motion, affine, cost, "ok");
 
         // Current becomes the reference for the next frame.
         if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
@@ -410,7 +548,8 @@ public:
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
             logstream << "cuda_camera_motion: frame=" << (frame_counter_ - 1)
-                      << " tx=" << tx << " cost=" << cost
+                      << " tx=" << affine.m02 << " ty=" << affine.m12
+                      << " affine_valid=" << affine.valid << " cost=" << cost
                       << " grid=" << grid_w_ << "x" << grid_h_;
         }
 
