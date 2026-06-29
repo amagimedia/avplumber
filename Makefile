@@ -227,6 +227,12 @@ ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
 NODES_SRC += $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
 override LIBS_FLAGS += -lnvidia-opticalflow
+ifeq ($(HAVE_NVCC),1)
+override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=1
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/neural_net/sport_specific/cuda_camera_motion.o))
+else
+override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=0
+endif
 ifeq ($(HAVE_OPENCV),1)
 OPENCV4_CFLAGS := $(shell pkg-config --cflags opencv4 2>/dev/null)
 OPENCV4_LIBS := $(shell pkg-config --libs opencv4 2>/dev/null)

@@ -39,6 +39,10 @@ extern "C" {
 #include "nvOpticalFlowCommon.h"
 #include "nvOpticalFlowCuda.h"
 
+#if HAVE_CCM_GPU_IRLS
+#include "../../../../objs/src/nodes/neural_net/sport_specific/cuda_camera_motion.ptx.h"
+#endif
+
 #if HAVE_OPENCV
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
@@ -119,6 +123,29 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         double residual_px = 0.0;
     };
 
+#if HAVE_CCM_GPU_IRLS
+    struct DeviceBox {
+        float x0 = 0.0f;
+        float y0 = 0.0f;
+        float x1 = 0.0f;
+        float y1 = 0.0f;
+    };
+
+    struct GpuReduceSummary {
+        double normal[6]{};
+        double bx[3]{};
+        double by[3]{};
+        int point_count = 0;
+        int inlier_count = 0;
+        double residual_sum = 0.0;
+        double cost_sum = 0.0;
+        double mag_sum = 0.0;
+        double mag_min = 0.0;
+        int total_count = 0;
+        int bg_count = 0;
+    };
+#endif
+
     std::string metadata_key_ = "camera_motion";
     bool strict_cuda_ = true;
     int debug_log_every_n_ = 0;
@@ -157,6 +184,15 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     std::vector<NV_OF_FLOW_VECTOR> host_grid_;
     std::vector<uint8_t> host_cost_;
 
+#if HAVE_CCM_GPU_IRLS
+    CUmodule gpu_irls_module_ = nullptr;
+    CUfunction gpu_irls_reduce_kernel_ = nullptr;
+    CUdeviceptr d_gpu_irls_reduce_ = 0;
+    CUdeviceptr d_gpu_irls_boxes_ = 0;
+    int gpu_irls_reduce_blocks_ = 0;
+    int gpu_irls_box_capacity_ = 0;
+#endif
+
     void destroyOFBuffers() {
         if (of_.nvOFDestroyGPUBufferCuda) {
             if (inBuf_)   { of_.nvOFDestroyGPUBufferCuda(inBuf_);   inBuf_ = nullptr; }
@@ -167,6 +203,21 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         of_w_ = of_h_ = grid_w_ = grid_h_ = 0;
         have_prev_ = false;
     }
+
+#if HAVE_CCM_GPU_IRLS
+    void releaseGpuIrlsBuffers() {
+        if (d_gpu_irls_reduce_) {
+            CCM_CHECK_CU(cuMemFree(d_gpu_irls_reduce_));
+            d_gpu_irls_reduce_ = 0;
+        }
+        if (d_gpu_irls_boxes_) {
+            CCM_CHECK_CU(cuMemFree(d_gpu_irls_boxes_));
+            d_gpu_irls_boxes_ = 0;
+        }
+        gpu_irls_reduce_blocks_ = 0;
+        gpu_irls_box_capacity_ = 0;
+    }
+#endif
 
     AVPixelFormat hwSwFormat(const av::VideoFrame& frm) const {
         if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
@@ -205,6 +256,40 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         if (CCM_CHECK_OF(of_.nvOFSetIOCudaStreams(hOF_, (CUstream)stream_, (CUstream)stream_))) return false;
         return true;
     }
+
+#if HAVE_CCM_GPU_IRLS
+    bool loadGpuIrlsKernel() {
+        if (gpu_irls_reduce_kernel_) return true;
+        if (!cu_ctx_) return false;
+        if (CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) return false;
+        const std::string ptx(avpl_camera_motion_ptx, avpl_camera_motion_ptx + avpl_camera_motion_ptx_len);
+        if (CCM_CHECK_CU(cuModuleLoadDataEx(&gpu_irls_module_, ptx.c_str(), 0, nullptr, nullptr))) return false;
+        if (CCM_CHECK_CU(cuModuleGetFunction(&gpu_irls_reduce_kernel_, gpu_irls_module_, "kCameraMotionAffineReduce"))) return false;
+        return true;
+    }
+
+    bool ensureGpuIrlsBuffers(int reduce_blocks, int box_count) {
+        if (reduce_blocks <= 0) return false;
+        if (gpu_irls_reduce_blocks_ < reduce_blocks) {
+            if (d_gpu_irls_reduce_) {
+                CCM_CHECK_CU(cuMemFree(d_gpu_irls_reduce_));
+                d_gpu_irls_reduce_ = 0;
+            }
+            if (CCM_CHECK_CU(cuMemAlloc(&d_gpu_irls_reduce_, (size_t)reduce_blocks * 20u * sizeof(double)))) return false;
+            gpu_irls_reduce_blocks_ = reduce_blocks;
+        }
+        if (box_count > gpu_irls_box_capacity_) {
+            if (d_gpu_irls_boxes_) {
+                CCM_CHECK_CU(cuMemFree(d_gpu_irls_boxes_));
+                d_gpu_irls_boxes_ = 0;
+            }
+            const int cap = std::max(8, box_count);
+            if (CCM_CHECK_CU(cuMemAlloc(&d_gpu_irls_boxes_, (size_t)cap * sizeof(DeviceBox)))) return false;
+            gpu_irls_box_capacity_ = cap;
+        }
+        return true;
+    }
+#endif
 
     bool ensureSession(int width, int height) {
         if (hOF_ && of_w_ == width && of_h_ == height && inBuf_ && refBuf_ && outBuf_) {
@@ -388,6 +473,21 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return solve6x6(AtA, Atb, out);
     }
 
+    static bool solveAffineFromReduced(const double normal[6], const double bx[3],
+                                       const double by[3], double out[6]) {
+        double A[6][6]{};
+        double b[6]{};
+        A[0][0] = normal[0]; A[0][1] = normal[1]; A[0][2] = normal[2];
+        A[1][0] = normal[1]; A[1][1] = normal[3]; A[1][2] = normal[4];
+        A[2][0] = normal[2]; A[2][1] = normal[4]; A[2][2] = normal[5];
+        A[3][3] = normal[0]; A[3][4] = normal[1]; A[3][5] = normal[2];
+        A[4][3] = normal[1]; A[4][4] = normal[3]; A[4][5] = normal[4];
+        A[5][3] = normal[2]; A[5][4] = normal[4]; A[5][5] = normal[5];
+        b[0] = bx[0]; b[1] = bx[1]; b[2] = bx[2];
+        b[3] = by[0]; b[4] = by[1]; b[5] = by[2];
+        return solve6x6(A, b, out);
+    }
+
     MotionSummary summarizeMotion(const std::vector<std::array<float,4>>& boxes) {
         MotionSummary s;
         const size_t n = (size_t)grid_w_ * grid_h_;
@@ -499,6 +599,140 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return a;
     }
 
+#if HAVE_CCM_GPU_IRLS
+    bool reduceGpuAffine(const std::vector<std::array<float,4>>& boxes, const double p[6],
+                         bool use_weights, bool allow_mask, GpuReduceSummary& out) {
+        if (!loadGpuIrlsKernel()) return false;
+
+        const int threads = 256;
+        const int n = grid_w_ * grid_h_;
+        const int blocks = std::max(1, std::min(512, (n + threads - 1) / threads));
+        const int box_count = allow_mask ? (int)boxes.size() : 0;
+        if (!ensureGpuIrlsBuffers(blocks, box_count)) return false;
+
+        if (box_count > 0) {
+            std::vector<DeviceBox> hboxes;
+            hboxes.reserve((size_t)box_count);
+            for (const auto& b : boxes) {
+                hboxes.push_back(DeviceBox{b[0], b[1], b[2], b[3]});
+            }
+            if (CCM_CHECK_CU(cuMemcpyHtoDAsync(d_gpu_irls_boxes_, hboxes.data(),
+                                               hboxes.size() * sizeof(DeviceBox), stream_))) return false;
+        }
+
+        NV_OF_CUDA_BUFFER_STRIDE_INFO osi{};
+        of_.nvOFGPUBufferGetStrideInfo(outBuf_, &osi);
+        CUdeviceptr odptr = of_.nvOFGPUBufferGetCUdeviceptr(outBuf_);
+        NV_OF_CUDA_BUFFER_STRIDE_INFO csi{};
+        of_.nvOFGPUBufferGetStrideInfo(costBuf_, &csi);
+        CUdeviceptr cdptr = of_.nvOFGPUBufferGetCUdeviceptr(costBuf_);
+        int flow_stride = (int)osi.strideInfo[0].strideXInBytes;
+        int cost_stride = (int)csi.strideInfo[0].strideXInBytes;
+        int iw = of_w_;
+        int ih = of_h_;
+        float margin = mask_margin_frac_;
+        int use_w = use_weights ? 1 : 0;
+        double huber = std::max(0.25, irls_huber_px_);
+
+        void* args[] = {
+            (void*)&odptr,
+            (void*)&cdptr,
+            (void*)&flow_stride,
+            (void*)&cost_stride,
+            (void*)&grid_w_,
+            (void*)&grid_h_,
+            (void*)&grid_size_,
+            (void*)&iw,
+            (void*)&ih,
+            (void*)&d_gpu_irls_boxes_,
+            (void*)&box_count,
+            (void*)&margin,
+            (void*)&use_w,
+            (void*)&p[0],
+            (void*)&p[1],
+            (void*)&p[2],
+            (void*)&p[3],
+            (void*)&p[4],
+            (void*)&p[5],
+            (void*)&huber,
+            (void*)&d_gpu_irls_reduce_,
+        };
+        const unsigned int shared_bytes = (unsigned int)(threads * sizeof(double));
+        if (CCM_CHECK_CU(cuLaunchKernel(gpu_irls_reduce_kernel_,
+                                        (unsigned int)blocks, 1, 1,
+                                        (unsigned int)threads, 1, 1,
+                                        shared_bytes, stream_, args, nullptr))) return false;
+
+        std::vector<double> h((size_t)blocks * 20u, 0.0);
+        if (CCM_CHECK_CU(cuMemcpyDtoHAsync(h.data(), d_gpu_irls_reduce_,
+                                           h.size() * sizeof(double), stream_)) ||
+            CCM_CHECK_CU(cuStreamSynchronize(stream_))) return false;
+
+        GpuReduceSummary s;
+        s.mag_min = std::numeric_limits<double>::max();
+        for (int bi = 0; bi < blocks; ++bi) {
+            const double* v = h.data() + (size_t)bi * 20u;
+            for (int i = 0; i < 6; ++i) s.normal[i] += v[i];
+            for (int i = 0; i < 3; ++i) s.bx[i] += v[6 + i];
+            for (int i = 0; i < 3; ++i) s.by[i] += v[9 + i];
+            s.point_count += (int)std::llround(v[12]);
+            s.inlier_count += (int)std::llround(v[13]);
+            s.residual_sum += v[14];
+            s.cost_sum += v[15];
+            s.mag_sum += v[16];
+            s.mag_min = std::min(s.mag_min, v[17]);
+            s.total_count += (int)std::llround(v[18]);
+            s.bg_count += (int)std::llround(v[19]);
+        }
+        if (s.mag_min == std::numeric_limits<double>::max()) s.mag_min = 0.0;
+        out = s;
+        return true;
+    }
+
+    bool estimateAffineGpuIrls(const std::vector<std::array<float,4>>& boxes,
+                               MotionSummary& motion, AffineSummary& affine, float& cost) {
+        double p[6] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0};
+        GpuReduceSummary red;
+        bool used_mask = !boxes.empty();
+        if (!reduceGpuAffine(boxes, p, false, true, red)) return false;
+        if (red.point_count < 8 && used_mask) {
+            used_mask = false;
+            if (!reduceGpuAffine(boxes, p, false, false, red)) return false;
+        }
+        if (red.point_count < 8) return false;
+        if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) return false;
+
+        const int iters = std::max(0, irls_iters_);
+        for (int iter = 0; iter < iters; ++iter) {
+            if (!reduceGpuAffine(boxes, p, true, used_mask, red)) return false;
+            if (red.point_count < 8) return false;
+            if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) return false;
+        }
+
+        if (!reduceGpuAffine(boxes, p, false, used_mask, red)) return false;
+
+        affine.m00 = p[0]; affine.m01 = p[1]; affine.m02 = p[2];
+        affine.m10 = p[3]; affine.m11 = p[4]; affine.m12 = p[5];
+        affine.point_count = red.point_count;
+        affine.inlier_count = red.inlier_count;
+        affine.inlier_frac = red.point_count > 0 ? (double)red.inlier_count / (double)red.point_count : 0.0;
+        affine.residual_px = red.inlier_count > 0 ? red.residual_sum / (double)red.inlier_count : 0.0;
+        affine.valid = red.inlier_count >= 8 && std::isfinite(affine.residual_px);
+
+        motion.tx_median = (float)affine.m02;
+        motion.tx_mad = 0.0f;
+        motion.flow_mag_min = (float)red.mag_min;
+        motion.flow_mag_mean = red.point_count > 0 ? (float)(red.mag_sum / (double)red.point_count) : 0.0f;
+        motion.bg_cell_count = red.bg_count;
+        motion.total_cell_count = red.total_count;
+        motion.bg_cell_frac = red.total_count > 0 ? (float)red.bg_count / (float)red.total_count : 0.0f;
+        motion.used_mask_fallback = !used_mask && !boxes.empty();
+
+        cost = red.total_count > 0 ? (float)(red.cost_sum / (double)red.total_count) : 0.0f;
+        return affine.valid;
+    }
+#endif
+
     AffineSummary estimateAffine(const MotionSummary& motion) {
         AffineSummary a;
         a.m02 = motion.tx_median;
@@ -585,6 +819,13 @@ public:
     ~CudaCameraMotion() {
         if (cu_ctx_) CCM_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
         destroyOFBuffers();
+#if HAVE_CCM_GPU_IRLS
+        releaseGpuIrlsBuffers();
+        if (gpu_irls_module_) {
+            CCM_CHECK_CU(cuModuleUnload(gpu_irls_module_));
+            gpu_irls_module_ = nullptr;
+        }
+#endif
         if (hOF_ && of_.nvOFDestroy) { of_.nvOFDestroy(hOF_); hOF_ = nullptr; }
     }
 
@@ -652,17 +893,28 @@ public:
         if (CCM_CHECK_OF(of_.nvOFExecute(hOF_, &ein, &eout))) {
             throw Error("cuda_camera_motion: nvOFExecute failed");
         }
-        if (!downloadGrid()) throw Error("cuda_camera_motion: flow download failed");
-
         // Background flow cells exclude ball/player boxes. If too few remain,
         // use all cells to keep metadata populated.
         const size_t n = (size_t)grid_w_ * grid_h_;
         const std::vector<std::array<float,4>> mask_boxes = collectMaskBoxes(raw);
-        const MotionSummary motion = summarizeMotion(mask_boxes);
-        const AffineSummary affine = estimateAffine(motion);
-        double cost_sum = 0.0;
-        for (size_t i = 0; i < n; ++i) cost_sum += (double)host_cost_[i];
-        const float cost = n ? (float)(cost_sum / (double)n) : 0.0f;
+        MotionSummary motion;
+        AffineSummary affine;
+        float cost = 0.0f;
+#if HAVE_CCM_GPU_IRLS
+        if (affine_backend_ == "gpu_irls" || affine_backend_ == "cuda_irls") {
+            if (!estimateAffineGpuIrls(mask_boxes, motion, affine, cost)) {
+                throw Error("cuda_camera_motion: gpu_irls estimation failed");
+            }
+        } else
+#endif
+        {
+            if (!downloadGrid()) throw Error("cuda_camera_motion: flow download failed");
+            motion = summarizeMotion(mask_boxes);
+            affine = estimateAffine(motion);
+            double cost_sum = 0.0;
+            for (size_t i = 0; i < n; ++i) cost_sum += (double)host_cost_[i];
+            cost = n ? (float)(cost_sum / (double)n) : 0.0f;
+        }
 
         writeMetadata(frm, true, motion, affine, cost, "ok");
 
