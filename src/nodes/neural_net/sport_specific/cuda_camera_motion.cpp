@@ -128,6 +128,13 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     std::string player_metadata_key_ = "srs_yolo_players";
     std::string ball_metadata_key_ = "tracknet_ball";
     float mask_margin_frac_ = 0.10f;
+#if HAVE_OPENCV
+    std::string affine_backend_ = "opencv_ransac";
+#else
+    std::string affine_backend_ = "tx_median";
+#endif
+    int irls_iters_ = 3;
+    double irls_huber_px_ = 2.0;
 
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
     CUcontext cu_ctx_ = nullptr;
@@ -317,6 +324,70 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return vals[mid];
     }
 
+    static bool solve6x6(double A[6][6], double b[6], double x[6]) {
+        double aug[6][7]{};
+        for (int r = 0; r < 6; ++r) {
+            for (int c = 0; c < 6; ++c) aug[r][c] = A[r][c];
+            aug[r][6] = b[r];
+        }
+
+        for (int col = 0; col < 6; ++col) {
+            int pivot = col;
+            double best = std::fabs(aug[col][col]);
+            for (int r = col + 1; r < 6; ++r) {
+                const double v = std::fabs(aug[r][col]);
+                if (v > best) { best = v; pivot = r; }
+            }
+            if (best < 1e-9 || !std::isfinite(best)) return false;
+            if (pivot != col) {
+                for (int c = col; c < 7; ++c) std::swap(aug[col][c], aug[pivot][c]);
+            }
+
+            const double div = aug[col][col];
+            for (int c = col; c < 7; ++c) aug[col][c] /= div;
+            for (int r = 0; r < 6; ++r) {
+                if (r == col) continue;
+                const double f = aug[r][col];
+                if (f == 0.0) continue;
+                for (int c = col; c < 7; ++c) aug[r][c] -= f * aug[col][c];
+            }
+        }
+
+        for (int i = 0; i < 6; ++i) {
+            x[i] = aug[i][6];
+            if (!std::isfinite(x[i])) return false;
+        }
+        return true;
+    }
+
+    static bool weightedAffineFit(const std::vector<FlowCell>& cells,
+                                  const std::vector<double>& weights,
+                                  double out[6]) {
+        double AtA[6][6]{};
+        double Atb[6]{};
+
+        auto accum = [&](const double row[6], double target, double w) {
+            if (w <= 0.0 || !std::isfinite(w)) return;
+            for (int i = 0; i < 6; ++i) {
+                Atb[i] += w * row[i] * target;
+                for (int j = 0; j < 6; ++j) AtA[i][j] += w * row[i] * row[j];
+            }
+        };
+
+        for (size_t i = 0; i < cells.size(); ++i) {
+            const FlowCell& cell = cells[i];
+            const double w = weights.empty() ? 1.0 : weights[i];
+            const double x = cell.x;
+            const double y = cell.y;
+            const double row_x[6] = {x, y, 1.0, 0.0, 0.0, 0.0};
+            const double row_y[6] = {0.0, 0.0, 0.0, x, y, 1.0};
+            accum(row_x, x + cell.dx, w);
+            accum(row_y, y + cell.dy, w);
+        }
+
+        return solve6x6(AtA, Atb, out);
+    }
+
     MotionSummary summarizeMotion(const std::vector<std::array<float,4>>& boxes) {
         MotionSummary s;
         const size_t n = (size_t)grid_w_ * grid_h_;
@@ -378,10 +449,64 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return s;
     }
 
+    AffineSummary estimateAffineIrls(const MotionSummary& motion) const {
+        AffineSummary a;
+        a.m02 = motion.tx_median;
+        a.point_count = (int)motion.cells.size();
+        if (motion.cells.size() < 8) return a;
+
+        std::vector<double> weights(motion.cells.size(), 1.0);
+        double p[6] = {1.0, 0.0, motion.tx_median, 0.0, 1.0, 0.0};
+        if (!weightedAffineFit(motion.cells, weights, p)) return a;
+
+        const double huber = std::max(0.25, irls_huber_px_);
+        const int iters = std::max(0, irls_iters_);
+        for (int iter = 0; iter < iters; ++iter) {
+            for (size_t i = 0; i < motion.cells.size(); ++i) {
+                const FlowCell& cell = motion.cells[i];
+                const double px = p[0] * cell.x + p[1] * cell.y + p[2];
+                const double py = p[3] * cell.x + p[4] * cell.y + p[5];
+                const double ex = px - (cell.x + cell.dx);
+                const double ey = py - (cell.y + cell.dy);
+                const double r = std::sqrt(ex * ex + ey * ey);
+                weights[i] = (r <= huber || r <= 1e-9) ? 1.0 : (huber / r);
+            }
+            if (!weightedAffineFit(motion.cells, weights, p)) return a;
+        }
+
+        a.m00 = p[0]; a.m01 = p[1]; a.m02 = p[2];
+        a.m10 = p[3]; a.m11 = p[4]; a.m12 = p[5];
+
+        double residual_sum = 0.0;
+        for (const FlowCell& cell : motion.cells) {
+            const double px = a.m00 * cell.x + a.m01 * cell.y + a.m02;
+            const double py = a.m10 * cell.x + a.m11 * cell.y + a.m12;
+            const double ex = px - (cell.x + cell.dx);
+            const double ey = py - (cell.y + cell.dy);
+            const double r = std::sqrt(ex * ex + ey * ey);
+            if (r <= huber) {
+                ++a.inlier_count;
+                residual_sum += r;
+            }
+        }
+        a.inlier_frac = a.point_count > 0 ? (double)a.inlier_count / (double)a.point_count : 0.0;
+        a.residual_px = a.inlier_count > 0 ? residual_sum / (double)a.inlier_count : 0.0;
+        a.valid = a.inlier_count >= 8 && std::isfinite(a.residual_px);
+        if (!a.valid) {
+            a.m00 = 1.0; a.m01 = 0.0; a.m02 = motion.tx_median;
+            a.m10 = 0.0; a.m11 = 1.0; a.m12 = 0.0;
+        }
+        return a;
+    }
+
     AffineSummary estimateAffine(const MotionSummary& motion) {
         AffineSummary a;
         a.m02 = motion.tx_median;
         a.point_count = (int)motion.cells.size();
+        if (affine_backend_ == "tx_median" || affine_backend_ == "translation") return a;
+        if (affine_backend_ == "cpu_irls" || affine_backend_ == "irls") {
+            return estimateAffineIrls(motion);
+        }
 #if HAVE_OPENCV
         if (motion.cells.size() < 8) return a;
 
@@ -431,6 +556,7 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         md << "{"
            << "\"frame_index\":" << (frame_counter_ > 0 ? frame_counter_ - 1 : 0) << ","
            << "\"has_prev\":" << (has_prev ? "true" : "false") << ","
+           << "\"backend\":\"" << affine_backend_ << "\","
            << "\"tx\":" << affine.m02 << ","
            << "\"ty\":" << affine.m12 << ","
            << "\"affine_2x3\":[["
@@ -567,6 +693,10 @@ public:
         if (params.count("player_metadata_key")) r->player_metadata_key_ = params["player_metadata_key"].get<std::string>();
         if (params.count("ball_metadata_key")) r->ball_metadata_key_ = params["ball_metadata_key"].get<std::string>();
         if (params.count("mask_margin_frac")) r->mask_margin_frac_ = params["mask_margin_frac"].get<float>();
+        if (params.count("affine_backend")) r->affine_backend_ = params["affine_backend"].get<std::string>();
+        if (params.count("camera_motion_backend")) r->affine_backend_ = params["camera_motion_backend"].get<std::string>();
+        if (params.count("irls_iters")) r->irls_iters_ = params["irls_iters"].get<int>();
+        if (params.count("irls_huber_px")) r->irls_huber_px_ = params["irls_huber_px"].get<double>();
         return r;
     }
 };
