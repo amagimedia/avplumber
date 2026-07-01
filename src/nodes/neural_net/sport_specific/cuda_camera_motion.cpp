@@ -144,6 +144,12 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         int total_count = 0;
         int bg_count = 0;
     };
+
+    enum class GpuIrlsEstimateStatus {
+        Ok,
+        Invalid,
+        Error,
+    };
 #endif
 
     std::string metadata_key_ = "camera_motion";
@@ -600,6 +606,17 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
     }
 
 #if HAVE_CCM_GPU_IRLS
+    static void populateGpuMotionSummary(const GpuReduceSummary& red, bool used_mask,
+                                         bool has_boxes, MotionSummary& motion, float& cost) {
+        motion.flow_mag_min = (float)red.mag_min;
+        motion.flow_mag_mean = red.point_count > 0 ? (float)(red.mag_sum / (double)red.point_count) : 0.0f;
+        motion.bg_cell_count = red.bg_count;
+        motion.total_cell_count = red.total_count;
+        motion.bg_cell_frac = red.total_count > 0 ? (float)red.bg_count / (float)red.total_count : 0.0f;
+        motion.used_mask_fallback = !used_mask && has_boxes;
+        cost = red.total_count > 0 ? (float)(red.cost_sum / (double)red.total_count) : 0.0f;
+    }
+
     bool reduceGpuAffine(const std::vector<std::array<float,4>>& boxes, const double p[6],
                          bool use_weights, bool allow_mask, GpuReduceSummary& out) {
         if (!loadGpuIrlsKernel()) return false;
@@ -689,27 +706,45 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
         return true;
     }
 
-    bool estimateAffineGpuIrls(const std::vector<std::array<float,4>>& boxes,
-                               MotionSummary& motion, AffineSummary& affine, float& cost) {
+    GpuIrlsEstimateStatus estimateAffineGpuIrls(const std::vector<std::array<float,4>>& boxes,
+                                                MotionSummary& motion, AffineSummary& affine,
+                                                float& cost, const char*& status) {
         double p[6] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0};
         GpuReduceSummary red;
         bool used_mask = !boxes.empty();
-        if (!reduceGpuAffine(boxes, p, false, true, red)) return false;
+        status = "ok";
+        if (!reduceGpuAffine(boxes, p, false, true, red)) return GpuIrlsEstimateStatus::Error;
         if (red.point_count < 8 && used_mask) {
             used_mask = false;
-            if (!reduceGpuAffine(boxes, p, false, false, red)) return false;
+            if (!reduceGpuAffine(boxes, p, false, false, red)) return GpuIrlsEstimateStatus::Error;
         }
-        if (red.point_count < 8) return false;
-        if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) return false;
+        populateGpuMotionSummary(red, used_mask, !boxes.empty(), motion, cost);
+        affine.point_count = red.point_count;
+        if (red.point_count < 8) {
+            status = "affine_insufficient_points";
+            return GpuIrlsEstimateStatus::Invalid;
+        }
+        if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) {
+            status = "affine_singular";
+            return GpuIrlsEstimateStatus::Invalid;
+        }
 
         const int iters = std::max(0, irls_iters_);
         for (int iter = 0; iter < iters; ++iter) {
-            if (!reduceGpuAffine(boxes, p, true, used_mask, red)) return false;
-            if (red.point_count < 8) return false;
-            if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) return false;
+            if (!reduceGpuAffine(boxes, p, true, used_mask, red)) return GpuIrlsEstimateStatus::Error;
+            populateGpuMotionSummary(red, used_mask, !boxes.empty(), motion, cost);
+            affine.point_count = red.point_count;
+            if (red.point_count < 8) {
+                status = "affine_insufficient_points";
+                return GpuIrlsEstimateStatus::Invalid;
+            }
+            if (!solveAffineFromReduced(red.normal, red.bx, red.by, p)) {
+                status = "affine_singular";
+                return GpuIrlsEstimateStatus::Invalid;
+            }
         }
 
-        if (!reduceGpuAffine(boxes, p, false, used_mask, red)) return false;
+        if (!reduceGpuAffine(boxes, p, false, used_mask, red)) return GpuIrlsEstimateStatus::Error;
 
         affine.m00 = p[0]; affine.m01 = p[1]; affine.m02 = p[2];
         affine.m10 = p[3]; affine.m11 = p[4]; affine.m12 = p[5];
@@ -721,15 +756,11 @@ class CudaCameraMotion : public NodeSISO<av::VideoFrame, av::VideoFrame>, public
 
         motion.tx_median = (float)affine.m02;
         motion.tx_mad = 0.0f;
-        motion.flow_mag_min = (float)red.mag_min;
-        motion.flow_mag_mean = red.point_count > 0 ? (float)(red.mag_sum / (double)red.point_count) : 0.0f;
-        motion.bg_cell_count = red.bg_count;
-        motion.total_cell_count = red.total_count;
-        motion.bg_cell_frac = red.total_count > 0 ? (float)red.bg_count / (float)red.total_count : 0.0f;
-        motion.used_mask_fallback = !used_mask && !boxes.empty();
-
-        cost = red.total_count > 0 ? (float)(red.cost_sum / (double)red.total_count) : 0.0f;
-        return affine.valid;
+        populateGpuMotionSummary(red, used_mask, !boxes.empty(), motion, cost);
+        if (!affine.valid) {
+            status = "affine_low_inliers";
+        }
+        return affine.valid ? GpuIrlsEstimateStatus::Ok : GpuIrlsEstimateStatus::Invalid;
     }
 #endif
 
@@ -902,8 +933,20 @@ public:
         float cost = 0.0f;
 #if HAVE_CCM_GPU_IRLS
         if (affine_backend_ == "gpu_irls" || affine_backend_ == "cuda_irls") {
-            if (!estimateAffineGpuIrls(mask_boxes, motion, affine, cost)) {
+            const char* estimate_metadata_status = "ok";
+            GpuIrlsEstimateStatus estimate_status = estimateAffineGpuIrls(
+                mask_boxes, motion, affine, cost, estimate_metadata_status);
+            if (estimate_status == GpuIrlsEstimateStatus::Error) {
                 throw Error("cuda_camera_motion: gpu_irls estimation failed");
+            }
+            if (estimate_status == GpuIrlsEstimateStatus::Invalid) {
+                writeMetadata(frm, true, motion, affine, cost, estimate_metadata_status);
+                if (!uploadLuma(refBuf_, y_plane, y_pitch, of_w_, of_h_)) {
+                    throw Error("cuda_camera_motion: ref roll upload failed");
+                }
+                CCM_CHECK_CU(cuStreamSynchronize(stream_));
+                this->sink_->put(frm);
+                return;
             }
         } else
 #endif
