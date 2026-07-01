@@ -83,7 +83,9 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     std::string metadata_key_ = "scene_diff";
     bool strict_cuda_ = true;
     int debug_log_every_n_ = 0;
-    int frames_lookahead_ = 1;
+    // Number of forward diffs (scene_diff+1..+N) to emit in addition to the
+    // always-emitted backward scene_diff. 0 = only scene_diff (Y_{idx-1} vs Y_idx).
+    int frames_lookahead_ = 0;
 
     AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
     CUcontext cu_ctx_ = nullptr;
@@ -198,12 +200,12 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         return true;
     }
 
-    // `frames_lookahead_` is the TOTAL number of diffs emitted per frame:
-    //   1 backward (scene_diff = Y_{idx-1} vs Y_idx)
-    // + (frames_lookahead_ - 1) forward (scene_diff+k = Y_{idx-1} vs Y_{idx+k})
-    // The ring must hold `frames_lookahead_` past Y planes so that when Y_t
+    // `frames_lookahead_` is the number of forward diffs emitted per frame:
+    //   scene_diff       = Y_{idx-1} vs Y_idx           (always emitted; frame 0 is a stub)
+    //   scene_diff+k     = Y_{idx-1} vs Y_{idx+k}       for k = 1..frames_lookahead_
+    // The ring must hold `frames_lookahead_ + 1` past Y planes so that when Y_t
     // arrives the anchor Y_{idx-1} of the oldest pending frame is still present.
-    int ringCapacity() const { return frames_lookahead_; }
+    int ringCapacity() const { return frames_lookahead_ + 1; }
 
     bool ensureBuffers(int width, int height, int blocks) {
         if (width <= 0 || height <= 0 || blocks <= 0) return false;
@@ -310,9 +312,9 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
 
     void emitPending(PendingFrame& pf) {
         std::ostringstream md;
-        // Emit `frames_lookahead_` keys total: scene_diff (Y_{idx-1} vs Y_idx) plus
-        // scene_diff+k for k=1..L (Y_{idx-1} vs Y_{idx+k}), where L = frames_lookahead_ - 1.
-        const int L = frames_lookahead_ - 1;
+        // Emit `frames_lookahead_ + 1` keys total: scene_diff (Y_{idx-1} vs Y_idx)
+        // plus scene_diff+k for k=1..L (Y_{idx-1} vs Y_{idx+k}), where L = frames_lookahead_.
+        const int L = frames_lookahead_;
         for (int k = 0; k <= L; ++k) {
             const std::string key = (k == 0) ? metadata_key_
                                              : (metadata_key_ + "+" + std::to_string(k));
@@ -329,7 +331,7 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         // non-strict mode). Emits stub metadata on every configured key so
         // downstream consumers behave as if no diff was available.
         std::ostringstream md;
-        const int L = frames_lookahead_ - 1;
+        const int L = frames_lookahead_;
         for (int k = 0; k <= L; ++k) {
             const std::string key = (k == 0) ? metadata_key_
                                              : (metadata_key_ + "+" + std::to_string(k));
@@ -446,8 +448,8 @@ public:
             return;
         }
 
-        const int L = frames_lookahead_ - 1;   // number of forward diffs per frame
-        const int Ncap = ringCapacity();       // == frames_lookahead_
+        const int L = frames_lookahead_;       // number of forward diffs per frame
+        const int Ncap = ringCapacity();       // == frames_lookahead_ + 1
         const CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)raw->data[0];
         const int y_pitch = raw->linesize[0];
 
@@ -508,7 +510,8 @@ public:
         pf.index = this_index;
         pf.width = width;
         pf.height = height;
-        pf.diffs.assign((size_t)frames_lookahead_, std::nullopt);
+        // diffs[0] is the primary backward diff; diffs[1..L] are the L forward diffs.
+        pf.diffs.assign((size_t)(frames_lookahead_ + 1), std::nullopt);
         if (ring_filled_ >= 1) {
             // Anchor Y_{this_index - 1} is at (ring_head_ - 1) mod Ncap. Copy into
             // scratch so the ring slot survives the kernel's writeback of Y_t.
@@ -591,7 +594,7 @@ public:
         if (params.count("debug_log_every_n")) r->debug_log_every_n_ = params["debug_log_every_n"].get<int>();
         if (params.count("frames_lookahead")) {
             const int v = params["frames_lookahead"].get<int>();
-            r->frames_lookahead_ = std::max(1, std::min(16, v));
+            r->frames_lookahead_ = std::max(0, std::min(16, v));
         }
         return r;
     }
