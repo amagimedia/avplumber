@@ -198,9 +198,16 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         return true;
     }
 
+    // `frames_lookahead_` is the TOTAL number of diffs emitted per frame:
+    //   1 backward (scene_diff = Y_{idx-1} vs Y_idx)
+    // + (frames_lookahead_ - 1) forward (scene_diff+k = Y_{idx-1} vs Y_{idx+k})
+    // The ring must hold `frames_lookahead_` past Y planes so that when Y_t
+    // arrives the anchor Y_{idx-1} of the oldest pending frame is still present.
+    int ringCapacity() const { return frames_lookahead_; }
+
     bool ensureBuffers(int width, int height, int blocks) {
         if (width <= 0 || height <= 0 || blocks <= 0) return false;
-        const int N = frames_lookahead_;
+        const int N = ringCapacity();
         const bool size_match = (prev_w_ == width && prev_h_ == height);
         const bool ring_ok = ((int)d_ring_y_.size() == N) && (d_scratch_y_ != 0);
         const bool caps_ok = block_capacity_ >= blocks;
@@ -278,7 +285,16 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         md.str("");
         md.clear();
         md.precision(9);
-        const bool has_prev = slot.has_value();
+        // k=0 is the primary diff Y_{idx-1} vs Y_idx. For k>=1 the slot may be
+        // absent because we ran off the end of the stream before the future frame
+        // Y_{idx+k} arrived; downstream treats missing slots as "no_forward_frame".
+        const bool has_prev = (pf.index > 0) && slot.has_value();
+        const char* status = "ok";
+        if (pf.index == 0) {
+            status = "no_prev_frame";
+        } else if (!slot.has_value()) {
+            status = "no_forward_frame";
+        }
         md << "{"
            << "\"frame_index\":" << pf.index << ","
            << "\"lookahead\":" << k << ","
@@ -287,17 +303,20 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
            << "\"mean_abs\":" << (has_prev ? slot->mean_abs : 0.0f) << ","
            << "\"mean_norm\":" << (has_prev ? slot->mean_norm : 0.0f) << ","
            << "\"mean_signed\":" << (has_prev ? slot->mean_signed : 0.0f) << ","
-           << "\"status\":\"" << (has_prev ? "ok" : "no_forward_frame") << "\","
+           << "\"status\":\"" << status << "\","
            << "\"width\":" << pf.width
            << "}";
     }
 
     void emitPending(PendingFrame& pf) {
         std::ostringstream md;
-        for (int k = 1; k <= frames_lookahead_; ++k) {
-            const std::string key = (k == 1) ? metadata_key_
-                                             : (metadata_key_ + "-" + std::to_string(k - 1));
-            appendDiffJson(md, pf, k, pf.diffs[(size_t)(k - 1)]);
+        // Emit `frames_lookahead_` keys total: scene_diff (Y_{idx-1} vs Y_idx) plus
+        // scene_diff+k for k=1..L (Y_{idx-1} vs Y_{idx+k}), where L = frames_lookahead_ - 1.
+        const int L = frames_lookahead_ - 1;
+        for (int k = 0; k <= L; ++k) {
+            const std::string key = (k == 0) ? metadata_key_
+                                             : (metadata_key_ + "+" + std::to_string(k));
+            appendDiffJson(md, pf, k, pf.diffs[(size_t)k]);
             av_dict_set(&pf.frame.raw()->metadata, key.c_str(), md.str().c_str(), 0);
         }
         this->sink_->put(pf.frame);
@@ -310,9 +329,10 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         // non-strict mode). Emits stub metadata on every configured key so
         // downstream consumers behave as if no diff was available.
         std::ostringstream md;
-        for (int k = 1; k <= frames_lookahead_; ++k) {
-            const std::string key = (k == 1) ? metadata_key_
-                                             : (metadata_key_ + "-" + std::to_string(k - 1));
+        const int L = frames_lookahead_ - 1;
+        for (int k = 0; k <= L; ++k) {
+            const std::string key = (k == 0) ? metadata_key_
+                                             : (metadata_key_ + "+" + std::to_string(k));
             md.str("");
             md.clear();
             md << "{"
@@ -426,38 +446,48 @@ public:
             return;
         }
 
-        const int N = frames_lookahead_;
+        const int L = frames_lookahead_ - 1;   // number of forward diffs per frame
+        const int Ncap = ringCapacity();       // == frames_lookahead_
         const CUdeviceptr y_plane = (CUdeviceptr)(uintptr_t)raw->data[0];
         const int y_pitch = raw->linesize[0];
 
-        // Compute diffs |Y_t - Y_{t-k}| for k = 1..ring_filled_.
-        // Each pending_[pending_.size() - k] gets its k-th slot filled.
-        const int k_max = ring_filled_;
-        for (int k = 1; k <= k_max; ++k) {
-            const int slot = (ring_head_ - k + N) % N;
-            CUdeviceptr prev_arg;
-            if (k == k_max) {
-                // Last diff uses the oldest slot directly; the kernel's writeback
-                // stores Y_t into that slot, which then becomes the new head.
-                prev_arg = d_ring_y_[slot];
-            } else {
-                // Preserve the ring slot for the next call by copying it into
-                // scratch and running the kernel against scratch. Scratch is
-                // clobbered with Y_t, which we discard.
-                if (LUMA_DIFF_CHECK_CU(cuMemcpyDtoDAsync(d_scratch_y_, d_ring_y_[slot],
-                                                           (size_t)width * (size_t)height,
-                                                           stream_))) {
-                    if (strict_cuda_) {
-                        throw Error("luma_diff: dtod copy failed");
-                    }
-                    writeStatusStubToCurrent(frm, width, height, "dtod_copy_failed");
-                    this->sink_->put(frm);
-                    return;
+        // For each pending frame pf (index = idx), the incoming Y_t plays the role
+        // of Y_{idx + k} where k = this_index - pf.index. The anchor Y_{idx-1} sits
+        // in the ring at (k + 1) steps back from the newest ring slot. All diffs
+        // share Y_t as the "current" plane; we vary the anchor.
+        //
+        // Emit-time note: we launch diffs into slots k=0..L (L+1 total) but only
+        // when the corresponding ring slot exists (ring_filled_ >= k+1). The
+        // primary k=0 case (Y_{idx-1} vs Y_idx) can be launched immediately when
+        // a pending frame is enqueued below; here we only handle the forward
+        // diffs (k>=1) for already-pending frames.
+        for (size_t pi = 0; pi < pending_.size(); ++pi) {
+            PendingFrame& pf = pending_[pi];
+            const int k = (int)(this_index - pf.index);
+            if (k <= 0 || k > L) continue;
+            if (pf.diffs[(size_t)k].has_value()) continue;
+            // Anchor Y_{pf.index - 1} is (k+1) steps back from Y_t. The ring holds
+            // the most recently seen frames with newest at (ring_head_ - 1). Y_t
+            // has not been inserted yet, so "1 step back" points to Y_{t-1}, which
+            // for pf sitting k steps ago is Y_{pf.index - 1} iff k+1 <= ring_filled_.
+            const int back = k + 1;
+            if (ring_filled_ < back) continue;  // pre-history frame — leave stub
+            const int slot = (ring_head_ - back + Ncap) % Ncap;
+            // Always copy the anchor into scratch — the kernel's writeback path
+            // clobbers its prev_arg with Y_t, and we need the ring slot preserved
+            // for other pending frames still to be diffed this frame.
+            if (LUMA_DIFF_CHECK_CU(cuMemcpyDtoDAsync(d_scratch_y_, d_ring_y_[slot],
+                                                       (size_t)width * (size_t)height,
+                                                       stream_))) {
+                if (strict_cuda_) {
+                    throw Error("luma_diff: dtod copy failed");
                 }
-                prev_arg = d_scratch_y_;
+                writeStatusStubToCurrent(frm, width, height, "dtod_copy_failed");
+                this->sink_->put(frm);
+                return;
             }
             DiffResult r;
-            if (!launchDiffKernel(y_plane, y_pitch, prev_arg, width, height,
+            if (!launchDiffKernel(y_plane, y_pitch, d_scratch_y_, width, height,
                                    /*has_prev=*/1, blocks, threads, &r)) {
                 if (strict_cuda_) {
                     throw Error("luma_diff: kernel launch/read failed");
@@ -466,24 +496,50 @@ public:
                 this->sink_->put(frm);
                 return;
             }
-            // Assign to the pending frame that has been waiting k steps.
-            // pending_ is oldest-first; the frame waiting k steps sits at
-            // pending_.size() - k (0-indexed from front).
-            const int pidx = (int)pending_.size() - k;
-            if (pidx >= 0 && pidx < (int)pending_.size()) {
-                pending_[(size_t)pidx].diffs[(size_t)(k - 1)] = r;
-            }
+            pf.diffs[(size_t)k] = r;
         }
 
-        // Ensure the current Y plane is stored in the ring for future diffs.
-        if (k_max > 0) {
-            // Last kernel launch above wrote Y_t into d_ring_y_[slot_of_k_max].
-            // Advance ring_head_ so future queries treat that slot as the newest.
-            ring_head_ = (ring_head_ + 1) % N;
-            ring_filled_ = std::min(ring_filled_ + 1, N);
-        } else {
-            // Cold start (ring empty): copy Y_t → d_ring_y_[ring_head_] via 2D
-            // memcpy (the source has a pitch that may exceed width).
+        // Now enqueue the current frame as pending. Its primary diff (k=0,
+        // anchor = Y_{this_index - 1}) can be filled in immediately if ring_filled_
+        // >= 1. Frame 0 has no predecessor → primary slot stays empty and emit
+        // will report status=no_prev_frame with has_prev=false.
+        PendingFrame pf;
+        pf.frame = frm;
+        pf.index = this_index;
+        pf.width = width;
+        pf.height = height;
+        pf.diffs.assign((size_t)frames_lookahead_, std::nullopt);
+        if (ring_filled_ >= 1) {
+            // Anchor Y_{this_index - 1} is at (ring_head_ - 1) mod Ncap. Copy into
+            // scratch so the ring slot survives the kernel's writeback of Y_t.
+            const int slot = (ring_head_ - 1 + Ncap) % Ncap;
+            if (LUMA_DIFF_CHECK_CU(cuMemcpyDtoDAsync(d_scratch_y_, d_ring_y_[slot],
+                                                       (size_t)width * (size_t)height,
+                                                       stream_))) {
+                if (strict_cuda_) {
+                    throw Error("luma_diff: dtod copy (primary) failed");
+                }
+                writeStatusStubToCurrent(frm, width, height, "dtod_copy_failed");
+                this->sink_->put(frm);
+                return;
+            }
+            DiffResult r;
+            if (!launchDiffKernel(y_plane, y_pitch, d_scratch_y_, width, height,
+                                   /*has_prev=*/1, blocks, threads, &r)) {
+                if (strict_cuda_) {
+                    throw Error("luma_diff: kernel launch/read (primary) failed");
+                }
+                writeStatusStubToCurrent(frm, width, height, "kernel_failed");
+                this->sink_->put(frm);
+                return;
+            }
+            pf.diffs[0] = r;
+        }
+        pending_.push_back(std::move(pf));
+
+        // Store Y_t into the ring for future anchor lookups. Copy the source (with
+        // pitch >= width) into d_ring_y_[ring_head_] as a compact plane.
+        {
             CUDA_MEMCPY2D copy = {};
             copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
             copy.srcDevice = y_plane;
@@ -496,30 +552,21 @@ public:
             if (LUMA_DIFF_CHECK_CU(cuMemcpy2DAsync(&copy, stream_)) ||
                 LUMA_DIFF_CHECK_CU(cuStreamSynchronize(stream_))) {
                 if (strict_cuda_) {
-                    throw Error("luma_diff: cold-start 2D memcpy failed");
+                    throw Error("luma_diff: ring insert 2D memcpy failed");
                 }
                 writeStatusStubToCurrent(frm, width, height, "cold_start_copy_failed");
                 this->sink_->put(frm);
                 return;
             }
-            ring_head_ = (ring_head_ + 1) % N;
-            ring_filled_ = std::min(ring_filled_ + 1, N);
+            ring_head_ = (ring_head_ + 1) % Ncap;
+            ring_filled_ = std::min(ring_filled_ + 1, Ncap);
         }
 
-        // Enqueue this frame as pending; its diffs will be filled in by the next
-        // frames_lookahead_ arrivals.
-        PendingFrame pf;
-        pf.frame = frm;
-        pf.index = this_index;
-        pf.width = width;
-        pf.height = height;
-        pf.diffs.assign((size_t)N, std::nullopt);
-        pending_.push_back(std::move(pf));
-
-        // Drain any pending frame whose diff slots are now all resolved. Because
-        // lookahead N frames arrive after t, the frame at position 0 (oldest)
-        // has all its diffs iff pending_.size() > N.
-        while ((int)pending_.size() > N) {
+        // Drain pending frames whose forward diffs are fully resolved. A frame at
+        // index idx is complete when we have seen Y_{idx + L}, i.e. when
+        // (this_index - idx) >= L. Equivalently drain the oldest whenever
+        // pending_.size() > L.
+        while ((int)pending_.size() > L) {
             emitPending(pending_.front());
             pending_.pop_front();
         }
@@ -528,7 +575,7 @@ public:
             const auto& latest = pending_.back();
             const auto& primary = latest.diffs[0];
             logstream << "luma_diff: frame=" << this_index
-                      << " lookahead=" << N
+                      << " frames_lookahead=" << frames_lookahead_
                       << " pending=" << pending_.size()
                       << " primary_ready=" << (primary.has_value() ? 1 : 0)
                       << " size=" << width << "x" << height;
