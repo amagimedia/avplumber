@@ -116,18 +116,40 @@ override CXXFLAGS += -DHAVE_JACK=1
 override LIBS_FLAGS += -ljack
 endif
 
-# PTX kernel build function: compile .cu to .ptx, embed as C header via xxd
+# CUDA module image build.
+#
+# Default to fatbin so one recorder image carries native SASS for the GPU
+# generations we deploy today: Turing/T4 (sm_75), Ampere/A100 (sm_80),
+# Ampere/A10 (sm_86), and Ada/L4 (sm_89). A PTX fallback for the highest
+# configured arch remains embedded for newer compatible drivers. The generated
+# file/header names keep the historical .ptx.h and *_ptx symbols because all
+# loaders already pass these bytes to cuModuleLoadDataEx(), which accepts PTX,
+# cubin, and fatbin images.
+CUDA_MODULE_IMAGE_FORMAT ?= fatbin
+CUDA_FATBIN_ARCHS ?= 75 80 86 89
+CUDA_FATBIN_PTX_ARCH ?= 89
+CUDA_FATBIN_GENCODE_FLAGS = $(foreach arch,$(CUDA_FATBIN_ARCHS),-gencode arch=compute_$(arch),code=sm_$(arch)) -gencode arch=compute_$(CUDA_FATBIN_PTX_ARCH),code=compute_$(CUDA_FATBIN_PTX_ARCH)
+
+ifeq ($(CUDA_MODULE_IMAGE_FORMAT),fatbin)
+CUDA_MODULE_IMAGE_NVCC_FLAGS = -fatbin $(CUDA_FATBIN_GENCODE_FLAGS)
+else ifeq ($(CUDA_MODULE_IMAGE_FORMAT),ptx)
+CUDA_MODULE_IMAGE_NVCC_FLAGS = -ptx
+else
+$(error Unsupported CUDA_MODULE_IMAGE_FORMAT=$(CUDA_MODULE_IMAGE_FORMAT); expected fatbin or ptx)
+endif
+
+# CUDA kernel build function: compile .cu to a CUDA module image, embed as C header via xxd
 # Usage: $(eval $(call ptx_kernel,cu_source,symbol_prefix,dependent_objects))
 define ptx_kernel
 ALL_PTX_H += objs/$(patsubst %.cu,%.ptx.h,$(1))
 
 objs/$(patsubst %.cu,%.ptx,$(1)): $(1)
 	@mkdir -p $$(dir $$@)
-	$$(NVCC) -ptx -o $$@ $$<
+	$$(NVCC) $$(CUDA_MODULE_IMAGE_NVCC_FLAGS) -o $$@ $$<
 
 objs/$(patsubst %.cu,%.ptx.h,$(1)): objs/$(patsubst %.cu,%.ptx,$(1))
 	@mkdir -p $$(dir $$@)
-	@if [ ! -s $$< ]; then echo "Error: PTX file $$< is empty or missing" >&2; exit 1; fi
+	@if [ ! -s $$< ]; then echo "Error: CUDA module image $$< is empty or missing" >&2; exit 1; fi
 	xxd -i $$< | sed -E 's/unsigned int [a-zA-Z0-9_]*_ptx_len/const unsigned int $(2)_len/; s/unsigned char [a-zA-Z0-9_]*_ptx/const char $(2)/' > $$@
 	@if [ ! -s $$@ ]; then echo "Error: Generated header $$@ is empty" >&2; exit 1; fi
 
