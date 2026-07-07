@@ -203,11 +203,13 @@ endif
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
 endif
 
+CUDA_ROOT ?= /usr/local/cuda
 ifeq ($(HAVE_CUDA),1)
 NODES_SRC += $(IPC_CUDA_SOURCE_SRC)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_rect_overlay.cpp
 override CPPSRC += cuda.cpp
-override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs
+override CXXFLAGS += -DHAVE_CUDA=1 -Iobjs -I$(CUDA_ROOT)/include -I$(CUDA_ROOT)/targets/x86_64-linux/include
+override LFLAGS += -L$(CUDA_ROOT)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_ROOT)/targets/x86_64-linux/lib
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 

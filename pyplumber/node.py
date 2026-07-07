@@ -291,6 +291,10 @@ class EncVideo(InternalNode):
     TYPE = "enc_video"
 
 
+class NvjpegEnc(InternalNode):
+    TYPE = "nvjpeg_enc"
+
+
 class Bsf(InternalNode):
     TYPE = "bsf"
 
