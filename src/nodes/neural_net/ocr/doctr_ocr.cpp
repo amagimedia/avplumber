@@ -25,7 +25,7 @@ namespace {
 constexpr int kDetBatch = 4;
 constexpr int kDetH = 200;
 constexpr int kDetW = 768;
-constexpr int kRecBatch = 24;
+constexpr int kRecBatch = 64;
 constexpr int kRecH = 32;
 constexpr int kRecW = 128;
 
@@ -98,30 +98,37 @@ double parseFps(const std::string& fps) {
     }
 }
 
-std::vector<Region> buildRegions(int W, int H, int region_height, int max_regions) {
+std::vector<Region> buildRegions(int W, int H, int region_height, const std::vector<float>& region_x, int max_regions) {
     std::vector<Region> out;
     int w = std::max(1, (int)std::floor((double)W / 2.5));
     int h = std::max(1, std::min(region_height, H));
     int y = std::max(0, H - h);
+    // Horizontal range from region_x [x_start_rel, x_end_rel], default full width.
+    int x_start = 0, x_end = W;
+    if (region_x.size() == 2) {
+        x_start = std::max(0, std::min(W, (int)std::floor(region_x[0] * W)));
+        x_end   = std::max(x_start + 1, std::min(W, (int)std::ceil(region_x[1] * W)));
+    }
+    int span = x_end - x_start;
     int step = std::max(1, w / 2);
     std::vector<int> xs;
-    for (int x = 0; x < std::max(1, W - w + 1); x += step) xs.push_back(x);
-    if (xs.empty() || xs.back() != W - w) xs.push_back(std::max(0, W - w));
+    for (int x = x_start; x < std::max(x_start + 1, x_end - w + 1); x += step) xs.push_back(x);
+    if (xs.empty() || xs.back() != x_end - w) xs.push_back(std::max(x_start, x_end - w));
     xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
     if ((int)xs.size() > max_regions) xs.resize((size_t)max_regions);
     for (size_t i = 0; i < xs.size(); ++i) {
         Region r;
         r.x = xs[i];
         r.y = y;
-        r.w = std::min(w, W - r.x);
+        r.w = std::min(w, x_end - r.x);
         r.h = h;
-        r.drop_left = r.x > 0;
-        r.drop_right = r.x + r.w < W;
+        r.drop_left = r.x > x_start;
+        r.drop_right = r.x + r.w < x_end;
         out.push_back(r);
     }
     while ((int)out.size() < kDetBatch) {
         Region r;
-        r.x = 0; r.y = y; r.w = 1; r.h = 1;
+        r.x = x_start; r.y = y; r.w = 1; r.h = 1;
         out.push_back(r);
     }
     return out;
@@ -374,6 +381,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     double input_fps_ = 25.0;
     int sample_every_n_ = 5;
     int region_height_ = 0;
+    std::vector<float> region_x_;
     int max_regions_ = 4;
     int max_boxes_ = 24;
     float det_bin_thresh_ = 0.1f;
@@ -620,7 +628,7 @@ public:
         const int W = frm.raw()->width;
         const int H = frm.raw()->height;
         int effective_region_height = region_height_ > 0 ? region_height_ : autoRegionHeight(W, H);
-        std::vector<Region> regions = buildRegions(W, H, effective_region_height, std::min(max_regions_, kDetBatch));
+        std::vector<Region> regions = buildRegions(W, H, effective_region_height, region_x_, std::min(max_regions_, kDetBatch));
         std::vector<int> det_boxes;
         det_boxes.reserve((size_t)kDetBatch * 4);
         for (int i = 0; i < kDetBatch; ++i) {
@@ -742,6 +750,10 @@ public:
         if (p.count("input_fps")) r->input_fps_ = parseFps(p["input_fps"].get<std::string>());
         r->sample_every_n_ = std::max(1, (int)std::lround(r->input_fps_ / std::max(0.1f, r->target_fps_)));
         if (p.count("region_height")) r->region_height_ = std::max(0, p["region_height"].get<int>());
+        if (p.count("region_x") && p["region_x"].is_array() && p["region_x"].size() == 2) {
+            r->region_x_.clear();
+            for (auto& v : p["region_x"]) r->region_x_.push_back(v.get<float>());
+        }
         if (p.count("max_regions")) r->max_regions_ = std::max(1, std::min(kDetBatch, p["max_regions"].get<int>()));
         if (p.count("max_boxes")) r->max_boxes_ = std::max(1, std::min(kRecBatch, p["max_boxes"].get<int>()));
         if (p.count("det_bin_thresh")) r->det_bin_thresh_ = p["det_bin_thresh"].get<float>();
