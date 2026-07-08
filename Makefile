@@ -150,7 +150,7 @@ objs/$(patsubst %.cu,%.ptx,$(1)): $(1)
 objs/$(patsubst %.cu,%.ptx.h,$(1)): objs/$(patsubst %.cu,%.ptx,$(1))
 	@mkdir -p $$(dir $$@)
 	@if [ ! -s $$< ]; then echo "Error: CUDA module image $$< is empty or missing" >&2; exit 1; fi
-	xxd -i $$< | sed -E 's/unsigned int [a-zA-Z0-9_]*_ptx_len/const unsigned int $(2)_len/; s/unsigned char [a-zA-Z0-9_]*_ptx/const char $(2)/; s/0x([0-9a-fA-F]{2})/(char)0x\1/g' > $$@
+	xxd -i $$< | sed -E 's/unsigned int [a-zA-Z0-9_]*_ptx_len/const unsigned int $(2)_len/; s/unsigned char [a-zA-Z0-9_]*_ptx/const unsigned char $(2)/' > $$@
 	@if [ ! -s $$@ ]; then echo "Error: Generated header $$@ is empty" >&2; exit 1; fi
 
 $(3): objs/$(patsubst %.cu,%.ptx.h,$(1))
