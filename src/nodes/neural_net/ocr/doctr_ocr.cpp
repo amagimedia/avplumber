@@ -383,7 +383,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     int region_height_ = 0;
     std::vector<float> region_x_;
     int max_regions_ = 4;
-    int max_boxes_ = 24;
+    int max_boxes_ = 64;
     float det_bin_thresh_ = 0.1f;
     float det_box_thresh_ = 0.1f;
     float reco_conf_thresh_ = 0.0f;
