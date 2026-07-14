@@ -25,7 +25,6 @@ namespace {
 constexpr int kDetBatch = 4;
 constexpr int kDetH = 200;
 constexpr int kDetW = 768;
-constexpr int kRecBatch = 64;
 constexpr int kRecH = 32;
 constexpr int kRecW = 128;
 
@@ -159,6 +158,7 @@ struct TrtRunner {
     int input_index = -1;
     int output_index = -1;
     int n = 0, c = 0, h = 0, w = 0;
+    int n_classes = 0;
     nvinfer1::IRuntime* runtime = nullptr;
     nvinfer1::ICudaEngine* engine = nullptr;
     nvinfer1::IExecutionContext* ctx = nullptr;
@@ -221,8 +221,20 @@ struct TrtRunner {
             }
         }
         if (input_index < 0 || output_index < 0) return false;
-        n = want_n; c = want_c; h = want_h; w = want_w;
-        logstream << "doctr_ocr: loaded engine=" << path << " input=" << n << "x" << c << "x" << h << "x" << w;
+        // Read actual n from the bound input shape (the plan's static batch dim),
+        // not from want_n — they differ when max_boxes != plan batch size.
+        {
+            nvinfer1::Dims in_dims = ctx->getTensorShape(tensor_names[(size_t)input_index].c_str());
+            n = (in_dims.nbDims > 0) ? (int)in_dims.d[0] : want_n;
+        }
+        c = want_c; h = want_h; w = want_w;
+        // Read n_classes from the last dim of the output tensor.
+        {
+            nvinfer1::Dims out_dims = ctx->getTensorShape(tensor_names[(size_t)output_index].c_str());
+            n_classes = (out_dims.nbDims > 0) ? (int)out_dims.d[out_dims.nbDims - 1] : 0;
+        }
+        logstream << "doctr_ocr: loaded engine=" << path << " input=" << n << "x" << c << "x" << h << "x" << w
+                  << " n_classes=" << n_classes;
         return true;
     }
 
@@ -453,11 +465,11 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         const std::string ptx(avpl_doctr_preprocess_ptx, avpl_doctr_preprocess_ptx + avpl_doctr_preprocess_ptx_len);
         if (CUDA_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, ptx.c_str(), 0, nullptr, nullptr))) return false;
         if (CUDA_CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, "kNV12_doctr_crop_resize_pad_f32"))) return false;
-        if (CUDA_CHECK_CU(cuMemAlloc(&d_boxes_, (size_t)kRecBatch * 4 * sizeof(int)))) return false;
         det_.path = detector_engine_;
         rec_.path = recognizer_engine_;
         if (!det_.init(logger_, kDetBatch, 3, kDetH, kDetW)) return false;
-        if (!rec_.init(logger_, kRecBatch, 3, kRecH, kRecW)) return false;
+        if (!rec_.init(logger_, max_boxes_, 3, kRecH, kRecW)) return false;
+        if (CUDA_CHECK_CU(cuMemAlloc(&d_boxes_, (size_t)rec_.n * 4 * sizeof(int)))) return false;
         initialized_ = true;
         return true;
     }
@@ -637,13 +649,13 @@ public:
         launchPreprocess(frm, det_, det_boxes, 0.798f, 0.785f, 0.772f, 0.264f, 0.2749f, 0.287f);
         bool ok = det_.infer();
         std::vector<TextBox> boxes = ok
-            ? boxesFromDetector(det_.output, regions, det_bin_thresh_, det_box_thresh_, edge_margin_px_, std::min(max_boxes_, kRecBatch))
+            ? boxesFromDetector(det_.output, regions, det_bin_thresh_, det_box_thresh_, edge_margin_px_, rec_.n)
             : std::vector<TextBox>();
 
         int raw_kept = (int)boxes.size();
         if (!boxes.empty()) {
-            std::vector<int> rec_boxes((size_t)kRecBatch * 4, 0);
-            for (size_t i = 0; i < boxes.size() && i < (size_t)kRecBatch; ++i) {
+            std::vector<int> rec_boxes((size_t)rec_.n * 4, 0);
+            for (size_t i = 0; i < boxes.size() && i < (size_t)rec_.n; ++i) {
                 int x1 = std::max(0, (int)std::floor(boxes[i].x1));
                 int y1 = std::max(0, (int)std::floor(boxes[i].y1));
                 int x2 = std::min(W, (int)std::ceil(boxes[i].x2));
@@ -656,8 +668,8 @@ public:
             launchPreprocess(frm, rec_, rec_boxes, 0.694f, 0.695f, 0.693f, 0.299f, 0.296f, 0.301f);
             if (rec_.infer()) {
                 const int steps = 33;
-                const int classes = (rec_.n > 0 && steps > 0)
-                    ? (int)(rec_.output.size() / ((size_t)rec_.n * (size_t)steps))
+                const int classes = (rec_.n_classes > 0)
+                    ? rec_.n_classes
                     : ((int)kFrenchTokens.size() + 1);
                 for (size_t i = 0; i < boxes.size(); ++i) {
                     auto decoded = decodeParseq(rec_.output.data() + i * steps * classes, steps, classes);
@@ -697,7 +709,7 @@ public:
         out["stats"] = {
             {"raw_boxes", raw_kept},
             {"recognized", recognized},
-            {"max_boxes", std::min(max_boxes_, kRecBatch)},
+            {"max_boxes", rec_.n},
             {"sample_every_n", sample_every_n_},
             {"target_fps", target_fps_},
             {"elapsed_ms", ms}
@@ -755,7 +767,7 @@ public:
             for (auto& v : p["region_x"]) r->region_x_.push_back(v.get<float>());
         }
         if (p.count("max_regions")) r->max_regions_ = std::max(1, std::min(kDetBatch, p["max_regions"].get<int>()));
-        if (p.count("max_boxes")) r->max_boxes_ = std::max(1, std::min(kRecBatch, p["max_boxes"].get<int>()));
+        if (p.count("max_boxes")) r->max_boxes_ = std::max(1, p["max_boxes"].get<int>());
         if (p.count("det_bin_thresh")) r->det_bin_thresh_ = p["det_bin_thresh"].get<float>();
         if (p.count("det_box_thresh")) r->det_box_thresh_ = p["det_box_thresh"].get<float>();
         if (p.count("reco_conf_thresh")) r->reco_conf_thresh_ = p["reco_conf_thresh"].get<float>();
