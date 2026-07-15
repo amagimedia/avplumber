@@ -55,11 +55,13 @@ typedef enum {
 } AvpMediaType;
 
 /* One media buffer crossing the boundary. Rust passes ONE reference in; the
- * receiver owns it until it either frees it or forwards it via avp_edge_push. */
+ * receiver owns it until it either frees it or forwards it via avp_edge_push.
+ * PTS lives on the AVFrame/AVPacket, in SOURCE TIME, and is never rewritten in
+ * transit (design §3.3). No epoch: a seek clears queues rather than tagging
+ * buffers (design §3.4). */
 typedef struct {
     AvpMediaType type;
     void*        ptr;     /* AVFrame*/AVPacket* for 1..3; opaque for 4..5 */
-    uint64_t     epoch;   /* seek/restart generation; see events below   */
 } AvpBuffer;
 
 /* For opaque C++-owned media (EGL/Metadata), the C++ side registers how Rust may
@@ -75,35 +77,27 @@ typedef struct {
 void avp_register_media_type(AvpCore*, AvpMediaType, const AvpMediaVtable*);
 
 /* -------------------------------------------------------------- edge events */
-/* In-band control on edges. Segment & Caps are STICKY: cached on the edge and
- * replayed to a (re)connecting consumer (design §3.6 — restart safety). */
+/* In-band CAUSAL control on edges (design §3.2). Takes effect where/when it
+ * arrives; nothing is applied retroactively to buffers already downstream.
+ * There is NO segment event and NO epoch — rate/offset/pause live on the master
+ * clock (AvpSyncGroup below), applied at the output. FLUSH preempts the pipe:
+ * it clears queued buffers on the way down (design §3.4). SPEC (stream format)
+ * is causal AND latched on the edge: the edge re-presents its current SPEC as the
+ * head item to any (re)connecting consumer, before any buffer — so there is no
+ * upstream pull walk to recover format (design §4.4.1, §3.6). This replaces the old
+ * IVideoFormatSource/IAudioMetadataSource findNodeUp() queries entirely. */
 typedef enum {
     AVP_EV_EOF         = 1,
-    AVP_EV_FLUSH_START = 2,   /* uses .epoch */
-    AVP_EV_FLUSH_STOP  = 3,   /* uses .epoch */
-    AVP_EV_SEGMENT     = 4,   /* uses .segment (STICKY) */
-    AVP_EV_CAPS        = 5    /* uses .caps    (STICKY) */
+    AVP_EV_FLUSH_START = 2,   /* preempts: clears queues downstream */
+    AVP_EV_FLUSH_STOP  = 3,
+    AVP_EV_SPEC        = 4    /* uses .spec; latched on the edge */
 } AvpEventType;
 
-typedef enum {
-    AVP_TS_INPUT     = 0,
-    AVP_TS_WALLCLOCK = 1,
-    AVP_TS_SYNCTIME  = 2
-} AvpTimestampSource;
-
-/* Timeline definition. out_pts = base + rescale((pts - start)/rate, time_base -> tb).
- * Promotion of SpeedControlTeam::scalePTS + RealTimeTeam offset + input_rec ts. */
-typedef struct {
-    AvpRational        time_base;
-    int64_t            base;       /* output pts assigned to `start`        */
-    int64_t            start;      /* first valid source pts in this segment*/
-    double             rate;       /* playback rate; <0 = reverse           */
-    uint64_t           sync_group; /* streams sharing it stay co-buffered   */
-    AvpTimestampSource ts_source;
-} AvpSegment;
-
-/* Sticky stream format. Complements (does not replace) IVideoFormatSource /
- * IAudioMetadataSource pull queries. */
+/* Stream format description (design §4.4.1): the resolved values that flow through
+ * an edge. Latched on the edge; NOT a GStreamer capability set and NOT negotiated
+ * (a single concrete "this is what flows here now", forward-only). Replaces the
+ * Fact interfaces (IVideoFormatSource / IAudioMetadataSource / IFrameRateSource /
+ * ITimeBaseSource). */
 typedef struct {
     AvpMediaType media;              /* VIDEO or AUDIO                     */
     /* video */
@@ -117,13 +111,11 @@ typedef struct {
     uint64_t     channel_layout;
     /* common */
     AvpRational  time_base;
-} AvpCaps;
+} AvpSpec;
 
 typedef struct {
     AvpEventType type;
-    uint64_t     epoch;      /* FLUSH_START / FLUSH_STOP */
-    AvpSegment   segment;    /* SEGMENT */
-    AvpCaps      caps;       /* CAPS    */
+    AvpSpec      spec;       /* SPEC */
 } AvpEdgeEvent;
 
 /* A dequeued item is either a buffer or an event (single ordered stream). */
@@ -154,6 +146,12 @@ int  avp_edge_peek(AvpEdge*, int timeout_ms, AvpItem* out);  /* 1 got, 0 none */
 void avp_edge_pop(AvpEdge*);
 int  avp_edge_occupied(AvpEdge*);
 
+/* Current latched SPEC of this edge (design §4.4.1). Normally a node just receives
+ * a SPEC item as the head of its stream and needn't call this; provided so the
+ * shim base / a late binder can read the format synchronously without consuming.
+ * Returns 1 and fills *out if a SPEC has ever flowed, 0 if none yet. */
+int  avp_edge_current_spec(AvpEdge*, AvpSpec* out);
+
 /* Non-blocking wakeup (replaces processWhenSignalled / consumedEvent). The core
  * re-invokes the node's vtable.poll when the edge becomes readable/writable. */
 void avp_edge_notify_readable(AvpEdge*, AvpNode*);
@@ -163,6 +161,52 @@ void avp_edge_notify_writable(AvpEdge*, AvpNode*);
  * endpoint handle. capacity==0 lets the core decide (DirectEdge if co-located). */
 AvpEdge* avp_node_bind_source(AvpNode*, const char* edge_name, AvpMediaType, size_t capacity);
 AvpEdge* avp_node_bind_sink  (AvpNode*, const char* edge_name, AvpMediaType, size_t capacity);
+
+/* ---------------------------------------------------------- master clock */
+/* The SyncGroup master clock (design §3.3): the ONE shared primitive that
+ * replaces SpeedControlTeam + RealTimeTeam. It owns the playback->wall mapping —
+ * rate, offset, pause — for a group of streams that must stay A/V-synchronized.
+ * Rate/offset/pause changes are O(1) writes here; buffers keep their source-time
+ * PTS and are mapped through the clock only when an OUTPUT stage releases them.
+ * A seek resets the clock (one shared reset for the whole group). No node other
+ * than an output/clock-sync stage reads this. */
+typedef struct AvpSyncGroup AvpSyncGroup;
+
+AvpSyncGroup* avp_sync_group(AvpCore*, const char* name);   /* get/create by name */
+
+/* Control-plane writes (from the control protocol / scheduled actions). */
+void avp_clock_set_rate  (AvpSyncGroup*, double rate);      /* <0 = reverse       */
+void avp_clock_set_paused(AvpSyncGroup*, int paused);       /* freeze/thaw output */
+void avp_clock_reset     (AvpSyncGroup*, int64_t new_pos, AvpRational tb); /* seek */
+
+/* Output-stage read: map a source-time PTS to wall/presentation time. Returns
+ * AVP_NOPTS while paused-and-not-yet-due; the stage sleeps until then. */
+int64_t avp_clock_map_to_wall(AvpSyncGroup*, int64_t src_pts, AvpRational tb);
+
+/* ------------------------------------------------------- shared timeline */
+/* SharedTimeline (design §3.3, was InstanceShared<SharedTimeline>): a named,
+ * PTS-keyed key/value store — the fifth core service alongside the SyncGroup.
+ * It is NOT on the data plane (no AVFrames): the control protocol/mixer WRITE
+ * scheduled values at a source-time PTS, and C++ Tier-S nodes (one_to_many,
+ * source_switcher, preheat_video_router, cuda_rect_overlay via TimelineReader)
+ * READ "the value in effect at this frame's PTS". Values are opaque JSON so the
+ * ABI needn't model the Parameters variant. Crosses the boundary in BOTH
+ * directions (Rust control writes, C++ nodes read), hence a C surface. */
+typedef struct AvpTimeline AvpTimeline;
+
+AvpTimeline* avp_timeline(AvpCore*, const char* name);   /* get/create by name */
+
+/* Control-plane writes (scheduled values keyed by source-time PTS, ms). */
+void avp_timeline_set      (AvpTimeline*, const char* channel, const char* key,
+                            int64_t at_pts_ms, const char* value_json);
+void avp_timeline_clear_key(AvpTimeline*, const char* channel, const char* key);
+void avp_timeline_gc       (AvpTimeline*, int64_t before_pts_ms);
+
+/* Node read: latest value with at_pts_ms <= frame_pts (compared via the frame
+ * timebase). Writes the JSON value into `out` (cap bytes) and returns its length,
+ * 0 if no entry applies, or the needed length (>cap) if truncated. */
+int  avp_timeline_get      (AvpTimeline*, const char* channel, const char* key,
+                            int64_t frame_pts, AvpRational tb, char* out, size_t cap);
 
 /* --------------------------------------------------------- node vtable/api */
 /* Nodes PULL from their edges (avp_edge_peek). process()/poll() take no item. */
@@ -189,32 +233,35 @@ void* avp_node_impl(AvpNode*);
 const char* avp_node_name(AvpNode*);
 
 /* -------------------------------------------------- interface discovery */
-/* Stable, append-only ids for the graph_interfaces.hpp capabilities. */
+/* Capability discovery is DIRECT only — you query a node you already hold (design
+ * §4.4). There is NO avp_find_interface_up / graph walk: the three registers the
+ * old findNodeUp<T>() served are now split —
+ *   - Facts  (format: IVideoFormatSource/IAudioMetadataSource/IFrameRateSource/
+ *             ITimeBaseSource) -> AvpSpec, latched in-band on the edge (above).
+ *   - Controls (IPlaybackControl direction, IInputReset, seek/speed/pause) ->
+ *             addressed to core services (AvpSyncGroup + the flush discontinuity).
+ *   - Live queries (below) -> this table, queried on a named/adjacent node.
+ * So only the Register-3 capabilities remain here. Stable, append-only ids. */
 typedef enum {
-    AVP_IFACE_DECODER              = 1,
+    AVP_IFACE_DECODER              = 1,   /* codec name, discard_until          */
     AVP_IFACE_ENCODER              = 2,
     AVP_IFACE_MUXER                = 3,
-    AVP_IFACE_VIDEO_FORMAT_SOURCE  = 4,
-    AVP_IFACE_AUDIO_METADATA_SOURCE= 5,
-    AVP_IFACE_FRAME_RATE_SOURCE    = 6,
-    AVP_IFACE_TIME_BASE_SOURCE     = 7,
-    AVP_IFACE_PLAYBACK_CONTROL     = 8,
-    AVP_IFACE_INPUT_RESET          = 9,
-    AVP_IFACE_FRAME_NUMBER         = 10,
-    AVP_IFACE_FRAME_TIMESTAMP      = 11,
-    AVP_IFACE_SENTINEL             = 12,
-    AVP_IFACE_PREFERRED_FORMAT_RX  = 13,
-    AVP_IFACE_NEEDS_OUT_FRAME_SIZE = 14,
-    AVP_IFACE_RETURNS_OBJECTS      = 15,
-    AVP_IFACE_INPUTS_OBJECTS       = 16,
-    AVP_IFACE_STREAMS_INPUT        = 17,
-    AVP_IFACE_JACK_SINK            = 18
-    /* append only */
+    AVP_IFACE_SENTINEL             = 4,   /* card/signal-present stats          */
+    AVP_IFACE_RETURNS_OBJECTS      = 5,   /* node.param.get bridge              */
+    AVP_IFACE_INPUTS_OBJECTS       = 6,   /* node.param.set bridge              */
+    AVP_IFACE_STREAMS_INPUT        = 7,   /* demux stream enumeration           */
+    AVP_IFACE_JACK_SINK            = 8    /* adjacent JACK pull callback         */
+    /* append only. NOTE: no *_FORMAT_SOURCE / *_PLAYBACK_CONTROL / *_INPUT_RESET
+     * / *_FRAME_RATE / *_TIME_BASE / *_FRAME_NUMBER / *_FRAME_TIMESTAMP ids —
+     * those were Facts (now AvpSpec) or Controls (now services), not queries.
+     * PREFERRED_FORMAT_RX / NEEDS_OUT_FRAME_SIZE are the reverse (downstream->
+     * upstream) hints; resolved as a direct query on the immediate downstream
+     * node — see design §12.1, added when that open question lands. */
 } AvpInterfaceId;
 
-/* Query one node, or walk upstream from an edge (replaces findNodeUp<T>). */
+/* Query a node the caller already holds (self, an adjacent node, or a node named
+ * by the control protocol). The ONLY interface-discovery primitive. */
 const void* avp_node_query_interface(AvpNode*, AvpInterfaceId);
-const void* avp_find_interface_up(AvpEdge* from, AvpInterfaceId);
 
 /* Representative per-interface C vtables. First arg is always the AvpNode whose
  * query_interface returned this vtable. The rest follow the same pattern. */
@@ -223,19 +270,6 @@ typedef struct {                                   /* AVP_IFACE_DECODER */
     const char* (*media_type_string)(AvpNode*);
     void        (*discard_until)(AvpNode*, int64_t pts, AvpRational tb);
 } AvpIDecoder;
-
-typedef struct {                                   /* AVP_IFACE_VIDEO_FORMAT_SOURCE */
-    int (*width)(AvpNode*);
-    int (*height)(AvpNode*);
-    int (*pixel_format)(AvpNode*);                 /* AVPixelFormat */
-} AvpIVideoFormatSource;
-
-typedef struct {                                   /* AVP_IFACE_PLAYBACK_CONTROL */
-    int  (*get_direction)(AvpNode*);               /* 0 fwd, 1 back */
-    void (*set_direction)(AvpNode*, int dir);
-    /* Target conversion / seek now flow as core-issued events; these remain for
-     * nodes that still answer queries. See design §4.4 (interfaces kept). */
-} AvpIPlaybackControl;
 
 typedef struct {                                   /* AVP_IFACE_RETURNS_OBJECTS */
     /* returns an owned JSON string; caller frees with avp_string_free */
@@ -286,14 +320,16 @@ int      avp_core_serve_tcp(AvpCore*, uint16_t port);
   `avp_edge_peek`. This is faithful to today's `source_->get()` and makes the shim a
   thin wrapper. (Earlier drafts sketched a push `poll(item)`; pull is chosen so
   legacy node bodies don't invert.)
-- **One item stream.** Buffers and events share one ordered queue (`AvpItem`), so
-  ordering between a `Segment` and the buffers under it is intrinsic (§3.3).
+- **One item stream.** Buffers and control tokens share one ordered queue
+  (`AvpItem`), so ordering between a flush and the buffers around it is intrinsic;
+  a flush additionally preempts (clears) the queue it crosses (§3.4).
 - **Ownership is stated per call.** `push` takes the ref on `PUSHED`; `peek` borrows
   until `pop`. This is the whole refcount contract the shim must honor (§3.2 of the
   breakdown).
 - **Interface vtables are `const` singletons per node type**; `query_interface`
-  returns a pointer to a static struct whose fns re-enter the node. Only 4 shown;
-  the rest are mechanical.
+  returns a pointer to a static struct whose fns re-enter the node. Only the
+  Register-3 live-query interfaces (§4.4) exist here; a couple are shown, the rest
+  are mechanical. Facts (format) are NOT interfaces — they are `AvpSpec` on the edge.
 
 ---
 
@@ -392,7 +428,7 @@ public:
     bool pop() { peeked_.reset(); avp_edge_pop(edge_); return true; }
     AvpEdge* edge() { return edge_; }
 private:
-    bool handleEvent(const AvpEdgeEvent&); /* flush/segment/caps -> node hooks; TODO */
+    bool handleEvent(const AvpEdgeEvent&); /* eof/flush/spec -> node hooks; TODO */
     static void* refOf(const AvpBuffer&);  /* av_frame_ref / media retain; TODO */
 };
 
@@ -403,7 +439,7 @@ public:
     using DataType = T;
     explicit Sink(AvpEdge* e): edge_(e) {}
     bool put(T data, bool drop_if_full = false) {
-        AvpBuffer b { avpshim::Media<T>::tag, avpshim::Media<T>::unwrap(data), 0 /*epoch set by core*/ };
+        AvpBuffer b { avpshim::Media<T>::tag, avpshim::Media<T>::unwrap(data) };
         AvpFlow f = avp_edge_push(edge_, &b);
         if (f == AVP_FLOW_PUSHED) { data.release_ownership(); /* ref moved to edge; TODO exact avcpp */ return true; }
         if (f == AVP_FLOW_BACKPRESSURE) { if (drop_if_full) return false; /* block: TODO */ return false; }
@@ -423,8 +459,12 @@ public:
     virtual void process() {}                 /* blocking nodes override */
     virtual void start() {}
     virtual void stop() {}
-    /* findNodeUp<IFoo> -> avp_find_interface_up + wrap back to the C++ interface */
-    template<typename Iface> Iface* findNodeUp();  /* TODO: id map + trampoline */
+    /* Format arrives as a latched SPEC on the input edge (design §4.4.1), routed to
+     * this hook before the first process(). Default: forward unchanged (identity)
+     * -> pass-through nodes need no override. A Transform returns its output SPEC;
+     * a query-only node reads it, (re)configures, and returns it. Replaces the old
+     * findNodeUp<IVideoFormatSource>() init pull. There is NO findNodeUp: no walk. */
+    virtual AvpSpec on_spec(const AvpSpec& in) { return in; }
 };
 
 template<typename InT>  class NodeSingleInput  : public virtual NodeBase {
@@ -490,7 +530,8 @@ template<typename Child> const AvpIDecoder* qi_decoder(AvpNode* n) {
 template<typename Child> const void* query_interface(AvpNode* n, uint32_t id) {
     switch (id) {
         case AVP_IFACE_DECODER: return qi_decoder<Child>(n);
-        /* QI_ENTRY(AVP_IFACE_VIDEO_FORMAT_SOURCE, qi_video_format<Child>) ... */
+        /* QI_ENTRY(AVP_IFACE_ENCODER, qi_encoder<Child>) ... (Register-3 only;
+         * no VIDEO_FORMAT_SOURCE — that Fact is served by on_spec, not a query) */
         default: return nullptr;
     }
 }
@@ -564,16 +605,20 @@ struct NodeCreationInfo {
   adopt/wrap ctor spelling (`wrap_ref{}` here is a placeholder) is the first thing to
   nail down.
 - **`query_interface` is mechanical but bulky.** Only `IDecoder` is written out; the
-  other ~17 follow identically. Generate them with an X-macro over
-  `(iface_id, cxx_interface, {method trampolines})` so adding an interface is one
-  line — mirroring how the old `DECLNODE` avoided boilerplate.
+  other ~7 Register-3 interfaces (§4.4) follow identically. Generate them with an
+  X-macro over `(iface_id, cxx_interface, {method trampolines})` so adding one is a
+  single line — mirroring how the old `DECLNODE` avoided boilerplate. (Fact
+  interfaces are NOT here; they route through `on_spec`, below.)
 - **Blocking vs non-blocking detection.** `vtable_for<Child>(nonblocking)` currently
   hardcodes blocking; detect via `std::is_base_of<NonBlockingNodeBase, Child>` (the
   shim keeps that marker base) and wire the `poll` trampoline + `notify_*`.
-- **Events → node hooks.** `Source::handleEvent` currently only surfaces EOF as a
-  marker (transition compatibility). Once nodes are event-aware it dispatches
-  `FlushStart`/`Segment`/`Caps` to optional `on_event` overrides; stateful Tier-S
-  nodes (decoders, filters) implement it to reset internal state (§3.6).
+- **Control tokens → node hooks.** `Source::handleEvent` currently only surfaces EOF
+  as a marker (transition compatibility). Once nodes are control-aware it dispatches
+  `FlushStart`/`FlushStop` to optional `on_event` overrides and `Spec` to the
+  `on_spec` hook (default: forward unchanged, §4.4.1); stateful Tier-S nodes
+  (decoders, filters) implement `FlushStart` to reset internal state. Timeline is
+  NOT delivered here — output/clock-sync stages read the master clock directly
+  (§3.3).
 
 ---
 
@@ -581,12 +626,19 @@ struct NodeCreationInfo {
 
 1. Pin avcpp + FFmpeg versions; determine the exact **adopt/wrap ctor** and ref
    semantics for `av::Packet`/`av::VideoFrame`/`av::AudioSamples`. Replace the
-   `wrap_ref{}` placeholders. **Unit-test refcounts** (wrap→drop, wrap→put) with
-   `av_buffer_get_ref_count`.
+   `wrap_ref{}` placeholders. **Unit-test refcounts** (wrap→drop, wrap→put,
+   **fan-out: push one frame to N edges → drop all N → refcount back to pre-push
+   value, no double-free**, and wrap→mutate-in-place→verify-CoW) with
+   `av_buffer_get_ref_count`, run under ASan/valgrind. See plan_v2 §8.2.1 for the
+   fan-out / shared-buffer mutation invariants these tests enforce.
 2. Implement `Source::refOf` (`av_frame_ref`/`av_packet_ref`/media-vtable retain) and
    confirm `peek`→`pop` keeps exactly one net ref.
-3. Generate the full `query_interface` X-macro table (17 entries) + the
-   `findNodeUp<Iface>` trampoline that wraps `avp_find_interface_up`.
+3. Generate the `query_interface` X-macro table (the ~8 Register-3 entries, §4.4).
+   Wire the `on_spec` bridge: for a node that reimplements a Fact interface
+   (`rescale_video`/`filters`), read its output getters after processing the input
+   `Spec` and emit the resulting `Spec`; for a node that read an upstream Fact at
+   init (encoder), feed the latched input `Spec` into the fields the old
+   `findNodeUp<IVideoFormatSource>()` pulled. No `avp_find_interface_up` (deleted).
 4. Wire non-blocking detection + the `poll`/`notify_*` path; port `firewall` (Tier R)
    and `rescale_video` (Tier S) as the two proofs.
 5. Decide `MetadataFrame` field access (design open Q §12.3) — opaque-move is enough

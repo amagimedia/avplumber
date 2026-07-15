@@ -16,17 +16,24 @@
 
 Seven concrete changes, each justified in the section noted:
 
-1. **Interface discovery is a first-class subsystem, not a table row.** The graph
-   is threaded with ~30 optional capabilities discovered by `dynamic_cast` and
-   `findNodeUp<T>()`. RTTI does not cross a C-ABI/`.so` boundary. We add an
-   explicit `query_interface(node, iface_id)` mechanism. (§4, §5)
+1. **Capability discovery splits into three registers, and the upstream walk is
+   deleted.** The graph is threaded with ~30 optional capabilities discovered today
+   by `dynamic_cast` + `findNodeUp<T>()` (a per-call upstream walk). Reading the call
+   sites, they are three different jobs: *Facts* (format) become `Spec` latched
+   in-band on the edge; *Controls* (direction/reset/seek) are addressed to core
+   services; only *live queries* on an already-known node keep an explicit
+   `query_interface(node, id)`. No graph walk survives — which also kills the
+   `input_hold_` lifetime hack. (§4.4, §4.4.1, §6)
 
-2. **In-band edge events/segments are the primary playback mechanism**, with
-   epochs as a secondary cheap-staleness check. This deletes `IFlushAndSeek`, the
-   4-phase seek handshake, and the per-edge `flushing_`/`flushed_` flags. Events do
-   **not** replace the capability interfaces — the data-plane push (events) and the
-   pull-plane query (interfaces) are complementary and both are kept, which is what
-   makes node restart during live op safe. (§3, §3.6, §4.4, §6)
+2. **Causal dataflow: source-time buffers + a shared master clock read at the
+   output.** Edges are pipes carrying buffers (PTS never rewritten in transit) plus
+   a minimal set of causal in-band control tokens (EOF, flush/seek, format). Rate,
+   offset and pause live on the master clock (`SyncGroup`) and are applied only at
+   the output — not threaded through the graph. This deletes `IFlushAndSeek`, the
+   4-phase seek handshake, the per-edge `flushing_`/`flushed_` flags, the
+   `speedChanged` reach-back, and the `AVFrame::metadata` timeline smuggling. Format
+   is recovered from the edge's latched `Spec` (§4.4.1), not a pull walk, which is
+   what makes node restart during live op safe. (§3, §3.6, §4.4, §6)
 
 3. **The four Teams and the scheduler-adjacent "nodes" become core Rust
    services**, not ported/shimmed C++ nodes. `RealTimeTeam` *is* the sync + seek
@@ -70,9 +77,11 @@ CUDA/GL/TensorRT, OBS embed) is materially longer. Treat it as MVP-then-strangle
 never a big-bang parity target.
 
 **Top risks, ranked:**
-1. Interface discovery across the boundary (mitigated by §4's `query_interface`).
+1. Capability discovery across the boundary (mitigated by §4.4's three-register
+   split: `Spec` in-band for Facts, services for Controls, direct `query_interface`
+   for live queries — no upstream walk).
 2. The Teams + 4-phase seek being replaced without behavior regressions on live
-   streams (mitigated by §3/§6's event model + the §10 parity-first ordering).
+   streams (mitigated by §3/§6's causal dataflow model + the §10 parity-first ordering).
 3. `.raw()` refcount correctness through the shim (mitigated by §2/§8's ownership
    contract).
 
@@ -98,8 +107,8 @@ typedef enum {
 typedef struct {
     AvpMediaType type;
     void*        ptr;      // AVFrame*/AVPacket* for 2/3/1, opaque for 4/5
-    uint64_t     epoch;    // staleness/seek generation (see §3.4)
-} AvpBuffer;
+} AvpBuffer;             // PTS is on the AVFrame/AVPacket, in source time (§3.3).
+                          // No epoch: seek clears queues rather than tagging them (§3.4).
 ```
 
 - For `PACKET/VIDEO/AUDIO`, `ptr` is a genuine FFmpeg C object. Rust owns a
@@ -127,79 +136,119 @@ including `av::VideoRescaler`, side-data walks, `av_dict_copy` — are unchanged
 
 ---
 
-## 3. Edge model: `Buffer | Event` streams (the keystone)
+## 3. Edge model: buffers + causal control (the keystone)
 
 This is the central design change. It replaces: EOF markers, `IFlushAndSeek`, the
-4-phase seek, per-edge flush flags, in-flight PTS rescaling, and the
-`AVFrame::metadata` timeline smuggling in `input_rec`.
+4-phase seek, per-edge flush flags, in-flight PTS rescaling, the `speedChanged`
+upstream walk, and the `AVFrame::metadata` timeline smuggling in `input_rec`.
 
-### 3.1 The insight
+### 3.1 The model: dataflow, not a graph engine
 
-The codebase **already** carries one in-band control signal on edges: EOF, via
-`createEofMarker`/`isEofMarker`/`consumeEofIfPresent`. Everything else
-(seek/flush/speed/pause/custom-timeline) is done *out of band* — by walking the
-graph with RTTI, flipping atomics, and broadcasting through Team singletons. We
-generalize the one thing that already works: **an edge carries an ordered stream
-of `Buffer` or `Event`.** This is the GStreamer buffers+events+segments model, and
-adopting its shape is what makes eventual GStreamer interop tractable.
+The mental model is **unix pipes / a modular synthesizer, not GStreamer.** An edge
+is a pipe carrying an ordered stream of buffers with occasional in-band control
+tokens. **Control is causal:** a control token takes effect *where and when it
+arrives*, exactly like bytes in a pipe or a control-voltage change in a synth.
+**Nothing is ever applied retroactively to buffers already downstream.** The entire
+apparatus in the C++ core that exists to *fake* instantaneous, retroactive control —
+the RTTI graph walks, the Team singletons, the `speedChanged` reach-back that
+re-rescales queued frames — is deleted, not ported.
 
-### 3.2 The event set
+The design has exactly three moving parts, and no more:
+
+1. **Data plane** — buffers carrying **source-time PTS, never rewritten in
+   transit.** A frame's PTS means the same thing at every hop from demux to sink.
+2. **In-band control** — a small set of causal tokens on the pipe: end-of-stream,
+   the seek/flush discontinuity, and format changes. That's it.
+3. **One shared primitive: the master clock** (`SyncGroup`, §6). It owns the
+   playback→wall mapping — offset, rate, pause state — and is read **at the output**
+   for A/V sync and reset on seek. This is the synth's master clock: one shared time
+   source that parallel pipes agree on. It is the *only* thing media forces on us
+   that plain pipes lack, and it exists solely for cross-stream sync and coherent
+   seek.
+
+The codebase already proves the shape works: EOF is *already* an in-band token
+(`createEofMarker`/`isEofMarker`). We generalize that one working mechanism and
+throw the out-of-band machinery away.
+
+### 3.2 What travels on an edge
 
 ```rust
 enum EdgeItem {
-    Buffer(AvpBuffer),
+    Buffer(AvpBuffer),   // source-time PTS, never rewritten in transit
     Event(EdgeEvent),
 }
 
 enum EdgeEvent {
-    /// End of stream. Replaces the EOF marker. Flows downstream; a node flushes
-    /// its internal state, forwards Eof, and finishes.
+    /// End of stream. A node flushes internal state, forwards Eof, finishes.
     Eof,
 
-    /// Begin discarding. Downstream drops Buffers (and flushes internal codec/
-    /// filter state) until FlushStop. Replaces startFlushing() + the pause
-    /// handshake.
-    FlushStart { epoch: u64 },
+    /// Seek / discontinuity. Preempts the pipe: clears queued Buffers and flushes
+    /// internal codec/filter state downstream, immediately. See §3.4.
+    FlushStart,
+    FlushStop,
 
-    /// Resume normal flow. Carries the epoch that subsequent Buffers will bear.
-    FlushStop { epoch: u64 },
-
-    /// STICKY. Timeline definition. Everything after this event is interpreted
-    /// relative to it. Replaces: SpeedControlTeam::scalePTS remap, RealTimeTeam
-    /// offset broadcast, and input_rec's ts_offsets_ / setFrameMetadataTimestamps.
-    /// Cached on the edge and replayed to a (re)connecting consumer (§3.6).
-    Segment(Segment),
-
-    /// STICKY. Stream format (caps). Sent before the first Buffer and whenever
-    /// format changes. Complements (does not replace) the IVideoFormatSource /
-    /// IAudioMetadataSource pull queries. Cached on the edge and replayed to a
-    /// (re)connecting consumer, so a restarted node never misses it (§3.6).
-    Caps(StreamCaps),
+    /// Stream format description (video: w/h/pixfmt; audio: rate/fmt/layout;
+    /// frame rate; time base). Sent before the first Buffer and whenever the
+    /// format changes. Latched on the edge: a (re)connecting consumer is handed
+    /// the current Spec as the head item before any Buffer — no pull walk. See
+    /// §4.4.1 and §3.6.
+    Spec(StreamSpec),
 }
 ```
 
-`Segment` is the workhorse. It is exactly the piecewise-linear remap
-`SpeedControlTeam::scalePTS` already computes, promoted to a first-class value:
+There is **no `Segment` event and no per-buffer epoch.** Rate and offset are not in
+the stream at all — they live on the master clock (§3.3). Format is causal and
+in-band but not cached/replayed (§3.6). This is the whole event set.
 
-```rust
-struct Segment {
-    time_base:   Rational,    // units of the ts fields below
-    base:        i64,         // output PTS assigned to `start`
-    start:       i64,         // first valid source PTS in this segment
-    rate:        f64,         // playback rate; negative = reverse
-    // clock domain this segment is synchronized against (RealTimeTeam offset_).
-    // Multiple streams sharing a sync_group stay buffered together.
-    sync_group:  SyncGroupId,
-    // which source timeline these timestamps express (input_rec ETimestampSource)
-    ts_source:   TimestampSource, // Input | Wallclock | SyncTime
-}
-```
+### 3.3 Timestamps and the master clock (what replaces `Segment`)
 
-A node maps a buffer PTS to output PTS with pure local arithmetic:
-`out = base + ((pts - start) as f64 / rate) rescaled to output tb`. No graph walk,
-no Team broadcast, no `av_dict_set`/`av_dict_get` round-trip per frame.
+**PTS on edges is always source time, and no node rewrites it.** Decode, filter,
+scale, split, mux — every node passes PTS through unchanged. The playback→wall
+mapping happens in exactly one place: **the master clock, read at the output** when
+a frame is released for presentation. Playback *rate is a property of that clock*,
+not a value threaded through the graph. So:
 
-### 3.3 Seek, redrawn
+- **Speed change** = change the clock's rate. O(1), at the clock. Every buffer
+  already in flight keeps its source-time PTS and is simply mapped through the new
+  rate when the output releases it. No in-band token, no queue drain, no reach-back.
+  This is the "fuse speed into the output clock" resolution: in a synth, playback
+  rate *is* the master clock — it belongs at the output stage, not mid-graph.
+- **Pause** = freeze the clock. The output stops releasing; back-pressure propagates
+  upstream through the pipes naturally. No pause handshake.
+
+Contrast the C++, where `speed.cpp` bakes rate into the PTS mid-graph
+(`rescaleFrameTS`→`setPts`) and therefore must **reach back and un-bake queued
+frames** on every rate change — the ~120-line `speedChanged` upstream walk
+(`lockProcessing()` on every node, re-rescaling in-flight PTSes, recovering the
+original PTS via the `AVFrame::metadata` `frame_ts` dict and a side `scaled_pts_`
+list). All of that existed only because the frame was the wrong place to store a
+mutable timeline. Keep source time on the frame and the entire mechanism vanishes.
+
+**Topology, not machinery, gives responsive control.** The one real cost of causal
+control is that a change is delayed by whatever buffer sits between the control
+point and the point of observation. That is a *topology* property. Two rules keep it
+small, and they are design guidance, not framework features:
+
+- **Keep heavy buffers upstream of the control point.** Put the jitter/source buffer
+  *before* speed/pause; keep the path from there to the output shallow. Then even a
+  purely in-band control change would be cheap — and the clock-based approach makes
+  it free.
+- **Fuse speed/pause into the output clock stage.** With no buffer between the knob
+  and the clock, the change is O(1) by construction. This is why `speed`/`pause`/
+  `realtime` become one output-clock **core service** (§6), not mid-graph nodes.
+
+`sync_group` (which master clock a stream reads) and `ts_source` (which source
+timeline the input stamps) are therefore **not** properties of a stream event. The
+first is a node/edge configuration selecting a clock domain; the second is an
+input-subsystem concern handled where timestamps originate (§6.3). Neither pollutes
+the data plane.
+
+### 3.4 Seek = a flushing discontinuity
+
+Seek is fundamentally different from speed: a speed change *preserves* buffers (that
+was the trap — trying to rewrite them), whereas a seek *discards* them (jump to a
+new position, throw away what was queued). Discarding is trivially safe — there is
+no per-frame state to recover — so seek is allowed to **preempt the pipe.**
 
 Old (imperative, RTTI, ordered 4-phase across `NodeSingleInput` + `RealTimeTeam`,
 `graph_base.hpp:84-170`):
@@ -213,37 +262,30 @@ _complete: dynamic_cast upstream to IDecoder::discardUntil, IPlaybackControl::
            seekAndPause, IInputReset::resetInput; resume all
 ```
 
-New (declarative, in-band, no pause handshake):
+New (a flush that clears queues + a clock reset, no pause handshake, no RTTI):
 
 ```
-1. Core bumps the sync_group epoch: E -> E+1.
-2. Source node (input_rec's replacement) emits, in-band on its output edge:
-      Event(FlushStart { epoch: E+1 })
-   Every downstream node, on receiving FlushStart:
-      - discards queued Buffers with epoch < E+1
-      - flushes its own internal state (decoder DPB, rescaler, FRUC buffers)
-      - forwards FlushStart, returns to idle for that stream
-   Stateful reset thus happens *where the state lives*, triggered by one event.
-3. Source repositions (seek table lookup, byte/frame/ts resolution — the
+1. Source (input_rec's replacement) issues FlushStart downstream. Unlike a
+   Buffer, a flush PREEMPTS: each edge it crosses clears its queued Buffers
+   immediately (drop — no rewrite), and each node flushes its own internal
+   state (decoder DPB, rescaler, FRUC buffers) where that state lives.
+   This is why seek is instant and not delayed by queue depth: the discontinuity
+   discards the pipe rather than waiting to drain it.
+2. Source repositions (seek table lookup, byte/frame/ts resolution — the
    input_rec logic, now a core InputReader method, §6.3).
-4. Source emits:
-      Event(Segment { base, start, rate, sync_group, ts_source })
-      Event(FlushStop { epoch: E+1 })
-      Buffer(..., epoch: E+1), Buffer(..., epoch: E+1), ...
+3. The master clock is reset to the new position (one shared reset for all
+   streams in the sync_group — this is what keeps A/V coherent across a seek).
+4. Source emits FlushStop, then fresh Spec, then Buffers at the new position.
+   The output resumes mapping source-time PTS through the reset clock.
 ```
 
-No `pauseProcessing()`, no cross-node mutex barrier, no ordering contract between
-four separately-invoked phases. Ordering is intrinsic: events cannot overtake the
-buffers they follow because they share the queue.
-
-### 3.4 Epochs as the cheap check
-
-Every `AvpBuffer` and the Flush events carry a `u64 epoch`. A node's fast path is:
-`if buf.epoch < self.current_epoch { drop }`. This handles the window between "seek
-issued" and "FlushStart observed" for buffers already in flight past a node, and
-lets a node cheaply reject stragglers without inspecting the event stream mid-batch.
-Epoch is the optimization; the event stream is the mechanism. (v1 had this
-inverted — epoch-only cannot flush a decoder's internal DPB.)
+Because a flush clears queues on the way down and the clock reset is a single shared
+operation, there is **no need for epoch tagging**: there are no stale buffers left in
+flight to distinguish (they were dropped), and the output only maps buffers it
+receives after `FlushStop` through the reset clock. Ordering between flush and the
+buffers that follow it is intrinsic to the pipe. (v1's epoch scheme was compensating
+for a design that let stale buffers linger; clearing on flush removes the problem
+rather than tracking it.)
 
 ### 3.5 Direct edges (zero-queue) fit naturally
 
@@ -261,72 +303,39 @@ by construction. **Hard invariant:** never fuse across a blocking boundary — a
 consumer would stall the producer's OS thread. The scheduler chooses edge type
 from whether the two nodes share an execution context (§5.3).
 
-### 3.6 Sticky events and node restart during live operation
+### 3.6 Node restart during live operation
 
-This is the one correctness hazard the event model introduces, and it must be
-designed for — not left implicit.
+The dataflow model keeps the C++'s accidental crash-tolerance instead of breaking
+it. Today every frame re-carries its own truth: `rescale_video` re-probes format
+per frame (`sourceChanged()`); `realtime` re-derives its offset from the shared
+clock. So when `restart_node`/`restart_group` fires on error during live op (wired
+as `onFinished` callbacks in `NodeManager::createNode`), the recreated node
+reconnects to its named edges and picks state up — nothing was stored only-once
+upstream, so nothing is missed.
 
-**The problem.** Today the design is crash-tolerant *by accident*: every frame
-re-carries its own truth. `rescale_video` re-probes format per frame
-(`sourceChanged()`); `realtime` re-derives its offset and reads
-`frame_ts`/`frame_no`/`wallclock` from `AVFrame::metadata` each frame. So when
-`restart_node`/`restart_group` fires on error during live op (wired as `onFinished`
-callbacks in `NodeManager::createNode`), the recreated node reconnects to its named
-edges and picks state up from the next frame. Nothing is sticky, so nothing is
-missed.
+We preserve this property by **not introducing sticky per-stream state on the
+edge.** Concretely:
 
-The event model breaks this: `Caps` and `Segment` are **sticky** — sent once,
-upstream, before the first buffer. A node that restarts mid-stream has already
-missed them. Naively it would then **stall** (waiting for a `Segment` that is never
-re-sent) or **mis-time / mass-drop** (no timeline; wrong epoch → treats live
-buffers as stale). That is a regression vs. today. Three mechanisms remove it, and
-they compose:
+- **Timeline survives restart because it isn't on the edge.** Rate/offset/pause live
+  on the master clock (§3.3), which is a core-owned service, not node state. A
+  restarted node rejoins and reads the current clock exactly as `realtime` does
+  today (`ready_=false` → converge) — no timeline to replay, nothing to miss.
+- **Format is recovered from the edge latch, not a pull walk and not replay.** The
+  edge latches the current `Spec` (§4.4.1); a (re)connecting consumer, on its first
+  pop, is handed that latched `Spec` as the head item before any buffer, re-inits in
+  `on_spec`, and proceeds. This is *local* current state of one pipe, not replayed
+  global policy (contrast the deleted `Segment`/epoch). So there is no upstream
+  interface walk to recover format (`findNodeUp` is deleted, §4.4) and no edge-side
+  sticky cache/replay machinery.
+- **Producer restart reuses the seek discontinuity.** A restarted producer self-
+  issues `FlushStart` → reposition → `FlushStop` → fresh `Spec` (§3.4), clearing
+  stale downstream buffers via the exact same flush mechanism. A consumer restart
+  reads the latched `Spec` + current clock as above. A whole-group restart is both.
 
-**(1) Sticky-event caching + replay on (re)connection (GStreamer's model — hard
-requirement of every `Edge` impl).** Each edge caches its current sticky set
-(`Caps`, `Segment`, current epoch), updated **at dequeue time** so the cache always
-reflects the last sticky event the consumer actually passed. When a restarted node
-registers as the edge's consumer, the edge replays the cache **first**, in canonical
-order (`Caps → Segment`), then drains the intact queue. Because events are in-band
-and the queue preserves ordering, this is correct even across a mid-segment
-boundary:
-
-```
-Before crash, consumer had processed:  Caps, SegA, buf1      cache = {Caps, SegA}
-Queue still holds:                     [SegB, buf2(segB)]
-Replay to the new consumer:            Caps, SegA, then SegB, buf2
-  ⇒ buf2 correctly under SegB; buf1 lost (expected — it was in-flight/in the DPB)
-```
-
-For a `DirectEdge` (no queue) the cache alone is replayed, then direct calls resume.
-
-**(2) Restart *is* a discontinuity — it reuses the seek path, no separate protocol.**
-If the **producer** side restarts, on `start()` it self-issues
-`FlushStart{epoch+1}` → re-probe → fresh `Caps`/`Segment` → `FlushStop`. That clears
-stale downstream buffers and re-establishes format+timeline via the exact §3.3
-mechanism. A **consumer** restart is covered by replay (1) from its still-live
-upstream edge. A whole-**group** restart is just both at once: cross-boundary edges
-replay from the still-running neighbour; intra-group edges get a fresh flush+segment
-from their restarted producer.
-
-**(3) Epoch counter and `SyncGroup` clock are core-owned, so they survive restart.**
-The epoch monotonic counter lives in the core/`SyncGroup`, not the node — so a
-post-restart epoch is strictly greater than any in-flight buffer's epoch (stale
-drops are correct), and it does not reset to 0. Likewise the `SyncGroup` shared
-clock/offset persists, so a restarted `realtime` node rejoins and re-syncs against
-it (`ready_=false` → converge) exactly as today, but without re-deriving the clock
-from scratch.
-
-**(4) Interfaces are the second recovery path** (why §4.4 keeps them). Independently
-of sticky replay, a restarted node can pull the current truth via
-`findNodeUp<IVideoFormatSource>` / `<IPlaybackControl>` — belt-and-suspenders, and
-the same query nodes already use to self-initialize. This is the concrete reason the
-event model does **not** replace those interfaces.
-
-**Requirement stated plainly:** sticky-event replay is mandatory in the `Edge`
-implementation. Without it the event model is strictly *worse* than the current
-design on crash tolerance; with it (plus 2–4) restart is safe and, in the
-producer/group case, semantically identical to a localized seek.
+The result: no sticky-event cache, no replay-on-reconnect, no epoch bookkeeping —
+the recovery story is "read the shared clock, pull current format," which is what
+the working C++ already does per frame, just done once at (re)start instead of
+repeatedly.
 
 ---
 
@@ -405,65 +414,144 @@ void    avp_edge_notify_readable(AvpEdge*, AvpNode*);
 void    avp_edge_notify_writable(AvpEdge*, AvpNode*);
 ```
 
-### 4.4 Interface discovery — the subsystem v1 missed
+### 4.4 Capability discovery — three registers, not one graph walk
 
-The ~30 interfaces in `graph_interfaces.hpp` are load-bearing and discovered by
-`dynamic_cast`/`findNodeUp<T>()`. RTTI does not cross `.so`. So:
+The ~30 interfaces in `graph_interfaces.hpp` are discovered today by
+`dynamic_cast` + `findNodeUp<T>()` — a per-call upstream walk. v1 modelled this
+1:1 as `avp_find_interface_up` (a walk across the FFI). That is **wrong**: it's
+fragile (a downstream node holding an upstream interface pointer while the producer
+stops/restarts — e.g. `decoders.cpp`'s `input_hold_` workaround, which the source
+comments admit is a hack), and it's a false economy (one "walk-and-cast" mechanism
+serving three unrelated jobs). Reading the actual call sites shows the interfaces
+split cleanly into **three registers**, each with its own, simpler mechanism. No
+upstream graph walk survives.
+
+**Register 1 — Facts (structural properties of the stream) → `Spec`.**
+`IVideoFormatSource`, `IAudioMetadataSource`, `IFrameRateSource`, `ITimeBaseSource`
+are read-only descriptions of what flows through an edge: width/height/pixfmt,
+sample rate/format/layout, frame rate, time base. They change only at a
+discontinuity. These become **`Spec`** — a value latched on the edge and carried
+in-band (§4.4.1). A consumer reads the current `Spec` off its *own input edge*; it
+never walks. `findNodeUp<IVideoFormatSource>()` is deleted.
+
+**Register 2 — Controls (mutating commands into a running node) → core services.**
+`IPlaybackControl` (direction), `IInputReset`, and the seek/speed/pause verbs are
+mutations a downstream node used to reach *up* the graph to apply. In the
+master-clock model (§6) they are addressed to the `SyncGroup`/seek service instead:
+direction is the sign of the clock `rate`, reset rides the `FlushStart`
+discontinuity. No node reaches into another node to mutate it, so there is nothing
+to dangle on restart. `avp_find_interface_up` is deleted for these too.
+
+**Register 3 — Live queries (ask a *specific, named* node something it computes).**
+`IDecoder::discard_until`, `IEncoder`, `IMuxer`, `ISentinel` stats,
+`IReturnsObjects`/`IInputsObjects` (`node.param.get/set`), `IStreamsInput` demux
+enumeration, `IJackSink` pull. These are real runtime calls, but every caller
+already knows *which* node it means (the control protocol addresses a node by name;
+an adjacent node talks to its immediate neighbour). So they keep a **direct**
+query — `avp_node_query_interface(node, id)` — on an explicitly-referenced node.
+There is no traversal: you query the node you already hold, not "walk up until
+something answers."
 
 ```c
 typedef uint32_t AvpInterfaceId;   // stable, closed enum — see table below
 
-// Direct query on a node.
+// Direct capability query on a node the caller already holds (control protocol,
+// adjacent node, or self). This is the ONLY interface-discovery primitive.
+// There is NO avp_find_interface_up: Facts travel as Spec on the edge (§4.4.1),
+// Controls are addressed to core services (§6), so no upstream walk exists.
 const void* avp_node_query_interface(AvpNode*, AvpInterfaceId);
-
-// Graph walk (replaces EdgeBase::findNodeUp<T>). Rust owns traversal; at each hop
-// it calls the node's query_interface across the FFI (node may be C++ or Rust).
-const void* avp_find_interface_up(AvpEdge* from, AvpInterfaceId);
 ```
 
-Each `AvpInterfaceId` names a plain-C vtable struct. Stable ID assignment for the
-current interface set (closed enum; new interfaces append):
+Reclassification of the v1 table (18 ids → registers):
 
-| Id | Interface (C++)            | Purpose |
-|----|----------------------------|---------|
-| 1  | `IDecoder`                 | codec name, `discard_until(pts)` |
-| 2  | `IEncoder`                 | codec params, `set_output` |
-| 3  | `IMuxer`                   | init from format context |
-| 4  | `IVideoFormatSource`       | width/height/pixfmt (pull query; complements `Caps`) |
-| 5  | `IAudioMetadataSource`     | sample rate/format/layout (pull query; complements `Caps`) |
-| 6  | `IFrameRateSource`         | frame rate |
-| 7  | `ITimeBaseSource`          | time base |
-| 8  | `IPlaybackControl`         | direction, target conversion, playback-direction query |
-| 9  | `IInputReset`              | reset internal state (pull path; complements `FlushStart`) |
-| 10 | `IFrameNumber`             | current frame number |
-| 11 | `IFrameTimestamp`          | current ts / wallclock / eof |
-| 12 | `ISentinel`                | card/signal-present status for stats |
-| 13 | `IPreferredFormatReceiver` | downstream format hints upstream |
-| 14 | `INeedsOutputFrameSize`    | audio frame sizing |
-| 15 | `IReturnsObjects`/`IInputsObjects` | node.param.get/set object bridge |
-| 16 | `IStreamsInput`            | demux stream enumeration |
-| 17 | `IJackSink`                | JACK pull callback |
-| …  | (append-only)              | |
+| v1 Interface (C++)         | Register | New mechanism |
+|----------------------------|----------|---------------|
+| `IVideoFormatSource`       | Fact     | `Spec` (video) latched on edge |
+| `IAudioMetadataSource`     | Fact     | `Spec` (audio) latched on edge |
+| `IFrameRateSource`         | Fact     | `Spec` field |
+| `ITimeBaseSource`          | Fact     | `Spec` field |
+| `IPlaybackControl`         | Control  | `SyncGroup` rate sign (§6) |
+| `IInputReset`              | Control  | rides `FlushStart` (§3.4) |
+| `IDecoder`                 | Query    | direct `query_interface` (named node) |
+| `IEncoder`                 | Query    | direct `query_interface` |
+| `IMuxer`                   | Query    | direct `query_interface` |
+| `ISentinel`                | Query    | direct (stats) |
+| `IReturnsObjects`/`IInputsObjects` | Query | direct (`node.param` bridge) |
+| `IStreamsInput`            | Query    | direct (demux enumeration) |
+| `IJackSink`                | Query    | direct (adjacent pull) |
+| `INeedsOutputFrameSize`    | reverse  | see §12 (downstream→upstream hint) |
+| `IPreferredFormatReceiver` | reverse  | see §12 (format negotiation direction) |
+| `IFrameNumber` / `IFrameTimestamp` | — | were read by the deleted `speedChanged` sync walk; now per-frame buffer metadata, not a capability. Candidate for removal (§12) |
 
-**Events and interfaces are complementary — both are kept.** Earlier drafts
-proposed dissolving items 4/5/8/9 (`IVideoFormatSource`, `IAudioMetadataSource`,
-`IPlaybackControl`, `IInputReset`) into the event model. That is reversed: they
-remain first-class interfaces alongside the events. The two mechanisms serve
-different planes:
+The surviving `AvpInterfaceId` enum therefore lists only the **Register-3** ids
+(headers §interface discovery). Facts moved to `Spec`; Controls moved to services.
 
-- **Events (`Caps`/`Segment`/`FlushStart`) are the data-plane push** — ordered,
-  per-stream, efficient, and how a running node normally learns format/timeline
-  and flushes internal state.
-- **Interfaces are the pull-plane query** — how a node *(re)initializes* by asking
-  upstream for the current truth (`findNodeUp<IVideoFormatSource>`,
-  `<IPlaybackControl>`), and how the control protocol and stats reach into a node.
+#### 4.4.1 `Spec` — Facts as latched edge state (replaces the upstream walk)
 
-This complementarity is what makes **restart during live operation** safe (§3.6): a
-node that restarts mid-stream and missed the sticky `Caps`/`Segment` has a second
-recovery path — pull current state via the interface — in addition to the edge's
-sticky-event replay. It also matches how nodes already self-initialize today
-(`rescale_video`'s ctor queries `IPreferredFormatReceiver`). So the full interface
-table is retained long-term, not treated as a temporary compat shim.
+`Spec` is an `EdgeItem` variant (§3.2) — the resolved description of the frames
+flowing through an edge (video: w/h/pixfmt; audio: rate/fmt/layout; plus frame
+rate, time base). Not GStreamer "caps": there is no capability set and no
+negotiation — it is a single concrete value asserting "this is what flows here
+now," forward-only, updated when it changes.
+
+**The edge latches it.** Every edge holds one `Spec` slot. Whenever a `Spec` token
+passes, the slot is overwritten. When a node attaches to an edge and first pulls,
+the edge re-presents the latched `Spec` as the head item *before* any buffer. This
+single mechanism — in the core edge, written once — is what removes the special
+case: there is no "pull current truth at start/restart/late-join." **Every reader,
+first-start or restarted or joined mid-stream, follows one contract:**
+
+> Pop your input edge. The first item is always the current `Spec`. Buffers follow.
+> A `Spec` change arrives in-band as a new `Spec` token *before* the frames it
+> describes.
+
+Because the latch decouples producer-start from consumer-start, no synchronized
+negotiation phase and no particular start order is required (this is also what
+makes restart safe — §3.6).
+
+**The node-side contract on `NodeSISO` is one optional hook, `on_spec`.** The shim
+base classifies each `EdgeItem` before the node sees it: a `Spec` item goes to
+`on_spec(Spec) -> Spec` (whose return is forwarded downstream and latched on the
+output edge); a frame goes to the node's existing `process()`. Three roles, three
+bodies:
+
+- **Pass-through** (firewall, split, null_sink): does *not* override `on_spec`.
+  Base default is identity → the `Spec` is forwarded unchanged. **~80 Tier-S nodes
+  get correct `Spec` forwarding for free, including for media dimensions they know
+  nothing about, with zero source edits.**
+- **Query-only** (encoder, sentinel): overrides `on_spec` to *read* the format and
+  (re)configure itself, then returns it (or emits its output-domain `Spec`).
+  Replaces the old `findNodeUp<IVideoFormatSource>()`-at-init. Strictly better: it
+  also fires on mid-stream format change, which init-time pull got wrong.
+- **Transform** (rescale_video, filters, resample_audio — the nodes that today
+  re-implement `IVideoFormatSource` with their *output* values): overrides
+  `on_spec` to compute and return a *new* `Spec`. The base forwards the new value,
+  not the incoming one — so a consumer N hops down reads the transformed `Spec` off
+  its adjacent edge, exactly what `findNodeUp` returned by stopping the walk at the
+  transform.
+
+**Initialization timing follows the origin, not a global policy.** The base
+guarantees `on_spec` fires before the first `process()`, so a node inits in
+`on_spec` and `process()` may assume it is configured — with no
+"construct vs. first-frame" branch in node code:
+
+- **Static-format origins** (demux from `codecpar`, `assume_metadata`) emit `Spec`
+  as their first output on `start()`; the whole init cascade (decode→scale→encode→
+  mux header) settles during startup, before frame 1 — **no added jitter, identical
+  to today's construct-time init.**
+- **Dynamic-format origins** (a decoder that only learns real pixfmt after frame 1)
+  emit `Spec` at frame 1; downstream inits then. That latency is inherent to the
+  stream — the encoder *cannot* open before the format is known — not introduced by
+  the model. Today's `findNodeUp`-at-init either got lucky via `codecpar` or was
+  simply broken for such a source; `on_spec` handles it correctly.
+
+This is what makes **restart during live operation** safe (§3.6) without edge-side
+*sticky replay*: `Spec` is not replayed global state (contrast the deleted
+`Segment`/epoch — that was global playback *policy*); it is the local, in-place
+current value of one pipe, exactly the modular-synth "the cable carries the current
+signal spec" model. A restarted node attaches, pops its latched `Spec`, re-inits,
+and proceeds. It also kills `input_hold_`: once the core supervisor owns node
+lifetime (§6), no downstream node pins an upstream one to keep an interface alive.
 
 ### 4.5 Factory registration (replaces `DECLNODE` + `generate_node_list`)
 
@@ -534,7 +622,7 @@ We keep the two models but change *how* the non-blocking side is written and tim
               _   = ctx.tick.next()      => self.on_tick(&ctx).await?,
               buf = ctx.input.next()     => match buf {
                   Item::Buffer(b) => self.on_buffer(b, &ctx).await?,
-                  Item::Event(e)  => self.on_event(e, &ctx).await?,  // Flush/Segment/Eof
+                  Item::Event(e)  => self.on_event(e, &ctx).await?,  // Flush/Spec/Eof
               }
           }
       }
@@ -571,10 +659,17 @@ distributed scheduler state:
   drives the 4-phase seek across all `seek_targets_`. `realtime` nodes are thin
   members registering a `weak_ptr`.
 - `SpeedControlTeam` maintains `last_pts_/last_sync_/shift_` and computes a
-  piecewise-linear PTS remap (`scalePTS`) — i.e. it already computes a `Segment`.
+  piecewise-linear PTS remap (`scalePTS`) — the playback→wall mapping that in the
+  new model lives on the master clock and is applied at the output (§3.3).
 - `PauseControlTeam` holds `paused_` + a condvar, `pause_at_`, and lists of
   `IInputReset`/`IFlushAndSeek`/`IPlaybackControl` weak refs.
 - `InputSeekTeam` fans `ISeekAt` add/clear to members.
+- `SharedTimeline` (a fifth `InstanceShared` singleton, structurally a Team) is a
+  named, PTS-keyed key/value store: the control protocol/mixer schedule values at a
+  source-time PTS and `TimelineReader` nodes read "the value in effect at this
+  frame's PTS". Not on the data plane (no frames), but it crosses the boundary in
+  both directions (Rust control writes, C++ Tier-S nodes read), so it becomes a core
+  service with its own ABI (`avp_timeline_*`, headers §shared timeline).
 
 Porting these as shimmed C++ nodes would drag the whole out-of-band, RTTI-driven,
 Team-singleton machinery into the new core. Instead:
@@ -583,14 +678,15 @@ Team-singleton machinery into the new core. Instead:
 
 | Old Team mechanism | New core mechanism |
 |---|---|
-| `RealTimeTeam::offset_` sync to smallest | `SyncGroup` clock domain in the executor; a shared clock the group's `Segment.base` is measured against |
-| `RealTimeTeam::flushAndSeek*` 4-phase | core issues `FlushStart`/`Segment`/`FlushStop` on the source edge (§3.3) |
-| `SpeedControlTeam::scalePTS` remap | `Segment { rate, base, start }` (§3.2); nodes apply local arithmetic |
-| direction sign-flip broadcast | `Segment { rate < 0 }` |
-| `PauseControlTeam` condvar | executor suspends the group's tasks; a paused group simply isn't polled |
-| `pause_at_` | a scheduled core action that emits the pause at a target PTS |
+| `RealTimeTeam::offset_` sync to smallest | `SyncGroup` **master clock**: one shared playback→wall mapping (offset) the group's output stages read at release time (§3.3) |
+| `RealTimeTeam::flushAndSeek*` 4-phase | core issues `FlushStart`/`FlushStop` (queue-clearing discontinuity) + one master-clock reset for the group (§3.4) |
+| `SpeedControlTeam::scalePTS` remap | `rate` on the master clock; applied at the output when a frame is released. O(1) speed change, no in-flight rewrite (§3.3) |
+| direction sign-flip broadcast | master-clock `rate < 0` |
+| `PauseControlTeam` condvar | freeze the master clock: the output stops releasing, back-pressure propagates upstream through the pipes (§3.3) |
+| `pause_at_` | a scheduled core action that freezes the clock at a target playback time |
 | `InputSeekTeam` fan-out | core `seek_at` table keyed by `SyncGroup` |
-| `RealTimeSpeed` reading `AVFrame::metadata` `frame_ts/frame_no/wallclock` | fields on `Buffer`/`Segment`, not dict round-trips |
+| `SharedTimeline` `set/get/gc` keyed by PTS | core `AvpTimeline` service; control writes, C++ `TimelineReader` nodes read the value in effect at a frame's PTS (§shared-timeline ABI) |
+| `RealTimeSpeed` reading `AVFrame::metadata` `frame_ts/frame_no/wallclock` | source-time PTS on the frame + the master clock, not dict round-trips |
 
 ### 6.3 `input_rec` becomes a core `InputReader`
 
@@ -603,10 +699,14 @@ and (c) a **custom-timeline** subsystem (`ETimestampSource`, `ts_offsets_`,
 - (b) the seek table + `resolveSeekTarget` become a core `SeekIndex` service the
   node owns; `StreamTarget` resolution (frame/live/end/bytes/wallclock/sync) is
   core code.
-- (c) `TimestampSource` and the offset table become part of `Segment` emission.
-  The node emits a `Segment { ts_source, base, start, ... }` instead of stamping
-  every frame's dict. Downstream nodes that need the custom timeline read it from
-  the current segment; the `realtime` replacement no longer does `av_dict_get` +
+- (c) `TimestampSource` and the offset table become an **input-side stamping
+  policy**: the `InputReader` computes each buffer's source-time PTS according to
+  the selected `ts_source` (Input/Wallclock/Sync) *at read time*, and stamps the
+  frame's PTS directly — no `av_dict_set`, no per-frame metadata smuggling. From
+  then on the PTS is plain source time and every downstream node treats it
+  uniformly (§3.3). `ts_source` is thus an input configuration, not a value that
+  travels the graph; the output stage maps that source-time PTS through the master
+  clock like any other. The `realtime` replacement no longer does `av_dict_get` +
   `atoll` per frame.
 
 ### 6.4 What gets deleted
@@ -616,6 +716,10 @@ and (c) a **custom-timeline** subsystem (`ETimestampSource`, `ts_offsets_`,
 `startFlushing/stopFlushing/maybeFlush`; the EOF-marker special path (folded into
 `EdgeEvent::Eof`); the `pauseProcessing()`/`lockProcessing()` cross-node barrier
 used only by seek. `Node::pauseProcessing` stays for the executor's group-suspend.
+Also deleted outright: `speed.cpp::speedChanged` (the ~120-line upstream reach-back
+that re-rescaled in-flight PTSes), `SpeedControlTeam::scalePTS` as a *node-level*
+remap, and the `AVFrame::metadata` `frame_ts`/`scaled_pts_` round-trip — all
+obviated by source-time PTS + a master clock applied at the output (§3.3).
 
 ---
 
@@ -681,8 +785,10 @@ shimmed — they become core services (§6).
 
 A header `avplumber_node_compat.hpp` that re-implements the API surface nodes use —
 `Node`, `NodeSISO<In,Out>`, `NodeSingleInput/Output`, `NodeMultiInput/Output`,
-`Source<T>`/`Sink<T>`, `createCommon`, `NodeCreationInfo`, the `DECLNODE*` macros,
-and `findNodeUp<T>()` — but backed by the C ABI instead of the old core.
+`Source<T>`/`Sink<T>`, `createCommon`, `NodeCreationInfo`, and the `DECLNODE*`
+macros — backed by the C ABI instead of the old core. `findNodeUp<T>()` is **not**
+re-implemented as a walk (§4.4 deletes it); the Fact interfaces it used to reach for
+are served by `Spec` (below).
 
 - `Source<T>::get/peek/pop` → `avp_edge_peek/pop` + wrap the returned
   `AvpBuffer.ptr` into `av::VideoFrame`/`av::Packet`/`av::AudioSamples` **adopting**
@@ -691,11 +797,22 @@ and `findNodeUp<T>()` — but backed by the C ABI instead of the old core.
 - `Sink<T>::put` → extract `.raw()`, build an `AvpBuffer`, `avp_edge_push`;
   translate `BACKPRESSURE` to the old `put(..., drop_if_full)` bool contract.
 - `DECLNODE(nodetype, Class)` → emits `avp_register_node_factory("nodetype",
-  &Class::__avp_factory)` + a generated `query_interface` that maps the closed
-  interface-ID table to `dynamic_cast<IFoo*>(this)`. So a node that today does
-  `class Foo : public NodeSISO<...>, public IDecoder` keeps working: the shim's
-  generated `query_interface(ID_IDecoder)` returns a C vtable trampolining to the
-  node's virtual methods.
+  &Class::__avp_factory)` + a generated `query_interface` that maps the surviving
+  (Register-3, §4.4) interface-ID table to `dynamic_cast<IFoo*>(this)`. So a node
+  that today does `class Foo : public NodeSISO<...>, public IDecoder` keeps working:
+  the shim's generated `query_interface(ID_IDecoder)` returns a C vtable trampolining
+  to the node's virtual methods. (Register-1 Fact interfaces like
+  `IVideoFormatSource` are *not* in this table — see `Spec` mapping next.)
+- **`Spec` ⇄ Fact-interface bridge.** The shim base's `on_spec` hook connects the C
+  ABI `Spec` token (§4.4.1) to the node's existing C++ code with no source edits in
+  the common case: for a node that implements a Fact interface with its *output*
+  values (`rescale_video`, `filters` — Register-1 Transform), the shim reads those
+  virtual getters (`width()`/`height()`/…) after the node processes the incoming
+  `Spec` and emits the resulting `Spec` downstream; for a node that *read* an
+  upstream Fact at init (encoder's `findNodeUp<IVideoFormatSource>()`), the shim
+  delivers the latched input `Spec` to a generated `on_spec` that feeds the same
+  fields the old init pulled. Nodes that neither produce nor consume format inherit
+  identity forwarding for free.
 - `DECLNODE_ATD*` (type auto-detect) → the shim registers one factory per
   concrete media type, since the runtime tag replaces template specialization.
 - EOF: the shim delivers `EdgeEvent::Eof` to nodes as the old EOF marker via
@@ -711,6 +828,65 @@ Rust transfers *one* ref into the node with each delivered buffer; the shim wrap
 owns that ref and frees it on destruction unless the node forwards it via `put`
 (which moves the ref into the outgoing `AvpBuffer`). This mirrors avcpp's existing
 move/copy semantics, so idiomatic node code stays correct.
+
+**Scope of this rule.** The one-ref-per-delivery contract above is a *lifetime*
+contract for the **linear one-in / one-out** case. It guarantees the buffer is not
+freed while the node holds it, and is freed exactly once afterwards. It does **not**
+by itself make fan-out or in-place mutation safe — see §8.2.1.
+
+### 8.2.1 Fan-out and shared-buffer mutation invariants
+
+`av_frame_ref`/`av_packet_ref` share the underlying `AVBuffer` (whose `refcount`
+is `atomic_uint` — concurrent holders across threads are safe for the *buffer*),
+but they give each holder its **own struct**: `metadata` is deep-copied, `side_data`
+entries are shared via `av_buffer_ref`, and scalar fields (`pts`/`format`/`width`/…)
+are plain-copied. **The `AVFrame`/`AVPacket` struct container has no locking.** The
+resulting invariant, which the linear §8.2 contract does not capture, is:
+
+> Two threads may hold refs to the same buffer, but must never touch the same
+> `AVFrame*`/`AVPacket*` **struct** concurrently.
+
+Three rules follow. They are currently satisfied only by luck of the present node
+set; the native-Rust `split`/`one_to_many` rewrites (Phase 2 proof set, §10) are
+precisely where a naive implementation introduces a double-free / use-after-free
+race, so they are stated here as hard requirements:
+
+1. **Fan-out ref's a distinct struct per edge.** `split` and `one_to_many`
+   must `av_frame_ref`/`av_frame_clone` (rsmpeg `AVFrame::clone`
+   → `av_frame_clone`) a **new struct** into *each* output edge. **Never enqueue the
+   same `AVFrame*`/`AVPacket*` into more than one edge** — the shared atomic buffer
+   refcount does not save you, because the race/double-free is on the struct
+   container, not the buffer. This is exactly what the C++ `split.cpp`/`one_to_many.cpp`
+   do today: each `EdgeSink<T>::put(*data)` copies the avcpp object (= one
+   `av_frame_ref` into a fresh struct per edge).
+
+2. **In-place writes require copy-on-write.** A shared buffer (`refcount > 1`) must
+   not be written through `data[]`/sample pointers without first calling
+   `av_frame_make_writable` (rsmpeg `AVFrame::make_writable`), which copies when the
+   ref is shared. Today this is latently safe because the FFmpeg-heavy mutators
+   (rescale, filter, encode) **produce new frames** rather than mutate inputs in
+   place — an accident of the current node set, not an enforced rule. Native Rust
+   nodes that mutate pixels/samples in place must honour CoW explicitly.
+
+3. **`side_data` content is shared; do not mutate it in place across a fan-out.**
+   `metadata` (the dict) is deep-copied by `av_frame_ref` and is safe to mutate per
+   holder, but `side_data` *content* is shared-refcounted — mutating it in place
+   races with other consumers. §8.2's mention of "mutates metadata/side-data"
+   addresses only **lifetime** (don't unref Rust's ref); it does **not** license
+   in-place side-data content edits on a shared frame.
+
+**C++ bumping the refcount is the safe case.** If a shim node calls `.raw()` and
+does its own `av_frame_ref` to retain a copy, that is a new atomic ref balanced by
+its own unref on a *distinct* struct — it cannot corrupt Rust's ref or free Rust's
+struct. The only C++-side hazards are the same two above (freeing a ref it does not
+own; in-place-mutating a shared buffer/side-data), which the avcpp move/copy
+semantics the shim mirrors already handle for idiomatic node code.
+
+**Test requirement (extends the refcount unit tests in `rust_refactor_headers.md`).**
+The Phase-1 refcount tests must explicitly cover fan-out: push one frame to N edges,
+drop all N wrappers, and assert via `av_buffer_get_ref_count` that the buffer
+refcount returns to its exact pre-push value with no double-free (run under
+ASan/`valgrind`). Add a matching wrap→mutate-in-place→verify-CoW case.
 
 ### 8.3 What still needs edits
 
@@ -745,9 +921,9 @@ free.
 The core swap is the one monolithic risky step; node porting is incremental. So we
 prove the ABI/shim against the *hardest real thing* before writing any Rust node.
 
-**Phase 0 — ABI + event model spec.** Finalize `avplumber_core.h` (§4), the
-`EdgeItem`/`Segment` model (§3), and the interface-ID table. Prototype a trivial
-2-node graph (demux → null_sink) end-to-end through the C ABI.
+**Phase 0 — ABI + dataflow model spec.** Finalize `avplumber_core.h` (§4), the
+`EdgeItem` model + master clock (§3), and the interface-ID table. Prototype a
+trivial 2-node graph (demux → null_sink) end-to-end through the C ABI.
 
 **Phase 1 — Rust core running existing C++ nodes via the shim, to parity.** Build:
 runtime graph + edges (`BufferedEdge` first), TCP control protocol (`serde_json`),
@@ -759,12 +935,13 @@ the shim (Teams still exist as instance-shared C++ objects reached via the gener
 registry). This validates raw-frame FFI, `query_interface`, and `.raw()` refcounts
 on genuinely avcpp-heavy nodes while you can still diff behavior.
 
-**Phase 2 — Event/segment playback + Teams as core services.** Implement
-`FlushStart/FlushStop/Segment/Caps`, `SyncGroup` clock domains, and reimplement the
-four Teams + `input_rec`'s SeekIndex/timeline natively (§6). Cut the target
-pipeline over from the old 4-phase seek to the event model; delete `IFlushAndSeek`
-and the flush flags once no shimmed node depends on them. (Brief window where old
-and new playback coexist.)
+**Phase 2 — Causal control playback + Teams as core services.** Implement
+`FlushStart/FlushStop/Spec` (Spec latched on the edge, §4.4.1), the `SyncGroup` master clock (rate/offset/pause read
+at the output) + the `AvpTimeline` shared store, and reimplement the four Teams +
+`SharedTimeline` + `input_rec`'s SeekIndex/timeline natively (§6). Cut the target pipeline over from the old 4-phase seek to the
+flush+clock-reset discontinuity; delete `IFlushAndSeek`, the flush flags, and
+`speedChanged` once no shimmed node depends on them. (Brief window where old and new
+playback coexist.)
 
 **Phase 3 — Native Rust node authoring.** `Transform`/`FlowNode` traits, the
 `#[avp_node]` proc macro, `linkme` registration (§7). Port simple leaf nodes
@@ -789,11 +966,13 @@ scripts and the control protocol remain compatible throughout.
 | Risk | Mitigation |
 |---|---|
 | Interface discovery across `.so` (RTTI doesn't cross) | `query_interface` + closed interface-ID table; shim autogenerates it from `dynamic_cast` (§4.4, §8) |
-| Replacing Teams/4-phase seek without live-stream regressions | Event/segment model preserves the existing math (`scalePTS`→`Segment`, `offset_`→`SyncGroup`); parity-first phasing keeps a diffable reference (§3, §6, §10) |
+| Replacing Teams/4-phase seek without live-stream regressions | Causal dataflow preserves the existing math (`scalePTS`/`offset_` → master clock applied at the output); parity-first phasing keeps a diffable reference (§3, §6, §10) |
 | `.raw()` refcount corruption through the shim | One-ref-per-delivery ownership contract mirroring avcpp move/copy semantics (§8.2) |
+| Fan-out double-free / struct-level data race in native `split`/`one_to_many` | Distinct-struct-per-edge + CoW + no in-place side-data mutation invariants; fan-out refcount test under ASan (§8.2.1) |
 | Clock jitter on the mixer-tick path | Bespoke single-threaded executor with external-tick-driven timer, not tokio's timer wheel (§5.2) |
-| Stateful node reset (decoder DPB, rescaler, FRUC) on seek | `FlushStart` is handled *inside* each stateful node, where the state lives (§3.3) |
-| **Node/group restart during live op misses sticky `Caps`/`Segment`** (regression vs. today's per-frame state) | **Mandatory** sticky-event replay on the edge + restart-as-discontinuity (producer self-flushes) + core-owned epoch/`SyncGroup` + interface pull as second recovery path (§3.6) |
+| Stateful node reset (decoder DPB, rescaler, FRUC) on seek | `FlushStart` preempts the pipe: clears queues on the way down and is handled *inside* each stateful node, where the state lives (§3.4) |
+| Responsive live control (speed/pause) despite queue latency | Rate/offset/pause live on the master clock, applied at the output — O(1), no in-flight rewrite; topology (heavy buffers upstream of the control point) keeps any residual latency small (§3.3) |
+| Node/group restart during live op | No sticky per-stream state to miss: timeline is on the core-owned master clock; current format is read from the edge's latched `Spec` (§4.4.1, no pull walk); producer restart reuses the flush discontinuity (§3.6) |
 | avcpp depth (`.raw()` ×393) | Nodes already operate at raw-struct level; pass `AVFrame*`/`AVPacket*` and keep avcpp C++-side (§2) |
 | `DECLNODE_ATD` template dispatch | Runtime media tag + one factory registration per concrete type (§8.1) |
 | CUDA/GL/TensorRT unportable to Rust | They stay C++ behind the shim, permanently (§10 Phase 6) |
@@ -804,15 +983,22 @@ scripts and the control protocol remain compatible throughout.
 
 ## 12. Open questions (carried + new)
 
-1. **Caps negotiation direction.** `IPreferredFormatReceiver` lets a downstream node
-   push a preferred pixfmt/resolution *upstream* (see `rescale_video` ctor calling
-   `findNodeUp<IPreferredFormatReceiver>()`). Does this stay a query (upstream
-   `query_interface`) or become an upstream **event** (a `Reconfigure` traveling
-   against the data flow)? GStreamer uses upstream events (`RECONFIGURE`). Leaning
-   event, for symmetry with §3.
-2. **DirectEdge + events.** When a chain is fused, do events still materialize as
-   `EdgeItem`s or become direct method calls (`on_event`)? Probably direct calls,
-   with the same handler the buffered path uses.
+1. **Reverse (against-the-flow) format hints.** `Spec` (§4.4.1) and the whole §4.4
+   model flow *downstream*. Two interfaces go the other way: `IPreferredFormatReceiver`
+   lets a downstream node push a preferred pixfmt/resolution *upstream* (see
+   `rescale_video` ctor), and `INeedsOutputFrameSize` pushes an audio frame size
+   upstream from the encoder. These are the only capabilities `Spec` does *not*
+   absorb. Options: (a) a direct `query_interface` on the *immediate downstream*
+   node the producer already holds (no walk — a producer knows its consumer edge);
+   (b) an upstream "hint" token type mirroring `Spec` backwards. Leaning **(a)**:
+   it's a single named-neighbour query, needs no against-the-flow token, and stays
+   consistent with "no graph walk" — the producer asks its one downstream, not "walk
+   down until someone answers." Confirm no case needs the hint to travel more than
+   one hop.
+2. **DirectEdge + control tokens.** When a chain is fused, do tokens still
+   materialize as `EdgeItem`s or become direct method calls (`on_event`)? Probably
+   direct calls, with the same handler the buffered path uses. Note flush must still
+   preempt (clear) any queue on a `BufferedEdge` leg of the same chain.
 3. **MetadataFrame across FFI.** `MetadataFrame` is a custom C++ type; the
    `AvpMediaVtable` retain/release handles ownership, but nodes that *read* its
    fields need either a C accessor surface or to stay C++-only. Enumerate which
@@ -821,6 +1007,7 @@ scripts and the control protocol remain compatible throughout.
    C ABI? Likely the OBS plugin links the Rust core as a static lib and registers
    OBS-specific nodes via the same factory ABI. Confirm no reliance on the C++ core
    object model.
-5. **Reverse playback.** `Segment.rate < 0` is defined, but reverse decode requires
-   GOP-granular buffering the current code handles specially
-   (`discardUntil(ts=0)`); confirm the InputReader owns this, not individual nodes.
+5. **Reverse playback.** A master-clock `rate < 0` handles presentation ordering,
+   but reverse decode requires GOP-granular buffering the current code handles
+   specially (`discardUntil(ts=0)`); confirm the InputReader owns this, not
+   individual nodes.
