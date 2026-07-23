@@ -231,6 +231,10 @@ class LumaDiff(InternalNode):
     TYPE = "luma_diff"
 
 
+class HogDiff(InternalNode):
+    TYPE = "hog_diff"
+
+
 class CudaSceneDiff(InternalNode):
     TYPE = "cuda_scene_diff"
 
