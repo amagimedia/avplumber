@@ -97,11 +97,20 @@ double parseFps(const std::string& fps) {
     }
 }
 
-std::vector<Region> buildRegions(int W, int H, int region_height, const std::vector<float>& region_x, int max_regions) {
+std::vector<Region> buildRegions(int W, int H, int region_height, const std::vector<float>& region_x,
+                                  int max_regions, float region_y = -1.0f) {
     std::vector<Region> out;
     int w = std::max(1, (int)std::floor((double)W / 2.5));
     int h = std::max(1, std::min(region_height, H));
-    int y = std::max(0, H - h);
+    // Vertical anchor: region_y in [0,1] is the normalized top edge of the scan
+    // band. A negative value (default/unset) preserves the original bottom-anchored
+    // behavior (y = H - h), so existing configs are unaffected.
+    int y;
+    if (region_y >= 0.0f) {
+        y = std::max(0, std::min(H - h, (int)std::lround((double)region_y * H)));
+    } else {
+        y = std::max(0, H - h);
+    }
     // Horizontal range from region_x [x_start_rel, x_end_rel], default full width.
     int x_start = 0, x_end = W;
     if (region_x.size() == 2) {
@@ -394,6 +403,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     int sample_every_n_ = 5;
     int region_height_ = 0;
     std::vector<float> region_x_;
+    float region_y_ = -1.0f;
     int max_regions_ = 4;
     int max_boxes_ = 64;
     float det_bin_thresh_ = 0.1f;
@@ -640,7 +650,8 @@ public:
         const int W = frm.raw()->width;
         const int H = frm.raw()->height;
         int effective_region_height = region_height_ > 0 ? region_height_ : autoRegionHeight(W, H);
-        std::vector<Region> regions = buildRegions(W, H, effective_region_height, region_x_, std::min(max_regions_, kDetBatch));
+        std::vector<Region> regions = buildRegions(W, H, effective_region_height, region_x_,
+                                                     std::min(max_regions_, kDetBatch), region_y_);
         std::vector<int> det_boxes;
         det_boxes.reserve((size_t)kDetBatch * 4);
         for (int i = 0; i < kDetBatch; ++i) {
@@ -766,6 +777,7 @@ public:
             r->region_x_.clear();
             for (auto& v : p["region_x"]) r->region_x_.push_back(v.get<float>());
         }
+        if (p.count("region_y")) r->region_y_ = p["region_y"].get<float>();
         if (p.count("max_regions")) r->max_regions_ = std::max(1, std::min(kDetBatch, p["max_regions"].get<int>()));
         if (p.count("max_boxes")) r->max_boxes_ = std::max(1, p["max_boxes"].get<int>());
         if (p.count("det_bin_thresh")) r->det_bin_thresh_ = p["det_bin_thresh"].get<float>();
