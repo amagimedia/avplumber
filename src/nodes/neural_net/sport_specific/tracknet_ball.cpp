@@ -87,6 +87,11 @@ enum class TrackNetPreprocessMode {
     SrsAffine,
 };
 
+enum class TrackNetNormalizationMode {
+    ImageNet,
+    ZeroOne,
+};
+
 enum class TrackNetSampleFillMode {
     None,
     Hold,
@@ -145,6 +150,12 @@ TrackNetPreprocessMode parsePreprocessModeString(const std::string& mode) {
     if (mode == "resize" || mode == "scale") return TrackNetPreprocessMode::Resize;
     if (mode == "srs_affine" || mode == "srs") return TrackNetPreprocessMode::SrsAffine;
     throw Error("tracknet_ball: preprocess_mode must be 'resize' or 'srs_affine'");
+}
+
+TrackNetNormalizationMode parseNormalizationModeString(const std::string& mode) {
+    if (mode == "imagenet") return TrackNetNormalizationMode::ImageNet;
+    if (mode == "zero_one") return TrackNetNormalizationMode::ZeroOne;
+    throw Error("tracknet_ball: normalization_mode must be 'imagenet' or 'zero_one'");
 }
 
 TrackNetSampleFillMode parseSampleFillModeString(const std::string& mode) {
@@ -212,6 +223,7 @@ protected:
     TrackNetOutputMode output_mode_ = TrackNetOutputMode::Detection;
     TrackNetTripletAlignment triplet_alignment_ = TrackNetTripletAlignment::Center;
     TrackNetPreprocessMode preprocess_mode_ = TrackNetPreprocessMode::Resize;
+    TrackNetNormalizationMode normalization_mode_ = TrackNetNormalizationMode::ImageNet;
     TrackNetSampleFillMode sample_fill_mode_ = TrackNetSampleFillMode::None;
     float conf_thresh_ = 0.5f;
     float visible_thresh_ = 0.5f;
@@ -931,6 +943,8 @@ protected:
         const int src_h = f1.height();
         const int dst_w = model.input_w;
         const int dst_h = model.input_h;
+        const int apply_imagenet_normalization =
+            normalization_mode_ == TrackNetNormalizationMode::ImageNet ? 1 : 0;
 
         void* args[] = {
             (void*)&y0, (void*)&pitch_y0,
@@ -941,7 +955,8 @@ protected:
             (void*)&uv2, (void*)&pitch_uv2,
             (void*)&out,
             (void*)&src_w, (void*)&src_h,
-            (void*)&dst_w, (void*)&dst_h
+            (void*)&dst_w, (void*)&dst_h,
+            (void*)&apply_imagenet_normalization
         };
 
         const unsigned int block_x = 32;
@@ -1323,6 +1338,8 @@ public:
         const std::string default_preprocess = emitsSrsBallMetadata(r->output_mode_) ? "srs_affine" : "resize";
         r->preprocess_mode_ = parsePreprocessModeString(
             jsonStringParam(params, "preprocess_mode", default_preprocess));
+        r->normalization_mode_ = parseNormalizationModeString(
+            jsonStringParam(params, "normalization_mode", "imagenet"));
         r->sample_fill_mode_ = parseSampleFillModeString(
             jsonStringParam(params, "sample_fill_mode", "none"));
         r->sample_fill_mode_ = parseSampleFillModeString(
