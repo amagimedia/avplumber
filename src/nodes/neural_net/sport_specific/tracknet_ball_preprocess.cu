@@ -160,22 +160,32 @@ __device__ __forceinline__ void sample_frame_rgb_srs_affine(
 
 __device__ __forceinline__ void store_tracknet_pixel(
     float* __restrict__ out, int frame_idx, int dst_idx, int plane_size,
-    float r, float g, float b)
+    float r, float g, float b, int apply_imagenet_normalization)
 {
     const int c = frame_idx * 3;
-    out[dst_idx + (c + 0) * plane_size] = (r - 0.485f) / 0.229f;
-    out[dst_idx + (c + 1) * plane_size] = (g - 0.456f) / 0.224f;
-    out[dst_idx + (c + 2) * plane_size] = (b - 0.406f) / 0.225f;
+    if (apply_imagenet_normalization) {
+        r = (r - 0.485f) / 0.229f;
+        g = (g - 0.456f) / 0.224f;
+        b = (b - 0.406f) / 0.225f;
+    }
+    out[dst_idx + (c + 0) * plane_size] = r;
+    out[dst_idx + (c + 1) * plane_size] = g;
+    out[dst_idx + (c + 2) * plane_size] = b;
 }
 
 __device__ __forceinline__ void store_tracknet_pixel(
     __half* __restrict__ out, int frame_idx, int dst_idx, int plane_size,
-    float r, float g, float b)
+    float r, float g, float b, int apply_imagenet_normalization)
 {
     const int c = frame_idx * 3;
-    out[dst_idx + (c + 0) * plane_size] = __float2half_rn((r - 0.485f) / 0.229f);
-    out[dst_idx + (c + 1) * plane_size] = __float2half_rn((g - 0.456f) / 0.224f);
-    out[dst_idx + (c + 2) * plane_size] = __float2half_rn((b - 0.406f) / 0.225f);
+    if (apply_imagenet_normalization) {
+        r = (r - 0.485f) / 0.229f;
+        g = (g - 0.456f) / 0.224f;
+        b = (b - 0.406f) / 0.225f;
+    }
+    out[dst_idx + (c + 0) * plane_size] = __float2half_rn(r);
+    out[dst_idx + (c + 1) * plane_size] = __float2half_rn(g);
+    out[dst_idx + (c + 2) * plane_size] = __float2half_rn(b);
 }
 
 template <typename OutT>
@@ -187,7 +197,8 @@ __device__ __forceinline__ void preprocess_triplet_resize(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     OutT* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -198,13 +209,13 @@ __device__ __forceinline__ void preprocess_triplet_resize(
 
     float r, g, b;
     sample_frame_rgb(y0, pitch_y0, uv0, pitch_uv0, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 0, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 0, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 
     sample_frame_rgb(y1, pitch_y1, uv1, pitch_uv1, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 1, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 1, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 
     sample_frame_rgb(y2, pitch_y2, uv2, pitch_uv2, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 2, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 2, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 }
 
 template <typename OutT>
@@ -216,7 +227,8 @@ __device__ __forceinline__ void preprocess_triplet_srs_affine(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     OutT* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -227,13 +239,13 @@ __device__ __forceinline__ void preprocess_triplet_srs_affine(
 
     float r, g, b;
     sample_frame_rgb_srs_affine(y0, pitch_y0, uv0, pitch_uv0, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 0, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 0, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 
     sample_frame_rgb_srs_affine(y1, pitch_y1, uv1, pitch_uv1, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 1, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 1, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 
     sample_frame_rgb_srs_affine(y2, pitch_y2, uv2, pitch_uv2, src_w, src_h, dst_w, dst_h, x, y, r, g, b);
-    store_tracknet_pixel(out_nchw, 2, dst_idx, plane_size, r, g, b);
+    store_tracknet_pixel(out_nchw, 2, dst_idx, plane_size, r, g, b, apply_imagenet_normalization);
 }
 
 extern "C" __global__ void kTrackNetNV12TripletToNCHW9_fp32(
@@ -244,12 +256,14 @@ extern "C" __global__ void kTrackNetNV12TripletToNCHW9_fp32(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     float* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     preprocess_triplet_resize(y0, pitch_y0, uv0, pitch_uv0,
                               y1, pitch_y1, uv1, pitch_uv1,
                               y2, pitch_y2, uv2, pitch_uv2,
-                              out_nchw, src_w, src_h, dst_w, dst_h);
+                              out_nchw, src_w, src_h, dst_w, dst_h,
+                              apply_imagenet_normalization);
 }
 
 extern "C" __global__ void kTrackNetNV12TripletToNCHW9_fp16(
@@ -260,12 +274,14 @@ extern "C" __global__ void kTrackNetNV12TripletToNCHW9_fp16(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     __half* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     preprocess_triplet_resize(y0, pitch_y0, uv0, pitch_uv0,
                               y1, pitch_y1, uv1, pitch_uv1,
                               y2, pitch_y2, uv2, pitch_uv2,
-                              out_nchw, src_w, src_h, dst_w, dst_h);
+                              out_nchw, src_w, src_h, dst_w, dst_h,
+                              apply_imagenet_normalization);
 }
 
 extern "C" __global__ void kTrackNetNV12TripletToNCHW9SrsAffine_fp32(
@@ -276,12 +292,14 @@ extern "C" __global__ void kTrackNetNV12TripletToNCHW9SrsAffine_fp32(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     float* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     preprocess_triplet_srs_affine(y0, pitch_y0, uv0, pitch_uv0,
                                   y1, pitch_y1, uv1, pitch_uv1,
                                   y2, pitch_y2, uv2, pitch_uv2,
-                                  out_nchw, src_w, src_h, dst_w, dst_h);
+                                  out_nchw, src_w, src_h, dst_w, dst_h,
+                                  apply_imagenet_normalization);
 }
 
 extern "C" __global__ void kTrackNetNV12TripletToNCHW9SrsAffine_fp16(
@@ -292,10 +310,12 @@ extern "C" __global__ void kTrackNetNV12TripletToNCHW9SrsAffine_fp16(
     const uint8_t* __restrict__ y2, size_t pitch_y2,
     const uint8_t* __restrict__ uv2, size_t pitch_uv2,
     __half* __restrict__ out_nchw,
-    int src_w, int src_h, int dst_w, int dst_h)
+    int src_w, int src_h, int dst_w, int dst_h,
+    int apply_imagenet_normalization)
 {
     preprocess_triplet_srs_affine(y0, pitch_y0, uv0, pitch_uv0,
                                   y1, pitch_y1, uv1, pitch_uv1,
                                   y2, pitch_y2, uv2, pitch_uv2,
-                                  out_nchw, src_w, src_h, dst_w, dst_h);
+                                  out_nchw, src_w, src_h, dst_w, dst_h,
+                                  apply_imagenet_normalization);
 }
