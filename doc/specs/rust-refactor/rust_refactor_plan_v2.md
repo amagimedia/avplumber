@@ -39,11 +39,14 @@ Seven concrete changes, each justified in the section noted:
    services**, not ported/shimmed C++ nodes. `RealTimeTeam` *is* the sync + seek
    coordinator; `realtime`/`speed`/`pause` are thin members of it. (§6)
 
-4. **Scheduling is "hybrid OS threads + a custom single-threaded executor per
-   clock domain," not "tokio."** Blocking codec/IO/CUDA calls need real threads;
-   the clock/tick path needs jitter-free timing tokio's timer wheel doesn't give.
+4. **Scheduling is "hybrid OS threads + a tokio current-thread runtime per clock
+   domain, tick-as-event."** Blocking codec/IO/CUDA calls need real threads; the
+   clock/tick path needs jitter-free timing. The tick is delivered as a
+   `tokio::sync::Notify` event (not `tokio::time`), so tokio's timer wheel never
+   sits on the frame-perfect path; `tokio::time` is opt-in with a jitter caveat.
    Async/await is still adopted for non-blocking nodes — that is the big
-   boilerplate + safety win. (§5)
+   boilerplate + safety win, and it brings the full tokio I/O + sync ecosystem
+   with it. (§5)
 
 5. **Phases are reordered: run the *existing C++ nodes* on the Rust core to parity
    first**, before porting any node to Rust. The core swap is the one monolithic
@@ -597,42 +600,83 @@ RESTART/FINISH_THREAD`) and topologically sorts nodes for ordered start/stop.
 
 We keep the two models but change *how* the non-blocking side is written and timed.
 
-### 5.2 Hybrid, not tokio
+### 5.2 Hybrid, with tokio — tick-as-event, not timer-as-tick
 
 - **Blocking nodes → real OS threads.** You cannot `.await` inside
   `avcodec_send_packet`, a CUDA kernel launch, or a blocking `read()`. Each blocking
-  node owns a thread; the body is a straight loop calling `process()`.
-- **Non-blocking nodes → a custom single-threaded executor per clock domain.**
+  node owns a thread; the body is a straight loop calling `process()`. If a blocking
+  node genuinely wants async networking it may build its own tokio runtime on its
+  thread, but that is the node's concern, not the framework's.
+- **Non-blocking nodes → a tokio current-thread runtime per clock domain.**
   Async/await is adopted here because it is precisely where the current design is
   weakest — the docs warn that stateful non-blocking nodes are hard
   (`processWhenSignalled` + `weak_ptr` capture dance, the "hidden queue of size 1",
   UAF footguns). An `async fn` holds state across `.await` points for free; the
   compiler builds the state machine. This is the single biggest boilerplate + safety
-  win and directly serves the project's "avoid boilerplate" value.
-- **Why not default tokio:** the original motivating bug was frame-perfect output
-  driven by the mixer's tick. tokio's timer wheel adds jitter. We run a bespoke
-  single-threaded executor whose timer is driven either by a `timerfd`/wallclock or
-  by an **external tick callback from the mixer**. The tick becomes a `Stream` a
-  node `select!`s on:
+  win and directly serves the project's "avoid boilerplate" value. Adopting tokio
+  here (rather than a bespoke executor) additionally brings `tokio::net`,
+  `tokio::io`, `tokio::sync`, and `tokio_util` to every non-blocking node with no
+  custom reactor to maintain.
+- **Why tokio, and why this still preserves frame-perfect output.** The original
+  motivating bug was frame-perfect output driven by the mixer's tick. The earlier
+  draft rejected tokio on the grounds that "tokio's timer wheel adds jitter." That
+  objection applies to `tokio::time` — not to the runtime as a whole. The
+  frame-perfect path is *tick-driven, not timer-driven*: the mixer delivers the tick
+  as a `tokio::sync::Notify` (or `mpsc`/`watch`) event, which the node `select!`s on.
+  No `tokio::time` await sits on that path, so no timer-wheel jitter reaches it. The
+  `new_current_thread` scheduler is cooperative and single-threaded — it drains
+  ready tasks before parking — which is precisely the existing
+  `EventLoop::fastExecute` inline-drain trick (run callbacks synchronously when you
+  can grab the lock). No work-stealing, no cross-thread preemption: the "opaque
+  scheduling policy" concern does not apply to the current-thread runtime.
+- **Runtime construction.** One runtime per clock domain, I/O driver on, timer
+  driver off by default:
+
+  ```rust
+  let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_io()           // tokio::net, tokio::io — available to every node
+      // .enable_time()      // deliberately OFF by default; opt-in per domain
+      .build()?;
+  ```
+
+  The runtime runs on a dedicated thread via `rt.block_on(supervisor_loop)`; each
+  node's `run()` is `rt.spawn()`-ed as a task on its clock domain's runtime. This is
+  single-threaded per domain by construction, matching the earlier "single-threaded
+  executor per clock domain" intent.
+- **The tick as event.** The mixer (a core service, or a blocking node on its own
+  thread) calls `tick_notify.notify_one()`. `Notify::notify_one()` is cross-thread
+  and wakes via the runtime's I/O-driver eventfd — sub-microsecond on Linux,
+  comparable to the bespoke eventfd wakeup it replaces. The node loop is plain
+  `tokio::select!`:
 
   ```rust
   async fn run(mut self, ctx: NodeCtx) -> Result<()> {
       loop {
-          select! {
-              _   = ctx.tick.next()      => self.on_tick(&ctx).await?,
-              buf = ctx.input.next()     => match buf {
+          tokio::select! {
+              _   = ctx.tick.notified()  => self.on_tick(&ctx).await?,  // external, not tokio::time
+              buf = ctx.input.recv()     => match buf {
                   Item::Buffer(b) => self.on_buffer(b, &ctx).await?,
-                  Item::Event(e)  => self.on_event(e, &ctx).await?,  // Flush/Spec/Eof
+                  Item::Event(e)  => self.on_event(e, &ctx).await?,    // Flush/Spec/Eof
               }
           }
       }
   }
   ```
 
-  This keeps async ergonomics without inheriting an opaque scheduling policy. (The
-  existing `EventLoop::fastExecute` inline-drain trick — run callbacks synchronously
-  when you can grab the lock — maps to the executor polling ready tasks before
-  parking.)
+- **`tokio::net` / `tokio::io` work directly.** A node doing RTMP/TCP/IPC just
+  `.await`s `TcpStream::connect`, `AsyncReadExt::read`, etc. — no sidecar runtime,
+  no channel bridge. `tokio::sync::*` (Mutex, RwLock, mpsc, oneshot, broadcast,
+  Notify, Semaphore) is available everywhere; it is executor-agnostic and would
+  have worked even on a bespoke executor, but adopting tokio removes the need to
+  maintain that executor at all.
+- **`tokio::time` is opt-in, with a documented jitter caveat.** Nodes that need a
+  watchdog/timeout enable `.enable_time()` on their domain's runtime (or the
+  decision is made domain-wide) and accept that *those specific awaits* carry
+  timer-wheel jitter. Frame-perfect paths stay on the tick event. Rule, enforced in
+  review and lint: **do not use `tokio::time` for frame pacing; use the tick
+  event.** With `.enable_time()` off by default, a stray `tokio::time::sleep`
+  panics ("time driver not enabled") rather than silently introducing jitter — the
+  failure mode is loud.
 
 ### 5.3 Group management and edge-type selection
 
@@ -640,10 +684,11 @@ We keep the two models but change *how* the non-blocking side is written and tim
   (`restart_node`/`restart_group`/`panic`/`exit`) move into the core as a Rust
   supervisor. Ordered start/stop is preserved.
 - During graph construction the core assigns each node to an execution context
-  (a blocking thread, or a named executor/clock domain). For an edge, if both
-  endpoints share an executor and neither is blocking → `DirectEdge`; otherwise
-  `BufferedEdge`. This is the co-location decision v1 described; the point to hold
-  is that it is derived from execution context, not guessed.
+  (a blocking thread, or a named tokio current-thread runtime / clock domain). For
+  an edge, if both endpoints share the same tokio `Runtime` (clock domain) and
+  neither is blocking → `DirectEdge`; otherwise `BufferedEdge`. This is the
+  co-location decision v1 described; the point to hold is that it is derived from
+  execution context, not guessed.
 
 ---
 
@@ -927,7 +972,7 @@ trivial 2-node graph (demux → null_sink) end-to-end through the C ABI.
 
 **Phase 1 — Rust core running existing C++ nodes via the shim, to parity.** Build:
 runtime graph + edges (`BufferedEdge` first), TCP control protocol (`serde_json`),
-factory registry, blocking-thread scheduler, one custom executor, `NodeGroup`
+factory registry, blocking-thread scheduler, one tokio current-thread runtime, `NodeGroup`
 supervisor with topo-sort + auto_restart. Ship the compat header (§8). **Target
 pipeline:** seekable `input_rec` → decode → `realtime` → encode/mux, run to parity
 against the C++ core. During this window the *old* 4-phase seek still works through
@@ -969,7 +1014,7 @@ scripts and the control protocol remain compatible throughout.
 | Replacing Teams/4-phase seek without live-stream regressions | Causal dataflow preserves the existing math (`scalePTS`/`offset_` → master clock applied at the output); parity-first phasing keeps a diffable reference (§3, §6, §10) |
 | `.raw()` refcount corruption through the shim | One-ref-per-delivery ownership contract mirroring avcpp move/copy semantics (§8.2) |
 | Fan-out double-free / struct-level data race in native `split`/`one_to_many` | Distinct-struct-per-edge + CoW + no in-place side-data mutation invariants; fan-out refcount test under ASan (§8.2.1) |
-| Clock jitter on the mixer-tick path | Bespoke single-threaded executor with external-tick-driven timer, not tokio's timer wheel (§5.2) |
+| Clock jitter on the mixer-tick path | Mixer tick delivered as a `tokio::sync::Notify` event on a current-thread runtime — `tokio::time` is off by default, so the timer wheel never touches the frame-perfect path (§5.2) |
 | Stateful node reset (decoder DPB, rescaler, FRUC) on seek | `FlushStart` preempts the pipe: clears queues on the way down and is handled *inside* each stateful node, where the state lives (§3.4) |
 | Responsive live control (speed/pause) despite queue latency | Rate/offset/pause live on the master clock, applied at the output — O(1), no in-flight rewrite; topology (heavy buffers upstream of the control point) keeps any residual latency small (§3.3) |
 | Node/group restart during live op | No sticky per-stream state to miss: timeline is on the core-owned master clock; current format is read from the edge's latched `Spec` (§4.4.1, no pull walk); producer restart reuses the flush discontinuity (§3.6) |

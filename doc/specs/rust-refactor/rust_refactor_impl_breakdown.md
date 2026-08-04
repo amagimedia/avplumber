@@ -196,6 +196,19 @@ Only nodes that reach into the machinery being replaced:
   only real overriders are the Tier-C nodes + the `NodeSingleInput` base itself.
   A Tier-S node that had custom flush logic implements `on_event(FlushStart)` — a few
   lines, only where it actually kept internal state (decoders, filters).
+  - **M3 pre-cutover audit (do before deleting `IFlushAndSeek`):** the claim "only
+    Tier-C nodes + the base override it" is the load-bearing correctness assumption
+    of the new seek (design §3.4 step 1 — each node flushes its *own* state on
+    `FlushStart`). The risk is a Tier-S node that keeps seek-relevant internal state
+    (decoder DPB, avfilter graph, FRUC/smoothing/reorder buffers) but relied on the
+    base's edge-clear + `pauseProcessing` barrier to reset it, **without** overriding
+    `IFlushAndSeek`. Such a node would carry stale state across the discontinuity.
+    Audit every Tier-S node under `src/nodes/**` for internal buffers that survive an
+    edge clear (grep for members holding `av::*`/`AVFrame*`/`std::deque`/reorder
+    state across `process()` calls, and for `discardUntil`/`resetInput`/DPB-flush
+    calls); each hit that isn't already an `IFlushAndSeek` overrider needs an explicit
+    `on_event(FlushStart)` in its shim. Output: a list of the (expected few) nodes
+    that need the hook, verified before `IFlushAndSeek` is removed in M3.
 - **`MetadataFrame` field readers** — fine C++↔C++ (opaque pointer moved by Rust). A
   problem only if a *Rust* node needs to read metadata fields (none in Tier R), which
   would need C accessors — deferred (open question §12.3 in the design).
@@ -212,7 +225,7 @@ node count it unlocks.
 | **M0** | `avplumber_core.h` + `EdgeItem`/`AvpSpec`/master-clock structs; 2-node smoke graph (demux→null_sink) over the ABI | Rust + C header | 0 |
 | **M1** | Core MVP: graph, `BufferedEdge` (with latched `Spec`, §4.4.1), blocking-thread sched, one executor, control protocol, factory registry, group supervisor, direct `query_interface` (no upstream walk) | Rust | — |
 | **M2** | `node_common.hpp` compat shim + `DECLNODE*` re-impl + avcpp marshalling + refcount contract | C++ | **all Tier-S recompile**; run `input_rec→decode→realtime→encode→mux` to **parity** (old 4-phase seek still via shim) | 
-| **M3** | Causal-control playback: `FlushStart/Stop` (flush preempts queues) + `Spec` latched on edges (§4.4.1), `SyncGroup` master clock (rate/offset/pause at the output) + `AvpTimeline` shared store; rewrite the 4 Teams + `SharedTimeline` + `input_rec` seek/timeline in Rust; cut pipeline over; delete `IFlushAndSeek` + `speedChanged` | Rust | Tier C live |
+| **M3** | Causal-control playback: `FlushStart/Stop` (flush preempts queues) + `Spec` latched on edges (§4.4.1), `SyncGroup` master clock (rate/offset/pause at the output) + `AvpTimeline` shared store; rewrite the 4 Teams + `SharedTimeline` + `input_rec` seek/timeline in Rust; cut pipeline over; delete `IFlushAndSeek` + `speedChanged` (**gated on the §3.5 FlushStart-state audit**) | Rust | Tier C live |
 | **M4** | Native node API: `Transform`/`FlowNode` traits, `#[avp_node]` proc macro, `linkme` registry; port Tier-R proof set | Rust | +7 Rust nodes |
 | **M5** | Async executor + `DirectEdge` fusion; benchmark mixer-tick latency | Rust | — |
 | **M6** | pyplumber: retarget pybind11 at the C ABI (or PyO3) | C++/Rust | python nodes |

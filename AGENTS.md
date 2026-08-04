@@ -11,25 +11,31 @@
 
 ## Project shape
 * avplumber is a graph-based real-time multimedia framework: nodes connected by typed queues/edges.
-* Controlled via line-based TCP protocol; `.avplumber` scripts create, connect, and start nodes. Python bindings in `pyplumber/`.
+* Controlled via:
+  * line-based TCP protocol; `.avplumber` scripts create, connect, and start nodes. Python bindings in `pyplumber/`.
+  * Rust and C APIs - to be done
 * Media edges carry FFmpeg packets, video frames, audio samples, metadata, or platform-specific image handles.
 * See [DEV_BASICS.md](doc/DEV_BASICS.md), scan the `doc/` directory for more docs.
 
 ## Code & logic style
 * No copy-paste between nodes or within a file; extract shared base classes, utilities, or helper functions/lambdas.
-* C++/Python project: prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
+* Rust/C++/Python project:
+  * prefer writing in Rust, especially the core framework (graph management) parts. However, C/C++/Python compatibility layers are allowed and, in fact, necessary.
+  * in C++ code, prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
 
 ## Framework changes
-* Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof.
-* Call out framework-wide behavior changes explicitly; don't make incidental edits during node/mixer work.
-* In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new
-interface, new shared object etc., or improving existing ones.
+* Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof. Or when we're in a middle of refactor that needs it.
+* Call out framework-wide behavior changes explicitly; don't make incidental edits during nodes work.
+* In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new interface, new shared object etc., or improving existing ones.
 
-## Writing new nodes
+## Writing new nodes (C++)
 * Put implementations under `src/nodes/`; `make` regenerates the node factory registry — rebuild after adding a node.
 * Subclass the appropriate template or `Node` directly. No semicolon after `DECLNODE(...)`.
 * Use JSON params; add dynamic handling only when runtime updates are needed.
 * See [developing_nodes.md](doc/developing_nodes.md) for structure and patterns.
+
+## Writing new nodes (C or Rust)
+No rules yet - API & ABI are being created. Do whatever works best for the overall shape of the project. Follow the DRY spirit, boilerplate avoidance, overall code cleanness and future-proofing.
 
 ## Before implementing
 * Think Before Coding: The agent must highlight ambiguities and ask clarifying questions instead of guessing
@@ -37,7 +43,6 @@ interface, new shared object etc., or improving existing ones.
 * Present multiple interpretations rather than picking silently.
 * Say so if a simpler approach exists. Push back when warranted.
 * If something is unclear, stop, name what's confusing, and ask.
-* Surgical Changes: Only modify exactly what is necessary. Avoid unnecessary refactors, unprompted cleanups, or touching unrelated files.
 * Verifiable Execution: Turn vague user requests into defined success criteria.
 
 # Agentic work guidelines
@@ -50,19 +55,9 @@ interface, new shared object etc., or improving existing ones.
 * `127.0.0.1` is fine when forcing local IPv4. Use `<host>`, `<path>`, `<bucket>` placeholders elsewhere.
 * Public project/registry URLs are fine.
 
-## Reporting files
-* Always include full absolute paths when referring to files; list each file separately.
-
 ## Build & test workflow
 * Don't build locally for x86/CUDA targets unless the host has the required hardware. Use a user-provided remote environment.
-* If `nvidia-smi` is unavailable locally, do not attempt CUDA, TensorRT, NVENC, Janus GPU, or neural build/run checks on localhost; use the configured SSH NVIDIA host instead.
-* Don't commit instance-specific build details (hostnames, IPs, SSH keys, CUDA/TensorRT paths).
-* CUDA/neural builds: preserve feature flags `CUDA`, `neural_net common`, `neural_net specific`, `NVCC/PTX`, `TensorRT`. Keep FRUC disabled unless testing frame interpolation.
-* pyplumber builds must use the same neural/CUDA/TensorRT feature set as the binary build.
-* DMA-BUF overlay builds need DRM/GL flags so `ipc_dmabuf_source`, `drm_prime_to_egl_image`, `drm_prime_to_cuda` are registered.
-* Prefer targeted tests for Python logic; do a remote build/run check for CUDA, TensorRT, Janus, or mixer graph changes.
-* When changing Python mixer code, rerun pytest covering `pyplumber/auto_mixer/`, `pyplumber/auto_switcher.py`, `pyplumber/mixer.py`, `tools/mixer_tui/` before reporting done.
-* For remote mixer graph debugging, keep web UI backend running with web UI registration enabled.
+* On hosts with custom FFmpeg under `/usr/local`, ensure `avplumber` loads FFmpeg libs from `/usr/local/lib`, not the distro path. Compare `/usr/local/bin/ffmpeg -filters` with the process environment; fix `LD_LIBRARY_PATH`, rpath, or service env.
 
 ## Build & test commands
 Prepare `./build.sh` and `./run.sh` on the remote host if they don't exist. Adapt these examples; don't use verbatim.
@@ -77,18 +72,7 @@ Example `run.sh` for pyplumber:
 LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 pyplumber/examples/auto_mixer.py --webui-api http://localhost:22222 --input-start-ts 660000 --remote-control-port 22422 --inputs /data/test-content/*.ts --output rtmp://... --debug-mouth-roi-bboxes
 ```
 
-Example `run.sh` for avplumber:
+Example `run.sh` for avplumber (C++):
 ```
 LD_LIBRARY_PATH=/usr/local/lib ./avplumber --webui-api http://localhost:22222 --port 22422 -s examples/sync_mixer.avplumber
 ```
-
-# Domain-specific rules
-
-## Python/VAD transplants
-* Keep the current graph-management framework. Don't copy `src/graph_mgmt.cpp`/`.hpp` from older branches unless explicitly asked.
-
-## CUDA graph rules
-* No `hwdownload`/`hwupload`/`hwupload_cuda` workarounds between CUDA decode, preprocessing, inference, draw nodes, and NVENC. Keep pipelines zero-copy (GPU-native filters: `scale_cuda`, `pad_cuda`, CUDA/NVENC frames end-to-end).
-* If CUDA filters fail, fix runtime/library selection; don't hide the problem with CPU round trips.
-* On hosts with custom FFmpeg under `/usr/local`, ensure `avplumber` loads FFmpeg libs from `/usr/local/lib`, not the distro path. Compare `/usr/local/bin/ffmpeg -filters` with the process environment; fix `LD_LIBRARY_PATH`, rpath, or service env.
-* Only use `hwupload`/`hwdownload` in examples explicitly about CPU/GPU or DMA-BUF interop; make that purpose clear in the graph name or comments.
