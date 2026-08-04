@@ -11,13 +11,17 @@
 
 ## Project shape
 * avplumber is a graph-based real-time multimedia framework: nodes connected by typed queues/edges.
-* Controlled via line-based TCP protocol; `.avplumber` scripts create, connect, and start nodes. Python bindings in `pyplumber/`.
+* Controlled via:
+  * line-based TCP protocol; `.avplumber` scripts create, connect, and start nodes. Python bindings in `pyplumber/`.
+  * Rust and C APIs - to be done
 * Media edges carry FFmpeg packets, video frames, audio samples, metadata, or platform-specific image handles.
 * See [DEV_BASICS.md](doc/DEV_BASICS.md), scan the `doc/` directory for more docs.
 
 ## Code & logic style
 * No copy-paste between nodes or within a file; extract shared base classes, utilities, or helper functions/lambdas.
-* C++/Python project: prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
+* Rust/C++/Python project:
+  * prefer writing in Rust, especially the core framework (graph management) parts. However, C/C++/Python compatibility layers are allowed and, in fact, necessary.
+  * in C++ code, prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
 
 ## Framework changes
 * Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof.
@@ -25,11 +29,14 @@
 * In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new
 interface, new shared object etc., or improving existing ones.
 
-## Writing new nodes
+## Writing new nodes (C++)
 * Put implementations under `src/nodes/`; `make` regenerates the node factory registry — rebuild after adding a node.
 * Subclass the appropriate template or `Node` directly. No semicolon after `DECLNODE(...)`.
 * Use JSON params; add dynamic handling only when runtime updates are needed.
 * See [developing_nodes.md](doc/developing_nodes.md) for structure and patterns.
+
+## Writing new nodes (C or Rust)
+No rules yet - API & ABI are being created. Do whatever works best for the overall shape of the project. Follow the DRY spirit, boilerplate avoidance, overall code cleanness and future-proofing.
 
 ## Before implementing
 * Think Before Coding: The agent must highlight ambiguities and ask clarifying questions instead of guessing
