@@ -1,0 +1,163 @@
+From 5d0ac856ccf9738f6e84853172ea2656082f176c Mon Sep 17 00:00:00 2001
+From: Avplumber Contributors <noreply@avplumber.invalid>
+Date: Wed, 5 Aug 2026 14:34:34 +0200
+Subject: [PATCH] avfilter/scale_cuda: fix interpolation edge handling
+
+---
+ libavfilter/vf_scale_cuda.c  |   5 ++
+ libavfilter/vf_scale_cuda.cu | 104 +++++++++++++++++++++++++++++------
+ 2 files changed, 93 insertions(+), 16 deletions(-)
+
+diff --git a/libavfilter/vf_scale_cuda.c b/libavfilter/vf_scale_cuda.c
+index 54a3409..2db84dd 100644
+--- a/libavfilter/vf_scale_cuda.c
++++ b/libavfilter/vf_scale_cuda.c
+@@ -446,6 +446,11 @@ static int scalecuda_resize(AVFilterContext *ctx,
+ 
+     for (i = 0; i < s->in_planes; i++) {
+         CUDA_TEXTURE_DESC tex_desc = {
++            .addressMode = {
++                CU_TR_ADDRESS_MODE_CLAMP,
++                CU_TR_ADDRESS_MODE_CLAMP,
++                CU_TR_ADDRESS_MODE_CLAMP,
++            },
+             .filterMode = s->interp_use_linear ?
+                           CU_TR_FILTER_MODE_LINEAR :
+                           CU_TR_FILTER_MODE_POINT,
+diff --git a/libavfilter/vf_scale_cuda.cu b/libavfilter/vf_scale_cuda.cu
+index de06ba9..414649e 100644
+--- a/libavfilter/vf_scale_cuda.cu
++++ b/libavfilter/vf_scale_cuda.cu
+@@ -1013,24 +1013,29 @@ struct Convert_rgb0_rgba
+ 
+ typedef float4 (*coeffs_function_t)(float, float);
+ 
+-__device__ static inline float4 lanczos_coeffs(float x, float param)
++__device__ static inline float lanczos_sinc(float x)
+ {
+     const float pi = 3.141592654f;
+ 
++    if (fabsf(x) < 1.0e-5f)
++        return 1.0f;
++
++    x *= pi;
++    return __sinf(x) / x;
++}
++
++__device__ static inline float lanczos_kernel(float x)
++{
++    return lanczos_sinc(x) * lanczos_sinc(x / 2.0f);
++}
++
++__device__ static inline float4 lanczos_coeffs(float x, float param)
++{
+     float4 res = make_float4(
+-        pi * (x + 1),
+-        pi * x,
+-        pi * (x - 1),
+-        pi * (x - 2));
+-
+-    res.x = res.x == 0.0f ? 1.0f :
+-        __sinf(res.x) * __sinf(res.x / 2.0f) / (res.x * res.x / 2.0f);
+-    res.y = res.y == 0.0f ? 1.0f :
+-        __sinf(res.y) * __sinf(res.y / 2.0f) / (res.y * res.y / 2.0f);
+-    res.z = res.z == 0.0f ? 1.0f :
+-        __sinf(res.z) * __sinf(res.z / 2.0f) / (res.z * res.z / 2.0f);
+-    res.w = res.w == 0.0f ? 1.0f :
+-        __sinf(res.w) * __sinf(res.w / 2.0f) / (res.w * res.w / 2.0f);
++        lanczos_kernel(x + 1),
++        lanczos_kernel(x),
++        lanczos_kernel(x - 1),
++        lanczos_kernel(x - 2));
+ 
+     return res / (res.x + res.y + res.z + res.w);
+ }
+@@ -1059,6 +1064,71 @@ __device__ static inline V apply_coeffs(float4 coeffs, V c0, V c1, V c2, V c3)
+     return res;
+ }
+ 
++__device__ static inline float clamp_texture_coord(float v, int size)
++{
++    return fminf(fmaxf(v, 0.0f), (float)(size - 1));
++}
++
++__device__ static inline uchar clip_float_to_uchar(float v)
++{
++    return (uchar)fminf(fmaxf(v, 0.0f), 255.0f);
++}
++
++__device__ static inline ushort clip_float_to_ushort(float v)
++{
++    return (ushort)fminf(fmaxf(v, 0.0f), 65535.0f);
++}
++
++template<typename T, typename V>
++__device__ static inline T from_scaled_floatN(const V &v)
++{
++    return from_floatN<T, V>(v);
++}
++
++template<>
++__device__ inline uchar from_scaled_floatN<uchar, float>(const float &v)
++{
++    return clip_float_to_uchar(v);
++}
++
++template<>
++__device__ inline uchar2 from_scaled_floatN<uchar2, float2>(const float2 &v)
++{
++    return make_uchar2(clip_float_to_uchar(v.x),
++                       clip_float_to_uchar(v.y));
++}
++
++template<>
++__device__ inline uchar4 from_scaled_floatN<uchar4, float4>(const float4 &v)
++{
++    return make_uchar4(clip_float_to_uchar(v.x),
++                       clip_float_to_uchar(v.y),
++                       clip_float_to_uchar(v.z),
++                       clip_float_to_uchar(v.w));
++}
++
++template<>
++__device__ inline ushort from_scaled_floatN<ushort, float>(const float &v)
++{
++    return clip_float_to_ushort(v);
++}
++
++template<>
++__device__ inline ushort2 from_scaled_floatN<ushort2, float2>(const float2 &v)
++{
++    return make_ushort2(clip_float_to_ushort(v.x),
++                        clip_float_to_ushort(v.y));
++}
++
++template<>
++__device__ inline ushort4 from_scaled_floatN<ushort4, float4>(const float4 &v)
++{
++    return make_ushort4(clip_float_to_ushort(v.x),
++                        clip_float_to_ushort(v.y),
++                        clip_float_to_ushort(v.z),
++                        clip_float_to_ushort(v.w));
++}
++
+ template<typename T>
+ __device__ static inline T Subsample_Nearest(cudaTextureObject_t tex,
+                                              int xo, int yo,
+@@ -1126,9 +1196,11 @@ __device__ static inline T Subsample_Bicubic(cudaTextureObject_t tex,
+     float4 coeffsX = coeffs_function(fx, param);
+     float4 coeffsY = coeffs_function(fy, param);
+ 
+-#define PIX(x, y) tex2D<floatT>(tex, (x), (y))
++#define PIX(x, y) tex2D<floatT>(tex, \
++                                clamp_texture_coord((x), src_width), \
++                                clamp_texture_coord((y), src_height))
+ 
+-    return from_floatN<T, floatT>(
++    return from_scaled_floatN<T>(
+         apply_coeffs<floatT>(coeffsY,
+             apply_coeffs<floatT>(coeffsX, PIX(px - 1, py - 1), PIX(px, py - 1), PIX(px + 1, py - 1), PIX(px + 2, py - 1)),
+             apply_coeffs<floatT>(coeffsX, PIX(px - 1, py    ), PIX(px, py    ), PIX(px + 1, py    ), PIX(px + 2, py    )),
+-- 
+2.53.0
+
