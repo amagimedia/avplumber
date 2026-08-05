@@ -37,9 +37,11 @@ not support that pairing. The demo must report the three supported modes
 explicitly rather than implying that all permutations of 4:2:0 and 4:4:4 are
 valid.
 
-All fixtures use a 641x361 canvas. The odd width and height exercise ceiling
-chroma dimensions and partial 2x2 edge blocks in every matrix case instead of
-relegating those paths to a rarely run optional test.
+All fixtures use a 641x360 canvas. The odd width exercises ceiling chroma width
+and a partial horizontal 2x2 edge block in every matrix case instead of
+relegating that path to a rarely run optional test. Odd height is excluded
+because FFmpeg n7.1.5's plain CUDA upload/download path loses the final 4:2:0
+chroma row before `overlay_many_cuda` is involved.
 
 ## Directory Shape
 
@@ -97,9 +99,12 @@ matrix runner starts it in a fresh process for each case. This deliberately
 trades some process startup time for bounded GPU memory, isolated logs, and a
 clear association between a failure and its graph configuration.
 
-For every source, the graph reads one lossless planar frame, decodes it in
-software, and uploads it once at the input boundary with the appropriate
-software format. The ordered CUDA edges feed a single `FilterVideo` node whose
+For every source, the graph reads a two-frame stream containing two identical
+copies of the lossless planar fixture. The second copy gives each input a later
+PTS so the existing multi-input scheduler can feed all equal-PTS first frames
+before end-of-stream. The graph decodes in software and uploads once at the
+input boundary with the appropriate software format. The ordered CUDA edges
+feed a single `FilterVideo` node whose
 graph is `overlay_many_cuda=inputs=N`. The main frame is source zero; overlay
 sources one through N-1 are connected in ascending layer order.
 
@@ -111,9 +116,10 @@ this correctness demo and are not proposed as production pipeline behavior.
 The graph accepts only explicit mode, input count, fixture directory, output
 path, dimensions, and timeout arguments. It validates that total inputs are in
 the filter's 2 through 16 range and that the selected mode is one of the three
-supported combinations. It terminates successfully only after receiving the
-exact expected output byte count. Timeout, graph failure, short output, excess
-output, or unsupported format is an error.
+supported combinations. It terminates successfully after receiving at least one
+complete frame, retains exactly the first frame for comparison, and discards any
+later identical fixture frames during graph shutdown. Timeout, graph failure,
+short output, or unsupported format is an error.
 
 ## CPU Reference and Comparison
 
@@ -198,6 +204,20 @@ visible, compute capability is below 7.0, or the driver cannot run the CUDA
 11.7-built code, the demo fails with a direct prerequisite error rather than
 falling back to software composition.
 
+## Native 1080p Artifact
+
+The matrix runner accepts explicit positive `--width` and `--height` values and
+passes them consistently through fixture generation, raw-frame parsing, the CPU
+reference, the PyPlumber graph, PNG conversion, and the JSON report. Its default
+remains 641x360 so normal runs retain horizontal 4:2:0 edge coverage.
+
+A separate maximum-input visual run uses 1920x1080, all 15 overlays, and all
+three supported format modes. Each mode must still match the CPU reference
+exactly. The three native result frames are retained as screenshots and joined
+without spatial scaling into a short 1920x1080 H.264 MP4. This artifact is a
+native-resolution compositor demonstration, not an upscale of the regression
+output.
+
 ## Validation
 
 Before reporting the demo complete:
@@ -207,6 +227,7 @@ Before reporting the demo complete:
 - verify patched FFmpeg exposes `overlay_many_cuda`;
 - run all 45 matrix cases on the configured NVIDIA T4 host;
 - require exact raw-plane agreement for all cases;
+- run all three 1920x1080 maximum-input cases and require exact agreement;
 - inspect the three mode contact sheets for layer order, transparency, and odd
   edge corruption;
 - run targeted local tests for the pure-Python asset and CPU-reference logic;
