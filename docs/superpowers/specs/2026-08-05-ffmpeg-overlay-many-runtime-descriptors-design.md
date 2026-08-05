@@ -51,10 +51,12 @@ layer count. This prevents a per-thread copy of the aggregate while retaining a
 single launch with no descriptor allocation or upload. Validation will inspect
 generated PTX and `ptxas` output for local-memory copies or spills.
 
-This design requires CUDA compute capability 7.0 or newer. The requirement
-refers to Volta-generation hardware or newer, not the CUDA 7 toolkit. Configure
-and runtime behavior must report this requirement clearly rather than failing
-with an unexplained module-load error.
+This design requires CUDA Toolkit 11.7 or newer and CUDA compute capability 7.0
+or newer. The hardware requirement refers to Volta-generation hardware or
+newer, not the CUDA 7 toolkit. `__grid_constant__` is mandatory rather than a
+conditional optimization. Configure and runtime behavior must report these
+requirements clearly rather than failing with an unexplained compiler or
+module-load error.
 
 The PTX exports exactly three entry points:
 
@@ -76,10 +78,20 @@ generic kernels and at most six measured fast paths.
 For each output frame, the filter:
 
 1. obtains all frames through the existing frame synchronizer;
-2. allocates a distinct CUDA output frame and copies frame properties;
-3. packs device addresses and pitches into the fixed launch descriptor;
-4. launches one fused kernel on FFmpeg's supplied CUDA stream;
-5. forwards the output without synchronizing the stream.
+2. omits unavailable secondary frames while preserving the z-order of the
+   available overlays;
+3. forwards the main frame unchanged only when no overlay is available;
+4. otherwise allocates a distinct pooled CUDA output frame and copies frame
+   properties;
+5. packs device addresses and pitches into the fixed launch descriptor;
+6. launches one fused kernel on FFmpeg's supplied CUDA stream;
+7. forwards the output without synchronizing the stream.
+
+Missing secondary inputs are handled independently. One missing overlay must
+not suppress other available overlays. A missing main frame remains an error.
+The filter never writes into the main input frame, even when that frame is
+writable; keeping source and destination distinct preserves the descriptor's
+non-aliasing contract.
 
 All three format combinations use one launch and one output write. In
 particular, the mixed YUV420P/YUVA444P path will no longer use separate Y, U,
@@ -109,7 +121,9 @@ result = (rounded + (rounded >> 8)) >> 8;
 
 This replaces the existing `>> 8` division-by-256 approximation. Alpha zero
 must return the background exactly; alpha 255 must return the foreground
-exactly.
+exactly. The result is rounded back to 8-bit after each overlay layer. Generic
+and specialized kernels must therefore produce the same result as sequential
+8-bit composition; they must not retain hidden higher precision across layers.
 
 For YUVA420P overlays, chroma alpha is the rounded average of the valid luma
 alpha samples in the corresponding 2x2 block. For YUVA444P overlays composed
@@ -145,15 +159,20 @@ Verification consists of:
 - GPU comparisons against a CPU reference for all three format combinations,
   1, 2, 4, 8, and 15 overlays, alpha endpoints and random alpha, padded
   pitches, partial CUDA blocks, and odd dimensions;
-- CUDA-event benchmarks against the current patch stack at 1080p and 2160p;
+- steady-state end-to-end filter benchmarks against the current patch stack at
+  1080p and 2160p, with frame pools prewarmed and identical graphs;
+- separate CUDA-event kernel timings used diagnostically rather than as the
+  acceptance metric;
 - checking `ptxas` register, spill, and local-memory reports.
 
 CUDA compilation and runtime validation must run on the configured NVIDIA
 host, not on a local machine without `nvidia-smi`. A measured regression above
 3 percent for 1 to 3 overlays or 5 percent for 4 to 15 overlays blocks removal
-of the old implementation until the cause is understood. One- and two-overlay
-specializations are accepted only under the benchmark rule above; a regression
-at another count must be fixed in the generic implementation.
+of the old implementation until the cause is understood. The gate uses complete
+steady-state filter cost, including descriptor packing, pooled output-frame
+acquisition, and kernel execution. One- and two-overlay specializations are
+accepted only under the benchmark rule above; a regression at another count
+must be fixed in the generic implementation.
 
 ## Non-goals
 
