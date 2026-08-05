@@ -24,6 +24,13 @@ protected:
     AVBufferRef* hw_frames_ctx_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+    // When set, label the output CUDA surface alpha-less (RGB0) instead of RGBA.
+    // The GL texture is RGBA8 either way; RGB0 marks the 4th channel as padding
+    // so consumers that can't take a transparent CUDA frame accept it -- e.g.
+    // feeding straight into h264_nvenc, or a plain ffmpeg hwdownload (ffmpeg's
+    // cuda hwcontext can't init a transparent-format download). Opt-in so the
+    // default RGBA path (in-house convert_cuda, which needs alpha) is unchanged.
+    bool drop_alpha_ = false;
 
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
@@ -412,7 +419,7 @@ public:
             return;
         } */
         // swfmt_from_fourcc not needed - texture is normalized to RGBA during texture copy
-        AVPixelFormat swfmt = AV_PIX_FMT_RGBA;
+        AVPixelFormat swfmt = drop_alpha_ ? AV_PIX_FMT_RGB0 : AV_PIX_FMT_RGBA;
 
         av::VideoFrame out;
         out.setTimeBase(in.timeBase());
@@ -486,6 +493,7 @@ public:
         if (!r->cuda_dev_ctx_) {
             throw Error("drm_prime_to_cuda: CUDA device context missing");
         }
+        r->drop_alpha_ = params.count("drop_alpha") ? (bool)params["drop_alpha"] : false;
         return r;
     }
 };

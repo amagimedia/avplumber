@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "rebuild:addons": "npm --prefix ./addons/fdpass run install",
+    "rebuild:shim": "bash native/gbm-linear-shim/build.sh",
     "dist": "npm run build && electron-builder"
   },
   "engines": {
@@ -29,7 +30,7 @@
     "@types/supertest": "^6.0.2",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
-    "electron": "41.3.0",
+    "electron": "^42.0.0",
     "electron-builder": "^25.1.8",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.1.0",

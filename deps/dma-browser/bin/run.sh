@@ -72,6 +72,35 @@ apply_nvidia_runtime() {
   local gl_backend="${DMA_BROWSER_GL_BACKEND:-angle}"
   local angle_backend="${DMA_BROWSER_ANGLE_BACKEND:-gl-egl}"
 
+  # GBM shim for the stock-Electron shared-texture capture path on NVIDIA, so no
+  # patched Chromium is needed (replaces the custom feature
+  # RenderableMappableSharedImageForceScanout). Only preloaded on the NVIDIA path
+  # (rewriting GBM flags can harm Intel/AMD). Two mutually exclusive modes:
+  #
+  #   FORCE_LINEAR (default): allocate LINEAR *and* RENDERING and pin the modifier
+  #     list to [LINEAR]. The buffer is a valid render target (SkSurface works ->
+  #     frames flow) AND CPU-linear, so a downstream consumer using a plain DRM
+  #     hwdownload (no CUDA/EGL detiling) reads a correct image. This is what the
+  #     minimal dmabuf demo needs.
+  #   ADD_SCANOUT (fallback, set FORCE_LINEAR=0 to use): strip LINEAR and add
+  #     SCANOUT|RENDERING. Also captures on stock Chromium, but the buffer is
+  #     tiled/block-linear -> only a CUDA/EGL import can detile it; a plain DRM
+  #     hwdownload yields a sheared image.
+  local shim="$PROJECT_ROOT/native/gbm-linear-shim/libgbm_linear_shim.so"
+  if [[ ! -f "$shim" && -x "$PROJECT_ROOT/native/gbm-linear-shim/build.sh" ]] && command -v cc >/dev/null 2>&1; then
+    shim="$("$PROJECT_ROOT/native/gbm-linear-shim/build.sh" 2>/dev/null | tail -1)"
+  fi
+  if [[ -f "$shim" ]]; then
+    export LD_PRELOAD="$shim${LD_PRELOAD:+:$LD_PRELOAD}"
+    export GBM_LINEAR_SHIM="${GBM_LINEAR_SHIM:-1}"
+    export GBM_LINEAR_SHIM_FORCE_LINEAR="${GBM_LINEAR_SHIM_FORCE_LINEAR:-1}"
+    export GBM_LINEAR_SHIM_ADD_SCANOUT="${GBM_LINEAR_SHIM_ADD_SCANOUT:-1}"
+    export GBM_LINEAR_SHIM_LOG="${GBM_LINEAR_SHIM_LOG:-0}"
+    echo "dma-browser: GBM linear shim preloaded ($shim)" >&2
+  else
+    echo "dma-browser: WARNING GBM linear shim missing; NVIDIA dmabuf capture may fail" >&2
+  fi
+
   export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-nvidia}"
   export NVD_BACKEND="${NVD_BACKEND:-direct}"
   export NVD_LOG="${NVD_LOG:-0}"

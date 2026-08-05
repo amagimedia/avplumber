@@ -1,0 +1,84 @@
+# DMA-BUF consumer for NVIDIA GPUs.
+#
+# On NVIDIA the browser's GPU render target is always tiled (block-linear) — the
+# driver refuses a linear *renderable* RGBA buffer — so a plain DRM hwdownload
+# reads sheared garbage. This build adds the GPU detiler: avplumber with
+# HAVE_CUDA + HAVE_GL + HAVE_DRM, so drm_prime_to_cuda can import the DMA-BUF via
+# EGL *honoring the NVIDIA modifier* into a linear CUDA frame that a normal
+# hwdownload then reads correctly. Still lean: NO TensorRT / neural / OpenCV /
+# VAAPI, built against the SYSTEM Fedora ffmpeg (which ships cuda hwframes +
+# libx264 + nvenc); the only heavy addition over the DRM-only image is the CUDA
+# runtime + EGL/GL. The NVIDIA driver libs (libcuda, EGL/GLES ICDs) are injected
+# at runtime by the NVIDIA container runtime (--gpus all + all caps).
+#
+# Build context = the avplumber repo root:
+#   docker build -t avplumber-dmabuf-consumer-cuda -f dmabuf-demo/consumer/Dockerfile.cuda .
+ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
+ARG AVP_FLAGS="HAVE_CUDA=1 HAVE_NVCC=0 HAVE_GL=1 HAVE_DRM=1 HAVE_NVJPEG=1 HAVE_VAAPI=0 HAVE_TENSORRT=0 NEURAL_NET_COMMON=0 NEURAL_NET_SPECIFIC=0 HAVE_NVOF=0 HAVE_NVOF_FRUC=0 HAVE_OPENCV=0 HAVE_SCTE35=0 CUDA_ROOT=/usr/local/cuda-13.0"
+
+FROM fedora:42 AS builder
+ARG AVP_FLAGS
+ARG CUDA_REPO_URL
+RUN dnf -y install \
+        "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+        "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
+        dnf-plugins-core \
+    && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
+    && dnf -y install --setopt=install_weak_deps=False \
+        gcc gcc-c++ binutils which make cmake git pkgconf-pkg-config xxd \
+        ffmpeg-devel \
+        libdrm-devel \
+        python3-devel \
+        boost-devel libcurl-devel gnutls-devel openssl-devel zlib-devel \
+        libglvnd-devel mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
+        cuda-nvcc-13-0 cuda-cudart-devel-13-0 cuda-driver-devel-13-0 \
+        cuda-cccl-13-0 cuda-crt-13-0 cuda-culibos-devel-13-0 libnvjpeg-devel-13-0 \
+    && dnf clean all
+WORKDIR /build
+COPY deps /build/deps
+COPY Makefile /build/Makefile
+# Wipe any stale CMake caches copied in with deps/*/build (empty CMAKE_AR etc).
+RUN command -v ar \
+    && find /build/deps -type f -name CMakeCache.txt -delete 2>/dev/null \
+    ; find /build/deps -depth -type d -name CMakeFiles -exec rm -rf {} + 2>/dev/null; true
+RUN make -j"$(nproc)" \
+        deps/cpr/build/lib/libcpr.a \
+        deps/avcpp/build/src/libavcpp.a \
+        deps/cuda_loader/cuda_drvapi_dynlink.o \
+        ${AVP_FLAGS}
+COPY src /build/src
+COPY pyplumber /build/pyplumber
+COPY generate_node_list /build/generate_node_list
+COPY .git /build/.git
+# Build the pyplumber python module against SYSTEM ffmpeg (headers under
+# /usr/include/ffmpeg on Fedora; Makefile hardcodes /usr/local, so add via
+# pkg-config). Python module only (the plain binary won't link the Python node
+# factories). HAVE_CUDA/GL/DRM give ipc_dmabuf_source + drm_prime_to_cuda.
+RUN make -j"$(nproc)" python_module BUILD_TYPE=Release ${AVP_FLAGS} \
+      CXXFLAGS+=" $(pkg-config --cflags libavformat libavcodec libavutil libavfilter libavdevice libswscale libswresample)"
+RUN sofile="$(ls /build/_avplumber*.so)" \
+    && for n in ipc_dmabuf_source drm_prime_to_cuda; do \
+         strings "$sofile" | grep -q "$n" && echo "OK: $n registered" \
+           || { echo "FATAL: $n missing from $sofile"; exit 1; }; \
+       done
+
+FROM fedora:42
+ARG CUDA_REPO_URL
+RUN dnf -y install \
+        "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+        "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
+        dnf-plugins-core \
+    && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
+    && dnf -y install --setopt=install_weak_deps=False \
+        bash ffmpeg libdrm boost-system boost-thread libcurl gnutls python3 \
+        libglvnd-egl libglvnd-gles libglvnd-opengl mesa-libEGL mesa-libGLES \
+        cuda-cudart-13-0 libnvjpeg-13-0 \
+    && dnf clean all
+COPY --from=builder /build/_avplumber*.so /opt/avplumber/
+COPY --from=builder /build/pyplumber /opt/avplumber/pyplumber
+ENV PYTHONPATH=/opt/avplumber
+ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/targets/x86_64-linux/lib
+# NVIDIA driver libs (libcuda, EGL/GLES vendor ICDs) come from the NVIDIA
+# container runtime; request compute+graphics+display so EGL import works.
+ENV NVIDIA_DRIVER_CAPABILITIES=all NVIDIA_VISIBLE_DEVICES=all
+WORKDIR /opt/avplumber

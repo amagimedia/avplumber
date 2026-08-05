@@ -21,16 +21,17 @@ export interface AppliedSwitch {
  * NVIDIA dmabuf patches from the S3 Electron 41 / Chrome 146 build.
  */
 export class HwAccelConfigurator {
+  // RenderableMappableSharedImageForceScanout is the offscreen-capture / NVIDIA
+  // GBM SharedImage feature (NOT VAAPI). It forces renderable mappable
+  // SharedImages to SCANOUT, which — together with the GBM linear shim — is what
+  // lets Chromium allocate an exportable dmabuf on NVIDIA. Without it,
+  // gbm_bo_create fails ("Cannot create bo ... usage=Scanout") and the GPU
+  // process crashes. It must stay enabled even with no video decode (this
+  // matches electron-hwaccel main.js, which enables it unconditionally). The
+  // VAAPI/video-decode features are intentionally omitted here and explicitly
+  // disabled below (a graphics overlay has no <video>).
   private static readonly ENABLED_FEATURES_BASE: readonly string[] = [
-    'AcceleratedVideoDecoder',
-    'AcceleratedVideoDecodeLinuxGL',
-    'VaapiOnNvidiaGPUs',
-    'VaapiIgnoreDriverChecks',
-    'UseChromeOSDirectVideoDecoder',
     'RenderableMappableSharedImageForceScanout',
-    'VaapiNvidiaSyncSurfaceBeforeOutput',
-    'VaapiNvidiaOutputBufferTuning:output_frame_pool_size/11',
-    'ReduceHardwareVideoDecoderBuffers',
   ];
 
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
@@ -41,6 +42,22 @@ export class HwAccelConfigurator {
     'VideoDecodeBatching',
     'Vulkan',
     'VulkanFromANGLE',
+    // No hardware video decode for a graphics overlay: explicitly disable the
+    // VAAPI/decode stack so the decode path is off (matches electron-hwaccel
+    // main.js when VAAPI is disabled). These are inert without <video> but are
+    // disabled so logs reflect the real (software) decode path.
+    'AcceleratedVideoDecoder',
+    'AcceleratedVideoDecodeLinuxGL',
+    'VaapiOnNvidiaGPUs',
+    'VaapiIgnoreDriverChecks',
+    'UseChromeOSDirectVideoDecoder',
+    'VaapiNvidiaSyncSurfaceBeforeOutput',
+    'VaapiNvidiaResetRecreatesDecoder',
+    'VaapiNvidiaSerializeDecodeLifecycle',
+    'VaapiNvidiaDropStaleDecoderFrames',
+    'VaapiNvidiaRtcResetDecoderAfterFrameGap',
+    'VaapiNvidiaOutputBufferTuning',
+    'ReduceHardwareVideoDecoderBuffers',
   ];
 
   private readonly env: Env;
@@ -69,12 +86,17 @@ export class HwAccelConfigurator {
     this.appendSwitch('disable-vulkan');
     this.appendSwitch('disable-hardware-overlays');
     this.appendSwitch('ignore-gpu-blocklist');
+    // No hardware video decode needed for a graphics overlay; force software
+    // decode so any stray <video> never hits the NVIDIA VAAPI path.
+    this.appendSwitch('disable-accelerated-video-decode');
 
     const enabled = HwAccelConfigurator.dedupe([
       ...HwAccelConfigurator.ENABLED_FEATURES_BASE,
       ...envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
     ]);
-    this.appendSwitch('enable-features', enabled.join(','));
+    if (enabled.length > 0) {
+      this.appendSwitch('enable-features', enabled.join(','));
+    }
 
     const disabled = HwAccelConfigurator.dedupe([
       ...HwAccelConfigurator.DISABLED_FEATURES_BASE,
@@ -88,6 +110,15 @@ export class HwAccelConfigurator {
       this.appendSwitch(
         'vmodule',
         [
+          'gl_context*=3',
+          'gl_display*=3',
+          'gl_surface*=3',
+          'gl_factory*=3',
+          '*egl*=3',
+          '*angle*=3',
+          'gpu_init*=2',
+          'gpu_info_collector*=2',
+          'sandbox_linux*=2',
           '*video_decoder_pipeline*=2',
           'video_decoder_pipeline=1',
           '*vaapi_video_decoder*=3',
