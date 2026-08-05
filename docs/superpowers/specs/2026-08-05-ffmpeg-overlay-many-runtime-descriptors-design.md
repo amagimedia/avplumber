@@ -1,32 +1,41 @@
-# FFmpeg CUDA Overlay Patch Consolidation
+# FFmpeg CUDA Overlay Runtime Descriptors
 
 ## Goal
 
 Replace `ffmpeg-patches/0019-overlay_many_cuda-performance-improvements.patch`
-and `ffmpeg-patches/0020-ffmpeg-match-host-cuda-overlay-edge-handling.patch`
-with one patch applied after patch `0018`. The replacement must retain the
-useful performance and correctness changes while eliminating the generated
-kernel matrix for input counts 2 through 16.
+with an independently reviewable `overlay_many_cuda` patch applied after patch
+`0018`. Fold the overlay-related correctness changes from the current `0020`
+into that patch while eliminating the generated kernel matrix for input counts
+2 through 16.
+
+Move the unrelated `scale_cuda` texture-addressing, Lanczos edge, and clipping
+changes into a separate replacement `0020` patch.
 
 The replacement targets the FFmpeg `n7.1.3` base documented in
 `ffmpeg-patches/README.md`. It must remain a zero-copy CUDA pipeline and use
 FFmpeg's existing CUDA context and stream.
 
+FFmpeg 9 is a feature-comparison baseline only; it is not the base for these
+patches. The overlay patch should be structured and documented for a future
+upstream review, but direct submission to current FFmpeg will require a rebase.
+
 ## Patch Shape
 
-The existing `0019` and `0020` files will be removed and replaced by one new
-`0019` patch. It will contain:
+The existing `0019` and `0020` files will be replaced by two patches with
+independent subjects and scopes.
+
+The new `0019` contains:
 
 - the complete `overlay_many_cuda` replacement;
 - deletion of `vf_overlay_many_cuda_generator.c`;
 - addition of a normal, committed `vf_overlay_many_cuda.cu` source;
 - the corresponding Makefile cleanup;
-- the `scale_cuda` texture-addressing, Lanczos edge, and output-clipping fixes
-  currently carried by patch `0020`.
+- all overlay bounds, output-frame-context, and edge fixes currently carried by
+  patch `0020`.
 
-Keeping the `scale_cuda` changes in the replacement is intentional: the goal is
-one behavioral replacement for both old patches, not merely an overlay-only
-squash.
+The new `0020` contains only the `scale_cuda` texture-addressing, Lanczos edge,
+and output-clipping fixes. The overlay patch must not depend on it, so the
+overlay change can be reviewed independently and rebased upstream on its own.
 
 ## Overlay Kernel Interface
 
@@ -36,10 +45,16 @@ and storage for at most 15 overlay plane descriptors. Fields use fixed-width
 integers, explicit padding, and compile-time size and offset checks.
 
 The complete launch packet is expected to be about 1.1 KiB, below the legacy
-4 KiB CUDA kernel-parameter limit. Overlay descriptors use constant indices in
-device code so the compiler can issue direct parameter loads rather than copy
-or dynamically index the aggregate in per-thread local memory. Validation will
-inspect generated PTX and `ptxas` output for local-memory copies or spills.
+4 KiB CUDA kernel-parameter limit. Kernels take it as a
+`__grid_constant__ const` value and index its overlay array using the runtime
+layer count. This prevents a per-thread copy of the aggregate while retaining a
+single launch with no descriptor allocation or upload. Validation will inspect
+generated PTX and `ptxas` output for local-memory copies or spills.
+
+This design requires CUDA compute capability 7.0 or newer. The requirement
+refers to Volta-generation hardware or newer, not the CUDA 7 toolkit. Configure
+and runtime behavior must report this requirement clearly rather than failing
+with an unexplained module-load error.
 
 The PTX exports exactly three entry points:
 
@@ -47,12 +62,14 @@ The PTX exports exactly three entry points:
 2. YUV444P main plus YUVA444P overlays;
 3. YUV420P main plus YUVA444P overlays.
 
-Each entry handles one base plus 1 to 15 overlays. The device source expresses
-the 15 possible layer operations once per format path, using uniform
-count-controlled exits between layers. This keeps the current compile-time
-unrolling advantage without emitting a separate function signature for every
-input count. No NVRTC, device-side launch, or per-frame device allocation is
-introduced.
+Each entry handles one base plus 1 to 15 overlays using a uniform runtime loop.
+No NVRTC, device-side launch, or per-frame device allocation is introduced.
+
+If CUDA-event benchmarks show that an exact one- or two-overlay specialization
+is more than 3 percent faster than its generic format kernel, that
+specialization may be included. It must use the same descriptor ABI. No other
+count specialization is permitted, limiting the exported surface to three
+generic kernels and at most six measured fast paths.
 
 ## Data Flow and Performance
 
@@ -96,8 +113,10 @@ exactly.
 
 For YUVA420P overlays, chroma alpha is the rounded average of the valid luma
 alpha samples in the corresponding 2x2 block. For YUVA444P overlays composed
-onto YUV420P, four full-resolution chroma results are composed in layer order
-and then averaged for the output chroma sample.
+onto YUV420P, every layer is composed independently at all four full-resolution
+chroma positions. The four final results are averaged only after all layers
+have been applied. Downsampling each overlay before composition is not an
+equivalent operation and is not permitted.
 
 Odd widths and heights use ceiling chroma dimensions. Edge 2x2 blocks include
 only valid samples, avoiding out-of-bounds reads and avoiding a bias from
@@ -116,9 +135,10 @@ first error. A failed launch never forwards the newly allocated output frame.
 Verification consists of:
 
 - applying the complete patch series to a clean FFmpeg `n7.1.3` checkout;
-- confirming that the replacement patch is the only `0019` and no `0020`
-  remains;
-- checking that PTX exports exactly the three overlay entry points;
+- confirming that `0019` changes only `overlay_many_cuda` and its build wiring;
+- confirming that `0020` changes only `scale_cuda`;
+- checking that PTX exports the three generic overlay entry points plus only
+  benchmark-approved one- or two-overlay specializations;
 - checking the launch descriptor size and host/device offsets;
 - exhaustive unit verification of the 8-bit blend formula against rounded
   integer division by 255;
@@ -131,7 +151,9 @@ Verification consists of:
 CUDA compilation and runtime validation must run on the configured NVIDIA
 host, not on a local machine without `nvidia-smi`. A measured regression above
 3 percent for 1 to 3 overlays or 5 percent for 4 to 15 overlays blocks removal
-of the old implementation until the cause is understood.
+of the old implementation until the cause is understood. One- and two-overlay
+specializations are accepted only under the benchmark rule above; a regression
+at another count must be fixed in the generic implementation.
 
 ## Non-goals
 
