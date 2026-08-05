@@ -15,6 +15,10 @@ HAVE_NVOF_FRUC ?= 1
 OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
+# The NV12 encoder API used by nvjpeg_enc is unavailable in older CUDA
+# toolkits.  Keep the node enabled by default, but allow CUDA builds that do
+# not need it to opt out independently of the other CUDA nodes.
+HAVE_NVJPEG ?= $(HAVE_CUDA)
 HAVE_TENSORRT = 0
 # Build neural_net nodes except sport_specific (draw, yolo/rtdetr, preprocess, utils)
 NEURAL_NET_COMMON ?= 0
@@ -216,7 +220,7 @@ override LFLAGS += -L$(CUDA_ROOT)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_ROO
 override DEPS_LIBS += deps/cuda_loader/cuda_drvapi_dynlink.o
 endif
 
-ifeq ($(HAVE_CUDA),1)
+ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG),11)
 ifneq (,$(wildcard $(SRCDIR)/nodes/nvjpeg_enc.cpp))
 override LIBS_FLAGS += -lnvjpeg -lcudart
 endif
