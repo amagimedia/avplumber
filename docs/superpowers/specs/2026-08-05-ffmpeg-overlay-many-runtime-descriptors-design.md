@@ -11,7 +11,7 @@ into that patch while eliminating the generated kernel matrix for input counts
 Move the unrelated `scale_cuda` texture-addressing, Lanczos edge, and clipping
 changes into a separate replacement `0020` patch.
 
-The replacement targets the FFmpeg `n7.1.3` base documented in
+The replacement targets the FFmpeg `n7.1.5` base documented in
 `ffmpeg-patches/README.md`. It must remain a zero-copy CUDA pipeline and use
 FFmpeg's existing CUDA context and stream.
 
@@ -148,7 +148,7 @@ first error. A failed launch never forwards the newly allocated output frame.
 
 Verification consists of:
 
-- applying the complete patch series to a clean FFmpeg `n7.1.3` checkout;
+- applying the complete patch series to a clean FFmpeg `n7.1.5` checkout;
 - confirming that `0019` changes only `overlay_many_cuda` and its build wiring;
 - confirming that `0020` changes only `scale_cuda`;
 - checking that PTX exports the three generic overlay entry points plus only

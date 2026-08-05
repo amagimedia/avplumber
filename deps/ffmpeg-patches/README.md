@@ -6,17 +6,17 @@ avplumber neural-net and CUDA workflows.
 ## Base
 
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg`
-- Upstream tag: `n7.1.3`
-- Upstream commit used for export: `f46e514491172d15bd74b4abb1814cd2f05a763e`
+- Upstream tag: `n7.1.5`
+- Upstream commit used for validation: `3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`
 
 ## Source
 
-The patches were exported from the private remote branch:
+The legacy patches were originally exported from the private remote branch:
 
 - branch: `n7.1.3-tellyodev`
 
 The patch series is intended to be applied in numeric order onto a clean public
-FFmpeg checkout at tag `n7.1.3`.
+FFmpeg checkout at tag `n7.1.5`.
 
 The current exported stack is compacted to keep CI churn manageable:
 
@@ -30,7 +30,7 @@ The current exported stack is compacted to keep CI churn manageable:
 Example:
 
 ```bash
-git clone --branch n7.1.3 --depth 1 https://github.com/FFmpeg/FFmpeg clean-ffmpeg
+git clone --branch n7.1.5 --depth 1 https://github.com/FFmpeg/FFmpeg clean-ffmpeg
 cd clean-ffmpeg
 git am /path/to/avplumber/deps/ffmpeg-patches/*.patch
 ```

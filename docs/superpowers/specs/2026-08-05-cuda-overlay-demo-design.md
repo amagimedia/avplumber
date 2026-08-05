@@ -3,7 +3,7 @@
 ## Goal
 
 Add a self-contained `cuda-overlay-demo/` that builds the repository's patched
-FFmpeg `n7.1.3` and PyPlumber integration, generates deterministic color-bar
+FFmpeg `n7.1.5` and PyPlumber integration, generates deterministic color-bar
 fixtures, and exercises `overlay_many_cuda` on an NVIDIA GPU.
 
 The demo is both a visual sample and a correctness harness. It produces PNG
@@ -151,7 +151,7 @@ comparison and therefore cannot hide or introduce a passing result.
 
 The Dockerfile uses a CUDA 11.7 development image and builds:
 
-- FFmpeg `n7.1.3` with the repository patch series and CUDA/NVCC support;
+- FFmpeg `n7.1.5` with the repository patch series and CUDA/NVCC support;
 - the avplumber Python module with the CUDA and NVCC/PTX features required by
   the graph;
 - the small Python dependencies used for fixture generation, planar reference
