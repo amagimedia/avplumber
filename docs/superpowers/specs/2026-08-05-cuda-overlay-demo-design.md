@@ -81,6 +81,11 @@ edge corruption visible. Each overlay contains:
 - exact alpha samples including 0, 1, 127, 128, 254, and 255;
 - one-pixel markers on the final row and column.
 
+Labels identify filter input indices rather than counting overlays separately:
+the base carries `L0`, and overlays one through 15 carry `L1` through `L15`.
+This exposes all 16 input positions without implying that the filter accepts a
+sixteenth overlay or a seventeenth total input.
+
 The source PNGs are retained under the generated artifacts for direct viewing.
 PNG encodes RGBA pixels, not subsampled planar YUVA formats, so it is not itself
 a 4:2:0 or 4:4:4 fixture. A deterministic preparation step uses the same built
