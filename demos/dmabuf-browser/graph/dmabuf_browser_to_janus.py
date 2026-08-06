@@ -30,8 +30,8 @@ Pipeline (public nodes only -- no in-house convert_cuda):
   mux -> output(rtp)   rtp://JANUS:5004?rtcp_port=5005  (payload_type 96)
 
 This mirrors the detile half of avplumber/examples/from_dmabuf.avplumber (the
-proven NVIDIA DMA-BUF consumer), with the Janus RTP output taken from
-pyplumber/auto_mixer/outputs.py.
+proven NVIDIA DMA-BUF consumer), with the Janus RTP output constructed directly
+from public node wrappers.
 The Janus streaming mountpoint must be video H264, payload type 96, on
 JANUS_VIDEO_PORT (see janus.plugin.streaming.jcfg).
 
