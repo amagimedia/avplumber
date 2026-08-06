@@ -9,12 +9,77 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
+from textual.message import Message
+from textual.widgets import Button, Footer, Header, Input, Label, Static
 
 try:
-    from .control import AvpConnection, mixer_command, parse_mixer_status, parse_scene_list
+    from .control import (
+        AvpConnection,
+        mixer_command,
+        parse_mixer_status,
+        parse_scene_list,
+    )
 except ImportError:
-    from control import AvpConnection, mixer_command, parse_mixer_status, parse_scene_list
+    from control import (
+        AvpConnection,
+        mixer_command,
+        parse_mixer_status,
+        parse_scene_list,
+    )
+
+
+class SceneButton(Static):
+    """Scene tile showing its keyboard index and current bus assignment."""
+
+    class Selected(Message):
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
+    DEFAULT_CSS = """
+    SceneButton {
+        width: auto;
+        min-width: 18;
+        height: 5;
+        border: solid $primary-darken-2;
+        padding: 0 1;
+        margin: 0 1;
+        content-align: center middle;
+        text-align: center;
+    }
+    SceneButton.pgm {
+        border: solid $error;
+        background: $error-darken-3;
+        color: $error-lighten-2;
+    }
+    SceneButton.pvw {
+        border: solid $success;
+        background: $success-darken-3;
+        color: $success-lighten-2;
+    }
+    SceneButton:hover {
+        border: solid $accent;
+        background: $accent-darken-3;
+    }
+    """
+
+    def __init__(self, index: int, name: str) -> None:
+        super().__init__()
+        self.scene_index = index
+        self.scene_name = name
+        self.refresh_content()
+
+    def refresh_content(self) -> None:
+        if "pgm" in self.classes:
+            bus = "◉ PGM"
+        elif "pvw" in self.classes:
+            bus = "● PVW"
+        else:
+            bus = f"  [{self.scene_index + 1}]"
+        self.update(f"{bus}\n{self.scene_name}")
+
+    def on_click(self) -> None:
+        self.post_message(self.Selected(self.scene_index))
 
 
 class MixerTui(App):
@@ -24,19 +89,72 @@ class MixerTui(App):
         Binding("c", "cut", "Cut"),
         Binding("f", "fade", "Fade"),
         Binding("w", "wipe", "Wipe"),
+        Binding("t", "toggle_direct", "Direct"),
         Binding("r", "reconnect", "Reconnect"),
     ]
     CSS = """
-    Screen { layout: vertical; }
-    #connection { height: 1; padding: 0 1; }
-    #buses { height: 7; }
-    .bus { width: 1fr; border: solid $primary; padding: 1 2; }
-    #program { border: solid $error; }
-    #preview { border: solid $success; }
-    #scenes { height: 1fr; border: solid $primary; }
-    #grids, #takes, #settings { height: 3; align-vertical: middle; }
+    Screen { background: $surface-darken-1; }
+    #connection {
+        height: 1;
+        background: $error-darken-2;
+        color: $error-lighten-1;
+        content-align: center middle;
+        text-align: center;
+    }
+    #connection.connected {
+        background: $success-darken-3;
+        color: $success-lighten-1;
+    }
+    #buses { height: 9; margin-bottom: 1; }
+    .bus {
+        width: 1fr;
+        height: 100%;
+        align: center middle;
+        content-align: center middle;
+        padding: 0 2;
+    }
+    #program {
+        border: heavy $error;
+        background: $error-darken-3;
+    }
+    #preview {
+        border: heavy $success;
+        background: $success-darken-3;
+    }
+    .bus.transitioning {
+        border: heavy $warning;
+        background: $warning-darken-3;
+    }
+    .bus Label, .bus Static {
+        width: 100%;
+        content-align: center middle;
+        text-align: center;
+    }
+    .bus Label { text-style: bold; }
+    #program Label { color: $error-lighten-1; }
+    #preview Label { color: $success-lighten-1; }
+    #program_scene, #preview_scene { text-style: bold; }
+    #scenes {
+        height: 7;
+        background: $panel;
+        border: solid $primary-darken-2;
+        align: left middle;
+        padding: 0 1;
+        margin-bottom: 1;
+        overflow-x: auto;
+    }
+    #grids, #takes, #settings {
+        height: 5;
+        background: $panel;
+        border: solid $primary-darken-2;
+        align: left middle;
+        padding: 0 1;
+    }
+    #grids { margin-bottom: 1; }
     Button { margin-right: 1; }
     Input { width: 24; margin-right: 1; }
+    #transition_status { min-width: 20; color: $text-muted; }
+    #transition_status.busy { color: $warning; text-style: bold; }
     """
 
     def __init__(
@@ -58,6 +176,7 @@ class MixerTui(App):
         self.pgm_scene = ""
         self.pvw_scene = ""
         self.transition = "idle"
+        self.direct_mode = False
         self._poll_timer = None
 
     def compose(self) -> ComposeResult:
@@ -65,30 +184,35 @@ class MixerTui(App):
         yield Static("Disconnected", id="connection")
         with Horizontal(id="buses"):
             with Vertical(classes="bus", id="program"):
-                yield Label("PROGRAM")
+                yield Label("◉  PROGRAM  ◉")
                 yield Static("(none)", id="program_scene")
+                yield Static("ON AIR")
             with Vertical(classes="bus", id="preview"):
-                yield Label("PREVIEW")
+                yield Label("●  PREVIEW  ●")
                 yield Static("(none)", id="preview_scene")
-        yield ListView(id="scenes")
+                yield Static("READY")
+        with Horizontal(id="scenes"):
+            pass
         with Horizontal(id="grids"):
+            yield Button("Fullscreen", id="fullscreen", variant="primary")
             yield Button("2-box", id="grid_2")
             yield Button("4-box", id="grid_4")
             yield Button("8-box", id="grid_8")
             yield Button("16-box", id="grid_16")
-            yield Button("Previous page", id="page_previous")
-            yield Button("Next page", id="page_next")
+            yield Button("◀ Page", id="page_previous")
+            yield Button("Page ▶", id="page_next")
         with Horizontal(id="settings"):
+            yield Static("Mode: idle", id="transition_status")
             yield Label("Transition seconds:")
             yield Input(str(self.default_fade_duration), id="fade_duration")
             yield Label("Wipe style:")
             yield Input(self.default_wipe_style, id="wipe_style")
         with Horizontal(id="takes"):
-            yield Button("PREVIEW", id="preview_take", variant="primary")
-            yield Button("CUT", id="cut", variant="error")
-            yield Button("FADE", id="fade", variant="success")
-            yield Button("WIPE", id="wipe", variant="warning")
-            yield Button("RECONNECT", id="reconnect")
+            yield Button("✂ CUT", id="cut", variant="error")
+            yield Button("⟿ FADE", id="fade", variant="success")
+            yield Button("▶ CUDA WIPE", id="wipe", variant="primary")
+            yield Button("Direct: OFF", id="direct")
+            yield Button("↻ RECONNECT", id="reconnect")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -96,7 +220,17 @@ class MixerTui(App):
         self.action_reconnect()
 
     def _set_connection_text(self, text: str) -> None:
-        self.query_one("#connection", Static).update(text)
+        connection = self.query_one("#connection", Static)
+        connection.update(text)
+        connection.set_class(self.connection.connected, "connected")
+
+    def _refresh_scene_buttons(self) -> None:
+        for button in self.query(SceneButton):
+            is_program = button.scene_name == self.pgm_scene
+            is_preview = button.scene_name == self.pvw_scene
+            button.set_class(is_program, "pgm")
+            button.set_class(is_preview and not is_program, "pvw")
+            button.refresh_content()
 
     async def _fetch_scenes(self) -> None:
         content = await self.connection.command(f"mixer.scenes {self.mixer_name}")
@@ -104,12 +238,15 @@ class MixerTui(App):
             raise RuntimeError("mixer.scenes returned no content")
         scenes = parse_scene_list(content)
         self.scenes = scenes
-        scene_list = self.query_one("#scenes", ListView)
-        await scene_list.clear()
-        await scene_list.extend(ListItem(Label(scene)) for scene in scenes)
+        scene_list = self.query_one("#scenes", Horizontal)
+        for button in list(scene_list.query(SceneButton)):
+            await button.remove()
+        await scene_list.mount(
+            *[SceneButton(index, scene) for index, scene in enumerate(scenes)]
+        )
         if scenes:
-            scene_list.index = 0
             self.selected_scene = scenes[0]
+        self._refresh_scene_buttons()
 
     async def _read_status(self) -> None:
         content = await self.connection.command(f"mixer.status {self.mixer_name}")
@@ -121,6 +258,14 @@ class MixerTui(App):
         self.transition = status.transition
         self.query_one("#program_scene", Static).update(self.pgm_scene or "(none)")
         self.query_one("#preview_scene", Static).update(self.pvw_scene or "(none)")
+        transition_status = self.query_one("#transition_status", Static)
+        transition_status.update(f"Mode: {self.transition}")
+        transition_status.set_class(self.transition != "idle", "busy")
+        for selector in ("#program", "#preview"):
+            self.query_one(selector).set_class(
+                self.transition != "idle", "transitioning"
+            )
+        self._refresh_scene_buttons()
 
     async def _poll_status(self) -> None:
         if not self.connection.connected:
@@ -219,13 +364,15 @@ class MixerTui(App):
 
     def _select_scene(self, scene: str) -> None:
         try:
-            index = self.scenes.index(scene)
+            self.scenes.index(scene)
         except ValueError:
             self.notify(f"Scene is unavailable: {scene}", severity="warning")
             return
         self.selected_scene = scene
-        self.query_one("#scenes", ListView).index = index
-        self._preview_selected()
+        if self.direct_mode:
+            self._direct_cut(scene)
+        else:
+            self._preview_selected()
 
     def _selected_grid(self) -> tuple[int, int] | None:
         parts = self.selected_scene.split("_")
@@ -245,16 +392,60 @@ class MixerTui(App):
         page = min(max(page, available[0]), available[-1])
         self._select_scene(f"grid_{capacity}_page_{page}")
 
-    @on(ListView.Selected, "#scenes")
-    def on_scene_selected(self, event: ListView.Selected) -> None:
+    @work(exclusive=True, group="take")
+    async def _direct_cut(self, scene: str) -> None:
+        if self.transition != "idle" or scene == self.pgm_scene:
+            return
+        try:
+            await self.connection.command(
+                mixer_command("cut", self.mixer_name, scene=scene)
+            )
+            await self._read_status()
+        except Exception as exc:
+            self.notify(str(exc), severity="error")
+
+    def action_toggle_direct(self) -> None:
+        self.direct_mode = not self.direct_mode
+        button = self.query_one("#direct", Button)
+        button.label = "Direct: ON" if self.direct_mode else "Direct: OFF"
+        button.variant = "warning" if self.direct_mode else "default"
+        button.tooltip = (
+            "Scene and layout selections cut directly to program"
+            if self.direct_mode
+            else "Scene and layout selections load preview"
+        )
+
+    def on_scene_button_selected(self, event: SceneButton.Selected) -> None:
         if 0 <= event.index < len(self.scenes):
-            self.selected_scene = self.scenes[event.index]
-            self._preview_selected()
+            self._select_scene(self.scenes[event.index])
+
+    def on_key(self, event) -> None:
+        if isinstance(self.focused, Input):
+            return
+        key = event.key
+        if key.isdigit() and key != "0":
+            index = int(key) - 1
+            if 0 <= index < min(9, len(self.scenes)):
+                self._select_scene(self.scenes[index])
+                event.stop()
+            return
+        if key.startswith("f") and key[1:].isdigit():
+            index = int(key[1:]) - 1
+            if 0 <= index < min(9, len(self.scenes)):
+                self._direct_cut(self.scenes[index])
+                event.stop()
 
     @on(Button.Pressed)
     def on_button(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
-        if button_id.startswith("grid_"):
+        if button_id == "fullscreen":
+            scene = (
+                self.selected_scene
+                if self.selected_scene.startswith("fullscreen_")
+                else "fullscreen_0"
+            )
+            self._select_scene(scene)
+        elif button_id.startswith("grid_"):
             self._select_grid_page(int(button_id.split("_", 1)[1]), 0)
         elif button_id in ("page_previous", "page_next"):
             selected = self._selected_grid()
@@ -264,14 +455,14 @@ class MixerTui(App):
                     capacity,
                     page + (-1 if button_id == "page_previous" else 1),
                 )
-        elif button_id == "preview_take":
-            self._preview_selected()
         elif button_id == "cut":
             self.action_cut()
         elif button_id == "fade":
             self.action_fade()
         elif button_id == "wipe":
             self.action_wipe()
+        elif button_id == "direct":
+            self.action_toggle_direct()
         elif button_id == "reconnect":
             self.action_reconnect()
 
