@@ -1,0 +1,82 @@
+From 1bbd5e268f460893dd900c2d7ba541f44446a350 Mon Sep 17 00:00:00 2001
+From: avplumber patches <avplumber@local>
+Date: Thu, 6 Aug 2026 14:48:08 +0200
+Subject: [PATCH] avfilter/transition_cuda: support runtime alpha commands
+
+---
+ libavfilter/vf_transition_cuda.c | 41 +++++++++++++++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 542e4a6..7f3462f 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "libavutil/log.h"
++#include "libavutil/mem.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/pixdesc.h"
+ #include "libavutil/hwcontext.h"
+@@ -503,12 +503,49 @@ static int transition_cuda_config_output(AVFilterLink *outlink)
+     return ff_framesync_configure(&ctx->fs);
+ }
+ 
++static int transition_cuda_process_command(AVFilterContext *avctx,
++                                           const char *cmd,
++                                           const char *args,
++                                           char *res,
++                                           int res_len,
++                                           int flags)
++{
++    TransitionCUDAContext *ctx = avctx->priv;
++    AVExpr *new_expr = NULL;
++    char *new_alpha_expr;
++    int ret;
++
++    (void)res;
++    (void)res_len;
++    (void)flags;
++
++    if (strcmp(cmd, "alpha"))
++        return AVERROR(ENOSYS);
++
++    ret = set_expr(&new_expr, args, "alpha", avctx);
++    if (ret < 0)
++        return ret;
++
++    new_alpha_expr = av_strdup(args);
++    if (!new_alpha_expr) {
++        av_expr_free(new_expr);
++        return AVERROR(ENOMEM);
++    }
++
++    av_expr_free(ctx->alpha_pexpr);
++    ctx->alpha_pexpr = new_expr;
++    av_freep(&ctx->alpha_expr);
++    ctx->alpha_expr = new_alpha_expr;
++    return 0;
++}
++
+ 
+ #define OFFSET(x) offsetof(TransitionCUDAContext, x)
+ #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++#define RUNTIME_FLAGS (FLAGS | AV_OPT_FLAG_RUNTIME_PARAM)
+ 
+ static const AVOption transition_cuda_options[] = {
+-    { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, FLAGS },
++    { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, RUNTIME_FLAGS },
+     { "eof_action", "Action to take when encountering EOF from secondary input ",
+         OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
+         EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
+@@ -553,6 +590,7 @@ const AVFilter ff_vf_transition_cuda = {
+     .init            = &transition_cuda_init,
+     .uninit          = &transition_cuda_uninit,
+     .activate        = &transition_cuda_activate,
++    .process_command = &transition_cuda_process_command,
+     FILTER_INPUTS(transition_cuda_inputs),
+     FILTER_OUTPUTS(transition_cuda_outputs),
+     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
+-- 
+2.53.0

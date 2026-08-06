@@ -46,13 +46,13 @@ class MixerTui(App):
         mixer: str,
         *,
         fade_duration: float,
-        wipe_file: str,
+        wipe_style: str,
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
         self.mixer_name = mixer
         self.default_fade_duration = fade_duration
-        self.default_wipe_file = wipe_file
+        self.default_wipe_style = wipe_style
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
@@ -79,10 +79,10 @@ class MixerTui(App):
             yield Button("Previous page", id="page_previous")
             yield Button("Next page", id="page_next")
         with Horizontal(id="settings"):
-            yield Label("Fade seconds:")
+            yield Label("Transition seconds:")
             yield Input(str(self.default_fade_duration), id="fade_duration")
-            yield Label("Wipe file:")
-            yield Input(self.default_wipe_file, id="wipe_file")
+            yield Label("Wipe style:")
+            yield Input(self.default_wipe_style, id="wipe_style")
         with Horizontal(id="takes"):
             yield Button("PREVIEW", id="preview_take", variant="primary")
             yield Button("CUT", id="cut", variant="error")
@@ -178,13 +178,20 @@ class MixerTui(App):
             if transition == "fade":
                 duration = float(self.query_one("#fade_duration", Input).value)
                 if duration <= 0:
-                    raise ValueError("fade duration must be positive")
+                    raise ValueError("transition duration must be positive")
                 payload["duration_sec"] = duration
             elif transition == "wipe":
-                wipe_file = self.query_one("#wipe_file", Input).value.strip()
-                if not wipe_file:
-                    raise ValueError("wipe file is required")
-                payload["wipe_file"] = wipe_file
+                style = self.query_one("#wipe_style", Input).value.strip()
+                supported = {"wipe_left", "wipe_right", "wipe_down", "wipe_up"}
+                if style not in supported:
+                    raise ValueError(
+                        "wipe style must be wipe_left, wipe_right, wipe_down, or wipe_up"
+                    )
+                duration = float(self.query_one("#fade_duration", Input).value)
+                if duration <= 0:
+                    raise ValueError("transition duration must be positive")
+                payload.update(style=style, duration_sec=duration)
+                transition = "cuda_wipe"
             await self.connection.command(
                 mixer_command(transition, self.mixer_name, **payload)
             )
@@ -275,14 +282,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=7777)
     parser.add_argument("--mixer", default="mixer")
     parser.add_argument("--fade-duration", type=float, default=0.5)
-    parser.add_argument("--wipe-file", default="")
+    parser.add_argument("--wipe-style", default="wipe_left")
     args = parser.parse_args(argv)
     MixerTui(
         args.host,
         args.port,
         args.mixer,
         fade_duration=args.fade_duration,
-        wipe_file=args.wipe_file,
+        wipe_style=args.wipe_style,
     ).run()
 
 

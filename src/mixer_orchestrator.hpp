@@ -74,6 +74,8 @@ class MixerOrchestrator {
     // Does NOT modify pgm_is_slot_a, pgm_scene_name, or transition_mode.
     // Caller must hold state_->mutex. Returns T_cleanup timestamp.
     int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms);
+    void cudaTransition(const std::string& scene_name, double duration_sec,
+                        int64_t start_pts_ms, const std::string& style);
 
     // Generic deferred cleanup: flip state + optionally delete nodes. The caller
     // schedules this for non-PTS-expressible work (node deletion and bookkeeping).
@@ -143,6 +145,8 @@ public:
     void preview(const std::string& scene_name);
     void cut(const std::string& scene_name, int64_t start_pts_ms = -1);
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
+    void cudaWipe(const std::string& scene_name, const std::string& style,
+                  double duration_sec, int64_t start_pts_ms = -1);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
               int64_t start_pts_ms = -1);
     void setOverlayEnabled(bool enabled, int64_t ready_timeout_ms = -1);

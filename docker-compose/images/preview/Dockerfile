@@ -5,7 +5,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     && dnf clean all
 
 WORKDIR /srv/janus-preview
-COPY preview/index.html ./
-COPY preview/preview-server.py ./
+COPY index.html ./
+COPY preview-server.py ./
 
 CMD ["python3", "preview-server.py"]

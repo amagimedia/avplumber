@@ -17,8 +17,8 @@ RUN useradd -m -u 1000 avp \
     && mkdir -p /run/avp-wayland \
     && chown avp:avp /run/avp-wayland
 
-COPY wayland/sway-headless.conf /etc/sway/avp-headless.conf
-COPY wayland/entrypoint.sh /usr/local/bin/avp-wayland-entrypoint
+COPY sway-headless.conf /etc/sway/avp-headless.conf
+COPY entrypoint.sh /usr/local/bin/avp-wayland-entrypoint
 RUN chmod +x /usr/local/bin/avp-wayland-entrypoint
 
 ENV XDG_RUNTIME_DIR=/run/avp-wayland

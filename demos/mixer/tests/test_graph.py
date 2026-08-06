@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from mixer import GraphOptions, build_application, infer_output_format
+import pytest
+
+from mixer import GraphOptions, build_application, infer_output_format, parse_args
 
 
 class FakeNode:
@@ -35,6 +37,7 @@ class FakeAvp:
         self.nodes = []
         self.commands = []
         self.control_port = None
+        self.ready = False
         self.edges = FakeEdges()
 
     def addNode(self, node):
@@ -45,6 +48,9 @@ class FakeAvp:
 
     def enableControlServer(self, port):
         self.control_port = port
+
+    def setReady(self):
+        self.ready = True
 
     def group(self, _name):
         return FakeGroup()
@@ -78,37 +84,56 @@ class FakeMixer:
         pass
 
 
+class FakeRtcpFeedbackListener:
+    def __init__(self, **parameters):
+        self.parameters = parameters
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+
 def fake_api():
     names = (
         "assume_video_format",
+        "bsf",
         "dec_video",
         "demux",
         "enc_video",
         "filter_video",
         "force_fps",
+        "force_key_frame",
         "input_rec",
         "mux",
         "output",
         "preheat_video_router",
         "realtime",
+        "split",
     )
     api = {
         "AVPlumber": FakeAvp,
         "MixerGraphBuilder": FakeMixer,
+        "RtcpFeedbackListener": FakeRtcpFeedbackListener,
     }
     api.update({
         {
             "assume_video_format": "AssumeVideoFormat",
+            "bsf": "Bsf",
             "dec_video": "DecVideo",
             "demux": "Demux",
             "enc_video": "EncVideo",
             "filter_video": "FilterVideo",
             "force_fps": "ForceFPS",
+            "force_key_frame": "ForceKeyFrame",
             "input_rec": "InputRec",
             "mux": "Mux",
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
             "realtime": "Realtime",
+            "split": "Split",
         }[name]: node_type(name)
         for name in names
     })
@@ -129,6 +154,16 @@ def test_graph_is_video_only_and_always_preheated():
 
     assert node_types.count("preheat_video_router") == 1
     assert len(mixer.routed_sources) == 1 + 2 + 4 + 8 + 16
+    assert mixer.parameters["defer_initial_routes"] is True
+    router = next(
+        node.parameters
+        for node in application.avp.nodes
+        if node.parameters["type"] == "preheat_video_router"
+    )
+    assert len(router["routes"]) == 2 * (1 + 2 + 4 + 8 + 16)
+    assert set(router["routes"]) == set(range(17))
+    assert len(application.preheated_output_edges) == len(router["routes"])
+    assert mixer.parameters["enable_wipe"] is False
     assert not hasattr(mixer, "add_source")
     assert not any(
         forbidden in node_type_name
@@ -136,6 +171,18 @@ def test_graph_is_video_only_and_always_preheated():
         for forbidden in ("audio", "vad", "infer", "face", "speaker")
     )
     assert mixer.initial_scene == ("fullscreen_0", "A")
+    normalizers = [
+        node.parameters
+        for node in application.avp.nodes
+        if node.parameters["type"] == "filter_video"
+        and node.parameters["name"].startswith("normalize_")
+    ]
+    assert normalizers
+    assert {node["dst_frame_rate"] for node in normalizers} == {"30/1"}
+
+    serialized_graph = repr([node.parameters for node in application.avp.nodes]).lower()
+    assert "hwdownload" not in serialized_graph
+    assert "hwupload" not in serialized_graph
 
 
 def test_graph_has_stable_fullscreen_and_paged_scenes():
@@ -158,3 +205,60 @@ def test_output_format_inference_is_explicit_when_ambiguous():
     assert infer_output_format("program.mp4") == "mp4"
     assert infer_output_format("anything", "nut") == "nut"
 
+
+def test_cli_accepts_ordered_repeatable_input_paths():
+    options = parse_args([
+        "--input",
+        "/media/first clip.mp4",
+        "--input",
+        "/media/second.mp4",
+        "--output",
+        "program.mp4",
+        "--loop-inputs",
+    ])
+
+    assert options.inputs == ("/media/first clip.mp4", "/media/second.mp4")
+    assert options.loop_inputs is True
+
+
+def test_janus_only_output_builds_video_rtp_and_feedback():
+    application = build_application(
+        GraphOptions(inputs=("input.mp4",), janus_output=True),
+        api=fake_api(),
+    )
+    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
+
+    assert nodes["janus_encoder"]["codec"] == "h264_nvenc"
+    assert nodes["janus_rtp_output"]["format"] == "rtp"
+    assert nodes["janus_rtp_output"]["options"]["payload_type"] == 96
+    assert application.rtcp_feedback_listener is not None
+
+
+def test_record_and_janus_outputs_split_program_video():
+    application = build_application(
+        GraphOptions(
+            inputs=("input.mp4",),
+            output="program.mp4",
+            janus_output=True,
+        ),
+        api=fake_api(),
+    )
+    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
+
+    assert nodes["split_program_video_output"]["dst"] == [
+        "program_video_record",
+        "program_video_janus",
+    ]
+
+
+def test_output_target_is_required():
+    with pytest.raises(ValueError, match="--output or --janus-output"):
+        build_application(GraphOptions(inputs=("input.mp4",)), api=fake_api())
+
+
+def test_cpu_encoder_is_rejected():
+    with pytest.raises(ValueError, match="NVENC"):
+        build_application(
+            GraphOptions(inputs=("input.mp4",), output="program.mp4", codec="libx264"),
+            api=fake_api(),
+        )

@@ -8,7 +8,6 @@ input=""
 pip_input=""
 output=""
 artifacts_dir=""
-default_live_output_url="http://test-streamer-s3dev.aws-dev.intranet/steam_test/test"
 dry_run=0
 docker_extra=()
 
@@ -147,9 +146,7 @@ else
             ;;
     esac
 
-    if [[ -z "${output}" ]]; then
-        output="${default_live_output_url}"
-    fi
+    [[ -n "${output}" ]] || die "--output is required for live mode"
     case "${output}" in
         rtmp://*|rtmps://*|srt://*) ;;
         *) die "live --output must be an rtmp://, rtmps://, or srt:// URL" ;;

@@ -20,8 +20,8 @@ x-gpu-deploy: &gpu-deploy
 services:
   janus:
     build:
-      context: ../pyplumber/auto_mixer/docker
-      dockerfile: janus/Dockerfile
+      context: ./images/janus
+      dockerfile: Dockerfile
       args:
         JANUS_REF: ${JANUS_REF:-v1.4.1}
     image: ${JANUS_IMAGE:-avplumber-janus}:${JANUS_IMAGE_TAG:-v1.4.1}
@@ -47,8 +47,8 @@ services:
 
   janus-preview:
     build:
-      context: ../pyplumber/auto_mixer/docker
-      dockerfile: preview/Dockerfile
+      context: ./images/preview
+      dockerfile: Dockerfile
     image: ${JANUS_PREVIEW_IMAGE:-avplumber-janus-preview}:${JANUS_PREVIEW_IMAGE_TAG:-latest}
     network_mode: host
     restart: unless-stopped
@@ -61,7 +61,7 @@ services:
   web-ui:
     build:
       context: ..
-      dockerfile: pyplumber/auto_mixer/docker/web-ui/Dockerfile
+      dockerfile: docker-compose/images/web-ui/Dockerfile
     image: ${WEB_UI_IMAGE:-avplumber-web-ui}:${WEBUI_IMAGE_TAG:-latest}
     network_mode: host
     restart: unless-stopped
@@ -85,8 +85,8 @@ services:
 
   wayland:
     build:
-      context: ../pyplumber/auto_mixer/docker
-      dockerfile: wayland/Dockerfile
+      context: ./images/wayland
+      dockerfile: Dockerfile
     image: ${WAYLAND_IMAGE:-avplumber-wayland}:${WAYLAND_IMAGE_TAG:-latest}
     restart: unless-stopped
     deploy: *gpu-deploy
@@ -117,7 +117,7 @@ services:
   dma-browser:
     build:
       context: ..
-      dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
+      dockerfile: docker-compose/images/dma-browser/Dockerfile
     image: ${DMA_BROWSER_IMAGE:-avplumber-dma-browser}:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
     deploy: *gpu-deploy
@@ -235,67 +235,6 @@ services:
       - ${NEURAL_DEMO_ARTIFACT_DIR:-./artifacts/neural-demo}:/run/avp/output
       - runner-logs:/var/log/avplumber
       - cuda-jit-cache:/cuda-cache
-
-  auto-mixer:
-    profiles:
-      - auto-mixer
-    build:
-      context: ..
-      dockerfile: pyplumber/auto_mixer/docker/auto-mixer/Dockerfile
-      additional_contexts:
-        tensorrt: ${TENSORRT_CONTEXT:-./empty/tensorrt}
-      args:
-        TENSORRT_ARCHIVE: ${TENSORRT_ARCHIVE:-tensorrt-minimal-with-tools.tgz}
-    image: ${AUTO_MIXER_IMAGE:-avplumber-auto-mixer}:${AUTO_MIXER_IMAGE_TAG:-latest}
-    network_mode: host
-    restart: "no"
-    deploy: *gpu-deploy
-    devices:
-      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
-    depends_on:
-      janus:
-        condition: service_started
-      web-ui:
-        condition: service_healthy
-      wayland:
-        condition: service_healthy
-      dma-browser:
-        condition: service_healthy
-    entrypoint: ["/opt/avp-compose-runner/run-auto-mixer.sh"]
-    environment:
-      <<: *gpu-env
-      AVP_MODEL_DIR: /models
-      AVP_FACE_ENGINE: /models-cache/face.fp16.plan
-      AVP_TENSORRT_TIMING_CACHE: /models-cache/tensorrt.timing.cache
-      AVP_WIPE_DIR: /media-wipes
-      AVP_HTML_OVERLAY_DRM_DEVICE: ${HTML_OVERLAY_DRM_DEVICE:-/dev/dri/renderD128}
-      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-22422}
-      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
-      AVP_INSTANCE_NAME: ${AUTO_MIXER_INSTANCE_NAME:-auto-mixer}
-      AVP_LOGFILE: ${AUTO_MIXER_LOGFILE:-/var/log/avplumber/auto-mixer.log}
-      AVP_JANUS_HOST: ${AUTO_MIXER_JANUS_HOST:-127.0.0.1}
-      AVP_JANUS_AUDIO_PORT: ${JANUS_AUDIO_PORT:-5002}
-      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
-      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
-      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
-      XDG_RUNTIME_DIR: /run/avp-wayland
-      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
-      AUTO_MIXER_INPUTS: ${AUTO_MIXER_INPUTS:-/media-inputs/*}
-      AUTO_MIXER_OUTPUT: ${AUTO_MIXER_OUTPUT:-janus}
-      AUTO_MIXER_ARGS: ${AUTO_MIXER_ARGS:-}
-      AUTO_MIXER_TALKSHOW_PROFILE: ${AUTO_MIXER_TALKSHOW_PROFILE:-1}
-      AUTO_MIXER_INPUT_START_TS: ${AUTO_MIXER_INPUT_START_TS:-}
-      AUTO_MIXER_HTML_OVERLAY_URL: ${HTML_OVERLAY_URL:-}
-    volumes:
-      - ./scripts/run-auto-mixer.sh:/opt/avp-compose-runner/run-auto-mixer.sh:ro
-      - ${FACE_ONNX:-./empty/face.onnx}:/models/face.onnx:ro
-      - ${FACE_ENGINE_CACHE_DIR:-./artifacts/model-cache}:/models-cache
-      - ${MEDIA_INPUT_DIR:-./empty/media}:/media-inputs:ro
-      - ${MEDIA_WIPE_DIR:-./empty/media}:/media-wipes:ro
-      - runner-logs:/var/log/avplumber
-      - cuda-jit-cache:/cuda-cache
-      - wayland-runtime:/run/avp-wayland
-      - dma-browser-sockets:/tmp/dma-page
 
   molmo-smoke:
     profiles:

@@ -1,7 +1,6 @@
-"""Reusable avplumber video mixer graph builder.
+"""Reusable AVPlumber video mixer graph builder.
 
-Mirrors the graph structure from examples/mixer.avplumber and supports the full
-MixerOrchestrator feature set: cut, crossfade, and media wipe transitions.
+Supports cuts, crossfades, procedural CUDA wipes, and optional media wipes.
 
 Typical usage
 -------------
@@ -71,7 +70,6 @@ class MixerSource:
     name: str
     pre_otm_edge: Optional[str]
     input_group: str
-    audio_edge: Optional[str] = None
     default_graph: Optional[str] = None
     pre_filter_edge_a: Optional[str] = None
     pre_filter_edge_b: Optional[str] = None
@@ -92,10 +90,8 @@ class MixerScene:
 class MixerGraphBuilder:
     """Build and operate an avplumber 2-slot video mixer (MixerOrchestrator).
 
-    The builder owns all mixer-internal nodes.  The caller owns input decode
-    chains, output encode/mux chains, and audio routing.  Audio edges are
-    recorded in add_source() metadata for the caller's convenience but are
-    not wired by this class.
+    The builder owns all mixer-internal video nodes.  The caller owns input
+    decode chains and output encode/mux chains.
 
     Node naming convention: every internal node or edge is prefixed with
     ``<name>_`` to allow multiple mixer instances in the same process.
@@ -111,6 +107,7 @@ class MixerGraphBuilder:
         timeline: Optional[str] = None,
         enable_wipe: bool = True,
         switch_margin_ms: int = 100,
+        defer_initial_routes: bool = False,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -122,12 +119,14 @@ class MixerGraphBuilder:
         self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
         self.switch_margin_ms = switch_margin_ms
+        self.defer_initial_routes = defer_initial_routes
 
         self._sources: List[MixerSource] = []
         self._source_index: Dict[str, int] = {}
         self._scenes: Dict[str, MixerScene] = {}
         self._initial_pgm_scene: Optional[str] = None
         self._initial_pgm_slot: str = "A"
+        self._routes_initialized = False
         self._current_pgm: Optional[str] = None
         self._built = False
 
@@ -140,7 +139,6 @@ class MixerGraphBuilder:
         name: str,
         pre_otm_edge: str,
         input_group: str,
-        audio_edge: Optional[str] = None,
         default_graph: Optional[str] = None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
@@ -158,9 +156,6 @@ class MixerGraphBuilder:
             one_to_many (typically the force_fps output of the input chain).
         input_group:
             Avplumber group that owns this source's OTM and crop-scale nodes.
-        audio_edge:
-            Optional name of the audio edge associated with this source.
-            Not wired by the builder; stored as metadata for the caller.
         default_graph:
             Initial crop/scale filter graph for this source's slot filters.
             Scene switches can still replace it, but preheated geometry
@@ -172,7 +167,7 @@ class MixerGraphBuilder:
         if name in self._source_index:
             raise ValueError(f"Source '{name}' already registered")
         idx = len(self._sources)
-        self._sources.append(MixerSource(name, pre_otm_edge, input_group, audio_edge, default_graph))
+        self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph))
         self._source_index[name] = idx
         return self
 
@@ -185,7 +180,6 @@ class MixerGraphBuilder:
         route_router: str,
         route_output_label_a: str,
         route_output_label_b: str,
-        audio_edge: Optional[str] = None,
         default_graph: Optional[str] = None,
     ) -> "MixerGraphBuilder":
         """Register a source whose slot filters are fed by a native preheat router."""
@@ -198,7 +192,6 @@ class MixerGraphBuilder:
             name=name,
             pre_otm_edge=None,
             input_group=input_group,
-            audio_edge=audio_edge,
             default_graph=default_graph,
             pre_filter_edge_a=pre_filter_edge_a,
             pre_filter_edge_b=pre_filter_edge_b,
@@ -332,6 +325,28 @@ class MixerGraphBuilder:
         self.avp.executeCommandsFromString(f"mixer.fade {json.dumps(cmd)}")
         self._current_pgm = scene
 
+    def cuda_wipe(
+        self,
+        scene: str,
+        style: str = "wipe_left",
+        duration_sec: float = 1.0,
+        start_pts_ms: int = -1,
+    ) -> None:
+        """Wipe to *scene* using the permanent zero-copy CUDA transition."""
+        supported = {"wipe_left", "wipe_right", "wipe_down", "wipe_up"}
+        if style not in supported:
+            raise ValueError(f"unsupported CUDA wipe style: {style}")
+        cmd = {
+            "mixer": self.name,
+            "scene": scene,
+            "style": style,
+            "duration_sec": duration_sec,
+        }
+        if start_pts_ms >= 0:
+            cmd["start_pts_ms"] = start_pts_ms
+        self.avp.executeCommandsFromString(f"mixer.cuda_wipe {json.dumps(cmd)}")
+        self._current_pgm = scene
+
     def wipe(
         self,
         scene: str,
@@ -366,8 +381,46 @@ class MixerGraphBuilder:
         NOT started here; the caller is responsible for those because they
         share a lifecycle with the input decode chains.
         """
+        if not self._routes_initialized:
+            raise RuntimeError(
+                "initial mixer routes must be initialized before starting groups"
+            )
         for g in [f"{self.name}_a", f"{self.name}_b", self.name]:
             self.avp.group(g).startNodes()
+
+    def initialize_routes(self) -> None:
+        """Publish the initial routed scene after optional graph preheating."""
+        if self._routes_initialized:
+            return
+        self.avp.executeCommandsFromString(
+            "mixer.init_routes " + json.dumps({"mixer": self.name})
+        )
+        self._routes_initialized = True
+
+    def begin_transition_preheat(self) -> None:
+        """Feed both scene slots into the permanent CUDA transition filter."""
+        if self._initial_pgm_scene is None:
+            raise RuntimeError("set_initial_scene() must be called before preheating")
+        self.preview(self._initial_pgm_scene)
+        lines = []
+        for slot in ("a", "b"):
+            node = self._n(f"otm_scene_{slot}")
+            lines.extend((
+                f"timeline.clear {self.timeline} {node}",
+                f"node.object.set {node} outputs 2",
+            ))
+        self.avp.executeCommandsFromString("\n".join(lines))
+
+    def finish_transition_preheat(self) -> None:
+        """Restore direct PGM/PVW routing after transition warm-up."""
+        lines = []
+        for slot in ("a", "b"):
+            node = self._n(f"otm_scene_{slot}")
+            lines.extend((
+                f"timeline.clear {self.timeline} {node}",
+                f"node.object.set {node} outputs 1",
+            ))
+        self.avp.executeCommandsFromString("\n".join(lines))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -529,6 +582,16 @@ class MixerGraphBuilder:
         fps_str = self._fps_str()
         pgm_is_a = self._initial_pgm_slot == "A"
         initial_active = 0 if pgm_is_a else 1
+
+        self.avp.addNode(FilterVideo({
+            "name": self._n("out_sel_transition"),
+            "src": [self._e("scA_trans"), self._e("scB_trans")],
+            "dst": self._e("trans_out"),
+            "graph": "transition_cuda=alpha='0':eval=frame",
+            "hwaccel": self.hwaccel,
+            "defer_preliminary_init": True,
+            "group": self.name,
+        }))
 
         self.avp.addNode(SourceSwitcher({
             "name": self._n("out_sel"),
@@ -711,7 +774,9 @@ class MixerGraphBuilder:
         for scene_name, scene in self._scenes.items():
             lines.append(self._scene_command(scene_name, scene))
 
-        lines.append("mixer.init_routes " + json.dumps({"mixer": self.name}))
+        if not self.defer_initial_routes:
+            lines.append("mixer.init_routes " + json.dumps({"mixer": self.name}))
+            self._routes_initialized = True
 
         self.avp.executeCommandsFromString("\n".join(lines))
 

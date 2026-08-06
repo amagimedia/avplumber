@@ -74,10 +74,6 @@ class PythonNode(NodeBase):
         data_type = args.get("data_type", "VideoFrame")
         self._src_data_type = args.get("src_data_type", data_type)
         self._dst_data_type = args.get("dst_data_type", data_type)
-        if self.TYPE == "python_node_audio_to_metadata":
-            self._src_data_type = args.get("src_data_type", "AudioSamples")
-            self._dst_data_type = args.get("dst_data_type", "MetadataFrame")
-
         params = args | { "type": self.TYPE, "type_python": self.__class__.__name__ }
         super().__init__(params)
         self._wrapper = None
@@ -109,17 +105,6 @@ class PythonNode(NodeBase):
             for dst_edge in dst_edges:
                 self._dst[dst_edge] = self._avplumber.getEdge(dst_edge, self._dst_data_type)
                 assert self._dst[dst_edge] is not None, f"Destination edge {dst_edge} not found"
-
-
-class AudioToMetadataPythonNode(PythonNode):
-    TYPE = "python_node_audio_to_metadata"
-
-    def __init__(self, args: dict):
-        params = {
-            "src_data_type": "AudioSamples",
-            "dst_data_type": "MetadataFrame",
-        } | args | {"type": self.TYPE}
-        super().__init__(params)
 
 
 class InternalNode(NodeBase):

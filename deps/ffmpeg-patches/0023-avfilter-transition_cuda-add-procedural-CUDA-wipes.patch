@@ -1,0 +1,154 @@
+From b3c7f6584796fdd2d0dc439ba8cf8dc4746fb27a Mon Sep 17 00:00:00 2001
+From: avplumber patches <avplumber@local>
+Date: Thu, 6 Aug 2026 14:51:46 +0200
+Subject: [PATCH] avfilter/transition_cuda: add procedural CUDA wipes
+
+---
+ libavfilter/vf_transition_cuda.c  | 33 +++++++++++++++++++++++++------
+ libavfilter/vf_transition_cuda.cu | 12 +++++++++--
+ 2 files changed, 37 insertions(+), 8 deletions(-)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index eb2416a..44a198f 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -78,6 +78,15 @@ enum EvalMode {
+     EVAL_MODE_NB
+ };
+ 
++enum TransitionMode {
++    TRANSITION_MODE_FADE,
++    TRANSITION_MODE_WIPE_LEFT,
++    TRANSITION_MODE_WIPE_RIGHT,
++    TRANSITION_MODE_WIPE_DOWN,
++    TRANSITION_MODE_WIPE_UP,
++    TRANSITION_MODE_NB
++};
++
+ static const char *const var_names[] = {
+     "main_w",    "W", ///< width  of the main    video
+     "main_h",    "H", ///< height of the main    video
+@@ -110,6 +119,7 @@ typedef struct TransitionCUDAContext {
+     FFFrameSync fs;
+ 
+     int eval_mode;
++    int transition_mode;
+     float alpha_coef;
+ 
+     double var_values[VAR_VARS_NB];
+@@ -190,7 +200,8 @@ static int transition_cuda_call_kernel(
+     int overlay_width, int overlay_height,
+     uint8_t* alpha_data, int alpha_linesize,
+     int alpha_adj_x, int alpha_adj_y,
+-    float alpha_coef) {
++    float alpha_coef,
++    int transition_mode) {
+ 
+     CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
+ 
+@@ -200,7 +211,8 @@ static int transition_cuda_call_kernel(
+         &overlay_width, &overlay_height,
+         &alpha_data, &alpha_linesize,
+         &alpha_adj_x, &alpha_adj_y,
+-        &alpha_coef
++        &alpha_coef,
++        &transition_mode
+     };
+ 
+     return CHECK_CU(cu->cuLaunchKernel(
+@@ -281,7 +293,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+         input_overlay->data[0], input_overlay->linesize[0],
+         input_overlay->width, input_overlay->height,
+         input_overlay->data[3], input_overlay->linesize[3], 1, 1,
+-        ctx->alpha_coef);
++        ctx->alpha_coef, ctx->transition_mode);
+ 
+     // overlay rest planes depending on pixel format
+ 
+@@ -293,7 +305,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[1], input_overlay->linesize[1],
+             input_overlay->width, input_overlay->height / 2,
+             0, 0, 0, 0,
+-            ctx->alpha_coef);
++            ctx->alpha_coef, ctx->transition_mode);
+         break;
+     case AV_PIX_FMT_YUV420P:
+     case AV_PIX_FMT_YUVA420P:
+@@ -303,7 +315,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[1], input_overlay->linesize[1],
+             input_overlay->width / 2, input_overlay->height / 2,
+             input_overlay->data[3], input_overlay->linesize[3], 2, 2,
+-            ctx->alpha_coef);
++            ctx->alpha_coef, ctx->transition_mode);
+ 
+         transition_cuda_call_kernel(ctx,
+             input_main->data[2], input_main->linesize[2],
+@@ -311,7 +323,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+             input_overlay->data[2], input_overlay->linesize[2],
+             input_overlay->width / 2, input_overlay->height / 2,
+             input_overlay->data[3], input_overlay->linesize[3], 2, 2,
+-            ctx->alpha_coef);
++            ctx->alpha_coef, ctx->transition_mode);
+         break;
+     default:
+         av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
+@@ -520,6 +532,9 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
+     (void)res_len;
+     (void)flags;
+ 
++    if (!strcmp(cmd, "mode"))
++        return av_opt_set(ctx, "mode", args, 0);
++
+     if (strcmp(cmd, "alpha"))
+         return AVERROR(ENOSYS);
+ 
+@@ -547,6 +562,12 @@ static int transition_cuda_process_command(AVFilterContext *avctx,
+ 
+ static const AVOption transition_cuda_options[] = {
+     { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, RUNTIME_FLAGS },
++    { "mode", "set the CUDA transition mode", OFFSET(transition_mode), AV_OPT_TYPE_INT, { .i64 = TRANSITION_MODE_FADE }, 0, TRANSITION_MODE_NB - 1, RUNTIME_FLAGS, "mode" },
++        { "fade",       "crossfade",             0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_FADE },       .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_left",  "wipe from left",        0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_LEFT },  .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_right", "wipe from right",       0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_RIGHT }, .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_down",  "wipe from top to bottom", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_DOWN }, .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_up",    "wipe from bottom to top", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_UP },   .flags = RUNTIME_FLAGS, .unit = "mode" },
+     { "eof_action", "Action to take when encountering EOF from secondary input ",
+         OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
+         EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
+diff --git a/libavfilter/vf_transition_cuda.cu b/libavfilter/vf_transition_cuda.cu
+index bbe8d6c..c688e66 100644
+--- a/libavfilter/vf_transition_cuda.cu
++++ b/libavfilter/vf_transition_cuda.cu
+@@ -26,7 +26,7 @@ __global__ void Transition_Cuda(
+     int overlay_w, int overlay_h,
+     unsigned char* overlay_alpha, int alpha_linesize,
+     int alpha_adj_x, int alpha_adj_y,
+-    float alpha_coef)
++    float alpha_coef, int transition_mode)
+ {
+     int x = blockIdx.x * blockDim.x + threadIdx.x;
+     int y = blockIdx.y * blockDim.y + threadIdx.y;
+@@ -37,6 +37,15 @@ __global__ void Transition_Cuda(
+     }
+ 
+     float alpha = alpha_coef;
++    if (transition_mode == 1) {
++        alpha = (x + 0.5f) / overlay_w <= alpha_coef;
++    } else if (transition_mode == 2) {
++        alpha = (x + 0.5f) / overlay_w >= 1.f - alpha_coef;
++    } else if (transition_mode == 3) {
++        alpha = (y + 0.5f) / overlay_h <= alpha_coef;
++    } else if (transition_mode == 4) {
++        alpha = (y + 0.5f) / overlay_h >= 1.f - alpha_coef;
++    }
+     if (alpha_linesize) {
+         alpha *= overlay_alpha[alpha_adj_x * x  + alpha_adj_y * y * alpha_linesize] / 255.f;
+     }
+@@ -45,4 +54,3 @@ __global__ void Transition_Cuda(
+ }
+ 
+ }
+-
+-- 
+2.53.0
+

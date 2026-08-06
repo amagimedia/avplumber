@@ -49,10 +49,9 @@ neural-demo/run-neural-demo.sh \
   --artifacts-dir /path/to/artifacts
 ```
 
-For Janus/WebRTC preview through the compose support stack, use the compose
-profile documented in
-`/home/jp/git/avplumber/pyplumber/auto_mixer/docker/README.md`. The entrypoint
-also accepts `AVP_OUTPUT=janus` directly; set `AVP_JANUS_VIDEO_PORT`,
+For Janus/WebRTC preview through the compose support stack, use the `neural`
+profile documented in `docker-compose/README.md`. The entrypoint also accepts
+`AVP_OUTPUT=janus` directly; set `AVP_JANUS_VIDEO_PORT`,
 `AVP_JANUS_VIDEO_RTCP_PORT`, `AVP_WEBUI_API`, and `AVP_REMOTE_CONTROL_PORT`
 to match the stack.
 
@@ -77,9 +76,7 @@ neural-demo/run-neural-demo.sh \
   --pip-input /path/to/pip.mp4
 ```
 
-If you do not pass `--output`, the demo streams to:
-
-- default live output: `http://test-streamer-s3dev.aws-dev.intranet/steam_test/test`
+Live mode requires an explicit `--output` RTMP, RTMPS, or SRT URL.
 
 The image build converts portable ONNX models into TensorRT plans for the
 current GPU and bakes those plans into `/home/tensorrt` in the runtime image.

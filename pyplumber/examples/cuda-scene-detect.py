@@ -84,14 +84,14 @@ from pyplumber.node import (
 )
 from pyplumber.scene_detect import CudaSceneDetectNode
 from pyplumber.node import StoreMetadata
-from pyplumber.auto_mixer.config import (
-    JANUS_DEFAULT_HOST,
-    JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
-    JANUS_DEFAULT_VIDEO_PORT,
-    JANUS_DEFAULT_VIDEO_SSRC,
-    RTP_PKT_SIZE,
-)
-from pyplumber.auto_mixer.rtcp_feedback import RtcpFeedbackListener
+from pyplumber.rtcp_feedback import RtcpFeedbackListener
+
+
+JANUS_DEFAULT_HOST = "127.0.0.1"
+JANUS_DEFAULT_VIDEO_PORT = 5004
+JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 3000
+JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
+RTP_PKT_SIZE = 1200
 
 
 # ── Input / output ────────────────────────────────────────────────────────────

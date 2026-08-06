@@ -1,12 +1,10 @@
 # Docker Compose Runner
 
-This directory owns demo orchestration only. It keeps Janus, web UI, DMA browser,
-and avplumber runners in one stack without making auto-mixer or neural-demo own
-the compose file.
+This directory owns shared demo orchestration. It keeps Janus, web UI, DMA
+browser, and AVPlumber runners in one stack.
 
-The generic `runner` service runs any mounted `.avplumber` script. Existing
-`neural-demo` and `auto-mixer` entrypoints are still available as separate
-profiles for the full basketball and talkshow demos.
+The generic `runner` service runs any mounted `.avplumber` script. The
+`neural-demo` profile runs the basketball demo.
 
 ## Layout
 
@@ -15,6 +13,7 @@ profiles for the full basketball and talkshow demos.
 - `.env.example` - all common knobs in one place.
 - `demos/*.env.example` - starting points for common demo choices.
 - `scripts/run-avplumber-script.sh` - entrypoint for a custom `.avplumber` graph.
+- `images/` - Dockerfiles for the shared support services.
 
 ## Custom Script
 
@@ -56,17 +55,6 @@ docker-compose/run-demo.sh --env docker-compose/demos/tracknet-ball.env --profil
 
 This is still the generic script runner. The env file only points at the
 mounted graph, media directory, model directory, and artifact directory.
-
-## Talkshow / Auto Mixer Demo
-
-```sh
-cp docker-compose/demos/talkshow-6cam.env.example docker-compose/demos/talkshow-6cam.env
-docker-compose/run-demo.sh --env docker-compose/demos/talkshow-6cam.env --profile auto-mixer up
-```
-
-Set `MEDIA_INPUT_DIR` to the host directory containing the six talkshow inputs.
-The container sees them under `/media-inputs`, so `AUTO_MIXER_INPUTS` should use
-that path.
 
 ## Support Services Only
 
