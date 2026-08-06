@@ -214,11 +214,38 @@ def test_cli_accepts_ordered_repeatable_input_paths():
         "/media/second.mp4",
         "--output",
         "program.mp4",
+        "--fps",
+        "60",
         "--loop-inputs",
     ])
 
     assert options.inputs == ("/media/first clip.mp4", "/media/second.mp4")
+    assert options.fps == 60
     assert options.loop_inputs is True
+
+
+def test_configured_fps_reaches_decode_normalization_mixer_and_outputs():
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(
+            inputs=("input.mp4",),
+            output="program.ts",
+            janus_output=True,
+            fps=60,
+        ),
+        api=fake_api(),
+    )
+    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
+
+    assert nodes["fps_0"]["fps"] == "60/1"
+    assert nodes["normalize_0"]["dst_frame_rate"] == "60/1"
+    assert nodes["layout_preheat_router"]["frame_rate"] == "60/1"
+    assert nodes["program_fps"]["fps"] == "60/1"
+    assert nodes["program_encoder"]["options"]["g"] == 120
+    assert nodes["janus_fps"]["fps"] == "60/1"
+    assert nodes["janus_encoder"]["options"]["g"] == 60
+    assert "level" not in nodes["janus_encoder"]["options"]
+    assert FakeMixer.instances[-1].parameters["fps"] == (60, 1)
 
 
 def test_janus_only_output_builds_video_rtp_and_feedback():

@@ -25,6 +25,7 @@ LD_LIBRARY_PATH=/usr/local/lib python3 demos/mixer/mixer.py \
   [--input <input-N> ...] \
   [--output <output-url-or-path>] \
   [--janus-output] \
+  [--fps 30] \
   --remote-control-port 7777
 ```
 
@@ -34,6 +35,9 @@ Repeat `--input` for any number of configurable file paths and use
 `--loop-inputs` for continuous playback of finite test files. Network input
 URLs remain supported. Output format is inferred for RTMP, SRT, `.flv`, `.ts`,
 `.mp4`, `.mkv`, and `.webm`; otherwise pass `--output-format`.
+`--fps` controls input normalization, mixer timing, GOP length, and every
+enabled output. Its default is 30; use `--fps 60` only when the decoder can
+sustain all selected source streams in real time.
 
 At least one output is required. `--janus-output` publishes H.264 video over
 RTP to Janus and may be used alone or alongside `--output`. It defaults to
