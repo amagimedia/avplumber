@@ -66,8 +66,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     && dnf clean all
 
 COPY --from=builder /opt/janus-avp /opt/janus-avp
-COPY janus/config/ /opt/janus-avp/etc/janus/
-COPY janus/janus-entrypoint.sh /usr/local/bin/janus-entrypoint
+COPY config/ /opt/janus-avp/etc/janus/
+COPY janus-entrypoint.sh /usr/local/bin/janus-entrypoint
 RUN chmod +x /usr/local/bin/janus-entrypoint
 
 ENTRYPOINT ["/usr/local/bin/janus-entrypoint"]

@@ -948,6 +948,20 @@ public:
             orch.fade(scene_name, duration_sec, start_pts_ms);
         };
 
+        // mixer.cuda_wipe {"mixer":"mixer","scene":"scene_name","style":"wipe_left","duration_sec":1.0,"start_pts_ms":123456789}
+        commands_["mixer.cuda_wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.cuda_wipe", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string scene_name = req.at("scene").get<std::string>();
+            std::string style = req.at("style").get<std::string>();
+            double duration_sec = req.value("duration_sec", 1.0);
+            int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
+            if (duration_sec <= 0)
+                throw Error("mixer.cuda_wipe: duration_sec must be > 0");
+            auto orch = mixerOrchestrator(mixer_name);
+            orch.cudaWipe(scene_name, style, duration_sec, start_pts_ms);
+        };
+
         // mixer.wipe {"mixer":"mixer","scene":"scene_name","wipe_file":"/path/with spaces.mov","duration_sec":2.0,"start_pts_ms":123456789}
         commands_["mixer.wipe"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.wipe", arg);

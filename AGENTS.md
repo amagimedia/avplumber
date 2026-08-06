@@ -61,30 +61,26 @@ interface, new shared object etc., or improving existing ones.
 * pyplumber builds must use the same neural/CUDA/TensorRT feature set as the binary build.
 * DMA-BUF overlay builds need DRM/GL flags so `ipc_dmabuf_source`, `drm_prime_to_egl_image`, `drm_prime_to_cuda` are registered.
 * Prefer targeted tests for Python logic; do a remote build/run check for CUDA, TensorRT, Janus, or mixer graph changes.
-* When changing Python mixer code, rerun pytest covering `pyplumber/auto_mixer/`, `pyplumber/auto_switcher.py`, `pyplumber/mixer.py`, `tools/mixer_tui/` before reporting done.
+* When changing Python mixer code, rerun pytest covering `pyplumber/mixer.py`
+  and `demos/mixer/` before reporting done.
 * For remote mixer graph debugging, keep web UI backend running with web UI registration enabled.
 
 ## Build & test commands
 Prepare `./build.sh` and `./run.sh` on the remote host if they don't exist. Adapt these examples; don't use verbatim.
 
-Example `build.sh` (auto mixer; remove `python_module` for the default binary target):
+Example `build.sh` (remove `python_module` for the default binary target):
 ```
 make -j8 NEURAL_NET_COMMON=1 NEURAL_NET_SPECIFIC=1 HAVE_DRM=1 HAVE_GL=1 HAVE_CUDA=1 HAVE_NVOF_FRUC=1 HAVE_NVCC=1 NVCC=/usr/local/cuda-13.0/bin/nvcc TENSORRT_ROOT=/opt/tensorrt PKG_CONFIG_PATH=/usr/local/lib/pkgconfig CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' python_module
 ```
 
-Example `run.sh` for pyplumber:
+Example `run.sh` for the generic mixer:
 ```
-LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 pyplumber/examples/auto_mixer.py --webui-api http://localhost:22222 --input-start-ts 660000 --remote-control-port 22422 --inputs /data/test-content/*.ts --output rtmp://... --debug-mouth-roi-bboxes
-```
-
-Example `run.sh` for avplumber:
-```
-LD_LIBRARY_PATH=/usr/local/lib ./avplumber --webui-api http://localhost:22222 --port 22422 -s examples/sync_mixer.avplumber
+LD_LIBRARY_PATH=/usr/local/lib venv/bin/python3 demos/mixer/mixer.py --input <path> --input <path> --output <path> --remote-control-port 22422
 ```
 
 # Domain-specific rules
 
-## Python/VAD transplants
+## Python node transplants
 * Keep the current graph-management framework. Don't copy `src/graph_mgmt.cpp`/`.hpp` from older branches unless explicitly asked.
 
 ## CUDA graph rules

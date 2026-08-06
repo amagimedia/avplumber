@@ -85,7 +85,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
 };
 
-template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource {
+template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource, public IInputsObjects {
     friend struct FilterMediaSpecific<T>;
 protected:
     using MediaSpecific = FilterMediaSpecific<T>;
@@ -704,6 +704,28 @@ public:
         }
     }
 public:
+    void setObject(const std::string key, const Parameters& value) override {
+        if (key != "filter_command")
+            throw Error("filter node: unknown object key: " + key);
+        if (!value.is_object())
+            throw Error("filter_command must be an object");
+        if (!filter_graph_)
+            throw Error("filter_command requires an initialized filter graph");
+
+        const std::string target = value.value("target", std::string("all"));
+        const std::string command = value.at("command").get<std::string>();
+        const std::string argument = value.value("argument", std::string(""));
+        char response[1024] = {};
+        const int ret = avfilter_graph_send_command(
+            filter_graph_, target.c_str(), command.c_str(), argument.c_str(),
+            response, sizeof(response), 0);
+        if (ret < 0) {
+            throw Error(
+                "filter_command " + target + "." + command + " failed: " +
+                av::error2string(ret));
+        }
+    }
+
     virtual void initDefaults(const Parameters &params) = 0;
     static std::shared_ptr<Child> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;

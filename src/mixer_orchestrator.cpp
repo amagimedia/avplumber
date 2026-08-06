@@ -1082,10 +1082,24 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
 }
 
 // ---------------------------------------------------------------------------
-// fade: crossfade transition.  All timeline values are computed from the
-// pre-flip state.  The state flip + transition node deletion are deferred.
+// fade: crossfade transition through the permanent preheated CUDA filter.
+// All timeline values are computed from the pre-flip state.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms) {
+void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
+                             int64_t start_pts_ms) {
+    cudaTransition(scene_name, duration_sec, start_pts_ms, "fade");
+}
+
+void MixerOrchestrator::cudaWipe(const std::string& scene_name, const std::string& style,
+                                 double duration_sec, int64_t start_pts_ms) {
+    if (style != "wipe_left" && style != "wipe_right" &&
+        style != "wipe_down" && style != "wipe_up")
+        throw Error("mixer.cuda_wipe: unsupported style: " + style);
+    cudaTransition(scene_name, duration_sec, start_pts_ms, style);
+}
+
+void MixerOrchestrator::cudaTransition(const std::string& scene_name, double duration_sec,
+                                       int64_t start_pts_ms, const std::string& style) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
 
@@ -1116,32 +1130,38 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     auto& target_scene = state_->scenes.at(scene_name);
     scheduleSceneControls(target_scene, T_start);
 
-    // 2. Create transition_cuda with direction-dependent alpha expression
+    // 2. Update the preheated transition_cuda expression while its input
+    // branches are idle. The filter graph itself remains running.
     std::string progress_expr = "clip((t-" + std::to_string(T_start / 1000.0) +
-        ")/" + std::to_string(duration_sec) + "\\,0\\,1)";
+        ")/" + std::to_string(duration_sec) + ",0,1)";
     std::string alpha_expr = pvw_is_slot_a ? "1-" + progress_expr : progress_expr;
-
-    std::string slot_a_trans_edge = edgeNameAt(nodes_, state_->slot_a.post_otm_name, "dst", 1);
-    std::string slot_b_trans_edge = edgeNameAt(nodes_, state_->slot_b.post_otm_name, "dst", 1);
-    std::string transition_out_edge = edgeNameAt(
-        nodes_, state_->source_switcher_name, "src", MixerState::transSourceSwitcherIndex());
-    if (slot_a_trans_edge.empty() || slot_b_trans_edge.empty() || transition_out_edge.empty())
-        throw Error("mixer.fade: graph is missing transition edges");
 
     std::string transition_node_name = state_->source_switcher_name.empty()
         ? transition_node_name_
         : state_->source_switcher_name + "_transition";
-
-    Parameters trans_params;
-    trans_params["type"] = "filter_video";
-    trans_params["name"] = transition_node_name;
-    trans_params["src"] = Parameters::array({slot_a_trans_edge, slot_b_trans_edge});
-    trans_params["dst"] = transition_out_edge;
-    trans_params["graph"] = "transition_cuda=alpha='" + alpha_expr + "':eval=frame";
-    trans_params["hwaccel"] = state_->hwaccel_name;
-    trans_params["defer_preliminary_init"] = true;
-    trans_params["group"] = "mixer_trans";
-    createAndStartNode(trans_params);
+    std::string filter_style = style;
+    if (pvw_is_slot_a) {
+        if (filter_style == "wipe_left")
+            filter_style = "wipe_right";
+        else if (filter_style == "wipe_right")
+            filter_style = "wipe_left";
+        else if (filter_style == "wipe_down")
+            filter_style = "wipe_up";
+        else if (filter_style == "wipe_up")
+            filter_style = "wipe_down";
+    }
+    Parameters mode_command = {
+        {"target", "transition_cuda"},
+        {"command", "mode"},
+        {"argument", filter_style},
+    };
+    setNodeObject(transition_node_name, "filter_command", mode_command);
+    Parameters alpha_command = {
+        {"target", "transition_cuda"},
+        {"command", "alpha"},
+        {"argument", alpha_expr},
+    };
+    setNodeObject(transition_node_name, "filter_command", alpha_command);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
@@ -1175,14 +1195,13 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     publishRoutedRoutesForProgramOnly(pvw_is_slot_a, target_scene, T_cleanup, false);
     timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
 
-    // 6. Deferred cleanup: delete transition node + flip state
+    // 6. Deferred state/routing cleanup. The transition node stays hot.
     int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
     postTransitionTask("mixer.fade.cleanup", flip_delay,
         [nodes = nodes_, state = state_, timeline = timeline_, scheduler = scheduler_,
-         transition_generation, pvw_is_slot_a, scene_name, transition_node_name] {
+         transition_generation, pvw_is_slot_a, scene_name] {
             deferredCleanup(nodes, state, timeline, scheduler, transition_generation,
-                            pvw_is_slot_a, scene_name,
-                            std::vector<std::string>{transition_node_name});
+                            pvw_is_slot_a, scene_name, {});
         });
     prep_guard.release();
 }
