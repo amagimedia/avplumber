@@ -23,7 +23,7 @@ deps/dma-browser/node_modules/
 deps/dma-browser/dist/
 deps/dma-browser/addons/fdpass/build/
 deps/dma-browser/addons/fdpass/node_modules/
-cuda-overlay-demo/artifacts/
+demos/cuda-overlay/artifacts/
 deps/libklvanc/autom4te.cache/
 deps/libklvanc/src/.libs/
 deps/libklvanc/tools/.libs/

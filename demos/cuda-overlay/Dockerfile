@@ -116,7 +116,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        PYTHONPATH=/build \
        python3 -c 'import pyplumber'
 
-COPY cuda-overlay-demo /build/cuda-overlay-demo
+COPY demos/cuda-overlay /build/demos/cuda-overlay
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
@@ -125,4 +125,4 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV PYPLUMBER_PATH=/build
 ENV PYTHONPATH=/build
 
-ENTRYPOINT ["python3", "/build/cuda-overlay-demo/tools/run_matrix.py"]
+ENTRYPOINT ["python3", "/build/demos/cuda-overlay/tools/run_matrix.py"]
