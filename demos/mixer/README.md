@@ -77,10 +77,14 @@ python3 demos/mixer/tui.py --host 127.0.0.1 --port 7777 \
   --wipe-style wipe_left
 ```
 
-Selecting any scene first loads it into preview and waits for readiness. CUT,
-FADE, and WIPE are not sent until that preheated preview slot reports ready.
-Disconnected or incomplete inputs retain their assigned positions; they never
-cause the remaining sources to reorder.
+The TUI uses the production switcher layout: program and preview buses, a
+scrollable scene strip, explicit layout/page controls, and cut/fade/CUDA-wipe
+controls. Selecting a scene normally loads it into preview and waits for
+readiness. Enable `Direct: ON` (or press `t`) to make scene and layout choices
+cut directly to program; F1–F9 always perform a direct cut. CUT, FADE, and WIPE
+are not sent until the preheated preview slot reports ready when Direct mode is
+off. Disconnected or incomplete inputs retain their assigned positions; they
+never cause the remaining sources to reorder.
 
 ## Layouts
 
