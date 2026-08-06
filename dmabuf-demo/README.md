@@ -20,8 +20,9 @@ NVIDIA thanks to the **GBM linear shim** + one Chromium feature flag.
 
 ### 1. Sender = stock Electron 42 (Chromium 146) + GBM shim
 - `deps/dma-browser/package.json`: `"electron": "^42.0.0"` (Chromium 146). **No `.npmrc`** private mirror.
-- **GBM shim — THE key to running stock Electron on NVIDIA** (`deps/dma-browser/native/gbm-linear-shim/`, built by `npm run rebuild:shim`, `LD_PRELOAD`ed from `bin/run.sh` on the NVIDIA path). Two env vars, both defaulted on by `run.sh`:
-  - `GBM_LINEAR_SHIM=1` — strips `GBM_BO_USE_LINEAR`.
+- **GBM shim — THE key to running stock Electron on NVIDIA** (`deps/dma-browser/native/gbm-linear-shim/`, built by `npm run rebuild:shim`, `LD_PRELOAD`ed from `bin/run.sh` on the NVIDIA path). Its relevant defaults are:
+  - `GBM_LINEAR_SHIM=1` — enables the allocation rewrites.
+  - `GBM_LINEAR_SHIM_FORCE_LINEAR=0` — strips `GBM_BO_USE_LINEAR`, allowing the NVIDIA driver to allocate a renderable tiled buffer. Forcing this to `1` commonly fails because NVIDIA cannot allocate a linear, renderable RGBA buffer.
   - **`GBM_LINEAR_SHIM_ADD_SCANOUT=1` — adds `GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING`** to renderable allocations. **This is the essential bit.** Stock Chromium's mappable-SharedImage path allocates a *scanout-only* buffer **without `RENDERING`** on NVIDIA, so it can't be a render target → `Unable to initialize SkSurface`, `paintCount: 0`, no frames. Adding `RENDERING` at the GBM layer replicates the custom Chromium **patch 0005** (`RenderableMappableSharedImageForceScanout`), so a **stock, unpatched Electron/Chromium captures**. (Verified: without it, stock Electron 41 *and* 42 both fail identically; with it, they paint. The private patched build is no longer needed.)
 - `--enable-features=RenderableMappableSharedImageForceScanout` is set for parity but is a **no-op on stock Chromium** (that feature only exists in the patched build) — the shim's `ADD_SCANOUT` is what actually does the job.
 - Note: `gpu_compositing=disabled_software` in `getGPUFeatureStatus()` is **expected/harmless** here (present even in the working patched build) — the offscreen `useSharedTexture` path is independent of the on-screen compositor. Don't chase it.
@@ -39,11 +40,9 @@ NVIDIA container runtime can mount it. A **compute-only** driver
 - Verify: `nvidia-smi` works **and** `ls /usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists.
 
 ### 3. Container NVIDIA EGL/GBM wiring (both wayland + dma-browser)
-The NVIDIA container runtime mounts the driver's EGL/GL **core**, but not the
-GBM glue. Each GPU container needs:
+Each GPU container needs:
 - `NVIDIA_DRIVER_CAPABILITIES=all` (must include `graphics`), `--gpus all`, `--privileged`, `--device /dev/dri`.
-- The EGL vendor ICD: `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` → `{"ICD":{"library_path":"libEGL_nvidia.so.0"}}`.
-- The NVIDIA GBM backend `nvidia-drm_gbm.so` (symlink → `libnvidia-egl-gbm.so.1`) and the host's matching `libnvidia-egl-gbm` bind-mounted in.
+- The EGL vendor ICD and NVIDIA GBM backend (`nvidia-drm_gbm.so`). Current NVIDIA Container Toolkit versions inject both when graphics capabilities are enabled. Older installations may need the host's matching `libnvidia-egl-gbm` mounted manually; do not bind over paths already injected by the runtime.
 - Env: `GBM_BACKEND=nvidia-drm`, `__GLX_VENDOR_LIBRARY_NAME=nvidia`, `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`.
 - **Do not** bake the NVIDIA driver into the container (version must match the host kernel module — let the runtime mount it).
 
@@ -52,10 +51,14 @@ GBM glue. Each GPU container needs:
 - The DRM render node is `root:render 0660`; sway runs as non-root `avp`, so the entrypoint `chmod o+rw /dev/dri/renderD128 /dev/dri/card*` (as root) before dropping to `avp` — a privileged container does **not** give a non-root user `CAP_DAC_OVERRIDE`.
 
 ### 5. avplumber graph → Janus RTP — `graph/dmabuf_browser_to_janus.py`
-`ipc_dmabuf_source(@drm)` → `assume_video_format(drm_prime/cuda)` → `force_fps` →
+`ipc_dmabuf_source(@drm)` → `assume_video_format(drm_prime/cuda)` → `smooth_timestamps` →
 `drm_prime_to_cuda(@gpu, drop_alpha)` → `force_keyframe(1s)` →
 `enc_video(h264_nvenc baseline)` → `bsf dump_extra=freq=keyframe` → `mux` →
 `output(rtp)` to Janus.
+
+Set `FPS` to the dma-browser window's capture rate. `smooth_timestamps`
+regularizes PTS while preserving one output frame per input frame; it does not
+convert between frame rates.
 - **Why CUDA detile:** on NVIDIA the browser's GPU render target is always tiled
   (block-linear); a plain DRM `hwdownload` reads sheared garbage. `drm_prime_to_cuda`
   EGL-imports the DMA-BUF honoring the tiling modifier into a linear CUDA frame,
@@ -77,3 +80,35 @@ open http://<JANUS_HOST_IP>:8080     # janus-preview
 Confirm capture is flowing: `curl http://127.0.0.1:9009/status` — `txFrameCount`
 should be climbing and `droppedReasons` near-empty. Turn on `GBM_LINEAR_SHIM_LOG=1`
 to see the shim strip `GBM_BO_USE_LINEAR`.
+
+## Duplicate-frame analysis
+
+The graph has a second output mode that measures duplicate browser frames
+without changing the live Janus path. It detiles the DMA-BUF into CUDA, performs
+an explicit diagnostic-only download and conversion to `yuv444p`, runs FFmpeg's
+`mpdecimate` inside avplumber, and counts frames immediately before and after
+the filter:
+
+```bash
+docker run --rm --network host --gpus all --privileged \
+  --security-opt seccomp=unconfined --device /dev/dri:/dev/dri \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e SOCKET=/tmp/dma-page/overlay.sock \
+  -e WIDTH=1280 -e HEIGHT=720 -e FPS=30 \
+  -e OUTPUT_MODE=mpdecimate \
+  -e MPDECIMATE_DURATION_SEC=600 \
+  -e MPDECIMATE_REPORT_INTERVAL_SEC=60 \
+  -v <dma-browser-socket-volume>:/tmp/dma-page \
+  -v "$PWD/dmabuf-demo/graph/dmabuf_browser_to_janus.py:/opt/avplumber/dmabuf_browser_to_janus.py:ro" \
+  avplumber-dmabuf-consumer-cuda \
+  python3 /opt/avplumber/dmabuf_browser_to_janus.py
+```
+
+Progress and the final result use a stable, grep-friendly format:
+
+```text
+[dmabuf_mpdecimate] final input=18000 unique=17990 duplicates=10 duplicate_pct=0.056
+```
+
+Set `MPDECIMATE_FILTER` to override the default `mpdecimate` filter expression,
+for example `mpdecimate=hi=768:lo=320:frac=0.33:max=0`.

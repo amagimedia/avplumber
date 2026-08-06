@@ -21,7 +21,8 @@ RUN npm ci
 
 COPY deps/dma-browser ./
 RUN npm run build \
-    && npm run rebuild:addons
+    && npm run rebuild:addons \
+    && npm run rebuild:shim
 
 FROM fedora:42
 

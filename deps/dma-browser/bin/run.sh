@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launcher for dma-browser.
 #
-# The default NVIDIA path expects the patched Electron 41 / Chrome 146 build
-# from the project .npmrc. No GBM LD_PRELOAD shim is applied.
+# The NVIDIA path uses the GBM shim with stock Electron so Chromium can allocate
+# a renderable DMA-BUF without requiring a patched build.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,15 +77,12 @@ apply_nvidia_runtime() {
   # RenderableMappableSharedImageForceScanout). Only preloaded on the NVIDIA path
   # (rewriting GBM flags can harm Intel/AMD). Two mutually exclusive modes:
   #
-  #   FORCE_LINEAR (default): allocate LINEAR *and* RENDERING and pin the modifier
-  #     list to [LINEAR]. The buffer is a valid render target (SkSurface works ->
-  #     frames flow) AND CPU-linear, so a downstream consumer using a plain DRM
-  #     hwdownload (no CUDA/EGL detiling) reads a correct image. This is what the
-  #     minimal dmabuf demo needs.
-  #   ADD_SCANOUT (fallback, set FORCE_LINEAR=0 to use): strip LINEAR and add
-  #     SCANOUT|RENDERING. Also captures on stock Chromium, but the buffer is
-  #     tiled/block-linear -> only a CUDA/EGL import can detile it; a plain DRM
-  #     hwdownload yields a sheared image.
+  #   ADD_SCANOUT (default): strip LINEAR and add SCANOUT|RENDERING. The resulting
+  #     buffer is tiled/block-linear, so consumers must use CUDA/EGL import to
+  #     detile it; a plain DRM hwdownload yields a sheared image.
+  #   FORCE_LINEAR (opt-in): allocate LINEAR|RENDERING and pin the modifier list
+  #     to [LINEAR]. NVIDIA commonly rejects that combination for RGBA render
+  #     targets, so use it only with a driver known to support it.
   local shim="$PROJECT_ROOT/native/gbm-linear-shim/libgbm_linear_shim.so"
   if [[ ! -f "$shim" && -x "$PROJECT_ROOT/native/gbm-linear-shim/build.sh" ]] && command -v cc >/dev/null 2>&1; then
     shim="$("$PROJECT_ROOT/native/gbm-linear-shim/build.sh" 2>/dev/null | tail -1)"
@@ -93,7 +90,7 @@ apply_nvidia_runtime() {
   if [[ -f "$shim" ]]; then
     export LD_PRELOAD="$shim${LD_PRELOAD:+:$LD_PRELOAD}"
     export GBM_LINEAR_SHIM="${GBM_LINEAR_SHIM:-1}"
-    export GBM_LINEAR_SHIM_FORCE_LINEAR="${GBM_LINEAR_SHIM_FORCE_LINEAR:-1}"
+    export GBM_LINEAR_SHIM_FORCE_LINEAR="${GBM_LINEAR_SHIM_FORCE_LINEAR:-0}"
     export GBM_LINEAR_SHIM_ADD_SCANOUT="${GBM_LINEAR_SHIM_ADD_SCANOUT:-1}"
     export GBM_LINEAR_SHIM_LOG="${GBM_LINEAR_SHIM_LOG:-0}"
     echo "dma-browser: GBM linear shim preloaded ($shim)" >&2
