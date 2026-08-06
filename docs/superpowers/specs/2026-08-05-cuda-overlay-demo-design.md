@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a self-contained `cuda-overlay-demo/` that builds the repository's patched
+Add a self-contained `demos/cuda-overlay/` directory that builds the repository's patched
 FFmpeg `n7.1.5` and PyPlumber integration, generates deterministic color-bar
 fixtures, and exercises `overlay_many_cuda` on an NVIDIA GPU.
 
@@ -48,7 +48,7 @@ chroma row before `overlay_many_cuda` is involved.
 The implementation will add:
 
 ```text
-cuda-overlay-demo/
+demos/cuda-overlay/
 |-- README.md
 |-- Dockerfile
 |-- compose.yaml
@@ -174,7 +174,7 @@ records FFmpeg version, filter availability, CUDA compiler version, GPU model,
 driver version, and compute capability in the report.
 
 `compose.yaml` defines one GPU test service with the generated artifacts bind
-mounted to `cuda-overlay-demo/artifacts/`. A multi-service live stack would add
+mounted to `demos/cuda-overlay/artifacts/`. A multi-service live stack would add
 coordination without improving this test, so generation, graph execution,
 comparison, and reporting run sequentially inside the test service. `run.sh`
 is a thin convenience wrapper around the corresponding Compose build and run
@@ -183,7 +183,7 @@ commands; it contains no machine-specific configuration.
 The normal user flow is:
 
 ```text
-./cuda-overlay-demo/run.sh
+./demos/cuda-overlay/run.sh
 ```
 
 The command returns nonzero if image generation, graph construction, any GPU
