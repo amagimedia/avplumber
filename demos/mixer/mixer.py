@@ -36,7 +36,7 @@ except ImportError:
     )
 
 
-FPS_NUM = 30
+DEFAULT_FPS = 30
 FPS_DEN = 1
 HWACCEL = "@gpu"
 MIXER_NAME = "mixer"
@@ -60,6 +60,7 @@ class GraphOptions:
     remote_control_port: int = 7777
     codec: str = "h264_nvenc"
     bitrate: str = "8M"
+    fps: int = DEFAULT_FPS
     loop_inputs: bool = False
     janus_output: bool = False
     janus_host: str = JANUS_DEFAULT_HOST
@@ -78,6 +79,8 @@ class GraphOptions:
             raise ValueError("--output or --janus-output is required")
         if not self.codec.endswith("_nvenc"):
             raise ValueError("--codec must be an NVENC encoder for zero-copy output")
+        if not 1 <= self.fps <= 240:
+            raise ValueError("--fps must be between 1 and 240")
         if not 0 <= self.remote_control_port <= 65535:
             raise ValueError("remote_control_port must be between 0 and 65535")
         if not 0 <= self.janus_rtcp_port <= 65535:
@@ -238,7 +241,9 @@ def _input_group(index: int) -> str:
     return f"input_{index}"
 
 
-def _build_input(avp, api, index: int, url: str, *, loop: bool) -> str:
+def _build_input(
+    avp, api, index: int, url: str, *, loop: bool, fps: int
+) -> str:
     group = _input_group(index)
     packet_edge = f"input_{index}_packets"
     video_packet_edge = f"input_{index}_video_packets"
@@ -284,7 +289,7 @@ def _build_input(avp, api, index: int, url: str, *, loop: bool) -> str:
         "name": f"fps_{index}",
         "src": realtime_edge,
         "dst": fps_edge,
-        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "fps": f"{fps}/{FPS_DEN}",
         "group": group,
     }))
     avp.addNode(api.FilterVideo({
@@ -300,7 +305,7 @@ def _build_input(avp, api, index: int, url: str, *, loop: bool) -> str:
         "dst_width": CANONICAL_SOURCE_WIDTH,
         "dst_height": CANONICAL_SOURCE_HEIGHT,
         "dst_pixel_format": "cuda",
-        "dst_frame_rate": f"{FPS_NUM}/{FPS_DEN}",
+        "dst_frame_rate": f"{fps}/{FPS_DEN}",
         "hwaccel": HWACCEL,
         "auto_restart": "group",
         "group": group,
@@ -317,7 +322,7 @@ def _route_label(capacity: int, slot: int, mixer_slot: str) -> str:
 
 
 def _build_preheated_layouts(
-    avp, api, mixer, input_edges: list[str]
+    avp, api, mixer, input_edges: list[str], *, fps: int
 ) -> tuple[str, ...]:
     outputs = []
     labels = []
@@ -338,8 +343,8 @@ def _build_preheated_layouts(
         "height": CANONICAL_SOURCE_HEIGHT,
         "pixel_format": "cuda",
         "real_pixel_format": "nv12",
-        "frame_rate": f"{FPS_NUM}/{FPS_DEN}",
-        "timebase": f"{FPS_DEN}/{FPS_NUM}",
+        "frame_rate": f"{fps}/{FPS_DEN}",
+        "timebase": f"{FPS_DEN}/{fps}",
         "timeline": mixer.timeline,
         "auto_restart": "group",
         "group": ROUTER_GROUP,
@@ -392,7 +397,7 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
         "name": "program_fps",
         "src": mixer_edge,
         "dst": fps_edge,
-        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "fps": f"{options.fps}/{FPS_DEN}",
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.AssumeVideoFormat({
@@ -415,7 +420,7 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
             "b": options.bitrate,
             "maxrate": options.bitrate,
             "bufsize": options.bitrate,
-            "g": FPS_NUM * 2,
+            "g": options.fps * 2,
             "bf": 0,
             "preset": "p3",
             "tune": "ll",
@@ -460,7 +465,7 @@ def _build_janus_output(avp, api, options: GraphOptions, mixer_edge: str) -> Non
         "name": "janus_fps",
         "src": mixer_edge,
         "dst": fps_edge,
-        "fps": f"{FPS_NUM}/{FPS_DEN}",
+        "fps": f"{options.fps}/{FPS_DEN}",
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.ForceKeyFrame({
@@ -492,11 +497,10 @@ def _build_janus_output(avp, api, options: GraphOptions, mixer_edge: str) -> Non
             "b": bitrate,
             "maxrate": bitrate,
             "bufsize": bitrate,
-            "g": FPS_NUM,
+            "g": options.fps,
             "bf": 0,
             "preset": "p6",
             "profile": "baseline",
-            "level": "4.0",
             "tune": "ull",
             "rc": "cbr",
             "rc-lookahead": 0,
@@ -597,20 +601,27 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     avp.edges.planCapacity("*", 4)
 
     input_edges = [
-        _build_input(avp, api, index, url, loop=options.loop_inputs)
+        _build_input(
+            avp,
+            api,
+            index,
+            url,
+            loop=options.loop_inputs,
+            fps=options.fps,
+        )
         for index, url in enumerate(options.inputs)
     ]
     mixer = api.MixerGraphBuilder(
         avp,
         name=MIXER_NAME,
         canvas=(CANVAS_WIDTH, CANVAS_HEIGHT),
-        fps=(FPS_NUM, FPS_DEN),
+        fps=(options.fps, FPS_DEN),
         hwaccel=HWACCEL,
         enable_wipe=False,
         defer_initial_routes=True,
     )
     preheated_output_edges = _build_preheated_layouts(
-        avp, api, mixer, input_edges
+        avp, api, mixer, input_edges, fps=options.fps
     )
     _define_scenes(mixer, len(input_edges))
     mixer.set_initial_scene("fullscreen_0", slot="A")
@@ -645,6 +656,12 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--remote-control-port", type=int, default=7777)
     parser.add_argument("--codec", default="h264_nvenc")
     parser.add_argument("--bitrate", default="8M")
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=DEFAULT_FPS,
+        help=f"Mixer and output frame rate (default: {DEFAULT_FPS})",
+    )
     parser.add_argument("--loop-inputs", action="store_true")
     parser.add_argument(
         "--janus-output",
@@ -679,6 +696,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         remote_control_port=args.remote_control_port,
         codec=args.codec,
         bitrate=args.bitrate,
+        fps=args.fps,
         loop_inputs=args.loop_inputs,
         janus_output=args.janus_output,
         janus_host=args.janus_host,
@@ -705,7 +723,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     print(
         f"Generic mixer started: {len(options.inputs)} inputs -> "
-        f"{', '.join(targets)}; control port "
+        f"{', '.join(targets)} at {options.fps} fps; control port "
         f"{options.remote_control_port or 'disabled'}"
     )
     try:
