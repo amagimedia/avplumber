@@ -14,22 +14,16 @@ export interface AppliedSwitch {
 }
 
 /**
- * Configures Chromium command-line switches for hardware-accelerated video
- * decoding and offscreen capture on Linux + patched Electron/Chromium.
+ * Configures Chromium command-line switches for offscreen DMA-BUF capture on
+ * Linux with stock Electron/Chromium.
  *
- * Reads `DMA_BROWSER_*` env vars. The default feature set expects the
- * NVIDIA dmabuf patches from the S3 Electron 41 / Chrome 146 build.
+ * Reads `DMA_BROWSER_*` env vars. Hardware video decoding remains disabled:
+ * this process renders graphics overlays rather than video players.
  */
 export class HwAccelConfigurator {
-  // RenderableMappableSharedImageForceScanout is the offscreen-capture / NVIDIA
-  // GBM SharedImage feature (NOT VAAPI). It forces renderable mappable
-  // SharedImages to SCANOUT, which — together with the GBM linear shim — is what
-  // lets Chromium allocate an exportable dmabuf on NVIDIA. Without it,
-  // gbm_bo_create fails ("Cannot create bo ... usage=Scanout") and the GPU
-  // process crashes. It must stay enabled even with no video decode (this
-  // matches electron-hwaccel main.js, which enables it unconditionally). The
-  // VAAPI/video-decode features are intentionally omitted here and explicitly
-  // disabled below (a graphics overlay has no <video>).
+  // Retained for compatibility with patched Chromium builds. Stock Electron
+  // ignores this unknown feature; the GBM shim supplies the NVIDIA allocation
+  // fix in that case.
   private static readonly ENABLED_FEATURES_BASE: readonly string[] = [
     'RenderableMappableSharedImageForceScanout',
   ];
@@ -90,18 +84,18 @@ export class HwAccelConfigurator {
     // decode so any stray <video> never hits the NVIDIA VAAPI path.
     this.appendSwitch('disable-accelerated-video-decode');
 
-    const enabled = HwAccelConfigurator.dedupe([
-      ...HwAccelConfigurator.ENABLED_FEATURES_BASE,
-      ...envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
-    ]);
-    if (enabled.length > 0) {
-      this.appendSwitch('enable-features', enabled.join(','));
-    }
-
     const disabled = HwAccelConfigurator.dedupe([
       ...HwAccelConfigurator.DISABLED_FEATURES_BASE,
       ...envList(this.env, 'DMA_BROWSER_CHROMIUM_DISABLE_FEATURES'),
     ]);
+    const disabledSet = new Set(disabled);
+    const enabled = HwAccelConfigurator.dedupe([
+      ...HwAccelConfigurator.ENABLED_FEATURES_BASE,
+      ...envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
+    ]).filter((feature) => !disabledSet.has(feature));
+    if (enabled.length > 0) {
+      this.appendSwitch('enable-features', enabled.join(','));
+    }
     this.appendSwitch('disable-features', disabled.join(','));
 
     if (envFlag(this.env, 'DMA_BROWSER_CHROMIUM_VLOG', false)) {
@@ -121,8 +115,6 @@ export class HwAccelConfigurator {
           'sandbox_linux*=2',
           '*video_decoder_pipeline*=2',
           'video_decoder_pipeline=1',
-          '*vaapi_video_decoder*=3',
-          'vaapi_video_decoder=3',
           '*native_pixmap_frame_resource*=2',
           'native_pixmap_frame_resource=1',
         ].join(','),

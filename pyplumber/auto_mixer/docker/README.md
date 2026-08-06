@@ -167,9 +167,10 @@ writes the overlay DMA-BUF socket to `/tmp/dma-page/overlay.sock` through the
 The browser REST API is available on
 `http://127.0.0.1:$DMA_BROWSER_REST_PORT/status`.
 
-For the VAAPI/NVIDIA path the browser defaults to a retained DMA-BUF pool of
-10 frames (`DMA_BROWSER_DMABUF_POOL_SIZE=10`) and enables the Chromium NVIDIA
-sync checks listed in `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES`.
+The browser defaults to a retained DMA-BUF pool of 10 frames
+(`DMA_BROWSER_DMABUF_POOL_SIZE=10`). Hardware video decoding is disabled for
+this graphics-overlay process; `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` remains
+available for unrelated Chromium feature overrides.
 
 The current image still builds `face.fp16.plan` at auto-mixer startup when the
 cache directory is empty. The intended next step is to move that generation
@@ -180,7 +181,7 @@ startup.
 
 The same compose stack can run the Dockerized basketball neural demo with Janus
 preview and Web UI registration. Build the neural-demo image first with
-`/home/jp/git/avplumber/neural-demo/build-neural-demo-image.sh`, then configure
+`neural-demo/build-neural-demo-image.sh`, then configure
 these host-local values in `.env`:
 
 ```sh

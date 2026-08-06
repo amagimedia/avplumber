@@ -23,7 +23,7 @@ deps/dma-browser/node_modules/
 deps/dma-browser/dist/
 deps/dma-browser/addons/fdpass/build/
 deps/dma-browser/addons/fdpass/node_modules/
-cuda-overlay-demo/artifacts/
+demos/cuda-overlay/artifacts/
 pyplumber/auto_mixer/docker/media-inputs/*
 !pyplumber/auto_mixer/docker/media-inputs/.gitkeep
 pyplumber/auto_mixer/docker/media-wipes/*

@@ -1,4 +1,4 @@
-# dmabuf-demo — browser overlay → avplumber → Janus (WebRTC)
+# dmabuf-browser — browser overlay → avplumber → Janus (WebRTC)
 
 Render a single HTML page (any URL — e.g. a broadcast graphics overlay)
 headlessly in **stock Electron**, export each frame as a GPU **DMA-BUF**
@@ -77,6 +77,10 @@ open http://<JANUS_HOST_IP>:8080     # janus-preview
 ./down.sh
 ```
 
+The Compose stack passes `HTML_OVERLAY_FPS` to both dma-browser and avplumber,
+so their timestamp rates cannot drift apart. Use an externally reachable
+`JANUS_HOST_IP` when opening the preview from another machine.
+
 Confirm capture is flowing: `curl http://127.0.0.1:9009/status` — `txFrameCount`
 should be climbing and `droppedReasons` near-empty. Turn on `GBM_LINEAR_SHIM_LOG=1`
 to see the shim strip `GBM_BO_USE_LINEAR`.
@@ -99,7 +103,7 @@ docker run --rm --network host --gpus all --privileged \
   -e MPDECIMATE_DURATION_SEC=600 \
   -e MPDECIMATE_REPORT_INTERVAL_SEC=60 \
   -v <dma-browser-socket-volume>:/tmp/dma-page \
-  -v "$PWD/dmabuf-demo/graph/dmabuf_browser_to_janus.py:/opt/avplumber/dmabuf_browser_to_janus.py:ro" \
+  -v "$PWD/demos/dmabuf-browser/graph/dmabuf_browser_to_janus.py:/opt/avplumber/dmabuf_browser_to_janus.py:ro" \
   avplumber-dmabuf-consumer-cuda \
   python3 /opt/avplumber/dmabuf_browser_to_janus.py
 ```
@@ -107,7 +111,7 @@ docker run --rm --network host --gpus all --privileged \
 Progress and the final result use a stable, grep-friendly format:
 
 ```text
-[dmabuf_mpdecimate] final input=18000 unique=17990 duplicates=10 duplicate_pct=0.056
+[dmabuf_mpdecimate] final input=18003 unique=18003 duplicates=0 duplicate_pct=0.000
 ```
 
 Set `MPDECIMATE_FILTER` to override the default `mpdecimate` filter expression,

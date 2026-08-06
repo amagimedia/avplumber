@@ -1,0 +1,150 @@
+name: ${COMPOSE_PROJECT_NAME:-avplumber-dmabuf-demo}
+
+services:
+  janus:
+    build:
+      context: ../../pyplumber/auto_mixer/docker
+      dockerfile: janus/Dockerfile
+      args:
+        JANUS_REF: ${JANUS_REF:-v1.4.1}
+    image: avplumber-dmabuf-demo-janus:${JANUS_IMAGE_TAG:-v1.4.1}
+    network_mode: host
+    restart: unless-stopped
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      JANUS_HOST_IP: ${JANUS_HOST_IP:?set JANUS_HOST_IP in demos/dmabuf-browser/.env}
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_AUDIO_ENABLED: "false"
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-20000-20100}
+      JANUS_DEBUG_LEVEL: ${JANUS_DEBUG_LEVEL:-4}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  janus-preview:
+    build:
+      context: ../../pyplumber/auto_mixer/docker
+      dockerfile: preview/Dockerfile
+    image: avplumber-dmabuf-demo-janus-preview:${JANUS_PREVIEW_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - janus
+    environment:
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+
+  wayland:
+    build:
+      context: .
+      dockerfile: wayland/Dockerfile
+    image: avplumber-dmabuf-demo-wayland:${WAYLAND_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    gpus: all
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      WLR_BACKENDS: headless
+      WLR_LIBINPUT_NO_DEVICES: "1"
+      WLR_NO_HARDWARE_CURSORS: "1"
+      WLR_RENDERER: gles2
+      WLR_RENDER_DRM_DEVICE: ${WLR_RENDER_DRM_DEVICE:-/dev/dri/renderD128}
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "socat -u OPEN:/dev/null UNIX-CONNECT:$${XDG_RUNTIME_DIR}/$${WAYLAND_DISPLAY}",
+        ]
+      start_period: 30s
+      start_interval: 1s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dma-browser:
+    build:
+      context: ../..
+      dockerfile: pyplumber/auto_mixer/docker/dma-browser/Dockerfile
+    image: avplumber-dmabuf-demo-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    gpus: all
+    shm_size: 1gb
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - /dev/dri:/dev/dri
+    depends_on:
+      wayland:
+        condition: service_healthy
+    environment:
+      XDG_RUNTIME_DIR: /run/avp-wayland
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-1}
+      NVIDIA_DRIVER_CAPABILITIES: all
+      DMA_BROWSER_FORCE_NVIDIA: "1"
+      DMA_BROWSER_REST_HOST: 0.0.0.0
+      DMA_BROWSER_REST_PORT: "9009"
+      DMA_BROWSER_SOCKET_DIR: /tmp/dma-page
+      DMA_BROWSER_AUTO_OPEN_ID: overlay
+      DMA_BROWSER_AUTO_OPEN_URL: ${HTML_OVERLAY_URL:?set HTML_OVERLAY_URL in demos/dmabuf-browser/.env}
+      DMA_BROWSER_AUTO_OPEN_WIDTH: ${HTML_OVERLAY_WIDTH:-1280}
+      DMA_BROWSER_AUTO_OPEN_HEIGHT: ${HTML_OVERLAY_HEIGHT:-720}
+      DMA_BROWSER_AUTO_OPEN_FPS: ${HTML_OVERLAY_FPS:-60}
+      DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
+      DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1920x1080,1280x720}
+      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+    volumes:
+      - wayland-runtime:/run/avp-wayland
+      - dma-browser-sockets:/tmp/dma-page
+    ports:
+      - "${DMA_BROWSER_REST_PORT:-9009}:9009"
+
+  avplumber:
+    build:
+      context: ../..
+      dockerfile: demos/dmabuf-browser/consumer/Dockerfile.cuda
+    image: avplumber-dmabuf-demo-consumer:${DMABUF_CONSUMER_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    gpus: all
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    devices:
+      - /dev/dri:/dev/dri
+    depends_on:
+      janus:
+        condition: service_started
+      dma-browser:
+        condition: service_healthy
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: all
+      SOCKET: /tmp/dma-page/overlay.sock
+      WIDTH: ${HTML_OVERLAY_WIDTH:-1280}
+      HEIGHT: ${HTML_OVERLAY_HEIGHT:-720}
+      FPS: ${HTML_OVERLAY_FPS:-60}
+      OUTPUT_MODE: janus
+      JANUS_HOST: 127.0.0.1
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+    volumes:
+      - dma-browser-sockets:/tmp/dma-page
+      - ./graph/dmabuf_browser_to_janus.py:/opt/avplumber/dmabuf_browser_to_janus.py:ro
+    command: ["python3", "/opt/avplumber/dmabuf_browser_to_janus.py"]
+
+volumes:
+  wayland-runtime:
+  dma-browser-sockets:

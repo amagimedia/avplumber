@@ -1,20 +1,27 @@
 # dma-browser
 
-Generic offscreen HTML page renderer for Linux + Electron, with GPU dmabuf capture (via `fdpass`) and PCM audio capture (Unix socket).
+Offscreen HTML graphics renderer for Linux + Electron, with GPU DMA-BUF capture
+(via `fdpass`) and PCM audio capture (Unix socket).
 
-Single Electron process. Up to 8 BrowserWindows. Controlled via a REST API on `127.0.0.1:9009`. Uses the patched Electron 41 / Chrome 146 build from the project `.npmrc`.
+Single Electron process. Up to 8 BrowserWindows. Controlled via a REST API on
+`127.0.0.1:9009`. Uses stock Electron; NVIDIA capture support comes from the
+GBM shim under `native/gbm-linear-shim/`.
 
 ## Quick start
 
 ```bash
 npm install
 npm run rebuild:addons   # builds fdpass native addon
+npm run rebuild:shim     # builds the NVIDIA GBM allocation shim
 npm start                # launches Electron through bin/run.sh
 ```
 
 ### NVIDIA GPUs
 
-`bin/run.sh` autodetects NVIDIA and applies the Wayland/VAAPI launch environment for the patched Chromium build. No GBM `LD_PRELOAD` shim is used. Force-enable the NVIDIA runtime args with:
+`bin/run.sh` autodetects NVIDIA, configures the Wayland/GBM environment, and
+preloads the allocation shim. Hardware video decoding is deliberately disabled;
+this process renders graphics overlays. Force-enable the NVIDIA runtime args
+with:
 
 ```bash
 DMA_BROWSER_FORCE_NVIDIA=1 npm start
@@ -42,7 +49,7 @@ Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interlea
 - `src/shared/` — IPC contracts shared between main + preload
 - `addons/fdpass/` — vendored native addon for dmabuf FD passing
 - `tests/unit/` — Vitest unit tests
-- `bin/run.sh` — launcher that applies NVIDIA Wayland/VAAPI runtime args when appropriate
+- `bin/run.sh` — launcher that applies NVIDIA Wayland/GBM runtime settings
 
 ## Tests
 

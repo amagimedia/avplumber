@@ -12,7 +12,7 @@
 # at runtime by the NVIDIA container runtime (--gpus all + all caps).
 #
 # Build context = the avplumber repo root:
-#   docker build -t avplumber-dmabuf-consumer-cuda -f dmabuf-demo/consumer/Dockerfile.cuda .
+#   docker build -t avplumber-dmabuf-consumer-cuda -f demos/dmabuf-browser/consumer/Dockerfile.cuda .
 ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
 ARG AVP_FLAGS="HAVE_CUDA=1 HAVE_NVCC=0 HAVE_GL=1 HAVE_DRM=1 HAVE_NVJPEG=1 HAVE_VAAPI=0 HAVE_TENSORRT=0 NEURAL_NET_COMMON=0 NEURAL_NET_SPECIFIC=0 HAVE_NVOF=0 HAVE_NVOF_FRUC=0 HAVE_OPENCV=0 HAVE_SCTE35=0 CUDA_ROOT=/usr/local/cuda-13.0"
 

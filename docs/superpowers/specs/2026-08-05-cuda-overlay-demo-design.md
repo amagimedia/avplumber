@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a self-contained `cuda-overlay-demo/` that builds the repository's patched
+Add a self-contained `demos/cuda-overlay/` that builds the repository's patched
 FFmpeg `n7.1.5` and PyPlumber integration, generates deterministic color-bar
 fixtures, and exercises `overlay_many_cuda` on an NVIDIA GPU.
 
@@ -12,7 +12,7 @@ against an independent CPU reference. It targets CUDA Toolkit 11.7 so the
 container build verifies the filter's documented minimum toolkit version. The
 runtime still requires compute capability 7.0 or newer.
 
-This directory is independent of the in-progress `dmabuf-demo/`. It follows the
+This directory is independent of `demos/dmabuf-browser/`. It follows the
 same idea of keeping a runnable example, graph, container definition, and
 documentation together, but it does not share files or services with that
 demo. It does not add a browser, Wayland compositor, Janus, or a live network
@@ -48,7 +48,7 @@ chroma row before `overlay_many_cuda` is involved.
 The implementation will add:
 
 ```text
-cuda-overlay-demo/
+demos/cuda-overlay/
 |-- README.md
 |-- Dockerfile
 |-- compose.yaml
@@ -174,7 +174,7 @@ records FFmpeg version, filter availability, CUDA compiler version, GPU model,
 driver version, and compute capability in the report.
 
 `compose.yaml` defines one GPU test service with the generated artifacts bind
-mounted to `cuda-overlay-demo/artifacts/`. A multi-service live stack would add
+mounted to `demos/cuda-overlay/artifacts/`. A multi-service live stack would add
 coordination without improving this test, so generation, graph execution,
 comparison, and reporting run sequentially inside the test service. `run.sh`
 is a thin convenience wrapper around the corresponding Compose build and run
@@ -183,7 +183,7 @@ commands; it contains no machine-specific configuration.
 The normal user flow is:
 
 ```text
-./cuda-overlay-demo/run.sh
+./demos/cuda-overlay/run.sh
 ```
 
 The command returns nonzero if image generation, graph construction, any GPU
@@ -238,7 +238,7 @@ Before reporting the demo complete:
 - run targeted local tests for the pure-Python asset and CPU-reference logic;
 - confirm tracked demo files contain no private host, credential, or
   machine-specific paths;
-- confirm the existing `dmabuf-demo/` and unrelated dirty files are unchanged.
+- confirm `demos/dmabuf-browser/` and unrelated dirty files are unchanged.
 
 CUDA build and execution are performed on the configured remote NVIDIA host,
 not on a local machine without `nvidia-smi`.

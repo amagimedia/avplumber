@@ -443,4 +443,3 @@ void* gbm_bo_map(struct gbm_bo* bo,
   }
   return result;
 }
-

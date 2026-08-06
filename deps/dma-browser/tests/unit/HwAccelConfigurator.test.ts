@@ -66,24 +66,30 @@ describe('HwAccelConfigurator.apply', () => {
     expect(findSwitch(calls, 'use-angle')?.value).toBe('gl-swiftshader');
   });
 
-  it('includes the expected base enable-features list', () => {
+  it('enables offscreen capture and disables hardware video decoding', () => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator({}, cl).apply();
     const enabled = findSwitch(calls, 'enable-features')?.value ?? '';
-    const features = enabled.split(',');
-    expect(features).toEqual(
+    const disabled = findSwitch(calls, 'disable-features')?.value ?? '';
+
+    expect(enabled.split(',')).toEqual(
+      expect.arrayContaining([
+        'RenderableMappableSharedImageForceScanout',
+      ]),
+    );
+    expect(disabled.split(',')).toEqual(
       expect.arrayContaining([
         'AcceleratedVideoDecoder',
         'AcceleratedVideoDecodeLinuxGL',
         'VaapiOnNvidiaGPUs',
         'VaapiIgnoreDriverChecks',
         'UseChromeOSDirectVideoDecoder',
-        'RenderableMappableSharedImageForceScanout',
         'VaapiNvidiaSyncSurfaceBeforeOutput',
-        'VaapiNvidiaOutputBufferTuning:output_frame_pool_size/11',
+        'VaapiNvidiaOutputBufferTuning',
         'ReduceHardwareVideoDecoderBuffers',
       ]),
     );
+    expect(findSwitch(calls, 'disable-accelerated-video-decode')).toBeDefined();
   });
 
   it('does not enable diagnostic or high-latency NVIDIA patch features by default', () => {
@@ -100,7 +106,7 @@ describe('HwAccelConfigurator.apply', () => {
     }
   });
 
-  it('appends extra/disable features from env and dedupes', () => {
+  it('appends safe extra features without re-enabling disabled video decode', () => {
     const { cl, calls } = recorder();
     new HwAccelConfigurator(
       {
@@ -112,7 +118,8 @@ describe('HwAccelConfigurator.apply', () => {
     const enabled = (findSwitch(calls, 'enable-features')?.value ?? '').split(',');
     const disabled = (findSwitch(calls, 'disable-features')?.value ?? '').split(',');
     expect(enabled).toContain('MyCustomFeature');
-    expect(enabled.filter((f) => f === 'AcceleratedVideoDecoder')).toHaveLength(1);
+    expect(enabled).not.toContain('AcceleratedVideoDecoder');
+    expect(disabled).toContain('AcceleratedVideoDecoder');
     expect(disabled).toContain('AnotherFeature');
     expect(disabled.filter((f) => f === 'Vulkan')).toHaveLength(1);
   });
@@ -122,7 +129,8 @@ describe('HwAccelConfigurator.apply', () => {
     new HwAccelConfigurator({ DMA_BROWSER_CHROMIUM_VLOG: '1' }, cl).apply();
     expect(findSwitch(calls, 'enable-logging')?.value).toBe('stderr');
     expect(findSwitch(calls, 'v')?.value).toBe('1');
-    expect(findSwitch(calls, 'vmodule')?.value).toContain('vaapi_video_decoder');
+    expect(findSwitch(calls, 'vmodule')?.value).toContain('gl_context');
+    expect(findSwitch(calls, 'vmodule')?.value).not.toContain('vaapi_video_decoder');
   });
 
   it('does not emit vlog switches by default', () => {

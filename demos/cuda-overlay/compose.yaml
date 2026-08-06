@@ -1,8 +1,10 @@
+name: cuda-overlay-demo
+
 services:
   test:
     build:
-      context: ..
-      dockerfile: cuda-overlay-demo/Dockerfile
+      context: ../..
+      dockerfile: demos/cuda-overlay/Dockerfile
       args:
         AVPLUMBER_REVISION: ${AVPLUMBER_REVISION:-workspace}
         FFMPEG_TAG: n7.1.5

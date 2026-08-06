@@ -39,8 +39,8 @@ COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
 
 RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
-    && git -C /tmp/ffmpeg config user.name "cuda-overlay-demo builder" \
-    && git -C /tmp/ffmpeg config user.email "cuda-overlay-demo@local" \
+    && git -C /tmp/ffmpeg config user.name "cuda-overlay builder" \
+    && git -C /tmp/ffmpeg config user.email "cuda-overlay@local" \
     && git -C /tmp/ffmpeg am /build/deps/ffmpeg-patches/*.patch
 
 RUN cd /tmp/ffmpeg \
@@ -86,8 +86,8 @@ COPY src /build/src
 COPY pyplumber /build/pyplumber
 
 RUN git init --quiet /build \
-    && git -C /build config user.name "cuda-overlay-demo builder" \
-    && git -C /build config user.email "cuda-overlay-demo@local" \
+    && git -C /build config user.name "cuda-overlay builder" \
+    && git -C /build config user.email "cuda-overlay@local" \
     && git -C /build commit --quiet --allow-empty -m "workspace ${AVPLUMBER_REVISION}"
 
 RUN make -j"$(nproc)" python_module \
@@ -116,7 +116,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        PYTHONPATH=/build \
        python3 -c 'import pyplumber'
 
-COPY cuda-overlay-demo /build/cuda-overlay-demo
+COPY demos/cuda-overlay /build/demos/cuda-overlay
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
@@ -125,4 +125,4 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV PYPLUMBER_PATH=/build
 ENV PYTHONPATH=/build
 
-ENTRYPOINT ["python3", "/build/cuda-overlay-demo/tools/run_matrix.py"]
+ENTRYPOINT ["python3", "/build/demos/cuda-overlay/tools/run_matrix.py"]

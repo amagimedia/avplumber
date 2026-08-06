@@ -1,4 +1,4 @@
-# cuda-overlay-demo — deterministic `overlay_many_cuda` validation
+# cuda-overlay — deterministic `overlay_many_cuda` validation
 
 Build the repository's FFmpeg patch stack on public FFmpeg `n7.1.5`, run the
 patched `overlay_many_cuda` through a purpose-built PyPlumber graph, and compare
@@ -41,21 +41,21 @@ CUDA toolkit; all FFmpeg CUDA and NVCC support remains enabled.
 From the repository root:
 
 ```bash
-./cuda-overlay-demo/run.sh
+./demos/cuda-overlay/run.sh
 ```
 
-To build without starting the matrix, run `./cuda-overlay-demo/build.sh`.
+To build without starting the matrix, run `./demos/cuda-overlay/build.sh`.
 
 For a smaller diagnostic sweep:
 
 ```bash
-./cuda-overlay-demo/run.sh --counts 1,2,8,15
+./demos/cuda-overlay/run.sh --counts 1,2,8,15
 ```
 
 For a native 1080p maximum-input run:
 
 ```bash
-./cuda-overlay-demo/run.sh --width 1920 --height 1080 --counts 15
+./demos/cuda-overlay/run.sh --width 1920 --height 1080 --counts 15
 ```
 
 Explicit dimensions apply to fixture generation, CUDA composition, the CPU
@@ -68,7 +68,7 @@ fails. There is no CPU fallback.
 
 ## Artifacts
 
-Each run creates a timestamped directory below `cuda-overlay-demo/artifacts/`
+Each run creates a timestamped directory below `demos/cuda-overlay/artifacts/`
 containing:
 
 - `assets/png/`: the base and 15 source overlay PNGs;

@@ -42,6 +42,7 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 | `HAVE_TENSORRT=1` | TensorRT inference nodes. Optionally set `TENSORRT_ROOT=` |
 | `HAVE_JACK=1` | `jack_sink`. Links `-ljack` |
 | `HAVE_NVCC=1` | Compile CUDA PTX for CUDA processing nodes. Requires `nvcc` |
+| `HAVE_NVJPEG=1` | Build `nvjpeg_enc`; defaults to `HAVE_CUDA`, but can be disabled independently |
 | `HAVE_SCTE35=1` | `scte35_parse` node |
 | `EMBED_IN=obs` | OBS source plugin build |
 

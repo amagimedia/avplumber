@@ -41,7 +41,7 @@ GPU render target is always tiled (block-linear) -- the driver refuses a linear
 linearly and yields a sheared/garbage image. drm_prime_to_cuda imports the
 DMA-BUF via EGL, which honors the modifier and detiles into a linear CUDA frame.
 This needs a consumer built with HAVE_CUDA+HAVE_GL+HAVE_DRM (see
-dmabuf-demo/consumer/Dockerfile.cuda). On a GPU that CAN give a linear renderable
+demos/dmabuf-browser/consumer/Dockerfile.cuda). On a GPU that CAN give a linear renderable
 buffer (Intel/AMD, dma-browser shim GBM_LINEAR_SHIM_FORCE_LINEAR=1) the DRM-only
 build + a plain hwdownload works and this CUDA step can be dropped.
 

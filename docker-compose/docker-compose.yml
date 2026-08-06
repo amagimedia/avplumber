@@ -147,10 +147,7 @@ services:
       DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1080x1920,1920x1080,1280x720}
       DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
       DMA_BROWSER_RENDER_NODE: ${DMA_BROWSER_RENDER_NODE:-}
-      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks}
-      LIBVA_DRIVER_NAME: nvidia
-      NVD_BACKEND: direct
-      NVD_LOG: ${NVD_LOG:-0}
+      DMA_BROWSER_CHROMIUM_EXTRA_FEATURES: ${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:-}
     volumes:
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page

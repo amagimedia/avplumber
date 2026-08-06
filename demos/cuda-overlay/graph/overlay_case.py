@@ -12,7 +12,7 @@ from pathlib import Path
 
 DEMO_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEMO_DIR / "tools"))
-sys.path.insert(0, os.environ.get("PYPLUMBER_PATH", str(DEMO_DIR.parent)))
+sys.path.insert(0, os.environ.get("PYPLUMBER_PATH", str(DEMO_DIR.parents[1])))
 
 from overlay_common import (  # noqa: E402
     HEIGHT,
