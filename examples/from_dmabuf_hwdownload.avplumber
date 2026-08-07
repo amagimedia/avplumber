@@ -2,7 +2,7 @@ hwaccel.init { "name": "@drm", "type": "drm", "device": "/dev/dri/renderD128" }
 
 # Slate loader:
 
-node.add {"url":"https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
+node.add {"url":"/path/to/slate.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
 node.add {"routing":{"v:0":"slate_vpkt"},"type":"demux","auto_restart":"off","name":"slate_demux","group":"slate_loader","src":"slate_input"}
 node.add {"type":"dec_video","auto_restart":"off","name":"slate_decoder","group":"slate_loader","src":"slate_vpkt","dst":"slate_vfrm"}
 node.add {"dst_width":1920,"dst_height":1080,"dst_pixel_format":"yuv420p","flags":["SWS_LANCZOS"],"type":"rescale_video","auto_restart":"off","name":"slate_scaler","group":"slate_loader","src":"slate_vfrm","dst":"slate_final"}
@@ -49,7 +49,7 @@ node.add {"type":"enc_video","codec":"libx264","options":{"b":"8500k","preset":"
 
 # Output:
 node.add {"type":"mux","auto_restart":"panic","name":"Mux","group":"out","src":["v_encoded"],"dst":"muxed_av"}
-node.add {"format":"flv","url":"rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/output","options":{},"type":"output","auto_restart":"panic","name":"Out","group":"out","src":"muxed_av"}
+node.add {"format":"flv","url":"rtmp://localhost/live/output","options":{},"type":"output","auto_restart":"panic","name":"Out","group":"out","src":"muxed_av"}
 
 
 #stats.subscribe {"url":"","name":"stream1","interval":3,"streams":{"video":[{"decoder":"Video_Decode","q_pre_dec":"in_v","q_post_dec":"v_decoded"}],"audio":[{"decoder":"Audio_Decode","q_pre_dec":"in_a","q_post_dec":"a_decoded"}]},"sentinel":"Video_Sentinel"}   

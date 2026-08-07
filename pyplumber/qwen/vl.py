@@ -426,9 +426,9 @@ class QwenVlAsync(MolmoVllmAsync):
         params.setdefault("backend", "transformers_direct")
         params.setdefault(
             "prompt",
-            "Analyze the basketball video window. Return JSON only as a list of objects with label, confidence, bbox_2d, and point_2d when visible. Coordinates must be integers from 0 to 999 relative to the video frame.",
+            "Analyze the video window. Return JSON only as a list of visible objects with label, confidence, bbox_2d, and point_2d. Coordinates must be integers from 0 to 999 relative to the video frame.",
         )
-        params.setdefault("prompt_id", "qwen_basketball")
+        params.setdefault("prompt_id", "qwen_objects")
         params.setdefault("metadata_key_detections", "qwen_detections")
         params.setdefault("metadata_key_points", "qwen_points")
         params.setdefault("metadata_key_raw", "qwen_raw")
@@ -503,7 +503,7 @@ class QwenVlAsync(MolmoVllmAsync):
                 raise RuntimeError("torch CUDA is unavailable")
 
             kernel_path = _find_repo_file(
-                "src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu",
+                "src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu",
                 Path(__file__).resolve(),
             )
             self._torch = torch

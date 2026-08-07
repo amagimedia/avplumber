@@ -80,8 +80,8 @@ COPY pyplumber/qwen/transformers_runner.py /opt/avplumber/pyplumber/qwen/transfo
 COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
 COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
 COPY src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh /opt/avplumber/src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh
-COPY src/nodes/neural_net/preprocess/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
-COPY src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu /opt/avplumber/src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu
+COPY src/nodes/neural_net/vlm/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/vlm/molmo2_preprocess.cu
+COPY src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu /opt/avplumber/src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu
 COPY tests/test_molmo_vllm.py /opt/avplumber/tests/test_molmo_vllm.py
 COPY tests/test_qwen_vl.py /opt/avplumber/tests/test_qwen_vl.py
 COPY docker/molmo/run-smoke.sh /opt/avp-molmo/run-smoke.sh

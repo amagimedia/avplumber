@@ -808,7 +808,7 @@ Parameters:
 - `metadata_key_srs` / `srs_metadata_key` (string, optional, default `tracknet_ball_srs`) - SRS-compatible ball metadata key
 - `triplet_alignment` (string, optional, default `center`, or `latest` for `srs_ball`) - `center` preserves the live/legacy buffering; `latest` emits each frame using triplets `[0,0,0]`, `[0,0,1]`, then `[t-2,t-1,t]`
 - `preprocess_mode` (string, optional, default `resize`, or `srs_affine` for `srs_ball`) - `resize` uses the legacy direct resize sampler; `srs_affine` matches SRS center-affine geometry before TrackNet normalization
-- `normalization_mode` (string, optional, default `imagenet`) - `imagenet` applies ImageNet mean/std normalization for basketball-style exports; `zero_one` emits RGB values directly in `[0, 1]` for soccer/football-style exports
+- `normalization_mode` (string, optional, default `imagenet`) - `imagenet` applies ImageNet mean/std normalization; `zero_one` emits RGB values directly in `[0, 1]`
 - `auto_sample_min_fps` / `tracknet_auto_sample_min_fps` / `auto_sample_fps_threshold` (number or ratio string, optional, default `0`) - enable automatic input-FPS-based TrackNet sampling at or above this FPS; `0` disables auto sampling. The node estimates FPS from incoming frame PTS and keeps every source frame on output with its original PTS/timebase.
 - `auto_sample_every_n` / `tracknet_auto_sample_every_n` / `auto_sample_divisor` (int, optional, default `1`) - when auto sampling is active, build TrackNet triplets from every Nth source frame. Non-sampled frames do not receive TrackNet metadata. Values greater than `1` require `triplet_alignment: "latest"`.
 - `sample_fill_mode` / `tracknet_sample_fill_mode` (string, optional, default `none`) - `none` leaves skipped frames without TrackNet metadata; `hold` copies the most recent inferred TrackNet metadata onto skipped frames.
@@ -816,7 +816,7 @@ Parameters:
 - `srs_channel` (int, optional, default `2`) - TrackNet heatmap channel consumed by the SRS-compatible postprocessor
 - `srs_score_threshold` (float, optional, default `0.5`) - post-sigmoid heatmap threshold for SRS-compatible connected components
 - `srs_use_hm_weight` (bool, optional, default `true`) - match SRS heatmap-weighted component center/score
-- `target_label` / `label` (string, optional, default `basketball`) - compact detection label
+- `target_label` / `label` (string, optional, default `ball`) - compact detection label
 - `conf_thresh` (float, optional, default `0.5`) - compact detection score threshold
 - `visible_thresh` (float, optional, default `0.5`) - compact detection visible threshold
 - `emit_invisible` (bool, optional, default `false`) - allow compact detections below `visible_thresh`

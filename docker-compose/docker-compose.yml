@@ -160,7 +160,7 @@ services:
   runner:
     profiles:
       - script
-    image: ${AVP_RUNNER_IMAGE:-avplumber-neural-demo:latest}
+    image: ${AVP_RUNNER_IMAGE:?set AVP_RUNNER_IMAGE to an AVPlumber runtime image}
     network_mode: host
     restart: "no"
     deploy: *gpu-deploy
@@ -198,43 +198,6 @@ services:
       - cuda-jit-cache:/cuda-cache
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
-
-  neural-demo:
-    profiles:
-      - neural
-    image: ${NEURAL_DEMO_IMAGE:-avplumber-neural-demo:latest}
-    network_mode: host
-    restart: "no"
-    deploy: *gpu-deploy
-    devices:
-      - ${DRI_DEVICE:-/dev/dri}:${DRI_DEVICE:-/dev/dri}
-    depends_on:
-      janus:
-        condition: service_started
-      web-ui:
-        condition: service_healthy
-    environment:
-      <<: *gpu-env
-      AVP_EXAMPLE: ${NEURAL_DEMO_EXAMPLE:-metadata}
-      AVP_MODE: ${NEURAL_DEMO_MODE:-live}
-      AVP_INPUT: /run/avp/input/input
-      AVP_OUTPUT: ${NEURAL_DEMO_OUTPUT:-janus}
-      AVP_ARTIFACT_DIR: /run/avp/output
-      AVP_METADATA_DUMPS: ${NEURAL_DEMO_METADATA_DUMPS:-0}
-      AVP_JANUS_HOST: ${NEURAL_DEMO_JANUS_HOST:-127.0.0.1}
-      AVP_JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
-      AVP_JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
-      AVP_JANUS_VIDEO_PT: ${JANUS_VIDEO_PT:-96}
-      AVP_JANUS_VIDEO_SSRC: "${JANUS_VIDEO_SSRC:-0x41565001}"
-      AVP_REMOTE_CONTROL_PORT: ${REMOTE_CONTROL_PORT:-22422}
-      AVP_WEBUI_API: http://127.0.0.1:${WEBUI_PORT:-22222}
-      AVP_INSTANCE_NAME: ${NEURAL_DEMO_INSTANCE_NAME:-neural-demo}
-      AVP_LOGFILE: ${NEURAL_DEMO_LOGFILE:-/var/log/avplumber/neural-demo.log}
-    volumes:
-      - ${NEURAL_DEMO_INPUT:-/dev/null}:/run/avp/input/input:ro
-      - ${NEURAL_DEMO_ARTIFACT_DIR:-./artifacts/neural-demo}:/run/avp/output
-      - runner-logs:/var/log/avplumber
-      - cuda-jit-cache:/cuda-cache
 
   molmo-smoke:
     profiles:

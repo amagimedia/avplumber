@@ -125,7 +125,7 @@ qwen_node.doStop()
 print("qwen mock strict node ok")
 
 print("== preprocess kernel ==")
-kernel_path = Path("/opt/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu")
+kernel_path = Path("/opt/avplumber/src/nodes/neural_net/vlm/molmo2_preprocess.cu")
 pre = _MolmoPreprocessor(
     torch_mod=torch,
     cupy_mod=cp,
@@ -163,7 +163,7 @@ if min_value < -1.1 or max_value > 1.1:
     raise SystemExit(f"preprocess tensor outside normalized range: {min_value}..{max_value}")
 print(f"preprocess ok: shape={tuple(tensor.shape)} range={min_value:.4f}..{max_value:.4f}")
 
-qwen_kernel_path = Path("/opt/avplumber/src/nodes/neural_net/preprocess/qwen3_vl_preprocess.cu")
+qwen_kernel_path = Path("/opt/avplumber/src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu")
 qwen_pre = _Qwen3Preprocessor(
     torch_mod=torch,
     cupy_mod=cp,
