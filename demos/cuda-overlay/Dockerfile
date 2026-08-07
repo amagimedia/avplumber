@@ -95,14 +95,12 @@ RUN make -j"$(nproc)" python_module \
         HAVE_CUDA=1 \
         HAVE_DRM=0 \
         HAVE_GL=0 \
-        HAVE_KAFKA=0 \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
         HAVE_NVJPEG=0 \
         HAVE_SCTE35=0 \
         HAVE_TENSORRT=0 \
-        NEURAL_NET_COMMON=0 \
-        NEURAL_NET_SPECIFIC=0 \
+        NEURAL_NET=0 \
         CUDA_MODULE_IMAGE_FORMAT=ptx \
         NVCC=/usr/local/cuda/bin/nvcc \
         CUDA_ROOT=/usr/local/cuda \

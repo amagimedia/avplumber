@@ -4,7 +4,10 @@
 import time
 import sys
 import os
-sys.path.append("../../")
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import torch
@@ -362,4 +365,3 @@ avp.group("g1").startNodes()
 while True:
     time.sleep(1)
     avp.heartbeat()
-

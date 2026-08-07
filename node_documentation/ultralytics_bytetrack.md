@@ -99,16 +99,16 @@ Optional:
 ## Example
 
 ```python
-from pyplumber.ultralytics_tracker import UltralyticsByteTrackNode
+from src.nodes.neural_net.tracking import UltralyticsByteTrackNode
 
 avp.addNode(UltralyticsByteTrackNode({
-    "name": "Track_Players",
+    "name": "Track_Objects",
     "group": "tracking",
     "src": "v_yuv420p",
     "dst": "v_tracked",
-    "weights": "/models/player_referee_ball_yolo_best.pt",
-    "metadata_key": "yolo_players",
-    "target_labels": ["player"],
+    "weights": "/models/yolo11n.pt",
+    "metadata_key": "tracked_objects",
+    "target_labels": ["person"],
     "tracker": "bytetrack.yaml",
     "device": 0,
 }))

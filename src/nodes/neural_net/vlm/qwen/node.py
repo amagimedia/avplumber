@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from pyplumber.molmo.vllm import (
+from ..molmo.node import (
     MolmoVllmAsync,
     _MolmoPreprocessor,
     _MolmoResult,
@@ -491,7 +491,7 @@ class QwenVlAsync(MolmoVllmAsync):
             factory = _load_runner_factory(self.runner_factory)
             self._runner = factory(self._runner_config())
         else:
-            from pyplumber.qwen.transformers_runner import TransformersQwen3VlDirectRunner
+            from .transformers_runner import TransformersQwen3VlDirectRunner
 
             self._runner = TransformersQwen3VlDirectRunner(self._runner_config())
 

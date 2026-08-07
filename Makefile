@@ -6,8 +6,6 @@ HAVE_DRM = 0
 # Optional bundled deps/features
 # - HAVE_SCTE35 controls whether we build/link libklvanc + libklscte35 and enable the SCTE-35 parser node.
 HAVE_SCTE35 = 1
-# - HAVE_KAFKA controls whether we build/link librdkafka (+ lz4/zstd) and enable the store_metadata node.
-HAVE_KAFKA = 0
 # Build NvOFFRUC-based frame interpolation node (requires CUDA + Optical_Flow_SDK_5.0.7 headers at build time,
 # and libNvOFFRUC.so available at runtime)
 HAVE_NVOF_FRUC ?= 1
@@ -20,13 +18,9 @@ HAVE_NVCC = 0
 # not need it to opt out independently of the other CUDA nodes.
 HAVE_NVJPEG ?= $(HAVE_CUDA)
 HAVE_TENSORRT = 0
-# Build generic neural inference, drawing, OCR, scene-cut ONNX, and reframing nodes.
-NEURAL_NET_COMMON ?= 0
-# Compatibility alias for downstream builds that used the old aggregate switch.
-# New builds should select tracking and scene-cut nodes explicitly.
-NEURAL_NET_SPECIFIC ?= 0
-NEURAL_NET_TRACKING ?= $(NEURAL_NET_SPECIFIC)
-NEURAL_NET_SCENE_CUT ?= $(NEURAL_NET_SPECIFIC)
+# Build all retained neural inference, drawing, tracking, scene-cut, OCR, and
+# reframing nodes. Optional hardware integrations still use their HAVE_* flags.
+NEURAL_NET ?= 0
 TENSORRT_ROOT =
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
@@ -66,16 +60,12 @@ override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
-ifeq ($(NEURAL_NET_TRACKING),1)
+ifeq ($(NEURAL_NET),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/player_tracker.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/tracknet_ball.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
-endif
-ifeq ($(NEURAL_NET_COMMON),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/reframing/smooth_crop_viewport.cpp
-endif
-ifeq ($(NEURAL_NET_SCENE_CUT),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cpp
 endif
@@ -100,15 +90,6 @@ CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
-
-ifeq ($(HAVE_KAFKA),1)
-DEPS_LIBS += deps/librdkafka/build/src/librdkafka.a
-override CXXFLAGS += -Ideps/librdkafka/src -DHAVE_KAFKA=1
-override LIBS_FLAGS += -lzstd -llz4
-else
-NODES_SRC := $(filter-out $(SRCDIR)/nodes/store_metadata.cpp,$(NODES_SRC))
-override CXXFLAGS += -DHAVE_KAFKA=0
-endif
 
 ifeq ($(HAVE_SCTE35),1)
 DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
@@ -172,7 +153,7 @@ NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_egl_image.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/yuv_to_rgba_surface.cu,avpl_yuv_rgba_ptx,objs/src/nodes/hwaccel/cuda_to_egl_image.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/cuda_overlay_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
@@ -186,7 +167,7 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET),11)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
@@ -198,11 +179,11 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_prepro
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_TRACKING)$(HAVE_NVCC),111)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_NVCC),111)
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/tracking/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/tracking/tracknet_ball.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_SCENE_CUT)$(HAVE_NVCC),111)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_NVCC),111)
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/scene_cut/luma_diff.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cu,avpl_hog_diff_ptx,objs/src/nodes/neural_net/scene_cut/hog_diff.o))
 endif
@@ -225,7 +206,7 @@ else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
 endif
 
-ifeq ($(NEURAL_NET_COMMON),1)
+ifeq ($(NEURAL_NET),1)
 override CXXFLAGS += -DHAVE_TENSORRT=1
 ifneq ($(strip $(TENSORRT_ROOT)),)
 override CXXFLAGS += -I$(TENSORRT_ROOT)/include
@@ -235,7 +216,7 @@ override LIBS_FLAGS += -lnvinfer -lnvinfer_plugin
 endif
 
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
-ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC),11)
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC)$(NEURAL_NET),111)
 ifneq (,$(wildcard $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface/NvOFFRUC.h))
 NODES_SRC += $(SRCDIR)/nodes/neural_net/nvof/nvof_fruc.cpp
 override CXXFLAGS += -DHAVE_NVOF_FRUC=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface
@@ -250,7 +231,7 @@ endif
 HAVE_NVOF ?= 0
 HAVE_OPENCV ?= 0
 NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
-ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET_SCENE_CUT),111)
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET),111)
 ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
 NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
@@ -384,7 +365,6 @@ clean_deps:
 	rm deps/cuda_loader/*.o || true
 	cd deps/libklvanc && git clean -xdf || true
 	cd deps/libklscte35 && git clean -xdf || true
-	rm -rf deps/librdkafka/build || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -403,25 +383,6 @@ deps/libklvanc/src/.libs/libklvanc.a:
 deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
 	cd deps/libklscte35 && git clean -xdf || true
 	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
-
-deps/librdkafka/build/src/librdkafka.a:
-	mkdir -p deps/librdkafka/build
-	cd deps/librdkafka/build && cmake \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DRDKAFKA_BUILD_STATIC=ON \
-		-DRDKAFKA_BUILD_TESTS=OFF \
-		-DRDKAFKA_BUILD_EXAMPLES=OFF \
-		-DWITH_SASL=OFF \
-		-DWITH_SSL=ON \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DCMAKE_AR=`which gcc-ar` \
-		-DCMAKE_RANLIB=`which gcc-ranlib` \
-		.. && $(MAKE) rdkafka VERBOSE=1
-
-ifeq ($(HAVE_KAFKA),1)
-# store_metadata.cpp needs librdkafka headers
-objs/src/nodes/store_metadata.o: deps/librdkafka/build/src/librdkafka.a
-endif
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<

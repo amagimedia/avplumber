@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# CUDA-accelerated scene detection using pyplumber.scene_detect.
+# CUDA-accelerated scene detection using the colocated scene-cut node.
 # All detection runs directly on NV12 CUDA frames — no hwdownload/CPU round-trip.
 #
 # Usage:
-#   AVP_INPUT=/path/to/video.mp4 python3 pyplumber/examples/cuda-scene-detect.py
+#   AVP_INPUT=/path/to/video.mp4 python3 -m src.nodes.neural_net.scene_cut.example
 #
 # Tunables (environment variables):
 #
@@ -42,12 +42,6 @@
 #     AVP_JANUS_VIDEO_PORT       RTP video port; RTCP = port+1 (default: 5004)
 #     AVP_JANUS_VIDEO_BITRATE_KBPS NVENC bitrate in kbps (default: 3000)
 #
-#   Metadata store
-#     AVP_METADATA_KAFKA         1 to enable writing metadata to Kafka (default: 0)
-#     AVP_METADATA_KAFKA_BROKERS Kafka bootstrap servers (default: localhost:9092)
-#     AVP_METADATA_KAFKA_TOPIC   Kafka topic to publish metadata to (default: scene-metadata)
-#     AVP_METADATA_KEYS          comma-separated metadata key names, or * for all (default: scene_overlay)
-#
 #   Monitoring
 #     AVP_WEBUI_API              Web UI endpoint, e.g. http://127.0.0.1:22222
 #     AVP_REMOTE_CONTROL_PORT    control server port for Web UI (required with AVP_WEBUI_API)
@@ -60,7 +54,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT))
 
 import pyplumber
@@ -82,9 +76,9 @@ from pyplumber.node import (
     Realtime,
     SmoothTimestamps,
 )
-from pyplumber.scene_detect import CudaSceneDetectNode
-from pyplumber.node import StoreMetadata
 from pyplumber.rtcp_feedback import RtcpFeedbackListener
+
+from src.nodes.neural_net.scene_cut.cuda_scene_detect import CudaSceneDetectNode
 
 
 JANUS_DEFAULT_HOST = "127.0.0.1"
@@ -149,13 +143,6 @@ JANUS_RTCP_FEEDBACK     = not _env_bool("AVP_DISABLE_JANUS_RTCP_FEEDBACK")
 JANUS_RTCP_FEEDBACK_BIND = os.environ.get("AVP_JANUS_RTCP_FEEDBACK_BIND", "0.0.0.0")
 JANUS_RTCP_FEEDBACK_PORT = int(os.environ.get("AVP_JANUS_RTCP_FEEDBACK_PORT", "0") or "0")
 INPUT_LOOP              = _env_bool("AVP_INPUT_LOOP", JANUS_OUTPUT)
-
-# ── Metadata store ────────────────────────────────────────────────────────────
-METADATA_KAFKA         = _env_bool("AVP_METADATA_KAFKA")
-METADATA_KAFKA_BROKERS = os.environ.get("AVP_METADATA_KAFKA_BROKERS", "localhost:9092")
-METADATA_KAFKA_TOPIC   = os.environ.get("AVP_METADATA_KAFKA_TOPIC", "scene-metadata")
-METADATA_KEYS          = os.environ.get("AVP_METADATA_KEYS", "scene_overlay")
-
 
 # ── Graph helpers ─────────────────────────────────────────────────────────────
 
@@ -340,25 +327,7 @@ def build_graph():
     else:
         nodes.append(_analysis_scale_filter(src=split_src))
 
-    # Determine detector dst edge and Kafka chain.
-    # Each avplumber edge has exactly one consumer, so we must chain nodes
-    # sequentially rather than tap the same edge from two nodes.
-    #
-    # render + kafka:   scale → detector(dst=v_scene_overlay_md)
-    #                         → MetadataStore(src=v_scene_overlay_md, dst=v_scene_md_stored)
-    #                         → JoinMetadata uses v_scene_md_stored
-    #
-    # no-render + kafka: scale → detector(dst=v_detect_pass)
-    #                          → MetadataStore(src=v_detect_pass, no dst — sink)
-    #
-    # no kafka:          scale → detector(dst=v_scene_overlay_md or no dst)
-
-    if render_output:
-        detector_dst = "v_scene_overlay_md"
-    elif METADATA_KAFKA:
-        detector_dst = "v_detect_pass"
-    else:
-        detector_dst = None
+    detector_dst = "v_scene_overlay_md" if render_output else None
 
     detector_params = {
         "src": "v_nv12_cuda",
@@ -374,44 +343,15 @@ def build_graph():
         "window_width": WINDOW_WIDTH,
         "min_content_val": MIN_CONTENT_VAL,
         "fade_bias": FADE_BIAS,
-        "metadata_key": OVERLAY_KEY if (render_output or METADATA_KAFKA) else "",
+        "metadata_key": OVERLAY_KEY if render_output else "",
     }
     detector = CudaSceneDetectNode(detector_params)
     nodes.append(detector)
 
-    _kafka_backend_cfg = {
-        "type": "kafka",
-        "bootstrap_servers": METADATA_KAFKA_BROKERS,
-        "topic": METADATA_KAFKA_TOPIC,
-    }
-    if METADATA_KAFKA and render_output:
-        # Pass-through: reads detector output, forwards to JoinMetadata
-        nodes.append(StoreMetadata({
-            "src": "v_scene_overlay_md",
-            "dst": "v_scene_md_stored",
-            "group": "scene",
-            "name": "MetadataToKafka",
-            "backend": _kafka_backend_cfg,
-            "metadata": METADATA_KEYS,
-        }))
-        _meta_edge = "v_scene_md_stored"
-    elif METADATA_KAFKA and not render_output:
-        # Sink: reads detector pass-through, no downstream consumer
-        nodes.append(StoreMetadata({
-            "src": "v_detect_pass",
-            "group": "scene",
-            "name": "MetadataToKafka",
-            "backend": _kafka_backend_cfg,
-            "metadata": METADATA_KEYS,
-        }))
-        _meta_edge = "v_scene_overlay_md"
-    else:
-        _meta_edge = "v_scene_overlay_md"
-
     if render_output:
         nodes.extend([
             JoinMetadata({
-                "src": ["v_full_cuda", _meta_edge],
+                "src": ["v_full_cuda", "v_scene_overlay_md"],
                 "dst": "v_full_with_scene_md",
                 "group": "scene", "auto_restart": "off",
             }),
@@ -485,8 +425,6 @@ def main():
         )
     if OUTPUT_URL:
         print(f"  output    : {OUTPUT_URL!r} ({OUTPUT_BITRATE})")
-    if METADATA_KAFKA:
-        print(f"  Kafka meta: {METADATA_KAFKA_BROKERS}  topic={METADATA_KAFKA_TOPIC!r}  keys={METADATA_KEYS!r}")
     if WEBUI_API:
         print(f"  Web UI    : {WEBUI_API!r} instance={INSTANCE_NAME!r} port={REMOTE_CONTROL_PORT}")
 

@@ -1,7 +1,7 @@
 # `cuda_infer_scene_cut_onnx`
 
-`cuda_infer_scene_cut_onnx` runs a pairwise CNN-embedding scene-cut classifier (the
-`amagimedia/scene-cut-experiments` export) on CUDA video frames and writes the final
+`cuda_infer_scene_cut_onnx` runs a pairwise CNN-embedding scene-cut classifier on
+CUDA video frames and writes the final
 `camera_shot_transition` decision directly onto each output frame. Unlike `luma_diff`
 / `hog_diff`, this model's cut threshold is baked into the ONNX graph at export time,
 so no external Python threshold/debounce decider node is needed downstream.
@@ -21,7 +21,7 @@ so no external Python threshold/debounce decider node is needed downstream.
 6. Writes `{"camera_shot_transition": bool, "camera_shot_type": "unknown"}` onto the
    output frame's metadata (schema-compatible with the `luma_scene_cut` Python node's
    output, so downstream consumers — `player_tracker`'s `camera_shot_metadata_key`,
-   the JSONL/Kafka emitter, HLS debug scene-cut counter — need no changes).
+   a metadata consumer or debug scene-cut counter — need no changes).
 
 ## Input Requirements
 
