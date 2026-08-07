@@ -36,10 +36,12 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 |---|---|
 | `BUILD_TYPE=Release` | Optimization flags (default: `Debug`, enables jittergen/delaygen) |
 | `HAVE_CUDA=1` | CUDA nodes; dynlink loader – no compile-time CUDA needed |
+| `HAVE_NVJPEG=1` | `nvjpeg_enc`; opt-in and requires CUDA plus nvJPEG/CUDA runtime development libraries |
 | `HAVE_GL=1` | OpenGL/EGL; required by `drm_prime_to_cuda`, `cuda_to_egl_image` |
 | `HAVE_VAAPI=1` | VAAPI (implies GL). Links `-lva -lGL -lEGL -lGLESv2` |
 | `HAVE_DRM=1` | DMA-BUF IPC source and DRM paths. Requires `libdrm-dev` |
 | `HAVE_TENSORRT=1` | TensorRT inference nodes. Optionally set `TENSORRT_ROOT=` |
+| `NEURAL_NET=1` | Retained neural nodes; legacy `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` act as aliases |
 | `HAVE_JACK=1` | `jack_sink`. Links `-ljack` |
 | `HAVE_NVCC=1` | Compile CUDA PTX for CUDA processing nodes. Requires `nvcc` |
 | `HAVE_SCTE35=1` | `scte35_parse` node |
@@ -48,7 +50,8 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 Feature gates (node only built when all conditions met):
 - `cuda_to_egl_image`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`
 - `drm_prime_to_cuda`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`
-- `cuda_infer_yolo` / `cuda_infer_rtdetr`: `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`
+- `nvjpeg_enc`: `HAVE_CUDA=1 HAVE_NVJPEG=1`
+- TensorRT inference nodes: `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`
 - `HAVE_GL` auto-enabled by `HAVE_VAAPI=1`
 
 Static library: `make static_library` → `libavplumber.a`. Public API: `src/avplumber.hpp`.
