@@ -668,6 +668,7 @@ public:
             }
             pf.diffs[0] = makeDiff(sum_abs, ring_norm_[anchor]);
         }
+        const bool current_primary_ready = pf.diffs[0].has_value();
         pending_.push_back(std::move(pf));
 
         // Commit current descriptor into the ring (D_t -> ring_head_ slot).
@@ -692,12 +693,10 @@ public:
         }
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            const auto& latest = pending_.back();
-            const auto& primary = latest.diffs[0];
             logstream << "hog_diff: frame=" << this_index
                       << " frames_lookahead=" << frames_lookahead_
                       << " pending=" << pending_.size()
-                      << " primary_ready=" << (primary.has_value() ? 1 : 0)
+                      << " primary_ready=" << (current_primary_ready ? 1 : 0)
                       << " desc_len=" << desc_len_
                       << " cells=" << cells_x_ << "x" << cells_y_
                       << " blocks=" << blocks_x_ << "x" << blocks_y_
