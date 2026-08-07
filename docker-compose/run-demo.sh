@@ -11,7 +11,6 @@ Usage:
 
 Examples:
   docker-compose/run-demo.sh --env docker-compose/demos/custom-script.env --profile script up
-  docker-compose/run-demo.sh --env docker-compose/demos/basketball-full.env --profile neural up
   docker-compose/run-demo.sh --env docker-compose/.env up -d
 EOF
 }

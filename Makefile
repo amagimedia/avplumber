@@ -20,10 +20,13 @@ HAVE_NVCC = 0
 # not need it to opt out independently of the other CUDA nodes.
 HAVE_NVJPEG ?= $(HAVE_CUDA)
 HAVE_TENSORRT = 0
-# Build neural_net nodes except sport_specific (draw, yolo/rtdetr, preprocess, utils)
+# Build generic neural inference, drawing, OCR, scene-cut ONNX, and reframing nodes.
 NEURAL_NET_COMMON ?= 0
-# Build neural_net sport-specific nodes
+# Compatibility alias for downstream builds that used the old aggregate switch.
+# New builds should select tracking and scene-cut nodes explicitly.
 NEURAL_NET_SPECIFIC ?= 0
+NEURAL_NET_TRACKING ?= $(NEURAL_NET_SPECIFIC)
+NEURAL_NET_SCENE_CUT ?= $(NEURAL_NET_SPECIFIC)
 TENSORRT_ROOT =
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
@@ -63,16 +66,18 @@ override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
-ifeq ($(NEURAL_NET_SPECIFIC),1)
-# cuda_camera_motion.cpp is gated separately (needs the NVOF dense headers); exclude
-# it from the blanket glob so the default build does not require the SDK.
-NODES_SRC += $(filter-out $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp,$(shell find $(SRCDIR)/nodes/neural_net/sport_specific -maxdepth 1 -name '*.cpp'))
-NODES_SRC += $(shell find $(SRCDIR)/nodes/neural_net/sport_specific/metadata_dump -maxdepth 1 -name '*.cpp')
+ifeq ($(NEURAL_NET_TRACKING),1)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/player_tracker.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/tracknet_ball.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 endif
 ifeq ($(NEURAL_NET_COMMON),1)
-NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/smooth_crop_viewport.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/reframing/smooth_crop_viewport.cpp
+endif
+ifeq ($(NEURAL_NET_SCENE_CUT),1)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cpp
 endif
 
 # hwaccel nodes moved from nodes/cuda to nodes/hwaccel
@@ -174,13 +179,11 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_bbox_labels.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_segmask.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_trail.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_bbox.cu,avpl_draw_bbox_ptx,objs/src/nodes/neural_net/draw/draw_bbox.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_text.cu,avpl_draw_text_ptx,objs/src/nodes/neural_net/draw/draw_text.o objs/src/nodes/neural_net/draw/draw_bbox_labels.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_segmask.cu,avpl_draw_segmask_ptx,objs/src/nodes/neural_net/draw/draw_segmask.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_draw_keypoints_ptx,objs/src/nodes/neural_net/draw/draw_keypoints.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_tactical_court.cu,avpl_draw_tactical_court_ptx,objs/src/nodes/neural_net/draw/draw_tactical_court.o))
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET_COMMON),11)
@@ -188,26 +191,20 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/doctr_ocr.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/utils/cuda_infer_scene_cut_onnx.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_preprocess.cu,avpl_doctr_preprocess_ptx,objs/src/nodes/neural_net/ocr/doctr_ocr.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/amagi_reframer.cu,avpl_reframer_ptx,objs/src/nodes/neural_net/utils/amagi_reframer.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/utils/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/utils/cuda_infer_scene_cut_onnx.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET_SPECIFIC)$(HAVE_NVCC),111)
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/jersey_color_extract.cu,avpl_jersey_uv_mean_ptx,objs/src/nodes/neural_net/sport_specific/jersey_color_extract.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_feet_seg.cu,avpl_player_feet_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_feet_seg.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/player_torso_seg.cu,avpl_player_torso_seg_ptx,objs/src/nodes/neural_net/sport_specific/player_torso_seg.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/sport_specific/tracknet_ball.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/sport_specific/luma_diff.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/hog_diff.cu,avpl_hog_diff_ptx,objs/src/nodes/neural_net/sport_specific/hog_diff.o))
-ifneq (,$(wildcard $(SRCDIR)/nodes/neural_net/sport_specific/court_seg_evidence_cuda.cu))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/court_seg_evidence_cuda.cu,avpl_court_seg_evidence_cuda_ptx,objs/src/nodes/neural_net/sport_specific/court_seg_evidence_cuda.o))
+ifeq ($(HAVE_CUDA)$(NEURAL_NET_TRACKING)$(HAVE_NVCC),111)
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/tracking/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/tracking/tracknet_ball.o))
 endif
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_crop_resize_pad.cu,avpl_ocr_crop_ptx,objs/src/nodes/neural_net/sport_specific/scoreboard_ocr.o))
+
+ifeq ($(HAVE_CUDA)$(NEURAL_NET_SCENE_CUT)$(HAVE_NVCC),111)
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/scene_cut/luma_diff.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cu,avpl_hog_diff_ptx,objs/src/nodes/neural_net/scene_cut/hog_diff.o))
 endif
 
 CUDA_ROOT ?= /usr/local/cuda
@@ -249,18 +246,18 @@ endif
 
 # CudaCameraMotion node — NVOF dense optical-flow camera path (Phase 2).
 # Built when HAVE_NVOF=1 + CUDA + the dense-API headers are vendored. Links the
-# driver-provided libnvidia-opticalflow; needs the sport_specific node infra.
+# driver-provided libnvidia-opticalflow.
 HAVE_NVOF ?= 0
 HAVE_OPENCV ?= 0
 NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
-ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET_SPECIFIC),111)
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET_SCENE_CUT),111)
 ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
-NODES_SRC += $(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
 override LIBS_FLAGS += -lnvidia-opticalflow
 ifeq ($(HAVE_NVCC),1)
 override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=1
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/sport_specific/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/neural_net/sport_specific/cuda_camera_motion.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/neural_net/scene_cut/cuda_camera_motion.o))
 else
 override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=0
 endif

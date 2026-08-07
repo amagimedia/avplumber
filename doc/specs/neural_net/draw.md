@@ -71,11 +71,11 @@ Reads GPU mask side data (`AV_FRAME_DATA_YOLO_SEG_MASKS_GPU`). Bilinear samples 
 ---
 
 ## Node: `draw_text`
-Render analysis text overlay (basketball stats).
+Render a text overlay from frame metadata.
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `metadata_key` | "basketball_analysis_v1" | Analysis source |
+| `metadata_key` | required | Metadata source |
 | `origin_x` / `origin_y` | 48 | Text position |
 | `font_scale` | 5 | Font size |
 | `draw_background` | true | Draw background box |

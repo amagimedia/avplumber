@@ -865,7 +865,7 @@ class MolmoVllmAsync(PythonNode):
                 raise RuntimeError("torch CUDA is unavailable")
 
             kernel_path = _find_repo_file(
-                "src/nodes/neural_net/preprocess/molmo2_preprocess.cu",
+                "src/nodes/neural_net/vlm/molmo2_preprocess.cu",
                 Path(__file__).resolve(),
             )
 

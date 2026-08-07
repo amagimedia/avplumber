@@ -26,7 +26,6 @@ native build flags and model assets.
 - `ultralytics-bytetrack.py`: Ultralytics inference with ByteTrack metadata.
 - `cuda-scene-detect.py`: GPU scene-change detection with optional Janus
   video output.
-- `tracker-live.py`: larger basketball tracking and analytics graph.
 - `molmo-vllm-node.py`: Molmo video-window inference integration.
 
 The generic manual N-input mixer is maintained separately under

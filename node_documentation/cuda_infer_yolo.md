@@ -182,7 +182,7 @@ node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
   "input_format": "RGB", "conf_thresh": 0.20, "max_det": 20,
   "mask_gpu_every_n": 1, "mask_cpu_every_n": 3, "mask_cpu_resolution": 120,
   "models": [
-    { "engine": "/models/ball.plan", "task_type": "detection", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" },
+    { "engine": "/models/detector.plan", "task_type": "detection", "class_names": ["object"], "output_box_format": "end2end_xyxy" },
     { "engine": "/models/yolo-seg.plan", "task_type": "segmentation", "class_names": ["person"], "output_box_format": "raw_cxcywh" }
   ]
 }

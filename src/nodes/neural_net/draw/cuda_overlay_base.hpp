@@ -131,8 +131,6 @@ struct ParsedYoloDetection {
     int y1 = 0;
     int x2 = 0;
     int y2 = 0;
-    int team = -1;
-    bool has_team = false;
     int cls = -1;
     bool has_cls = false;
     std::string label;
@@ -147,8 +145,6 @@ struct ParsedYoloDetection {
     bool has_velocity = false;
     double velocity_x = 0.0;
     double velocity_y = 0.0;
-    double jersey_mode_ratio = 0.0;
-    bool has_jersey_mode_ratio = false;
 };
 
 bool scaleAndClampBBox(double x1, double y1, double x2, double y2, int frame_width, int frame_height,

@@ -204,10 +204,6 @@ class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
 
-class ShotClassifier(InternalNode):
-    TYPE = "shot_classifier"
-
-
 class PlayerTracker(InternalNode):
     TYPE = "player_tracker"
 
@@ -234,14 +230,6 @@ class LumaSceneCut(InternalNode):
 
 class CudaInferSceneCutOnnx(InternalNode):
     TYPE = "cuda_infer_scene_cut_onnx"
-
-
-class BallTracker(InternalNode):
-    TYPE = "ball_tracker"
-
-
-class BallHandler(InternalNode):
-    TYPE = "ball_handler"
 
 
 class DrawTrail(InternalNode):
