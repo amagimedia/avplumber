@@ -244,6 +244,10 @@ class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
 
 
+class DrawSegMask(InternalNode):
+    TYPE = "draw_segmask"
+
+
 class DrawKeypoints(InternalNode):
     TYPE = "draw_keypoints"
 
