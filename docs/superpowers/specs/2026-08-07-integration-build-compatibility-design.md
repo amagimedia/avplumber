@@ -60,6 +60,11 @@ its existing revision.
 
 ## EKA integration
 
+EKA's recorder images will pass `HAVE_NVJPEG=1` explicitly because the thumbnail
+graph instantiates `nvjpeg_enc` for GPU JPEG output. The images already install the
+nvJPEG development package and copy its runtime library. This preserves thumbnails
+while allowing CUDA-only consumers to leave nvJPEG disabled.
+
 The Janus and web-ui services will use the avplumber submodule as their build
 context and select these Dockerfiles:
 

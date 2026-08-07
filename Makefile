@@ -14,13 +14,15 @@ OPTICAL_FLOW_SDK_DIR_NAME ?= deps/Optical_Flow_SDK_5.0.7
 # HAVE_CUDA does not require any system dependencies, but nvcc does
 HAVE_NVCC = 0
 # The NV12 encoder API used by nvjpeg_enc is unavailable in older CUDA
-# toolkits.  Keep the node enabled by default, but allow CUDA builds that do
-# not need it to opt out independently of the other CUDA nodes.
-HAVE_NVJPEG ?= $(HAVE_CUDA)
-HAVE_TENSORRT = 0
+# toolkits. Enable the node independently from the other CUDA nodes.
+HAVE_NVJPEG ?= 0
+HAVE_TENSORRT ?= 0
 # Build all retained neural inference, drawing, tracking, scene-cut, OCR, and
 # reframing nodes. Optional hardware integrations still use their HAVE_* flags.
-NEURAL_NET ?= 0
+# The old split flags remain aliases for downstream build compatibility.
+NEURAL_NET_COMMON ?= 0
+NEURAL_NET_SPECIFIC ?= 0
+NEURAL_NET ?= $(if $(filter 1,$(NEURAL_NET_COMMON) $(NEURAL_NET_SPECIFIC)),1,0)
 TENSORRT_ROOT =
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
@@ -62,7 +64,6 @@ NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
 ifeq ($(NEURAL_NET),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/player_tracker.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/tracknet_ball.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 NODES_SRC += $(SRCDIR)/nodes/neural_net/reframing/smooth_crop_viewport.cpp
@@ -167,7 +168,8 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_keypoints.cu,avpl_
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw_trail_ptx,objs/src/nodes/neural_net/draw/draw_trail.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET),11)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/tracknet_ball.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
@@ -177,9 +179,6 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,a
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_preprocess.cu,avpl_doctr_preprocess_ptx,objs/src/nodes/neural_net/ocr/doctr_ocr.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
-endif
-
-ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_NVCC),111)
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/tracking/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/tracking/tracknet_ball.o))
 endif
 
@@ -206,7 +205,7 @@ else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
 endif
 
-ifeq ($(NEURAL_NET),1)
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
 override CXXFLAGS += -DHAVE_TENSORRT=1
 ifneq ($(strip $(TENSORRT_ROOT)),)
 override CXXFLAGS += -I$(TENSORRT_ROOT)/include
