@@ -538,6 +538,7 @@ public:
             }
             pf.diffs[0] = r;
         }
+        const bool current_primary_ready = pf.diffs[0].has_value();
         pending_.push_back(std::move(pf));
 
         // Store Y_t into the ring for future anchor lookups. Copy the source (with
@@ -575,12 +576,10 @@ public:
         }
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            const auto& latest = pending_.back();
-            const auto& primary = latest.diffs[0];
             logstream << "luma_diff: frame=" << this_index
                       << " frames_lookahead=" << frames_lookahead_
                       << " pending=" << pending_.size()
-                      << " primary_ready=" << (primary.has_value() ? 1 : 0)
+                      << " primary_ready=" << (current_primary_ready ? 1 : 0)
                       << " size=" << width << "x" << height;
         }
     }
