@@ -61,24 +61,19 @@ RUN /usr/bin/python3 -m pip install --no-cache-dir --upgrade pip uv \
 
 RUN mkdir -p \
         /opt/avp-molmo \
-        /opt/avplumber/pyplumber/examples \
-        /opt/avplumber/pyplumber/molmo \
-        /opt/avplumber/pyplumber/qwen \
         /opt/avplumber/src/nodes/neural_net/preprocess \
+        /opt/avplumber/src/nodes/neural_net/vlm \
         /opt/avplumber/tests \
         /artifacts \
         /models/huggingface
 
-COPY pyplumber/molmo/__init__.py /opt/avplumber/pyplumber/molmo/__init__.py
-COPY pyplumber/molmo/vllm.py /opt/avplumber/pyplumber/molmo/vllm.py
-COPY pyplumber/molmo/vllm_runner.py /opt/avplumber/pyplumber/molmo/vllm_runner.py
-COPY pyplumber/molmo/transformers_runner.py /opt/avplumber/pyplumber/molmo/transformers_runner.py
-COPY pyplumber/molmo/transformers_sidecar.py /opt/avplumber/pyplumber/molmo/transformers_sidecar.py
-COPY pyplumber/qwen/__init__.py /opt/avplumber/pyplumber/qwen/__init__.py
-COPY pyplumber/qwen/vl.py /opt/avplumber/pyplumber/qwen/vl.py
-COPY pyplumber/qwen/transformers_runner.py /opt/avplumber/pyplumber/qwen/transformers_runner.py
 COPY pyplumber/node.py /opt/avplumber/pyplumber/node.py
-COPY pyplumber/examples/molmo-vllm-node.py /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
+COPY src/__init__.py /opt/avplumber/src/__init__.py
+COPY src/nodes/__init__.py /opt/avplumber/src/nodes/__init__.py
+COPY src/nodes/neural_net/__init__.py /opt/avplumber/src/nodes/neural_net/__init__.py
+COPY src/nodes/neural_net/vlm/__init__.py /opt/avplumber/src/nodes/neural_net/vlm/__init__.py
+COPY src/nodes/neural_net/vlm/molmo /opt/avplumber/src/nodes/neural_net/vlm/molmo
+COPY src/nodes/neural_net/vlm/qwen /opt/avplumber/src/nodes/neural_net/vlm/qwen
 COPY src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh /opt/avplumber/src/nodes/neural_net/preprocess/nv12_rgb_cuda.cuh
 COPY src/nodes/neural_net/vlm/molmo2_preprocess.cu /opt/avplumber/src/nodes/neural_net/vlm/molmo2_preprocess.cu
 COPY src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu /opt/avplumber/src/nodes/neural_net/vlm/qwen3_vl_preprocess.cu

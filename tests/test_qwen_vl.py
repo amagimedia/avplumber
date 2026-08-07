@@ -1,7 +1,5 @@
-import importlib.util
 import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -9,33 +7,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-PYPLUMBER_PACKAGE = types.ModuleType("pyplumber")
-PYPLUMBER_PACKAGE.__path__ = [str(REPO_ROOT / "pyplumber")]
-sys.modules.setdefault("pyplumber", PYPLUMBER_PACKAGE)
-MOLMO_PACKAGE = types.ModuleType("pyplumber.molmo")
-MOLMO_PACKAGE.__path__ = [str(REPO_ROOT / "pyplumber" / "molmo")]
-sys.modules.setdefault("pyplumber.molmo", MOLMO_PACKAGE)
-
-MOLMO_MODULE_PATH = REPO_ROOT / "pyplumber" / "molmo" / "vllm.py"
-MOLMO_SPEC = importlib.util.spec_from_file_location("pyplumber.molmo.vllm", MOLMO_MODULE_PATH)
-assert MOLMO_SPEC is not None and MOLMO_SPEC.loader is not None
-molmo_vllm = importlib.util.module_from_spec(MOLMO_SPEC)
-sys.modules[MOLMO_SPEC.name] = molmo_vllm
-MOLMO_SPEC.loader.exec_module(molmo_vllm)
-
-MODULE_PATH = REPO_ROOT / "pyplumber" / "qwen" / "vl.py"
-SPEC = importlib.util.spec_from_file_location("qwen_vl_for_tests", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-qwen_vl = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = qwen_vl
-SPEC.loader.exec_module(qwen_vl)
-
-RUNNER_MODULE_PATH = REPO_ROOT / "pyplumber" / "qwen" / "transformers_runner.py"
-RUNNER_SPEC = importlib.util.spec_from_file_location("qwen_runner_for_tests", RUNNER_MODULE_PATH)
-assert RUNNER_SPEC is not None and RUNNER_SPEC.loader is not None
-qwen_runner = importlib.util.module_from_spec(RUNNER_SPEC)
-sys.modules[RUNNER_SPEC.name] = qwen_runner
-RUNNER_SPEC.loader.exec_module(qwen_runner)
+from src.nodes.neural_net.vlm.molmo import node as molmo_vllm
+from src.nodes.neural_net.vlm.qwen import node as qwen_vl
+from src.nodes.neural_net.vlm.qwen import transformers_runner as qwen_runner
 
 
 def _parse(text, width=800, height=448):

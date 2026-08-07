@@ -3,8 +3,10 @@
 import os
 import sys
 import time
+from pathlib import Path
 
-sys.path.append("../..")
+REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(REPO_ROOT))
 
 import pyplumber
 from pyplumber.node import (
@@ -18,7 +20,8 @@ from pyplumber.node import (
     Output,
     RescaleVideo,
 )
-from pyplumber.ultralytics_tracker import UltralyticsByteTrackNode
+
+from src.nodes.neural_net.tracking.ultralytics_bytetrack import UltralyticsByteTrackNode
 
 
 INPUT_URL = os.environ.get("AVP_INPUT", "input.mp4")

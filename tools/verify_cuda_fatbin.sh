@@ -23,7 +23,7 @@ TARGET="${1:-objs/src/nodes/neural_net/draw/draw_bbox.ptx}"
 ARCHS="${CUDA_FATBIN_ARCHS:-75 80 86 89}"
 
 make "${TARGET}" \
-  HAVE_CUDA=1 HAVE_NVCC=1 NEURAL_NET_COMMON=1 \
+  HAVE_CUDA=1 HAVE_NVCC=1 NEURAL_NET=1 \
   CUDA_MODULE_IMAGE_FORMAT=fatbin \
   CUDA_FATBIN_ARCHS="${ARCHS}"
 

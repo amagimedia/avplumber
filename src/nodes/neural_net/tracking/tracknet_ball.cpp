@@ -73,18 +73,11 @@ enum class TrackNetOutputMode {
     Detection,
     Raw,
     Both,
-    SrsBall,
-    SrsBallAndRaw,
 };
 
 enum class TrackNetTripletAlignment {
     Center,
     Latest,
-};
-
-enum class TrackNetPreprocessMode {
-    Resize,
-    SrsAffine,
 };
 
 enum class TrackNetNormalizationMode {
@@ -102,12 +95,7 @@ bool emitsDetectionMetadata(TrackNetOutputMode mode) {
 }
 
 bool emitsRawMetadata(TrackNetOutputMode mode) {
-    return mode == TrackNetOutputMode::Raw || mode == TrackNetOutputMode::Both ||
-           mode == TrackNetOutputMode::SrsBallAndRaw;
-}
-
-bool emitsSrsBallMetadata(TrackNetOutputMode mode) {
-    return mode == TrackNetOutputMode::SrsBall || mode == TrackNetOutputMode::SrsBallAndRaw;
+    return mode == TrackNetOutputMode::Raw || mode == TrackNetOutputMode::Both;
 }
 
 int inputChannels(const nvinfer1::Dims& dims) {
@@ -135,21 +123,13 @@ TrackNetOutputMode parseOutputModeString(const std::string& mode) {
     if (mode == "detection" || mode == "detections") return TrackNetOutputMode::Detection;
     if (mode == "raw") return TrackNetOutputMode::Raw;
     if (mode == "both" || mode == "detection_and_raw") return TrackNetOutputMode::Both;
-    if (mode == "srs_ball" || mode == "srs") return TrackNetOutputMode::SrsBall;
-    if (mode == "srs_ball_and_raw" || mode == "srs_and_raw") return TrackNetOutputMode::SrsBallAndRaw;
-    throw Error("tracknet_ball: output_mode must be 'detection', 'raw', 'both', 'srs_ball', or 'srs_ball_and_raw'");
+    throw Error("tracknet_ball: output_mode must be 'detection', 'raw', or 'both'");
 }
 
 TrackNetTripletAlignment parseTripletAlignmentString(const std::string& alignment) {
     if (alignment == "center") return TrackNetTripletAlignment::Center;
     if (alignment == "latest" || alignment == "vod_latest") return TrackNetTripletAlignment::Latest;
     throw Error("tracknet_ball: triplet_alignment must be 'center' or 'latest'");
-}
-
-TrackNetPreprocessMode parsePreprocessModeString(const std::string& mode) {
-    if (mode == "resize" || mode == "scale") return TrackNetPreprocessMode::Resize;
-    if (mode == "srs_affine" || mode == "srs") return TrackNetPreprocessMode::SrsAffine;
-    throw Error("tracknet_ball: preprocess_mode must be 'resize' or 'srs_affine'");
 }
 
 TrackNetNormalizationMode parseNormalizationModeString(const std::string& mode) {
@@ -183,16 +163,6 @@ Parameters dimsToJson(const nvinfer1::Dims& dims) {
     return out;
 }
 
-float sigmoidFloat(float v) {
-    if (!std::isfinite(v)) return 0.0f;
-    if (v >= 0.0f) {
-        const float z = std::exp(-v);
-        return 1.0f / (1.0f + z);
-    }
-    const float z = std::exp(v);
-    return z / (1.0f + z);
-}
-
 Parameters tensorValuesToJson(const std::vector<float>& values, int max_elements, size_t* emitted_count = nullptr,
                               size_t* nonfinite_count = nullptr) {
     const size_t limit = max_elements > 0 ? std::min(values.size(), (size_t)max_elements) : values.size();
@@ -218,20 +188,15 @@ class TrackNetBall : public NodeSISO<av::VideoFrame, av::VideoFrame>,
 protected:
     std::string metadata_key_detection_ = "yolo_ball";
     std::string metadata_key_raw_ = "tracknet_raw";
-    std::string metadata_key_srs_ball_ = "tracknet_ball_srs";
     std::string target_label_ = "ball";
     TrackNetOutputMode output_mode_ = TrackNetOutputMode::Detection;
     TrackNetTripletAlignment triplet_alignment_ = TrackNetTripletAlignment::Center;
-    TrackNetPreprocessMode preprocess_mode_ = TrackNetPreprocessMode::Resize;
     TrackNetNormalizationMode normalization_mode_ = TrackNetNormalizationMode::ImageNet;
     TrackNetSampleFillMode sample_fill_mode_ = TrackNetSampleFillMode::None;
     float conf_thresh_ = 0.5f;
     float visible_thresh_ = 0.5f;
-    float srs_score_threshold_ = 0.5f;
     bool emit_invisible_ = false;
-    bool srs_use_hm_weight_ = true;
     int raw_output_max_elements_ = 0;
-    int srs_channel_ = 2;
     int output_model_width_ = 0;
     int output_model_height_ = 0;
     bool debug_log_metadata_ = false;
@@ -253,7 +218,6 @@ protected:
     AVPixelFormat source_sw_format_ = AV_PIX_FMT_NONE;
 
     int output_tensor_index_ = -1;
-    int srs_heatmap_tensor_index_ = -1;
     bool output_contract_validated_ = false;
     uint64_t frame_counter_ = 0;
     uint64_t infer_counter_ = 0;
@@ -545,16 +509,9 @@ protected:
     }
 
     bool configureTracknetPreprocess(ModelRunner& model) {
-        const char* kname = nullptr;
-        if (preprocess_mode_ == TrackNetPreprocessMode::SrsAffine) {
-            kname = (model.input_dtype == nvinfer1::DataType::kHALF)
-                ? "kTrackNetNV12TripletToNCHW9SrsAffine_fp16"
-                : "kTrackNetNV12TripletToNCHW9SrsAffine_fp32";
-        } else {
-            kname = (model.input_dtype == nvinfer1::DataType::kHALF)
-                ? "kTrackNetNV12TripletToNCHW9_fp16"
-                : "kTrackNetNV12TripletToNCHW9_fp32";
-        }
+        const char* kname = model.input_dtype == nvinfer1::DataType::kHALF
+            ? "kTrackNetNV12TripletToNCHW9_fp16"
+            : "kTrackNetNV12TripletToNCHW9_fp32";
         if (CUDA_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
             logstream << "tracknet_ball: failed to get preprocess kernel for " << model.engine_path;
             return false;
@@ -722,7 +679,6 @@ protected:
 
     void resetTracknetContextBoundState() {
         output_tensor_index_ = -1;
-        srs_heatmap_tensor_index_ = -1;
         output_contract_validated_ = false;
         resetContextBoundState();
     }
@@ -820,31 +776,6 @@ protected:
         return initializeTracknetInCurrentContext();
     }
 
-    struct SrsCandidate {
-        float x = 0.0f;
-        float y = 0.0f;
-        float score = 0.0f;
-    };
-
-    bool getHeatmapShape(const OutputTensor& ot, int& channels, int& height, int& width) const {
-        channels = 0;
-        height = 0;
-        width = 0;
-        if (ot.dims.nbDims == 4 && ot.dims.d[0] == 1) {
-            channels = ot.dims.d[1];
-            height = ot.dims.d[2];
-            width = ot.dims.d[3];
-            return channels > 0 && height > 0 && width > 0;
-        }
-        if (ot.dims.nbDims == 3) {
-            channels = ot.dims.d[0];
-            height = ot.dims.d[1];
-            width = ot.dims.d[2];
-            return channels > 0 && height > 0 && width > 0;
-        }
-        return false;
-    }
-
     bool validateOutputContract(ModelRunner& model) {
         if (inputChannels(model.input_dims) != 9 || model.input_w <= 0 || model.input_h <= 0) {
             logstream << "tracknet_ball: engine must have NCHW input with 9 channels";
@@ -852,7 +783,6 @@ protected:
         }
 
         output_tensor_index_ = -1;
-        srs_heatmap_tensor_index_ = -1;
         if (emitsDetectionMetadata(output_mode_)) {
             for (size_t i = 0; i < model.outputs.size(); ++i) {
                 const OutputTensor& ot = model.outputs[i];
@@ -870,31 +800,6 @@ protected:
 
             if (output_tensor_index_ < 0) {
                 logstream << "tracknet_ball: failed to find output tensor with [x1,y1,x2,y2,score,visible]";
-                return false;
-            }
-        }
-
-        if (emitsSrsBallMetadata(output_mode_)) {
-            for (size_t i = 0; i < model.outputs.size(); ++i) {
-                int channels = 0;
-                int heatmap_h = 0;
-                int heatmap_w = 0;
-                if (getHeatmapShape(model.outputs[i], channels, heatmap_h, heatmap_w) &&
-                    channels > srs_channel_) {
-                    srs_heatmap_tensor_index_ = (int)i;
-                    if (debug_log_metadata_) {
-                        logstream << "tracknet_ball: SRS heatmap output tensor=" << model.outputs[i].name
-                                  << " channels=" << channels
-                                  << " size=" << heatmap_w << "x" << heatmap_h
-                                  << " dtype=" << dtypeName(model.outputs[i].dtype);
-                    }
-                    break;
-                }
-            }
-
-            if (srs_heatmap_tensor_index_ < 0) {
-                logstream << "tracknet_ball: failed to find SRS heatmap output tensor with channel "
-                          << srs_channel_ << " (expected CHW or NCHW logits)";
                 return false;
             }
         }
@@ -1010,18 +915,6 @@ protected:
                           << " outputs=" << model.outputs.size();
             }
         }
-        if (emitsSrsBallMetadata(output_mode_)) {
-            const std::string srs_md = buildSrsBallMetadata(model, output_frame.width(), output_frame.height());
-            av_dict_set(&output_frame.raw()->metadata, metadata_key_srs_ball_.c_str(), srs_md.c_str(), 0);
-            storeTracknetMetadata(metadata_key_srs_ball_, srs_md);
-
-            if (debug_log_metadata_ && debug_log_every_n_ > 0 &&
-                (infer_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-                logstream << "tracknet_ball: frame=" << frame_counter_
-                          << " srs_metadata_key=" << metadata_key_srs_ball_
-                          << " " << srs_md;
-            }
-        }
         return true;
     }
 
@@ -1076,142 +969,6 @@ protected:
             j["nonfinite_elements"] = tensorElementsToJsonSize(nonfinite_elements);
             j["nonfinite_encoding"] = "null";
         }
-        return j.dump();
-    }
-
-    std::vector<SrsCandidate> extractSrsCandidates(const ModelRunner& model, int source_w, int source_h) const {
-        std::vector<SrsCandidate> candidates;
-        if (source_w <= 0 || source_h <= 0) {
-            return candidates;
-        }
-        if (srs_heatmap_tensor_index_ < 0 || (size_t)srs_heatmap_tensor_index_ >= model.outputs.size()) {
-            return candidates;
-        }
-
-        const OutputTensor& ot = model.outputs[(size_t)srs_heatmap_tensor_index_];
-        int channels = 0;
-        int heatmap_h = 0;
-        int heatmap_w = 0;
-        if (!getHeatmapShape(ot, channels, heatmap_h, heatmap_w) || srs_channel_ < 0 || srs_channel_ >= channels) {
-            return candidates;
-        }
-
-        const size_t plane_size = (size_t)heatmap_w * (size_t)heatmap_h;
-        const size_t offset = (size_t)srs_channel_ * plane_size;
-        if (offset + plane_size > ot.host_output.size() || plane_size == 0) {
-            return candidates;
-        }
-
-        std::vector<float> heatmap(plane_size);
-        std::vector<uint8_t> active(plane_size, 0);
-        bool any_active = false;
-        for (size_t i = 0; i < plane_size; ++i) {
-            const float v = sigmoidFloat(ot.host_output[offset + i]);
-            heatmap[i] = v;
-            if (v > srs_score_threshold_) {
-                active[i] = 1;
-                any_active = true;
-            }
-        }
-        if (!any_active) {
-            return candidates;
-        }
-
-        std::vector<uint8_t> visited(plane_size, 0);
-        std::vector<int> stack;
-        stack.reserve(256);
-        const float src_scale = (float)std::max(source_w, source_h);
-        const float inv_factor = src_scale / (float)heatmap_w;
-        const float src_cx = 0.5f * (float)source_w;
-        const float src_cy = 0.5f * (float)source_h;
-        const float hm_cx = 0.5f * (float)heatmap_w;
-        const float hm_cy = 0.5f * (float)heatmap_h;
-
-        for (int start_y = 0; start_y < heatmap_h; ++start_y) {
-            for (int start_x = 0; start_x < heatmap_w; ++start_x) {
-                const int start_idx = start_y * heatmap_w + start_x;
-                if (!active[(size_t)start_idx] || visited[(size_t)start_idx]) continue;
-
-                stack.clear();
-                stack.push_back(start_idx);
-                visited[(size_t)start_idx] = 1;
-
-                float sum_w = 0.0f;
-                float sum_x = 0.0f;
-                float sum_y = 0.0f;
-                int count = 0;
-
-                while (!stack.empty()) {
-                    const int idx = stack.back();
-                    stack.pop_back();
-                    const int y = idx / heatmap_w;
-                    const int x = idx - y * heatmap_w;
-                    const float w = heatmap[(size_t)idx];
-
-                    if (srs_use_hm_weight_) {
-                        sum_w += w;
-                        sum_x += (float)x * w;
-                        sum_y += (float)y * w;
-                    } else {
-                        sum_x += (float)x;
-                        sum_y += (float)y;
-                    }
-                    ++count;
-
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        const int ny = y + dy;
-                        if (ny < 0 || ny >= heatmap_h) continue;
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            if (dx == 0 && dy == 0) continue;
-                            const int nx = x + dx;
-                            if (nx < 0 || nx >= heatmap_w) continue;
-                            const int nidx = ny * heatmap_w + nx;
-                            if (!active[(size_t)nidx] || visited[(size_t)nidx]) continue;
-                            visited[(size_t)nidx] = 1;
-                            stack.push_back(nidx);
-                        }
-                    }
-                }
-
-                if (count <= 0) continue;
-                const float denom = srs_use_hm_weight_ ? sum_w : (float)count;
-                if (denom <= 0.0f || !std::isfinite(denom)) continue;
-                const float hm_x = sum_x / denom;
-                const float hm_y = sum_y / denom;
-                const float src_x = (hm_x - hm_cx) * inv_factor + src_cx;
-                const float src_y = (hm_y - hm_cy) * inv_factor + src_cy;
-                const float score = srs_use_hm_weight_ ? sum_w : (float)count;
-                candidates.push_back({src_x, src_y, score});
-            }
-        }
-        return candidates;
-    }
-
-    std::string buildSrsBallMetadata(const ModelRunner& model, int source_w, int source_h) {
-        Parameters j;
-        j["frame"] = infer_counter_ > 0 ? (int64_t)(infer_counter_ - 1) : 0;
-        j["bboxes"] = Parameters::array();
-
-        const std::vector<SrsCandidate> candidates = extractSrsCandidates(model, source_w, source_h);
-        if (candidates.empty() || source_w <= 0 || source_h <= 0) {
-            return j.dump();
-        }
-
-        const SrsCandidate* best = nullptr;
-        for (const SrsCandidate& candidate : candidates) {
-            if (!best || candidate.score > best->score) {
-                best = &candidate;
-            }
-        }
-        if (!best) {
-            return j.dump();
-        }
-
-        Parameters bbox;
-        bbox["x"] = best->x / (float)source_w;
-        bbox["y"] = best->y / (float)source_h;
-        bbox["score"] = best->score;
-        j["bboxes"].push_back(bbox);
         return j.dump();
     }
 
@@ -1329,15 +1086,9 @@ public:
         r->metadata_key_detection_ = jsonStringParam(params, "metadata_key", r->metadata_key_detection_);
         r->metadata_key_raw_ = jsonStringParam(params, "metadata_key_raw", r->metadata_key_raw_);
         r->metadata_key_raw_ = jsonStringParam(params, "raw_metadata_key", r->metadata_key_raw_);
-        r->metadata_key_srs_ball_ = jsonStringParam(params, "metadata_key_srs", r->metadata_key_srs_ball_);
-        r->metadata_key_srs_ball_ = jsonStringParam(params, "srs_metadata_key", r->metadata_key_srs_ball_);
         r->output_mode_ = parseOutputModeString(jsonStringParam(params, "output_mode", "detection"));
-        const std::string default_alignment = emitsSrsBallMetadata(r->output_mode_) ? "latest" : "center";
         r->triplet_alignment_ = parseTripletAlignmentString(
-            jsonStringParam(params, "triplet_alignment", default_alignment));
-        const std::string default_preprocess = emitsSrsBallMetadata(r->output_mode_) ? "srs_affine" : "resize";
-        r->preprocess_mode_ = parsePreprocessModeString(
-            jsonStringParam(params, "preprocess_mode", default_preprocess));
+            jsonStringParam(params, "triplet_alignment", "center"));
         r->normalization_mode_ = parseNormalizationModeString(
             jsonStringParam(params, "normalization_mode", "imagenet"));
         r->sample_fill_mode_ = parseSampleFillModeString(
@@ -1349,16 +1100,10 @@ public:
             !params.count("metadata_key_raw") && !params.count("raw_metadata_key")) {
             r->metadata_key_raw_ = params["metadata_key"].get<std::string>();
         }
-        if (emitsSrsBallMetadata(r->output_mode_) && params.count("metadata_key") &&
-            !params.count("metadata_key_srs") && !params.count("srs_metadata_key")) {
-            r->metadata_key_srs_ball_ = params["metadata_key"].get<std::string>();
-        }
         r->target_label_ = parseLabel(params);
         r->conf_thresh_ = jsonFloatParam(params, "conf_thresh", r->conf_thresh_);
         r->visible_thresh_ = jsonFloatParam(params, "visible_thresh", r->visible_thresh_);
-        r->srs_score_threshold_ = jsonFloatParam(params, "srs_score_threshold", r->srs_score_threshold_);
         r->emit_invisible_ = jsonBoolParam(params, "emit_invisible", r->emit_invisible_);
-        r->srs_use_hm_weight_ = jsonBoolParam(params, "srs_use_hm_weight", r->srs_use_hm_weight_);
         r->use_cuda_graph_ = jsonBoolParam(params, "use_cuda_graph", r->use_cuda_graph_);
         r->debug_log_metadata_ = jsonBoolParam(params, "debug_log_metadata", r->debug_log_metadata_);
         r->debug_log_every_n_ = jsonIntParam(params, "debug_log_every_n", r->debug_log_every_n_);
@@ -1372,7 +1117,6 @@ public:
         r->raw_output_max_elements_ = jsonIntParam(params, "raw_output_max_elements", r->raw_output_max_elements_);
         r->raw_output_max_elements_ = jsonIntParam(
             params, "raw_output_max_elements_per_tensor", r->raw_output_max_elements_);
-        r->srs_channel_ = jsonIntParam(params, "srs_channel", r->srs_channel_);
         r->output_model_width_ = jsonIntParam(params, "output_model_width", r->output_model_width_);
         r->output_model_height_ = jsonIntParam(params, "output_model_height", r->output_model_height_);
         if ((r->output_model_width_ < 0) || (r->output_model_height_ < 0)) {
@@ -1391,13 +1135,6 @@ public:
             r->triplet_alignment_ != TrackNetTripletAlignment::Latest) {
             throw Error("tracknet_ball: auto sampling every N frames requires triplet_alignment='latest'");
         }
-        if (r->srs_channel_ < 0) {
-            throw Error("tracknet_ball: srs_channel must be >= 0");
-        }
-        if (r->srs_score_threshold_ < 0.0f || r->srs_score_threshold_ > 1.0f) {
-            throw Error("tracknet_ball: srs_score_threshold must be between 0 and 1");
-        }
-
         ModelRunner model;
         model.engine_path = parseEnginePath(params);
         model.engine_name = std::filesystem::path(model.engine_path).filename().string();

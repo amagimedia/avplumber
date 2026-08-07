@@ -57,9 +57,9 @@ capability = torch.cuda.get_device_capability(0)
 print(f"cuda device={device_name} capability={capability}")
 
 print("== parser ==")
-from pyplumber.molmo.vllm import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
-from pyplumber.molmo.vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
-from pyplumber.qwen.vl import QwenVlAsync, _Qwen3Preprocessor, parse_qwen_generated_text
+from src.nodes.neural_net.vlm.molmo.node import MolmoVllmAsync, _MolmoPreprocessor, parse_molmo_generated_text
+from src.nodes.neural_net.vlm.molmo.vllm_runner import _format_molmo2_video_prompt, _metadata_for_window
+from src.nodes.neural_net.vlm.qwen.node import QwenVlAsync, _Qwen3Preprocessor, parse_qwen_generated_text
 
 det_md, point_md, raw_md = parse_molmo_generated_text(
     json.dumps({"objects": [{"label": "ball", "confidence": 0.9, "bbox": [400, 400, 600, 600], "point": [500, 500]}]}),
@@ -205,7 +205,7 @@ if [[ "${AVP_MOLMO_RUN_GRAPH:-0}" == "1" ]]; then
     timeout_seconds="${AVP_MOLMO_GRAPH_TIMEOUT:-45}"
 
     set +e
-    timeout "${timeout_seconds}" "${python_bin}" /opt/avplumber/pyplumber/examples/molmo-vllm-node.py
+    timeout "${timeout_seconds}" "${python_bin}" -m src.nodes.neural_net.vlm.molmo.example
     status=$?
     set -e
 

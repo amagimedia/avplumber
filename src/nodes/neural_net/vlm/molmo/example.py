@@ -13,11 +13,10 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT))
 
 import pyplumber
-from pyplumber.molmo.vllm import MolmoVllmAsync
 from pyplumber.node import (
     AssumeVideoFormat,
     DecVideo,
@@ -32,6 +31,8 @@ from pyplumber.node import (
     Output,
     RealtimeVideoFrame,
 )
+
+from src.nodes.neural_net.vlm.molmo.node import MolmoVllmAsync
 
 
 def _env_bool(name: str, default: bool) -> bool:

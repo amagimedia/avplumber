@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 try:
-    from pyplumber.molmo.transformers_runner import (
+    from .transformers_runner import (
         TransformersMolmo2VideoRunner,
         _get_float,
         _get_int,

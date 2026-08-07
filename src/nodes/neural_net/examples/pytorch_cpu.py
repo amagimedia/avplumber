@@ -11,7 +11,10 @@ import time
 import sys
 import os
 import ctypes
-sys.path.append("../..")
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import torch

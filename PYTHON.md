@@ -9,9 +9,7 @@ From repository root:
 ```bash
 cd avplumber
 make -j8 \
-  NEURAL_NET_COMMON=1 \
-  NEURAL_NET_TRACKING=1 \
-  NEURAL_NET_SCENE_CUT=1 \
+  NEURAL_NET=1 \
   HAVE_CUDA=1 \
   HAVE_NVOF_FRUC=1 \
   HAVE_NVCC=1 \
@@ -40,10 +38,10 @@ From Python you can:
 
 ## 2) Project setup pattern
 
-The sample scripts live in `pyplumber/examples/`. See
-[`pyplumber/examples/README.md`](pyplumber/examples/README.md) for example usage,
-dependencies, and notes on PyTorch, CUDA, torchvision, BlazeFace, and the live
-tracker graph.
+The minimal framework sample lives in `pyplumber/examples/`. Reusable Python
+neural nodes and their examples are grouped by purpose under
+`src/nodes/neural_net/`. See
+[`pyplumber/examples/README.md`](pyplumber/examples/README.md) for the index.
 
 Those scripts add the local package to `sys.path` before importing `pyplumber`:
 

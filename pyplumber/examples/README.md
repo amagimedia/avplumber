@@ -12,21 +12,20 @@ python3 pyplumber/examples/simple-node.py
 ```
 
 Common variables are `AVP_INPUT`, `AVP_OUTPUT`, `AVP_OUTPUT_FORMAT`, and
-`AVP_USE_REALTIME`. CUDA examples require an AVPlumber build with CUDA and a
-compatible NVIDIA driver. TensorRT examples additionally need the appropriate
-native build flags and model assets.
+`AVP_USE_REALTIME`. Reusable neural nodes and their examples live beside the
+native neural sources under `src/nodes/neural_net`.
 
 ## Examples
 
 - `simple-node.py`: minimal `PythonNode` frame-processing graph.
-- `pytorch-node.py`: CPU PyTorch inference on decoded frames.
-- `pytorch-cuda-node.py`: direct access to CUDA frame memory from PyTorch.
-- `torchvision-node.py`: torchvision object detection on CUDA frames.
-- `blazeface-node.py`: BlazeFace inference implemented in Python.
-- `ultralytics-bytetrack.py`: Ultralytics inference with ByteTrack metadata.
-- `cuda-scene-detect.py`: GPU scene-change detection with optional Janus
-  video output.
-- `molmo-vllm-node.py`: Molmo video-window inference integration.
+
+Neural examples:
+
+- `src/nodes/neural_net/examples`: generic PyTorch, torchvision, and
+  BlazeFace examples;
+- `src/nodes/neural_net/scene_cut/example.py`: CUDA scene-change detection;
+- `src/nodes/neural_net/tracking/example.py`: Ultralytics with ByteTrack;
+- `src/nodes/neural_net/vlm/molmo/example.py`: Molmo video-window inference.
 
 The generic manual N-input mixer is maintained separately under
 `demos/mixer/`. It provides fullscreen and 2/4/8/16-box portrait layouts,

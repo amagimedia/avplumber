@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .node import PythonNode
+from pyplumber.node import PythonNode
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:

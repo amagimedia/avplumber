@@ -5,7 +5,8 @@ import os
 import json
 import urllib.request
 from pathlib import Path
-sys.path.append("../../")
+REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import numpy as np
@@ -673,4 +674,3 @@ avp.group("g1").startNodes()
 while True:
     time.sleep(1)
     avp.heartbeat()
-
