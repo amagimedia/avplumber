@@ -284,7 +284,8 @@ std::vector<uint8_t> morphOpen3x3(const std::vector<uint8_t>& src, int W, int H)
 }
 
 std::vector<TextBox> boxesFromDetector(const std::vector<float>& logits, const std::vector<Region>& regions,
-                                       float bin_thresh, float box_thresh, int edge_margin_px, int max_boxes) {
+                                       float bin_thresh, float box_thresh, float edge_margin, int edge_margin_px,
+                                       int max_boxes) {
     std::vector<TextBox> boxes;
     const int area = kDetH * kDetW;
     for (int b = 0; b < kDetBatch; ++b) {
@@ -338,9 +339,14 @@ std::vector<TextBox> boxesFromDetector(const std::vector<float>& logits, const s
             float x2n = std::min(1.0f, ((float)maxx + 1.0f + expand) / (float)kDetW);
             float y2n = std::min(1.0f, ((float)maxy + 1.0f + expand) / (float)kDetH);
             const Region& r = regions[(size_t)b];
-            float margin = (float)edge_margin_px / std::max(1.0f, (float)r.w);
-            if (r.drop_left && x1n <= margin) continue;
-            if (r.drop_right && x2n >= 1.0f - margin) continue;
+            float norm_bw = x2n - x1n;
+            float norm_bh = y2n - y1n;
+            float pad_x = edge_margin * norm_bw + (float)edge_margin_px / std::max(1.0f, (float)r.w);
+            float pad_y = edge_margin * norm_bh + (float)edge_margin_px / std::max(1.0f, (float)r.h);
+            x1n = std::max(0.0f, x1n - pad_x);
+            y1n = std::max(0.0f, y1n - pad_y);
+            x2n = std::min(1.0f, x2n + pad_x);
+            y2n = std::min(1.0f, y2n + pad_y);
             TextBox tb;
             tb.region = b;
             tb.x1n = x1n; tb.y1n = y1n; tb.x2n = x2n; tb.y2n = y2n; tb.det_conf = score;
@@ -409,6 +415,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     float det_bin_thresh_ = 0.1f;
     float det_box_thresh_ = 0.1f;
     float reco_conf_thresh_ = 0.0f;
+    float edge_margin_ = 0.0f;
     int edge_margin_px_ = 2;
     int debug_log_every_n_ = 0;
     uint64_t frame_counter_ = 0;
@@ -660,7 +667,8 @@ public:
         launchPreprocess(frm, det_, det_boxes, 0.798f, 0.785f, 0.772f, 0.264f, 0.2749f, 0.287f);
         bool ok = det_.infer();
         std::vector<TextBox> boxes = ok
-            ? boxesFromDetector(det_.output, regions, det_bin_thresh_, det_box_thresh_, edge_margin_px_, rec_.n)
+            ? boxesFromDetector(det_.output, regions, det_bin_thresh_, det_box_thresh_, edge_margin_, edge_margin_px_,
+                                rec_.n)
             : std::vector<TextBox>();
 
         int raw_kept = (int)boxes.size();
@@ -783,6 +791,7 @@ public:
         if (p.count("det_bin_thresh")) r->det_bin_thresh_ = p["det_bin_thresh"].get<float>();
         if (p.count("det_box_thresh")) r->det_box_thresh_ = p["det_box_thresh"].get<float>();
         if (p.count("reco_conf_thresh")) r->reco_conf_thresh_ = p["reco_conf_thresh"].get<float>();
+        if (p.count("edge_margin")) r->edge_margin_ = std::clamp(p["edge_margin"].get<float>(), 0.0f, 1.0f);
         if (p.count("edge_margin_px")) r->edge_margin_px_ = std::max(0, p["edge_margin_px"].get<int>());
         if (p.count("debug_log_every_n")) r->debug_log_every_n_ = std::max(0, p["debug_log_every_n"].get<int>());
         if (r->debug_hwaccel_) {
