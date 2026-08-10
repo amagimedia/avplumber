@@ -505,6 +505,9 @@ Format of binary seek table: 16-byte records containing:
 
 Format of text seek table: values as above separated by space, each record in one line
 
+Pending seek-table entries are flushed and the canonical seek-table links are
+published when a finite input reaches EOF, including a final partial batch.
+
 ### `jack_sink`
 
 1 input: `av::AudioSamples` (sample format must be `fltp`, sample rate must be equal to JACK's)

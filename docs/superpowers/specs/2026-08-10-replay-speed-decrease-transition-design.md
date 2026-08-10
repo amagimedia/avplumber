@@ -19,10 +19,8 @@ the input skip policy correctly, but frames discarded or already executing in
 the decoder and downstream event loop cannot be reconstructed by timestamp
 rescaling.
 
-Reducing queue capacity, disabling the input optimization, and issuing an
-immediate zero-offset seek did not eliminate the transition. The latter two
-reduced parts of the transient but still allowed old selections to re-enter
-after apparently correct frames.
+An exact-frame pause and seek did not eliminate the transition: decoder and
+downstream work selected at the old cadence still arrived after the seek.
 
 ## Scope
 
@@ -31,58 +29,57 @@ to 100 percent or below while playback is active. Preserve the existing direct
 behavior for speed increases, zero-speed pause, and speed changes made while
 already paused. Scrubbing behavior is unchanged in this fix.
 
-Do not change `input_rec`, decoders, `speed_video`, `force_fps`, graph
-management, pybind, or the control protocol.
+Do not change framework nodes, graph management, pybind, or the control
+protocol.
 
 ## Considered Approaches
 
-1. **Coordinated pause, exact-frame seek, and resume — selected.** This is the
-   only approach that stops displaying old selections and reconstructs the
-   source sequence from the all-intra seek table. It adds a short intentional
-   freeze while the transition completes.
-2. **Disable `input_rec` fast-frame skipping.** This raises NVDEC work to 50 fps
-   at 2x and shortened the observed transient to about 200 ms, but three old
-   selected frames still escaped downstream.
+1. **Backpressure before `force_fps` — selected.** A second existing `pause`
+   node stops new frames between `speed_video` and `force_fps` without blocking
+   its worker. Frames already selected at 2x drain normally; the speed change
+   then resets `force_fps` before the gate resumes.
+2. **Exact-frame pause, seek, and resume.** This replayed the requested frame,
+   but stale decoder work still produced duplicates and gaps after resume.
 3. **Flush or change generic speed-node behavior.** An immediate flush raced
    in-flight decoder/event-loop work, while a framework-wide barrier would be
    risky and disproportionate for this small replay demo.
 
+The player does not attach `input_rec` to the speed team. All source frames are
+decoded, `speed_video` scales their timestamps, and `force_fps` performs the
+2x selection. This costs roughly 50 decoded frames per second for a 25 fps
+source at 2x, but keeps consecutive source frames available at the boundary.
+
 ## Transition
 
-The controller uses its existing observed-frame seam and a condition variable.
-For an active transition from above 100 percent to 100 percent or below:
+The controller uses its observed-frame seam and a condition variable. For an
+active transition from above 100 percent to 100 percent or below:
 
-1. Record whether playback was active and request `pause <pause-team> now`.
+1. Request `pause replay_transition now` on the gate before `force_fps`.
 2. Wait until the post-realtime observation sequence is quiet for two nominal
    frame periods, bounded by the slot control timeout.
-3. Capture the last observed absolute `frame_no`.
-4. Send the new signed `speed.set` before seeking, so `input_rec` updates its
-   fast-frame skip policy before reading from the new position.
-5. Send `seek <sync-team> frame <frame_no>` and wait for a new observation of
-   that exact frame while paused.
-6. Resume only when playback was active before the transition.
+3. Send the new signed `speed.set`; this retimes queued frames and resets
+   `force_fps` while the gate remains closed.
+4. Request a Janus IDR, then `resume replay_transition`.
 
 The controller's condition waits release its state lock so the position probe
 can publish observations. Only one controller operation executes the transition
-at a time. The existing command wrapper forces a Janus IDR for the absolute
-seek.
+at a time.
 
-If the pause does not become quiet or the exact seek frame is not observed
-within the configured timeout, the operation raises an actionable error and
-leaves playback paused. It must not resume from an uncertain position.
+If the output does not become quiet or a command fails, the operation raises an
+actionable error and reopens the transition gate.
 
 ## Testing
 
 The existing confirmed seams remain in use:
 
-- A controller test drives the public speed operation, publishes deterministic
-  observations from a command adapter, and verifies the literal command order:
-  pause, signed speed, absolute frame seek, resume.
+- A controller test drives the public speed operation and verifies the literal
+  command order: close gate, signed speed, IDR, reopen gate. The failure case
+  verifies that the gate reopens.
 - Direct speed changes while paused and speed increases retain their existing
   command sequences.
-- The NVIDIA-host `--exercise-v2` path samples observed frame numbers after a
-  2x to 1x transition. Once the coordinated operation returns, the next ten
-  changing source frames must advance by exactly one without a jump.
+- The NVIDIA-host `--exercise-v2` path records every observation callback after
+  a 2x to 1x transition. The next ten source frames must advance by exactly one
+  without a jump.
 - The complete replay Python suite and all existing v2 GPU exercises must pass.
 
 No timing assertion includes NVENC, Janus, WebRTC, or display latency.

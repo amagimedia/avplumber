@@ -231,8 +231,9 @@ input_rec(output.ts with output.ts+seek and output.ts+history)
   -> demux video
   -> dec_video(CUDA)
   -> speed_video
+  -> pause(speed-transition gate)
   -> force_fps
-  -> pause
+  -> pause(playback)
   -> realtime<VideoFrame>
   -> position probe
   -> force_keyframe
@@ -247,30 +248,30 @@ as its synchronization timestamp source, and enables looping by default.
 `--no-loop` disables looping, and the TUI makes the active loop mode visible.
 The player infers nominal FPS from the replay artifact, cross-checks it against
 the seek-table cadence, and fails when it is absent, invalid, or inconsistent.
-The playback graph uses one set of pause, speed, and realtime teams. Their
-names are namespaced internally so future slot and section composition does
-not require changing the controller interface.
+The playback graph uses separate playback-pause and speed-transition gates,
+plus speed and realtime teams. Their names are namespaced internally so future
+slot and section composition does not require changing the controller
+interface.
 
 The video is decoded and re-encoded for Janus. Re-encoding is required because
 pause, reverse, seek, and speed changes create a new continuous output
 timeline. Passing the recorded H.264 packets through directly would not
 produce correct realtime RTP timing after those operations.
 
-For control responsiveness, the player follows the SSGW v2 replay graph's
-queue layout. Every player and Janus-output edge has capacity one, except the
-compressed-video edge immediately before `dec_video`, which has capacity
-seven. Ordinary same-direction speed changes continue to use the existing
-`speed_video` timestamp rescaling; they do not flush or explicitly discard
-decoded frames. Capacity-one queues ensure that the single queued frame per
-processing stage can be rescaled instead of leaving a stale tail to drain.
-Direction changes retain the existing flush-and-seek behavior.
+For control responsiveness, every player and Janus-output edge has capacity
+one. Testing a seven-packet decoder-input exception did not improve the 2x to
+1x transition, so the final graph keeps the smaller capacity throughout. The
+player decodes every source frame; `speed_video` rescales timestamps and
+`force_fps` performs fast-playback selection. Active decreases from above 1x
+to 1x or below use the pre-`force_fps` gate defined in the speed-decrease
+transition design. Direction changes retain the existing flush-and-seek
+behavior.
 
 At 25 fps, a same-direction speed change must reach the requested cadence at
 the post-realtime position probe within two output ticks after the command is
 acknowledged. This measurement excludes NVENC, Janus, WebRTC, and display
-latency. A graph-construction test must also pin the capacity-one default and
-the seven-packet decoder-input exception so later changes cannot silently
-restore deep buffering.
+latency. A graph-construction test pins the capacity-one default so later
+changes cannot silently restore deep buffering.
 
 The pass-through position probe records the seek-table frame metadata and
 mapped wallclock metadata that actually reach the output branch. It forwards
@@ -367,7 +368,7 @@ Suggested layout:
 +- TIME NUDGE --------------------------------------------------------+
 | -30s   -5s   -1s                         +1s   +5s   +30s           |
 +- SPEED / ABSOLUTE SEEK --------------------------------------------+
-| 0.25x  0.5x  1x  2x  4x       elapsed input         GO            |
+| 0.25x  0.5x  1x  2x           elapsed input         GO            |
 | UTC timestamp input                                  GO TO UTC     |
 +- REGRESSION --------------------------------------------------------+
 | Exercise v2 controls                         pass/fail summary      |
