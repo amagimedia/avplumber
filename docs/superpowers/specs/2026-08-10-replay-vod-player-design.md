@@ -24,7 +24,8 @@ The first version is deliberately limited to:
 - one replay recording loaded by the player;
 - one playback slot;
 - one H.264 RTP video output to Janus;
-- software decoding and `libx264` encoding by default; and
+- NVIDIA hardware decoding and `h264_nvenc` encoding without CPU frame
+  transfers; and
 - Stream Studio Gateway v2 playback controls only.
 
 The first version does not include audio, live recording, multiple sources,
@@ -43,6 +44,23 @@ stream-zero packet:
 int64 timestamp_ms
 uint64 byte_offset
 ```
+
+The recorder's `sentinel_video` also tracks the relationship between corrected
+media timestamps and the system UTC clock. It writes packed 32-byte history
+records to `output.ts+history`:
+
+```text
+int64 changed_at
+int64 input_timestamp_offset
+int64 wallclock_offset
+int64 output_timestamp_offset
+```
+
+`input_rec` uses this history independently of the seek table. The history
+converts a shared wallclock or synchronization target into a recording-local
+media timestamp; the seek table then converts that timestamp or frame into an
+MPEG-TS byte offset. Both sidecars are therefore part of a complete replay
+artifact.
 
 The current Stream Studio Gateway v2 replay player reduces its playback
 operations to these AVPlumber primitives:
@@ -97,6 +115,7 @@ controller.status() -> PlaybackStatus
 - configured playback speed percent;
 - active scrubbing speed percent;
 - current media timestamp;
+- mapped UTC timestamp;
 - current frame number;
 - media duration;
 - source readiness; and
@@ -115,26 +134,39 @@ The transcode application builds this graph:
 ```text
 input
   -> demux first video stream
-  -> dec_video
+  -> dec_video(CUDA)
   -> force_fps
   -> force_keyframe
-  -> enc_video(libx264)
+  -> enc_video(h264_nvenc)
   -> mux(video is stream zero)
   -> output(mpegts plus binary and text seek tables)
 ```
 
-The default encoder contract is:
+The encoder contract is:
 
-- codec `libx264`;
+- codec `h264_nvenc` with CUDA frames supplied directly;
 - baseline profile;
 - GOP size one;
 - no B-frames; and
-- CRF 17.
+- NVENC VBR constant-quality mode with `cq=17` and no bitrate cap.
+
+The current recorder expresses its quality intent as `crf=17` for both
+`libx264` and `h264_nvenc`. Standard FFmpeg NVENC exposes `cq`, not `crf`, and
+AVPlumber only logs encoder options left unconsumed by FFmpeg. The standalone
+transcoder therefore uses the supported NVENC equivalent and requires a
+remote encoder smoke test to prove that no quality option is silently ignored.
 
 The force-keyframe node reinforces the all-intra contract. The requested frame
-rate is explicit and defaults to the existing replay example's 60 fps. The
-application runs without realtime pacing so offline conversion can be faster
-than playback speed.
+rate is a required transcoder argument; there is no guessed or default rate.
+The application runs without realtime pacing so offline conversion can be
+faster than playback speed. Source dimensions are preserved. CUDA format
+normalization may convert to NV12 when required by baseline NVENC, but it does
+not resize or download frames.
+
+Both applications initialize a CUDA hardware context and fail at startup when
+the required NVIDIA decoder, CUDA-frame path, or NVENC encoder is unavailable.
+There is no software fallback because the deployment and acceptance hosts are
+NVIDIA Fedora systems.
 
 The output basename produces:
 
@@ -142,15 +174,33 @@ The output basename produces:
 output.ts
 output.ts+seek
 output.ts+txt
+output.ts+history
 ```
+
+The transcoder synthesizes one constant history mapping for its continuous,
+normalized output. `--wallclock-start` accepts either a timezone-qualified
+ISO-8601 value or `now`, and defaults to `now`. A timezone-less explicit value
+is rejected. `now` is captured once in UTC and assigned to replay frame zero;
+it does not advance according to offline transcoding time. Future batch/N-input
+conversion must capture one `now` value for the whole batch rather than once
+per input.
+
+Let `P0` be the first timestamp in the completed seek table and `W0` the
+selected wallclock origin, both in milliseconds. The single packed history
+record is `(changed_at=0, input_offset=0, wallclock_offset=P0-W0,
+output_offset=0)`. This makes `input_rec` map any stored timestamp `P` to
+`W0 + (P-P0)` without assuming that an MPEG-TS mux starts at zero.
 
 The output node retains its rotating seek-table backing files because that is
 the live-recorder contract. The canonical `+seek` and `+txt` paths must point
 to complete data after finite output closes.
 
-The application refuses to overwrite any output or sidecar unless `--force`
-is passed. It waits for the output node to finish, shuts down the graph, and
-then validates the artifacts before returning success.
+The application refuses to overwrite any member of an output family unless
+`--force` is passed. It writes to a sibling staging location, waits for the
+output node to finish, shuts down the graph, and validates the MPEG-TS and all
+sidecars. Publication uses same-filesystem atomic replacements, with the
+MPEG-TS path published last as the completed-artifact marker. A failed run
+must not expose a new MPEG-TS path that points at missing or invalid sidecars.
 
 ## Seek-Table Finalization
 
@@ -177,47 +227,57 @@ the packed seek-table format or the live rotation interval.
 The player application builds this graph:
 
 ```text
-input_rec(output.ts with output.ts+seek)
+input_rec(output.ts with output.ts+seek and output.ts+history)
   -> demux video
-  -> dec_video
+  -> dec_video(CUDA)
   -> speed_video
   -> force_fps
   -> pause
   -> realtime<VideoFrame>
   -> position probe
   -> force_keyframe
-  -> enc_video(libx264, low latency)
+  -> enc_video(h264_nvenc, 4 Mbit/s CBR, ultra-low latency)
   -> bsf(dump_extra=freq=keyframe)
   -> mux
   -> output(rtp)
 ```
 
-`input_rec` uses the binary seek table, zero preseek, input timestamps, and
-looping enabled by default. The playback graph uses one set of pause, speed,
-and realtime teams. Their names are namespaced internally so future slot and
-section composition does not require changing the controller interface.
+`input_rec` auto-loads both adjacent sidecars, uses zero preseek and wallclock
+as its synchronization timestamp source, and enables looping by default.
+`--no-loop` disables looping, and the TUI makes the active loop mode visible.
+The player infers nominal FPS from the replay artifact, cross-checks it against
+the seek-table cadence, and fails when it is absent, invalid, or inconsistent.
+The playback graph uses one set of pause, speed, and realtime teams. Their
+names are namespaced internally so future slot and section composition does
+not require changing the controller interface.
 
 The video is decoded and re-encoded for Janus. Re-encoding is required because
 pause, reverse, seek, and speed changes create a new continuous output
 timeline. Passing the recorded H.264 packets through directly would not
 produce correct realtime RTP timing after those operations.
 
-The pass-through position probe records the seek-table frame metadata that
-actually reaches the output branch. The TUI and regression runner use this
-observed position rather than estimating it from elapsed wallclock time.
+The pass-through position probe records the seek-table frame metadata and
+mapped wallclock metadata that actually reach the output branch. It forwards
+CUDA frames without reading or copying their pixels. The TUI and regression
+runner use this observed position rather than estimating it from elapsed
+wallclock time. User-facing elapsed time is zero-based at the first seek-table
+entry; raw container timestamps remain internal.
 
 The default Janus contract matches the existing demos:
 
 - RTP port 5004 and RTCP port 5005;
 - dynamic payload type 96;
 - configurable host and SSRC;
-- H.264 baseline low-latency output;
+- `h264_nvenc` H.264 baseline output at fixed 4 Mbit/s CBR;
+- a one-second GOP, no B-frames, and ultra-low-latency settings matching the
+  mixer demo;
 - SPS/PPS repeated at keyframes; and
 - RTCP PLI/FIR requests trigger a forced keyframe.
 
-The defaults are software-only so graph and playback testing do not require a
-GPU. A future CUDA/NVENC implementation must be a separate zero-copy graph
-configuration; it must not insert CPU download/upload stages into a CUDA path.
+Janus is an already configured, video-only Streaming plugin mountpoint. The
+player sends RTP/RTCP and reuses `pyplumber.rtcp_feedback`; it does not create,
+delete, or administer the mountpoint. The 4 Mbit/s Janus rate is fixed in
+version one and is not a TUI control.
 
 ## Playback Operations
 
@@ -225,7 +285,7 @@ The controller implements all current v2 single-source playback operations:
 
 | Operation | Semantics |
 | --- | --- |
-| Play | Restore configured forward speed and resume |
+| Play | Resume in the retained direction when configured speed is nonzero |
 | Pause | Pause immediately while retaining configured speed |
 | Reverse play | Resume with the negative configured speed magnitude |
 | Media timestamp set | Absolute millisecond seek |
@@ -237,9 +297,14 @@ The controller implements all current v2 single-source playback operations:
 | Go to live | Seek to `max(start, duration - 3000 ms)` |
 | Current play toggle | Select play or pause from current state |
 
-A speed of zero pauses playback, matching Gateway behavior. Setting a nonzero
-speed respects the current forward/reverse mode. Scrubbing does not overwrite
-the configured playback speed.
+A speed of zero leaves playback paused and reports that a nonzero speed must be
+selected; Play does not claim a playing state while speed remains zero. This
+corrects an inconsistent Gateway state transition while retaining its useful
+behavior. Setting a nonzero speed respects the current forward/reverse mode.
+Scrubbing retains the Gateway's 20 percent dead zone and 100 ms command
+throttle, does not overwrite configured playback speed, and restores the
+saved direction instead of always returning to forward playback. Frame and
+second nudges preserve the current play/pause state.
 
 The fixed frame and time nudge controls use these signed values:
 
@@ -261,6 +326,7 @@ contains:
 
 - recording and Janus status;
 - an observed timestamp/frame timeline;
+- the mapped UTC timestamp and a `GO TO UTC` input;
 - play, pause, reverse, scrub, and tail transport controls;
 - symmetric frame and second nudge rows;
 - speed presets and current speed;
@@ -285,7 +351,8 @@ Suggested layout:
 +- TIME NUDGE --------------------------------------------------------+
 | -30s   -5s   -1s                         +1s   +5s   +30s           |
 +- SPEED / ABSOLUTE SEEK --------------------------------------------+
-| 0.25x  0.5x  1x  2x  4x       timestamp input       GO            |
+| 0.25x  0.5x  1x  2x  4x       elapsed input         GO            |
+| UTC timestamp input                                  GO TO UTC     |
 +- REGRESSION --------------------------------------------------------+
 | Exercise v2 controls                         pass/fail summary      |
 +--------------------------------------------------------------------+
@@ -301,7 +368,7 @@ internal node names:
 - playback state transitions and scrub restoration;
 - speed and scrubbing range validation;
 - TUI buttons and keyboard bindings; and
-- binary seek-table parsing and validation.
+- binary seek-table and timestamp-history parsing and validation.
 
 Finite-output integration tests cover both fewer than 60 frames and a length
 that ends within a later 60-entry batch. They require:
@@ -322,7 +389,8 @@ The headless playback exercise observes graph output and checks:
 7. reverse playback decreases timestamps;
 8. forward and reverse scrubbing work and restore prior state;
 9. tail seek reaches approximately duration minus three seconds; and
-10. rapid seeks while paused followed by shutdown finish before a timeout.
+10. an absolute UTC seek reaches the frame predicted by `+history`; and
+11. rapid seeks while paused followed by shutdown finish before a timeout.
 
 The final check directly targets regressions caused by decoder input blocking
 or failure to wake during seek and shutdown.
@@ -338,6 +406,7 @@ Before playback, the application validates that:
 - the MPEG-TS and binary seek table exist and are readable;
 - the binary file size is a multiple of 16 bytes;
 - the seek table is nonempty with monotonic timestamps and offsets; and
+- the 32-byte history file contains a valid frame-zero wallclock mapping;
 - the recording exposes a video stream.
 
 Graph exceptions are captured by the PyPlumber exception callback. The TUI
@@ -363,14 +432,22 @@ future work adds source lifecycle, slot selection, A/B visibility and linking,
 but does not change the single-slot playback operation semantics, position
 probe, or Janus output module defined here.
 
+All future inputs in one synchronized section must use the same nominal frame
+rate. The slot builder may accept an optional target canvas internally for
+that future composition, but version one preserves the source dimensions and
+does not expose dormant A/B format logic.
+
 ## Acceptance Criteria
 
 The feature is complete when:
 
-- one command transcodes a VOD to a video-only all-intra replay MPEG-TS;
+- one command transcodes a VOD through CUDA/NVENC to a video-only all-intra
+  replay MPEG-TS;
 - the canonical binary seek table includes the final encoded frame;
+- the transcoder publishes a valid wallclock history sidecar and never exposes
+  a newly incomplete output family;
 - the player opens the generated recording without OBS or Gateway;
-- Janus displays the video-only RTP output;
+- Janus displays the video-only, 4 Mbit/s NVENC RTP output;
 - the TUI exposes every agreed v2 playback control;
 - headless regression mode verifies the controls from observed positions;
 - paused rapid seek and shutdown do not hang; and

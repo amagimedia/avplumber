@@ -8,12 +8,13 @@ Design: `docs/superpowers/specs/2026-08-10-replay-vod-player-design.md`
 
 Deliver two executable PyPlumber applications:
 
-- `demos/replay/transcode.py` converts one VOD into a video-only, all-intra
-  replay MPEG-TS with complete binary and text seek tables.
+- `demos/replay/transcode.py` converts one VOD through CUDA/NVENC into a
+  video-only, all-intra replay MPEG-TS with complete seek and wallclock-history
+  sidecars.
 - `demos/replay/player.py` plays one replay recording through one slot,
-  publishes H.264 RTP directly to Janus, and exposes all agreed Stream Studio
-  Gateway v2 single-source playback controls through Textual and headless
-  regression modes.
+  publishes fixed 4 Mbit/s H.264 NVENC RTP directly to Janus, and exposes all
+  agreed Stream Studio Gateway v2 single-source playback controls through
+  Textual and headless regression modes.
 
 The implementation must not depend on OBS or Stream Studio Gateway at runtime.
 
@@ -25,8 +26,8 @@ Tests will observe behavior only through these agreed seams:
    `PlaybackStatus` out.
 2. **Executable interface** — CLI arguments, exit status, and documented
    artifacts.
-3. **Recording artifact interface** — MPEG-TS plus the documented packed
-   binary/text seek tables.
+3. **Recording artifact interface** — MPEG-TS plus the documented packed seek
+   table and timestamp-history sidecars.
 4. **Playback output interface** — observed frame/timestamp progress from the
    pass-through probe and RTP packets emitted by the graph.
 5. **Textual interface** — visible state and user actions through Textual's
@@ -41,8 +42,9 @@ or private helper calls.
 ## Constraints
 
 - Keep version one video-only, one input, and one output slot.
-- Default to software decode and `libx264`; do not add an incomplete NVENC
-  switch or CPU/GPU transfer workaround.
+- Require the NVIDIA stack. Keep decoded frames in CUDA through processing and
+  encode both outputs with `h264_nvenc`; do not add a software fallback or any
+  `hwdownload`/`hwupload` workaround.
 - Do not change graph management, control protocol, main, or sentinel code.
 - The only C++ behavior change is seek-table finalization in the existing
   output node.
@@ -51,7 +53,7 @@ or private helper calls.
 - Work in red → green vertical slices. Do not write the whole test suite before
   implementation, and defer nonessential refactoring to final review.
 
-## Task 1: Establish the Replay Module and Seek-Table Contract
+## Task 1: Establish the Replay Artifact and Value Contracts
 
 Files:
 
@@ -88,7 +90,16 @@ implementation:
 Expose one validation function returning recording limits needed by the player
 rather than separate shallow validation helpers.
 
-### Slice 1.3: Define playback values
+### Slice 1.3: Read and validate timestamp history
+
+1. Write a failing test with literal packed 32-byte history records.
+2. Add immutable `TimestampHistoryEntry` values and a public reader.
+3. Validate record size, ordering, and the frame-zero wallclock mapping.
+4. Add literal conversion cases proving media timestamp to UTC and UTC to
+   media timestamp without using the implementation formula in expected
+   values.
+
+### Slice 1.4: Define playback values
 
 Add public, immutable definitions for:
 
@@ -96,7 +107,7 @@ Add public, immutable definitions for:
 - `PlaybackStatus`;
 - transcode configuration;
 - replay-slot configuration; and
-- Janus video configuration.
+- Janus video configuration with a fixed 4 Mbit/s encoder contract.
 
 Tests should construct valid and invalid configurations through their public
 initializers. Validate frame rate, ports, payload type, SSRC, speed range, and
@@ -112,7 +123,7 @@ Files:
 - Add `demos/replay/transcode.py`.
 - Add `demos/replay/tests/test_graph.py`.
 
-### Slice 2.1: Build a video-only all-intra graph
+### Slice 2.1: Build a video-only all-intra CUDA graph
 
 1. Write a failing graph test through `build_transcode_application(config,
    api=...)` using a lightweight AVPlumber adapter.
@@ -121,31 +132,48 @@ Files:
 3. Build this graph:
 
    ```text
-   input -> demux(v:0) -> dec_video -> force_fps -> force_keyframe
-         -> enc_video(libx264) -> mux -> output(mpegts)
+   input -> demux(v:0) -> dec_video(CUDA) -> force_fps -> force_keyframe
+         -> enc_video(h264_nvenc) -> mux -> output(mpegts)
    ```
 
 4. Assert the user-visible format contract:
 
    - no audio routing or audio nodes;
    - video is the only and therefore stream-zero mux input;
-   - baseline profile, GOP size one, no B-frames, and CRF 17;
+   - CUDA hardware context and CUDA decoder output;
+   - baseline profile, GOP size one, no B-frames, `rc=vbr`, `cq=17`, and no
+     bitrate cap;
    - `ts_sort_wait` zero;
-   - binary and text sidecar paths derived from the output path; and
+   - binary seek, text seek, and binary history paths derived from the output
+     path; and
    - no realtime pacing in the offline graph.
 
 5. Run the graph test before adding additional CLI behavior.
 
-### Slice 2.2: Protect output artifacts
+### Slice 2.2: Generate wallclock history
+
+1. Add failing parser tests for `--wallclock-start now`, timezone-qualified
+   ISO-8601 values, and rejection of timezone-less values.
+2. Default to `now` and resolve it exactly once in UTC before graph start.
+3. After transcode, read the first seek timestamp `P0` and write the literal
+   packed record `(0, 0, P0-W0, 0)`, where `W0` is the selected UTC origin.
+4. Validate the generated history through the public artifact reader.
+
+### Slice 2.3: Protect and stage output artifacts
 
 1. Add failing CLI/parser tests for missing input, invalid fps, and an existing
    output family.
-2. Implement `--input`, `--output`, `--fps`, and `--force`.
+2. Implement `--input`, `--output`, required `--fps`, optional
+   `--wallclock-start` defaulting to `now`, and `--force`.
 3. Treat the MPEG-TS, canonical sidecars, and rotated backing files as one
    output family. Without `--force`, report every collision and make no
    changes. With `--force`, remove only the explicitly resolved output family.
 
-### Slice 2.3: Finish a finite transcode cleanly
+4. Transcode into a sibling staging location. Validate every staged artifact,
+   publish sidecars with same-filesystem atomic replacement, and publish the
+   MPEG-TS path last as the completion marker.
+
+### Slice 2.4: Finish a finite transcode cleanly
 
 1. Add a lifecycle test using an AVPlumber adapter that signals output
    completion and records shutdown.
@@ -194,8 +222,8 @@ pass.
    - the 60-entry live publication interval; and
    - video stream zero as the recorded stream.
 
-6. Rebuild the CPU Python module in an environment with the required compiler
-   and FFmpeg development libraries.
+6. Rebuild the CUDA/NVENC Python module on the configured NVIDIA Fedora host
+   using the same CUDA/neural/TensorRT feature set as the binary build.
 7. Re-run the short-recording test until it passes.
 
 ### Slice 3.3: Cover exact and later partial batches
@@ -234,7 +262,9 @@ For each operation:
 Required behavior:
 
 - pause sends immediate pause and retains configured speed;
-- play restores forward configured speed before resume when needed; and
+- play retains forward/reverse direction and resumes only when configured
+  speed is nonzero;
+- play at zero speed remains truthfully paused with an actionable status; and
 - toggle selects play or pause from current state.
 
 ### Slice 4.2: Absolute, frame, and second seeking
@@ -268,6 +298,7 @@ with the implementation formula.
 Add cycles for:
 
 - signed scrubbing from -500 through 500 percent;
+- the Gateway-compatible 20 percent dead zone and 100 ms throttle;
 - zero scrubbing cancellation;
 - configured playback speed remaining unchanged while scrubbing; and
 - restoring the pre-scrub play/pause and direction state.
@@ -295,19 +326,23 @@ Files:
 2. Build:
 
    ```text
-   input_rec -> demux(v:0) -> dec_video -> speed_video -> force_fps
+   input_rec -> demux(v:0) -> dec_video(CUDA) -> speed_video -> force_fps
              -> pause -> realtime<VideoFrame> -> position probe
    ```
 
-3. Require `input_rec` to use the adjacent binary seek table, zero preseek,
-   input timestamps, and the controller's pause/speed/realtime teams.
-4. Keep all node and team names inside the slot implementation. Return only
+3. Require `input_rec` to use adjacent `+seek` and `+history` sidecars, zero
+   preseek, `timestamp_source=wallclock`, looping by default, and the
+   controller's pause/speed/realtime teams.
+4. Infer FPS from the artifact, verify it against seek-table cadence, and fail
+   on missing or inconsistent values. Support `--no-loop` and expose loop state
+   in public status.
+5. Keep all node and team names inside the slot implementation. Return only
    the output video edge, controller, and application lifecycle.
 
 ### Slice 5.2: Report observed position
 
-1. Add a failing test feeding frames with literal `frame_no` and `frame_ts`
-   metadata through the probe.
+1. Add a failing test feeding frames with literal `frame_no`, `frame_ts`, and
+   wallclock metadata through the probe.
 2. Implement a thread-safe pass-through `PythonNode` that forwards each frame
    once and updates observed status.
 3. Prove missing metadata does not overwrite the last valid observation or
@@ -319,19 +354,21 @@ Files:
 2. Build:
 
    ```text
-   slot edge -> force_keyframe -> enc_video(libx264 low latency)
+   slot edge -> force_keyframe -> enc_video(h264_nvenc, 4 Mbit/s CBR)
              -> bsf(dump_extra=freq=keyframe) -> mux -> output(rtp)
    ```
 
 3. Require RTP/RTCP port pairing, payload type 96 by default, configured SSRC,
-   `skip_rtcp`, and no audio or OBS sink nodes.
+   `skip_rtcp`, and no audio or OBS sink nodes. Match the mixer encoder contract:
+   `b=maxrate=bufsize=4000k`, one-second GOP, no B-frames, baseline, CBR,
+   ultra-low latency, forced IDRs, and strict GOP.
 4. Reuse `pyplumber.rtcp_feedback.RtcpFeedbackListener`; PLI/FIR invokes the
    force-keyframe node trigger.
-5. Add a CPU integration check with a local UDP receiver. Require at least one
-   RTP packet with the configured payload type and SSRC, independently of
+5. Add an NVIDIA-host integration check with a UDP receiver. Require at least
+   one RTP packet with the configured payload type and SSRC, independently of
    Janus availability.
-6. Validate CLI options for recording, fps, Janus host, video port, payload
-   type, SSRC, and control timeout.
+6. Validate CLI options for recording, Janus host, video port, payload type,
+   SSRC, loop mode, and control timeout. FPS is inferred, not a player option.
 
 ### Slice 5.4: Lifecycle and failure reporting
 
@@ -372,7 +409,8 @@ Add one scenario at a time, keeping each red → green cycle executable:
 7. reverse play decreases timestamps;
 8. positive/negative scrub changes direction and cancellation restores state;
 9. tail seek reaches duration minus three seconds; and
-10. rapid paused seeks followed by shutdown finish before the timeout.
+10. absolute UTC seek reaches the history-predicted frame; and
+11. rapid paused seeks followed by shutdown finish before the timeout.
 
 For recordings too short to exercise a 30-second nudge, report an explicit
 skip for that value while continuing the remaining checks. Unit tests still
@@ -406,7 +444,7 @@ Files:
 1. Write a failing Textual pilot test using the real controller with an
    in-memory AVPlumber command adapter and position source.
 2. Render source, Janus destination, current/duration timeline, frame, state,
-   direction, speed, scrubbing speed, and latest error.
+   direction, speed, scrubbing speed, mapped UTC, loop mode, and latest error.
 3. Poll `controller.status()` without blocking Textual's event loop.
 
 ### Slice 7.2: Transport controls
@@ -442,6 +480,7 @@ Add tests and implementation for:
 
 - 0.25x, 0.5x, 1x, 2x, and 4x presets;
 - absolute timestamp entry with validation;
+- timezone-qualified UTC entry with a `GO TO UTC` action;
 - live display of speed/scrubbing get semantics; and
 - starting the headless v2 exercise in a Textual worker with incremental
   pass/fail results.
@@ -465,10 +504,11 @@ Files:
 
 Document:
 
-- CPU Python-module prerequisites;
+- NVIDIA/CUDA/NVENC Python-module prerequisites;
 - Textual installation;
 - one-input transcode example using `<path>` placeholders;
 - produced MPEG-TS and sidecar files;
+- default synthetic `now` wallclock origin and explicit ISO-8601 usage;
 - Janus video-only mountpoint requirements;
 - TUI launch and keyboard map;
 - all v2 playback controls and their AVPlumber meaning;
@@ -499,9 +539,10 @@ python3 -m pytest -q demos/replay/tests
 python3 -m pytest -q tests/test_rtcp_feedback.py
 ```
 
-### CPU integration
+### NVIDIA integration
 
-In an environment with a matching FFmpeg and PyPlumber build:
+On the configured NVIDIA Fedora host with a matching FFmpeg and PyPlumber
+CUDA/NVENC build:
 
 1. generate deterministic short and partial-batch VOD fixtures;
 2. run both transcoder integration cases;
@@ -510,8 +551,9 @@ In an environment with a matching FFmpeg and PyPlumber build:
 5. repeat the rapid paused-seek/shutdown case enough times to expose a wakeup
    race rather than relying on one pass.
 
-Do not run a CUDA/NVENC build locally when `nvidia-smi` is unavailable. This
-version does not require CUDA.
+Do not run the media integration, CUDA/NVENC build, or Janus checks locally
+when `nvidia-smi` is unavailable. Pure Python graph/controller/history/TUI
+tests remain suitable for local execution.
 
 ### Janus acceptance
 
@@ -543,8 +585,10 @@ instance details in tracked files.
 
 - Both executable PyPlumber applications work from documented commands.
 - The transcoder emits an all-intra video-only MPEG-TS and complete canonical
-  seek tables for short, exact-batch, and partial-batch lengths.
-- The player publishes video directly to Janus without OBS or Gateway.
+  seek tables plus valid wallclock history for short, exact-batch, and
+  partial-batch lengths.
+- The player publishes fixed 4 Mbit/s NVENC video directly to Janus without
+  OBS or Gateway.
 - Textual exposes every agreed v2 single-source playback operation, including
   all frame and second nudge values.
 - Headless mode verifies playback from observed timestamps/frames and exits
