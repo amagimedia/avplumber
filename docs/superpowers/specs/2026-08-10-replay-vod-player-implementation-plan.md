@@ -50,6 +50,15 @@ or private helper calls.
   output node.
 - Do not copy the mixer TUI or control code. Reuse its Textual patterns while
   implementing replay-specific widgets and behavior.
+- Keep this a small demo. Production Python remains limited to `replay.py`,
+  `transcode.py`, and `player.py`; prefer plain functions, frozen dataclasses,
+  and one controller over framework layers or generalized orchestration.
+- Keep tests compact and demonstrative. Parameterize repeated control values,
+  share one lightweight graph adapter, and test public behavior instead of
+  creating mocks or fixtures for private helpers.
+- Extract a helper only when it removes real duplication or hides a genuinely
+  complex graph/control detail. Do not add extension points for unimplemented
+  A/B or N-input behavior.
 - Work in red → green vertical slices. Do not write the whole test suite before
   implementation, and defer nonessential refactoring to final review.
 
@@ -577,6 +586,8 @@ instance details in tracked files.
 - Confirm no audio, OBS, Gateway, A/B, playlist, or recording behavior entered
   version one.
 - Confirm tests target the agreed seams and do not lock down private helpers.
+- Confirm the demo has no avoidable wrapper classes, one-call indirection, or
+  repetitive one-case tests that can be expressed parametrically.
 - Confirm the output-node behavior change is isolated and documented.
 - Perform a final code review only after all red → green slices are complete;
   avoid broad cleanup during feature implementation.
