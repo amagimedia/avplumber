@@ -256,6 +256,22 @@ pause, reverse, seek, and speed changes create a new continuous output
 timeline. Passing the recorded H.264 packets through directly would not
 produce correct realtime RTP timing after those operations.
 
+For control responsiveness, the player follows the SSGW v2 replay graph's
+queue layout. Every player and Janus-output edge has capacity one, except the
+compressed-video edge immediately before `dec_video`, which has capacity
+seven. Ordinary same-direction speed changes continue to use the existing
+`speed_video` timestamp rescaling; they do not flush or explicitly discard
+decoded frames. Capacity-one queues ensure that the single queued frame per
+processing stage can be rescaled instead of leaving a stale tail to drain.
+Direction changes retain the existing flush-and-seek behavior.
+
+At 25 fps, a same-direction speed change must reach the requested cadence at
+the post-realtime position probe within two output ticks after the command is
+acknowledged. This measurement excludes NVENC, Janus, WebRTC, and display
+latency. A graph-construction test must also pin the capacity-one default and
+the seven-packet decoder-input exception so later changes cannot silently
+restore deep buffering.
+
 The pass-through position probe records the seek-table frame metadata and
 mapped wallclock metadata that actually reach the output branch. It forwards
 CUDA frames without reading or copying their pixels. The TUI and regression
