@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Playlist Player TUI mockup</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#111821; --panel2:#0e141c; --ink:#cdd6e0; --dim:#7c8a99;
+    --line:#243040; --accent:#3fb950; --warn:#d29922; --err:#f85149; --sel:#1f6feb;
+    --next:#8957e5; --mono:"JetBrains Mono","Cascadia Code",Consolas,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#05070a;color:var(--ink);font-family:var(--mono);font-size:14px;padding:18px;}
+  .app{max-width:1080px;margin:0 auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;overflow:hidden;box-shadow:0 8px 40px #000a;}
+  .titlebar{background:#0d1219;border-bottom:1px solid var(--line);padding:6px 12px;color:#e6edf3;display:flex;justify-content:space-between;}
+  .titlebar .t{color:#e6edf3}
+  .titlebar .k{color:var(--dim)}
+  /* status header */
+  .state{border:2px solid var(--accent);margin:10px;border-radius:6px;padding:8px 12px;line-height:1.6;background:var(--panel2);}
+  .state.paused{border-color:var(--warn)}
+  .state.error{border-color:var(--err)}
+  .state .row1{display:flex;gap:24px;flex-wrap:wrap;color:var(--dim)}
+  .state b{color:var(--ink)}
+  .badge{padding:0 8px;border-radius:10px;border:1px solid var(--line);}
+  .badge.play{color:#0b0f14;background:var(--accent);border-color:var(--accent);font-weight:700}
+  .badge.pause{color:#0b0f14;background:var(--warn);border-color:var(--warn);font-weight:700}
+  .clipline{color:var(--ink);margin-top:4px}
+  .lastline{color:var(--dim);margin-top:2px}
+  .lastline .err{color:var(--err)}
+  /* table */
+  .tablewrap{margin:10px;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:#0d1219;color:var(--dim);text-align:left;padding:6px 10px;font-weight:600;border-bottom:1px solid var(--line);text-transform:uppercase;font-size:12px;letter-spacing:.05em}
+  tbody td{padding:6px 10px;border-bottom:1px solid #182230}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#0f1620}
+  tbody tr.selected{background:rgba(31,111,235,.18);outline:1px solid var(--sel);outline-offset:-1px}
+  tbody tr.current{background:rgba(63,185,80,.12)}
+  tbody tr.selected.current{background:rgba(63,185,80,.2)}
+  tbody tr.disabled td{color:#4c5866;text-decoration:line-through}
+  .st{width:44px;text-align:center;font-weight:700}
+  .st.cur{color:var(--accent)}
+  .st.next{color:var(--next)}
+  .st.dis{color:#4c5866}
+  .num{color:var(--dim);width:32px}
+  .spd{width:52px;color:var(--dim)}
+  .from,.to{width:78px;color:var(--dim)}
+  .emode{width:120px}
+  .native{width:130px;color:var(--dim);font-size:12px}
+  .native .norm{color:var(--accent)}
+  .pill{padding:0 8px;border-radius:10px;border:1px solid var(--line);font-size:12px;white-space:nowrap;cursor:pointer}
+  .pill:hover{filter:brightness(1.4);border-style:dashed}
+  .pill.end{color:#79c0ff;border-color:#264b6e}
+  .pill.timed{color:var(--warn);border-color:#5a4410}
+  .pill.loop{color:var(--next);border-color:#3d2a63}
+  /* button rows */
+  .controls{margin:0 10px 10px}
+  .brow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px;border:1px solid #182230;border-top:none;background:var(--panel2)}
+  .brow:first-child{border-top:1px solid #182230;border-radius:6px 6px 0 0}
+  .brow:last-child{border-radius:0 0 6px 6px}
+  .brow .lbl{color:var(--dim);width:78px;flex:none}
+  button{font-family:var(--mono);font-size:13px;background:var(--panel);color:var(--ink);border:1px solid var(--line);
+    border-radius:5px;padding:5px 10px;cursor:pointer}
+  button:hover{border-color:#3b4a5c;background:#152030}
+  button:active{transform:translateY(1px)}
+  button.mode.active{background:var(--sel);border-color:var(--sel);color:#fff;font-weight:700}
+  button.danger:hover{border-color:var(--err);color:var(--err)}
+  input[type=text]{font-family:var(--mono);background:#0a0f16;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:5px 8px;width:260px}
+  .footer{background:#0d1219;border-top:1px solid var(--line);color:var(--dim);padding:5px 12px;display:flex;gap:18px;flex-wrap:wrap}
+  .footer b{color:#e6edf3;background:#1a2430;border:1px solid var(--line);border-radius:3px;padding:0 5px}
+  /* modal */
+  .scrim{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center}
+  .scrim.open{display:flex}
+  .modal{width:520px;background:var(--panel);border:2px solid var(--sel);border-radius:8px;overflow:hidden}
+  .modal h3{margin:0;padding:8px 12px;background:#0d1219;border-bottom:1px solid var(--line);color:#e6edf3}
+  .modal .body{padding:12px;max-height:60vh;overflow:auto}
+  .tree{border:1px solid var(--line);border-radius:5px;background:#0a0f16;padding:6px;margin-bottom:10px}
+  .tree .n{padding:2px 6px;cursor:pointer;border-radius:3px}
+  .tree .n:hover{background:#152030}
+  .tree .n.dir{color:#79c0ff}
+  .tree .n.sel{background:rgba(31,111,235,.25);outline:1px solid var(--sel)}
+  .tree .indent{padding-left:18px}
+  .fields{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:var(--dim);margin-top:6px}
+  .fields input[type=text]{width:70px}
+  .modal .actions{display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:#0d1219}
+  .hint{color:var(--dim);font-size:12px;margin:2px 0 8px}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="titlebar"><span class="t">AVPlumber Playlist → Janus</span><span class="k">q Quit &nbsp; space Play/Pause &nbsp; n/p Next/Prev &nbsp; a Add &nbsp; Del Remove</span></div>
+
+  <div class="state" id="state">
+    <div class="row1">
+      <span>JANUS <b>127.0.0.1:5004</b></span>
+      <span>PT=<b>96</b></span>
+      <span>SSRC=<b>0x41565001</b></span>
+      <span>OUT=<b>1920×1080@30</b></span>
+      <span>MODE=<b id="modeLbl">LoopAll</b></span>
+      <span id="transportBadge"><span class="badge play">▶ PLAY</span></span>
+    </div>
+    <div class="clipline" id="clipline">clip 2/5 &nbsp; <b>intro.mp4</b> &nbsp; 00:07.3 / 00:12.0</div>
+    <div class="lastline" id="lastline">last: sources.play.next</div>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th class="st">st</th><th class="num">#</th><th>name</th>
+        <th class="emode">element mode</th><th class="native">native→out</th><th class="from">from</th><th class="to">to / dur</th><th class="spd">spd</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="controls">
+    <div class="brow">
+      <span class="lbl">transport</span>
+      <button onclick="transport('play')">▶ PLAY</button>
+      <button onclick="transport('pause')">⏸ PAUSE</button>
+      <button onclick="transport('toggle')">⏯ TOGGLE</button>
+      <button onclick="transport('stop')">■ STOP</button>
+      <button onclick="prev()">⏮ PREV</button>
+      <button onclick="next()">⏭ NEXT</button>
+      <button onclick="randomJump()" title="out-of-order jump: not preloaded → freeze on last frame, never black">🎲 RANDOM</button>
+    </div>
+    <div class="brow">
+      <span class="lbl">mode</span>
+      <button class="mode" data-mode="PlayAll" onclick="setMode(this)">PlayAll</button>
+      <button class="mode" data-mode="PlayCurrent" onclick="setMode(this)">PlayCurrent</button>
+      <button class="mode active" data-mode="LoopAll" onclick="setMode(this)">LoopAll</button>
+      <button class="mode" data-mode="LoopCurrent" onclick="setMode(this)">LoopCurrent</button>
+    </div>
+    <div class="brow">
+      <span class="lbl">edit</span>
+      <button onclick="openAdd()">＋ ADD</button>
+      <button class="danger" onclick="removeSel()">－ REMOVE</button>
+      <button onclick="move(-1)">▲ UP</button>
+      <button onclick="move(1)">▼ DOWN</button>
+      <button onclick="toggleDisabled()">◉ ENABLE/DISABLE</button>
+      <button onclick="cycleEmode()">↺ ELEMENT MODE</button>
+      <button onclick="playSel()">⏵⏵ PLAY SELECTED</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span><b>space</b> play/pause</span><span><b>n</b> next</span><span><b>p</b> prev</span>
+    <span><b>↑↓</b> select</span><span><b>a</b> add</span><span><b>Del</b> remove</span><span><b>q</b> quit</span>
+  </div>
+</div>
+
+<!-- ADD modal -->
+<div class="scrim" id="scrim">
+  <div class="modal">
+    <h3>＋ ADD CLIP</h3>
+    <div class="body">
+      <div class="hint">media dir: /media &nbsp; — click a file, or type a URL below</div>
+      <div class="tree" id="tree"></div>
+      <div>URL: <input type="text" id="urlIn" placeholder="rtsp:// or http:// …"/></div>
+      <div class="fields">
+        element mode:
+        <button class="mode active emb" data-em="end" onclick="pickEmode(this)">PlayToEnd</button>
+        <button class="mode emb" data-em="timed" onclick="pickEmode(this)">Timed</button>
+        <button class="mode emb" data-em="loop" onclick="pickEmode(this)">LoopSelf</button>
+      </div>
+      <div class="fields">
+        from <input type="text" id="fFrom" value="0.0"/>
+        <span id="durWrap">dur <input type="text" id="fDur" value="5.0"/></span>
+        speed <input type="text" id="fSpeed" value="1.0"/>
+      </div>
+    </div>
+    <div class="actions">
+      <button onclick="closeAdd()">CANCEL</button>
+      <button class="mode active" onclick="confirmAdd()">＋ ADD</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- mock state ----
+// emode: "end" (PlayToEnd) | "timed" (Timed, fixed duration) | "loop" (LoopSelf)
+let clips = [
+  {name:"bumper.png",  emode:"timed",native:"still",     from:"0.0", to:"3.0", spd:"1.0", disabled:false},
+  {name:"intro.mp4",   emode:"end",  native:"1280×720@25",from:"0.0", to:"end", spd:"1.0", disabled:false},
+  {name:"ad_break.mp4",emode:"end",  native:"1920×1080@30",from:"0.0",to:"end", spd:"1.0", disabled:true},
+  {name:"sports.mp4",  emode:"loop", native:"1920×1080@60",from:"2.0",to:"end", spd:"1.0", disabled:false},
+  {name:"outro.mp4",   emode:"end",  native:"720×480@24", from:"0.0", to:"end", spd:"1.0", disabled:false},
+];
+const OUTFMT="1920×1080@30";
+const EMODE={end:{label:"PlayToEnd",cls:"end"},timed:{label:"Timed",cls:"timed"},loop:{label:"LoopSelf",cls:"loop"}};
+let current = 1;      // index of playing clip
+let selected = 1;     // highlighted row
+let mode = "LoopAll";
+let playing = true;
+let lastCmd = "sources.play.next";
+let lastErr = "";
+
+function enabledIndicesFrom(i, dir){
+  // helper for next/prev skipping disabled
+  const n=clips.length; let idx=i;
+  for(let k=0;k<n;k++){ idx=(idx+dir+n)%n; if(!clips[idx].disabled) return idx; }
+  return null;
+}
+function nextIndex(){
+  if(mode==="PlayCurrent"||mode==="LoopCurrent") return mode==="LoopCurrent"?current:null;
+  const wrap = (mode==="LoopAll");
+  // linear next enabled after current
+  for(let i=current+1;i<clips.length;i++) if(!clips[i].disabled) return i;
+  if(wrap){ for(let i=0;i<=current;i++) if(!clips[i].disabled) return i; }
+  return null;
+}
+
+function render(){
+  const tb=document.getElementById("rows"); tb.innerHTML="";
+  const nxt=nextIndex();
+  clips.forEach((c,i)=>{
+    const tr=document.createElement("tr");
+    tr.className=(i===current?"current ":"")+(i===selected?"selected ":"")+(c.disabled?"disabled":"");
+    tr.onclick=()=>{selected=i;render();};
+    let st="ok",cls="";
+    if(c.disabled){st="··";cls="dis";}
+    if(i===nxt){st="→";cls="next";}
+    if(i===current){st="▶▶";cls="cur";}
+    const em=EMODE[c.emode]||EMODE.end;
+    const to = c.emode==="timed" ? `${c.to} (dur)` : c.to;
+    tr.innerHTML=`<td class="st ${cls}">${st}</td><td class="num">${i+1}</td><td>${c.name}</td>`+
+      `<td class="emode"><span class="pill ${em.cls}" onclick="event.stopPropagation();cycleEmodeAt(${i})" title="click to cycle element mode">${em.label}</span></td>`+
+      `<td class="native">${c.native} <span class="norm">→ ${OUTFMT}</span></td>`+
+      `<td class="from">${c.from}</td><td class="to">${to}</td><td class="spd">${c.spd}</td>`;
+    tb.appendChild(tr);
+  });
+  document.getElementById("modeLbl").textContent=mode;
+  document.querySelectorAll("button.mode[data-mode]").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
+  const badge=playing?'<span class="badge play">▶ PLAY</span>':'<span class="badge pause">⏸ PAUSE</span>';
+  document.getElementById("transportBadge").innerHTML=badge;
+  const c=clips[current];
+  document.getElementById("clipline").innerHTML = current==null?'<b>stopped</b>':
+    `clip ${current+1}/${clips.length} &nbsp; <b>${c?c.name:'—'}</b> &nbsp; 00:07.3 / 00:12.0`;
+  const st=document.getElementById("state");
+  st.className="state"+(lastErr?" error":(!playing?" paused":""));
+  document.getElementById("lastline").innerHTML= lastErr?`<span class="err">error: ${lastErr}</span>`:`last: ${lastCmd}`;
+}
+
+// ---- actions (mock; log the command that the real controller would send) ----
+function cmd(s){lastCmd=s;lastErr="";render();}
+function transport(k){ if(k==="play"){playing=true}else if(k==="pause"){playing=false}else if(k==="toggle"){playing=!playing}else if(k==="stop"){playing=false;current=null;} cmd("playouts."+(k==="toggle"?"playPause":k)); }
+function next(){ const n=nextIndex(); if(n==null){lastErr="no next (end of playlist)";render();return;} current=n;selected=n;cmd("sources.play.next"); }
+function prev(){ const p=enabledIndicesFrom(current,-1); if(p==null){render();return;} current=p;selected=p;cmd("sources.play.prev"); }
+function setMode(btn){ mode=btn.dataset.mode; cmd("playlists.mode.set "+mode); }
+function removeSel(){ if(clips.length<=1){lastErr="cannot remove last clip";render();return;} const wasCur=selected===current; clips.splice(selected,1); if(current!==null&&selected<current)current--; if(current>=clips.length)current=clips.length-1; if(wasCur){/* force cut to resolved next */} selected=Math.min(selected,clips.length-1); cmd("sources.remove #"+(selected+1)); }
+function move(dir){ const j=selected+dir; if(j<0||j>=clips.length)return; [clips[selected],clips[j]]=[clips[j],clips[selected]]; if(current===selected)current=j; else if(current===j)current=selected; selected=j; cmd("sources.reorder → #"+(j+1)); }
+function toggleDisabled(){ clips[selected].disabled=!clips[selected].disabled; cmd("sources.disable.set #"+(selected+1)+"="+clips[selected].disabled); }
+function cycleEmodeAt(i){ const order=["end","timed","loop"]; const c=clips[i]; c.emode=order[(order.indexOf(c.emode)+1)%order.length]; if(c.emode==="timed"&&(!c.to||c.to==="end"))c.to="5.0"; selected=i; cmd("sources.mode.set #"+(i+1)+"="+EMODE[c.emode].label); }
+function cycleEmode(){ cycleEmodeAt(selected); }
+function playSel(){ current=selected; playing=true; cmd("sources.play #"+(selected+1)); }
+function randomJump(){
+  const enabled=clips.map((c,i)=>({c,i})).filter(x=>!x.c.disabled&&x.i!==current);
+  if(!enabled.length){lastErr="no other enabled clip";render();return;}
+  const t=enabled[Math.floor(Math.random()*enabled.length)].i;
+  current=t;selected=t;playing=true;
+  // not preloaded → simulator freezes on last frame until target ready (NEVER black)
+  cmd("goto #"+(t+1)+"  [not preloaded → HOLD last frame ~open+decode, never black]");
+}
+
+// ---- ADD modal + fake file tree ----
+const fs = [
+  {name:"bumper.mp4",dir:false,d:0},
+  {name:"intro.mp4",dir:false,d:0},
+  {name:"ads/",dir:true,d:0},
+  {name:"ad_break.mp4",dir:false,d:1},
+  {name:"promo.mp4",dir:false,d:1},
+  {name:"sports.mp4",dir:false,d:0},
+  {name:"outro.mp4",dir:false,d:0},
+];
+let pickedFile=null;
+function buildTree(){
+  const t=document.getElementById("tree");t.innerHTML="";
+  const root=document.createElement("div");root.className="n dir";root.textContent="▸ /media";t.appendChild(root);
+  fs.forEach((f,i)=>{
+    const d=document.createElement("div");
+    d.className="n "+(f.dir?"dir":"")+(pickedFile===i?" sel":"");
+    d.style.paddingLeft=(18+f.d*18)+"px";
+    d.textContent=(f.dir?"▸ ":"• ")+f.name;
+    if(!f.dir){ d.onclick=()=>{pickedFile=i;document.getElementById("urlIn").value="";buildTree();}; }
+    t.appendChild(d);
+  });
+}
+let addEmode="end";
+function pickEmode(btn){ addEmode=btn.dataset.em; document.querySelectorAll(".emb").forEach(b=>b.classList.toggle("active",b===btn)); document.getElementById("durWrap").style.display = addEmode==="timed"?"":"none"; }
+function openAdd(){pickedFile=null;addEmode="end";document.getElementById("urlIn").value="";document.querySelectorAll(".emb").forEach(b=>b.classList.toggle("active",b.dataset.em==="end"));document.getElementById("durWrap").style.display="none";buildTree();document.getElementById("scrim").classList.add("open");}
+function closeAdd(){document.getElementById("scrim").classList.remove("open");}
+function confirmAdd(){
+  const url=document.getElementById("urlIn").value.trim();
+  let name = url ? url : (pickedFile!=null?fs[pickedFile].name:null);
+  if(!name){lastErr="pick a file or enter a URL";closeAdd();render();return;}
+  const dur=document.getElementById("fDur").value.trim();
+  clips.splice(selected+1,0,{
+    name, emode:addEmode,
+    from:document.getElementById("fFrom").value||"0.0",
+    to: addEmode==="timed" ? (dur||"5.0") : "end",
+    spd:document.getElementById("fSpeed").value||"1.0", disabled:false});
+  selected=selected+1; closeAdd(); cmd("sources.add "+name+" ("+EMODE[addEmode].label+")");
+}
+
+// ---- keyboard ----
+document.addEventListener("keydown",e=>{
+  if(document.getElementById("scrim").classList.contains("open")){ if(e.key==="Escape")closeAdd(); return; }
+  if(e.key===" "){e.preventDefault();transport("toggle");}
+  else if(e.key==="n")next(); else if(e.key==="p")prev();
+  else if(e.key==="a"){e.preventDefault();openAdd();}
+  else if(e.key==="Delete")removeSel();
+  else if(e.key==="ArrowUp"){e.preventDefault();selected=Math.max(0,selected-1);render();}
+  else if(e.key==="ArrowDown"){e.preventDefault();selected=Math.min(clips.length-1,selected+1);render();}
+});
+render();
+</script>
+</body>
+</html>
