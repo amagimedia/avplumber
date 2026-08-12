@@ -1,121 +1,197 @@
-"""Exercise the live builder (playlist_app.build_playlist_application) against a
-fake AVPlumber, so the graph wiring/lifecycle is covered without a GPU."""
+"""Live builder and lifecycle against a host-independent AVPlumber fake."""
+
+import json
+import time
 import types
 
-import pytest
-
 from helpers import clips
+from playlist import SWITCHER_TYPE, item_node_names
+
+
+class FakeWrapper:
+    def __init__(self):
+        self.isWorking = False
+
+    def stop(self, _wait):
+        self.isWorking = False
+
+
+class FakeNodeObject:
+    def __init__(self, parameters):
+        self.parameters = parameters
+        self._wrapper = FakeWrapper()
+
+
+class FakePythonNode(FakeNodeObject):
+    pass
+
+
+class FakeEdge:
+    def wait_peek(self, _timeout_ms):
+        return object()
+
+
+class FakeEdges:
+    def __init__(self):
+        self.plans = []
+
+    def planCapacity(self, pattern, capacity):
+        self.plans.append((pattern, capacity))
 
 
 class FakeGroup:
-    def __init__(self, name, backend):
-        self.name, self.backend = name, backend
-    def startNodes(self):
-        self.backend.started.append(self.name)
+    def __init__(self, name, avp):
+        self.name = name
+        self.avp = avp
+
     def stopNodes(self):
-        self.backend.stopped.append(self.name)
+        self.avp.commands.append(f"direct-stop:{self.name}")
 
 
-class FakeNode:
+class FakeWorkingNode:
     isWorking = True
 
 
 class FakeAvp:
     def __init__(self):
-        self.commands, self.added = [], []
-        self.started, self.stopped = [], []
-        self.groups = {}
-        self.ready = False
-        self.edges = types.SimpleNamespace(planCapacity=lambda *a: None)
+        self.commands = []
+        self.added = []
+        self.edges = FakeEdges()
+        self.backend = None
         self.on_exception = None
-    def executeCommandsFromString(self, cmd):
-        self.commands.append(cmd)
-        if cmd.startswith("node.add "):
-            import json
-            self.added.append(json.loads(cmd[len("node.add "):])["name"])
+        self.ready = False
+        self.shutdown_called = False
+        self.log_files = []
+
+    def setLogFile(self, value):
+        self.log_files.append(value)
+
+    def executeCommandsFromString(self, command):
+        self.commands.append(command)
+        if command.startswith("node.add "):
+            self.added.append(json.loads(command[len("node.add "):]))
+        if command == "group.start switch":
+            for node in self.added:
+                if node.get("group") == "switch" and "object" in node:
+                    node["object"]._wrapper.isWorking = True
+        if command.startswith("node.object.set pl_switcher active"):
+            self.backend.observe_frame({})
+            self.backend.observe_frame({})
+
     def addNode(self, node):
-        self.added.append(getattr(node, "_name", "python_node"))
+        parameters = dict(node.parameters)
+        parameters["object"] = node
+        self.added.append(parameters)
+
+    def getEdge(self, _name):
+        return FakeEdge()
+
+    def node(self, _name):
+        return FakeWorkingNode()
+
     def group(self, name):
-        return self.groups.setdefault(name, FakeGroup(name, self))
-    def node(self, name):
-        return FakeNode()
+        return FakeGroup(name, self)
+
     def setReady(self):
         self.ready = True
-    def setExceptionCallback(self, cb):
+
+    def setExceptionCallback(self, _callback):
         pass
+
     def shutdown(self):
-        pass
-
-
-class FakeProbe:
-    worker_running = False
-    def __init__(self, params, controller):
-        self._name = params["name"]
-        self.controller = controller
-    def request_stop(self): pass
-    def detach(self): pass
+        self.shutdown_called = True
 
 
 class FakeListener:
-    def __init__(self, **kw): self.kw = kw
-    def start(self): pass
-    def stop(self): pass
+    def __init__(self, **parameters):
+        self.parameters = parameters
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
 
 
 def fake_api():
-    class _NT:
-        def __init__(self, type_):
-            self.type_ = type_
-        def __call__(self, params):
-            n = types.SimpleNamespace(**params)
-            n._name = params["name"]
-            return n
-    by_type = {t: _NT(t) for t in (
-        "input_rec", "demux", "dec_video", "speed_video", "rescale_video",
-        "force_fps", "pause", "source_switcher", "realtime<av::VideoFrame>")}
+    def factory(type_name):
+        class Node(FakeNodeObject):
+            TYPE = type_name
+
+            def __init__(self, parameters):
+                super().__init__({"type": type_name, **parameters})
+        return Node
+
     return types.SimpleNamespace(
-        AVPlumber=FakeAvp, Bsf=_NT("bsf"), EncVideo=_NT("enc_video"),
-        ForceKeyFrame=_NT("force_keyframe"), Mux=_NT("mux"), Output=_NT("output"),
-        PositionProbe=FakeProbe, RtcpFeedbackListener=FakeListener, by_type=by_type)
+        AVPlumber=FakeAvp,
+        Bsf=factory("bsf"),
+        EncVideo=factory("enc_video"),
+        ForceKeyFrame=factory("force_keyframe"),
+        Mux=factory("mux"),
+        Output=factory("output"),
+        PythonNode=FakePythonNode,
+        RtcpFeedbackListener=FakeListener,
+        by_type={name: factory(name) for name in (
+            "input_rec", "demux", "dec_video", "speed_video", "force_fps",
+            "pause", SWITCHER_TYPE, "realtime<av::VideoFrame>")},
+    )
 
 
-def _build(**kw):
-    import playlist_app as pa
-    cfg = pa.PlaylistConfig(clips=clips("a", "b", "c"), **kw)
-    return pa, pa.build_playlist_application(cfg, api=fake_api())
+def build(tmp_path):
+    import playlist_app
+    config = playlist_app.PlaylistConfig(
+        clips=clips("a", "b", "c", "d", "e"),
+        log_file=str(tmp_path / "playlist.log"),
+        control_timeout=1,
+    )
+    app = playlist_app.build_playlist_application(config, api=fake_api())
+    app.avp.backend = app.backend
+    return app
 
 
-def test_build_adds_worker0_switcher_and_output():
-    _, app = _build()
-    added = set(app.avp.added)
-    # worker 0 chain
-    for n in ("worker0_input", "worker0_pause"):
-        assert n in added
-    # switcher + shared realtime + probe + janus output
-    for n in ("pl_switcher", "pl_realtime", "pl_position", "janus_encoder",
-              "janus_rtp_output"):
-        assert n in added
+def added_by_name(app):
+    return {node["name"]: node for node in app.avp.added}
 
 
-def test_start_releases_worker0_and_reaches_ready():
-    _, app = _build()
-    # make readiness happen as soon as worker0 is released
-    orig_play = app.controller.play
-    def play_then_ready():
-        orig_play()
-        app.controller.ready = True
-    app.controller.play = play_then_ready
+def test_builder_adds_one_initial_item_stable_switcher_and_replay_output(tmp_path):
+    app = build(tmp_path)
+    nodes = added_by_name(app)
+    for name in item_node_names(0):
+        assert name in nodes
+    for name in ("pl_switcher", "pl_realtime", "pl_position",
+                 "janus_force_keyframe", "janus_encoder", "janus_headers",
+                 "janus_mux", "janus_rtp_output"):
+        assert name in nodes
+    assert nodes["pl_switcher"]["type"] == SWITCHER_TYPE
+    assert "repeat_on_stall" not in repr(app.avp.added)
+    assert "sentinel" not in repr(app.avp.added).lower()
+    assert app.avp.edges.plans == [("*", 1)]
+    assert app.avp.log_files
+
+
+def test_start_reaches_source_ready_before_janus_ready(tmp_path):
+    app = build(tmp_path)
     app.start()
+    status = app.controller.status()
+    assert status.playing and status.output_alive
     assert app.avp.ready is True
-    assert "worker0" in app.avp.started and "output" in app.avp.started
-    assert f"resume worker0_pauseteam" in app.avp.commands
-
-
-def test_stop_tears_down_groups():
-    _, app = _build()
-    app.controller.ready = True
-    app.controller.play = lambda: setattr(app.controller, "ready", True)
-    app.start()
+    assert app.rtcp_feedback_listener.started is True
+    commands = app.avp.commands
+    assert commands.index("group.start pl_item_0") < commands.index("group.start switch")
+    assert commands.index("group.start switch") < commands.index("group.start output")
     app.stop()
-    assert "output" in app.avp.stopped
-    assert "worker0" in app.avp.stopped
+
+
+def test_stop_is_bounded_and_tears_down_permanent_groups_only_at_shutdown(tmp_path):
+    app = build(tmp_path)
+    app.start()
+    app.controller.stop()
+    deadline = time.monotonic() + 1
+    while "group.stop pl_item_0" not in app.avp.commands and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "group.stop output" not in app.avp.commands
+    app.stop()
+    assert "direct-stop:output" in app.avp.commands
+    assert "direct-stop:switch" in app.avp.commands
+    assert app.avp.shutdown_called

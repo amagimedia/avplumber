@@ -1,88 +1,54 @@
-"""Shared test helpers: a fake command sink that records the exact AVP command
-stream, plus small clip builders.  This is the backbone of the regression
-harness -- every playlist feature is asserted against the recorded commands."""
+"""Deterministic fakes shared by playlist policy and UI tests."""
+
 from __future__ import annotations
 
-import json
 from typing import List
 
-from playlist import Clip, ElementMode, PlaylistController, PlaylistMode
-
-
-class Recorder:
-    """Capture every command the controller emits."""
-    def __init__(self):
-        self.cmds: List[str] = []
-
-    def __call__(self, cmd: str) -> None:
-        self.cmds.append(cmd)
-
-    def clear(self) -> None:
-        self.cmds.clear()
-
-    def matching(self, prefix: str) -> List[str]:
-        return [c for c in self.cmds if c.startswith(prefix)]
-
-    def added_nodes(self):
-        out = []
-        for c in self.cmds:
-            if c.startswith("node.add "):
-                out.append(json.loads(c[len("node.add "):]))
-        return out
-
-    def deleted_nodes(self):
-        return [c[len("node.delete "):] for c in self.cmds
-                if c.startswith("node.delete ")]
-
-    def objects_set(self):
-        """Return list of (node, key, value_str) for node.object.set commands."""
-        out = []
-        for c in self.cmds:
-            if c.startswith("node.object.set "):
-                _, _, rest = c.partition("node.object.set ")
-                node, key, val = rest.split(" ", 2)
-                out.append((node, key, val))
-        return out
-
-
-class FakeBackend(Recorder):
-    """Records commands AND enforces the backend's node-namespace rule:
-    node.add rejects a name that already exists (mirrors createNode's
-    'Name busy'); node.delete frees it.  Lets tests catch rebuild bugs that a
-    plain recorder would miss."""
-    def __init__(self):
-        super().__init__()
-        self.live: set = set()
-
-    def __call__(self, cmd: str) -> None:
-        super().__call__(cmd)
-        if cmd.startswith("node.add "):
-            node = json.loads(cmd[len("node.add "):])
-            name = node["name"]
-            if name in self.live:
-                raise AssertionError(f"Name busy: {name}")
-            self.live.add(name)
-        elif cmd.startswith("node.delete "):
-            name = cmd[len("node.delete "):]
-            self.live.discard(name)
+from playlist import (BackendEvent, Clip, ElementMode, InMemoryBackend,
+                      PlaylistController, PlaylistMode)
 
 
 def clips(*specs) -> List[Clip]:
-    """specs: name or (name, element_mode) or (name, element_mode, kwargs)."""
-    out = []
-    for s in specs:
-        if isinstance(s, str):
-            out.append(Clip(url=f"/media/{s}", name=s))
-        elif len(s) == 2:
-            out.append(Clip(url=f"/media/{s[0]}", name=s[0], element_mode=s[1]))
+    """Build named clips with stable IDs; specs may include mode and kwargs."""
+    result = []
+    for spec in specs:
+        if isinstance(spec, str):
+            name, mode, kwargs = spec, ElementMode.PLAY_TO_END, {}
+        elif len(spec) == 2:
+            name, mode, kwargs = spec[0], spec[1], {}
         else:
-            out.append(Clip(url=f"/media/{s[0]}", name=s[0], element_mode=s[1], **s[2]))
-    return out
+            name, mode, kwargs = spec[0], spec[1], spec[2]
+        result.append(Clip(
+            url=f"/media/{name}", name=name, item_id=f"item-{name}",
+            element_mode=mode, **kwargs))
+    return result
 
 
-def controller(clip_list=None, mode=PlaylistMode.LOOP_ALL, **kw):
-    rec = Recorder()
-    cl = clip_list if clip_list is not None else clips("a", "b", "c")
-    ctl = PlaylistController(rec, cl, mode=mode, **kw)
-    rec.clear()  # drop construction noise (there is none, but be explicit)
-    return ctl, rec
+class FakePlaybackBackend(InMemoryBackend):
+    def __init__(self):
+        super().__init__(auto_ready=False)
+
+    def ready(self, clip: Clip, request_id: int) -> None:
+        self.events.append(BackendEvent("ready", clip.item_id, request_id))
+
+    def failed(self, clip: Clip, request_id: int, message: str) -> None:
+        self.events.append(BackendEvent(
+            "failed", clip.item_id, request_id, message=message))
+
+    def eof(self, clip: Clip) -> None:
+        self.events.append(BackendEvent("eof", clip.item_id))
+
+
+def controller(clip_list=None, mode=PlaylistMode.LOOP_ALL):
+    backend = FakePlaybackBackend()
+    playlist = clip_list if clip_list is not None else clips("a", "b", "c")
+    return PlaylistController(backend, playlist, mode=mode), backend
+
+
+def finish_pending(ctl: PlaylistController, backend: FakePlaybackBackend) -> int:
+    status = ctl.status()
+    assert status.pending_index is not None
+    request_id = backend.calls[-1][1]
+    backend.ready(ctl.clips[status.pending_index], request_id)
+    ctl.poll(0)
+    return request_id
