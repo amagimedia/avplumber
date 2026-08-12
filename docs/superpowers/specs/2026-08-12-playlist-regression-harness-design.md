@@ -39,9 +39,11 @@ protocol, or any other framework/node behavior. `force_fps` only normalizes
 arriving frames; it is not a stalled-source generator. Sentinel is excluded
 because its backup-media contract does not model a stopped VOD element.
 
-The existing pybind GIL change stays isolated until the live harness works. A
-responsiveness check then determines whether it is necessary; the playlist
-policy must not depend on new C++ semantics.
+The harness uses Python edge-wiretap callbacks for readiness and EOF events.
+The separately committed pybind call guards remain necessary so those callbacks
+can acquire the GIL while another Python thread is waiting in a control command
+or group start/stop request. This is a binding-liveness change only; playlist
+policy does not depend on new graph or node semantics.
 
 ## Test media
 
@@ -92,32 +94,44 @@ item Pause/Stop. No action shuts down the application or output graph.
 The graph uses the existing nodes without behavioral changes:
 
 ```text
-item N: input_rec -> demux -> dec_video(cuda) -> speed_video
-        -> force_fps -> pause -> item_N_out
+item N: input_rec(pause_team=item_N_pause_team)
+        -> demux -> dec_video(cuda) -> speed_video
+        -> force_fps -> item_N_normalized
 
-item_0_out .. item_7_out -> source_switcher<av::VideoFrame>
-        -> realtime -> position/EOF probe
+item_0_normalized .. item_15_normalized
+        -> source_switcher<av::VideoFrame>
+        -> realtime -> position probe
         -> force_keyframe -> h264_nvenc -> bsf -> mux -> Janus RTP
 ```
 
-Eight stable switcher slots permit add/remove and active-item rebuilds without
-recreating the permanent switch/output graph. Five are populated by the default
-scenario. Reordering changes policy order, not graph slot identity.
+Sixteen fixed switcher slots permit add/remove and active-item rebuilds without
+recreating the permanent switch/output graph. Only used slots have source
+nodes. Changed and removed sources are stopped and their slots are retired until
+application shutdown; avoiding runtime node deletion removes a graph teardown
+race while preserving a bounded session suitable for this regression harness.
+Five slots are populated by the default scenario. Reordering changes policy
+order, not graph slot identity.
 
-Element Play starts or rebuilds the destination source group, waits for a valid
-frame before its pause gate, releases that gate, selects its existing C++
-switcher slot, and requests a keyframe. Only after the new frame reaches the
-shared path is the previous source group stopped. A failed destination retains
-the previous active source and frame.
+Element Play holds the destination `input_rec` through its existing pause team,
+starts the source group, observes one valid frame on a non-consuming normalized
+edge wiretap, then pauses the input again. It ensures the permanent output is
+started, resumes and selects the ready C++ switcher slot, requests a keyframe,
+and waits for the new frame to reach the shared path before stopping the previous
+source group. A failed destination retains the previous active source and frame.
 
-Element Pause gates only that source. Element Stop stops only that source group.
-The output graph stays started. As in `demos/replay`, no new video frames are
-sent while the active source is stopped, so the viewer normally retains its
-last decoded frame. Continuous RTP during Stop is not claimed or synthesized;
-the live Janus regression must prove that the mountpoint resumes correctly.
+Element Pause uses only that source's input pause team. Element Stop stops only
+that source group and waits for every node in it to leave the working state
+before a restart is accepted. The output graph stays started. As in
+`demos/replay`, no new video frames are sent while the active source is stopped,
+so the viewer retains its last decoded frame. Continuous RTP during Stop is not
+claimed or synthesized; the live Janus regression must prove that the mountpoint
+resumes correctly.
 
-The EOF/readiness probe only records events. TUI/controller polling performs
-policy changes so processing callbacks never recursively mutate graph groups.
+Readiness wiretaps observe normalized item edges, the EOF wiretap observes the
+selected switch edge before `realtime` consumes the EOF marker, and the
+downstream position probe records frame position. These callbacks only record
+events. TUI/controller polling performs policy changes so processing callbacks
+never recursively mutate graph groups.
 
 ## Controller and backend boundary
 
@@ -150,15 +164,17 @@ recorded in memory and never printed while Textual owns the terminal.
    matrix, disabled-item behavior, and manual boundary/wrap behavior.
 2. Controller with a fake asynchronous backend: every action, Stop-to-Play,
    edits during playback, EOF, superseded loads, failure, and output health.
-3. Graph/backend fakes: existing-node shapes, stable slot identity, readiness
-   before cut, source-only Stop, permanent output lifetime, command serialization,
-   and non-blocking public calls.
+3. Graph/backend fakes: existing-node shapes, fixed slot identity, retired slots
+   without runtime deletion, readiness before cut, source-only Stop, permanent
+   output lifetime, command serialization, and non-blocking public calls.
 4. Textual Pilot: every button and binding, selected-row targeting, no Footer,
-   no duplicate controls, no log text, and responsiveness during slow backend
-   work.
+   no duplicate controls, main and Add/Edit visibility at 80x24, no log text,
+   and responsiveness during slow backend work.
 5. Remote NVIDIA/Janus: five generated clips, decoded-frame identity and
-   output-node health across the complete action sequence, plus explicit proof
-   that Janus survives and resumes after quiet Stop intervals.
+   output-node health across the complete action sequence, actual Timed
+   completion, a native LoopSelf interval without controller restart, PlayToEnd
+   natural EOF, plus explicit proof that Janus survives and resumes after quiet
+   Stop intervals.
 
 ## Delivery boundary
 

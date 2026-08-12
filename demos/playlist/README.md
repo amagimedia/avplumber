@@ -28,22 +28,30 @@ fixture definition; the 95-second basketball demo files are not used.
 Each loaded element owns a stable source group:
 
 ```text
-input_rec -> demux -> dec_video(cuda) -> speed_video
-          -> force_fps -> pause -> item_N_out
+input_rec(pause_team=item_N_pause_team)
+    -> demux -> dec_video(cuda) -> speed_video
+    -> force_fps -> item_N_normalized
 ```
 
-Eight stable item edges feed the existing typed C++ switcher, leaving room for
-add/remove and active-element edits without rebuilding the output graph:
+Sixteen fixed item edges feed the existing typed C++ switcher. Only used slots
+have source nodes. Changed and removed sources retire their slots until shutdown,
+avoiding runtime node-deletion races while leaving room for this small regression
+session:
 
 ```text
-item_0_out ... item_7_out -> source_switcher<av::VideoFrame>
-    -> realtime -> position/EOF probe
+item_0_normalized ... item_15_normalized
+    -> source_switcher<av::VideoFrame>
+    -> realtime -> position probe
     -> force_keyframe -> h264_nvenc -> bsf -> mux -> Janus RTP
 ```
 
-Element Play readies its source before selecting the slot. A failed target does
-not replace the previous active source. Element or playlist Stop only stops
-source groups; it never stops the switch, realtime, encoder, mux, or RTP output.
+Element Play holds `input_rec` through its existing pause team, starts the source,
+observes one non-consuming readiness frame, and pauses it again. It then starts
+the permanent output if necessary, resumes and selects the ready slot, and waits
+for shared output before stopping the old source. EOF is observed on the selected
+switch edge before `realtime` consumes the marker. A failed target does not replace
+the previous active source. Element or playlist Stop waits for only that source
+group to stop; it never stops the switch, realtime, encoder, mux, or RTP output.
 
 Like the working replay demo, Pause/Stop makes the push graph quiet and a viewer
 normally retains its last decoded frame. The harness does not synthesize a
@@ -68,6 +76,11 @@ call the same action methods as buttons. AVPlumber logs go to `--log-file`, and
 native control replies are redirected to that file while Textual owns the
 terminal. All graph operations run on a serialized backend worker so the TUI
 thread never waits for group start/stop.
+
+The only associated framework-level change is the separately committed Python
+binding call guard that releases the GIL during control commands and group
+start/stop requests. It permits the readiness/EOF callbacks to run; it does not
+change graph or node behavior.
 
 ## Run
 
@@ -98,12 +111,14 @@ python3 demos/playlist/regression.py \
   --log-file playlist-regression.log
 ```
 
-It emits one JSON result after shutdown and checks that the native RTP output
-stays working through playlist and per-item Play/Pause/Stop, modes, navigation,
-edits, source failure, add/remove/reorder, and natural EOF. Observe the matching
-Janus mountpoint during the run to verify the decoded last frame remains visible
-while a source is stopped and that playback resumes without recreating the
-mountpoint.
+It emits one JSON result after shutdown. A 10 ms background sampler checks that
+the native RTP output stays working while every playlist mode runs the complete
+playlist Play/Pause/Stop/Stop-to-Play/Next/Previous cycle, every item runs its
+transport cycle, and the harness exercises edits, source failure,
+add/remove/reorder, actual Timed completion, a native LoopSelf interval, and
+PlayToEnd natural EOF. Observe the matching Janus mountpoint during the run to
+verify the decoded last frame remains visible while a source is stopped and that
+playback resumes without recreating the mountpoint.
 
 A host-independent clickable dry run records actions in memory and prints
 nothing while Textual owns the terminal:
@@ -126,7 +141,8 @@ Coverage includes:
 - superseded and failed source loads;
 - a deliberately slow backend operation proving public calls remain quick;
 - every visible Textual button, primary keyboard bindings, no Footer, unique
-  control IDs, and zero command/log output;
+  control IDs, main and Add/Edit control visibility at 80x24, and zero
+  command/log output;
 - FFprobe validation of all generated fixtures when present.
 
 The remote live regression remains the acceptance gate for CUDA/NVENC and Janus

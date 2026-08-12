@@ -66,38 +66,82 @@ def stop_application_bounded(application, timeout: float) -> bool:
 
 
 class FrameworkStdoutRedirect:
-    """Keep embedded command replies off Textual's terminal without C++ changes."""
+    """Send native output to the log while Textual keeps its terminal stream."""
 
     def __init__(self, log_file: str):
         self.log_file = log_file
         self._saved_fd = None
+        self._saved_stderr_fd = None
         self._saved_stdout = None
+        self._saved_stderr = None
+        self._saved_dunder_stdout = None
+        self._saved_dunder_stderr = None
+        self._terminal_stream = None
+        self._terminal_stderr_stream = None
         self._stream = None
 
     def __enter__(self):
         path = Path(self.log_file)
         path.parent.mkdir(parents=True, exist_ok=True)
         sys.stdout.flush()
+        sys.stderr.flush()
+        self._saved_stdout = sys.stdout
+        self._saved_stderr = sys.stderr
+        self._saved_dunder_stdout = sys.__stdout__
+        self._saved_dunder_stderr = sys.__stderr__
+        self._terminal_stream = os.fdopen(
+            os.dup(1), "w", buffering=1,
+            encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
+            errors="replace",
+        )
+        self._terminal_stderr_stream = os.fdopen(
+            os.dup(2), "w", buffering=1,
+            encoding=getattr(sys.stderr, "encoding", None) or "utf-8",
+            errors="replace",
+        )
         self._stream = path.open("a", buffering=1)
         self._saved_fd = os.dup(1)
+        self._saved_stderr_fd = os.dup(2)
         os.dup2(self._stream.fileno(), 1)
-        self._saved_stdout = sys.stdout
+        os.dup2(self._stream.fileno(), 2)
+        # Textual's terminal driver writes through sys.__stderr__ on Linux
+        # (sys.__stdout__ on other drivers). Ordinary Python diagnostics and
+        # native output continue to the log.
         sys.stdout = self._stream
+        sys.stderr = self._stream
+        sys.__stdout__ = self._terminal_stream
+        sys.__stderr__ = self._terminal_stderr_stream
         return self
 
     def __exit__(self, _exception_type, _exception, _traceback):
         if self._saved_fd is None:
             return
         sys.stdout.flush()
+        sys.stderr.flush()
+        sys.__stdout__.flush()
+        sys.__stderr__.flush()
         # AVPlumber writes command replies through std::cout. With the default
         # synchronized iostreams, flushing libc drains those bytes before fd 1
         # is restored to Textual's terminal.
         ctypes.CDLL(None).fflush(None)
         os.dup2(self._saved_fd, 1)
+        os.dup2(self._saved_stderr_fd, 2)
         os.close(self._saved_fd)
+        os.close(self._saved_stderr_fd)
         self._saved_fd = None
+        self._saved_stderr_fd = None
         sys.stdout = self._saved_stdout
+        sys.stderr = self._saved_stderr
+        sys.__stdout__ = self._saved_dunder_stdout
+        sys.__stderr__ = self._saved_dunder_stderr
         self._saved_stdout = None
+        self._saved_stderr = None
+        self._saved_dunder_stdout = None
+        self._saved_dunder_stderr = None
+        self._terminal_stream.close()
+        self._terminal_stream = None
+        self._terminal_stderr_stream.close()
+        self._terminal_stderr_stream = None
         self._stream.close()
         self._stream = None
 
@@ -125,16 +169,23 @@ else:
             clip = self._clip
             with Vertical(id="clip-modal"):
                 yield Static("EDIT ELEMENT" if clip else "ADD ELEMENT", id="modal-title")
-                yield Input(value=clip.url if clip else "", placeholder="media path", id="edit-url")
-                yield Input(value=clip.name if clip else "", placeholder="display name", id="edit-name")
-                yield Input(value=str(clip.play_from_ms) if clip else "0",
-                            placeholder="cue-in ms", id="edit-from")
-                yield Input(value="" if clip is None or clip.play_to_ms is None
-                            else str(clip.play_to_ms), placeholder="cue-out ms", id="edit-to")
-                yield Input(value="" if clip is None or clip.duration_ms is None
-                            else str(clip.duration_ms), placeholder="Timed duration ms", id="edit-duration")
-                yield Input(value=str(clip.speed) if clip else "1.0",
-                            placeholder="speed", id="edit-speed")
+                with Horizontal(classes="field-row"):
+                    yield Input(value=clip.url if clip else "",
+                                placeholder="media path", id="edit-url")
+                    yield Input(value=clip.name if clip else "",
+                                placeholder="display name", id="edit-name")
+                with Horizontal(classes="field-row"):
+                    yield Input(value=str(clip.play_from_ms) if clip else "0",
+                                placeholder="cue-in ms", id="edit-from")
+                    yield Input(value="" if clip is None or clip.play_to_ms is None
+                                else str(clip.play_to_ms), placeholder="cue-out ms",
+                                id="edit-to")
+                with Horizontal(classes="field-row"):
+                    yield Input(value="" if clip is None or clip.duration_ms is None
+                                else str(clip.duration_ms),
+                                placeholder="Timed duration ms", id="edit-duration")
+                    yield Input(value=str(clip.speed) if clip else "1.0",
+                                placeholder="speed", id="edit-speed")
                 with Horizontal(classes="control-row"):
                     for mode in ELEMENT_MODES:
                         yield Button(
@@ -198,13 +249,15 @@ else:
         #state.stopped { border: heavy $warning; }
         #state.error { border: heavy $error; }
         #clips { height: 1fr; }
-        #controls { height: 12; border: round $primary; padding: 0 1; }
+        #controls { height: 15; border: round $primary; padding: 0 1; }
         .section-label { height: 1; color: $text-muted; }
         .control-row { height: 3; }
         Button { min-width: 10; margin-right: 1; }
         Button.active { background: $primary; }
         #clip-modal { width: 72; height: auto; border: heavy $primary;
                       background: $surface; padding: 1; }
+        .field-row { height: 3; }
+        .field-row Input { width: 1fr; }
         """
         BINDINGS = [
             Binding("q", "quit", "", show=False),
@@ -249,20 +302,22 @@ else:
                         yield Button(
                             mode.value, id=f"list-mode-{mode.name}", classes="list-mode")
                 yield Static("SELECTED ELEMENT", classes="section-label")
-                with Horizontal(classes="control-row"):
-                    for button_id, label in (
-                        ("item-play", "ITEM PLAY"),
-                        ("item-pause", "ITEM PAUSE"),
-                        ("item-stop", "ITEM STOP"),
-                        ("item-mode", "ITEM MODE"),
-                        ("item-edit", "EDIT"),
-                        ("item-enable", "ENABLE"),
-                        ("item-add", "ADD"),
-                        ("item-remove", "REMOVE"),
-                        ("item-up", "UP"),
-                        ("item-down", "DOWN"),
-                    ):
-                        yield Button(label, id=button_id)
+                item_controls = (
+                    ("item-play", "ITEM PLAY"),
+                    ("item-pause", "ITEM PAUSE"),
+                    ("item-stop", "ITEM STOP"),
+                    ("item-mode", "ITEM MODE"),
+                    ("item-edit", "EDIT"),
+                    ("item-enable", "ENABLE"),
+                    ("item-add", "ADD"),
+                    ("item-remove", "REMOVE"),
+                    ("item-up", "UP"),
+                    ("item-down", "DOWN"),
+                )
+                for row in (item_controls[:5], item_controls[5:]):
+                    with Horizontal(classes="control-row"):
+                        for button_id, label in row:
+                            yield Button(label, id=button_id)
 
         def on_mount(self):
             table = self.query_one("#clips", DataTable)

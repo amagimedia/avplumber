@@ -27,6 +27,17 @@ class FakePythonNode(FakeNodeObject):
 
 
 class FakeEdge:
+    def __init__(self):
+        self.callbacks = []
+
+    def addWiretapCallback(self, callback):
+        self.callbacks.append(callback)
+
+    def emit(self, value=None):
+        value = object() if value is None else value
+        for callback in self.callbacks:
+            callback(value)
+
     def wait_peek(self, _timeout_ms):
         return object()
 
@@ -49,7 +60,14 @@ class FakeGroup:
 
 
 class FakeWorkingNode:
-    isWorking = True
+    def __init__(self, avp, name):
+        self.avp = avp
+        self.name = name
+
+    @property
+    def isWorking(self):
+        return self.avp.node_states.get(
+            self.name, self.name == "janus_rtp_output")
 
 
 class FakeAvp:
@@ -62,6 +80,8 @@ class FakeAvp:
         self.ready = False
         self.shutdown_called = False
         self.log_files = []
+        self.edge_objects = {}
+        self.node_states = {}
 
     def setLogFile(self, value):
         self.log_files.append(value)
@@ -69,11 +89,26 @@ class FakeAvp:
     def executeCommandsFromString(self, command):
         self.commands.append(command)
         if command.startswith("node.add "):
-            self.added.append(json.loads(command[len("node.add "):]))
+            node = json.loads(command[len("node.add "):])
+            self.added.append(node)
+            self.node_states[node["name"]] = False
+        if command.startswith("group.start "):
+            group = command[len("group.start "):]
+            for node in self.added:
+                if node.get("group") == group:
+                    self.node_states[node["name"]] = True
+        if command.startswith("group.stop "):
+            group = command[len("group.stop "):]
+            for node in self.added:
+                if node.get("group") == group:
+                    self.node_states[node["name"]] = False
         if command == "group.start switch":
             for node in self.added:
                 if node.get("group") == "switch" and "object" in node:
                     node["object"]._wrapper.isWorking = True
+        if command.startswith("resume pl_item_"):
+            slot = command.split("_", 3)[2]
+            self.getEdge(f"pl_item_{slot}_normalized").emit()
         if command.startswith("node.object.set pl_switcher active"):
             self.backend.observe_frame({})
             self.backend.observe_frame({})
@@ -82,12 +117,13 @@ class FakeAvp:
         parameters = dict(node.parameters)
         parameters["object"] = node
         self.added.append(parameters)
+        self.node_states[parameters["name"]] = False
 
-    def getEdge(self, _name):
-        return FakeEdge()
+    def getEdge(self, name):
+        return self.edge_objects.setdefault(name, FakeEdge())
 
-    def node(self, _name):
-        return FakeWorkingNode()
+    def node(self, name):
+        return FakeWorkingNode(self, name)
 
     def group(self, name):
         return FakeGroup(name, self)
@@ -134,7 +170,7 @@ def fake_api():
         RtcpFeedbackListener=FakeListener,
         by_type={name: factory(name) for name in (
             "input_rec", "demux", "dec_video", "speed_video", "force_fps",
-            "pause", SWITCHER_TYPE, "realtime<av::VideoFrame>")},
+            SWITCHER_TYPE, "realtime<av::VideoFrame>")},
     )
 
 
@@ -170,7 +206,16 @@ def test_builder_adds_one_initial_item_stable_switcher_and_replay_output(tmp_pat
     assert app.avp.log_files
 
 
-def test_start_reaches_source_ready_before_janus_ready(tmp_path):
+def test_selected_switch_edge_reports_eof_before_realtime_consumes_it(tmp_path):
+    app = build(tmp_path)
+    app.backend._probe_item = app.controller.clips[0].item_id
+    app.avp.getEdge("pl_switched").emit(types.SimpleNamespace(width=0))
+    events = app.backend.poll_events()
+    assert [(event.kind, event.item_id) for event in events] == [
+        ("eof", app.controller.clips[0].item_id)]
+
+
+def test_start_preheats_first_source_between_switch_and_permanent_output(tmp_path):
     app = build(tmp_path)
     app.start()
     status = app.controller.status()
@@ -178,8 +223,16 @@ def test_start_reaches_source_ready_before_janus_ready(tmp_path):
     assert app.avp.ready is True
     assert app.rtcp_feedback_listener.started is True
     commands = app.avp.commands
-    assert commands.index("group.start pl_item_0") < commands.index("group.start switch")
-    assert commands.index("group.start switch") < commands.index("group.start output")
+    switch = commands.index("group.start switch")
+    source = commands.index("group.start pl_item_0")
+    output = commands.index("group.start output")
+    pauses = [index for index, command in enumerate(commands)
+              if command == "pause pl_item_0_pause_team now"]
+    resumes = [index for index, command in enumerate(commands)
+               if command == "resume pl_item_0_pause_team"]
+    select = commands.index("node.object.set pl_switcher active 0")
+    assert (switch < pauses[0] < source < resumes[0] < pauses[1]
+            < output < resumes[1] < select)
     app.stop()
 
 

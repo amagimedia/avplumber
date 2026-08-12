@@ -75,7 +75,7 @@ class PlaylistConfig:
 def load_avp_api():
     from pyplumber import AVPlumber
     from pyplumber.node import (Bsf, DecVideo, Demux, EncVideo, ForceFPS,
-                                ForceKeyFrame, InputRec, Mux, Output, Pause,
+                                ForceKeyFrame, InputRec, Mux, Output,
                                 PythonNode, RealtimeVideoFrame, SourceSwitcher,
                                 SpeedVideo)
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
@@ -89,7 +89,6 @@ def load_avp_api():
         "dec_video": DecVideo,
         "speed_video": SpeedVideo,
         "force_fps": ForceFPS,
-        "pause": Pause,
         SWITCHER_TYPE: SourceSwitcherVideoFrame,
         "realtime<av::VideoFrame>": RealtimeVideoFrame,
     }
@@ -167,6 +166,8 @@ class AsyncPlaylistBackend:
         self._active_slot: Optional[int] = None
         self._probe_item: Optional[str] = None
         self._frame_sequence = 0
+        self._item_frame_sequences: Dict[int, int] = {}
+        self._slot_errors: Dict[int, str] = {}
         self._switch_started = False
         self._output_started = False
         self._output_alive = False
@@ -185,6 +186,7 @@ class AsyncPlaylistBackend:
         self._item_slots[item_id] = slot
         self._slot_fingerprints[slot] = _clip_fingerprint(clip)
         self._built_slots.add(slot)
+        self._watch_slot(slot)
 
     # Public methods never wait for AVPlumber.
     def play_item(self, request_id: int, item_id: str, clip: Clip) -> None:
@@ -267,54 +269,77 @@ class AsyncPlaylistBackend:
         if slot not in self._running_slots:
             return
         self._execute(f"group.stop {item_group(slot)}")
+        deadline = time.monotonic() + self.config.control_timeout
+        while any(self.avp.node(name).isWorking
+                  for name in item_node_names(slot)):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"playlist slot {slot} did not stop")
+            time.sleep(0.01)
         self._running_slots.discard(slot)
 
-    def _delete_slot(self, slot: int) -> None:
+    def _retire_slot(self, slot: int) -> None:
+        """Stop a slot but keep its nodes until application shutdown.
+
+        Runtime deletion races the asynchronous group stop. This deliberately
+        small regression harness has spare fixed switcher inputs, so retiring
+        a slot is both simpler and deterministic.
+        """
         self._stop_slot(slot)
-        if slot in self._built_slots:
-            for name in reversed(item_node_names(slot)):
-                self._execute(f"node.delete {name}")
-            self._built_slots.discard(slot)
-            self._slot_fingerprints.pop(slot, None)
-        old_item = self._slot_items.pop(slot, None)
+        old_item = self._slot_items.get(slot)
         if old_item is not None and self._item_slots.get(old_item) == slot:
             self._item_slots.pop(old_item, None)
 
     def _build_slot(self, slot: int, item_id: str, clip: Clip) -> None:
-        self._delete_slot(slot)
+        if slot in self._built_slots:
+            raise RuntimeError(f"playlist slot {slot} is already built")
         for spec in plan_item_nodes(slot, clip, self.config.fps):
             self._execute(_spec_command(spec))
         self._slot_items[slot] = item_id
         self._item_slots[item_id] = slot
         self._slot_fingerprints[slot] = _clip_fingerprint(clip)
         self._built_slots.add(slot)
+        self._watch_slot(slot)
+
+    def _watch_slot(self, slot: int) -> None:
+        self._item_frame_sequences.setdefault(slot, 0)
+        self.avp.getEdge(item_edge(slot, "normalized")).addWiretapCallback(
+            lambda _frame, watched_slot=slot: self.observe_item_frame(watched_slot))
 
     def _start_and_ready_slot(self, slot: int) -> None:
         self._stop_slot(slot)
+        with self._frame_condition:
+            self._slot_errors.pop(slot, None)
+        self._execute(f"pause {item_pause_team(slot)} now")
         self._execute(f"group.start {item_group(slot)}")
         self._running_slots.add(slot)
-        frame = self.avp.getEdge(item_edge(slot, "normalized")).wait_peek(
-            int(self.config.control_timeout * 1000))
-        if frame is None:
-            raise TimeoutError(f"item slot {slot} produced no frame")
+
+    def _wait_for_item_frame(self, slot: int, baseline: int) -> None:
+        deadline = time.monotonic() + self.config.control_timeout
+        with self._frame_condition:
+            while self._item_frame_sequences.get(slot, 0) <= baseline:
+                if slot in self._slot_errors:
+                    raise RuntimeError(self._slot_errors[slot])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"item slot {slot} produced no frame")
+                self._frame_condition.wait(min(remaining, 0.1))
 
     def _prepare_slot(self, item_id: str, clip: Clip) -> Tuple[int, Optional[int]]:
         existing = self._item_slots.get(item_id)
         fingerprint = _clip_fingerprint(clip)
-        old_active_slot = self._active_slot if item_id == self._active_item else None
+        replaced_slot = None
 
         if existing is None:
             slot = self._free_slot()
             self._build_slot(slot, item_id, clip)
-        elif self._slot_fingerprints.get(existing) != fingerprint and old_active_slot == existing:
+        elif self._slot_fingerprints.get(existing) != fingerprint:
             slot = self._free_slot(exclude=existing)
             self._build_slot(slot, item_id, clip)
+            replaced_slot = existing
         else:
             slot = existing
-            if self._slot_fingerprints.get(slot) != fingerprint:
-                self._build_slot(slot, item_id, clip)
         self._start_and_ready_slot(slot)
-        return slot, old_active_slot if old_active_slot != slot else None
+        return slot, replaced_slot
 
     def _wait_for_frames(self, baseline: int, count: int = 2) -> None:
         deadline = time.monotonic() + self.config.control_timeout
@@ -341,7 +366,6 @@ class AsyncPlaylistBackend:
             time.sleep(0.01)
         if self._listener is not None:
             self._listener.start()
-        self.avp.setReady()
         self._output_started = True
         self._set_output_alive(True)
 
@@ -349,15 +373,32 @@ class AsyncPlaylistBackend:
         assert task.request_id is not None and task.item_id is not None
         assert task.clip is not None
         slot = None
-        stale_active_slot = None
+        replaced_slot = None
         previous_item, previous_slot = self._active_item, self._active_slot
         try:
-            slot, stale_active_slot = self._prepare_slot(task.item_id, task.clip)
+            # Permanent consumers must exist before a paused source starts.
+            # Otherwise its first ready frame can be stranded on an edge that
+            # had no consumer when the source group was created.
+            self._ensure_switch_started()
+            slot, replaced_slot = self._prepare_slot(task.item_id, task.clip)
             if not self._is_current(task.request_id):
                 self._stop_slot(slot)
                 return
 
-            self._ensure_switch_started()
+            with self._frame_condition:
+                item_baseline = self._item_frame_sequences.get(slot, 0)
+            self._execute(f"resume {item_pause_team(slot)}")
+            self._wait_for_item_frame(slot, item_baseline)
+            self._execute(f"pause {item_pause_team(slot)} now")
+            if not self._is_current(task.request_id):
+                self._stop_slot(slot)
+                return
+
+            # The encoder/output needs the preheated source's timebase, but it
+            # must start before the source is resumed and selected so the
+            # position-probe edge cannot fill while readiness is measured.
+            self._ensure_output_started()
+
             with self._frame_condition:
                 baseline = self._frame_sequence
             self._probe_item = task.item_id
@@ -370,11 +411,10 @@ class AsyncPlaylistBackend:
 
             if not self._is_current(task.request_id):
                 return
-            self._ensure_output_started()
             if previous_slot is not None and previous_slot != slot:
                 self._stop_slot(previous_slot)
-            if stale_active_slot is not None and stale_active_slot != slot:
-                self._delete_slot(stale_active_slot)
+            if replaced_slot is not None and replaced_slot != slot:
+                self._retire_slot(replaced_slot)
             self._emit(BackendEvent(
                 "ready", task.item_id, task.request_id))
         except Exception as exc:
@@ -390,6 +430,12 @@ class AsyncPlaylistBackend:
                     self._emit(BackendEvent(
                         "error", task.item_id,
                         message=f"source rollback failed: {rollback_error}"))
+            if (slot is not None
+                    and self._item_slots.get(task.item_id) == slot):
+                if replaced_slot is None:
+                    self._item_slots.pop(task.item_id, None)
+                else:
+                    self._item_slots[task.item_id] = replaced_slot
             if slot is not None and slot != self._active_slot:
                 self._stop_slot(slot)
             self._emit(BackendEvent(
@@ -410,7 +456,7 @@ class AsyncPlaylistBackend:
         elif task.kind == "speed" and slot is not None and task.speed is not None:
             self._execute(f"speed.set {item_speed_team(slot)} {task.speed}")
         elif task.kind == "remove" and slot is not None:
-            self._delete_slot(slot)
+            self._retire_slot(slot)
 
     def _run(self) -> None:
         if self.config.log_file:
@@ -435,6 +481,35 @@ class AsyncPlaylistBackend:
                 self._emit(BackendEvent("error", task.item_id, message=str(exc)))
 
     # Called by the Python probe on its graph worker thread.
+    def report_graph_exception(self, name: str, node_type: str,
+                               message: str) -> None:
+        detail = f"{name} ({node_type}): {message}"
+        slot = next((candidate for candidate in self._slot_items
+                     if (name == item_group(candidate)
+                         or name.startswith(f"{item_group(candidate)}_"))), None)
+        if slot is None:
+            self._emit(BackendEvent("error", message=detail))
+            return
+        with self._frame_condition:
+            self._slot_errors[slot] = detail
+            self._frame_condition.notify_all()
+        if slot == self._active_slot:
+            self._emit(BackendEvent(
+                "error", self._slot_items.get(slot), message=detail))
+
+    def observe_item_frame(self, slot: int) -> None:
+        with self._frame_condition:
+            self._item_frame_sequences[slot] = (
+                self._item_frame_sequences.get(slot, 0) + 1)
+            self._frame_condition.notify_all()
+
+    def observe_switched_frame(self, frame) -> None:
+        try:
+            if frame.width == 0:
+                self.observe_eof()
+        except (AttributeError, RuntimeError):
+            return
+
     def observe_frame(self, metadata) -> None:
         position_ms = None
         try:
@@ -473,6 +548,7 @@ class PlaylistApplication:
                 self.controller.poll(int(time.monotonic() * 1000))
                 status = self.controller.status()
                 if status.playing and status.output_alive:
+                    self.avp.setReady()
                     return
                 if status.error:
                     raise RuntimeError(status.error)
@@ -527,8 +603,7 @@ def build_playlist_application(config: PlaylistConfig, api=None) -> PlaylistAppl
 
     backend = AsyncPlaylistBackend(avp, api, config)
     controller = PlaylistController(backend, config.clips, config.mode)
-    avp.on_exception = lambda name, node_type, message: backend._emit(
-        BackendEvent("error", message=f"{name} ({node_type}): {message}"))
+    avp.on_exception = backend.report_graph_exception
 
     first_index = next(
         index for index, clip in enumerate(config.clips) if not clip.disabled)
@@ -539,6 +614,8 @@ def build_playlist_application(config: PlaylistConfig, api=None) -> PlaylistAppl
 
     for spec in plan_switch_nodes(config.slot_capacity, config.fps):
         _add_spec(avp, api, spec)
+    avp.getEdge("pl_switched").addWiretapCallback(
+        backend.observe_switched_frame)
 
     class PositionProbe(api.PythonNode):
         def __init__(self, parameters):

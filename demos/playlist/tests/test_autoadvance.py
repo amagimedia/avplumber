@@ -1,5 +1,7 @@
 """Natural EOF and timed completion through the public controller seam."""
 
+import pytest
+
 from helpers import clips, controller, finish_pending
 from playlist import ElementMode as E, PlaylistMode as M, TransportState
 
@@ -86,3 +88,41 @@ def test_stale_eof_from_previous_item_is_ignored():
     backend.eof(ctl.clips[0]); ctl.poll(100)
     assert backend.calls == []
     assert ctl.status().active_index == 1
+
+
+@pytest.mark.parametrize("element_mode", list(E))
+@pytest.mark.parametrize("playlist_mode", list(M))
+@pytest.mark.parametrize("start_index", [0, 1])
+def test_public_completion_matrix_at_middle_and_boundary(
+        element_mode, playlist_mode, start_index):
+    kwargs = {"duration_ms": 100} if element_mode is E.TIMED else {}
+    ctl, backend = controller(
+        clips(("a", element_mode, kwargs), ("b", element_mode, kwargs)),
+        playlist_mode,
+    )
+    start(ctl, backend, start_index)
+    backend.clear()
+
+    if element_mode is E.TIMED:
+        ctl.poll(100)
+    else:
+        backend.eof(ctl.clips[start_index])
+        ctl.poll(100)
+
+    expected_by_mode = {
+        M.PLAY_ALL: (1, None),
+        M.PLAY_CURRENT: (None, None),
+        M.LOOP_ALL: (1, 0),
+        M.LOOP_CURRENT: (0, 1),
+    }
+    expected = (start_index if element_mode is E.LOOP_SELF
+                else expected_by_mode[playlist_mode][start_index])
+    if expected is None:
+        assert backend.calls[-2:] == [
+            ("cancel_activation",),
+            ("stop_item", ctl.clips[start_index].item_id),
+        ]
+        assert ctl.status().transport is TransportState.STOPPED
+    else:
+        assert backend.calls[-1][0] == "play_item"
+        assert backend.calls[-1][2] == ctl.clips[expected].item_id
