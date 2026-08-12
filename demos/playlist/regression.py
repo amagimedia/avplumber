@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,6 +37,32 @@ class LiveRegression:
         self.controller = application.controller
         self.checks: list[Check] = []
         self.timeout = application.config.control_timeout
+        self._monitor_stop = threading.Event()
+        self._monitor_error: str | None = None
+        self._monitor_thread: threading.Thread | None = None
+
+    def _start_output_monitor(self):
+        def monitor():
+            while not self._monitor_stop.wait(0.01):
+                try:
+                    if not self.application.avp.node(
+                            "janus_rtp_output").isWorking:
+                        self._monitor_error = "Janus RTP output stopped"
+                        return
+                except Exception as exc:
+                    self._monitor_error = f"Janus RTP output check failed: {exc}"
+                    return
+
+        self._monitor_thread = threading.Thread(
+            target=monitor, name="playlist-output-monitor", daemon=True)
+        self._monitor_thread.start()
+
+    def _stop_output_monitor(self):
+        self._monitor_stop.set()
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(self.timeout)
+            if self._monitor_thread.is_alive():
+                raise TimeoutError("Janus RTP output monitor did not stop")
 
     def poll(self):
         self.controller.poll(int(time.monotonic() * 1000))
@@ -55,6 +82,8 @@ class LiveRegression:
 
     def assert_output(self, name: str):
         self.poll()
+        if self._monitor_error:
+            raise RuntimeError(f"{self._monitor_error} during {name}")
         status = self.controller.status()
         native_alive = bool(
             self.application.avp.node("janus_rtp_output").isWorking)
@@ -68,17 +97,32 @@ class LiveRegression:
             position_ms=self.controller.observed_pts_ms,
         ))
 
-    def assert_quiet_output(self, name: str, settle: float = 0.25,
+    def assert_quiet_output(self, name: str, settle: float = 0.2,
                             sample: float = 0.25):
         """Require a stopped source PTS and a working RTP node throughout."""
-        deadline = time.monotonic() + settle
-        while time.monotonic() < deadline:
-            self.assert_output(f"{name} settle")
+        deadline = time.monotonic() + self.timeout
+        source_slot = self.application.backend._active_slot
+        while source_slot in self.application.backend._running_slots:
+            self.assert_output(f"{name} source stop")
             self.checks.pop()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{name}: source group did not stop")
             time.sleep(0.02)
         stopped_position = self.controller.observed_pts_ms
-        if stopped_position is None:
-            raise RuntimeError(f"{name}: no decoded source position was observed")
+        stable_since = time.monotonic()
+        while True:
+            self.assert_output(f"{name} settle")
+            self.checks.pop()
+            current_position = self.controller.observed_pts_ms
+            if current_position != stopped_position:
+                stopped_position = current_position
+                stable_since = time.monotonic()
+            if (stopped_position is not None
+                    and time.monotonic() - stable_since >= settle):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{name}: source position did not settle")
+            time.sleep(0.02)
         deadline = time.monotonic() + sample
         while time.monotonic() < deadline:
             self.assert_output(f"{name} sample")
@@ -96,7 +140,40 @@ class LiveRegression:
         )
         self.assert_output(name)
 
+    def assert_same_source_playing(self, index: int, name: str,
+                                   duration: float):
+        """Prove native playback continues without a controller restart."""
+        slot = self.application.backend._active_slot
+        request_id = self.controller._request_id
+        first_sequence = self.application.backend._frame_sequence
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            self.poll()
+            status = self.controller.status()
+            if status.error:
+                raise RuntimeError(f"{name}: {status.error}")
+            if (status.active_index != index
+                    or status.transport is not TransportState.PLAYING):
+                raise RuntimeError(f"{name}: selected source stopped or changed")
+            if self.application.backend._active_slot != slot:
+                raise RuntimeError(f"{name}: source slot was rebuilt")
+            if self.controller._request_id != request_id:
+                raise RuntimeError(f"{name}: controller restarted the source")
+            self.assert_output(f"{name} sample")
+            self.checks.pop()
+            time.sleep(0.02)
+        if self.application.backend._frame_sequence <= first_sequence:
+            raise RuntimeError(f"{name}: no frames crossed the shared output")
+        self.assert_output(name)
+
     def run(self, natural_eof_timeout: float = 13.0):
+        self._start_output_monitor()
+        try:
+            return self._run_actions(natural_eof_timeout)
+        finally:
+            self._stop_output_monitor()
+
+    def _run_actions(self, natural_eof_timeout: float):
         self.assert_output("startup")
 
         for mode in PlaylistMode:
@@ -104,23 +181,36 @@ class LiveRegression:
             if self.controller.status().mode is not mode:
                 raise RuntimeError(f"playlist mode did not change to {mode.value}")
             self.assert_output(f"playlist mode {mode.value}")
+            prefix = f"playlist {mode.value}"
+            self.controller.pause()
+            self.wait_for(
+                lambda: self.controller.status().transport is TransportState.PAUSED,
+                f"{prefix} pause")
+            self.assert_output(f"{prefix} pause")
+            self.controller.play()
+            self.wait_playing(0, f"{prefix} resume")
 
-        self.controller.pause()
-        self.wait_for(
-            lambda: self.controller.status().transport is TransportState.PAUSED,
-            "playlist pause")
-        self.assert_output("playlist pause")
-        self.controller.play()
-        self.wait_playing(self.controller.status().active_index, "playlist resume")
+            self.controller.stop()
+            self.wait_for(
+                lambda: self.controller.status().transport is TransportState.STOPPED,
+                f"{prefix} stop")
+            self.assert_quiet_output(f"{prefix} stop")
+            self.controller.play()
+            self.wait_playing(0, f"{prefix} stop-to-play")
 
-        active = self.controller.status().active_index
-        self.controller.stop()
-        self.wait_for(
-            lambda: self.controller.status().transport is TransportState.STOPPED,
-            "playlist stop")
-        self.assert_quiet_output("playlist stop quiet interval")
-        self.controller.play()
-        self.wait_playing(active, "playlist stop-to-play")
+            if mode.loops:
+                self.controller.prev()
+                self.wait_playing(4, f"{prefix} previous wrap")
+                self.controller.next()
+                self.wait_playing(0, f"{prefix} next wrap")
+            else:
+                if self.controller.prev():
+                    raise RuntimeError(f"{prefix} previous wrapped unexpectedly")
+                self.assert_output(f"{prefix} previous boundary")
+                self.controller.next()
+                self.wait_playing(1, f"{prefix} next")
+                self.controller.prev()
+                self.wait_playing(0, f"{prefix} previous")
 
         # Every item executes Play, Pause, Stop, and Stop-to-Play.
         for index in range(5):
@@ -139,6 +229,17 @@ class LiveRegression:
             self.controller.element_play(index)
             self.wait_playing(index, f"item {index + 1} stop-to-play")
 
+        # An item-addressed action on a non-active source must not alter the
+        # active item, playlist transport, or permanent Janus output.
+        active = self.controller.status().active_index
+        inactive = (active + 2) % len(self.controller.clips)
+        self.controller.element_pause(inactive)
+        self.assert_same_source_playing(
+            active, "inactive item Pause leaves active source playing", 0.25)
+        self.controller.element_stop(inactive)
+        self.assert_same_source_playing(
+            active, "inactive item Stop leaves active source playing", 0.25)
+
         self.controller.set_mode(PlaylistMode.LOOP_ALL)
         before = self.controller.status().active_index
         self.controller.next()
@@ -147,9 +248,15 @@ class LiveRegression:
         self.controller.prev()
         self.wait_playing(before, "playlist previous")
 
-        # Mode, cue, speed, disable, reorder, add and remove operations.
-        self.controller.set_element_mode(before, ElementMode.TIMED, 3000)
+        # Timed must complete from unpaused wall-clock playback on the live graph.
+        self.controller.set_element_mode(before, ElementMode.TIMED, 1000)
         self.wait_playing(before, "active element Timed mode")
+        timed_expected = (before + 1) % len(self.controller.clips)
+        self.wait_playing(timed_expected, "active element Timed completion")
+
+        # Cue, speed, disable, reorder, add and remove operations.
+        self.controller.element_play(before)
+        self.wait_playing(before, "active element replay after Timed completion")
         self.controller.update_clip(before, play_from_ms=1000, play_to_ms=8000)
         self.wait_playing(before, "active element cue edit")
         self.controller.update_clip(before, speed=1.25)
@@ -201,7 +308,22 @@ class LiveRegression:
         self.controller.remove_clip(broken_index)
         self.controller.clear_error()
 
-        # Natural EOF must advance using the current policy.
+        # LoopSelf must cross its cue-out without a controller restart or slot
+        # rebuild. Manual navigation remains the escape from that element mode.
+        loop_index = self.controller.status().active_index
+        self.controller.update_clip(loop_index, play_to_ms=2000)
+        self.wait_playing(loop_index, "LoopSelf cue source restart")
+        self.controller.set_element_mode(loop_index, ElementMode.LOOP_SELF)
+        self.wait_playing(loop_index, "active element LoopSelf mode")
+        self.assert_same_source_playing(
+            loop_index, "active element LoopSelf native loop", 3.0)
+        self.controller.next()
+        manual_target = (loop_index + 1) % len(self.controller.clips)
+        self.wait_playing(manual_target, "manual Next escapes LoopSelf")
+
+        # PlayToEnd natural EOF must advance using the current policy.
+        self.controller.element_play(loop_index)
+        self.wait_playing(loop_index, "return to natural EOF source")
         natural_index = self.controller.status().active_index
         self.controller.set_mode(PlaylistMode.LOOP_ALL)
         self.controller.set_element_mode(natural_index, ElementMode.PLAY_TO_END)

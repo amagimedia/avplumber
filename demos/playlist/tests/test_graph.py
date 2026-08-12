@@ -9,16 +9,11 @@ from playlist import (DEFAULT_SLOT_CAPACITY, SWITCHER_TYPE, Clip,
 def test_item_chain_matches_existing_replay_video_path():
     specs = plan_item_nodes(3, Clip(url="/media/a.mp4"), fps=30)
     assert [spec.type for spec in specs] == [
-        "input_rec", "demux", "dec_video", "speed_video", "force_fps", "pause"]
+        "input_rec", "demux", "dec_video", "speed_video", "force_fps"]
     assert [spec.name for spec in specs] == item_node_names(3)
     assert all(spec.group == item_group(3) for spec in specs)
-    assert specs[-1].params == {
-        "src": item_edge(3, "normalized"),
-        "dst": item_edge(3, "out"),
-        "team": item_pause_team(3),
-        "sync_team": "pl_sync",
-        "paused": True,
-    }
+    assert specs[0].params["pause_team"] == item_pause_team(3)
+    assert specs[-1].params["dst"] == item_edge(3, "normalized")
 
 
 def test_item_chain_applies_cues_speed_and_only_native_force_fps_parameters():
@@ -55,7 +50,7 @@ def test_permanent_switch_path_uses_existing_cpp_switcher_and_realtime_only():
     assert all(spec.group == "switch" for spec in specs)
     switcher, realtime = specs
     assert switcher.params == {
-        "src": [item_edge(slot, "out")
+        "src": [item_edge(slot, "normalized")
                 for slot in range(DEFAULT_SLOT_CAPACITY)],
         "dst": "pl_switched",
         "active": 0,

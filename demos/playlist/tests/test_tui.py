@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 import time
 
 import pytest
@@ -50,6 +51,35 @@ def test_one_visible_control_surface_has_unique_ids_and_no_footer():
                 "item-play", "item-pause", "item-stop", "item-mode", "item-edit",
                 "item-enable", "item-add", "item-remove", "item-up", "item-down",
             }
+    run(scenario())
+
+
+def test_every_control_is_visible_in_an_80_by_24_terminal():
+    async def scenario():
+        ctl, _ = running_controller()
+        app = PlaylistTui(ctl)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            for button in app.query(Button):
+                assert button.region.x >= 0
+                assert button.region.y >= 0
+                assert button.region.right <= app.size.width
+                assert button.region.bottom <= app.size.height
+    run(scenario())
+
+
+def test_every_edit_control_is_visible_in_an_80_by_24_terminal():
+    async def scenario():
+        ctl, _ = running_controller()
+        app = PlaylistTui(ctl)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.click("#item-edit")
+            await pilot.pause()
+            for control in app.screen.query("Input, Button"):
+                assert control.region.x >= 0
+                assert control.region.y >= 0
+                assert control.region.right <= app.size.width
+                assert control.region.bottom <= app.size.height
     run(scenario())
 
 
@@ -204,9 +234,13 @@ def test_live_framework_stdout_is_redirected_to_log(tmp_path, capfd):
     log_file = tmp_path / "playlist.log"
     with FrameworkStdoutRedirect(str(log_file)):
         print("python command reply", flush=True)
+        print("textual frame", file=sys.__stderr__, flush=True)
         os.write(1, b"native command reply\n")
+        print("python diagnostic", file=sys.stderr, flush=True)
+        os.write(2, b"native diagnostic\n")
     captured = capfd.readouterr()
     assert captured.out == ""
-    assert captured.err == ""
+    assert captured.err == "textual frame\n"
     assert log_file.read_text().splitlines() == [
-        "python command reply", "native command reply"]
+        "python command reply", "native command reply",
+        "python diagnostic", "native diagnostic"]

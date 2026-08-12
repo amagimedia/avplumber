@@ -52,6 +52,28 @@ def test_playlist_pause_resume_stop_never_change_output_health():
     assert ctl.status().output_alive is True
 
 
+@pytest.mark.parametrize("mode", list(M))
+def test_playlist_transport_cycle_in_every_playlist_mode(mode):
+    ctl, backend = controller(mode=mode)
+    start(ctl, backend)
+    item_id = ctl.clips[0].item_id
+    backend.clear()
+
+    assert ctl.pause()
+    assert ctl.play()
+    assert ctl.stop()
+    assert ctl.play()
+
+    assert backend.calls[:4] == [
+        ("pause_item", item_id),
+        ("resume_item", item_id),
+        ("cancel_activation",),
+        ("stop_item", item_id),
+    ]
+    assert backend.calls[4][0] == "play_item"
+    assert backend.calls[4][2] == item_id
+
+
 def test_stop_then_play_restarts_selected_item_at_its_cue():
     ctl, backend = controller(clips(
         ("a", E.PLAY_TO_END, {"play_from_ms": 2500}), "b"))
@@ -88,6 +110,46 @@ def test_selected_item_play_pause_stop_are_item_addressed():
     assert ctl.element_stop(2)
     assert backend.calls[-1] == ("stop_item", target)
     assert ctl.status().transport is TransportState.STOPPED
+
+
+@pytest.mark.parametrize("element_mode", list(E))
+def test_selected_item_transport_cycle_in_every_element_mode(element_mode):
+    kwargs = {"duration_ms": 1000} if element_mode is E.TIMED else {}
+    ctl, backend = controller(clips(("a", element_mode, kwargs), "b"))
+    start(ctl, backend)
+    item_id = ctl.clips[0].item_id
+    backend.clear()
+
+    assert ctl.element_pause(0)
+    assert ctl.element_play(0)
+    assert ctl.element_stop(0)
+    assert ctl.element_play(0)
+
+    assert backend.calls[:3] == [
+        ("pause_item", item_id),
+        ("resume_item", item_id),
+        ("stop_item", item_id),
+    ]
+    assert backend.calls[3][0] == "play_item"
+    assert backend.calls[3][2] == item_id
+
+
+@pytest.mark.parametrize("mode", list(M))
+@pytest.mark.parametrize("direction,start_index", [(+1, 2), (-1, 0)])
+def test_manual_navigation_boundary_in_every_playlist_mode(
+        mode, direction, start_index):
+    ctl, backend = controller(mode=mode)
+    start(ctl, backend, start_index)
+    backend.clear()
+
+    changed = ctl.next() if direction > 0 else ctl.prev()
+    if mode.loops:
+        expected = 0 if direction > 0 else 2
+        assert changed
+        assert backend.calls[-1][2] == ctl.clips[expected].item_id
+    else:
+        assert changed is False
+        assert backend.calls == []
 
 
 def test_pause_and_stop_on_inactive_item_still_execute_for_that_source_only():

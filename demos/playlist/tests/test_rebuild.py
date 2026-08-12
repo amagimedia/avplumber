@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from helpers import clips
 from playlist import Clip, item_group, item_pause_team
 from playlist_app import AsyncPlaylistBackend, PlaylistConfig
@@ -62,11 +64,14 @@ def test_destination_is_readied_then_resumed_and_selected_before_old_stops():
     activate(backend, playlist[1], 2)
     destination = backend._item_slots[playlist[1].item_id]
     commands = avp.commands
+    pauses = [index for index, command in enumerate(commands)
+              if command == f"pause {item_pause_team(destination)} now"]
+    resumes = [index for index, command in enumerate(commands)
+               if command == f"resume {item_pause_team(destination)}"]
     start = commands.index(f"group.start {item_group(destination)}")
-    resume = commands.index(f"resume {item_pause_team(destination)}")
     flip = commands.index(f"node.object.set pl_switcher active {destination}")
     stop_old = commands.index("group.stop pl_item_0")
-    assert start < resume < flip < stop_old
+    assert pauses[0] < start < resumes[0] < pauses[1] < resumes[1] < flip < stop_old
     assert "group.stop output" not in commands
     backend.close()
 
@@ -111,8 +116,8 @@ def test_superseded_activation_never_reports_stale_item_ready():
     backend.close()
 
 
-def test_remove_frees_stable_slot_for_a_later_added_item():
-    backend, _, playlist = backend_for()
+def test_remove_retires_slot_without_runtime_node_deletion():
+    backend, avp, playlist = backend_for()
     activate(backend, playlist[0], 1)
     activate(backend, playlist[1], 2)
     old_slot = backend._item_slots[playlist[1].item_id]
@@ -122,7 +127,9 @@ def test_remove_frees_stable_slot_for_a_later_added_item():
         time.sleep(0.005)
     added = Clip(url="/media/new", name="new", item_id="item-new")
     activate(backend, added, 3)
-    assert backend._item_slots[added.item_id] == old_slot
+    assert backend._item_slots[added.item_id] != old_slot
+    assert not [command for command in avp.commands
+                if command.startswith("node.delete ")]
     backend.close()
 
 
@@ -133,4 +140,15 @@ def test_no_sentinel_black_or_stall_extension_appears_in_dynamic_commands():
     assert "sentinel" not in serialized
     assert "fallback_active" not in serialized
     assert "repeat_on_stall" not in serialized
+    backend.close()
+
+
+def test_inactive_target_graph_error_fails_readiness_without_global_error():
+    backend, _, playlist = backend_for()
+    backend.report_graph_exception(
+        "pl_item_0", "NodeGroup", "No such file or directory")
+    with pytest.raises(RuntimeError, match="No such file or directory"):
+        backend._wait_for_item_frame(0, 0)
+    assert not [event for event in backend.poll_events()
+                if event.kind == "error"]
     backend.close()

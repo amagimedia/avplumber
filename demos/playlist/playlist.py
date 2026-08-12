@@ -19,7 +19,7 @@ OUTPUT_REALTIME_NODE = "pl_realtime"
 SYNC_TEAM = "pl_sync"
 SWITCHER_NAME = "pl_switcher"
 SWITCHER_TYPE = "source_switcher<av::VideoFrame>"
-DEFAULT_SLOT_CAPACITY = 8
+DEFAULT_SLOT_CAPACITY = 16
 
 
 class PlaylistMode(str, Enum):
@@ -187,7 +187,7 @@ def item_speed_team(slot: int) -> str:
 
 def item_node_names(slot: int) -> List[str]:
     return [item_edge(slot, suffix) for suffix in (
-        "input", "demux", "decode", "speed", "fps", "pause")]
+        "input", "demux", "decode", "speed", "fps")]
 
 
 def _timestamp_ms(value: int) -> str:
@@ -207,6 +207,7 @@ def plan_item_nodes(slot: int, clip: Clip, fps: int = 30) -> List[NodeSpec]:
         "preseek": 0,
         "stop_delay": 0,
         "timestamp_source": "wallclock",
+        "pause_team": item_pause_team(slot),
         "loop": clip.element_mode is ElementMode.LOOP_SELF,
         "send_eof": True,
     }
@@ -243,13 +244,6 @@ def plan_item_nodes(slot: int, clip: Clip, fps: int = 30) -> List[NodeSpec]:
             "dst": item_edge(slot, "normalized"),
             "fps": f"{fps}/1",
         }),
-        NodeSpec("pause", item_edge(slot, "pause"), group, {
-            "src": item_edge(slot, "normalized"),
-            "dst": item_edge(slot, "out"),
-            "team": item_pause_team(slot),
-            "sync_team": SYNC_TEAM,
-            "paused": True,
-        }),
     ]
 
 
@@ -259,7 +253,8 @@ def plan_switch_nodes(slot_capacity: int = DEFAULT_SLOT_CAPACITY,
         raise ValueError("slot capacity must be positive")
     return [
         NodeSpec(SWITCHER_TYPE, SWITCHER_NAME, "switch", {
-            "src": [item_edge(slot, "out") for slot in range(slot_capacity)],
+            "src": [item_edge(slot, "normalized")
+                    for slot in range(slot_capacity)],
             "dst": "pl_switched",
             "active": 0,
         }),
