@@ -14,7 +14,7 @@ AVPlumber runtime image.
 
 ## Build contract
 
-The Docker build context is `demos/playlist/`. The Dockerfile has two stages:
+The Docker build context is `demos/playlist/`. The Dockerfile has three stages:
 
 1. An Alpine 3.21 fixture stage installs Bash, FFmpeg, and DejaVu fonts. It runs
    `test-media/generate.sh`, which produces and validates the five H.264,
@@ -27,10 +27,11 @@ The Docker build context is `demos/playlist/`. The Dockerfile has two stages:
    playlist application, and generated MP4s under
    `/opt/avplumber/demos/playlist/`.
 
-The final stage adds the copied pure-Python dependency directory to
-`PYTHONPATH` and verifies that `pyplumber`, Textual, and exactly five fixture
-files import/load successfully. It neither requires package-manager/root access
-to the base nor installs or rebuilds AVPlumber, CUDA, FFmpeg, or TensorRT.
+The final stage prepends the copied pure-Python dependency directory to the
+base image's `PYTHONPATH`, verifies that `pyplumber` is discoverable without
+loading the GPU binding, imports Textual, and checks exactly five fixture files.
+It neither requires package-manager/root access to the base nor installs or
+rebuilds AVPlumber, CUDA, FFmpeg, or TensorRT.
 
 The build fails if FFmpeg lacks the required test sources, drawtext support, or
 H.264 encoder; if fixture validation fails; or if the final base does not expose
@@ -62,8 +63,8 @@ Acceptance requires:
 
 - the fixture stage builds independently and its generator validation passes;
 - the final image builds from a real CUDA-enabled Python AVPlumber base;
-- an image-level smoke check sees exactly five fixture files and imports
-  `pyplumber` and Textual;
+- an image-level smoke check sees exactly five fixture files, imports Textual,
+  and finds `pyplumber`; the real binding import runs on the GPU host;
 - a dry-run container starts without host media;
 - on the remote NVIDIA/Janus host, the container reaches `JANUS ALIVE`, the
   decoded 1920x1080 WebRTC preview advances, and the existing live playlist

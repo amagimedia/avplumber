@@ -23,6 +23,35 @@ demos/playlist/test-media/generate.sh
 The MP4 files are ignored build artifacts. The generator is the authoritative
 fixture definition; the 95-second basketball demo files are not used.
 
+### Persistent playlist image
+
+The playlist-specific multi-stage image generates and validates the five clips
+during `docker build`. The final image contains the MP4s as an immutable layer;
+it does not depend on host media or regenerate them when a container starts.
+Its base must already provide the CUDA-enabled `pyplumber` module and matching
+AVPlumber runtime:
+
+```sh
+export AVP_BASE_IMAGE=<cuda-python-avplumber-image>
+docker build \
+  --build-arg AVP_BASE_IMAGE="$AVP_BASE_IMAGE" \
+  --tag avplumber-playlist:local \
+  demos/playlist
+```
+
+Run the clickable TUI against Janus on the host network:
+
+```sh
+docker run --rm -it \
+  --gpus all \
+  --network host \
+  avplumber-playlist:local
+```
+
+Recreating that container uses the same five image-layer clips. Rebuilding the
+image reruns the committed deterministic generator. To use a different Janus
+endpoint, append the normal `player.py` CLI arguments after the image name.
+
 ## Existing-node graph
 
 Each loaded element owns a stable source group:
