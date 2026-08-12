@@ -169,24 +169,28 @@ class NodeSpec:
     params: dict
 
 
-def item_group(slot: int) -> str:
-    return f"pl_item_{slot}"
+def item_group(slot: int, generation: int = 0) -> str:
+    base = f"pl_item_{slot}"
+    return base if generation == 0 else f"{base}_g{generation}"
 
 
-def item_edge(slot: int, suffix: str) -> str:
-    return f"pl_item_{slot}_{suffix}"
+def item_edge(slot: int, suffix: str, generation: int = 0) -> str:
+    # Every source generation for a switcher slot ends at the same fixed edge.
+    if suffix == "normalized":
+        return f"pl_item_{slot}_{suffix}"
+    return f"{item_group(slot, generation)}_{suffix}"
 
 
-def item_pause_team(slot: int) -> str:
-    return f"pl_item_{slot}_pause_team"
+def item_pause_team(slot: int, generation: int = 0) -> str:
+    return f"{item_group(slot, generation)}_pause_team"
 
 
-def item_speed_team(slot: int) -> str:
-    return f"pl_item_{slot}_speed_team"
+def item_speed_team(slot: int, generation: int = 0) -> str:
+    return f"{item_group(slot, generation)}_speed_team"
 
 
-def item_node_names(slot: int) -> List[str]:
-    return [item_edge(slot, suffix) for suffix in (
+def item_node_names(slot: int, generation: int = 0) -> List[str]:
+    return [item_edge(slot, suffix, generation) for suffix in (
         "input", "demux", "decode", "speed", "fps")]
 
 
@@ -197,17 +201,18 @@ def _timestamp_ms(value: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
-def plan_item_nodes(slot: int, clip: Clip, fps: int = 30) -> List[NodeSpec]:
+def plan_item_nodes(slot: int, clip: Clip, fps: int = 30,
+                    generation: int = 0) -> List[NodeSpec]:
     """Existing replay-shaped source chain for one stable switcher slot."""
-    group = item_group(slot)
+    group = item_group(slot, generation)
     input_params = {
         "url": clip.url,
-        "dst": item_edge(slot, "packets"),
+        "dst": item_edge(slot, "packets", generation),
         "timeout": -1,
         "preseek": 0,
         "stop_delay": 0,
         "timestamp_source": "wallclock",
-        "pause_team": item_pause_team(slot),
+        "pause_team": item_pause_team(slot, generation),
         "loop": clip.element_mode is ElementMode.LOOP_SELF,
         "send_eof": True,
     }
@@ -217,30 +222,31 @@ def plan_item_nodes(slot: int, clip: Clip, fps: int = 30) -> List[NodeSpec]:
         input_params["stop_ts"] = _timestamp_ms(clip.play_to_ms)
 
     return [
-        NodeSpec("input_rec", item_edge(slot, "input"), group, input_params),
-        NodeSpec("demux", item_edge(slot, "demux"), group, {
-            "src": item_edge(slot, "packets"),
-            "routing": {"v:0": item_edge(slot, "video_packets")},
+        NodeSpec("input_rec", item_edge(slot, "input", generation), group,
+                 input_params),
+        NodeSpec("demux", item_edge(slot, "demux", generation), group, {
+            "src": item_edge(slot, "packets", generation),
+            "routing": {"v:0": item_edge(slot, "video_packets", generation)},
         }),
-        NodeSpec("dec_video", item_edge(slot, "decode"), group, {
-            "src": item_edge(slot, "video_packets"),
-            "dst": item_edge(slot, "decoded"),
+        NodeSpec("dec_video", item_edge(slot, "decode", generation), group, {
+            "src": item_edge(slot, "video_packets", generation),
+            "dst": item_edge(slot, "decoded", generation),
             "pixel_format": "cuda",
             "hwaccel": GPU_DEVICE,
             "codec_map": {"h264": "h264_cuvid"},
             "hwaccel_only_for_codecs": ["h264"],
             "flush_magic": True,
         }),
-        NodeSpec("speed_video", item_edge(slot, "speed"), group, {
-            "src": item_edge(slot, "decoded"),
-            "dst": item_edge(slot, "speeded"),
-            "team": item_speed_team(slot),
+        NodeSpec("speed_video", item_edge(slot, "speed", generation), group, {
+            "src": item_edge(slot, "decoded", generation),
+            "dst": item_edge(slot, "speeded", generation),
+            "team": item_speed_team(slot, generation),
             "sync_team": SYNC_TEAM,
             "sync_node": OUTPUT_REALTIME_NODE,
             "speed": clip.speed,
         }),
-        NodeSpec("force_fps", item_edge(slot, "fps"), group, {
-            "src": item_edge(slot, "speeded"),
+        NodeSpec("force_fps", item_edge(slot, "fps", generation), group, {
+            "src": item_edge(slot, "speeded", generation),
             "dst": item_edge(slot, "normalized"),
             "fps": f"{fps}/1",
         }),
@@ -632,10 +638,6 @@ class PlaylistController:
         self.clips[index] = updated
         if not changes or old.item_id != self._active_id:
             return
-        if set(changes) == {"speed"} and self.transport in (
-                TransportState.PLAYING, TransportState.PAUSED):
-            self._backend.set_speed(old.item_id, updated.speed)
-            return
         if self.transport in (TransportState.PLAYING, TransportState.PAUSED):
             self._request_item(index)
 
@@ -720,9 +722,6 @@ class InMemoryBackend:
 
     def cancel_activation(self) -> None:
         self.calls.append(("cancel_activation",))
-
-    def set_speed(self, item_id: str, speed: float) -> None:
-        self.calls.append(("set_speed", item_id, speed))
 
     def remove_item(self, item_id: str) -> None:
         self.calls.append(("remove_item", item_id))

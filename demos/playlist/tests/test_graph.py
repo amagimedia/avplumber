@@ -16,6 +16,17 @@ def test_item_chain_matches_existing_replay_video_path():
     assert specs[-1].params["dst"] == item_edge(3, "normalized")
 
 
+def test_reused_slot_generation_has_unique_nodes_teams_and_fixed_switch_edge():
+    specs = plan_item_nodes(3, Clip(url="/media/a.mp4"), fps=30, generation=7)
+    assert {spec.group for spec in specs} == {"pl_item_3_g7"}
+    assert [spec.name for spec in specs] == [
+        f"pl_item_3_g7_{suffix}"
+        for suffix in ("input", "demux", "decode", "speed", "fps")]
+    assert specs[0].params["pause_team"] == "pl_item_3_g7_pause_team"
+    assert specs[3].params["team"] == "pl_item_3_g7_speed_team"
+    assert specs[-1].params["dst"] == item_edge(3, "normalized")
+
+
 def test_item_chain_applies_cues_speed_and_only_native_force_fps_parameters():
     clip = Clip(url="/media/a.mp4", play_from_ms=1250, play_to_ms=8750,
                 speed=1.25)

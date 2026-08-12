@@ -34,9 +34,12 @@ input_rec(pause_team=item_N_pause_team)
 ```
 
 Sixteen fixed item edges feed the existing typed C++ switcher. Only used slots
-have source nodes. Changed and removed sources retire their slots until shutdown,
-avoiding runtime node-deletion races while leaving room for this small regression
-session:
+have source nodes. Before a changed or removed source releases its slot, the
+backend stops its group and waits until every source node reports non-working.
+Reuse creates a uniquely named source generation feeding the same fixed switcher
+edge; stopped generations remain inert until application shutdown. This avoids
+unsafe node/team-name reuse while leaving the permanent switch/output graph
+untouched:
 
 ```text
 item_0_normalized ... item_15_normalized
@@ -52,6 +55,11 @@ for shared output before stopping the old source. EOF is observed on the selecte
 switch edge before `realtime` consumes the marker. A failed target does not replace
 the previous active source. Element or playlist Stop waits for only that source
 group to stop; it never stops the switch, realtime, encoder, mux, or RTP output.
+
+URL, cue, loop-mode, and speed edits are construction changes in this harness.
+They use the same ready-source handoff instead of issuing `speed.set` across the
+multi-source switch graph; `speed_video` receives the requested speed when the
+new generation is constructed.
 
 Like the working replay demo, Pause/Stop makes the push graph quiet and a viewer
 normally retains its last decoded frame. The harness does not synthesize a
@@ -116,9 +124,11 @@ the native RTP output stays working while every playlist mode runs the complete
 playlist Play/Pause/Stop/Stop-to-Play/Next/Previous cycle, every item runs its
 transport cycle, and the harness exercises edits, source failure,
 add/remove/reorder, actual Timed completion, a native LoopSelf interval, and
-PlayToEnd natural EOF. Observe the matching Janus mountpoint during the run to
-verify the decoded last frame remains visible while a source is stopped and that
-playback resumes without recreating the mountpoint.
+PlayToEnd natural EOF. Twenty alternating graph-affecting mode edits additionally
+prove stopped source slots are reusable without exhausting the fixed switcher.
+Observe the matching Janus mountpoint during the run to verify the decoded last
+frame remains visible while a source is stopped and that playback resumes without
+recreating the mountpoint.
 
 A host-independent clickable dry run records actions in memory and prints
 nothing while Textual owns the terminal:
