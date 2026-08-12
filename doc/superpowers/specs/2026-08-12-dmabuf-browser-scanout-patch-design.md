@@ -48,11 +48,20 @@ API, receives N independent DMA-BUF sockets, imports each through
 `ipc_dmabuf_source` and `drm_prime_to_cuda`, and composites them on the GPU.
 No source count is baked into the graph.
 
-The grid chooses near-square row and column counts from N. Each 16:9 source is
-scaled and padded inside its cell so the 1920x1080 program output is not
-distorted. For N=8 this produces a 3x3 grid with one empty cell. A separate
-single-source mode runs one full-canvas source through the same DMA-BUF import
-and Janus output path as a baseline.
+The requested load uses 1920x1080@60 capture for every input. The grid chooses
+near-square row and column counts from N, then scales and pads each 16:9 source
+inside its cell so the 1920x1080 program output is not distorted. For N=8 this
+produces a 3x3 grid with one empty cell. A separate single-source mode runs one
+full-canvas source through the same DMA-BUF import and Janus output path as a
+baseline.
+
+Performance and duplicate detection are separate phases. The production phase
+stays zero-copy through the grid mixer and records GPU, encoder, memory, and
+PCIe counters. The diagnostic phase fans out each imported CUDA input, performs
+an explicit full-resolution download, and runs an independent `mpdecimate`.
+Those downloads intentionally create about 4 GB/s of raw device-to-host traffic
+for N=8 at 1080p60, so diagnostic PCIe/CPU measurements are not production
+performance measurements.
 
 The browser's default maximum remains 8, but `DMA_BROWSER_MAX_WINDOWS` becomes
 configurable above that default so a future N is not rejected by an
