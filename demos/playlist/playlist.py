@@ -354,10 +354,11 @@ class PlaylistController:
         self._timed_remaining_ms = (
             clip.duration_ms if clip and clip.element_mode is ElementMode.TIMED else None)
 
-    def _request_item(self, index: int) -> bool:
+    def _request_item(self, index: int, *, select: bool = True) -> bool:
         self._check_index(index)
         clip = self.clips[index]
-        self._selected_id = clip.item_id
+        if select:
+            self._selected_id = clip.item_id
         if clip.disabled:
             self.error = "element is disabled"
             self.error_item_id = clip.item_id
@@ -447,7 +448,6 @@ class PlaylistController:
 
     def play(self) -> bool:
         if (self.transport is TransportState.PAUSED
-                and self._active_id == self._selected_id
                 and self._active_id is not None):
             self._backend.resume_item(self._active_id)
             self.transport = TransportState.PLAYING
@@ -455,10 +455,10 @@ class PlaylistController:
             return True
         if self.transport in (TransportState.PLAYING, TransportState.LOADING):
             return False
-        target = self.selected_index
+        target = self.active_index
         if target is None:
             target = first_enabled(self.clips)
-        return False if target is None else self._request_item(target)
+        return False if target is None else self._request_item(target, select=False)
 
     def pause(self) -> bool:
         if self.transport is not TransportState.PLAYING or self._active_id is None:

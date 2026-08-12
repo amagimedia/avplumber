@@ -104,6 +104,11 @@ The Textual UI has separate, explicitly labelled rows:
 - selected element: Play, Pause, Stop, `PlayToEnd`/`Timed`/`LoopSelf`, edit cue
   and speed, enable/disable, add, remove, and reorder.
 
+Highlighting an element changes only the selected-element target. Playlist Play
+resumes or restarts the active element, or starts the first enabled element when
+the playlist has not activated one yet; use ITEM PLAY to activate the highlighted
+element explicitly.
+
 Per-element Pause and Stop are regression-only source-lifecycle controls. The
 current gateway playlist API exposes item Play/select, cue, duration, disable,
 remove, and reorder, while whole-playlist Pause/Stop are media controls.

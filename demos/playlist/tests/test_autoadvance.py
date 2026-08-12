@@ -7,8 +7,7 @@ from playlist import ElementMode as E, PlaylistMode as M, TransportState
 
 
 def start(ctl, backend, index=0):
-    ctl.select(index)
-    assert ctl.play()
+    assert ctl.element_play(index)
     finish_pending(ctl, backend)
 
 

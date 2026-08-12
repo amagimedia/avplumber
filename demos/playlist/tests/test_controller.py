@@ -7,8 +7,7 @@ from playlist import Clip, ElementMode as E, PlaylistMode as M, TransportState
 
 
 def start(ctl, backend, index=0):
-    ctl.select(index)
-    assert ctl.play()
+    assert ctl.element_play(index)
     finish_pending(ctl, backend)
 
 
@@ -74,14 +73,37 @@ def test_playlist_transport_cycle_in_every_playlist_mode(mode):
     assert backend.calls[4][2] == item_id
 
 
-def test_stop_then_play_restarts_selected_item_at_its_cue():
+def test_stop_highlight_then_playlist_play_restarts_active_item_at_its_cue():
     ctl, backend = controller(clips(
-        ("a", E.PLAY_TO_END, {"play_from_ms": 2500}), "b"))
+        ("a", E.PLAY_TO_END, {"play_from_ms": 2500}), "b", "c"))
     start(ctl, backend); ctl.stop(); backend.clear()
+    ctl.select(2)
+
     assert ctl.play()
     operation, _, item_id, clip = backend.calls[-1]
     assert (operation, item_id, clip.play_from_ms) == (
         "play_item", ctl.clips[0].item_id, 2500)
+    assert ctl.status().selected_index == 2
+
+
+def test_pause_highlight_then_playlist_play_resumes_active_item():
+    ctl, backend = controller()
+    start(ctl, backend); ctl.pause(); backend.clear()
+    ctl.select(2)
+
+    assert ctl.play()
+    assert backend.calls == [("resume_item", ctl.clips[0].item_id)]
+    assert ctl.status().selected_index == 2
+    assert ctl.status().active_index == 0
+
+
+def test_playlist_play_before_first_activation_ignores_highlighted_item():
+    ctl, backend = controller()
+    ctl.select(2)
+
+    assert ctl.play()
+    assert backend.calls[-1][2] == ctl.clips[0].item_id
+    assert ctl.status().selected_index == 2
 
 
 def test_playlist_next_previous_and_all_four_modes():
