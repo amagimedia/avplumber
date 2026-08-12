@@ -1,8 +1,11 @@
-From 30b851f13d97bad9b0b28e7310122d914ac6fc1d Mon Sep 17 00:00:00 2001
-From: avplumber builder <build@avplumber.local>
-Date: Thu, 25 Jun 2026 23:30:36 +0200
-Subject: [PATCH] avfilter/npp: use CUDA 13 stream context APIs
+From e5ba36a6cfabc10f5c745fba9e8a91fef92cf4a7 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 3/7] avfilter/npp: support CUDA 13 stream context APIs
 
+Add an NPP compatibility layer and use explicit CUDA stream contexts in scale, sharpen, and transpose filters.
+
+Original-commit: 30b851f13d97bad9b0b28e7310122d914ac6fc1d
 ---
  libavfilter/cuda/npp_compat.h  | 65 ++++++++++++++++++++++++++++++++++
  libavfilter/vf_scale_npp.c     | 56 ++++++++++++++++++++---------
@@ -301,6 +304,3 @@ index 1706267..e24dc53 100644
          if (err != NPP_SUCCESS) {
              av_log(ctx, AV_LOG_ERROR, "NPP transpose error: %d\n", err);
              return AVERROR_UNKNOWN;
--- 
-2.54.0
-

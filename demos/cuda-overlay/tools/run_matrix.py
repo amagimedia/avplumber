@@ -20,7 +20,7 @@ from overlay_common import HEIGHT, MAX_OVERLAYS, MODES, WIDTH, read_frame, write
 
 
 DEMO_DIR = Path(__file__).resolve().parents[1]
-REPO_DIR = DEMO_DIR.parent
+REPO_DIR = DEMO_DIR.parents[1]
 GRAPH = DEMO_DIR / "graph" / "overlay_case.py"
 
 
