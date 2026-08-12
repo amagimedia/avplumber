@@ -6,6 +6,7 @@
 #include <avcpp/codeccontext.h>
 #include <avcpp/videorescaler.h>
 #include <ios>
+#include <libavutil/avutil.h>
 #include <memory>
 extern "C" {
 #include "libavutil/channel_layout.h"
@@ -529,6 +530,8 @@ protected:
     av::Timestamp wallclock_offset_ = NOTS;
     /// When true, an upstream EOF marker is forwarded to the sink and this node finishes (VOD / file end).
     bool eof_passthrough_ = false;
+    /// Wallclock epoch (ms) before which all frames are silently dropped and no backup frames are generated.
+    int64_t hold_until_ms_ = AV_NOPTS_VALUE;
 
     enum class FrameSource: int {
         None = -1,
@@ -624,6 +627,15 @@ protected:
             card_status_ = is_card | (ts << 1);
         }
     }
+    bool isHeld() {
+        if (hold_until_ms_ == AV_NOPTS_VALUE) return false;
+        bool r = wallclock.absolute_ts().timestamp() < hold_until_ms_;
+        if (!r) {
+            hold_until_ms_ = AV_NOPTS_VALUE; // latch to prevent NTP edge cases
+        }
+        last_success_ = !r;
+        return r;
+    }
     void handleWallclockOffset(const av::Timestamp output_pts, const av::Timestamp now_wallclock) {
         if (!track_wallclock_) return;
         av::Timestamp new_offset = addTS(output_pts, negateTS(now_wallclock));
@@ -680,6 +692,14 @@ public:
             T &frm = *pfrm;
             av::Timestamp frame_wallclock = wallclock.absolute_ts();
             if (frm.isComplete() && frm.pts().isValid()) {
+                // Wallclock hold check before processing.
+                if (isHeld()) {
+                    if (!this->source_->pop()) {
+                        throw Error("pop() failed on held frame! (should never happen)");
+                    }
+                    return;
+                }
+
                 // success, we have frame
                 setFrameSource(FrameSource::Input);
                 mspec_.normalizeFrame(frm);
@@ -873,7 +893,7 @@ public:
                 last_success_ = false;
             }
         }
-        if (pfrm==nullptr) {
+        if (pfrm==nullptr && !isHeld()) {
             // timeout getting frame
             setFrameSource(FrameSource::Backup);
             av::Timestamp rtc;
@@ -889,8 +909,10 @@ public:
                 //logstream << "Stalled for " << stalled_sec << " = " << rtc << " - " << next_ts_ << ", max " << max_stalled_sec_;
                 should_emit_backups = (!last_success_) || (stalled_sec > max_stalled_sec_);
             }
-            // Never hold corr_->getLock() across sink output: another sentinel (audio) may need the
-            // mutex while we block on a full downstream queue, which deadlocks shutdown and live graphs.
+            // Never hold corr_->getLock() across sink output: another sentinel may need the mutex
+            // while we block on a full downstream queue, which deadlocks shutdown and live graphs.
+            // TODO: this comment (and change) was written by AI, we're using outputFrame(drop_if_full: true),
+            // so is lock decoupling actually needed?
             if (should_emit_backups) {
                 sink_full_ = false;
                 //logstream << "TIMEOUT ";
@@ -1090,6 +1112,11 @@ public:
             corr->start_ts_ = av::Timestamp(AVTS(params["start_ts"].get<float>()*1000.0f+0.5f), {1, 1000});
         }
         auto r = NodeSISO<T, T>::template createCommon<PTSCorrectorNode>(edges, params, corr, params, max_stalled_sec, max_freeze_sec, forward_start_shift, max_streams_diff, nci.instance);
+        if (params.count("hold_until_ms")) {
+            r->hold_until_ms_ = params["hold_until_ms"].get<int64_t>();
+        } else if (params.count("hold_until_iso")) {
+            r->hold_until_ms_ = parseIso8601ToMs(params["hold_until_iso"]);
+        }
         if (params.count("initial_picture_buffer")) {
             std::string pict_buf_name = params["initial_picture_buffer"];
             std::shared_ptr<PictureBuffer> pictbuf = InstanceSharedObjects<PictureBuffer>::get(nci.instance, pict_buf_name);

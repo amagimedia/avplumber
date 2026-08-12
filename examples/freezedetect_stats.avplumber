@@ -1,0 +1,54 @@
+# Manual verification of the stats metadata-latching feature (CPU-only, no Java).
+#
+# Usage:
+#   1. Edit the input URL below to point at your frozen-prone source
+#      (an RTMP stream, e.g. rtmp://localhost/live/input, or a local file path).
+#   2. Run:  ./avplumber -s examples/freezedetect_stats.avplumber
+#   3. Feed an input that freezes (still frame / dropped source) and watch the
+#      console: every second the stats JSON is printed to stdout (empty url =>
+#      console, see src/rest_client.cpp sendInternal).
+#   4. In streams_video[0].metadata["lavfi.freezedetect."] you should see the
+#      latched object appear/change on freeze events, e.g.:
+#        { "freeze_start": "<pts>", "freeze_duration": "<sec>" }
+#      on freeze start, and
+#        { "freeze_duration": "<sec>", "freeze_end": "<pts>" }
+#      on freeze end. Between events the object is latched (unchanged) so the
+#      consumer always sees the last reported freeze snapshot.
+#
+# Notes:
+#   - freezedetect is a passthrough lavfi filter; it has no `metadata` option,
+#     it always writes lavfi.freezedetect.* frame metadata. The stats wiretap
+#     reads that metadata off the filter's OUTPUT edge (v_freeze) via
+#     q_post_dec, and latches it per the configured metadata_prefixes.
+#   - Pure CPU pipeline: no hwaccel.init, no @gpu. Suitable for a remote host
+#     without CUDA. Audio is decoded to a null_sink so audio stats work too
+#     (mirrors examples/remux_analyze_audio.avplumber).
+
+# >>> EDIT THIS URL to your input source (RTMP or file path) <<<
+node.add { "type": "input", "url": "<path>/freezedetect_test.mp4", "dst": "in0", "options": { "probesize": 3000000, "analyzeduration": 3000000 }, "group": "all", "auto_restart": "group", "name": "input", "timeout": 5, "initial_timeout": 8 }
+
+node.add { "type": "demux", "src": "in0", "routing": { "v:0": "v_in", "a:0": "a_in" }, "group": "all", "auto_restart": "group" }
+
+# Video: CPU decode -> realtime (pace to wallclock) -> freezedetect (CPU) -> null_sink.
+# freezedetect writes lavfi.freezedetect.* frame metadata on its output edge.
+# realtime paces decoded frames to 1x so a local file (or a live source) lines up
+# with the 1s stats prints; it shares team @fd with the audio realtime node for A/V
+# sync. set_pts=false keeps source PTS, so freezedetect's duration=2 is measured on
+# the original timeline. No input_ts_queue => no max-buffered flush, the file just
+# plays at 1x instead of decoding flat-out.
+node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "all", "auto_restart": "group", "name": "Video_Decoder" }
+node.add { "type": "realtime", "team": "@fd", "src": "v_dec", "dst": "v_rt", "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "group": "all", "auto_restart": "group", "name": "RTSync_Video" }
+node.add { "type": "filter_video", "graph": "freezedetect=noise=0.001:duration=2", "src": "v_rt", "dst": "v_freeze", "group": "all", "auto_restart": "group", "name": "FreezeDetect" }
+node.add { "type": "null_sink", "src": "v_freeze", "group": "all" }
+
+# Audio: CPU decode -> realtime (team @fd) -> null_sink (so audio stats are populated too).
+node.add { "type": "dec_audio", "src": "a_in", "dst": "a_dec", "group": "all", "auto_restart": "group", "name": "Audio_Decoder" }
+node.add { "type": "realtime", "team": "@fd", "src": "a_dec", "dst": "a_rt", "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3, "group": "all", "auto_restart": "group", "name": "RTSync_Audio" }
+node.add { "type": "null_sink", "src": "a_rt", "group": "all" }
+
+# empty url => stats JSON printed to console each interval (1s).
+# video stream reads freezedetect metadata off the v_freeze (post-dec) edge and
+# latches it under the "lavfi.freezedetect." prefix.
+stats.subscribe { "url": "", "name": "manual_verify", "interval": 1, "streams": { "video": [ { "q_pre_dec": "v_in", "q_post_dec": "v_freeze", "decoder": "Video_Decoder", "metadata_prefixes": [ "lavfi.freezedetect." ] } ], "audio": [ { "q_pre_dec": "a_in", "q_post_dec": "a_rt", "decoder": "Audio_Decoder" } ] } }
+
+group.start all

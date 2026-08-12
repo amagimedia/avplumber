@@ -26,6 +26,10 @@ std::string mediaTypeToString(AVMediaType mt);
 std::string fieldOrderToString(AVFieldOrder fo);
 uint64_t stringToChannelLayout(const std::string);
 
+// Parse ISO 8601 date-time string (e.g. "2025-06-15T14:30:00Z" or "2025-06-15T14:30:00+02:00")
+// Returns Unix epoch milliseconds. Throws std::runtime_error on parse failure.
+int64_t parseIso8601ToMs(const std::string &iso);
+
 class Wallclock {
 protected:
     using TimeUnit = std::chrono::milliseconds;
