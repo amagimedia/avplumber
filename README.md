@@ -216,7 +216,7 @@ system's process.
 
 ## Seeking infrastructure & playback control (experimental)
 
-Despite the architecture initially being designed solely for handling live streams, latest updates to avplumber bring playback control support.
+avplumber is mainly designed to handle live streams, but it does contain nodes that support playback control.
 
 Seeking is complicated because queues need to be flushed to ensure that user doesn't have to wait for them to drain after requesting a seek. Also, we want to display frame after seek even when the player is paused. That's why seek commands (`seek`) need the name of the downmost node in the graph that limits output speed (in a video player it would be `realtime`). The graph is walked up, passing needed requests to decoder nodes and issuing the actual seek request to the `input_rec` node.
 
@@ -228,6 +228,8 @@ See `examples/video_player.avplumber` for a typical graph with playback control 
 * `speed.set s 2` - set speed to 2 times faster than realtime
 * `speed.set s -1` - set speed to reverse (1x)
 
+TODO: is this documentation accurate and up-to-date?
+
 ### Fast seek
 
 If you want seeking to be as fast as possible, you'll need a specially encoded file. You can make it with avplumber, too.
@@ -235,7 +237,7 @@ If you want seeking to be as fast as possible, you'll need a specially encoded f
 * Use intra-frame-only codec for `enc_video`
 * Specify `seek_table` option of the `output` node
 
-In your application controlling the player, parse the generated seek table and find byte offset corresponding to the timestamp you want to seek to. Then issue the command:
+In your application controlling the player, issue the command:
 
 `seek rtsync now <timestamp>`
 
@@ -317,9 +319,14 @@ open log file in less, press `/` or `?` and use this regular expression:
 
 ## License and acknowledgements
 
-Created by Teodor Wozniak <teodor.wozniak@amagi.com> https://lumifaza.org
+Created by:
 
-Copyright (c) 2018-2024 Amagi Media Labs Pvt. Ltd https://amagi.com
+* original author, framework, FFmpeg-based nodes, sentinel, hardware acceleration: Teodor Wozniak <teodor.wozniak@amagi.com> https://lumifaza.org
+* non-live playback control, Python integration: Lukasz Misek
+* hardware acceleration, machine learning video processing: [Jan Pietek](https://github.com/jpietek)
+* various artificial neural networks, with core changes always reviewed by human neural networks
+
+Copyright (c) 2018-2026 Amagi Media Labs Pvt. Ltd https://amagi.com
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as
