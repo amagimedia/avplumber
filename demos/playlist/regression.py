@@ -229,6 +229,16 @@ class LiveRegression:
             self.controller.element_play(index)
             self.wait_playing(index, f"item {index + 1} stop-to-play")
 
+        # Repeated graph-affecting mode edits must release and reuse stopped
+        # switcher slots rather than eventually freezing on slot exhaustion.
+        stress_index = self.controller.status().active_index
+        for edit in range(20):
+            mode = (ElementMode.LOOP_SELF if edit % 2 == 0
+                    else ElementMode.PLAY_TO_END)
+            self.controller.set_element_mode(stress_index, mode)
+            self.wait_playing(
+                stress_index, f"slot reuse mode edit {edit + 1}")
+
         # An item-addressed action on a non-active source must not alter the
         # active item, playlist transport, or permanent Janus output.
         active = self.controller.status().active_index
@@ -260,7 +270,7 @@ class LiveRegression:
         self.controller.update_clip(before, play_from_ms=1000, play_to_ms=8000)
         self.wait_playing(before, "active element cue edit")
         self.controller.update_clip(before, speed=1.25)
-        self.assert_output("active element speed")
+        self.wait_playing(before, "active element speed rebuild")
         self.controller.set_disabled(before, True)
         self.wait_for(
             lambda: self.controller.status().transport is TransportState.STOPPED,

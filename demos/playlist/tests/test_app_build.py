@@ -5,7 +5,7 @@ import time
 import types
 
 from helpers import clips
-from playlist import SWITCHER_TYPE, item_node_names
+from playlist import ElementMode, SWITCHER_TYPE, item_node_names
 
 
 class FakeWrapper:
@@ -248,3 +248,27 @@ def test_stop_is_bounded_and_tears_down_permanent_groups_only_at_shutdown(tmp_pa
     assert "direct-stop:output" in app.avp.commands
     assert "direct-stop:switch" in app.avp.commands
     assert app.avp.shutdown_called
+
+
+def test_repeated_active_mode_edits_do_not_exhaust_switcher_slots(tmp_path):
+    app = build(tmp_path)
+    app.start()
+    try:
+        for edit in range(24):
+            mode = (ElementMode.LOOP_SELF if edit % 2 == 0
+                    else ElementMode.PLAY_TO_END)
+            app.controller.set_element_mode(0, mode)
+            deadline = time.monotonic() + 1
+            while app.controller.status().pending_index is not None:
+                app.controller.poll(int(time.monotonic() * 1000))
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"mode edit {edit} did not finish")
+                time.sleep(0.005)
+            status = app.controller.status()
+            assert status.playing
+            assert status.active_index == 0
+            assert status.error == ""
+        assert not [command for command in app.avp.commands
+                    if command.startswith("speed.set ")]
+    finally:
+        app.stop()

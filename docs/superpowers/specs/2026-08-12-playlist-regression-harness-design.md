@@ -106,11 +106,13 @@ item_0_normalized .. item_15_normalized
 
 Sixteen fixed switcher slots permit add/remove and active-item rebuilds without
 recreating the permanent switch/output graph. Only used slots have source
-nodes. Changed and removed sources are stopped and their slots are retired until
-application shutdown; avoiding runtime node deletion removes a graph teardown
-race while preserving a bounded session suitable for this regression harness.
-Five slots are populated by the default scenario. Reordering changes policy
-order, not graph slot identity.
+nodes. Changed and removed source groups are stopped, every source node is
+observed non-working, and then the fixed switch edge can be reused by a uniquely
+named source generation. Stopped generations remain inert until application
+shutdown. This avoids both the asynchronous group-stop race and unsafe
+node/team-name reuse without touching the permanent graph. Five slots are
+populated by the default scenario. Reordering changes policy order, not graph
+slot identity.
 
 Element Play holds the destination `input_rec` through its existing pause team,
 starts the source group, observes one valid frame on a non-consuming normalized
@@ -118,6 +120,11 @@ edge wiretap, then pauses the input again. It ensures the permanent output is
 started, resumes and selects the ready C++ switcher slot, requests a keyframe,
 and waits for the new frame to reach the shared path before stopping the previous
 source group. A failed destination retains the previous active source and frame.
+
+URL, cue, loop-mode, and speed edits rebuild through the same generation handoff.
+In particular, the harness does not issue runtime `speed.set` across the
+multi-source switch graph; the selected speed is an existing `speed_video`
+construction parameter.
 
 Element Pause uses only that source's input pause team. Element Stop stops only
 that source group and waits for every node in it to leave the working state
@@ -164,9 +171,10 @@ recorded in memory and never printed while Textual owns the terminal.
    matrix, disabled-item behavior, and manual boundary/wrap behavior.
 2. Controller with a fake asynchronous backend: every action, Stop-to-Play,
    edits during playback, EOF, superseded loads, failure, and output health.
-3. Graph/backend fakes: existing-node shapes, fixed slot identity, retired slots
-   without runtime deletion, readiness before cut, source-only Stop, permanent
-   output lifetime, command serialization, and non-blocking public calls.
+3. Graph/backend fakes: existing-node shapes, fixed slot identity, source-stop
+   completion before slot release/reuse, readiness before cut, source-only Stop,
+   permanent output lifetime, command serialization, and non-blocking public
+   calls.
 4. Textual Pilot: every button and binding, selected-row targeting, no Footer,
    no duplicate controls, main and Add/Edit visibility at 80x24, no log text,
    and responsiveness during slow backend work.

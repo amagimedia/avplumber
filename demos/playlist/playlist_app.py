@@ -21,8 +21,8 @@ from typing import Dict, List, Optional, Tuple
 from playlist import (BackendEvent, DEFAULT_SLOT_CAPACITY, GPU_DEVICE,
                       SWITCHER_NAME, SWITCHER_TYPE, Clip, NodeSpec,
                       PlaylistController, PlaylistMode, item_edge, item_group,
-                      item_node_names, item_pause_team, item_speed_team,
-                      plan_item_nodes, plan_switch_nodes)
+                      item_node_names, item_pause_team, plan_item_nodes,
+                      plan_switch_nodes)
 
 JANUS_FORCE_KEYFRAME_NODE = "janus_force_keyframe"
 JANUS_FORCE_KEYFRAME_COMMAND = (
@@ -145,7 +145,6 @@ class _Task:
     request_id: Optional[int] = None
     item_id: Optional[str] = None
     clip: Optional[Clip] = None
-    speed: Optional[float] = None
 
 
 class AsyncPlaylistBackend:
@@ -175,7 +174,11 @@ class AsyncPlaylistBackend:
         self._slot_items: Dict[int, str] = {}
         self._item_slots: Dict[str, int] = {}
         self._slot_fingerprints: Dict[int, Tuple] = {}
+        self._slot_generations: Dict[int, int] = {}
+        self._next_generations: Dict[int, int] = {}
+        self._all_item_groups = set()
         self._built_slots = set()
+        self._watched_slots = set()
         self._running_slots = set()
 
     def bind_listener(self, listener) -> None:
@@ -185,6 +188,9 @@ class AsyncPlaylistBackend:
         self._slot_items[slot] = item_id
         self._item_slots[item_id] = slot
         self._slot_fingerprints[slot] = _clip_fingerprint(clip)
+        self._slot_generations[slot] = 0
+        self._next_generations[slot] = 1
+        self._all_item_groups.add(item_group(slot))
         self._built_slots.add(slot)
         self._watch_slot(slot)
 
@@ -206,9 +212,6 @@ class AsyncPlaylistBackend:
     def cancel_activation(self) -> None:
         with self._state_lock:
             self._latest_request = None
-
-    def set_speed(self, item_id: str, speed: float) -> None:
-        self._tasks.put(_Task("speed", item_id=item_id, speed=speed))
 
     def remove_item(self, item_id: str) -> None:
         self._tasks.put(_Task("remove", item_id=item_id))
@@ -268,49 +271,59 @@ class AsyncPlaylistBackend:
     def _stop_slot(self, slot: int) -> None:
         if slot not in self._running_slots:
             return
-        self._execute(f"group.stop {item_group(slot)}")
+        generation = self._slot_generations[slot]
+        self._execute(f"group.stop {item_group(slot, generation)}")
         deadline = time.monotonic() + self.config.control_timeout
         while any(self.avp.node(name).isWorking
-                  for name in item_node_names(slot)):
+                  for name in item_node_names(slot, generation)):
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"playlist slot {slot} did not stop")
             time.sleep(0.01)
         self._running_slots.discard(slot)
 
-    def _retire_slot(self, slot: int) -> None:
-        """Stop a slot but keep its nodes until application shutdown.
-
-        Runtime deletion races the asynchronous group stop. This deliberately
-        small regression harness has spare fixed switcher inputs, so retiring
-        a slot is both simpler and deterministic.
-        """
+    def _release_slot(self, slot: int) -> None:
+        """Stop the source generation before reusing its fixed switch edge."""
         self._stop_slot(slot)
-        old_item = self._slot_items.get(slot)
+        self._built_slots.discard(slot)
+        self._slot_fingerprints.pop(slot, None)
+        self._slot_generations.pop(slot, None)
+        old_item = self._slot_items.pop(slot, None)
         if old_item is not None and self._item_slots.get(old_item) == slot:
             self._item_slots.pop(old_item, None)
+        with self._frame_condition:
+            self._slot_errors.pop(slot, None)
 
     def _build_slot(self, slot: int, item_id: str, clip: Clip) -> None:
         if slot in self._built_slots:
             raise RuntimeError(f"playlist slot {slot} is already built")
-        for spec in plan_item_nodes(slot, clip, self.config.fps):
+        generation = self._next_generations.get(slot, 0)
+        self._next_generations[slot] = generation + 1
+        for spec in plan_item_nodes(
+                slot, clip, self.config.fps, generation=generation):
             self._execute(_spec_command(spec))
         self._slot_items[slot] = item_id
         self._item_slots[item_id] = slot
         self._slot_fingerprints[slot] = _clip_fingerprint(clip)
+        self._slot_generations[slot] = generation
+        self._all_item_groups.add(item_group(slot, generation))
         self._built_slots.add(slot)
         self._watch_slot(slot)
 
     def _watch_slot(self, slot: int) -> None:
+        if slot in self._watched_slots:
+            return
+        self._watched_slots.add(slot)
         self._item_frame_sequences.setdefault(slot, 0)
         self.avp.getEdge(item_edge(slot, "normalized")).addWiretapCallback(
             lambda _frame, watched_slot=slot: self.observe_item_frame(watched_slot))
 
     def _start_and_ready_slot(self, slot: int) -> None:
         self._stop_slot(slot)
+        generation = self._slot_generations[slot]
         with self._frame_condition:
             self._slot_errors.pop(slot, None)
-        self._execute(f"pause {item_pause_team(slot)} now")
-        self._execute(f"group.start {item_group(slot)}")
+        self._execute(f"pause {item_pause_team(slot, generation)} now")
+        self._execute(f"group.start {item_group(slot, generation)}")
         self._running_slots.add(slot)
 
     def _wait_for_item_frame(self, slot: int, baseline: int) -> None:
@@ -375,6 +388,8 @@ class AsyncPlaylistBackend:
         slot = None
         replaced_slot = None
         previous_item, previous_slot = self._active_item, self._active_slot
+        previous_generation = (None if previous_slot is None else
+                               self._slot_generations.get(previous_slot))
         try:
             # Permanent consumers must exist before a paused source starts.
             # Otherwise its first ready frame can be stranded on an edge that
@@ -387,9 +402,10 @@ class AsyncPlaylistBackend:
 
             with self._frame_condition:
                 item_baseline = self._item_frame_sequences.get(slot, 0)
-            self._execute(f"resume {item_pause_team(slot)}")
+            generation = self._slot_generations[slot]
+            self._execute(f"resume {item_pause_team(slot, generation)}")
             self._wait_for_item_frame(slot, item_baseline)
-            self._execute(f"pause {item_pause_team(slot)} now")
+            self._execute(f"pause {item_pause_team(slot, generation)} now")
             if not self._is_current(task.request_id):
                 self._stop_slot(slot)
                 return
@@ -403,7 +419,7 @@ class AsyncPlaylistBackend:
                 baseline = self._frame_sequence
             self._probe_item = task.item_id
             self._active_item, self._active_slot = task.item_id, slot
-            self._execute(f"resume {item_pause_team(slot)}")
+            self._execute(f"resume {item_pause_team(slot, generation)}")
             self._execute(f"node.object.set {SWITCHER_NAME} active {slot}")
             if self._output_started:
                 self._execute(JANUS_FORCE_KEYFRAME_COMMAND)
@@ -414,14 +430,16 @@ class AsyncPlaylistBackend:
             if previous_slot is not None and previous_slot != slot:
                 self._stop_slot(previous_slot)
             if replaced_slot is not None and replaced_slot != slot:
-                self._retire_slot(replaced_slot)
+                self._release_slot(replaced_slot)
             self._emit(BackendEvent(
                 "ready", task.item_id, task.request_id))
         except Exception as exc:
             if (slot is not None and self._active_slot == slot
-                    and previous_slot is not None and previous_slot != slot):
+                    and previous_slot is not None and previous_slot != slot
+                    and previous_generation is not None):
                 try:
-                    self._execute(f"resume {item_pause_team(previous_slot)}")
+                    self._execute(
+                        f"resume {item_pause_team(previous_slot, previous_generation)}")
                     self._execute(
                         f"node.object.set {SWITCHER_NAME} active {previous_slot}")
                     self._probe_item = previous_item
@@ -437,7 +455,7 @@ class AsyncPlaylistBackend:
                 else:
                     self._item_slots[task.item_id] = replaced_slot
             if slot is not None and slot != self._active_slot:
-                self._stop_slot(slot)
+                self._release_slot(slot)
             self._emit(BackendEvent(
                 "failed", task.item_id, task.request_id, message=str(exc)))
 
@@ -447,16 +465,16 @@ class AsyncPlaylistBackend:
             return
         item_id = task.item_id
         slot = None if item_id is None else self._item_slots.get(item_id)
+        generation = (None if slot is None else
+                      self._slot_generations.get(slot))
         if task.kind == "pause" and slot is not None:
-            self._execute(f"pause {item_pause_team(slot)} now")
+            self._execute(f"pause {item_pause_team(slot, generation)} now")
         elif task.kind == "resume" and slot is not None:
-            self._execute(f"resume {item_pause_team(slot)}")
+            self._execute(f"resume {item_pause_team(slot, generation)}")
         elif task.kind == "stop" and slot is not None:
             self._stop_slot(slot)
-        elif task.kind == "speed" and slot is not None and task.speed is not None:
-            self._execute(f"speed.set {item_speed_team(slot)} {task.speed}")
         elif task.kind == "remove" and slot is not None:
-            self._retire_slot(slot)
+            self._release_slot(slot)
 
     def _run(self) -> None:
         if self.config.log_file:
@@ -484,10 +502,14 @@ class AsyncPlaylistBackend:
     def report_graph_exception(self, name: str, node_type: str,
                                message: str) -> None:
         detail = f"{name} ({node_type}): {message}"
-        slot = next((candidate for candidate in self._slot_items
-                     if (name == item_group(candidate)
-                         or name.startswith(f"{item_group(candidate)}_"))), None)
+        slot = next((candidate for candidate, generation
+                     in self._slot_generations.items()
+                     if (name == item_group(candidate, generation)
+                         or name in item_node_names(candidate, generation))), None)
         if slot is None:
+            if any(name == group or name.startswith(f"{group}_")
+                   for group in self._all_item_groups):
+                return
             self._emit(BackendEvent("error", message=detail))
             return
         with self._frame_condition:
@@ -526,6 +548,9 @@ class AsyncPlaylistBackend:
 
     def observe_eof(self) -> None:
         self._emit(BackendEvent("eof", self._probe_item))
+
+    def item_groups(self) -> List[str]:
+        return sorted(self._all_item_groups)
 
 
 @dataclass
@@ -581,9 +606,9 @@ class PlaylistApplication:
                 self.avp.group(group).stopNodes()
             except Exception:
                 pass
-        for slot in range(self.config.slot_capacity):
+        for group in self.backend.item_groups():
             try:
-                self.avp.group(item_group(slot)).stopNodes()
+                self.avp.group(group).stopNodes()
             except Exception:
                 pass
         self.avp.shutdown()

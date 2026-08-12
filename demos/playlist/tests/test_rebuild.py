@@ -76,14 +76,13 @@ def test_destination_is_readied_then_resumed_and_selected_before_old_stops():
     backend.close()
 
 
-def test_stop_pause_resume_and_speed_are_item_addressed_and_never_stop_output():
+def test_stop_pause_and_resume_are_item_addressed_and_never_stop_output():
     backend, avp, playlist = backend_for()
     activate(backend, playlist[0])
     avp.commands.clear()
     item_id = playlist[0].item_id
     backend.pause_item(item_id)
     backend.resume_item(item_id)
-    backend.set_speed(item_id, 1.25)
     backend.stop_item(item_id)
     deadline = time.monotonic() + 1
     while "group.stop pl_item_0" not in avp.commands and time.monotonic() < deadline:
@@ -91,7 +90,6 @@ def test_stop_pause_resume_and_speed_are_item_addressed_and_never_stop_output():
     assert avp.commands == [
         "pause pl_item_0_pause_team now",
         "resume pl_item_0_pause_team",
-        "speed.set pl_item_0_speed_team 1.25",
         "group.stop pl_item_0",
     ]
     assert backend.output_alive() is True
@@ -116,7 +114,7 @@ def test_superseded_activation_never_reports_stale_item_ready():
     backend.close()
 
 
-def test_remove_retires_slot_without_runtime_node_deletion():
+def test_remove_reuses_fixed_edge_with_a_unique_stopped_source_generation():
     backend, avp, playlist = backend_for()
     activate(backend, playlist[0], 1)
     activate(backend, playlist[1], 2)
@@ -127,7 +125,10 @@ def test_remove_retires_slot_without_runtime_node_deletion():
         time.sleep(0.005)
     added = Clip(url="/media/new", name="new", item_id="item-new")
     activate(backend, added, 3)
-    assert backend._item_slots[added.item_id] != old_slot
+    assert backend._item_slots[added.item_id] == old_slot
+    stop = avp.commands.index(f"group.stop {item_group(old_slot)}")
+    start = avp.commands.index(f"group.start {item_group(old_slot, 1)}")
+    assert stop < start
     assert not [command for command in avp.commands
                 if command.startswith("node.delete ")]
     backend.close()

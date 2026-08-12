@@ -220,12 +220,15 @@ def test_element_mode_and_settings_are_independent_from_playlist_mode():
     assert backend.calls == []
 
 
-def test_active_speed_change_uses_runtime_speed_control():
+def test_active_speed_change_rebuilds_source_without_runtime_speed_command():
     ctl, backend = controller()
     start(ctl, backend); backend.clear()
     item_id = ctl.clips[0].item_id
     ctl.update_clip(0, speed=0.5)
-    assert backend.calls == [("set_speed", item_id, 0.5)]
+    operation, _, called_item_id, clip = backend.calls[-1]
+    assert (operation, called_item_id, clip.speed) == (
+        "play_item", item_id, 0.5)
+    assert not [call for call in backend.calls if call[0] == "set_speed"]
 
 
 def test_active_cue_or_mode_change_reloads_item():
