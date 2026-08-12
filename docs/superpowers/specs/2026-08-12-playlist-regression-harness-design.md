@@ -45,6 +45,17 @@ been decoded.
 - A production playlist service, persistence layer, or remote API.
 - A command log, diagnostic panel, or HTML UI mockup.
 
+## Test media
+
+The demo uses five generated H.264 MP4 fixtures rather than the 95-second
+basketball demo assets. Every fixture is 1920x1080, 30 fps, exactly 300 frames
+and 10 seconds long. Each uses a distinct FFmpeg test pattern and burns in its
+clip identity, zero-based frame number, and `HH:MM:SS.mmm` PTS clock.
+
+Generated MP4 files are local artifacts rather than source-controlled binaries.
+A deterministic generator script is part of the demo so the same fixtures can
+be recreated in the local workspace or on the remote NVIDIA test environment.
+
 ## Playback model
 
 `PlaylistMode` controls automatic behavior after an element completion:
