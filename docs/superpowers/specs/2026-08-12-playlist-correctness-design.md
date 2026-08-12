@@ -35,9 +35,10 @@ visible switch is committed.
 
 If a newer request supersedes the activation at that boundary, the backend
 stops the prepared target and returns without changing the active item, active
-slot, probe item, or source-switcher selection. Submission of the switch command
-is the activation commit point; a request accepted after that point is the next
-activation rather than a cancellation of the committed cut.
+slot, probe item, or source-switcher selection. A guarded state transition
+immediately before switch-command submission is the activation commit point; a
+request accepted after that point is the next activation rather than a
+cancellation of the committed cut.
 
 This preserves non-blocking public backend methods. The fix does not hold a
 state lock across an AVPlumber control command and does not introduce new graph

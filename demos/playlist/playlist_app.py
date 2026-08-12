@@ -255,6 +255,16 @@ class AsyncPlaylistBackend:
         with self._state_lock:
             return self._latest_request == request_id and not self._closing.is_set()
 
+    def _commit_activation(self, request_id: int, item_id: str,
+                           slot: int) -> bool:
+        with self._state_lock:
+            if (self._latest_request != request_id
+                    or self._closing.is_set()):
+                return False
+            self._probe_item = item_id
+            self._active_item, self._active_slot = item_id, slot
+            return True
+
     def _set_output_alive(self, value: bool) -> None:
         with self._state_lock:
             changed = self._output_alive != value
@@ -417,9 +427,11 @@ class AsyncPlaylistBackend:
 
             with self._frame_condition:
                 baseline = self._frame_sequence
-            self._probe_item = task.item_id
-            self._active_item, self._active_slot = task.item_id, slot
             self._execute(f"resume {item_pause_team(slot, generation)}")
+            if not self._commit_activation(
+                    task.request_id, task.item_id, slot):
+                self._stop_slot(slot)
+                return
             self._execute(f"node.object.set {SWITCHER_NAME} active {slot}")
             if self._output_started:
                 self._execute(JANUS_FORCE_KEYFRAME_COMMAND)

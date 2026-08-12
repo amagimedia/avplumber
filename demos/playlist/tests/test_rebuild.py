@@ -114,6 +114,38 @@ def test_superseded_activation_never_reports_stale_item_ready():
     backend.close()
 
 
+def test_superseded_activation_never_reaches_stale_visible_cut():
+    class SupersedingAvp(FakeAvp):
+        def __init__(self):
+            super().__init__()
+            self.resume_count = 0
+            self.superseding_clip = None
+
+        def executeCommandsFromString(self, command):
+            if command == "resume pl_item_1_pause_team":
+                self.resume_count += 1
+                if self.resume_count == 2:
+                    clip = self.superseding_clip
+                    self.backend.play_item(3, clip.item_id, clip)
+            super().executeCommandsFromString(command)
+
+    avp = SupersedingAvp()
+    backend, _, playlist = backend_for(avp=avp)
+    activate(backend, playlist[0], 1)
+    avp.commands.clear()
+    avp.superseding_clip = playlist[2]
+
+    backend.play_item(2, playlist[1].item_id, playlist[1])
+    ready, all_events = wait_events(backend, "ready")
+
+    assert [(event.item_id, event.request_id) for event in ready] == [
+        (playlist[2].item_id, 3)]
+    assert "node.object.set pl_switcher active 1" not in avp.commands
+    assert not [event for event in all_events
+                if event.kind == "ready" and event.request_id == 2]
+    backend.close()
+
+
 def test_remove_reuses_fixed_edge_with_a_unique_stopped_source_generation():
     backend, avp, playlist = backend_for()
     activate(backend, playlist[0], 1)
