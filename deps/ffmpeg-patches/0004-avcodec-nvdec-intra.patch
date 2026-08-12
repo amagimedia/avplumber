@@ -1,8 +1,11 @@
-From 4bb0479af64eab3994fecbbda2911609db892f22 Mon Sep 17 00:00:00 2001
+From 100f0aa5a67eb5500a1c38576e4003db59255f4b Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
-Date: Thu, 5 Mar 2026 10:14:47 +0100
-Subject: [PATCH 04/20] nvdec intra patch (legacy old tellyo code)
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 4/7] avcodec/nvdec: handle intra-only streams
 
+Preserve the legacy CUVID handling required for intra-only decoded streams.
+
+Original-commit: 4bb0479af64eab3994fecbbda2911609db892f22
 ---
  libavcodec/cuviddec.c | 7 +++++++
  1 file changed, 7 insertions(+)
@@ -25,6 +28,3 @@ index 3fae9c1..7ad59f1 100644
      if (ctx->deint_mode_current != cudaVideoDeinterlaceMode_Weave && !ctx->drop_second_field)
          avctx->framerate = av_mul_q(avctx->framerate, (AVRational){2, 1});
  
--- 
-2.53.0
-

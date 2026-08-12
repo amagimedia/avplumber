@@ -1,8 +1,11 @@
-From 3708bfab707a6eeb151829fd5c92807470c0f6d8 Mon Sep 17 00:00:00 2001
+From 127f4c991739e9af8cdc5ac1315511c5e1bd85ef Mon Sep 17 00:00:00 2001
 From: Teodor Wozniak <teodor.wozniak@amagi.com>
-Date: Tue, 24 Feb 2026 18:15:04 +0100
-Subject: [PATCH 01/20] swscale: add fast unscaled path argb to yuva420p
+Date: Wed, 12 Aug 2026 15:53:23 +0000
+Subject: [PATCH 1/7] swscale/aarch64: add fast ARGB to YUVA420P conversion
 
+Add an unscaled NEON conversion path for ARGB input to YUVA420P output.
+
+Original-commit: 3708bfab707a6eeb151829fd5c92807470c0f6d8
 ---
  libswscale/aarch64/input.S                 |  36 ++++
  libswscale/aarch64/swscale.c               |   6 +
@@ -446,8 +449,3 @@ index a074b18..0c961ad 100644
  function ff_nv24_to_yuv420p_chroma_neon, export=1
  // x0  uint8_t *dst1
  // x1  int dstStride1
-
-base-commit: f46e514491172d15bd74b4abb1814cd2f05a763e
--- 
-2.53.0
-

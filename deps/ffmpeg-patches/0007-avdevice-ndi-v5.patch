@@ -1,9 +1,11 @@
-From 6f4d2c58f2f6dd88e0612621ede61d51bc12980c Mon Sep 17 00:00:00 2001
+From 2d74ed07e99ba7a0f3a09ccf2d20cddbb9f39b71 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
-Date: Thu, 5 Mar 2026 12:28:56 +0100
-Subject: [PATCH 11/20] ndi libav input with v5 support + missing
- make/configure changes
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 7/7] avdevice/ndi: restore NDI v5 integration
 
+Register the existing NDI v5 input and output devices, add configure detection, and restore their user documentation.
+
+Original-commit: 6f4d2c58f2f6dd88e0612621ede61d51bc12980c
 ---
  configure                |  7 +++++
  doc/indevs.texi          | 65 ++++++++++++++++++++++++++++++++++++++++
@@ -13,7 +15,7 @@ Subject: [PATCH 11/20] ndi libav input with v5 support + missing
  5 files changed, 123 insertions(+)
 
 diff --git a/configure b/configure
-index 6b98b5f..f2c6154 100755
+index 2cd7884..5ae4594 100755
 --- a/configure
 +++ b/configure
 @@ -316,6 +316,7 @@ External library support:
@@ -32,7 +34,7 @@ index 6b98b5f..f2c6154 100755
      libfdk_aac
      libtls
  "
-@@ -3723,6 +3725,10 @@ decklink_indev_suggest="libzvbi"
+@@ -3726,6 +3728,10 @@ decklink_indev_suggest="libzvbi"
  decklink_outdev_deps="decklink threads"
  decklink_outdev_suggest="libklvanc"
  decklink_outdev_extralibs="-lstdc++"
@@ -43,7 +45,7 @@ index 6b98b5f..f2c6154 100755
  dshow_indev_deps="IBaseFilter"
  dshow_indev_extralibs="-lpsapi -lole32 -lstrmiids -luuid -loleaut32 -lshlwapi"
  fbdev_indev_deps="linux_fb_h"
-@@ -6880,6 +6886,7 @@ enabled chromaprint       && { check_pkg_config chromaprint libchromaprint "chro
+@@ -6883,6 +6889,7 @@ enabled chromaprint       && { check_pkg_config chromaprint libchromaprint "chro
                                 require chromaprint chromaprint.h chromaprint_get_version -lchromaprint; }
  enabled decklink          && { require_headers DeckLinkAPI.h &&
                                 { test_cpp_condition DeckLinkAPIVersion.h "BLACKMAGIC_DECKLINK_API_VERSION >= 0x0a0b0000" || die "ERROR: Decklink API version must be >= 10.11"; } }
@@ -218,6 +220,3 @@ index 9b9a914..ac942ec 100644
  extern const FFInputFormat  ff_dshow_demuxer;
  extern const FFInputFormat  ff_fbdev_demuxer;
  extern const FFOutputFormat ff_fbdev_muxer;
--- 
-2.53.0
-

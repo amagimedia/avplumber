@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1550" height="420" viewBox="0 0 1550 420">
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="420" viewBox="0 0 1700 420">
   <defs>
     <style>
       .box { fill: #111827; stroke: #a78bfa; stroke-width: 2; rx: 10; ry: 10; }
@@ -26,21 +26,26 @@
   <text x="475" y="100" class="txt">dec_audio</text>
   <text x="475" y="118" class="txt small">AAC packet to PCM</text>
 
-  <rect x="620" y="80" width="260" height="56" class="box ai"/>
+  <rect x="620" y="80" width="250" height="56" class="box"/>
   <text x="750" y="100" class="txt">filter_audio</text>
-  <text x="750" y="118" class="txt small">highpass, lowpass, resample, whisper</text>
+  <text x="750" y="118" class="txt small">highpass, lowpass, 16 kHz mono</text>
 
-  <rect x="940" y="80" width="150" height="56" class="box sink"/>
-  <text x="1015" y="100" class="txt">null_sink</text>
-  <text x="1015" y="118" class="txt small">discard audio</text>
+  <rect x="920" y="80" width="250" height="56" class="box ai"/>
+  <text x="1045" y="100" class="txt">whisper node</text>
+  <text x="1045" y="118" class="txt small">AVPlumber ASR</text>
 
-  <rect x="690" y="210" width="240" height="56" class="box src"/>
-  <text x="810" y="232" class="txt">transcript output</text>
-  <text x="810" y="250" class="txt small">destination=/tmp/rtmp_whisper.srt</text>
+  <rect x="1220" y="80" width="150" height="56" class="box sink"/>
+  <text x="1295" y="100" class="txt">null_sink</text>
+  <text x="1295" y="118" class="txt small">discard audio</text>
+
+  <rect x="925" y="210" width="240" height="56" class="box src"/>
+  <text x="1045" y="232" class="txt">transcript output</text>
+  <text x="1045" y="250" class="txt small">destination=/tmp/rtmp_whisper.srt</text>
 
   <path d="M160 108 L210 108" class="arrow"/>
   <path d="M340 108 L390 108" class="arrow"/>
   <path d="M560 108 L620 108" class="arrow"/>
-  <path d="M880 108 L940 108" class="arrow"/>
-  <path d="M790 136 L810 210" class="arrow dash"/>
+  <path d="M870 108 L920 108" class="arrow"/>
+  <path d="M1170 108 L1220 108" class="arrow"/>
+  <path d="M1045 136 L1045 210" class="arrow dash"/>
 </svg>

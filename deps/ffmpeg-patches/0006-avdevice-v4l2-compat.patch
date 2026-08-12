@@ -1,8 +1,11 @@
-From 961ec93cbc352178ae5572c8d7f03f508edc3147 Mon Sep 17 00:00:00 2001
+From c89a55032f642c8c6afd7df0c52febe16a3c23d0 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
-Date: Thu, 5 Mar 2026 12:25:44 +0100
-Subject: [PATCH 10/20] v4l2 patch (legacy old tellyo code)
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 6/7] avdevice/v4l2: retain source timestamps
 
+Preserve the legacy V4L2 timestamp behavior used by avplumber inputs.
+
+Original-commit: 961ec93cbc352178ae5572c8d7f03f508edc3147
 ---
  libavdevice/v4l2.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
@@ -20,6 +23,3 @@ index 0ae6872..644752f 100644
              av_log(ctx, AV_LOG_WARNING,
                     "Dequeued v4l2 buffer contains %d bytes, but %d were expected. Flags: 0x%08X.\n",
                     bytesused, s->frame_size, buf.flags);
--- 
-2.53.0
-

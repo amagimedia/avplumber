@@ -1,0 +1,168 @@
+From 1a90f8bb489004be416498b9bd3c1f76e498a675 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 5/7] avformat/rtp: extend RFC 4175 frame handling
+
+Support the legacy 4:2:0 payload layout and skip incomplete RFC 4175 frames without emitting corrupted output.
+
+Original-commits: e4b4dbdccaa82b007bf3f320d7fd761f1cbd9a14 364d9773b677feedc39ed4a3e30a15e95878b811
+---
+ libavformat/rtpdec_rfc4175.c | 88 ++++++++++++++++++++++++++++++++----
+ 1 file changed, 80 insertions(+), 8 deletions(-)
+
+diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
+index b49fc55..2f0dff0 100644
+--- a/libavformat/rtpdec_rfc4175.c
++++ b/libavformat/rtpdec_rfc4175.c
+@@ -43,6 +43,9 @@ struct PayloadContext {
+     unsigned int frame_size;
+     unsigned int pgroup; /* size of the pixel group in bytes */
+     unsigned int xinc;
++    int is_yuv420;
++    int next_offset;
++    int next_line;
+ 
+     uint32_t timestamp;
+ };
+@@ -53,6 +56,7 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     int tag;
+     const AVPixFmtDescriptor *desc;
+ 
++    data->is_yuv420 = 0;
+     if (!strncmp(data->sampling, "YCbCr-4:2:2", 11)) {
+         tag = MKTAG('U', 'Y', 'V', 'Y');
+         data->xinc = 2;
+@@ -71,6 +75,7 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     } else if (!strncmp(data->sampling, "YCbCr-4:2:0", 11)) {
+         tag = MKTAG('I', '4', '2', '0');
+         data->xinc = 4;
++        data->is_yuv420 = 1;
+ 
+         if (data->depth == 8) {
+             data->pgroup = 6;
+@@ -108,6 +113,8 @@ static int rfc4175_parse_format(AVStream *stream, PayloadContext *data)
+     stream->codecpar->codec_tag = tag;
+     stream->codecpar->bits_per_coded_sample = av_get_bits_per_pixel(desc);
+     data->frame_size = data->width * data->height * data->pgroup / data->xinc;
++    data->next_offset = 0;
++    data->next_line = 0;
+ 
+     if (data->interlaced)
+         stream->codecpar->field_order = AV_FIELD_TT;
+@@ -225,6 +232,8 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+             av_freep(&data->frame);
+         }
+         data->frame = NULL;
++        data->next_offset = 0;
++        data->next_line = 0;
+     }
+ 
+     data->field = 0;
+@@ -232,6 +241,14 @@ static int rfc4175_finalize_packet(PayloadContext *data, AVPacket *pkt,
+     return ret;
+ }
+ 
++static void rfc4175_discard_packet(PayloadContext *data)
++{
++    av_freep(&data->frame);
++    data->frame = NULL;
++    data->next_offset = 0;
++    data->next_line = 0;
++}
++
+ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+                                  AVStream *st, AVPacket *pkt, uint32_t *timestamp,
+                                  const uint8_t * buf, int len,
+@@ -255,8 +272,12 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+              * previous frame (or pair of fields) anyway by filling the AVPacket.
+              */
+             av_log(ctx, AV_LOG_ERROR, "Missed previous RTP Marker\n");
+-            missed_last_packet = 1;
+-            rfc4175_finalize_packet(data, pkt, st->index);
++            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++                rfc4175_discard_packet(data);
++            } else {
++                missed_last_packet = 1;
++                rfc4175_finalize_packet(data, pkt, st->index);
++            }
+         }
+ 
+         if (!data->frame)
+@@ -270,6 +291,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+         }
+     }
+ 
++    if (!data->frame) {
++        /* buffer already freed by discard, or duplicate packet */
++        return AVERROR(EAGAIN);
++    }
++
+     /*
+      * looks for the 'Continuation bit' in scan lines' headers
+      * to find where data start
+@@ -310,13 +336,59 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+         if (line >= data->height)
+             return AVERROR_INVALIDDATA;
+ 
+-        /* prevent ill-formed packets to write after buffer's end */
+-        copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
+-        if (copy_offset + length > data->frame_size || !data->frame)
+-            return AVERROR_INVALIDDATA;
++        if ((ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) &&
++            (data->next_line != line || data->next_offset != offset)) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "packet loss: line %d -> %d, offset %d -> %d\n",
++                   data->next_line, line, data->next_offset, offset);
++            rfc4175_discard_packet(data);
++            return AVERROR(EAGAIN);
++        }
++        if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
++            data->next_offset = offset + length * data->xinc /
++                                         (data->pgroup * (1 + !!data->is_yuv420));
++            if (data->next_offset >= data->width) {
++                data->next_offset = 0;
++                data->next_line = line + 1 + !!data->is_yuv420;
++            }
++        }
+ 
+-        dest = data->frame + copy_offset;
+-        memcpy(dest, payload, length);
++        if (data->is_yuv420) {
++            uint8_t *yd1p, *yd2p, *up, *vp, *udp, *vdp;
++            const uint8_t *p;
++            int uvoff, i;
++
++            /* libavformat stores YUV420 planar frames, depacketized payload is interleaved */
++            if (line % 2 != 0 || !data->frame || (offset % 2) != 0 || (length % 6) != 0)
++                return AVERROR_INVALIDDATA;
++
++            yd1p = data->frame + line * data->width + offset;
++            yd2p = yd1p + data->width;
++            up = data->frame + data->width * data->height;
++            vp = up + data->width / 2 * data->height / 2;
++            uvoff = line / 2 * data->width / 2 + offset / 2;
++            udp = up + uvoff;
++            vdp = vp + uvoff;
++            p = payload;
++
++            for (i = 0; i < length; i += 6) {
++                *yd1p++ = p[0];
++                *yd1p++ = p[1];
++                *yd2p++ = p[2];
++                *yd2p++ = p[3];
++                *udp++ = p[4];
++                *vdp++ = p[5];
++                p += 6;
++            }
++        } else {
++            /* prevent ill-formed packets to write after buffer's end */
++            copy_offset = (line * data->width + offset) * data->pgroup / data->xinc;
++            if (copy_offset + length > data->frame_size || !data->frame)
++                return AVERROR_INVALIDDATA;
++
++            dest = data->frame + copy_offset;
++            memcpy(dest, payload, length);
++        }
+ 
+         payload += length;
+         payload_len -= length;
