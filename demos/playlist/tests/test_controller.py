@@ -1,166 +1,267 @@
-"""Controller transport + edit regression: next/prev/goto, preload behaviour,
-mode changes, add/remove/reorder incl. the two remove guard cases -- all
-asserted through the recorded command stream."""
-import json
+"""Every public playlist and selected-element action at the backend seam."""
 
 import pytest
 
-from playlist import (Clip, ElementMode, PlaylistMode, pause_team,
-                      worker_group)
-from helpers import Recorder, clips, controller
-
-M = PlaylistMode
-E = ElementMode
+from helpers import clips, controller, finish_pending
+from playlist import Clip, ElementMode as E, PlaylistMode as M, TransportState
 
 
-def test_starts_on_first_enabled():
-    ctl, _ = controller(clips(("a", E.PLAY_TO_END, {"disabled": True}), "b", "c"))
-    assert ctl.current_index == 1
-    assert ctl.status().active_worker == 0
+def start(ctl, backend, index=0):
+    ctl.select(index)
+    assert ctl.play()
+    finish_pending(ctl, backend)
 
 
-def test_next_cuts_to_idle_worker():
-    ctl, rec = controller(mode=M.LOOP_ALL)          # a,b,c
-    assert ctl.next() is True
-    assert ctl.current_index == 1
-    assert ctl.status().active_worker == 1
-    # unpause-before-flip appears in the stream
-    assert f"resume {pause_team(1)}" in rec.cmds
+def test_initial_state_selects_first_enabled_but_starts_stopped():
+    ctl, backend = controller(clips(
+        ("a", E.PLAY_TO_END, {"disabled": True}), "b", "c"))
+    status = ctl.status()
+    assert status.selected_index == 1
+    assert status.active_index is None
+    assert status.pending_index is None
+    assert status.transport is TransportState.STOPPED
+    assert backend.calls == []
 
 
-def test_next_preloads_following_clip_on_idle():
-    ctl, rec = controller(mode=M.LOOP_ALL)          # a,b,c
-    ctl.next()                                       # now on b (worker1)
-    rec.clear()
-    # rebuild for next(=c) should target the now-idle worker0
-    ctl.next()                                       # -> c (worker0), already preloaded
-    # since c was preloaded on worker0, cut should NOT rebuild worker0 first
-    assert f"group.stop {worker_group(0)}" not in rec.matching("group.stop") \
-        or True  # preload optimisation is best-effort; cut still lands
-    assert ctl.current_index == 2
+def test_playlist_play_is_two_phase_and_commits_on_matching_ready_event():
+    ctl, backend = controller()
+    assert ctl.play()
+    request = backend.calls[-1][1]
+    assert ctl.status().transport is TransportState.LOADING
+    assert ctl.status().pending_index == 0
+    assert ctl.notify_source_ready(ctl.clips[0].item_id, request + 1) is False
+    assert ctl.notify_source_ready(ctl.clips[0].item_id, request) is True
+    assert ctl.status().active_index == 0
+    assert ctl.status().transport is TransportState.PLAYING
 
 
-def test_prev_moves_backwards():
-    ctl, _ = controller(mode=M.LOOP_ALL)
-    ctl.next(); ctl.next()                           # c
-    assert ctl.prev() is True
-    assert ctl.current_index == 1
+def test_playlist_pause_resume_stop_never_change_output_health():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    item_id = ctl.clips[0].item_id
+
+    assert ctl.pause()
+    assert backend.calls == [("pause_item", item_id)]
+    assert ctl.play()
+    assert backend.calls[-1] == ("resume_item", item_id)
+    assert ctl.stop()
+    assert backend.calls[-2:] == [
+        ("cancel_activation",), ("stop_item", item_id)]
+    assert ctl.status().transport is TransportState.STOPPED
+    assert ctl.status().active_index == 0
+    assert ctl.status().output_alive is True
 
 
-def test_next_at_end_play_all_fails():
-    ctl, _ = controller(mode=M.PLAY_ALL)
-    ctl.next(); ctl.next()                            # at c (last)
+def test_stop_then_play_restarts_selected_item_at_its_cue():
+    ctl, backend = controller(clips(
+        ("a", E.PLAY_TO_END, {"play_from_ms": 2500}), "b"))
+    start(ctl, backend); ctl.stop(); backend.clear()
+    assert ctl.play()
+    operation, _, item_id, clip = backend.calls[-1]
+    assert (operation, item_id, clip.play_from_ms) == (
+        "play_item", ctl.clips[0].item_id, 2500)
+
+
+def test_playlist_next_previous_and_all_four_modes():
+    ctl, backend = controller(mode=M.PLAY_ALL)
+    start(ctl, backend); backend.clear()
+    assert ctl.next()
+    assert backend.calls[-1][2] == ctl.clips[1].item_id
+    finish_pending(ctl, backend)
+    assert ctl.prev()
+    assert backend.calls[-1][2] == ctl.clips[0].item_id
+    for mode in M:
+        ctl.set_mode(mode)
+        assert ctl.status().mode is mode
+
+
+def test_selected_item_play_pause_stop_are_item_addressed():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    target = ctl.clips[2].item_id
+    assert ctl.element_play(2)
+    assert backend.calls[-1][2] == target
+    finish_pending(ctl, backend)
+    backend.clear()
+    assert ctl.element_pause(2)
+    assert backend.calls == [("pause_item", target)]
+    assert ctl.element_stop(2)
+    assert backend.calls[-1] == ("stop_item", target)
+    assert ctl.status().transport is TransportState.STOPPED
+
+
+def test_pause_and_stop_on_inactive_item_still_execute_for_that_source_only():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    inactive = ctl.clips[2].item_id
+    assert ctl.element_pause(2)
+    assert ctl.element_stop(2)
+    assert backend.calls == [
+        ("pause_item", inactive), ("stop_item", inactive)]
+    assert ctl.status().active_index == 0
+    assert ctl.status().transport is TransportState.PLAYING
+
+
+def test_superseded_load_ignores_stale_completion():
+    ctl, backend = controller()
+    ctl.element_play(1)
+    first_request = backend.calls[-1][1]
+    ctl.element_play(2)
+    second_request = backend.calls[-1][1]
+    assert second_request > first_request
+    assert ctl.notify_source_ready(ctl.clips[1].item_id, first_request) is False
+    assert ctl.notify_source_ready(ctl.clips[2].item_id, second_request) is True
+    assert ctl.status().active_index == 2
+
+
+def test_failed_replacement_retains_previous_active_transport_and_frame():
+    ctl, backend = controller()
+    start(ctl, backend)
+    ctl.element_play(2)
+    request = backend.calls[-1][1]
+    assert ctl.notify_source_failed(
+        ctl.clips[2].item_id, request, "cannot open source")
+    status = ctl.status()
+    assert status.selected_index == 2
+    assert status.active_index == 0
+    assert status.pending_index is None
+    assert status.transport is TransportState.PLAYING
+    assert status.error_index == 2
+    assert status.error == "cannot open source"
+
+
+def test_manual_navigation_escapes_loop_self_and_current_only():
+    ctl, backend = controller(clips(("a", E.LOOP_SELF), "b"), M.LOOP_CURRENT)
+    start(ctl, backend); backend.clear()
+    assert ctl.next()
+    assert backend.calls[-1][2] == ctl.clips[1].item_id
+
+
+def test_non_loop_boundary_is_noop_without_error():
+    ctl, backend = controller(clips("a", "b"), M.PLAY_CURRENT)
+    start(ctl, backend, 1); backend.clear()
     assert ctl.next() is False
-    assert ctl.status().error
+    assert backend.calls == []
+    assert ctl.status().error == ""
 
 
-def test_goto_disabled_rejected():
-    ctl, _ = controller(clips("a", ("b", E.PLAY_TO_END, {"disabled": True}), "c"))
-    assert ctl.goto(1) is False
-    assert ctl.current_index == 0
-
-
-def test_goto_out_of_range():
-    ctl, _ = controller()
-    with pytest.raises(IndexError):
-        ctl.goto(99)
-
-
-def test_goto_scheduled_emits_timeline():
-    ctl, rec = controller()
-    ctl.goto(2, at_pts_ms=9000)
-    ts = rec.matching("timeline.set ")
-    assert ts and json.loads(ts[-1][len("timeline.set "):])["at"] == 9000
-
-
-def test_toggle_pauses_active_worker():
-    ctl, rec = controller()
-    ctl.toggle()                                     # -> paused
-    assert ctl.playing is False
-    assert f"pause {pause_team(0)} now" in rec.cmds
-    rec.clear()
-    ctl.toggle()                                     # -> playing
-    assert ctl.playing is True
-    assert f"resume {pause_team(0)}" in rec.cmds
-
-
-def test_stop_clears_current():
-    ctl, _ = controller()
-    ctl.stop()
-    assert ctl.current_index is None
-    assert ctl.playing is False
-
-
-def test_set_mode():
-    ctl, _ = controller()
+def test_element_mode_and_settings_are_independent_from_playlist_mode():
+    ctl, backend = controller()
     ctl.set_mode(M.PLAY_CURRENT)
-    assert ctl.mode == M.PLAY_CURRENT
-    assert ctl.next_index(+1) is None
+    ctl.set_element_mode(1, E.TIMED, duration_ms=1500)
+    ctl.update_clip(1, play_from_ms=1000, play_to_ms=8000,
+                    duration_ms=3000, speed=1.25)
+    clip = ctl.clips[1]
+    assert ctl.mode is M.PLAY_CURRENT
+    assert (clip.element_mode, clip.play_from_ms, clip.play_to_ms,
+            clip.duration_ms, clip.speed) == (E.TIMED, 1000, 8000, 3000, 1.25)
+    assert backend.calls == []
 
 
-# --- edits -------------------------------------------------------------
-def test_append_clip():
-    ctl, _ = controller()
-    ctl.append_clip(Clip(url="/media/d.mp4"))
-    assert ctl.clips[-1].name == "d.mp4"
-    assert len(ctl.clips) == 4
+def test_active_speed_change_uses_runtime_speed_control():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    item_id = ctl.clips[0].item_id
+    ctl.update_clip(0, speed=0.5)
+    assert backend.calls == [("set_speed", item_id, 0.5)]
 
 
-def test_insert_before_current_shifts_index():
-    ctl, _ = controller()
-    ctl.next()                                       # current=1 (b)
-    ctl.insert_clip(0, Clip(url="/media/z.mp4"))
-    assert ctl.clips[0].name == "z.mp4"
-    assert ctl.current_index == 2                    # b shifted right
+def test_active_cue_or_mode_change_reloads_item():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    ctl.update_clip(0, play_from_ms=1000)
+    assert backend.calls[-1][0] == "play_item"
+    request = backend.calls[-1][1]
+    assert ctl.notify_source_ready(ctl.clips[0].item_id, request)
+    backend.clear()
+    ctl.set_element_mode(0, E.LOOP_SELF)
+    assert backend.calls[-1][0] == "play_item"
 
 
-def test_remove_non_current_refreshes_preload():
-    ctl, _ = controller(mode=M.LOOP_ALL)             # a,b,c current=0
-    ctl.remove_clip(2)                               # remove c (not current)
-    assert [c.name for c in ctl.clips] == ["a", "b"]
-    assert ctl.current_index == 0
+def test_add_insert_reorder_preserve_active_identity():
+    ctl, backend = controller()
+    start(ctl, backend, 1)
+    active_id = ctl.clips[1].item_id
+    ctl.append_clip(Clip(url="/media/d", name="d", item_id="item-d"))
+    ctl.insert_clip(0, Clip(url="/media/z", name="z", item_id="item-z"))
+    ctl.reorder_clip(2, 4)
+    assert ctl.clips[ctl.status().active_index].item_id == active_id
 
 
-def test_remove_before_current_decrements_index():
-    ctl, _ = controller(mode=M.LOOP_ALL)
-    ctl.next()                                       # current=1
-    ctl.remove_clip(0)                               # remove a
-    assert ctl.current_index == 0
-    assert [c.name for c in ctl.clips] == ["b", "c"]
+def test_remove_inactive_and_active_release_only_their_item_slots():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    inactive_id = ctl.clips[2].item_id
+    ctl.remove_clip(2)
+    assert backend.calls == [("remove_item", inactive_id)]
+    active_id = ctl.clips[0].item_id
+    backend.clear()
+    ctl.remove_clip(0)
+    assert backend.calls == [("remove_item", active_id)]
+    assert ctl.status().active_index is None
+    assert ctl.status().transport is TransportState.STOPPED
 
 
-def test_remove_current_cuts_away():
-    ctl, rec = controller(mode=M.LOOP_ALL)           # a,b,c current=0
-    ctl.remove_clip(0)                               # remove current a
-    assert [c.name for c in ctl.clips] == ["b", "c"]
-    # a cut happened: active flip emitted
-    assert any("active" in v for _, k, v in rec.objects_set() if k == "active") \
-        or ctl.current_index is not None
+def test_remove_pending_cancels_before_release_and_keeps_previous_item_playing():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    active_id = ctl.clips[0].item_id
+    pending = ctl.clips[2]
+    assert ctl.element_play(2)
+    request = backend.calls[-1][1]
+    backend.clear()
+
+    ctl.remove_clip(2)
+
+    assert backend.calls == [
+        ("cancel_activation",), ("remove_item", pending.item_id)]
+    status = ctl.status()
+    assert ctl.clips[status.active_index].item_id == active_id
+    assert status.pending_index is None
+    assert status.transport is TransportState.PLAYING
+    assert ctl.notify_source_ready(pending.item_id, request) is False
 
 
-def test_remove_last_clip_rejected():
+def test_removing_last_item_and_duplicate_ids_are_rejected():
     ctl, _ = controller(clips("only"))
     with pytest.raises(ValueError):
         ctl.remove_clip(0)
-
-
-def test_reorder_tracks_current():
-    ctl, _ = controller(mode=M.LOOP_ALL)             # a,b,c current=0
-    ctl.reorder_clip(0, 2)                           # move a to end
-    assert [c.name for c in ctl.clips] == ["b", "c", "a"]
-    assert ctl.clips[ctl.current_index].name == "a"  # current still follows a
-
-
-def test_set_disabled_then_skipped():
-    ctl, _ = controller(mode=M.LOOP_ALL)
-    ctl.set_disabled(1, True)
-    assert ctl.next_index(+1) == 2                    # b skipped
-
-
-def test_set_element_mode_timed_needs_duration():
-    ctl, _ = controller()
     with pytest.raises(ValueError):
-        ctl.set_element_mode(0, E.TIMED)
-    ctl.set_element_mode(0, E.TIMED, duration_ms=4000)
-    assert ctl.clips[0].element_mode == E.TIMED
-    assert ctl.clips[0].duration_ms == 4000
+        ctl.append_clip(Clip(url="/other", item_id="item-only"))
+
+
+def test_disable_enable_stops_only_item_and_selects_an_enabled_successor():
+    ctl, backend = controller()
+    start(ctl, backend); backend.clear()
+    active_id = ctl.clips[0].item_id
+    ctl.set_disabled(0, True)
+    assert backend.calls == [("stop_item", active_id)]
+    assert ctl.status().selected_index == 1
+    assert ctl.status().transport is TransportState.STOPPED
+    ctl.set_disabled(0, False)
+    assert ctl.clips[0].disabled is False
+
+
+def test_disable_pending_cancels_before_stop_and_returns_to_stopped():
+    ctl, backend = controller()
+    pending = ctl.clips[2]
+    assert ctl.element_play(2)
+    request = backend.calls[-1][1]
+    backend.clear()
+
+    ctl.set_disabled(2, True)
+
+    assert backend.calls == [
+        ("cancel_activation",), ("stop_item", pending.item_id)]
+    status = ctl.status()
+    assert status.pending_index is None
+    assert status.transport is TransportState.STOPPED
+    assert status.selected_index == 0
+    assert ctl.notify_source_ready(pending.item_id, request) is False
+
+
+def test_status_uses_cached_output_health():
+    ctl, backend = controller()
+    assert ctl.status().output_alive is True
+    backend.alive = False
+    assert ctl.status().output_alive is False

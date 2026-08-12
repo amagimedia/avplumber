@@ -1,30 +1,34 @@
-"""Live backend for the playlist player.  Builds N replay-style worker chains ->
-source_switcher -> one realtime reclock -> the verbatim replay Janus H.264 RTP
-output group, and hands the controller a command sink wired to AVPlumber.
+#!/usr/bin/env python3
+"""Asynchronous live backend for the playlist regression harness.
 
-Everything here is glue over EXISTING AVPlumber nodes -- there are NO C++
-changes.  The worker chain and Janus output group are copied from
-demos/replay/replay.py so the two demos stay bug-for-bug comparable.  The pure
-control logic lives in playlist.py and is fully unit-tested without a GPU.
+Playlist elements occupy stable inputs on AVPlumber's existing C++ source
+switcher. The replay Janus output group is permanent; item and playlist Stop
+operations only stop item groups. All blocking graph operations are serialized
+off the Textual thread.
 """
+
 from __future__ import annotations
 
+import json
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
-from playlist import (GPU_DEVICE, Clip, PlaylistController, PlaylistMode,
-                      plan_output_nodes, plan_worker_nodes, worker_group)
+from playlist import (BackendEvent, DEFAULT_SLOT_CAPACITY, GPU_DEVICE,
+                      SWITCHER_NAME, SWITCHER_TYPE, Clip, NodeSpec,
+                      PlaylistController, PlaylistMode, item_edge, item_group,
+                      item_node_names, item_pause_team, item_speed_team,
+                      plan_item_nodes, plan_switch_nodes)
 
 JANUS_FORCE_KEYFRAME_NODE = "janus_force_keyframe"
 JANUS_FORCE_KEYFRAME_COMMAND = (
     f"node.object.set {JANUS_FORCE_KEYFRAME_NODE} trigger true")
 
 
-# --------------------------------------------------------------------------- #
-# Config (mirrors demos/replay JanusVideoConfig / PlayerConfig)
-# --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class JanusVideoConfig:
     host: str = "127.0.0.1"
@@ -34,7 +38,7 @@ class JanusVideoConfig:
     rtcp_bind: str = "0.0.0.0"
     rtcp_port: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.host:
             raise ValueError("Janus host is required")
         if not 1 <= self.video_port < 65535:
@@ -49,35 +53,504 @@ class JanusVideoConfig:
 class PlaylistConfig:
     clips: List[Clip]
     mode: PlaylistMode = PlaylistMode.LOOP_ALL
-    worker_count: int = 2
     fps: int = 30
     width: int = 1920
     height: int = 1080
+    slot_capacity: int = DEFAULT_SLOT_CAPACITY
     janus: JanusVideoConfig = field(default_factory=JanusVideoConfig)
     control_timeout: float = 10.0
+    log_file: str = "playlist-demo.log"
+
+    def __post_init__(self) -> None:
+        if not self.clips:
+            raise ValueError("playlist must contain at least one element")
+        if self.fps <= 0 or self.width <= 0 or self.height <= 0:
+            raise ValueError("output format must be positive")
+        if len(self.clips) > self.slot_capacity:
+            raise ValueError("playlist has more elements than switcher slots")
+        if self.control_timeout <= 0:
+            raise ValueError("control timeout must be positive")
 
 
-# --------------------------------------------------------------------------- #
-# AVP API loader (same node set as demos/replay + PositionProbe)
-# --------------------------------------------------------------------------- #
 def load_avp_api():
     from pyplumber import AVPlumber
     from pyplumber.node import (Bsf, DecVideo, Demux, EncVideo, ForceFPS,
                                 ForceKeyFrame, InputRec, Mux, Output, Pause,
-                                PythonNode, RealtimeVideoFrame, RescaleVideo,
-                                SourceSwitcher, SpeedVideo)
+                                PythonNode, RealtimeVideoFrame, SourceSwitcher,
+                                SpeedVideo)
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
-    class PositionProbe(PythonNode):
-        def __init__(self, parameters, controller):
+    class SourceSwitcherVideoFrame(SourceSwitcher):
+        TYPE = SWITCHER_TYPE
+
+    by_type = {
+        "input_rec": InputRec,
+        "demux": Demux,
+        "dec_video": DecVideo,
+        "speed_video": SpeedVideo,
+        "force_fps": ForceFPS,
+        "pause": Pause,
+        SWITCHER_TYPE: SourceSwitcherVideoFrame,
+        "realtime<av::VideoFrame>": RealtimeVideoFrame,
+    }
+    return SimpleNamespace(
+        AVPlumber=AVPlumber,
+        Bsf=Bsf,
+        EncVideo=EncVideo,
+        ForceKeyFrame=ForceKeyFrame,
+        Mux=Mux,
+        Output=Output,
+        PythonNode=PythonNode,
+        RtcpFeedbackListener=RtcpFeedbackListener,
+        by_type=by_type,
+    )
+
+
+def _add_node(avp, node_type, name: str, group: str, **params):
+    node = node_type({"name": name, "group": group, **params})
+    avp.addNode(node)
+    return node
+
+
+def _add_spec(avp, api, spec: NodeSpec):
+    return _add_node(
+        avp, api.by_type[spec.type], spec.name, spec.group, **spec.params)
+
+
+def _spec_command(spec: NodeSpec) -> str:
+    return "node.add " + json.dumps({
+        "type": spec.type,
+        "name": spec.name,
+        "group": spec.group,
+        **spec.params,
+    }, separators=(",", ":"))
+
+
+def _rtp_url(config: JanusVideoConfig) -> str:
+    return (
+        f"rtp://{config.host}:{config.video_port}?pkt_size=1200"
+        f"&rtcp_port={config.video_port + 1}"
+    )
+
+
+def _clip_fingerprint(clip: Clip) -> Tuple:
+    return (
+        clip.url, clip.element_mode.value, clip.play_from_ms, clip.play_to_ms,
+        clip.duration_ms, clip.speed,
+    )
+
+
+@dataclass(frozen=True)
+class _Task:
+    kind: str
+    request_id: Optional[int] = None
+    item_id: Optional[str] = None
+    clip: Optional[Clip] = None
+    speed: Optional[float] = None
+
+
+class AsyncPlaylistBackend:
+    """Quick public methods plus one serialized AVPlumber worker."""
+
+    def __init__(self, avp, api, config: PlaylistConfig):
+        self.avp = avp
+        self.api = api
+        self.config = config
+        self._tasks: queue.Queue[_Task] = queue.Queue()
+        self._events: queue.SimpleQueue[BackendEvent] = queue.SimpleQueue()
+        self._state_lock = threading.Lock()
+        self._frame_condition = threading.Condition()
+        self._thread: Optional[threading.Thread] = None
+        self._closing = threading.Event()
+        self._latest_request: Optional[int] = None
+        self._active_item: Optional[str] = None
+        self._active_slot: Optional[int] = None
+        self._probe_item: Optional[str] = None
+        self._frame_sequence = 0
+        self._switch_started = False
+        self._output_started = False
+        self._output_alive = False
+        self._listener = None
+        self._slot_items: Dict[int, str] = {}
+        self._item_slots: Dict[str, int] = {}
+        self._slot_fingerprints: Dict[int, Tuple] = {}
+        self._built_slots = set()
+        self._running_slots = set()
+
+    def bind_listener(self, listener) -> None:
+        self._listener = listener
+
+    def register_built_item(self, item_id: str, slot: int, clip: Clip) -> None:
+        self._slot_items[slot] = item_id
+        self._item_slots[item_id] = slot
+        self._slot_fingerprints[slot] = _clip_fingerprint(clip)
+        self._built_slots.add(slot)
+
+    # Public methods never wait for AVPlumber.
+    def play_item(self, request_id: int, item_id: str, clip: Clip) -> None:
+        with self._state_lock:
+            self._latest_request = request_id
+        self._tasks.put(_Task("play", request_id, item_id, clip))
+
+    def resume_item(self, item_id: str) -> None:
+        self._tasks.put(_Task("resume", item_id=item_id))
+
+    def pause_item(self, item_id: str) -> None:
+        self._tasks.put(_Task("pause", item_id=item_id))
+
+    def stop_item(self, item_id: str) -> None:
+        self._tasks.put(_Task("stop", item_id=item_id))
+
+    def cancel_activation(self) -> None:
+        with self._state_lock:
+            self._latest_request = None
+
+    def set_speed(self, item_id: str, speed: float) -> None:
+        self._tasks.put(_Task("speed", item_id=item_id, speed=speed))
+
+    def remove_item(self, item_id: str) -> None:
+        self._tasks.put(_Task("remove", item_id=item_id))
+
+    def output_alive(self) -> bool:
+        with self._state_lock:
+            return self._output_alive
+
+    def poll_events(self) -> List[BackendEvent]:
+        result = []
+        while True:
+            try:
+                result.append(self._events.get_nowait())
+            except queue.Empty:
+                return result
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="playlist-backend", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self.cancel_activation()
+        self._closing.set()
+        self._tasks.put(_Task("shutdown"))
+        if self._thread is not None:
+            self._thread.join(self.config.control_timeout)
+            if self._thread.is_alive():
+                raise TimeoutError("playlist backend did not stop")
+            self._thread = None
+
+    def _emit(self, event: BackendEvent) -> None:
+        self._events.put(event)
+
+    def _execute(self, command: str) -> None:
+        self.avp.executeCommandsFromString(command)
+
+    def _is_current(self, request_id: int) -> bool:
+        with self._state_lock:
+            return self._latest_request == request_id and not self._closing.is_set()
+
+    def _set_output_alive(self, value: bool) -> None:
+        with self._state_lock:
+            changed = self._output_alive != value
+            self._output_alive = value
+        if changed:
+            self._emit(BackendEvent("health", value=value))
+
+    def _free_slot(self, exclude: Optional[int] = None) -> int:
+        for slot in range(self.config.slot_capacity):
+            if slot != exclude and slot not in self._slot_items:
+                return slot
+        raise RuntimeError("no free source-switcher slot")
+
+    def _stop_slot(self, slot: int) -> None:
+        if slot not in self._running_slots:
+            return
+        self._execute(f"group.stop {item_group(slot)}")
+        self._running_slots.discard(slot)
+
+    def _delete_slot(self, slot: int) -> None:
+        self._stop_slot(slot)
+        if slot in self._built_slots:
+            for name in reversed(item_node_names(slot)):
+                self._execute(f"node.delete {name}")
+            self._built_slots.discard(slot)
+            self._slot_fingerprints.pop(slot, None)
+        old_item = self._slot_items.pop(slot, None)
+        if old_item is not None and self._item_slots.get(old_item) == slot:
+            self._item_slots.pop(old_item, None)
+
+    def _build_slot(self, slot: int, item_id: str, clip: Clip) -> None:
+        self._delete_slot(slot)
+        for spec in plan_item_nodes(slot, clip, self.config.fps):
+            self._execute(_spec_command(spec))
+        self._slot_items[slot] = item_id
+        self._item_slots[item_id] = slot
+        self._slot_fingerprints[slot] = _clip_fingerprint(clip)
+        self._built_slots.add(slot)
+
+    def _start_and_ready_slot(self, slot: int) -> None:
+        self._stop_slot(slot)
+        self._execute(f"group.start {item_group(slot)}")
+        self._running_slots.add(slot)
+        frame = self.avp.getEdge(item_edge(slot, "normalized")).wait_peek(
+            int(self.config.control_timeout * 1000))
+        if frame is None:
+            raise TimeoutError(f"item slot {slot} produced no frame")
+
+    def _prepare_slot(self, item_id: str, clip: Clip) -> Tuple[int, Optional[int]]:
+        existing = self._item_slots.get(item_id)
+        fingerprint = _clip_fingerprint(clip)
+        old_active_slot = self._active_slot if item_id == self._active_item else None
+
+        if existing is None:
+            slot = self._free_slot()
+            self._build_slot(slot, item_id, clip)
+        elif self._slot_fingerprints.get(existing) != fingerprint and old_active_slot == existing:
+            slot = self._free_slot(exclude=existing)
+            self._build_slot(slot, item_id, clip)
+        else:
+            slot = existing
+            if self._slot_fingerprints.get(slot) != fingerprint:
+                self._build_slot(slot, item_id, clip)
+        self._start_and_ready_slot(slot)
+        return slot, old_active_slot if old_active_slot != slot else None
+
+    def _wait_for_frames(self, baseline: int, count: int = 2) -> None:
+        deadline = time.monotonic() + self.config.control_timeout
+        with self._frame_condition:
+            while self._frame_sequence < baseline + count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("selected item did not reach the shared output")
+                self._frame_condition.wait(min(remaining, 0.1))
+
+    def _ensure_switch_started(self) -> None:
+        if not self._switch_started:
+            self._execute("group.start switch")
+            self._switch_started = True
+
+    def _ensure_output_started(self) -> None:
+        if self._output_started:
+            return
+        self._execute("group.start output")
+        deadline = time.monotonic() + self.config.control_timeout
+        while not self.avp.node("janus_rtp_output").isWorking:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Janus RTP output did not start")
+            time.sleep(0.01)
+        if self._listener is not None:
+            self._listener.start()
+        self.avp.setReady()
+        self._output_started = True
+        self._set_output_alive(True)
+
+    def _activate(self, task: _Task) -> None:
+        assert task.request_id is not None and task.item_id is not None
+        assert task.clip is not None
+        slot = None
+        stale_active_slot = None
+        previous_item, previous_slot = self._active_item, self._active_slot
+        try:
+            slot, stale_active_slot = self._prepare_slot(task.item_id, task.clip)
+            if not self._is_current(task.request_id):
+                self._stop_slot(slot)
+                return
+
+            self._ensure_switch_started()
+            with self._frame_condition:
+                baseline = self._frame_sequence
+            self._probe_item = task.item_id
+            self._active_item, self._active_slot = task.item_id, slot
+            self._execute(f"resume {item_pause_team(slot)}")
+            self._execute(f"node.object.set {SWITCHER_NAME} active {slot}")
+            if self._output_started:
+                self._execute(JANUS_FORCE_KEYFRAME_COMMAND)
+            self._wait_for_frames(baseline)
+
+            if not self._is_current(task.request_id):
+                return
+            self._ensure_output_started()
+            if previous_slot is not None and previous_slot != slot:
+                self._stop_slot(previous_slot)
+            if stale_active_slot is not None and stale_active_slot != slot:
+                self._delete_slot(stale_active_slot)
+            self._emit(BackendEvent(
+                "ready", task.item_id, task.request_id))
+        except Exception as exc:
+            if (slot is not None and self._active_slot == slot
+                    and previous_slot is not None and previous_slot != slot):
+                try:
+                    self._execute(f"resume {item_pause_team(previous_slot)}")
+                    self._execute(
+                        f"node.object.set {SWITCHER_NAME} active {previous_slot}")
+                    self._probe_item = previous_item
+                    self._active_item, self._active_slot = previous_item, previous_slot
+                except Exception as rollback_error:
+                    self._emit(BackendEvent(
+                        "error", task.item_id,
+                        message=f"source rollback failed: {rollback_error}"))
+            if slot is not None and slot != self._active_slot:
+                self._stop_slot(slot)
+            self._emit(BackendEvent(
+                "failed", task.item_id, task.request_id, message=str(exc)))
+
+    def _handle(self, task: _Task) -> None:
+        if task.kind == "play":
+            self._activate(task)
+            return
+        item_id = task.item_id
+        slot = None if item_id is None else self._item_slots.get(item_id)
+        if task.kind == "pause" and slot is not None:
+            self._execute(f"pause {item_pause_team(slot)} now")
+        elif task.kind == "resume" and slot is not None:
+            self._execute(f"resume {item_pause_team(slot)}")
+        elif task.kind == "stop" and slot is not None:
+            self._stop_slot(slot)
+        elif task.kind == "speed" and slot is not None and task.speed is not None:
+            self._execute(f"speed.set {item_speed_team(slot)} {task.speed}")
+        elif task.kind == "remove" and slot is not None:
+            self._delete_slot(slot)
+
+    def _run(self) -> None:
+        if self.config.log_file:
+            self.avp.setLogFile(self.config.log_file)
+        while not self._closing.is_set():
+            try:
+                task = self._tasks.get(timeout=0.1)
+            except queue.Empty:
+                if self._output_started:
+                    try:
+                        self._set_output_alive(
+                            bool(self.avp.node("janus_rtp_output").isWorking))
+                    except Exception as exc:
+                        self._set_output_alive(False)
+                        self._emit(BackendEvent("error", message=str(exc)))
+                continue
+            if task.kind == "shutdown":
+                break
+            try:
+                self._handle(task)
+            except Exception as exc:
+                self._emit(BackendEvent("error", task.item_id, message=str(exc)))
+
+    # Called by the Python probe on its graph worker thread.
+    def observe_frame(self, metadata) -> None:
+        position_ms = None
+        try:
+            if "frame_ts" in metadata:
+                position_ms = int(metadata["frame_ts"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        with self._frame_condition:
+            self._frame_sequence += 1
+            self._frame_condition.notify_all()
+        if position_ms is not None:
+            self._emit(BackendEvent(
+                "position", self._probe_item, position_ms=position_ms))
+
+    def observe_eof(self) -> None:
+        self._emit(BackendEvent("eof", self._probe_item))
+
+
+@dataclass
+class PlaylistApplication:
+    avp: object
+    config: PlaylistConfig
+    controller: PlaylistController
+    backend: AsyncPlaylistBackend
+    position_probe: object
+    rtcp_feedback_listener: object
+    _stopped: bool = False
+
+    def start(self) -> None:
+        self.backend.start()
+        try:
+            if not self.controller.play():
+                raise RuntimeError("initial playlist element did not start")
+            deadline = time.monotonic() + self.config.control_timeout
+            while True:
+                self.controller.poll(int(time.monotonic() * 1000))
+                status = self.controller.status()
+                if status.playing and status.output_alive:
+                    return
+                if status.error:
+                    raise RuntimeError(status.error)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("playlist/Janus startup timed out")
+                time.sleep(0.01)
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self.avp.setExceptionCallback(None)
+        self.backend.close()
+        try:
+            self.rtcp_feedback_listener.stop()
+        except Exception:
+            pass
+        if self.position_probe.worker_running:
+            self.position_probe.request_stop()
+            deadline = time.monotonic() + self.config.control_timeout
+            while self.position_probe.worker_running:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out stopping playlist position probe")
+                time.sleep(0.01)
+        self.position_probe.detach()
+        for group in ("output", "switch"):
+            try:
+                self.avp.group(group).stopNodes()
+            except Exception:
+                pass
+        for slot in range(self.config.slot_capacity):
+            try:
+                self.avp.group(item_group(slot)).stopNodes()
+            except Exception:
+                pass
+        self.avp.shutdown()
+        self.backend._set_output_alive(False)
+        self._stopped = True
+
+
+def build_playlist_application(config: PlaylistConfig, api=None) -> PlaylistApplication:
+    api = api or load_avp_api()
+    avp = api.AVPlumber()
+    if config.log_file:
+        Path(config.log_file).parent.mkdir(parents=True, exist_ok=True)
+        avp.setLogFile(config.log_file)
+    avp.executeCommandsFromString(
+        f'hwaccel.init {{"name":"{GPU_DEVICE}","type":"cuda"}}')
+    avp.edges.planCapacity("*", 1)
+
+    backend = AsyncPlaylistBackend(avp, api, config)
+    controller = PlaylistController(backend, config.clips, config.mode)
+    avp.on_exception = lambda name, node_type, message: backend._emit(
+        BackendEvent("error", message=f"{name} ({node_type}): {message}"))
+
+    first_index = next(
+        index for index, clip in enumerate(config.clips) if not clip.disabled)
+    first_clip = config.clips[first_index]
+    for spec in plan_item_nodes(0, first_clip, config.fps):
+        _add_spec(avp, api, spec)
+    backend.register_built_item(first_clip.item_id, 0, first_clip)
+
+    for spec in plan_switch_nodes(config.slot_capacity, config.fps):
+        _add_spec(avp, api, spec)
+
+    class PositionProbe(api.PythonNode):
+        def __init__(self, parameters):
             super().__init__(parameters)
-            self.controller = controller
 
         def process(self):
             frame = self._src.get()
-            if frame:
-                self.controller.observe_metadata(frame.metadata)
-                self._dst.enqueue(frame)
+            if frame is None or frame.width == 0:
+                backend.observe_eof()
+                return
+            backend.observe_frame(frame.metadata)
+            self._dst.enqueue(frame)
 
         @property
         def worker_running(self):
@@ -91,149 +564,31 @@ def load_avp_api():
                 raise RuntimeError("position probe is still running")
             self._src = self._dst = self._wrapper = self._avplumber = None
 
-    # map the plan's node-type strings to the pyplumber node classes
-    by_type = {
-        "input_rec": InputRec, "demux": Demux, "dec_video": DecVideo,
-        "speed_video": SpeedVideo, "rescale_video": RescaleVideo,
-        "force_fps": ForceFPS, "pause": Pause, "source_switcher": SourceSwitcher,
-        "realtime<av::VideoFrame>": RealtimeVideoFrame,
-    }
-    return SimpleNamespace(
-        AVPlumber=AVPlumber, Bsf=Bsf, EncVideo=EncVideo, ForceKeyFrame=ForceKeyFrame,
-        Mux=Mux, Output=Output, PositionProbe=PositionProbe,
-        RtcpFeedbackListener=RtcpFeedbackListener, by_type=by_type)
-
-
-def _add_node(avp, node_type, name, group, **params):
-    node = node_type({"name": name, "group": group, **params})
-    avp.addNode(node)
-    return node
-
-
-def _add_spec(avp, api, spec):
-    node_type = api.by_type[spec.type]
-    return _add_node(avp, node_type, spec.name, spec.group, **spec.params)
-
-
-def _init_cuda(avp) -> None:
-    avp.executeCommandsFromString(
-        f'hwaccel.init {{ "name": "{GPU_DEVICE}", "type": "cuda" }}')
-
-
-def _rtp_url(cfg: JanusVideoConfig) -> str:
-    return (f"rtp://{cfg.host}:{cfg.video_port}?pkt_size=1200"
-            f"&rtcp_port={cfg.video_port + 1}")
-
-
-# --------------------------------------------------------------------------- #
-# Application
-# --------------------------------------------------------------------------- #
-@dataclass
-class PlaylistApplication:
-    avp: object
-    config: PlaylistConfig
-    controller: PlaylistController
-    position_probe: object
-    rtcp_feedback_listener: object
-    _stopped: bool = False
-
-    def _wait_for(self, predicate, description: str) -> None:
-        deadline = time.monotonic() + self.config.control_timeout
-        while not predicate():
-            if self.controller.error:
-                raise RuntimeError(self.controller.error)
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out waiting for {description}")
-            time.sleep(0.01)
-
-    def start(self) -> None:
-        try:
-            self.avp.group(worker_group(0)).startNodes()
-            self.avp.group("switch").startNodes()
-            # worker 0 was added frozen (paused=True); release it so it produces
-            # frames, otherwise the readiness wait below never completes.
-            self.controller.play()
-            self._wait_for(lambda: self.controller.ready, "the first source frame")
-            # arm the next clip on the idle worker (best-effort, never blocks)
-            self.controller._rebuild_idle_for_next()
-            self.avp.group("output").startNodes()
-            self._wait_for(lambda: self.avp.node("janus_rtp_output").isWorking,
-                           "the Janus RTP output")
-            self.rtcp_feedback_listener.start()
-            self.avp.setReady()
-        except Exception:
-            self.stop()
-            raise
-
-    def stop(self) -> None:
-        if self._stopped:
-            return
-        self.avp.setExceptionCallback(None)
-        self.rtcp_feedback_listener.stop()
-        if self.position_probe.worker_running:
-            self.position_probe.request_stop()
-            deadline = time.monotonic() + self.config.control_timeout
-            while self.position_probe.worker_running:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("timed out stopping the position probe")
-                time.sleep(0.01)
-        self.position_probe.detach()
-        self.avp.group("output").stopNodes()
-        self.avp.group("switch").stopNodes()
-        for i in range(self.config.worker_count):
-            self.avp.group(worker_group(i)).stopNodes()
-        self.avp.shutdown()
-        self._stopped = True
-
-
-def build_playlist_application(config: PlaylistConfig, api=None) -> PlaylistApplication:
-    api = api or load_avp_api()
-    avp = api.AVPlumber()
-    _init_cuda(avp)
-    avp.edges.planCapacity("*", 1)
-
-    def command(value: str) -> None:
-        avp.executeCommandsFromString(value)
-
-    controller = PlaylistController(
-        command, config.clips, mode=config.mode, worker_count=config.worker_count,
-        fps=config.fps, width=config.width, height=config.height)
-    avp.on_exception = lambda name, node_type, message: controller.set_error(
-        f"{name} ({node_type}): {message}")
-
-    fps = config.fps
-
-    # worker 0 (the initially-active clip) -- the rest are built on demand by
-    # the controller's preload path.  worker 0 must NOT start paused, so we
-    # release it immediately after building.
-    first_clip = config.clips[controller.current_index]
-    for spec in plan_worker_nodes(0, first_clip, fps, config.width, config.height):
-        _add_spec(avp, api, spec)
-
-    # switcher + single shared realtime reclock
-    for spec in plan_output_nodes(config.worker_count, fps, active=0):
-        _add_spec(avp, api, spec)
-
-    # position probe on the shared output edge (feeds observe_metadata)
-    probe = api.PositionProbe({
-        "name": "pl_position", "src": "pl_realtime_out", "dst": "pl_observed",
-        "data_type": "VideoFrame", "group": "switch"}, controller)
+    probe = PositionProbe({
+        "name": "pl_position",
+        "src": "pl_realtime_out",
+        "dst": "pl_observed",
+        "data_type": "VideoFrame",
+        "group": "switch",
+    })
     avp.addNode(probe)
 
-    # verbatim replay Janus output group, downstream of pl_observed
     bitrate = "4000k"
     _add_node(avp, api.ForceKeyFrame, JANUS_FORCE_KEYFRAME_NODE, "output",
               src="pl_observed", dst="janus_keyframes", interval_sec="1/1")
     _add_node(avp, api.EncVideo, "janus_encoder", "output",
               src="janus_keyframes", dst="janus_encoded", codec="h264_nvenc",
               hwaccel=GPU_DEVICE, options={
-                  "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
-                  "bf": 0, "preset": "p6", "profile": "baseline", "tune": "ull",
-                  "rc": "cbr", "rc-lookahead": 0, "zerolatency": 1, "delay": 0,
-                  "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1, "aud": 1,
-                  "spatial-aq": 1, "temporal-aq": 0})
+                  "b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
+                  "g": config.fps, "bf": 0, "preset": "p6",
+                  "profile": "baseline", "tune": "ull", "rc": "cbr",
+                  "rc-lookahead": 0, "zerolatency": 1, "delay": 0,
+                  "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1,
+                  "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
+              })
     _add_node(avp, api.Bsf, "janus_headers", "output",
-              src="janus_encoded", dst="janus_headers", bsf="dump_extra=freq=keyframe")
+              src="janus_encoded", dst="janus_headers",
+              bsf="dump_extra=freq=keyframe")
     _add_node(avp, api.Mux, "janus_mux", "output",
               src=["janus_headers"], dst="janus_muxed", ts_sort_wait=0)
     _add_node(avp, api.Output, "janus_rtp_output", "output",
@@ -242,10 +597,14 @@ def build_playlist_application(config: PlaylistConfig, api=None) -> PlaylistAppl
                        "rtpflags": "skip_rtcp", "ssrc": config.janus.ssrc})
 
     listener = api.RtcpFeedbackListener(
-        bind_host=config.janus.rtcp_bind, bind_port=config.janus.rtcp_port,
-        janus_host=config.janus.host, janus_rtcp_port=config.janus.video_port + 1,
+        bind_host=config.janus.rtcp_bind,
+        bind_port=config.janus.rtcp_port,
+        janus_host=config.janus.host,
+        janus_rtcp_port=config.janus.video_port + 1,
         media_ssrc=config.janus.ssrc,
-        on_keyframe_request=lambda _r: avp.executeCommandsFromString(
-            JANUS_FORCE_KEYFRAME_COMMAND))
-
-    return PlaylistApplication(avp, config, controller, probe, listener)
+        on_keyframe_request=lambda _request: avp.executeCommandsFromString(
+            JANUS_FORCE_KEYFRAME_COMMAND),
+    )
+    backend.bind_listener(listener)
+    return PlaylistApplication(
+        avp, config, controller, backend, probe, listener)
