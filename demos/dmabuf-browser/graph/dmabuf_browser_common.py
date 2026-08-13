@@ -35,6 +35,11 @@ class FrameCounts:
         with self._lock:
             return self._input, self._output
 
+    def reset(self):
+        with self._lock:
+            self._input = 0
+            self._output = 0
+
 
 class CountInputFrames(PythonNode):
     def __init__(self, args, counts):
@@ -216,8 +221,11 @@ def make_janus_h264_output_nodes(
     output_format,
     output_url,
     output_options,
+    encoder_preset="p4",
+    encoder_tune="ll",
+    encoder_profile="baseline",
 ):
-    """Return the common zero-copy CUDA-to-NVENC Janus output chain."""
+    """Return the common zero-copy CUDA-to-NVENC output chain."""
     keyframe_edge = f"{prefix}_keyframed"
     encoded_edge = f"{prefix}_encoded"
     headers_edge = f"{prefix}_headers"
@@ -248,9 +256,9 @@ def make_janus_h264_output_nodes(
                     "g": fps,
                     "bf": 0,
                     "rc": "cbr",
-                    "preset": "p4",
-                    "tune": "ll",
-                    "profile": "baseline",
+                    "preset": encoder_preset,
+                    "tune": encoder_tune,
+                    "profile": encoder_profile,
                     "forced-idr": 1,
                 },
             }
