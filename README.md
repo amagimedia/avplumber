@@ -1,5 +1,10 @@
 # avplumber - make your own libav processing graph
 
+[![Sixteen colored and labeled layers composed by overlay_many_cuda](demos/cuda-overlay/docs/overlay-many-cuda-16-input-1080p.png)](demos/cuda-overlay/README.md)
+
+One 1080p base and 15 transparent, labeled overlays composed on the GPU by
+`overlay_many_cuda`. [Run the verified CUDA overlay demo](demos/cuda-overlay/README.md).
+
 avplumber is a graph-based real-time processing framework. Graph can be reconfigured on the fly using a text API. Most nodes are based on FFmpeg's libavcodec, libavformat & libavfilter. You can create entire transcoding & filtering chain in it, replacing FFmpeg in many use cases.
 
 avplumber was created because we were experienced with FFmpeg and wanted to have its features, plus more flexibility. For example, it is possible to:
