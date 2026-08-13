@@ -153,7 +153,7 @@ class MixerTui(App):
     #grids { margin-bottom: 1; }
     Button { margin-right: 1; }
     Input { width: 24; margin-right: 1; }
-    #transition_status { min-width: 20; color: $text-muted; }
+    #transition_status { width: auto; min-width: 20; color: $text-muted; }
     #transition_status.busy { color: $warning; text-style: bold; }
     """
 

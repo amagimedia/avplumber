@@ -60,6 +60,12 @@ def test_direct_mode_scene_tile_cuts_to_program():
         async with app.run_test(size=(160, 45)) as pilot:
             await pilot.pause()
             assert len(app.query(SceneButton)) == 3
+            controls = app.query(
+                "Button, #transition_status, #fade_duration, #wipe_style"
+            )
+            for control in controls:
+                assert control.region.x >= 0
+                assert control.region.right <= app.size.width
 
             await pilot.press("t")
             app.query(SceneButton)[1].on_click()
