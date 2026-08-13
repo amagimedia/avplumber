@@ -5,9 +5,9 @@ headlessly in Electron, export each frame as a GPU **DMA-BUF** (zero-copy), feed
 it into an **avplumber** graph, and stream it to **Janus** for WebRTC preview in
 a browser.
 
-[![Sixteen 1080p60 browser sources composed into one 4x4 GPU grid](docs/16-input-grid.png)](docs/16-input-grid-10s.mp4)
+[![Sixteen 1080p60 browser sources composed into one 4x4 GPU grid](docs/16-input-grid.png)](https://amagimedia.github.io/avplumber/download.html?file=demos%2Fdmabuf-browser%2Fdocs%2F16-input-grid-10s.mp4)
 
-[Watch or download the 10-second MP4 demo](docs/16-input-grid-10s.mp4). It shows
+[Watch or download the 10-second MP4 demo](https://amagimedia.github.io/avplumber/download.html?file=demos%2Fdmabuf-browser%2Fdocs%2F16-input-grid-10s.mp4). It shows
 16 independent 1920x1080@60 browser captures, grouped as two Electron processes
 with eight windows each, composed into one 1920x1080@60 output. The file contains
 exactly 600 consecutive frames encoded by NVENC at about 12 Mbit/s. DMA-BUF
