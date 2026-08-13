@@ -25,6 +25,8 @@ steady-state sample:
   no increasing capture/transmit drop counter;
 - the encoded RTP stream contains one frame marker for every 60 Hz output tick,
   with a measured wall-clock rate between 59.5 and 60.5 frames per second;
+- pausing any one input for five seconds does not pause or reduce the cadence of
+  the program output or the other seven inputs;
 - the graph reports no queue overflow, EGL import, synchronization, CUDA, or
   encoder errors;
 - the production graph contains no per-input `drm_prime_to_cuda`,
@@ -32,6 +34,8 @@ steady-state sample:
 - steady state contains no `eglCreateImageKHR`, `cuGraphicsEGLRegisterImage`,
   `cuGraphicsResourceGetMappedEglFrame`, `glFinish`, or context-wide
   synchronization;
+- Chromium textures are released only after the consumer acknowledges that the
+  last CUDA read has completed; fixed pool depth is not used as synchronization;
 - average avplumber SM utilization is at least 50 percent lower than the prior
   eight-input CUDA graph (approximately 35.6 percent SM in the earlier sample),
   with a target of 18 percent or less on the same host and workload; and
@@ -64,9 +68,14 @@ browser input, no intermediate canvas, and no final canvas copy. The only
 full-frame pixel write is the unavoidable write into the final CUDA output that
 NVENC consumes.
 
+The compositor keeps the existing RGB0 NVENC input. The encoder is not the
+measured bottleneck, and changing output color format would not remove a source
+copy. This optimization remains focused on DMA-BUF import, scaling, and
+composition.
+
 The implementation adds a new node rather than changing graph management or
-the control protocol. The existing CUDA compositor remains available as an
-explicit comparison and diagnostic backend.
+the line-based graph control protocol. The existing CUDA compositor remains
+available as an explicit comparison and diagnostic backend.
 
 ## DMA-BUF import cache and synchronization
 
@@ -93,9 +102,30 @@ must not select `unsafe`. The initial scope remains the single-plane
 ABGR8888/ARGB8888 buffers produced by the Electron DMA-BUF path. Multi-plane
 YUV import is not part of this optimization.
 
-The importer continues to attach a lifetime holder to each `EglImageFrame`, so
-cache eviction cannot destroy an EGLImage while a queue or compositor still
-references it.
+Each `EglImageFrame` carries separate allocation and per-frame lifetime holders.
+The allocation holder keeps the cached EGLImage and duplicated DMA-BUF FD alive
+and may be retained by the CUDA-registration cache. The per-frame holder keeps
+the release acknowledgement pending and must never be retained by that cache.
+Queues, the latest-frame slot, and an in-flight CUDA read retain both holders.
+
+The DMA-BUF socket protocol also carries a release acknowledgement keyed by the
+existing `frame_count`. It is a fixed 16-byte little-endian record containing a
+32-bit protocol magic, a 32-bit reserved field, and the 64-bit frame number.
+The avplumber receiver queues partial or temporarily blocked writes and flushes
+them from its existing socket poll loop; an acknowledgement must not block a
+CUDA or graph-processing thread.
+
+The Electron sender retains each `OffscreenSharedTexture` until every client
+that successfully received that frame either acknowledges it or disconnects.
+The FD-pass add-on tracks the recipient set and notifies TypeScript only when it
+becomes empty. The avplumber receiver attaches the acknowledgement to the
+received frame's lifetime. Frames discarded before CUDA use can acknowledge
+immediately. After a frame has been sampled, the compositor records a CUDA event
+after its last read and retains only the per-frame holder until that event
+completes; it polls events without a context-wide synchronization. Only then can
+the frame lifetime callback queue the acknowledgement. This closes the
+consumer-to-producer reuse direction that a producer-side `sync_file` wait does
+not cover.
 
 ## Cached EGL/CUDA interop and compositor
 
@@ -125,7 +155,7 @@ physical allocation.
 For every output frame, the node clears the final CUDA frame once and launches
 one bilinear texture-sampling kernel for each active source; those kernels
 sample the cached CUDA texture objects and write disjoint configured rectangles
-directly.
+directly into RGB0.
 The eight-input demo uses the existing near-square layout calculation and passes
 destination `x`, `y`, `width`, and `height` values to the compositor. Empty
 cells remain opaque black. The first implementation needs static rectangles and
@@ -152,23 +182,24 @@ behind a GL copy or CPU fallback.
 
 ## Frame scheduling
 
-The compositor uses one configurable input as the 60 Hz clock, defaulting to
-input zero. On every clock-input frame it drains the other active input queues
-to their newest available frames and renders exactly one composite. This is
-latest-frame behavior analogous to a real-time OBS scene: individual input
-arrivals update held textures but do not independently trigger additional
-composites.
+The compositor owns a monotonic program clock with configurable frame rate,
+defaulting to 60 Hz. This is implemented entirely inside the new node: it waits
+on the existing multi-input edge events only until the next program deadline,
+drains every ready input queue to its newest frame, and renders once when that
+deadline arrives. It does not change graph management, scheduling, or the
+line-based graph control protocol. A missed deadline advances to the next
+future tick rather than emitting a catch-up burst.
 
-Startup waits until every active input has supplied a frame, subject to the
-existing bounded warm-up timeout. After warm-up, a temporarily late input keeps
-its last frame. A clock-input discontinuity is passed downstream and the
-existing program timestamp normalization remains responsible for the outgoing
-monotonic timeline. EOF from a non-clock input freezes its last frame; EOF from
-the clock input ends the compositor after queued work is drained.
+Input arrivals update held frames but never trigger extra composites. A late,
+paused, or EOF input keeps its last frame while the clock and other inputs
+continue. Before an input has produced its first usable frame, its rectangle is
+black. Neither compositor startup nor the program clock waits for every input
+to become ready. Reuse and source-age counters identify individual stalled
+inputs without coupling output cadence to them.
 
-This scheduling removes the current behavior where several inputs advancing at
-the same timestamp cause several complete GPU composites that a downstream
-`fps` filter later discards.
+The compositor generates the output PTS directly from the program clock. The
+production graph therefore does not need a downstream `fps` filter to discard
+extra composites or to manufacture frames when an input stalls.
 
 ## Demo integration
 
@@ -177,11 +208,18 @@ source it creates only the IPC receiver, the existing DRM format assertion, and
 `drm_prime_to_egl_image`. It passes the unsized EGLImage frames and calculated
 destination rectangles to the one compositor.
 
+The demo starts all input groups without serial readiness waits, then starts the
+compositor and output. A missing initial input produces a black cell instead of
+blocking the remaining sources or Janus output.
+
+The compositor backend, source count, and frame rate remain explicit demo
+settings. Source count remains `N`, defaulting to eight.
+
 The old CUDA graph stays selectable by an explicit backend setting for A/B
 measurements and the independent per-source `mpdecimate` diagnostic. Source
-count remains parameterized as `N`, defaulting to eight; neither the compositor
-nor its cache hardcodes eight or an x86_64/NVIDIA architecture. NVIDIA is the
-target used for validation, not a vendor condition in the node.
+count is not fixed in the node; neither the compositor nor its cache hardcodes
+eight or an x86_64/NVIDIA architecture. NVIDIA is the target used for
+validation, not a vendor condition in the node.
 
 ## Error handling and observability
 
@@ -192,8 +230,8 @@ the old per-input CUDA path.
 
 The importer records cache hits, fresh imports, synchronization fallbacks, and
 evictions in periodic aggregate counters rather than per-frame logs. The
-compositor records rendered frames, skipped pre-warm-up clock ticks, held-input
-reuse, and EGL/CUDA failures. Optional periodic debug logging exposes these
+compositor records rendered ticks, missed program deadlines, per-input reuse and
+age, and EGL/CUDA failures. Optional periodic debug logging exposes these
 counters without making normal operation noisy.
 
 ## Validation
@@ -203,6 +241,7 @@ Local validation covers pure graph generation and layout behavior:
 - an eight-source EGL production graph contains eight synchronized EGL
   importers and one compositor;
 - it contains no per-source CUDA conversion or scale filter;
+- it contains no downstream production `fps` filter;
 - its compositor rectangles match the expected aspect-preserving grid;
 - source count remains parameterized; and
 - the explicit legacy/diagnostic backend still generates the existing CUDA
@@ -214,12 +253,16 @@ Remote validation consists of:
 1. a single-source smoke test for import, composition, CUDA handoff, NVENC, and
    Janus output;
 2. the eight-source 60-second acceptance run described above;
-3. process-attributed GPU SM, memory, encoder, decoder, and PCIe sampling;
-4. confirmation that all eight producer counters remain at full rate;
-5. RTP frame-marker and timestamp accounting at the Janus input;
-6. a separate eight-input `mpdecimate` uniqueness run;
-7. visual inspection through the existing Janus preview; and
-8. an Nsight Systems capture confirming EGL registration, EGL-frame lookup, and
+3. a five-second pause of each input in turn, confirming that output remains at
+   60 Hz and only that input's reuse counter increases;
+4. release-acknowledgement accounting, including disconnect and frames dropped
+   before composition, with no fixed-depth forced releases;
+5. process-attributed GPU SM, memory, encoder, decoder, and PCIe sampling;
+6. confirmation that all eight producer counters remain at full rate;
+7. RTP frame-marker and timestamp accounting at the Janus input;
+8. a separate eight-input `mpdecimate` uniqueness run;
+9. visual inspection through the existing Janus preview; and
+10. an Nsight Systems capture confirming EGL registration, EGL-frame lookup, and
    CUDA texture creation occur only during cache-slot creation, while steady
    state contains only the clear/layer kernels per output tick with no graphics
    map/unmap, per-input copy, or scale chain. Nsight Compute is used only if
@@ -237,4 +280,4 @@ untouched.
   scanout/native-handle patch or shim;
 - no vendor or CPU-architecture hardcoding in avplumber;
 - no dynamic scene graph, transitions, or general-purpose alpha mixer; and
-- no graph-management, sentinel, or control-protocol changes.
+- no graph-management, sentinel, or line-based graph control-protocol changes.
