@@ -7,6 +7,21 @@ Electron and users who run a stock Electron binary through the GBM shim. Carry
 only the allocation change needed for Electron to export a renderable NVIDIA
 DMA-BUF that avplumber can import.
 
+## Upstream Chromium foundation
+
+Credit the upstream work that made Chromium capture buffers shareable before
+describing the later NVIDIA allocation fix. Reito OvO's Chromium CL 5276423
+added RGBA capture into an existing native GPU texture. CL 5265077 then made
+`FrameSinkVideoCapturer` support RGBA output backed by a native-texture GPU
+memory buffer, explicitly enabling accelerated shared-texture consumers such
+as CEF OSR, Electron, and OBS. Link the two implementation CLs directly and
+link Reito's combined Chromium-author query for their test and pixel-format
+correctness follow-ups.
+
+Keep this history distinct from CL 6681354. The 2024 work established RGBA
+native-texture buffer sharing; CL 6681354 later added the consumer choice that
+avoids CPU-mappable/linear allocation for the NVIDIA path.
+
 ## Electron patch
 
 Chromium CL 6681354 introduced the internal
