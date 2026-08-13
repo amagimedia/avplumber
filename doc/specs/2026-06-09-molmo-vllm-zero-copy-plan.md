@@ -64,7 +64,7 @@ References:
 Add:
 
 ```text
-/home/jp/git/avplumber/src/nodes/neural_net/vlm/molmo/node.py
+src/nodes/neural_net/vlm/molmo/node.py
 ```
 
 Primary class:
@@ -119,7 +119,7 @@ The preprocess copy from NV12 CUDA frame into Molmo CUDA tensor is acceptable. I
 Add:
 
 ```text
-/home/jp/git/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
+src/nodes/neural_net/preprocess/molmo2_preprocess.cu
 ```
 
 Phase 1 launcher:
@@ -155,8 +155,8 @@ The initial input policy is square resize, not letterbox. This matches Molmo2's 
 
 Use existing AVP Python zero-copy patterns:
 
-- `/home/jp/git/avplumber/src/nodes/neural_net/examples/pytorch_cuda.py`
-- `/home/jp/git/avplumber/src/nodes/neural_net/scene_cut/cuda_scene_detect.py`
+- `src/nodes/neural_net/examples/pytorch_cuda.py`
+- `src/nodes/neural_net/scene_cut/cuda_scene_detect.py`
 
 Input plane wrapping:
 
@@ -541,9 +541,9 @@ Reference:
 Phase 1:
 
 ```text
-/home/jp/git/avplumber/src/nodes/neural_net/vlm/molmo/node.py
-/home/jp/git/avplumber/src/nodes/neural_net/preprocess/molmo2_preprocess.cu
-/home/jp/git/avplumber/src/nodes/neural_net/vlm/molmo/example.py
+src/nodes/neural_net/vlm/molmo/node.py
+src/nodes/neural_net/preprocess/molmo2_preprocess.cu
+src/nodes/neural_net/vlm/molmo/example.py
 ```
 
 External/local patch area:

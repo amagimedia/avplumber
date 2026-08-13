@@ -94,11 +94,11 @@ class SceneDetector:
 
 class HistogramDetector(SceneDetector):
     """Histogram correlation-based scene detector.
-    
+
     Computes normalized luma histograms and detects scene changes when
     correlation between consecutive frames drops below threshold.
     """
-    
+
     def process_frame(self, y_plane_cuda, uv_plane_cuda=None) -> str:
         hist = self._compute_histogram(y_plane_cuda)
         over = False
@@ -109,25 +109,25 @@ class HistogramDetector(SceneDetector):
         if self._should_update_state:
             self._last_state = hist
         return result
-    
+
     def _compute_histogram(self, y_plane):
         """Compute normalized histogram on GPU."""
         hist = cp.histogram(y_plane, bins=self.hist_bins, range=(0, 256))[0]
         hist_norm = hist.astype(cp.float32) / hist.sum()
         return hist_norm
-    
+
     def _histogram_correlation(self, hist1, hist2):
         """Compute correlation between two histograms."""
         mean1 = hist1.mean()
         mean2 = hist2.mean()
-        
+
         numerator = ((hist1 - mean1) * (hist2 - mean2)).sum()
         denom1 = cp.sqrt(((hist1 - mean1) ** 2).sum())
         denom2 = cp.sqrt(((hist2 - mean2) ** 2).sum())
-        
+
         if denom1 == 0 or denom2 == 0:
             return 1.0
-        
+
         corr = numerator / (denom1 * denom2)
         return float(corr)
 
@@ -371,10 +371,10 @@ class ThresholdDetector(SceneDetector):
 
 class CudaSceneDetectNode(PythonNode):
     """CUDA-accelerated scene detection node for AVPlumber.
-    
+
     Operates directly on NV12 CUDA frames. Detects scene changes and optionally
     writes metadata to frames for downstream overlay rendering.
-    
+
     Args (node params):
         detector_type: Detection algorithm: "content", "adaptive", "histogram" or "threshold"
         threshold: Detection sensitivity (meaning depends on detector)
@@ -387,7 +387,7 @@ class CudaSceneDetectNode(PythonNode):
         fade_bias: Threshold detector only — bias toward fade-in/out (default: 0.0)
         luma_only: Content detector only — use only V channel (default: False)
         metadata_key: Optional key to write scene cut metadata to frames
-        
+
     Outputs metadata in format:
         {
           "scene_count": int,
@@ -395,23 +395,23 @@ class CudaSceneDetectNode(PythonNode):
           "avg_process_time_ms": float
         }
     """
-    
+
     DETECTOR_CLASSES = {
         "content":   ContentDetector,
         "adaptive":  AdaptiveDetector,
         "histogram": HistogramDetector,
         "threshold": ThresholdDetector,
     }
-    
+
     def __init__(self, args):
         super().__init__(args)
-        
+
         if not HAVE_CUPY:
             raise RuntimeError(
                 "cupy is required for CUDA scene detection. "
                 "Install with: pip install cupy-cuda12x"
             )
-        
+
         # Extract parameters
         detector_type = args.get("detector_type", "content")
         _defaults = {"content": 27.0, "adaptive": 3.0, "threshold": 12.0, "histogram": 0.95}
@@ -457,14 +457,14 @@ class CudaSceneDetectNode(PythonNode):
                 confirm_frames=confirm_frames,
                 **extra
             )
-        
+
         # State
         self._frame_no = 0
         self._cuts: List[Tuple[int, float]] = []
         self._process_time_total = 0.0
         self._last_activity = time.monotonic()
         self._pending_frames: list = []   # buffered frames during confirm streak
-        
+
         thr_display = extra.get("adaptive_threshold", threshold)
         print(
             f"[CudaSceneDetect] initialized: type={detector_type}, "
@@ -475,7 +475,7 @@ class CudaSceneDetectNode(PythonNode):
         # doesn't block for hundreds of ms inside process() and trigger a timeout.
         if detector_type in ("content", "adaptive"):
             self._warmup_cupy_hsv(hist_bins)
-    
+
     def _warmup_cupy_hsv(self, hist_bins: int):
         """Trigger cupy JIT compilation for all HSV/histogram kernels during init."""
         import numpy as np
@@ -533,7 +533,7 @@ class CudaSceneDetectNode(PythonNode):
             memptr=cp.cuda.MemoryPointer(cp.cuda.UnownedMemory(ptr, uv_size, owner=frame), 0)
         )
         return uv_flat.reshape(uv_height, stride)[:, :width]
-    
+
     def _frame_seconds(self, frame) -> float:
         """Extract timestamp in seconds from frame PTS."""
         NOPTS = -9223372036854775808
@@ -545,7 +545,7 @@ class CudaSceneDetectNode(PythonNode):
         if not tb or int(tb.den) == 0:
             return float(ts)
         return float(ts) * float(tb.num) / float(tb.den)
-    
+
     def _fmt_overlay_ts(self, seconds):
         if seconds is None or seconds != seconds:
             return "NONE"
@@ -576,7 +576,7 @@ class CudaSceneDetectNode(PythonNode):
             ],
         }
         frame.metadata[self._metadata_key] = json.dumps(payload)
-    
+
     def _forward_if_configured(self, frame):
         """Forward frame to destination edges if configured."""
         dst = getattr(self, "_dst", None)
@@ -585,7 +585,7 @@ class CudaSceneDetectNode(PythonNode):
                 edge.enqueue(frame)
         elif dst is not None:
             dst.enqueue(frame)
-    
+
     def process(self):
         """Process one frame (called repeatedly by AVPlumber event loop)."""
         frame = self._src.tryGet(1000)
@@ -642,11 +642,11 @@ class CudaSceneDetectNode(PythonNode):
             # CUT_NO — forward immediately
             self._write_metadata(frame)
             self._forward_if_configured(frame)
-    
+
     def idle_seconds(self) -> float:
         """Return seconds since last frame received."""
         return time.monotonic() - self._last_activity
-    
+
     def get_stats(self) -> dict:
         """Return detection statistics."""
         avg_ms = (
@@ -660,7 +660,7 @@ class CudaSceneDetectNode(PythonNode):
             "avg_frame_time_ms": round(avg_ms, 3),
             "cuts": self._cuts,
         }
-    
+
     def finalize(self):
         """Print summary when processing ends."""
         # Flush any frames still buffered in a pending streak
@@ -670,16 +670,16 @@ class CudaSceneDetectNode(PythonNode):
         self._pending_frames = []
 
         stats = self.get_stats()
-        
+
         print("\n=== CUDA Scene Detection Summary ===")
         print(f"frames analyzed     : {stats['frames_analyzed']}")
         print(f"scene changes       : {stats['scene_changes']}")
         print(f"scenes              : {stats['scenes']}")
         print(f"avg frame time      : {stats['avg_frame_time_ms']:.3f} ms")
-        
+
         if not self._cuts:
             return
-        
+
         print("\nscene boundaries:")
         start = 0.0
         for idx, (cut_frame, seconds) in enumerate(self._cuts, start=1):
@@ -689,7 +689,7 @@ class CudaSceneDetectNode(PythonNode):
             )
             start = seconds
         print(f"  scene {len(self._cuts) + 1:<3} {self._fmt_ts(start)} -> EOF")
-    
+
     @staticmethod
     def _fmt_ts(seconds: float) -> str:
         """Format timestamp as HH:MM:SS.mmm"""

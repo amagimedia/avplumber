@@ -154,4 +154,3 @@ def all_scenes(input_count: int) -> tuple[SceneSpec, ...]:
             for page in range(grid_page_count(input_count, capacity))
         )
     return tuple(scenes)
-

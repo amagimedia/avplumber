@@ -34,4 +34,3 @@ def test_invalid_response_shapes_are_rejected():
         parse_mixer_status("[]")
     with pytest.raises(ValueError, match="list"):
         parse_scene_list("{}")
-

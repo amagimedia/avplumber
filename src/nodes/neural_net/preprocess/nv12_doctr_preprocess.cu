@@ -69,4 +69,3 @@ extern "C" __global__ void kNV12_doctr_crop_resize_pad_f32(
     out_nchw[out_idx + 1 * plane] = (g - mean_g) / std_g;
     out_nchw[out_idx + 2 * plane] = (b - mean_b) / std_b;
 }
-
