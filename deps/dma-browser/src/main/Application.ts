@@ -6,6 +6,7 @@ import { Logger } from './support/Logger';
 import { ManagedWindow, type IManagedWindowFactory } from './ManagedWindow';
 import { WindowManager } from './WindowManager';
 import { AllowedDims } from './capture/AllowedDims';
+import { DEFAULT_RETAINED_FRAME_POOL_SIZE } from './capture/FrameCaptureChannel';
 import { RestServer } from './rest/RestServer';
 import { envFlag, envInt, envList, envString, type Env } from './support/env';
 import type { WindowConfig } from './config/WindowConfig';
@@ -115,9 +116,15 @@ export class Application {
   private readConfig(): ApplicationConfig {
     const host = envString(this.env, 'DMA_BROWSER_REST_HOST', '127.0.0.1');
     const port = envInt(this.env, 'DMA_BROWSER_REST_PORT', 9009, 1, 65535);
-    const maxWindows = envInt(this.env, 'DMA_BROWSER_MAX_WINDOWS', 8, 1, 8);
+    const maxWindows = envInt(this.env, 'DMA_BROWSER_MAX_WINDOWS', 8, 1, Number.MAX_SAFE_INTEGER);
     const loadWatchdogMs = envInt(this.env, 'DMA_BROWSER_LOAD_WATCHDOG_MS', 30_000, 1000, 600_000);
-    const dmabufPoolSize = envInt(this.env, 'DMA_BROWSER_DMABUF_POOL_SIZE', 10, 1, 64);
+    const dmabufPoolSize = envInt(
+      this.env,
+      'DMA_BROWSER_DMABUF_POOL_SIZE',
+      DEFAULT_RETAINED_FRAME_POOL_SIZE,
+      1,
+      64,
+    );
     const dimsList = envList(this.env, 'DMA_BROWSER_ALLOWED_DIMS');
     const allowedDims = AllowedDims.fromList(dimsList.length > 0 ? dimsList : DEFAULT_ALLOWED_DIMS);
     return {

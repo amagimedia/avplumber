@@ -729,6 +729,7 @@ Receive GPU frames via a UNIX domain socket with FD passing (DMA-BUF). Produces 
 Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
+-   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
 
 ### `ipc_socket_audio_source`
 
@@ -865,11 +866,49 @@ Supported DRM formats (layer0/plane0 only):
 - `DRM_FORMAT_ARGB8888`
 
 Cache behavior:
-- Maintains an internal cache keyed by the incoming DMA-BUF FD number.
-- Cache entries are evicted when an FD is not seen for `ttl` seconds, and the whole cache is purged when resolution changes.
+- Identifies a physical allocation by `st_dev`, `st_ino`, dimensions, DRM fourcc,
+  modifier, plane offset, and plane pitch. FD integers are not identity because
+  they can be reused.
+- Keeps a duplicated DMA-BUF FD alive with every cached `EGLImageKHR`.
+- Reuses the same immutable `EGLImageKHR` when that allocation returns. The
+  producer/consumer protocol must retain each delivered frame until downstream
+  GPU reads finish; `ipc_dmabuf_source` provides that ordering through release
+  acknowledgements.
+- Evicts idle entries after `ttl` and the least-recently-used entry at the configured limit.
 
 Parameters:
-- `ttl` (float seconds, optional, default `5.0`) - cache entry time-to-live
+- `cache_mode` (string, optional, default `"reuse"`) - `reuse` or `off`
+- `ttl` (float seconds, optional, default `3.0`) - cache entry time-to-live
+- `max_cache_entries` (integer, optional, default `64`) - maximum retained imports
+- `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate cache counters
+
+### `egl_image_cuda_overlay`
+
+Scale and compose multiple cached `EglImageFrame` inputs directly into one
+pitched CUDA RGB0 frame. Each stable input image is registered once with
+`cuGraphicsEGLRegisterImage`; its `CUeglFrame` and CUDA texture object are then
+kept for that physical allocation. CUDA EGL image resources do not require
+per-frame map/unmap. Every output tick samples the cached texture objects with
+bilinear scaling and writes the configured rectangles directly. There are no
+per-input CUDA frames, scale filters, or pixel copies.
+
+The node owns its output clock. It keeps the latest frame independently for
+each input, so a stalled input repeats its last image without blocking other
+inputs or the program output. The frame lifetime holders are released only
+after a CUDA event confirms that the sampling kernels have completed.
+
+N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 software format
+
+Parameters:
+- `src` (array of edge names, required) - input EGL image edges
+- `dst` (string, required) - output CUDA video edge
+- `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+- `width`, `height` (integers, required) - output canvas dimensions
+- `layers` (array, required, one per input) - objects containing `dst_x`, `dst_y`, `dst_w`, and `dst_h`
+- `fps` (ratio string, optional, default `"60/1"`) - independent compositor output rate
+- `cache_ttl` (float seconds, optional, default `3.0`) - idle interop-slot lifetime
+- `max_cache_entries` (integer, optional, default `440`) - maximum registered slots
+- `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate compositor counters
 
 ### `jittergen`
 

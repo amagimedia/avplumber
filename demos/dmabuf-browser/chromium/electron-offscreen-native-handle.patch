@@ -1,0 +1,70 @@
+From: avplumber contributors <noreply@example.invalid>
+Subject: [PATCH] electron: opt OSR shared textures into native handles
+
+Chromium supports capture buffers that do not require CPU access through
+BufferFormatPreference::kPreferSharedImageWithNativeHandle. Electron's
+offscreen shared-texture consumer still requests kPreferMappableSharedImage,
+which selects a linear allocation that NVIDIA cannot also use as a render
+target.
+
+Add a disabled-by-default runtime feature that makes only Electron's offscreen
+shared-texture consumer request the native-handle path. The Electron binary
+retains upstream behavior unless the feature is explicitly enabled with:
+
+  --enable-features=RenderableMappableSharedImageForceScanout
+
+The native-handle preference and its SCANOUT allocation behavior come from
+Chromium CL 6681354:
+https://chromium-review.googlesource.com/c/chromium/src/+/6681354
+
+---
+ shell/browser/osr/osr_video_consumer.cc | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/shell/browser/osr/osr_video_consumer.cc b/shell/browser/osr/osr_video_consumer.cc
+--- a/shell/browser/osr/osr_video_consumer.cc
++++ b/shell/browser/osr/osr_video_consumer.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <utility>
+ 
++#include "base/feature_list.h"
+ #include "media/base/limits.h"
+ #include "media/base/video_frame_metadata.h"
+ #include "media/capture/mojom/video_capture_buffer.mojom.h"
+@@ -18,6 +19,9 @@
+ 
+ namespace {
+ 
++BASE_FEATURE(kRenderableMappableSharedImageForceScanout,
++             base::FEATURE_DISABLED_BY_DEFAULT);
++
+ media::VideoPixelFormat GetTargetPixelFormatFromOption(
+     const std::string& pixel_format_option) {
+   if (pixel_format_option == "argb") {
+@@ -79,11 +83,18 @@ OffScreenVideoConsumer::~OffScreenVideoConsumer() = default;
+ 
+ void OffScreenVideoConsumer::SetActive(bool active) {
+   if (active) {
+-    video_capturer_->Start(
+-        this,
+-        view_->offscreen_use_shared_texture()
+-            ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
+-            : viz::mojom::BufferFormatPreference::kDefault);
++    auto buffer_format_preference =
++        viz::mojom::BufferFormatPreference::kDefault;
++    if (view_->offscreen_use_shared_texture()) {
++      buffer_format_preference =
++          base::FeatureList::IsEnabled(
++              kRenderableMappableSharedImageForceScanout)
++              ? viz::mojom::BufferFormatPreference::
++                    kPreferSharedImageWithNativeHandle
++              : viz::mojom::BufferFormatPreference::
++                    kPreferMappableSharedImage;
++    }
++    video_capturer_->Start(this, buffer_format_preference);
+   } else {
+     video_capturer_->Stop();
+   }
+-- 
+2.50.1

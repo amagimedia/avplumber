@@ -20,10 +20,11 @@ this diagnostic mode; the default Janus path remains GPU-native through NVENC.
 Pipeline (public nodes only -- no in-house convert_cuda):
 
   ipc_dmabuf_source(@drm)                    DRM_PRIME frames from the browser
-  assume_video_format(drm_prime / cuda)
-  smooth_timestamps
+  assume_video_format(drm_prime / RGB0)
   drm_prime_to_cuda(@gpu)                    EGL-import the DMA-BUF honoring the
                                              NVIDIA tiling modifier -> RGB0 CUDA
+  setpts/settb                               preserve the browser's shared
+                                             monotonic clock at 1/FPS precision
   force_keyframe(1s)                         IDR cadence so WebRTC viewers can join
   enc_video(h264_nvenc, baseline, low latency)
   bsf: dump_extra=freq=keyframe              repeat SPS/PPS on every keyframe
@@ -41,9 +42,7 @@ GPU render target is always tiled (block-linear) -- the driver refuses a linear
 linearly and yields a sheared/garbage image. drm_prime_to_cuda imports the
 DMA-BUF via EGL, which honors the modifier and detiles into a linear CUDA frame.
 This needs a consumer built with HAVE_CUDA+HAVE_GL+HAVE_DRM (see
-demos/dmabuf-browser/consumer/Dockerfile.cuda). On a GPU that CAN give a linear renderable
-buffer (Intel/AMD, dma-browser shim GBM_LINEAR_SHIM_FORCE_LINEAR=1) the DRM-only
-build + a plain hwdownload works and this CUDA step can be dropped.
+demos/dmabuf-browser/consumer/Dockerfile.cuda).
 
 Env overrides:
   SOCKET (default /tmp/dma-page/overlay.sock), WIDTH, HEIGHT, FPS, RENDER_NODE,
@@ -55,7 +54,6 @@ Env overrides:
 
 import os
 import sys
-import threading
 import time
 
 sys.path.insert(
@@ -67,17 +65,17 @@ sys.path.insert(
 
 import pyplumber
 from pyplumber.node import (
-    IpcDmabufSource,
     AssumeVideoFormat,
-    SmoothTimestamps,
-    DrmPrimeToCuda,
     FilterVideo,
-    ForceKeyFrame,
-    EncVideo,
-    Bsf,
-    Mux,
-    Output,
-    PythonNode,
+)
+
+from dmabuf_browser_common import (
+    CountInputFrames,
+    CountOutputFrames,
+    FrameCounts,
+    duplicate_stats,
+    make_dmabuf_cuda_input_nodes,
+    make_janus_h264_output_nodes,
 )
 
 SOCKET = os.environ.get("SOCKET", "/tmp/dma-page/overlay.sock")
@@ -137,52 +135,8 @@ avp.executeCommandsFromString(
 avp.executeCommandsFromString('hwaccel.init { "name": "@gpu", "type": "cuda" }')
 
 
-class FrameCounts:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._input = 0
-        self._output = 0
-
-    def increment_input(self):
-        with self._lock:
-            self._input += 1
-
-    def increment_output(self):
-        with self._lock:
-            self._output += 1
-
-    def snapshot(self):
-        with self._lock:
-            return self._input, self._output
-
-
-class CountInputFrames(PythonNode):
-    def __init__(self, args, counts):
-        self._counts = counts
-        super().__init__(args)
-
-    def process(self):
-        frame = self._src.get()
-        if frame:
-            self._counts.increment_input()
-            self._dst.enqueue(frame)
-
-
-class CountOutputFrames(PythonNode):
-    def __init__(self, args, counts):
-        self._counts = counts
-        super().__init__(args)
-
-    def process(self):
-        frame = self._src.get()
-        if frame:
-            self._counts.increment_output()
-
-
 def print_mpdecimate_stats(counts, final=False):
-    input_frames, output_frames = counts.snapshot()
-    duplicates = max(0, input_frames - output_frames)
-    duplicate_pct = 100.0 * duplicates / input_frames if input_frames else 0.0
+    input_frames, output_frames, duplicates, duplicate_pct = duplicate_stats(counts)
     label = "final" if final else "progress"
     print(
         "[dmabuf_mpdecimate] %s input=%d unique=%d duplicates=%d duplicate_pct=%.3f"
@@ -191,126 +145,35 @@ def print_mpdecimate_stats(counts, final=False):
     )
 
 
-nodes = [
-    IpcDmabufSource(
-        {
-            "socket": SOCKET,
-            "dst": "v_ipc",
-            "hwaccel": "@drm",
-            "group": "in",
-            "name": "Overlay_Receive",
-            "auto_restart": "group",
-        }
-    ),
-    AssumeVideoFormat(
-        {
-            "width": W,
-            "height": H,
-            "pixel_format": "drm_prime",
-            "real_pixel_format": "rgb0",
-            "src": "v_ipc",
-            "dst": "v_assumed",
-            "group": "out",
-            "auto_restart": "panic",
-        }
-    ),
-    SmoothTimestamps(
-        {
-            "fps": "%d/1" % FPS,
-            "src": "v_assumed",
-            "dst": "v_fps",
-            "group": "out",
-            "auto_restart": "panic",
-        }
-    ),
-    # Detile: EGL-import the DMA-BUF (honoring the NVIDIA tiling modifier) into a
-    # linear RGB0 CUDA frame. This is the step a DRM-only build cannot do.
-    DrmPrimeToCuda(
-        {
-            "hwaccel": "@gpu",
-            "drop_alpha": True,
-            "src": "v_fps",
-            "dst": "v_cuda",
-            "group": "out",
-            "name": "Overlay_ToCuda",
-            "auto_restart": "group",
-        }
-    ),
-]
+nodes, cuda_edge = make_dmabuf_cuda_input_nodes(
+    prefix="v",
+    socket=SOCKET,
+    width=W,
+    height=H,
+    fps=FPS,
+    drm_hwaccel="@drm",
+    cuda_hwaccel="@gpu",
+    source_group="in",
+    processing_group="out",
+)
 
 if OUTPUT_MODE == "janus":
     nodes.extend(
-        [
-            ForceKeyFrame(
-                {
-                    "interval_sec": "1/1",
-                    "src": "v_cuda",
-                    "dst": "v_kf",
-                    "group": "out",
-                    "auto_restart": "panic",
-                }
+        make_janus_h264_output_nodes(
+            prefix="v_janus",
+            src=cuda_edge,
+            group="out",
+            cuda_hwaccel="@gpu",
+            fps=FPS,
+            bitrate=BITRATE,
+            output_format=OUT_FORMAT,
+            output_url=OUT_URL,
+            output_options=(
+                {"payload_type": J_PT, "rtpflags": "skip_rtcp", "ssrc": J_SSRC}
+                if OUT_FORMAT == "rtp"
+                else {}
             ),
-            # Encode the CUDA frame directly with NVENC (it accepts the RGB0 CUDA
-            # surface and does the CSC to h264 internally). We skip hwdownload --
-            # ffmpeg's cuda hwcontext can't init a transparent-format download -- and
-            # keep this path to public nodes + system ffmpeg.
-            EncVideo(
-                {
-                    "codec": "h264_nvenc",
-                    "hwaccel": "@gpu",
-                    "src": "v_kf",
-                    "dst": "v_enc",
-                    "group": "out",
-                    "name": "Video_Encode",
-                    "auto_restart": "panic",
-                    "options": {
-                        "b": BITRATE,
-                        "maxrate": BITRATE,
-                        "bufsize": BITRATE,
-                        "g": FPS,
-                        "bf": 0,
-                        "rc": "cbr",
-                        "preset": "p4",
-                        "tune": "ll",
-                        "profile": "baseline",
-                        "forced-idr": 1,
-                    },
-                }
-            ),
-            Bsf(
-                {
-                    "bsf": "dump_extra=freq=keyframe",
-                    "src": "v_enc",
-                    "dst": "v_enc_hdr",
-                    "group": "out",
-                    "auto_restart": "panic",
-                }
-            ),
-            Mux(
-                {
-                    "src": ["v_enc_hdr"],
-                    "dst": "mux_v",
-                    "ts_sort_wait": 0,
-                    "group": "out",
-                    "auto_restart": "panic",
-                }
-            ),
-            Output(
-                {
-                    "format": OUT_FORMAT,
-                    "url": OUT_URL,
-                    "options": (
-                        {"payload_type": J_PT, "rtpflags": "skip_rtcp", "ssrc": J_SSRC}
-                        if OUT_FORMAT == "rtp"
-                        else {}
-                    ),
-                    "src": "mux_v",
-                    "group": "out",
-                    "name": "Janus_Out",
-                    "auto_restart": "panic",
-                }
-            ),
-        ]
+        )
     )
     mpdecimate_counts = None
 else:
@@ -323,7 +186,7 @@ else:
                     "height": H,
                     "pixel_format": "cuda",
                     "real_pixel_format": "rgb0",
-                    "src": "v_cuda",
+                    "src": cuda_edge,
                     "dst": "v_mp_cuda",
                     "group": "out",
                     "auto_restart": "panic",

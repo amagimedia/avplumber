@@ -1,84 +1,165 @@
-# DMA-BUF consumer for NVIDIA GPUs.
+# NVIDIA DMA-BUF consumer with cached EGL/CUDA interop, composition, and NVENC.
 #
-# On NVIDIA the browser's GPU render target is always tiled (block-linear) — the
-# driver refuses a linear *renderable* RGBA buffer — so a plain DRM hwdownload
-# reads sheared garbage. This build adds the GPU detiler: avplumber with
-# HAVE_CUDA + HAVE_GL + HAVE_DRM, so drm_prime_to_cuda can import the DMA-BUF via
-# EGL *honoring the NVIDIA modifier* into a linear CUDA frame that a normal
-# hwdownload then reads correctly. Still lean: NO TensorRT / neural / OpenCV /
-# VAAPI, built against the SYSTEM Fedora ffmpeg (which ships cuda hwframes +
-# libx264 + nvenc); the only heavy addition over the DRM-only image is the CUDA
-# runtime + EGL/GL. The NVIDIA driver libs (libcuda, EGL/GLES ICDs) are injected
-# at runtime by the NVIDIA container runtime (--gpus all + all caps).
+# The distro FFmpeg used by the DRM-only demo does not provide scale_cuda on
+# every distribution.  Build FFmpeg here so the N-source scaling graph has a
+# reproducible GPU resizer for the legacy comparison and diagnostic graphs.
+# The production graph scales while sampling registered EGL images in its CUDA
+# compositor and never needs a CPU scale/download. Callers may supply explicit
+# gencode flags; the default deliberately does not fix one GPU architecture.
 #
-# Build context = the avplumber repo root:
-#   docker build -t avplumber-dmabuf-consumer-cuda -f demos/dmabuf-browser/consumer/Dockerfile.cuda .
-ARG CUDA_REPO_URL=https://developer.download.nvidia.com/compute/cuda/repos/fedora42/x86_64/cuda-fedora42.repo
-ARG AVP_FLAGS="HAVE_CUDA=1 HAVE_NVCC=0 HAVE_GL=1 HAVE_DRM=1 HAVE_NVJPEG=1 HAVE_VAAPI=0 HAVE_TENSORRT=0 NEURAL_NET=0 HAVE_NVOF=0 HAVE_NVOF_FRUC=0 HAVE_OPENCV=0 HAVE_SCTE35=0 CUDA_ROOT=/usr/local/cuda-13.0"
+# Build context = the avplumber repository root:
+#   docker build -t avplumber-dmabuf-consumer-cuda \
+#     -f demos/dmabuf-browser/consumer/Dockerfile.cuda .
+ARG CUDA_IMAGE_VERSION=11.7.1
+ARG UBUNTU_VERSION=22.04
 
-FROM fedora:42 AS builder
-ARG AVP_FLAGS
-ARG CUDA_REPO_URL
-RUN dnf -y install \
-        "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
-        dnf-plugins-core \
-    && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
-    && dnf -y install --setopt=install_weak_deps=False \
-        gcc gcc-c++ binutils which make cmake git pkgconf-pkg-config xxd \
-        ffmpeg-devel \
-        libdrm-devel \
-        python3-devel \
-        boost-devel libcurl-devel gnutls-devel openssl-devel zlib-devel \
-        libglvnd-devel mesa-libEGL-devel mesa-libGLES-devel mesa-libGL-devel \
-        cuda-nvcc-13-0 cuda-cudart-devel-13-0 cuda-driver-devel-13-0 \
-        cuda-cccl-13-0 cuda-crt-13-0 cuda-culibos-devel-13-0 libnvjpeg-devel-13-0 \
-    && dnf clean all
+FROM nvidia/cuda:${CUDA_IMAGE_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG FFMPEG_TAG=n7.1.5
+ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
+ARG CUDA_NVCC_FLAGS="-O2"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        autoconf \
+        automake \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libboost-all-dev \
+        libcurl4-openssl-dev \
+        libdrm-dev \
+        libegl-dev \
+        libgles-dev \
+        libglvnd-dev \
+        libgnutls28-dev \
+        libssl-dev \
+        libtool \
+        nasm \
+        pkg-config \
+        python3 \
+        python3-dev \
+        xxd \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --quiet --branch "${NV_CODEC_HEADERS_TAG}" --depth 1 \
+        https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
+    && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
+    && rm -rf /tmp/nv-codec-headers
+
+COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
+
+RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
+        https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+    && git -C /tmp/ffmpeg config user.name "dmabuf-browser-demo builder" \
+    && git -C /tmp/ffmpeg config user.email "dmabuf-browser-demo@local" \
+    && git -C /tmp/ffmpeg am /build/deps/ffmpeg-patches/*.patch
+
+RUN cd /tmp/ffmpeg \
+    && ./configure \
+        --prefix=/usr/local \
+        --libdir=/usr/local/lib \
+        --incdir=/usr/local/include \
+        --pkgconfigdir=/usr/local/lib/pkgconfig \
+        --enable-gpl \
+        --enable-nonfree \
+        --enable-shared \
+        --disable-static \
+        --enable-cuda \
+        --enable-cuda-nvcc \
+        --enable-ffnvcodec \
+        --enable-libdrm \
+        --enable-nvenc \
+        --disable-libnpp \
+        --disable-doc \
+        --disable-htmlpages \
+        --disable-manpages \
+        --disable-podpages \
+        --disable-txtpages \
+        --extra-cflags=-I/usr/local/cuda/include \
+        --extra-ldflags=-L/usr/local/cuda/lib64 \
+        --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
+        --nvcc=/usr/local/cuda/bin/nvcc \
+        --nvccflags="${CUDA_NVCC_FLAGS}" \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/ffmpeg
+
+RUN /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q ' scale_cuda ' \
+    && /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q ' mpdecimate '
+
 WORKDIR /build
 COPY deps /build/deps
-COPY Makefile /build/Makefile
-# Wipe any stale CMake caches copied in with deps/*/build (empty CMAKE_AR etc).
-RUN command -v ar \
-    && find /build/deps -type f -name CMakeCache.txt -delete 2>/dev/null \
-    ; find /build/deps -depth -type d -name CMakeFiles -exec rm -rf {} + 2>/dev/null; true
-RUN make -j"$(nproc)" \
-        deps/cpr/build/lib/libcpr.a \
-        deps/avcpp/build/src/libavcpp.a \
-        deps/cuda_loader/cuda_drvapi_dynlink.o \
-        ${AVP_FLAGS}
+COPY Makefile generate_node_list /build/
 COPY src /build/src
 COPY pyplumber /build/pyplumber
-COPY generate_node_list /build/generate_node_list
 COPY .git /build/.git
-# Build the pyplumber python module against SYSTEM ffmpeg (headers under
-# /usr/include/ffmpeg on Fedora; Makefile hardcodes /usr/local, so add via
-# pkg-config). Python module only (the plain binary won't link the Python node
-# factories). HAVE_CUDA/GL/DRM give ipc_dmabuf_source + drm_prime_to_cuda.
-RUN make -j"$(nproc)" python_module BUILD_TYPE=Release ${AVP_FLAGS} \
-      CXXFLAGS+=" $(pkg-config --cflags libavformat libavcodec libavutil libavfilter libavdevice libswscale libswresample)"
-RUN sofile="$(ls /build/_avplumber*.so)" \
-    && for n in ipc_dmabuf_source drm_prime_to_cuda; do \
-         strings "$sofile" | grep -q "$n" && echo "OK: $n registered" \
-           || { echo "FATAL: $n missing from $sofile"; exit 1; }; \
-       done
 
-FROM fedora:42
-ARG CUDA_REPO_URL
-RUN dnf -y install \
-        "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm" \
-        dnf-plugins-core \
-    && dnf config-manager addrepo --from-repofile="${CUDA_REPO_URL}" \
-    && dnf -y install --setopt=install_weak_deps=False \
-        bash ffmpeg libdrm boost-system boost-thread libcurl gnutls python3 \
-        libglvnd-egl libglvnd-gles libglvnd-opengl mesa-libEGL mesa-libGLES \
-        cuda-cudart-13-0 libnvjpeg-13-0 \
-    && dnf clean all
+RUN find /build/deps -type f -name CMakeCache.txt -delete 2>/dev/null \
+    ; find /build/deps -depth -type d -name CMakeFiles -exec rm -rf {} + 2>/dev/null; true
+
+RUN make -j"$(nproc)" python_module \
+        BUILD_TYPE=Release \
+        HAVE_CUDA=1 \
+        HAVE_DRM=1 \
+        HAVE_GL=1 \
+        HAVE_NVOF_FRUC=0 \
+        HAVE_NVCC=1 \
+        HAVE_NVJPEG=0 \
+        HAVE_SCTE35=0 \
+        HAVE_TENSORRT=0 \
+        NEURAL_NET=0 \
+        CUDA_MODULE_IMAGE_FORMAT=ptx \
+        NVCC=/usr/local/cuda/bin/nvcc \
+        CUDA_ROOT=/usr/local/cuda \
+        PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+        CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda/include' \
+        LFLAGS+=' -Wl,--disable-new-dtags -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda/lib64 -Wl,-rpath,/usr/local/cuda/lib64'
+
+RUN sofile="/build/_avplumber$(python3-config --extension-suffix)" \
+    && test -s "${sofile}" \
+    && ldd "${sofile}" | grep -q '/usr/local/lib/libavfilter' \
+    && for node in ipc_dmabuf_source drm_prime_to_cuda drm_prime_to_egl_image \
+                   cuda_rect_overlay egl_image_cuda_overlay; do \
+         strings "${sofile}" | grep -q "${node}" || exit 1; \
+       done \
+    && LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64 \
+       PYTHONPATH=/build python3 -c 'import pyplumber'
+
+FROM nvidia/cuda:${CUDA_IMAGE_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libboost-system1.74.0 \
+        libboost-thread1.74.0 \
+        libcurl4 \
+        libdrm2 \
+        libegl1 \
+        libgles2 \
+        libgl1 \
+        libgnutls30 \
+        libssl3 \
+        python3 \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=builder /usr/local/lib /usr/local/lib
 COPY --from=builder /build/_avplumber*.so /opt/avplumber/
 COPY --from=builder /build/pyplumber /opt/avplumber/pyplumber
+
+RUN ldconfig \
+    && /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q ' scale_cuda ' \
+    && /usr/local/bin/ffmpeg -hide_banner -filters 2>&1 | grep -q ' mpdecimate '
+
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV PYPLUMBER_PATH=/opt/avplumber
 ENV PYTHONPATH=/opt/avplumber
-ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/targets/x86_64-linux/lib
-# NVIDIA driver libs (libcuda, EGL/GLES vendor ICDs) come from the NVIDIA
-# container runtime; request compute+graphics+display so EGL import works.
-ENV NVIDIA_DRIVER_CAPABILITIES=all NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /opt/avplumber

@@ -40,8 +40,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         expat \
         gtk3 \
         libdrm \
-        libva \
-        libva-nvidia-driver \
         libwayland-client \
         libX11 \
         libxcb \
@@ -77,11 +75,7 @@ ENV DMA_BROWSER_REST_PORT=9009
 ENV DMA_BROWSER_SOCKET_DIR=/tmp/dma-page
 ENV DMA_BROWSER_FORCE_NVIDIA=1
 ENV DMA_BROWSER_ALLOWED_DIMS=1080x1920,1920x1080,1280x720
-ENV DMA_BROWSER_DMABUF_POOL_SIZE=10
-ENV DMA_BROWSER_CHROMIUM_EXTRA_FEATURES=VaapiNvidiaSyncSurfaceAfterEndPicture,VaapiNvidiaSurfaceReuseChecks
-ENV LIBVA_DRIVER_NAME=nvidia
-ENV NVD_BACKEND=direct
-ENV NVD_LOG=0
+ENV DMA_BROWSER_DMABUF_POOL_SIZE=11
 
 HEALTHCHECK --interval=5s --timeout=5s --start-period=20s --retries=12 \
   CMD curl -fsS "http://127.0.0.1:${DMA_BROWSER_REST_PORT}/status" >/dev/null || exit 1

@@ -825,8 +825,12 @@ public:
     }
     virtual av::Rational frameRate() {
         if (out_ctx_) {
-            return av_buffersink_get_frame_rate(out_ctx_);
-        } else if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
+            av::Rational frame_rate = av_buffersink_get_frame_rate(out_ctx_);
+            if (frame_rate.getNumerator() > 0 && frame_rate.getDenominator() > 0) {
+                return frame_rate;
+            }
+        }
+        if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
             return default_frame_rate_;
         } else {
             throw Error("unknown filter output frame rate");

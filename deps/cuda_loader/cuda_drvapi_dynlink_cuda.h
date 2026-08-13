@@ -1809,6 +1809,13 @@ typedef CUresult CUDAAPI tcuGraphicsUnmapResources(unsigned int count, CUgraphic
 typedef CUresult CUDAAPI tcuSurfObjectCreate(CUsurfObject *pSurfObject, const struct CUDA_RESOURCE_DESC_st *pResDesc);
 typedef CUresult CUDAAPI tcuSurfObjectDestroy(CUsurfObject surfObject);
 
+/* Texture object API typedefs (CUDA 5.0+) */
+typedef CUresult CUDAAPI tcuTexObjectCreate(CUtexObject *pTexObject,
+                                            const struct CUDA_RESOURCE_DESC_st *pResDesc,
+                                            const struct CUDA_TEXTURE_DESC_st *pTexDesc,
+                                            const struct CUDA_RESOURCE_VIEW_DESC_st *pResViewDesc);
+typedef CUresult CUDAAPI tcuTexObjectDestroy(CUtexObject texObject);
+
 
 /* Missing name-to-string error API */
 typedef CUresult CUDAAPI tcuGetErrorName(CUresult error, const char **pStr);
@@ -1953,6 +1960,9 @@ extern tcuCtxGetLimit                        *cuCtxGetLimit;
 /* Surface object function pointers */
 extern tcuSurfObjectCreate              *cuSurfObjectCreate;
 extern tcuSurfObjectDestroy             *cuSurfObjectDestroy;
+/* Texture object function pointers */
+extern tcuTexObjectCreate               *cuTexObjectCreate;
+extern tcuTexObjectDestroy              *cuTexObjectDestroy;
 
 // These functions could be using the CUDA 3.2 interface (_v2)
 extern tcuMemcpyHtoD                   *cuMemcpyHtoD;

@@ -52,7 +52,7 @@ The production data path is:
 
 ```text
 ipc_dmabuf_source (x8)
-  -> drm_prime_to_egl_image (x8, cached and synchronized)
+  -> drm_prime_to_egl_image (x8, allocation-keyed cache)
   -> egl_image_cuda_overlay (direct EGL/CUDA registration, one CUDA compositor)
   -> final CUDA RGB0 frame (written directly)
   -> NVENC
@@ -80,27 +80,30 @@ available as an explicit comparison and diagnostic backend.
 ## DMA-BUF import cache and synchronization
 
 `drm_prime_to_egl_image` is the reusable import boundary. Its cache will follow
-the OBS invariants:
+the proven OBS import-cache invariants:
 
 - identify a buffer by `st_dev`, `st_ino`, width, height, DRM fourcc, plane
   pitch, plane offset, and modifier; an incoming FD number may accelerate a
   lookup but is not buffer identity;
 - retain a duplicated DMA-BUF FD for the lifetime of every cached EGLImage;
-- reuse an EGLImage only after exporting a DMA-BUF read `sync_file` and waiting
-  on it through `EGL_ANDROID_native_fence_sync`, with bounded CPU polling when
-  the EGL native-fence path is unavailable;
-- if synchronization fails or times out, import a fresh EGLImage and retain it
-  for deferred destruction instead of reusing the possibly busy image;
+- reuse the immutable EGLImage object whenever the same physical allocation
+  returns rather than importing it again;
 - evict unused entries by TTL and evict the least recently used entry when the
   bounded cache is full; and
 - invalidate an entry when its identity or import attributes change, including
   FD-number reuse and resolution changes.
 
-Synchronized caching is the default. JSON parameters may select `off` for a
-fresh-import comparison or `unsafe` for an explicit diagnostic, but the demo
-must not select `unsafe`. The initial scope remains the single-plane
+Reuse is the default. A JSON parameter may select `off` for a fresh-import
+comparison. The initial scope remains the single-plane
 ABGR8888/ARGB8888 buffers produced by the Electron DMA-BUF path. Multi-plane
 YUV import is not part of this optimization.
+
+An explicit DMA-BUF `sync_file` wait is not a prerequisite for a cache hit in
+this demo. The header/runtime path was unavailable on the validation stack and
+fresh-import fallback defeated persistent registration. This follows the
+working OBS cache commit rather than its later uncommitted sync-file experiment.
+The Electron paint callback supplies the produced frame; release ACK ownership
+prevents Chromium from recycling its allocation while CUDA may still read it.
 
 Each `EglImageFrame` carries separate allocation and per-frame lifetime holders.
 The allocation holder keeps the cached EGLImage and duplicated DMA-BUF FD alive
@@ -124,8 +127,12 @@ immediately. After a frame has been sampled, the compositor records a CUDA event
 after its last read and retains only the per-frame holder until that event
 completes; it polls events without a context-wide synchronization. Only then can
 the frame lifetime callback queue the acknowledgement. This closes the
-consumer-to-producer reuse direction that a producer-side `sync_file` wait does
-not cover.
+consumer-to-producer reuse direction.
+
+The sender permits at most 11 sent-but-unacknowledged frames per window, matching
+the established browser-ingest pool setting. This is a configurable ceiling,
+not a fixed release delay or preallocation count. At the ceiling, the newest
+paint is dropped and released; an older in-flight texture is never evicted.
 
 ## Cached EGL/CUDA interop and compositor
 
@@ -162,10 +169,9 @@ cells remain opaque black. The first implementation needs static rectangles and
 opaque sources only; dynamic layout metadata and general alpha compositing are
 outside this optimization.
 
-The importer's per-frame DMA-BUF `sync_file` wait establishes producer-to-CUDA
-ordering before a cached EGLImage is emitted. CUDA reads and final-canvas writes
-run on the normal FFmpeg device stream, so repeated use and NVENC consumption
-remain ordered without a context-wide synchronization. The frame loop must not
+CUDA reads and final-canvas writes run on the normal FFmpeg device stream, so
+repeated use and NVENC consumption remain ordered without a context-wide
+synchronization. The frame loop must not
 call `glFinish`, `cuCtxSynchronize`, register/unregister resources, or create and
 destroy CUDA texture objects.
 
@@ -228,17 +234,25 @@ device, CUDA EGL interoperability, EGL frame type, or color format is missing.
 It must not silently introduce an OpenGL copy, download to CPU, or fall back to
 the old per-input CUDA path.
 
-The importer records cache hits, fresh imports, synchronization fallbacks, and
-evictions in periodic aggregate counters rather than per-frame logs. The
+The importer records cache hits, fresh imports, and evictions in periodic
+aggregate counters rather than per-frame logs. The
 compositor records rendered ticks, missed program deadlines, per-input reuse and
 age, and EGL/CUDA failures. Optional periodic debug logging exposes these
 counters without making normal operation noisy.
+
+The browser process topology is controlled independently of source count.
+`DMA_BROWSER_WINDOWS_PER_PROCESS` defaults to eight, and the launcher derives
+the number of Electron workers as the ceiling of total windows divided by that
+group size. `DMA_BROWSER_PROCESS_COUNT` remains an explicit override. The
+public supervisor enforces the requested total even when the final process has
+unused capacity. This preserves an adjustable isolation boundary without
+hardcoding the eight-source test case.
 
 ## Validation
 
 Local validation covers pure graph generation and layout behavior:
 
-- an eight-source EGL production graph contains eight synchronized EGL
+- an eight-source EGL production graph contains eight allocation-cached EGL
   importers and one compositor;
 - it contains no per-source CUDA conversion or scale filter;
 - it contains no downstream production `fps` filter;

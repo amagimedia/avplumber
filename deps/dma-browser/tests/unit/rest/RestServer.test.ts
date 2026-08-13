@@ -25,6 +25,8 @@ function snapshotFor(cfg: WindowConfig): WindowSnapshot {
       droppedFrames: 0,
       droppedReasons: {},
       txFrameCount: 0,
+      releasedFrameCount: 0,
+      retainedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };
@@ -97,18 +99,14 @@ describe('POST /window/open', () => {
 describe('POST /window/close', () => {
   it('200 on success', async () => {
     const mgr = buildManager({ close: vi.fn().mockResolvedValue(undefined) });
-    const res = await request(buildServer(mgr).app)
-      .post('/window/close')
-      .send({ id: 'win-1' });
+    const res = await request(buildServer(mgr).app).post('/window/close').send({ id: 'win-1' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, id: 'win-1' });
   });
 
   it('404 when id not found', async () => {
     const mgr = buildManager({ close: vi.fn().mockRejectedValue(new NotFoundError('gone')) });
-    const res = await request(buildServer(mgr).app)
-      .post('/window/close')
-      .send({ id: 'win-1' });
+    const res = await request(buildServer(mgr).app).post('/window/close').send({ id: 'win-1' });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('NotFoundError');
   });
@@ -123,9 +121,7 @@ describe('POST /window/close', () => {
 describe('POST /window/refresh /update /show', () => {
   it('refresh returns 200 with snapshot', async () => {
     const mgr = buildManager({ refresh: vi.fn().mockReturnValue(snapshotFor(validBody)) });
-    const res = await request(buildServer(mgr).app)
-      .post('/window/refresh')
-      .send({ id: 'win-1' });
+    const res = await request(buildServer(mgr).app).post('/window/refresh').send({ id: 'win-1' });
     expect(res.status).toBe(200);
     expect(res.body.id).toBe('win-1');
   });
