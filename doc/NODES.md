@@ -779,10 +779,11 @@ Parameters:
     -   `class_names` (array of strings, optional) - class-label mapping by index
     -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
     -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
+    -   `boxes_normalized` (bool, optional, default `false`) - set `true` for DeepStream/Triton-style YOLO exports whose box coordinates are normalized to `[0,1]`. The decoder rescales them to model-space pixels using the engine input dimensions, so downstream consumers keep receiving `coord_space = "model"` pixel coordinates.
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
 -   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
--   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
+-   TensorRT input binding datatype may be `float32`, `float16`, or `uint8`; node preprocess selects the matching CUDA kernel automatically. `float32`/`float16` inputs are normalized to `[0,1]`; `uint8` inputs receive raw `0..255` values (for engines whose ONNX graph bakes in the `/255` normalization).
 -   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
 -   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
 -   `max_det` (int, optional, default `300`) - max detections per frame after NMS
