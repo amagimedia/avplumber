@@ -28,6 +28,7 @@ from dmabuf_browser_common import (
     make_dmabuf_egl_input_nodes,
     make_janus_h264_output_nodes,
 )
+from dmabuf_output_config import resolve_output_config
 from dmabuf_scale_layout import MAX_COMPOSITOR_INPUTS, fit_filter_graph, fit_rect, grid_cells
 
 
@@ -109,6 +110,13 @@ def wait_for_edge(avp, edge, timeout_sec, data_type=None):
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for the first frame on {edge}")
         time.sleep(0.05)
+
+
+def wait_with_heartbeats(avp, duration_sec):
+    deadline = time.monotonic() + duration_sec
+    while time.monotonic() < deadline:
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+        avp.heartbeat()
 
 
 def make_mpdecimate_probe(
@@ -241,28 +249,40 @@ rest_url = os.environ.get("DMA_BROWSER_REST_URL", "http://127.0.0.1:9009")
 render_node = os.environ.get("RENDER_NODE", "/dev/dri/renderD128")
 duration_sec = env_float("TEST_DURATION_SEC", 0)
 report_interval_sec = env_float("REPORT_INTERVAL_SEC", 10, 0.1)
+mpdecimate_warmup_sec = env_float("MPDECIMATE_WARMUP_SEC", 0)
+pre_graph_warmup_sec = env_float("PRE_GRAPH_WARMUP_SEC", 0)
 browser_reopen_delay_sec = env_float("BROWSER_REOPEN_DELAY_SEC", 1)
+reopen_browser_windows = env_flag("REOPEN_BROWSER_WINDOWS", True)
 dmabuf_pool_size = env_int("DMA_BROWSER_DMABUF_POOL_SIZE", 11)
 diagnose_duplicates = env_flag("MPDECIMATE_INPUTS", False)
 if diagnose_duplicates and compositor_backend != "cuda":
     sys.exit("MPDECIMATE_INPUTS requires COMPOSITOR_BACKEND=cuda; diagnostics run separately")
+if mpdecimate_warmup_sec and not diagnose_duplicates:
+    sys.exit("MPDECIMATE_WARMUP_SEC requires MPDECIMATE_INPUTS=1")
 use_drm_hwaccel = env_flag("USE_DRM_HWACCEL", True)
 mpdecimate_width = env_int("MPDECIMATE_WIDTH", 640, 16)
 mpdecimate_height = env_int("MPDECIMATE_HEIGHT", 360, 16)
 
 window_ids = [f"{window_prefix}_{index:02d}" for index in range(source_count)]
 sockets = [os.path.join(socket_dir, f"{window_id}.sock") for window_id in window_ids]
-open_browser_windows(
-    rest_url,
-    source_url,
-    source_count,
-    source_width,
-    source_height,
-    fps,
-    window_prefix,
-    browser_reopen_delay_sec,
-)
+if reopen_browser_windows:
+    open_browser_windows(
+        rest_url,
+        source_url,
+        source_count,
+        source_width,
+        source_height,
+        fps,
+        window_prefix,
+        browser_reopen_delay_sec,
+    )
 wait_for_sockets(sockets, env_float("SOCKET_TIMEOUT_SEC", 120, 1))
+if pre_graph_warmup_sec:
+    print(
+        f"[dmabuf_scale] waiting {pre_graph_warmup_sec:g}s before graph startup",
+        flush=True,
+    )
+    time.sleep(pre_graph_warmup_sec)
 
 avp = pyplumber.AVPlumber()
 if use_drm_hwaccel:
@@ -478,6 +498,12 @@ janus_rtcp_port = env_int("JANUS_VIDEO_RTCP_PORT", janus_port + 1)
 janus_pt = env_int("JANUS_VIDEO_PT", 96)
 janus_ssrc = env_int("JANUS_VIDEO_SSRC", 0x41565001)
 output_url = f"rtp://{janus_host}:{janus_port}?pkt_size=1200&rtcp_port={janus_rtcp_port}"
+output_format, output_url, output_options = resolve_output_config(
+    os.environ,
+    output_url,
+    janus_pt,
+    janus_ssrc,
+)
 for node in make_janus_h264_output_nodes(
     prefix="scale_janus",
     src=program_edge,
@@ -485,9 +511,12 @@ for node in make_janus_h264_output_nodes(
     cuda_hwaccel="@gpu",
     fps=fps,
     bitrate=os.environ.get("VIDEO_BITRATE", "8000k"),
-    output_format="rtp",
+    output_format=output_format,
     output_url=output_url,
-    output_options={"payload_type": janus_pt, "rtpflags": "skip_rtcp", "ssrc": janus_ssrc},
+    output_options=output_options,
+    encoder_preset=os.environ.get("VIDEO_ENCODER_PRESET", "p4"),
+    encoder_tune=os.environ.get("VIDEO_ENCODER_TUNE", "ll"),
+    encoder_profile=os.environ.get("VIDEO_ENCODER_PROFILE", "baseline"),
 ):
     avp.addNode(node)
 
@@ -502,6 +531,14 @@ if compositor_backend != "egl_cuda":
 if compositor_backend == "egl_cuda" or source_count > 1:
     avp.group("mixer").startNodes()
 wait_for_edge(avp, ready_program_edge, graph_start_timeout_sec)
+if mpdecimate_warmup_sec:
+    print(
+        f"[dmabuf_scale] warming mpdecimate for {mpdecimate_warmup_sec:g}s",
+        flush=True,
+    )
+    wait_with_heartbeats(avp, mpdecimate_warmup_sec)
+    for counts in counts_by_source:
+        counts.reset()
 avp.group("output").startNodes()
 
 print(
@@ -511,7 +548,7 @@ print(
     f"canvas={canvas_width}x{canvas_height} mpdecimate={diagnose_duplicates} "
     f"dmabuf_pool_size={dmabuf_pool_size} "
     f"mpdecimate_size={mpdecimate_width}x{mpdecimate_height} "
-    f"output={output_url}",
+    f"output_format={output_format} output={output_url}",
     flush=True,
 )
 

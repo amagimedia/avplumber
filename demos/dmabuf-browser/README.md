@@ -5,6 +5,21 @@ headlessly in Electron, export each frame as a GPU **DMA-BUF** (zero-copy), feed
 it into an **avplumber** graph, and stream it to **Janus** for WebRTC preview in
 a browser.
 
+[![Sixteen 1080p60 browser sources composed into one 4x4 GPU grid](docs/16-input-grid.png)](docs/16-input-grid-10s.mp4)
+
+[Watch or download the 10-second MP4 demo](docs/16-input-grid-10s.mp4). It shows
+16 independent 1920x1080@60 browser captures, grouped as two Electron processes
+with eight windows each, composed into one 1920x1080@60 output. The file contains
+exactly 600 consecutive frames encoded by NVENC at about 12 Mbit/s. DMA-BUF
+import, scaling, composition, and encoding stay on the GPU; only the compressed
+H.264 packets reach the file muxer. The reference run used about **42% GPU
+utilization**
+on the single 70 W Tesla T4 supplied by an entry-level AWS EC2
+G4dn instance; no larger GPU was required. That leaves headroom for a second
+16-source scene—**32 independent 60 fps browser captures** in total. Treat that as
+a capacity target rather than a universal limit because Chromium rendering
+cost depends on page content.
+
 NVIDIA needs Chromium's renderable SharedImage without the CPU-linear
 allocation constraint. The recommended route is the supplied GBM shim with a
 stock Electron binary; it has been exercised with Electron 41 / Chromium 146

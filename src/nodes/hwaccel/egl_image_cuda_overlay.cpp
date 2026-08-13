@@ -541,9 +541,16 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 		return static_cast<int>(std::min<int64_t>(millis, std::numeric_limits<int>::max()));
 	}
 
-	void advanceClock() {
-		next_tick_ += frame_period_;
+	void advanceClockAfterRender(bool first_render) {
 		++next_output_pts_;
+		if (first_render) {
+			// The first render lazily registers the initial EGL/CUDA interop
+			// slots. Start the real-time schedule after that one-time work so
+			// initialization cannot create a gap between output PTS 0 and 1.
+			next_tick_ = Clock::now() + frame_period_;
+			return;
+		}
+		next_tick_ += frame_period_;
 		const auto now = Clock::now();
 		while (next_tick_ <= now) {
 			next_tick_ += frame_period_;
@@ -631,7 +638,8 @@ public:
 			return;
 		drainAllInputs();
 
-		if (!clock_started_) {
+		const bool first_render = !clock_started_;
+		if (first_render) {
 			next_tick_ = Clock::now();
 			clock_started_ = true;
 		}
@@ -650,7 +658,7 @@ public:
 		if (!render(next_output_pts_))
 			throw Error("egl_image_cuda_overlay: render failed");
 		std::fill(updated_since_tick_.begin(), updated_since_tick_.end(), false);
-		advanceClock();
+		advanceClockAfterRender(first_render);
 	}
 
 	int width() override { return canvas_width_; }
