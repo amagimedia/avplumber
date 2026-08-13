@@ -1,20 +1,46 @@
-# Replay VOD and single-slot player demo
+# Replay VOD player demo
+
+<img src="docs/tui.svg" alt="The replay TUI showing playback status, transport, scrub, seek, speed, UTC, and regression controls" width="100%">
+
+## Features
 
 This directory contains two small PyPlumber applications:
 
-- `transcode.py` converts one VOD to the video-only replay MPEG-TS format.
-- `player.py` controls one replay slot and sends H.264 RTP directly to a
-  preconfigured Janus Streaming mountpoint.
+- `transcode.py` converts one video-on-demand file into AVPlumber's seekable
+  replay format.
+- `player.py` controls one replay slot and sends video-only H.264 RTP to an
+  existing Janus Streaming mountpoint.
 
-Neither application uses OBS or Stream Studio Gateway at runtime. Version one
-has one input, one slot, one output, and no audio.
+Neither application needs OBS or Stream Studio Gateway at runtime. The controls
+model the Gateway v2 single-source playback operations.
+
+The player provides:
+
+- Play, Pause, Play/Pause Toggle, and Reverse controls;
+- forward and backward scrubbing;
+- relative seeks of 1, 5, or 30 frames and 1, 5, or 30 seconds;
+- `0x`, `0.25x`, `0.5x`, `1x`, and `2x` playback speeds;
+- absolute media-time and timezone-qualified UTC seeks;
+- **TAIL -3s**, which jumps to three seconds before the recording ends;
+- optional looping, enabled by default; and
+- a built-in **RUN V2** playback regression exercise.
+
+The status panel shows the recording, Janus destination, RTP payload type and
+SSRC, Play/Pause state, direction, configured and scrub speeds, current frame,
+position and duration, mapped UTC time, loop state, last command, and errors.
+Controls remain disabled until the first source frame is ready.
+
+Keyboard controls are Space for Play/Pause, Left/Right for one frame, Down/Up
+for one second, and `q` to quit. The footer displays these bindings.
 
 ## Requirements
 
 Use an NVIDIA host with an AVPlumber Python module built with the same CUDA,
-NVCC, neural, and TensorRT options as the AVPlumber binary. FFmpeg must expose
-CUDA decoding and `h264_nvenc`, and AVPlumber must load the matching FFmpeg
-libraries. There is deliberately no software fallback and no CPU
+NVCC, neural, and TensorRT options as the AVPlumber binary. FFmpeg must provide
+CUDA decoding and `h264_nvenc`, and AVPlumber must load those matching FFmpeg
+libraries.
+
+There is no software fallback, audio output, or CPU
 `hwdownload`/`hwupload` path.
 
 Install the TUI dependency into the same Python environment:
@@ -25,7 +51,7 @@ python3 -m pip install -r demos/replay/requirements.txt
 
 ## Create a replay recording
 
-The frame rate is required rather than guessed:
+Choose the output frame rate explicitly:
 
 ```sh
 python3 demos/replay/transcode.py \
@@ -34,8 +60,9 @@ python3 demos/replay/transcode.py \
   --fps 30
 ```
 
-The output is all-intra H.264 baseline video encoded by NVENC in VBR
-constant-quality mode (`cq=17`). It preserves the source dimensions and emits:
+The frame rate must be an integer from 1 to 240. The output is all-intra H.264
+baseline video encoded by NVENC in VBR constant-quality mode (`cq=17`). It
+preserves the source dimensions and creates four files that must stay together:
 
 ```text
 replay.ts
@@ -44,13 +71,8 @@ replay.ts+txt
 replay.ts+history
 ```
 
-The binary seek table contains packed native-endian `(int64 timestamp_ms,
-uint64 byte_offset)` records. The history contains packed native-endian
-`(int64 changed_at, int64 input_offset, int64 wallclock_offset, int64
-output_offset)` records.
-
-By default, frame zero is mapped to the UTC time at which the command starts.
-Use a timezone-qualified value to select a different origin:
+By default, frame zero maps to the UTC time at which conversion starts. Supply
+a timezone-qualified value to choose another origin:
 
 ```sh
 python3 demos/replay/transcode.py \
@@ -60,27 +82,28 @@ python3 demos/replay/transcode.py \
   --wallclock-start 2026-08-10T12:00:00Z
 ```
 
-The application refuses any existing member of the output family. `--force`
-allows replacement. Conversion happens in a sibling staging directory;
-validated sidecars are published first and the `.ts` file last.
+The converter refuses to overwrite any member of an existing output family.
+Pass `--force` to replace it. Conversion uses a sibling staging directory and
+publishes the validated `.ts` file last, so an incomplete conversion does not
+look ready to the player.
 
 ## Configure Janus
 
-Create a video-only Janus Streaming mountpoint that receives H.264 RTP. The
-defaults are:
+Create a video-only Janus Streaming mountpoint that receives H.264 RTP. This
+demo uses the following defaults:
 
-```text
-RTP host        127.0.0.1
-video RTP port  5004
-video RTCP port 5005
-payload type    96
-SSRC            0x41565001
-bitrate         4000 kbit/s CBR
-```
+| Setting | Default | Player option |
+| --- | --- | --- |
+| RTP destination | `127.0.0.1:5004` | `--janus-host`, `--janus-video-port` |
+| RTCP destination | `127.0.0.1:5005` | follows the video RTP port |
+| RTP payload type | `96` | `--janus-video-pt` |
+| SSRC | `0x41565001` | `--janus-video-ssrc` |
+| output bitrate | 4000 kbit/s CBR | fixed by the demo |
+| local RTCP listener | `0.0.0.0` on an automatic port | `--janus-rtcp-bind`, `--janus-rtcp-port` |
 
-The demo does not create or destroy the mountpoint through the Janus API. It
-sends RTCP sender announcements and listens for PLI/FIR; either request forces
-an immediate encoder keyframe.
+The demo sends RTCP sender announcements and listens for PLI/FIR feedback;
+either feedback request forces an immediate encoder keyframe. It does not
+create or destroy the Janus mountpoint through the Janus API.
 
 ## Run the player
 
@@ -91,31 +114,29 @@ python3 demos/replay/player.py \
   --janus-video-port 5004
 ```
 
-The player infers the integer frame rate from the seek table and rejects
-inconsistent cadence. Playback loops by default; pass `--no-loop` for finite
-playback. The header always shows `LOOP=ON` or `LOOP=OFF`.
+The player validates the recording and its sidecars, infers the integer frame
+rate from the seek table, waits for the first decoded frame, starts the Janus
+output, and opens the TUI. It rejects inconsistent frame cadence.
 
-The TUI provides the current/duration timeline, frame, mapped UTC timestamp,
-direction, configured speed, active scrub speed, source readiness, Janus RTP
-configuration, last command, and graph errors. Its controls reproduce the
-Stream Studio Gateway v2 single-source playback operations:
+Useful options are:
 
-- play, pause, play/pause toggle, and reverse play;
-- scrub backward, scrub forward, and stop scrubbing;
-- relative `-30`, `-5`, `-1`, `+1`, `+5`, and `+30` frame seeks;
-- relative `-30`, `-5`, `-1`, `+1`, `+5`, and `+30` second seeks;
-- `0x`, `0.25x`, `0.5x`, `1x`, and `2x` speed;
-- absolute zero-based media-time seek;
-- timezone-qualified absolute UTC seek; and
-- `TAIL -3s`, the finite-recording equivalent of Gateway's go-to-live action.
+- `--no-loop` to stop at the end instead of looping;
+- `--no-tui` to keep the player running without the terminal interface;
+- `--control-timeout <seconds>` to change the five-second operation timeout;
+  and
+- the Janus options in the table above when the mountpoint differs.
 
-Scrubbing keeps the configured playback speed separate, uses the Gateway's
-20% dead zone and 100 ms throttle, then restores both the previous pause state
-and the previous forward/reverse direction. A configured speed of zero is
-truthfully paused; Play reports that a nonzero speed must be chosen.
+Run `python3 demos/replay/player.py --help` for the complete option list.
 
-Keyboard controls are Space for play/pause, Left/Right for one frame,
-Down/Up for one second, and `q` to quit. The buttons expose every larger nudge.
+### Scrubbing and speed
+
+Scrubbing has a 20% dead zone and sends updates at most once every 100 ms. When
+scrubbing stops, the player restores the previous Play/Pause state and
+forward/reverse direction.
+
+Choosing `0x` pauses playback. Play then reports that a nonzero speed must be
+selected. The configured speed remains separate from the temporary scrub
+speed.
 
 ## Regression exercise
 
@@ -128,23 +149,37 @@ python3 demos/replay/player.py \
   --exercise-v2
 ```
 
-This observes frames after play, pause, absolute and relative seeks, speed
-changes, reverse, scrubbing, tail, UTC seek, and rapid paused seeks. It prints
-`PASS`, `FAIL`, or an explicit `SKIP` for a nudge that the recording is too
-short to exercise, and exits nonzero on failure. The TUI's `RUN V2` button
-runs the same checks.
+The exercise observes frames after Play, Pause, absolute and relative seeks,
+speed changes, Reverse, scrubbing, Tail, UTC seek, and rapid paused seeks. It
+prints `PASS`, `FAIL`, or an explicit `SKIP` when the recording is too short for
+a nudge, and exits nonzero on failure. The TUI's **RUN V2** button runs the same
+checks.
 
 ## Troubleshooting
 
-- An invalid or absent `+seek`/`+history` file is rejected before CUDA startup.
-- If decoding or NVENC fails, confirm the process loads the same custom FFmpeg
-  libraries as the working `ffmpeg` command; do not insert a CPU round trip.
-- If Janus has no picture, confirm its mountpoint payload type, SSRC, RTP port,
-  RTCP port, and H.264 codec match the TUI header.
-- If video does not recover after a seek, inspect RTCP reachability and verify
-  PLI/FIR messages reach the player's configured RTCP bind address.
+- If startup rejects the recording, confirm that its `+seek` and `+history`
+  files exist and belong to the same conversion.
+- If decoding or NVENC fails, confirm that the process loads the same custom
+  FFmpeg libraries as the working `ffmpeg` command. Do not add a CPU round trip.
+- If Janus has no picture, compare its H.264 codec, payload type, SSRC, RTP port,
+  and RTCP port with the values in the TUI header.
+- If video does not recover after a seek, check RTCP reachability and confirm
+  that PLI/FIR requests reach the configured RTCP bind address.
 
-This demo intentionally omits recording live inputs, audio, clips, bins,
-playlists, transitions, and A/B switching. `build_player_application` returns
-one slot's controller and video output path; a future N-input A/B application
-can compose multiple slots without changing their control semantics.
+## Tests
+
+```sh
+python3 -m pytest demos/replay/tests -q
+```
+
+## Format and implementation notes
+
+The binary seek table contains native-endian `(int64 timestamp_ms, uint64
+byte_offset)` records. The history contains native-endian `(int64 changed_at,
+int64 input_offset, int64 wallclock_offset, int64 output_offset)` records.
+
+The player always has one input, one replay slot, and one output. It
+intentionally omits live recording, audio, clips, bins, playlists, transitions,
+and A/B switching. `build_player_application` returns one slot's controller and
+video output path so a future multi-input application can compose several slots
+without changing their control semantics.

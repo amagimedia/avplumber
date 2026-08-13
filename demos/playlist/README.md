@@ -1,34 +1,141 @@
-# Playlist regression harness
+# Playlist demo
 
-A deliberately small simulator for the OBS MSE source-switcher and Stream
-Studio playlist controls. It drives AVPlumber's existing C++ nodes and sends one
-video-only H.264 RTP stream to an existing Janus Streaming mountpoint.
+<img src="docs/tui.svg" alt="The playlist TUI showing five clips, playlist status, playlist controls, and selected-item controls" width="100%">
 
-This is a regression harness, not a second production playlist service. It does
-not modify `source_switcher`, `force_fps`, sentinel, graph management, or the
-control protocol.
+<img src="docs/tui-edit.svg" alt="The playlist TUI showing the Edit Element dialog" width="100%">
 
-## Fixed regression scenario
+## Features
 
-The default playlist has five distinct generated clips. Every clip is H.264,
-1920x1080, 30 fps, 300 frames, and exactly ten seconds. The picture contains a
-unique clip label, zero-based frame number, and PTS clock.
+This demo plays a list of video clips through AVPlumber and sends one video-only
+H.264 RTP stream to an existing Janus Streaming mountpoint. It is a regression
+harness for playlist behavior, not a production playlist service.
 
-Generate or regenerate them with:
+The interface provides:
+
+- playlist Play, Pause, Stop, Previous, and Next controls;
+- separate Play, Pause, and Stop controls for the highlighted item;
+- four playlist modes and three per-item completion modes;
+- editable media path, display name, cue-in, cue-out, duration, and speed;
+- controls to add, remove, enable, disable, and reorder items; and
+- visible playlist, selected-item, active-item, loading, Janus-output, and error
+  state.
+
+Highlighting a row selects it for item operations but does not switch the
+output. Use **ITEM PLAY** to put the highlighted item on air. Playlist Play
+resumes the active item or, if nothing has been activated yet, starts the first
+enabled item.
+
+### Playback modes
+
+Playlist and item modes are independent:
+
+| Mode | What happens when an item completes |
+| --- | --- |
+| `PlayAll` | Play the next enabled item, then stop after the last one. |
+| `PlayCurrent` | Stop after the current item. |
+| `LoopAll` | Play all enabled items repeatedly. |
+| `LoopCurrent` | Repeat the current item. |
+| `PlayToEnd` | Complete the item at its cue-out or natural end. |
+| `Timed` | Complete the item after its configured playing time. |
+| `LoopSelf` | Repeat this item until the user navigates away from it. |
+
+Manual Previous and Next navigation can leave a current-only or `LoopSelf`
+item. Disabled items are skipped.
+
+### Keyboard controls
+
+The shortcuts are intentionally hidden in the TUI and call the same actions as
+the buttons:
+
+| Key | Action |
+| --- | --- |
+| Space | Playlist Play/Pause |
+| `s` | Playlist Stop |
+| `n` / `p` | Next / Previous |
+| Enter | Play highlighted item |
+| `u` / `x` | Pause / Stop highlighted item |
+| `m` | Cycle highlighted item's mode |
+| `e` | Enable or disable highlighted item |
+| `a` / Delete | Add / remove item |
+| `1` / `2` / `3` / `4` | `PlayAll` / `PlayCurrent` / `LoopAll` / `LoopCurrent` |
+| `q` | Quit |
+
+## Preview without AVPlumber, CUDA, or Janus
+
+Install the Textual dependency and run the in-memory UI:
+
+```sh
+python3 -m pip install -r demos/playlist/requirements.txt
+python3 demos/playlist/player.py --dry-run
+```
+
+The controls work against a fake backend, but no video is decoded or sent.
+
+## Run with video output
+
+### Requirements
+
+The live demo requires:
+
+- an NVIDIA host;
+- a CUDA-enabled AVPlumber binary and a `pyplumber` module built with the same
+  CUDA, NVCC, neural, and TensorRT feature set;
+- matching FFmpeg libraries with CUDA decoding and `h264_nvenc`; and
+- an existing, video-only Janus Streaming mountpoint that accepts H.264 RTP.
+
+There is no software-decoding fallback, audio output, or CPU
+`hwdownload`/`hwupload` path.
+
+### Prepare the five demo clips
 
 ```sh
 demos/playlist/test-media/generate.sh
 ```
 
-The MP4 files are ignored build artifacts. The generator is the authoritative
-fixture definition; the 95-second basketball demo files are not used.
+The generator creates five distinct H.264 clips under
+`demos/playlist/test-media/`. Each clip is 1920x1080, 30 fps, 300 frames, and
+ten seconds long. Its picture shows the clip label, zero-based frame number,
+and PTS clock. The generated MP4 files are ignored build artifacts; the script
+is the fixture definition.
 
-### Persistent playlist image
+### Start the player
 
-The playlist-specific multi-stage image generates and validates the five clips
-during `docker build`. The final image contains the MP4s as an immutable layer;
-it does not depend on host media or regenerate them when a container starts.
-Its base must already provide the CUDA-enabled `pyplumber` module and matching
+```sh
+python3 demos/playlist/player.py \
+  --janus-host 127.0.0.1 \
+  --janus-video-port 5004 \
+  --log-file playlist-demo.log
+```
+
+The default Janus settings are:
+
+| Setting | Default | Option |
+| --- | --- | --- |
+| RTP destination | `127.0.0.1:5004` | `--janus-host`, `--janus-video-port` |
+| RTP payload type | `96` | `--janus-video-pt` |
+| SSRC | `0x41565001` | `--janus-video-ssrc` |
+| local RTCP listener | `0.0.0.0` on an automatic port | `--janus-rtcp-bind`, `--janus-rtcp-port` |
+| control timeout | 10 seconds | `--control-timeout` |
+
+Janus receives RTCP on the port immediately after the video RTP port. The
+player listens for PLI/FIR feedback and forces an encoder keyframe when Janus
+requests one.
+
+Use `--media-dir <path>` when the five generated filenames are in a different
+directory. Use `--no-tui` for the short headless control smoke test. Run
+`python3 demos/playlist/player.py --help` for the complete option list.
+
+AVPlumber logs and native control replies go to `--log-file` while Textual owns
+the terminal.
+
+Per-item Pause and Stop are regression-only source-lifecycle controls. The
+current gateway playlist API exposes item Play/select, cue, duration, disable,
+remove, and reorder, while playlist Pause and Stop are media controls.
+
+## Run in Docker
+
+The playlist image generates and validates the five clips during the build. Its
+base image must already contain the CUDA-enabled `pyplumber` module and matching
 AVPlumber runtime:
 
 ```sh
@@ -39,7 +146,7 @@ docker build \
   demos/playlist
 ```
 
-Run the clickable TUI against Janus on the host network:
+Run it against Janus on the host network:
 
 ```sh
 docker run --rm -it \
@@ -48,103 +155,13 @@ docker run --rm -it \
   avplumber-playlist:local
 ```
 
-Recreating that container uses the same five image-layer clips. Rebuilding the
-image reruns the committed deterministic generator. To use a different Janus
-endpoint, append the normal `player.py` CLI arguments after the image name.
+Recreating the container reuses the clips stored in the image. Rebuilding the
+image reruns the deterministic generator. Append normal `player.py` options
+after the image name to change the Janus configuration.
 
-## Existing-node graph
+## Regression exercise
 
-Each loaded element owns a stable source group:
-
-```text
-input_rec(pause_team=item_N_pause_team)
-    -> demux -> dec_video(cuda) -> speed_video
-    -> force_fps -> item_N_normalized
-```
-
-Sixteen fixed item edges feed the existing typed C++ switcher. Only used slots
-have source nodes. Before a changed or removed source releases its slot, the
-backend stops its group and waits until every source node reports non-working.
-Reuse creates a uniquely named source generation feeding the same fixed switcher
-edge; stopped generations remain inert until application shutdown. This avoids
-unsafe node/team-name reuse while leaving the permanent switch/output graph
-untouched:
-
-```text
-item_0_normalized ... item_15_normalized
-    -> source_switcher<av::VideoFrame>
-    -> realtime -> position probe
-    -> force_keyframe -> h264_nvenc -> bsf -> mux -> Janus RTP
-```
-
-Element Play holds `input_rec` through its existing pause team, starts the source,
-observes one non-consuming readiness frame, and pauses it again. It then starts
-the permanent output if necessary, resumes and selects the ready slot, and waits
-for shared output before stopping the old source. EOF is observed on the selected
-switch edge before `realtime` consumes the marker. A failed target does not replace
-the previous active source. Element or playlist Stop waits for only that source
-group to stop; it never stops the switch, realtime, encoder, mux, or RTP output.
-
-URL, cue, loop-mode, and speed edits are construction changes in this harness.
-They use the same ready-source handoff instead of issuing `speed.set` across the
-multi-source switch graph; `speed_video` receives the requested speed when the
-new generation is constructed.
-
-Like the working replay demo, Pause/Stop makes the push graph quiet and a viewer
-normally retains its last decoded frame. The harness does not synthesize a
-cadence with sentinel or a modified `force_fps`. The live regression verifies
-that the real Janus setup survives the quiet interval and resumes on Play.
-
-## Controls
-
-The Textual UI has separate, explicitly labelled rows:
-
-- playlist: Play, Pause, Stop, Previous, Next, and `PlayAll`, `PlayCurrent`,
-  `LoopAll`, `LoopCurrent`;
-- selected element: Play, Pause, Stop, `PlayToEnd`/`Timed`/`LoopSelf`, edit cue
-  and speed, enable/disable, add, remove, and reorder.
-
-Highlighting an element changes only the selected-element target. Playlist Play
-resumes or restarts the active element, or starts the first enabled element when
-the playlist has not activated one yet; use ITEM PLAY to activate the highlighted
-element explicitly.
-
-Per-element Pause and Stop are regression-only source-lifecycle controls. The
-current gateway playlist API exposes item Play/select, cue, duration, disable,
-remove, and reorder, while whole-playlist Pause/Stop are media controls.
-
-There is no Footer and no command/log panel. Keyboard bindings are hidden and
-call the same action methods as buttons. AVPlumber logs go to `--log-file`, and
-native control replies are redirected to that file while Textual owns the
-terminal. All graph operations run on a serialized backend worker so the TUI
-thread never waits for group start/stop.
-
-The only associated framework-level change is the separately committed Python
-binding call guard that releases the GIL during control commands and group
-start/stop requests. It permits the readiness/EOF callbacks to run; it does not
-change graph or node behavior.
-
-## Run
-
-Install Textual:
-
-```sh
-python3 -m pip install -r demos/playlist/requirements.txt
-```
-
-On the NVIDIA/Janus host:
-
-```sh
-python3 demos/playlist/player.py \
-  --janus-host 127.0.0.1 \
-  --janus-video-port 5004 \
-  --log-file playlist-demo.log
-```
-
-The default RTP payload type is 96 and SSRC is `0x41565001`. Use the matching
-CLI options when the mountpoint differs.
-
-Run the complete five-item action sequence without Textual with:
+Run the full live acceptance sequence without the TUI:
 
 ```sh
 python3 demos/playlist/regression.py \
@@ -153,23 +170,16 @@ python3 demos/playlist/regression.py \
   --log-file playlist-regression.log
 ```
 
-It emits one JSON result after shutdown. A 10 ms background sampler checks that
-the native RTP output stays working while every playlist mode runs the complete
-playlist Play/Pause/Stop/Stop-to-Play/Next/Previous cycle, every item runs its
-transport cycle, and the harness exercises edits, source failure,
-add/remove/reorder, actual Timed completion, a native LoopSelf interval, and
-PlayToEnd natural EOF. Twenty alternating graph-affecting mode edits additionally
-prove stopped source slots are reusable without exhausting the fixed switcher.
-Observe the matching Janus mountpoint during the run to verify the decoded last
-frame remains visible while a source is stopped and that playback resumes without
-recreating the mountpoint.
+It prints one JSON result after shutdown. The exercise covers all playlist and
+item modes; playlist and item transport; cue and speed edits; add, remove,
+disable, and reorder; source failure; timed completion; native `LoopSelf`; and
+natural EOF. It also checks that stopped switcher slots remain reusable and
+that the permanent RTP output stays working throughout.
 
-A host-independent clickable dry run records actions in memory and prints
-nothing while Textual owns the terminal:
-
-```sh
-python3 demos/playlist/player.py --dry-run
-```
+Observe the Janus mountpoint during the run to confirm that Pause and Stop
+retain the last decoded frame and that Play resumes without recreating the
+mountpoint. This live NVIDIA/Janus run is the acceptance gate; local tests do
+not substitute for observing decoded Janus video.
 
 ## Tests
 
@@ -177,17 +187,42 @@ python3 demos/playlist/player.py --dry-run
 python3 -m pytest demos/playlist/tests -q
 ```
 
-Coverage includes:
+The local suite covers playlist policy, controller actions, graph shape,
+asynchronous source handoff and failure, all visible Textual controls at an
+80x24 terminal size, hidden keyboard bindings, and generated media validation
+when the fixtures are present.
 
-- the complete four playlist modes by three element modes matrix;
-- every playlist and selected-element action;
-- stable C++ switcher-slot graph shape and source-only Stop;
-- superseded and failed source loads;
-- a deliberately slow backend operation proving public calls remain quick;
-- every visible Textual button, primary keyboard bindings, no Footer, unique
-  control IDs, main and Add/Edit control visibility at 80x24, and zero
-  command/log output;
-- FFprobe validation of all generated fixtures when present.
+## Implementation notes
 
-The remote live regression remains the acceptance gate for CUDA/NVENC and Janus
-resume behavior; local tests do not claim to substitute for decoded Janus video.
+The demo uses existing AVPlumber nodes. Each loaded item owns a source group:
+
+```text
+input_rec -> demux -> CUDA decode -> speed_video -> force_fps
+```
+
+Up to sixteen fixed item edges feed the existing typed switcher and permanent
+output graph:
+
+```text
+item_0_normalized ... item_15_normalized
+    -> source_switcher<av::VideoFrame>
+    -> realtime -> position probe
+    -> force_keyframe -> h264_nvenc -> bsf -> mux -> Janus RTP
+```
+
+Before switching, the backend starts the requested source, waits for a decoded
+frame, and only then selects it. A failed source therefore does not replace the
+working source. Changed sources use new, uniquely named generations so stopped
+node and team names are never reused unsafely.
+
+URL, cue, mode, and speed edits rebuild only the affected source. Playlist and
+item Stop leave the switcher, realtime node, encoder, mux, and RTP output
+running. The source side becomes quiet, so a viewer normally retains its last
+decoded frame; the demo does not synthesize frames during the pause.
+
+The harness does not modify `source_switcher`, `force_fps`, sentinel, graph
+management, or the control protocol. Its only associated framework-level
+change is the Python binding call guard that releases the GIL during control
+commands and group start/stop requests so readiness and EOF callbacks can run.
+Blocking graph operations run on one serialized backend worker rather than the
+TUI thread.
