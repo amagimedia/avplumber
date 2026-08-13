@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
-PATCH_FILE="${SCRIPT_DIR}/electron-offscreen-native-handle.patch"
+ELECTRON_PATCH_FILE="${SCRIPT_DIR}/electron-offscreen-native-handle.patch"
+CHROMIUM_PATCH_FILE="${SCRIPT_DIR}/chromium-native-handle-texture-capture.patch"
+CHROMIUM_PATCHED_FILE="components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc"
 
 usage() {
   cat <<'EOF'
@@ -24,8 +26,9 @@ Environment overrides:
   ELECTRON_OUT_DIR       Chromium output directory (default: out/Release).
   BUILD_JOBS             Parallel build jobs passed to autoninja.
 
-The patch changes Electron's offscreen shared-texture consumer and leaves the
-embedded Chromium source untouched. It is disabled by default at runtime.
+The Electron patch adds the disabled-by-default runtime selector. The Chromium
+patch completes the native-handle texture-capture path required by that
+selector. Both changes are needed; the feature remains disabled by default.
 
 The script never resets an existing checkout. It refuses a mismatched or dirty
 checkout so that local Chromium/Electron work is not overwritten.
@@ -59,10 +62,12 @@ if [[ "${OUT_DIR}" == /* || "${OUT_DIR}" == *..* ]]; then
   echo "ELECTRON_OUT_DIR must be a relative path without '..': ${OUT_DIR}" >&2
   exit 2
 fi
-if [[ ! -f "${PATCH_FILE}" ]]; then
-  echo "Missing Electron patch: ${PATCH_FILE}" >&2
-  exit 2
-fi
+for patch_file in "${ELECTRON_PATCH_FILE}" "${CHROMIUM_PATCH_FILE}"; do
+  if [[ ! -f "${patch_file}" ]]; then
+    echo "Missing patch: ${patch_file}" >&2
+    exit 2
+  fi
+done
 
 if [[ ! -d "${DEPOT_TOOLS}/.git" ]]; then
   mkdir -p "$(dirname -- "${DEPOT_TOOLS}")"
@@ -110,7 +115,7 @@ if [[ "${current_tag}" != "${ELECTRON_TAG}" ]]; then
   exit 3
 fi
 
-if git -C "${ELECTRON_SRC}" apply --reverse --check "${PATCH_FILE}" >/dev/null 2>&1; then
+if git -C "${ELECTRON_SRC}" apply --reverse --check "${ELECTRON_PATCH_FILE}" >/dev/null 2>&1; then
   unexpected_changes="$(
     git -C "${ELECTRON_SRC}" status --porcelain | \
       awk 'substr($0, 4) != "shell/browser/osr/osr_video_consumer.cc"'
@@ -127,15 +132,31 @@ else
     git -C "${ELECTRON_SRC}" status --short >&2
     exit 4
   fi
-  git -C "${ELECTRON_SRC}" apply --check "${PATCH_FILE}"
-  git -C "${ELECTRON_SRC}" apply "${PATCH_FILE}"
-  echo "Applied $(basename -- "${PATCH_FILE}")."
+  git -C "${ELECTRON_SRC}" apply --check "${ELECTRON_PATCH_FILE}"
+  git -C "${ELECTRON_SRC}" apply "${ELECTRON_PATCH_FILE}"
+  echo "Applied $(basename -- "${ELECTRON_PATCH_FILE}")."
 fi
 
-if [[ -n "$(git -C "${CHROMIUM_SRC}" status --porcelain --untracked-files=no)" ]]; then
-  echo "Chromium checkout is dirty; refusing to build unrelated changes." >&2
-  git -C "${CHROMIUM_SRC}" status --short >&2
-  exit 4
+if git -C "${CHROMIUM_SRC}" apply --reverse --check "${CHROMIUM_PATCH_FILE}" >/dev/null 2>&1; then
+  unexpected_changes="$(
+    git -C "${CHROMIUM_SRC}" status --porcelain --untracked-files=no | \
+      awk -v expected="${CHROMIUM_PATCHED_FILE}" 'substr($0, 4) != expected'
+  )"
+  if [[ -n "${unexpected_changes}" ]]; then
+    echo "Chromium checkout has changes besides the DMA-BUF patch; refusing to build." >&2
+    printf '%s\n' "${unexpected_changes}" >&2
+    exit 4
+  fi
+  echo "Chromium native-handle capture patch is already applied."
+else
+  if [[ -n "$(git -C "${CHROMIUM_SRC}" status --porcelain --untracked-files=no)" ]]; then
+    echo "Chromium checkout is dirty; refusing to apply the patch." >&2
+    git -C "${CHROMIUM_SRC}" status --short >&2
+    exit 4
+  fi
+  git -C "${CHROMIUM_SRC}" apply --check "${CHROMIUM_PATCH_FILE}"
+  git -C "${CHROMIUM_SRC}" apply "${CHROMIUM_PATCH_FILE}"
+  echo "Applied $(basename -- "${CHROMIUM_PATCH_FILE}")."
 fi
 
 chromium_version="$(awk -F= '

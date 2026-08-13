@@ -20,16 +20,23 @@ correctness follow-ups.
 
 Keep this history distinct from CL 6681354. The 2024 work established RGBA
 native-texture buffer sharing; CL 6681354 later added the consumer choice that
-avoids CPU-mappable/linear allocation for the NVIDIA path.
+avoids CPU-mappable/linear allocation for the NVIDIA path. CL 6681354 did not,
+however, admit that new preference to `FrameSinkVideoCapturerImpl`'s existing
+texture/blit-result path. Chromium CL 8220427 identifies and fixes that second
+gap. As of 2026-08-13 it is still under review.
 
-## Electron patch
+## Source patches
 
 Chromium CL 6681354 introduced the internal
-`kPreferSharedImageWithNativeHandle` capture-buffer preference. The Electron
-patch adds a disabled-by-default `RenderableMappableSharedImageForceScanout`
-feature in Electron's OSR consumer. When the feature is enabled and the window
-uses `useSharedTexture`, Electron selects Chromium's native-handle preference
-instead of `kPreferMappableSharedImage`.
+`kPreferSharedImageWithNativeHandle` capture-buffer preference. The source-build
+route has two patches. The Chromium patch carries the production-code part of
+CL 8220427 so the native-handle preference takes the GPU texture/blit path and
+only the mappable preference marks the blit target as CPU-mappable. The
+Electron patch adds a disabled-by-default
+`RenderableMappableSharedImageForceScanout` feature in Electron's OSR consumer.
+When the feature is enabled and the window uses `useSharedTexture`, Electron
+selects Chromium's native-handle preference instead of
+`kPreferMappableSharedImage`.
 
 This combined design retains runtime opt-in without changing Chromium's
 general renderable video-frame pool. The launcher enables the feature only on
@@ -37,23 +44,26 @@ the detected NVIDIA path. The same Electron binary behaves like upstream when
 the feature is absent and remains usable on other GPU vendors.
 
 The demo includes a script that creates an isolated Electron checkout, applies
-the patch, builds `electron:electron_dist_zip`, and emits an artifact and
-checksum. The patch must apply to both Electron 41.3.0 / Chromium 146 and
+both patches, builds `electron:electron_dist_zip`, and emits an artifact and
+checksum. Both patches must apply to Electron 41.3.0 / Chromium 146 and
 Electron 43.4.0 / Chromium 150.
 
 ## Stock-binary shim
 
-The alternative is an architecture-neutral C source shim compiled on the
-target host and loaded into stock Electron with `LD_PRELOAD`. It intercepts
-only GBM buffer and surface allocation functions that carry usage flags,
-removes `GBM_BO_USE_LINEAR`, and adds `GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING`.
-It does not change Chromium's feature registry, modifier lists, CPU mapping, or
-video decoding.
+The verified alternative is an architecture-neutral C source shim compiled on
+the target host and loaded into stock Electron with `LD_PRELOAD`. Stock
+Electron continues selecting `kPreferMappableSharedImage`, so it already takes
+the established texture/blit path. The shim intercepts only GBM buffer and
+surface allocation functions that carry usage flags, clears
+`GBM_BO_USE_LINEAR` (`0x10`), and adds `GBM_BO_USE_SCANOUT` (`0x01`) plus
+`GBM_BO_USE_RENDERING` (`0x04`). It does not change Chromium's feature
+registry, modifier lists, CPU mapping code, or video decoding.
 
 NVIDIA may then allocate a tiled buffer. avplumber imports it through EGL with
 its DRM modifier, and `drm_prime_to_cuda` detiles it into a CUDA frame before
-NVENC. The shim is NVIDIA-gated because low-level GBM flag rewriting is not a
-portable policy for other vendors.
+NVENC. The shim itself is process-wide and has no vendor detection, so the
+launcher and documentation must gate it to NVIDIA. Low-level GBM flag
+rewriting is not a portable policy for other vendors.
 
 ## Scaling tests
 
@@ -95,7 +105,7 @@ Do not change the DMA-BUF receiver protocol or graph-management framework.
 
 ## Validation
 
-- Apply the Electron patch to both supported source layouts.
+- Apply both source patches to both supported source layouts.
 - Run the focused `deps/dma-browser` unit, TypeScript, lint, and formatting
   checks.
 - Compile the shim on the local architecture and the NVIDIA x86_64 target.
