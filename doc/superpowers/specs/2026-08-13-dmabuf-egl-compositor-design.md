@@ -3,9 +3,10 @@
 ## Goal
 
 Sustain eight independent 1920x1080@60 Electron browser captures and produce one
-1920x1080@60 Janus program output without converting or scaling every input in
-CUDA. Preserve the browser-ingest/OBS DMA-BUF ingestion model through the final
-OpenGL composite; hand only that composite to the existing CUDA/NVENC pipeline.
+1920x1080@60 Janus program output without materializing or scaling a separate
+CUDA frame for every input. Import each DMA-BUF as a persistent EGLImage,
+register that EGLImage directly with CUDA, and sample it from one CUDA
+compositor that writes the final FFmpeg CUDA frame for NVENC.
 
 The existing eight-input path is the performance baseline, not the design to
 extend. It imports every DMA-BUF anew, copies every 1920x1080 input into an
@@ -28,6 +29,9 @@ steady-state sample:
   encoder errors;
 - the production graph contains no per-input `drm_prime_to_cuda`,
   `scale_cuda`, `hwdownload`, or `hwupload` stage;
+- steady state contains no `eglCreateImageKHR`, `cuGraphicsEGLRegisterImage`,
+  `cuGraphicsResourceGetMappedEglFrame`, `glFinish`, or context-wide
+  synchronization;
 - average avplumber SM utilization is at least 50 percent lower than the prior
   eight-input CUDA graph (approximately 35.6 percent SM in the earlier sample),
   with a target of 18 percent or less on the same host and workload; and
@@ -45,21 +49,20 @@ The production data path is:
 ```text
 ipc_dmabuf_source (x8)
   -> drm_prime_to_egl_image (x8, cached and synchronized)
-  -> egl_image_compositor_cuda (one GL context and one render target)
-  -> CUDA frame (one composite copy per output frame)
+  -> egl_image_cuda_overlay (direct EGL/CUDA registration, one CUDA compositor)
+  -> final CUDA RGB0 frame (written directly)
   -> NVENC
   -> Janus RTP
 ```
 
-This follows the proven OBS browser-ingest path until the terminal output
-representation. OBS retains an OpenGL texture. Avplumber instead registers the
-single composite texture with CUDA graphics interop and copies it into one
-FFmpeg CUDA frame so the existing NVENC nodes remain unchanged. The DMA-BUF to
-EGLImage to input-texture path is zero-copy. The registered composite texture
-is exposed to CUDA as an array, while the normal FFmpeg `AV_PIX_FMT_CUDA` path
-expects pitched device memory, so the design retains one array-to-device copy
-per program frame. There is no CUDA representation of an individual browser
-input in the production graph.
+Avplumber registers every cached EGLImage once with CUDA EGL interoperability,
+gets its persistent CUDA array or pitched view, and samples that view directly.
+Each output tick launches CUDA texture-sampling kernels that scale the sources
+into disjoint rectangles of the final pitched `AV_PIX_FMT_CUDA` RGB0 frame.
+There is no OpenGL object or render pass, no CUDA frame for an individual
+browser input, no intermediate canvas, and no final canvas copy. The only
+full-frame pixel write is the unavoidable write into the final CUDA output that
+NVENC consumes.
 
 The implementation adds a new node rather than changing graph management or
 the control protocol. The existing CUDA compositor remains available as an
@@ -94,42 +97,58 @@ The importer continues to attach a lifetime holder to each `EglImageFrame`, so
 cache eviction cannot destroy an EGLImage while a queue or compositor still
 references it.
 
-## EGL compositor
+## Cached EGL/CUDA interop and compositor
 
-`egl_image_compositor_cuda` accepts multiple `EglImageFrame` inputs and emits
-CUDA `av::VideoFrame` objects. It owns one EGL display/context, one set of input
-texture names, one shader program, and one persistent 1920x1080 framebuffer
-texture. It binds each current EGLImage directly to its input texture with
-`glEGLImageTargetTexture2DOES`; it does not copy source pixels into intermediate
-textures.
+`egl_image_cuda_overlay` accepts multiple `EglImageFrame` inputs and emits CUDA
+`av::VideoFrame` objects. It owns a cache that extends every upstream cached
+physical allocation into this immutable object chain:
 
-For every output frame, the node clears the framebuffer once and draws each
-active source into its configured rectangle. Bilinear texture sampling scales
-1920x1080 inputs to their grid cells during those draws. The eight-input demo
-uses the existing near-square layout calculation and passes destination
-`x`, `y`, `width`, and `height` values to the compositor. Empty cells remain
-opaque black. The first implementation needs static rectangles and opaque
-sources only; dynamic layout metadata and general alpha compositing are outside
-this optimization.
+```text
+DMA-BUF allocation
+  -> EGLImageKHR
+  -> CUgraphicsResource
+  -> CUeglFrame
+  -> CUarray or pitched CUDA view
+  -> CUtexObject
+```
 
-The framebuffer texture is registered with CUDA once and reused. After the GL
-draws, CUDA/GL resource mapping provides the graphics-to-CUDA synchronization.
-The node copies the one completed RGBA/RGB0 canvas into a pooled FFmpeg CUDA
-frame and then emits it. It must not call `glFinish` for every input; a fallback
-whole-frame `glFinish` is acceptable only if remote testing proves the normal
-interop synchronization insufficient, and must be reported as such.
+`cuGraphicsEGLRegisterImage` and `cuGraphicsResourceGetMappedEglFrame` run only
+when a new physical backing allocation appears. NVIDIA's EGL registration does
+not require graphics map/unmap calls. The upstream importer keys physical
+allocations by `st_dev`, `st_ino`, dimensions, DRM fourcc, modifier, and every
+plane's offset and pitch, so FD-number reuse cannot alias a cache entry. The
+compositor's EGLImage-handle lookup is safe because it retains that upstream
+entry for the entire CUDA-registration lifetime. A cache entry and its CUDA
+texture object are destroyed only after all held frames stop referencing that
+physical allocation.
 
-On the desktop NVIDIA target this registration uses
-[`cuGraphicsGLRegisterImage`](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/graphics-interop.html),
-which exposes a GL texture as a CUDA array without copying it. It does not use
-`cuGraphicsEGLRegisterImage`: NVIDIA documents that entry point as
-[Tegra-only](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-for-tegra-appnote/index.html).
-The standard FFmpeg `AV_PIX_FMT_CUDA`/NVENC chain expects pitched CUDA device
-memory rather than the registered GL array, which is why the one final
-array-to-device copy remains. Direct registration of an EGLImage-backed input
-GL texture is a remote capability probe, not an assumed desktop contract; it
-may inform a later fused CUDA backend but cannot be the fallback for this
-design.
+For every output frame, the node clears the final CUDA frame once and launches
+one bilinear texture-sampling kernel for each active source; those kernels
+sample the cached CUDA texture objects and write disjoint configured rectangles
+directly.
+The eight-input demo uses the existing near-square layout calculation and passes
+destination `x`, `y`, `width`, and `height` values to the compositor. Empty
+cells remain opaque black. The first implementation needs static rectangles and
+opaque sources only; dynamic layout metadata and general alpha compositing are
+outside this optimization.
+
+The importer's per-frame DMA-BUF `sync_file` wait establishes producer-to-CUDA
+ordering before a cached EGLImage is emitted. CUDA reads and final-canvas writes
+run on the normal FFmpeg device stream, so repeated use and NVENC consumption
+remain ordered without a context-wide synchronization. The frame loop must not
+call `glFinish`, `cuCtxSynchronize`, register/unregister resources, or create and
+destroy CUDA texture objects.
+
+On the desktop NVIDIA target this registration uses NVIDIA's
+[`cuGraphicsEGLRegisterImage` API][cuda-egl], the same pattern already used by
+`src-streamer`. The API exposes the EGLImage as a `CUeglFrame` without copying
+it and does not require per-frame graphics map/unmap calls. The node supports
+CUDA array and pitched EGL frame types and derives RGB channel lanes from
+`CUeglColorFormat`; it does not hardcode the observed buffer ordering. Failure
+of direct EGL registration is a hard capability error and must not be hidden
+behind a GL copy or CPU fallback.
+
+[cuda-egl]: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EGL.html
 
 ## Frame scheduling
 
@@ -154,9 +173,9 @@ the same timestamp cause several complete GPU composites that a downstream
 ## Demo integration
 
 The scaling demo selects the EGL compositor for its production grid. For every
-source it creates only the IPC receiver, the existing DRM format assertion and
-timestamp alignment, and `drm_prime_to_egl_image`. It passes the unsized
-EGLImage frames and calculated destination rectangles to the one compositor.
+source it creates only the IPC receiver, the existing DRM format assertion, and
+`drm_prime_to_egl_image`. It passes the unsized EGLImage frames and calculated
+destination rectangles to the one compositor.
 
 The old CUDA graph stays selectable by an explicit backend setting for A/B
 measurements and the independent per-source `mpdecimate` diagnostic. Source
@@ -166,15 +185,15 @@ target used for validation, not a vendor condition in the node.
 
 ## Error handling and observability
 
-Node creation fails with a specific error if the required DMA-BUF import,
-EGLImage texture binding, framebuffer, shader, CUDA device, or CUDA/GL interop
-capability is missing. It must not silently download to CPU or fall back to the
-old per-input CUDA path.
+Node creation fails with a specific error if the required DMA-BUF import, CUDA
+device, CUDA EGL interoperability, EGL frame type, or color format is missing.
+It must not silently introduce an OpenGL copy, download to CPU, or fall back to
+the old per-input CUDA path.
 
 The importer records cache hits, fresh imports, synchronization fallbacks, and
 evictions in periodic aggregate counters rather than per-frame logs. The
 compositor records rendered frames, skipped pre-warm-up clock ticks, held-input
-reuse, and GL/CUDA failures. Optional periodic debug logging exposes these
+reuse, and EGL/CUDA failures. Optional periodic debug logging exposes these
 counters without making normal operation noisy.
 
 ## Validation
@@ -200,10 +219,11 @@ Remote validation consists of:
 5. RTP frame-marker and timestamp accounting at the Janus input;
 6. a separate eight-input `mpdecimate` uniqueness run;
 7. visual inspection through the existing Janus preview; and
-8. an Nsight Systems capture confirming one render pass and one final
-   graphics-to-CUDA copy per output tick, with no per-input CUDA scale/copy
-   chain. Nsight Compute is used only if profiling identifies a custom CUDA
-   kernel as a remaining bottleneck.
+8. an Nsight Systems capture confirming EGL registration, EGL-frame lookup, and
+   CUDA texture creation occur only during cache-slot creation, while steady
+   state contains only the clear/layer kernels per output tick with no graphics
+   map/unmap, per-input copy, or scale chain. Nsight Compute is used only if
+   profiling identifies a custom CUDA kernel as a remaining bottleneck.
 
 Only containers created for this DMA-BUF test may be stopped or replaced.
 Unrelated recorder, playlist, replay, Janus, and web UI workloads remain
