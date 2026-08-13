@@ -356,8 +356,10 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
     }
 
     model.input_dtype = model.trt_engine->getTensorDataType(model.input_tensor_name.c_str());
-    if (!(model.input_dtype == nvinfer1::DataType::kFLOAT || model.input_dtype == nvinfer1::DataType::kHALF)) {
-        logstream << "cuda_infer_yolo: input datatype must be float/half for " << model.engine_path;
+    if (!(model.input_dtype == nvinfer1::DataType::kFLOAT ||
+          model.input_dtype == nvinfer1::DataType::kHALF ||
+          model.input_dtype == nvinfer1::DataType::kUINT8)) {
+        logstream << "cuda_infer_yolo: input datatype must be float/half/uint8 for " << model.engine_path;
         return false;
     }
 
@@ -392,9 +394,12 @@ bool CudaInferTrtBase::ensureCompatibleInput(const ModelRunner& model, size_t mo
 }
 
 bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
-    const char* kname = (model.input_dtype == nvinfer1::DataType::kHALF)
-        ? "kNV12_to_NCHW_fp16"
-        : "kNV12_to_NCHW_fp32";
+    const char* kname;
+    switch (model.input_dtype) {
+        case nvinfer1::DataType::kHALF:  kname = "kNV12_to_NCHW_fp16"; break;
+        case nvinfer1::DataType::kUINT8: kname = "kNV12_to_NCHW_u8";   break;
+        default:                         kname = "kNV12_to_NCHW_fp32"; break;
+    }
     if (CUDA_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
         logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
         return false;

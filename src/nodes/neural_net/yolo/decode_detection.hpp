@@ -1,5 +1,10 @@
 #pragma once
-#include "../common/infer_trt_base.hpp"
+#include <NvInfer.h>  // for nvinfer1::Dims
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+#include "../common/decode_types.hpp"
 
 namespace yolo_base {
 
@@ -104,6 +109,14 @@ public:
                 det.x2 = cx + w * 0.5f; det.y2 = cy + h * 0.5f;
                 det.conf = best;
                 det.cls = best_cls;
+            }
+
+            // Rescale normalized [0,1] coordinates to model-space pixels.
+            if (params.boxes_normalized && params.model_w > 0 && params.model_h > 0) {
+                det.x1 *= (float)params.model_w;
+                det.x2 *= (float)params.model_w;
+                det.y1 *= (float)params.model_h;
+                det.y2 *= (float)params.model_h;
             }
 
             if (det.conf < params.conf_thresh) continue;

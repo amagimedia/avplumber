@@ -213,7 +213,10 @@ public:
                 model.output_box_format,
                 model.class_index_remap,
                 model.nms_iou_thresh,
-                model.nms_class_agnostic
+                model.nms_class_agnostic,
+                model.boxes_normalized,
+                model.input_w,
+                model.input_h
             };
 
             if (model.task_type == TaskType::Detection && model.det_decoder) {
@@ -548,6 +551,10 @@ public:
 
             if (mp.count("output_box_format")) {
                 model.output_box_format = parseFmt(mp["output_box_format"].get<std::string>());
+            }
+
+            if (mp.count("boxes_normalized")) {
+                model.boxes_normalized = mp["boxes_normalized"].get<bool>();
             }
 
             if (mp.count("include_in_detection_metadata")) {

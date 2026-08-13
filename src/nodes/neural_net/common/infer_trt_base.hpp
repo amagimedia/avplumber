@@ -3,6 +3,7 @@
 #include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
 #include "yolo_side_data.hpp"
+#include "decode_types.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -61,21 +62,10 @@ public:
 
 // --- Enums ---
 enum class TaskType { Detection, Segmentation, Pose };
-enum class OutputBoxFormat { EndToEndXYXY, RawCXCYWH };
-
-// --- Detection struct ---
-struct Detection {
-    float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
-    float conf = 0.0f;
-    int cls = -1;
-    int model_index = -1;
-};
+// OutputBoxFormat, Detection, DetectionResult and DecodeParams are defined in
+// decode_types.hpp (kept dependency-light so the decoder is unit-testable).
 
 // --- Decode results ---
-struct DetectionResult {
-    std::vector<Detection> detections;
-};
-
 struct SegmentationResult : DetectionResult {
     AVBufferRef* gpu_mask_buf = nullptr;
     int mask_proto_w = 0, mask_proto_h = 0;
@@ -87,15 +77,6 @@ struct SegmentationResult : DetectionResult {
 struct PoseResult : DetectionResult {
     std::vector<float> keypoints;  // flat [x, y, conf, x, y, conf, ...] per detection
     int num_keypoints = 0;         // keypoints per detection (e.g. 34)
-};
-
-struct DecodeParams {
-    int model_index;
-    float conf_thresh;
-    OutputBoxFormat box_format;
-    const std::vector<int>& class_index_remap;
-    float nms_iou_thresh = 0.0f;
-    bool nms_class_agnostic = false;
 };
 
 // --- Utility functions ---
@@ -128,6 +109,7 @@ inline size_t elementSize(nvinfer1::DataType dt) {
         case nvinfer1::DataType::kFLOAT: return 4;
         case nvinfer1::DataType::kHALF: return 2;
         case nvinfer1::DataType::kINT8: return 1;
+        case nvinfer1::DataType::kUINT8: return 1;
         case nvinfer1::DataType::kINT32: return 4;
         case nvinfer1::DataType::kINT64: return 8;
         case nvinfer1::DataType::kBOOL: return 1;
@@ -228,6 +210,9 @@ struct ModelRunner {
     bool include_in_detection_metadata = true;
     float nms_iou_thresh = 0.0f;
     bool nms_class_agnostic = false;
+    // Model emits box coordinates normalized to [0,1] (e.g. DeepStream/Triton-style
+    // YOLO exports). Decoder rescales them to model-space pixels.
+    bool boxes_normalized = false;
     std::vector<std::string> class_names;
     std::vector<int> class_index_remap;
 
