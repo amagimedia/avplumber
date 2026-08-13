@@ -716,4 +716,4 @@ public:
 	}
 };
 
-DECLNODE(egl_image_cuda_overlay, EglImageCudaOverlay);
+DECLNODE(egl_image_cuda_overlay, EglImageCudaOverlay)

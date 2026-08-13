@@ -1,3 +1,5 @@
+#include "../../node_common.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -11,7 +13,6 @@
 #include <string>
 #include <vector>
 
-#include "../../node_common.hpp"
 #include "../common/infer_trt_base.hpp"
 
 // PTX blob for TrackNet triplet preprocessing.

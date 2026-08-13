@@ -107,4 +107,3 @@ class AvpConnection:
                 lines.append(line.decode("utf-8"))
             content = "".join(lines)
         return int(code_text), status, content
-

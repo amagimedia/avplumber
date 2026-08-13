@@ -88,4 +88,3 @@ def test_invalid_capacity_and_page_are_rejected():
         grid_page_count(2, 3)
     with pytest.raises(ValueError, match="outside"):
         grid_scene(2, 2, 1)
-

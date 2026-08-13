@@ -1,5 +1,6 @@
 #include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
+#include "cuda_frame_helpers.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -22,62 +23,7 @@ extern "C" {
 
 #include "../../../../objs/src/nodes/neural_net/scene_cut/luma_diff.ptx.h"
 
-namespace {
-
-int check_cu(CUresult err, const char* func) {
-    if (err == CUDA_SUCCESS) return 0;
-    const char* err_name = nullptr;
-    const char* err_string = nullptr;
-    if (cuGetErrorName && cuGetErrorString) {
-        cuGetErrorName(err, &err_name);
-        cuGetErrorString(err, &err_string);
-    }
-    logstream << "luma_diff: " << func << " failed: "
-              << (err_name ? err_name : "?") << ": "
-              << (err_string ? err_string : "?");
-    return -1;
-}
-
-#define LUMA_DIFF_CHECK_CU(x) check_cu((x), #x)
-
-bool isSupportedLumaCudaFormat(AVPixelFormat sw_fmt) {
-    switch (sw_fmt) {
-        case AV_PIX_FMT_NV12:
-        case AV_PIX_FMT_YUV420P:
-        case AV_PIX_FMT_YUVJ420P:
-        case AV_PIX_FMT_GRAY8:
-            return true;
-        default:
-            return false;
-    }
-}
-
-std::string jsonStringEscape(const std::string& value) {
-    std::ostringstream out;
-    for (char c : value) {
-        switch (c) {
-            case '"': out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            case '\b': out << "\\b"; break;
-            case '\f': out << "\\f"; break;
-            case '\n': out << "\\n"; break;
-            case '\r': out << "\\r"; break;
-            case '\t': out << "\\t"; break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    out << "\\u00";
-                    const char* hex = "0123456789abcdef";
-                    out << hex[((unsigned char)c >> 4) & 0x0f]
-                        << hex[(unsigned char)c & 0x0f];
-                } else {
-                    out << c;
-                }
-        }
-    }
-    return out.str();
-}
-
-} // namespace
+#define LUMA_DIFF_CHECK_CU(x) scene_cut_cuda::checkCuda((x), "luma_diff", #x)
 
 class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
     std::string metadata_key_ = "scene_diff";
@@ -145,45 +91,6 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         block_capacity_ = 0;
         ring_head_ = 0;
         ring_filled_ = 0;
-    }
-
-    AVPixelFormat hwSwFormat(const av::VideoFrame& frm) const {
-        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
-            return AV_PIX_FMT_NONE;
-        }
-        const AVHWFramesContext* ctx = (const AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-        return ctx ? ctx->sw_format : AV_PIX_FMT_NONE;
-    }
-
-    bool initCudaContextFromFrame(const av::VideoFrame& frm) {
-        if (cu_ctx_) return true;
-        if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
-            logstream << "luma_diff: missing hw_frames_ctx";
-            return false;
-        }
-        AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-        if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
-            logstream << "luma_diff: missing device_ctx/hwctx in frame";
-            return false;
-        }
-        cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
-        if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) {
-            logstream << "luma_diff: missing CUDA context in frame";
-            return false;
-        }
-        cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
-        if (LUMA_DIFF_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
-            return false;
-        }
-        stream_ = cuda_dev_ctx_->stream;
-        if (!stream_) {
-            if (LUMA_DIFF_CHECK_CU(cuStreamCreate(&stream_, 0))) {
-                stream_ = nullptr;
-                return false;
-            }
-            owns_stream_ = true;
-        }
-        return true;
     }
 
     bool loadKernel() {
@@ -345,7 +252,7 @@ class LumaDiff : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
                << "\"mean_abs\":0,"
                << "\"mean_norm\":0,"
                << "\"mean_signed\":0,"
-               << "\"status\":\"" << jsonStringEscape(status) << "\","
+               << "\"status\":\"" << scene_cut_cuda::jsonStringEscape(status) << "\","
                << "\"width\":" << width
                << "}";
             av_dict_set(&frm.raw()->metadata, key.c_str(), md.str().c_str(), 0);
@@ -404,8 +311,8 @@ public:
             return;
         }
 
-        const AVPixelFormat sw_fmt = hwSwFormat(frm);
-        if (!isSupportedLumaCudaFormat(sw_fmt)) {
+        const AVPixelFormat sw_fmt = scene_cut_cuda::hwSwFormat(frm);
+        if (!scene_cut_cuda::isSupportedLumaCudaFormat(sw_fmt)) {
             std::ostringstream msg;
             msg << "unsupported_sw_format_" << (int)sw_fmt;
             if (strict_cuda_) {
@@ -425,7 +332,9 @@ public:
             return;
         }
 
-        if (!initCudaContextFromFrame(frm) || !loadKernel()) {
+        if (!scene_cut_cuda::initCudaContextFromFrame(
+                frm, "luma_diff", cuda_dev_ctx_, cu_ctx_, stream_, owns_stream_) ||
+            !loadKernel()) {
             if (strict_cuda_) {
                 throw Error("luma_diff: failed to initialize CUDA");
             }

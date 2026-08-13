@@ -1,3 +1,5 @@
+#include "../../node_common.hpp"
+
 // CudaCameraMotion — per-frame camera motion via the NVIDIA Optical Flow
 // (NVOF) dense engine.
 //
@@ -15,7 +17,6 @@
 // headers are vendored in deps/Optical_Flow_SDK_5.0.7. Built only when
 // HAVE_NVOF=1 (see Makefile gate).
 
-#include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 

@@ -294,6 +294,6 @@ public:
     }
 };
 
-DECLNODE(nvjpeg_enc, NvjpegEncoderNode);
+DECLNODE(nvjpeg_enc, NvjpegEncoderNode)
 
 #endif
