@@ -1,5 +1,10 @@
 # CUDA Overlay Demo — deterministic `overlay_many_cuda` validation
 
+![Sixteen colored and labeled layers composed by overlay_many_cuda](docs/overlay-many-cuda-16-input-1080p.png)
+
+One 1080p base and 15 transparent, labeled overlays composed on the GPU by
+`overlay_many_cuda`.
+
 Build the repository's FFmpeg patch stack on public FFmpeg `n7.1.5`, run the
 patched `overlay_many_cuda` through a purpose-built PyPlumber graph, and compare
 every output plane against an independent CPU reference.
