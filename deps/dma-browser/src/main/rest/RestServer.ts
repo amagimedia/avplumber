@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { ConfigService } from '../config/ConfigService';
-import type { WindowManager } from '../WindowManager';
+import type { WindowControl } from '../WindowControl';
 import { toErrorResponse } from './errors';
 
 export interface RestServerOptions {
@@ -10,13 +10,17 @@ export interface RestServerOptions {
 }
 
 export class RestServer {
-  private readonly manager: WindowManager;
+  private readonly manager: WindowControl;
   private readonly cfg: ConfigService;
   private readonly opts: RestServerOptions;
   public readonly app: Express;
   private server: Server | null = null;
 
-  constructor(manager: WindowManager, opts: RestServerOptions, cfg: ConfigService = new ConfigService()) {
+  constructor(
+    manager: WindowControl,
+    opts: RestServerOptions,
+    cfg: ConfigService = new ConfigService(),
+  ) {
     this.manager = manager;
     this.opts = opts;
     this.cfg = cfg;
@@ -79,41 +83,49 @@ export class RestServer {
     });
 
     this.app.post('/window/refresh', (req, res, next) => {
-      try {
-        const { id } = this.cfg.validateId(req.body);
-        const snap = this.manager.refresh(id);
-        res.status(200).json(snap);
-      } catch (err) {
-        next(err);
-      }
+      void (async () => {
+        try {
+          const { id } = this.cfg.validateId(req.body);
+          const snap = await this.manager.refresh(id);
+          res.status(200).json(snap);
+        } catch (err) {
+          next(err);
+        }
+      })();
     });
 
     this.app.post('/window/update', (req, res, next) => {
-      try {
-        const { id, url } = this.cfg.validateUpdateUrl(req.body);
-        const snap = this.manager.update(id, url);
-        res.status(200).json(snap);
-      } catch (err) {
-        next(err);
-      }
+      void (async () => {
+        try {
+          const { id, url } = this.cfg.validateUpdateUrl(req.body);
+          const snap = await this.manager.update(id, url);
+          res.status(200).json(snap);
+        } catch (err) {
+          next(err);
+        }
+      })();
     });
 
     this.app.post('/window/show', (req, res, next) => {
-      try {
-        const { id, show } = this.cfg.validateShow(req.body);
-        const snap = this.manager.show(id, show);
-        res.status(200).json(snap);
-      } catch (err) {
-        next(err);
-      }
+      void (async () => {
+        try {
+          const { id, show } = this.cfg.validateShow(req.body);
+          const snap = await this.manager.show(id, show);
+          res.status(200).json(snap);
+        } catch (err) {
+          next(err);
+        }
+      })();
     });
 
     this.app.get('/status', (_req, res, next) => {
-      try {
-        res.status(200).json(this.manager.status());
-      } catch (err) {
-        next(err);
-      }
+      void (async () => {
+        try {
+          res.status(200).json(await this.manager.status());
+        } catch (err) {
+          next(err);
+        }
+      })();
     });
 
     this.app.use((_req, res) => {

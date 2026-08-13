@@ -1,14 +1,41 @@
 #!/usr/bin/env bash
 # Launcher for dma-browser.
 #
-# The default NVIDIA path expects the patched Electron 41 / Chrome 146 build
-# from the project .npmrc. No GBM LD_PRELOAD shim is applied.
+# The default NVIDIA path expects an Electron build with the demo's
+# runtime-gated native-handle patch. No GBM LD_PRELOAD shim is applied.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
+if [[ -z "${DMA_BROWSER_WORKER_INDEX:-}" && -z "${DMA_BROWSER_PROCESS_COUNT:-}" ]]; then
+  grouping_total_raw="${DMA_BROWSER_MAX_WINDOWS:-8}"
+  grouping_size_raw="${DMA_BROWSER_WINDOWS_PER_PROCESS:-8}"
+  if [[ ! "$grouping_total_raw" =~ ^[0-9]+$ || ! "$grouping_size_raw" =~ ^[0-9]+$ ]] ||
+    (( 10#$grouping_total_raw < 1 || 10#$grouping_size_raw < 1 )); then
+    echo "dma-browser: window grouping values must be positive integers" >&2
+    exit 1
+  fi
+  grouping_total=$((10#$grouping_total_raw))
+  grouping_size=$((10#$grouping_size_raw))
+  export DMA_BROWSER_PROCESS_COUNT=$(((grouping_total + grouping_size - 1) / grouping_size))
+fi
+
+if [[ -z "${DMA_BROWSER_WORKER_INDEX:-}" && "${DMA_BROWSER_PROCESS_COUNT:-1}" != "1" ]]; then
+  node_bin="${DMA_BROWSER_NODE_BIN:-node}"
+  if ! command -v "$node_bin" >/dev/null 2>&1; then
+    echo "dma-browser: Node.js is required for multiprocess supervision" >&2
+    exit 1
+  fi
+  exec "$node_bin" "$PROJECT_ROOT/dist/main/supervisor/index.js"
+fi
+
 electron_args=(--no-sandbox)
+
+if [[ -n "${DMA_BROWSER_USER_DATA_DIR:-}" ]]; then
+  mkdir -p -- "$DMA_BROWSER_USER_DATA_DIR"
+  electron_args+=("--user-data-dir=$DMA_BROWSER_USER_DATA_DIR")
+fi
 
 detect_nvidia() {
   if [[ "${DMA_BROWSER_FORCE_NVIDIA:-0}" == "1" ]]; then
@@ -71,19 +98,9 @@ apply_nvidia_runtime() {
   local render_node
   local gl_backend="${DMA_BROWSER_GL_BACKEND:-angle}"
   local angle_backend="${DMA_BROWSER_ANGLE_BACKEND:-gl-egl}"
+  local scanout_feature="RenderableMappableSharedImageForceScanout"
 
-  export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-nvidia}"
-  export NVD_BACKEND="${NVD_BACKEND:-direct}"
-  export NVD_LOG="${NVD_LOG:-0}"
-
-  if [[ -d /opt/libva-2.17/lib/x86_64-linux-gnu ]]; then
-    export LD_LIBRARY_PATH="/opt/libva-2.17/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-  fi
-  if [[ -d /usr/lib64/dri ]]; then
-    export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib64/dri}"
-  elif [[ -d /usr/lib/x86_64-linux-gnu/dri ]]; then
-    export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri}"
-  fi
+  export DMA_BROWSER_CHROMIUM_EXTRA_FEATURES="${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES:+${DMA_BROWSER_CHROMIUM_EXTRA_FEATURES},}${scanout_feature}"
 
   if wayland_display="$(detect_wayland_display)"; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"

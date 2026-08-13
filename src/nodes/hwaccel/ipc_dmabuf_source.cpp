@@ -16,7 +16,14 @@ extern "C" {
 #include <sys/stat.h>
 #include <time.h>
 #include <stdint.h>
+#include <array>
+#include <atomic>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <new>
 #include "../../hwaccel.hpp"
+#include "../../../deps/dma-browser/addons/fdpass/dmabuf_ack.h"
 
 #pragma pack(push, 1)
 struct TexInfo {
@@ -31,32 +38,153 @@ struct TexInfo {
 };
 #pragma pack(pop)
 
+class DmabufReleaseAckQueue {
+    struct PendingAck {
+        uint64_t connection_generation;
+        std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES> bytes;
+    };
+
+    int wake_fd_ = -1;
+    mutable std::mutex mutex_;
+    std::deque<PendingAck> pending_;
+    size_t front_offset_ = 0;
+    uint64_t active_generation_ = 0;
+    uint64_t next_generation_ = 1;
+    std::atomic<bool> interrupted_{false};
+
+    void wake() const {
+        const uint64_t value = 1;
+        if (wake_fd_ >= 0) {
+            (void)::write(wake_fd_, &value, sizeof(value));
+        }
+    }
+
+public:
+    DmabufReleaseAckQueue(): wake_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
+        if (wake_fd_ < 0) throw Error("eventfd() failed for DMA-BUF release acknowledgements");
+    }
+
+    ~DmabufReleaseAckQueue() {
+        if (wake_fd_ >= 0) ::close(wake_fd_);
+    }
+
+    int wakeFd() const { return wake_fd_; }
+    bool interrupted() const { return interrupted_.load(); }
+
+    uint64_t beginConnection() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.clear();
+        front_offset_ = 0;
+        active_generation_ = next_generation_++;
+        return active_generation_;
+    }
+
+    void endConnection(uint64_t generation) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_generation_ != generation) return;
+        active_generation_ = 0;
+        pending_.clear();
+        front_offset_ = 0;
+    }
+
+    void enqueue(uint64_t generation, uint64_t frame_count) {
+        if (interrupted()) return;
+        PendingAck ack{};
+        ack.connection_generation = generation;
+        dmabufEncodeReleaseAck(ack.bytes.data(), frame_count);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (generation == 0 || generation != active_generation_) return;
+            pending_.push_back(ack);
+        }
+        wake();
+    }
+
+    void interrupt() {
+        interrupted_.store(true);
+        wake();
+    }
+
+    void drainWakeFd() const {
+        uint64_t value;
+        while (::read(wake_fd_, &value, sizeof(value)) == sizeof(value)) {}
+    }
+
+    bool hasPending() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !pending_.empty();
+    }
+
+    bool flush(int socket_fd, uint64_t generation) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation == 0 || generation != active_generation_) return true;
+        while (!pending_.empty()) {
+            PendingAck &ack = pending_.front();
+            if (ack.connection_generation != generation) {
+                pending_.pop_front();
+                front_offset_ = 0;
+                continue;
+            }
+            const uint8_t *data = ack.bytes.data() + front_offset_;
+            const size_t remaining = ack.bytes.size() - front_offset_;
+            const ssize_t sent = ::send(socket_fd, data, remaining, MSG_DONTWAIT | MSG_NOSIGNAL);
+            if (sent > 0) {
+                front_offset_ += static_cast<size_t>(sent);
+                if (front_offset_ == ack.bytes.size()) {
+                    pending_.pop_front();
+                    front_offset_ = 0;
+                }
+                continue;
+            }
+            if (sent < 0 && errno == EINTR) continue;
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+            return false;
+        }
+        return true;
+    }
+};
+
 class UnixFdpassClient {
 protected:
     std::string path_;
     int conn_fd_ = -2;
-    int event_fd_ = -2;
+    std::shared_ptr<DmabufReleaseAckQueue> ack_queue_;
+    uint64_t connection_generation_ = 0;
     struct pollfd pollfds_[2];
     static constexpr size_t CONN_INDEX = 0;
     static constexpr size_t EVENT_INDEX = 1;
     bool connecting_ = false;
+
+    void closeConnection() {
+        if (conn_fd_ >= 0) ::close(conn_fd_);
+        conn_fd_ = -1;
+        pollfds_[CONN_INDEX].fd = -1;
+        pollfds_[CONN_INDEX].events = POLLIN;
+        connecting_ = false;
+        ack_queue_->endConnection(connection_generation_);
+        connection_generation_ = 0;
+    }
 public:
-    UnixFdpassClient(const std::string &path): path_(path) {
-        event_fd_ = eventfd(0, 0);
+    UnixFdpassClient(const std::string &path):
+        path_(path), ack_queue_(std::make_shared<DmabufReleaseAckQueue>()) {
         pollfds_[CONN_INDEX].events = POLLIN;
         pollfds_[CONN_INDEX].revents = 0;
         pollfds_[EVENT_INDEX].events = POLLIN;
         pollfds_[EVENT_INDEX].revents = 0;
-        pollfds_[EVENT_INDEX].fd = event_fd_;
+        pollfds_[EVENT_INDEX].fd = ack_queue_->wakeFd();
         pollfds_[CONN_INDEX].fd = -1;
     }
     ~UnixFdpassClient() {
-        if (conn_fd_ >= 0) close(conn_fd_);
-        if (event_fd_ >= 0) close(event_fd_);
+        closeConnection();
     }
     void interrupt() {
-        uint64_t v = 1;
-        write(event_fd_, &v, sizeof(v));
+        ack_queue_->interrupt();
+    }
+    void releaseFrame(uint64_t generation, uint64_t frame_count) {
+        ack_queue_->enqueue(generation, frame_count);
+    }
+    std::shared_ptr<DmabufReleaseAckQueue> releaseQueue() const {
+        return ack_queue_;
     }
     bool ensureConnected() {
         if (conn_fd_ >= 0) return true;
@@ -83,13 +211,15 @@ public:
             return false;
         }
         conn_fd_ = fd;
+        connection_generation_ = ack_queue_->beginConnection();
         pollfds_[CONN_INDEX].fd = conn_fd_;
         connecting_ = (rc < 0); // EINPROGRESS
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
+    bool recvTexInfoAndFD(TexInfo &info, int &received_fd, uint64_t &connection_generation) {
         received_fd = -1;
+        connection_generation = 0;
         // Prepare to receive payload + a single FD via SCM_RIGHTS
         char control[CMSG_SPACE(sizeof(int))];
         struct iovec iov;
@@ -111,6 +241,10 @@ public:
             // Update pollfds each iteration
             pollfds_[CONN_INDEX].revents = 0;
             pollfds_[EVENT_INDEX].revents = 0;
+            pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
+            if (!connecting_ && ack_queue_->hasPending()) {
+                pollfds_[CONN_INDEX].events |= POLLOUT;
+            }
             int pret = poll(pollfds_, 2, 50);
             if (pret < 0) {
                 if (errno == EINTR) continue;
@@ -122,9 +256,8 @@ public:
             }
             if (pollfds_[EVENT_INDEX].revents & POLLIN) {
                 pollfds_[EVENT_INDEX].revents = 0;
-                int64_t blackhole;
-                ::read(event_fd_, &blackhole, sizeof blackhole);
-                return false;
+                ack_queue_->drainWakeFd();
+                if (ack_queue_->interrupted()) return false;
             }
             if (conn_fd_ < 0) {
                 continue;
@@ -133,15 +266,15 @@ public:
             if (connecting_ && (pollfds_[CONN_INDEX].revents & (POLLOUT | POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
                 int soerr = 0; socklen_t slen = sizeof(soerr);
                 if (getsockopt(conn_fd_, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0) {
-                    close(conn_fd_);
-                    conn_fd_ = -1;
-                    pollfds_[CONN_INDEX].fd = -1;
-                    pollfds_[CONN_INDEX].events = POLLIN;
-                    connecting_ = false;
+                    closeConnection();
                     continue;
                 }
                 connecting_ = false;
                 pollfds_[CONN_INDEX].events = POLLIN;
+            }
+            if (!connecting_ && !ack_queue_->flush(conn_fd_, connection_generation_)) {
+                closeConnection();
+                continue;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLIN)) {
                 memset(&msg, 0, sizeof(msg));
@@ -152,9 +285,7 @@ public:
                 ssize_t r = recvmsg(conn_fd_, &msg, MSG_DONTWAIT);
                 if (r <= 0) {
                     // connection reset or EOF: close and wait for next
-                    close(conn_fd_);
-                    conn_fd_ = -1;
-                    pollfds_[CONN_INDEX].fd = -1;
+                    closeConnection();
                     continue;
                 }
                 // Ancillary data
@@ -169,27 +300,53 @@ public:
                 }
                 if (received_fd < 0) {
                     logstream << "fdpass: recvmsg without FD";
+                    closeConnection();
                     return false;
                 }
                 if (static_cast<size_t>(r) < sizeof(TexInfo)) {
                     logstream << "fdpass: metadata too small (" << r << ")";
                     close(received_fd);
                     received_fd = -1;
+                    closeConnection();
                     return false;
                 }
+                connection_generation = connection_generation_;
                 return true;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR | POLLNVAL)) {
-                close(conn_fd_);
-                conn_fd_ = -1;
-                pollfds_[CONN_INDEX].fd = -1;
-                connecting_ = false;
+                closeConnection();
             }
         }
     }
 };
 
-class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>, public IStoppable, public ReportsFinishByFlag, public IVideoFormatSource {
+struct DmabufFrameOwner {
+    AVDRMFrameDescriptor descriptor{};
+    std::shared_ptr<DmabufReleaseAckQueue> ack_queue;
+    uint64_t connection_generation = 0;
+    uint64_t frame_count = 0;
+};
+
+static void releaseDmabufFrameOwner(DmabufFrameOwner *owner) {
+    if (!owner) return;
+    for (int i = 0; i < owner->descriptor.nb_objects; ++i) {
+        if (owner->descriptor.objects[i].fd >= 0) {
+            ::close(owner->descriptor.objects[i].fd);
+            owner->descriptor.objects[i].fd = -1;
+        }
+    }
+    if (owner->ack_queue) {
+        owner->ack_queue->enqueue(owner->connection_generation, owner->frame_count);
+    }
+    delete owner;
+}
+
+class IPCDMABUFSource: public NodeSingleOutput<av::VideoFrame>,
+                       public IStoppable,
+                       public ReportsFinishByFlag,
+                       public IVideoFormatSource,
+                       public IFrameRateSource,
+                       public ITimeBaseSource {
 protected:
     static constexpr uint32_t PIX_FMT_RGBA = ('R' << 24 | 'G' << 16 | 'B' << 8 | 'A');
     static constexpr uint32_t PIX_FMT_BGRA = ('B' << 24 | 'G' << 16 | 'R' << 8 | 'A');
@@ -199,6 +356,7 @@ protected:
     UnixFdpassClient receiver_;
     int width_ = 0;
     int height_ = 0;
+    av::Rational frame_rate_{0, 1};
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
 
@@ -253,6 +411,8 @@ public:
     virtual int width() { return width_; }
     virtual int height() { return height_; }
     virtual av::PixelFormat pixelFormat() { return av::PixelFormat(AV_PIX_FMT_DRM_PRIME); }
+    virtual av::Rational frameRate() { return frame_rate_; }
+    virtual av::Rational timeBase() { return {1, 1000000}; }
     virtual void stop() {
         receiver_.interrupt();
         this->finished_ = true;
@@ -260,7 +420,8 @@ public:
     virtual void process() {
         TexInfo ti{};
         int dmabuf_fd = -1;
-        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
+        uint64_t connection_generation = 0;
+        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd, connection_generation)) {
             wallclock.sleepms(5);
             return;
         }
@@ -268,6 +429,7 @@ public:
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
             close(dmabuf_fd);
+            receiver_.releaseFrame(connection_generation, ti.frame_count);
             return;
         }
 
@@ -307,12 +469,17 @@ public:
             }
         }
 
-        AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)av_mallocz(sizeof(AVDRMFrameDescriptor));
-        if (!desc) {
+        DmabufFrameOwner *owner = new (std::nothrow) DmabufFrameOwner;
+        if (!owner) {
             if (dmabuf_fd >= 0) close(dmabuf_fd);
-            logstream << "av_mallocz failed for DRM descriptor";
+            receiver_.releaseFrame(connection_generation, ti.frame_count);
+            logstream << "allocation failed for DRM descriptor";
             return;
         }
+        owner->ack_queue = receiver_.releaseQueue();
+        owner->connection_generation = connection_generation;
+        owner->frame_count = ti.frame_count;
+        AVDRMFrameDescriptor *desc = &owner->descriptor;
 
         desc->nb_objects = 1;
         desc->objects[0].fd = dmabuf_fd;
@@ -339,15 +506,11 @@ public:
 
         AVBufferRef *buf = av_buffer_create(reinterpret_cast<uint8_t*>(desc), sizeof(*desc),
             [](void *opaque, uint8_t *data){
-                AVDRMFrameDescriptor *d = reinterpret_cast<AVDRMFrameDescriptor*>(data);
-                for (int i=0; i<d->nb_objects; i++) {
-                    if (d->objects[i].fd >= 0) close(d->objects[i].fd);
-                }
-                av_free(d);
-            }, desc, 0);
+                (void)data;
+                releaseDmabufFrameOwner(reinterpret_cast<DmabufFrameOwner*>(opaque));
+            }, owner, 0);
         if (!buf) {
-            if (dmabuf_fd >= 0) close(dmabuf_fd);
-            av_free(desc);
+            releaseDmabufFrameOwner(owner);
             logstream << "av_buffer_create failed for DRM descriptor";
             return;
         }
@@ -368,6 +531,9 @@ public:
         auto r = std::make_shared<IPCDMABUFSource>(make_unique<EdgeSink<av::VideoFrame>>(edge), params["socket"]);
         if (params.count("hwaccel")) {
             r->hwaccel_ = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        }
+        if (params.count("fps")) {
+            r->frame_rate_ = parseRatio(params["fps"]);
         }
         return r;
     }

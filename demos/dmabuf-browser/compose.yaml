@@ -81,7 +81,7 @@ services:
     image: avplumber-dmabuf-demo-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
     gpus: all
-    shm_size: 1gb
+    shm_size: ${DMA_BROWSER_SHM_SIZE:-1gb}
     privileged: true
     security_opt:
       - seccomp:unconfined
@@ -105,7 +105,7 @@ services:
       DMA_BROWSER_AUTO_OPEN_FPS: ${HTML_OVERLAY_FPS:-60}
       DMA_BROWSER_AUTO_OPEN_AUDIO: "0"
       DMA_BROWSER_ALLOWED_DIMS: ${DMA_BROWSER_ALLOWED_DIMS:-1920x1080,1280x720}
-      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-10}
+      DMA_BROWSER_DMABUF_POOL_SIZE: ${DMA_BROWSER_DMABUF_POOL_SIZE:-11}
     volumes:
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page

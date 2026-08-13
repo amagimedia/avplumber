@@ -270,6 +270,12 @@ ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_DRM),111)
 NODES_SRC += $(DRM_PRIME_TO_CUDA_SRC)
 endif
 
+# Cached EGLImage input sampled directly by a CUDA overlay kernel.
+ifeq ($(HAVE_CUDA)$(HAVE_GL)$(HAVE_DRM)$(HAVE_NVCC),1111)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/egl_image_cuda_overlay.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/egl_image_cuda_overlay.cu,avpl_egl_cuda_overlay_ptx,objs/src/nodes/hwaccel/egl_image_cuda_overlay.o))
+endif
+
 ifeq ($(HAVE_VAAPI),1)
 override CXXFLAGS += -DHAVE_VAAPI=1
 override LIBS_FLAGS += -lva

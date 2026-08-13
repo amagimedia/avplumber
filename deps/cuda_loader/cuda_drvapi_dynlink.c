@@ -239,6 +239,9 @@ tcuGraphicsResourceGetMappedEglFrame  *cuGraphicsResourceGetMappedEglFrame;
 /* Surface object API */
 tcuSurfObjectCreate              *cuSurfObjectCreate;
 tcuSurfObjectDestroy             *cuSurfObjectDestroy;
+/* Texture object API */
+tcuTexObjectCreate               *cuTexObjectCreate;
+tcuTexObjectDestroy              *cuTexObjectDestroy;
 
 #define STRINGIFY(X) #X
 
@@ -596,6 +599,8 @@ CUresult CUDAAPI cuInit_drvapi(unsigned int Flags, int cudaVersion)
         GET_PROC(cuLaunchKernel);
         GET_PROC(cuSurfObjectCreate);
         GET_PROC(cuSurfObjectDestroy);
+        GET_PROC(cuTexObjectCreate);
+        GET_PROC(cuTexObjectDestroy);
         GET_PROC(cuProfilerStop);
     }
 

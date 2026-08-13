@@ -57,11 +57,13 @@ baseline.
 
 Performance and duplicate detection are separate phases. The production phase
 stays zero-copy through the grid mixer and records GPU, encoder, memory, and
-PCIe counters. The diagnostic phase fans out each imported CUDA input, performs
-an explicit full-resolution download, and runs an independent `mpdecimate`.
-Those downloads intentionally create about 4 GB/s of raw device-to-host traffic
-for N=8 at 1080p60, so diagnostic PCIe/CPU measurements are not production
-performance measurements.
+PCIe counters. The diagnostic phase fans out every imported CUDA frame, scales
+the diagnostic copy to 640x360 on the GPU by default, downloads it, and runs an
+independent `mpdecimate`. This evaluates every temporal frame from every
+1920x1080@60 input while limiting raw device-to-host traffic to about 0.44 GB/s
+for N=8. A full-resolution override would create about 4 GB/s and can
+backpressure the capture-buffer lifetime, so diagnostic PCIe/CPU measurements
+are not production performance measurements.
 
 The browser's default maximum remains 8, but `DMA_BROWSER_MAX_WINDOWS` becomes
 configurable above that default so a future N is not rejected by an
@@ -70,9 +72,8 @@ capture dimensions, frame rate, and the compositing node's input-mask width.
 
 ## Exclusions
 
-Do not copy or document the NVIDIA VAAPI/NVDEC patch series from
-`electron-hwaccel`. Include no decoder synchronization, buffer-pool tuning,
-reset handling, surface-lifetime diagnostics, or VAAPI logging.
+Do not include unrelated browser video-decoder changes. This work is limited
+to the offscreen render-target allocation needed by the DMA-BUF receiver.
 
 Preserve the EGL/GBM, DRM render-node, DMA-BUF, CUDA detiling, and NVENC path.
 Do not change the DMA-BUF receiver protocol or graph-management framework.

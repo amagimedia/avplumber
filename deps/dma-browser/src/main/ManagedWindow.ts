@@ -263,6 +263,8 @@ export class ManagedWindow implements IManagedWindow {
           droppedFrames: channelStats.droppedFrames,
           droppedReasons: channelStats.droppedReasons,
           txFrameCount: channelStats.txFrameCount,
+          releasedFrameCount: channelStats.releasedFrameCount,
+          retainedFrameCount: channelStats.retainedFrameCount,
           lastPaintTsMs: channelStats.lastPaintTsMs,
         }
       : {
@@ -270,6 +272,8 @@ export class ManagedWindow implements IManagedWindow {
           droppedFrames: 0,
           droppedReasons: {},
           txFrameCount: 0,
+          releasedFrameCount: 0,
+          retainedFrameCount: 0,
           lastPaintTsMs: null,
         };
     return {
