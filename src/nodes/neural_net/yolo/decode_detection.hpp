@@ -1,9 +1,51 @@
 #pragma once
-#include "../common/infer_trt_base.hpp"
+#include <NvInfer.h>  // for nvinfer1::Dims
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+#include "../common/decode_types.hpp"
 
 namespace yolo_base {
 
 class DetectionDecoder {
+    static float iou(const Detection& a, const Detection& b) {
+        float x1 = std::max(a.x1, b.x1);
+        float y1 = std::max(a.y1, b.y1);
+        float x2 = std::min(a.x2, b.x2);
+        float y2 = std::min(a.y2, b.y2);
+        float w = std::max(0.0f, x2 - x1);
+        float h = std::max(0.0f, y2 - y1);
+        float inter = w * h;
+        float area_a = std::max(0.0f, a.x2 - a.x1) * std::max(0.0f, a.y2 - a.y1);
+        float area_b = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
+        float uni = area_a + area_b - inter;
+        return uni > 0.0f ? inter / uni : 0.0f;
+    }
+
+    static void applyNms(std::vector<Detection>& dets, float iou_thresh, bool class_agnostic) {
+        if (iou_thresh <= 0.0f || dets.size() < 2) return;
+
+        std::sort(dets.begin(), dets.end(),
+            [](const Detection& a, const Detection& b) { return a.conf > b.conf; });
+
+        std::vector<uint8_t> suppressed(dets.size(), 0);
+        std::vector<Detection> kept;
+        kept.reserve(dets.size());
+
+        for (size_t i = 0; i < dets.size(); ++i) {
+            if (suppressed[i]) continue;
+            kept.push_back(dets[i]);
+            for (size_t j = i + 1; j < dets.size(); ++j) {
+                if (suppressed[j]) continue;
+                if (!class_agnostic && dets[i].cls != dets[j].cls) continue;
+                if (iou(dets[i], dets[j]) > iou_thresh) suppressed[j] = 1;
+            }
+        }
+
+        dets = std::move(kept);
+    }
+
 public:
     DetectionResult decode(
         const std::vector<const float*>& host_outputs,
@@ -69,15 +111,26 @@ public:
                 det.cls = best_cls;
             }
 
+            // Rescale normalized [0,1] coordinates to model-space pixels.
+            if (params.boxes_normalized && params.model_w > 0 && params.model_h > 0) {
+                det.x1 *= (float)params.model_w;
+                det.x2 *= (float)params.model_w;
+                det.y1 *= (float)params.model_h;
+                det.y2 *= (float)params.model_h;
+            }
+
             if (det.conf < params.conf_thresh) continue;
 
             // Apply class index remapping
             if (det.cls >= 0 && (size_t)det.cls < params.class_index_remap.size()) {
                 det.cls = params.class_index_remap[(size_t)det.cls];
+                if (det.cls < 0) continue;
             }
 
             result.detections.push_back(det);
         }
+
+        applyNms(result.detections, params.nms_iou_thresh, params.nms_class_agnostic);
 
         return result;
     }

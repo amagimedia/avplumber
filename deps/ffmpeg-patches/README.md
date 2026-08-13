@@ -1,55 +1,56 @@
 # FFmpeg Patch Stack
 
-This directory contains the public patch stack for the FFmpeg variant used by
-avplumber neural-net and CUDA workflows.
+This directory contains the public FFmpeg patch stack used by avplumber's CUDA
+composition and media-input workflows.
 
 ## Base
 
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg`
-- Upstream tag: `n7.1.3`
-- Upstream commit used for export: `f46e514491172d15bd74b4abb1814cd2f05a763e`
+- Upstream tag: `n7.1.5`
+- Upstream commit: `3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`
+- Expected patched tree: `52361f7251069ef74fbb41460e6e1b65d6f9947c`
 
-## Source
+## Series
 
-The patches were exported from the private remote branch:
+The seven patches are ordered by filename and grouped by feature rather than by
+the chronology of incomplete ports and follow-up fixes:
 
-- branch: `n7.1.3-tellyodev`
+1. `0001-swscale-aarch64-argb-yuva420p.patch` — AArch64 fast color conversion.
+2. `0002-avfilter-cuda-composition-suite.patch` — CUDA pad, convert, crop,
+   overlay, overlay-many, scale edge handling, transitions, and procedural
+   wipes.
+3. `0003-avfilter-npp-cuda13-compat.patch` — CUDA 13 NPP compatibility.
+4. `0004-avcodec-nvdec-intra.patch` — NVDEC intra-only stream handling.
+5. `0005-avformat-rtp-rfc4175.patch` — RFC 4175 4:2:0 and incomplete-frame
+   handling.
+6. `0006-avdevice-v4l2-compat.patch` — V4L2 timestamp compatibility.
+7. `0007-avdevice-ndi-v5.patch` — NDI v5 device registration and documentation.
 
-The patch series is intended to be applied in numeric order onto a clean public
-FFmpeg checkout at tag `n7.1.3`.
+Each patch message lists the original exported FFmpeg commits it replaces.
 
-The current exported stack is compacted to keep CI churn manageable:
-
-- patches `0001` through `0015` preserve the original functional commit split
-- patch `0016-github-actions.patch` squashes the original GitHub Actions-only
-  commits from the private branch into one CI patch
-- patches `0017` onward preserve the later functional FFmpeg changes
+The old FFmpeg `af_whisper` port is intentionally absent. Speech-to-text belongs
+in an AVPlumber node and is not part of this FFmpeg variant.
 
 ## Apply
 
-Example:
-
 ```bash
-git clone --branch n7.1.3 --depth 1 https://github.com/FFmpeg/FFmpeg clean-ffmpeg
-cd clean-ffmpeg
-git am /path/to/avplumber/deps/ffmpeg-patches/*.patch
+git clone --branch n7.1.5 --depth 1 \
+  https://github.com/FFmpeg/FFmpeg clean-ffmpeg
+git -C clean-ffmpeg config user.name "patch application"
+git -C clean-ffmpeg config user.email "patch-application@local"
+git -C clean-ffmpeg am /path/to/avplumber/deps/ffmpeg-patches/*.patch
 ```
 
-## Validation Target
+## Verify
 
-Host validation path:
+Run the verifier with any FFmpeg Git checkout that contains the documented base
+commit. It creates and removes an isolated temporary worktree; it does not alter
+the checkout's active branch:
 
-- `<ffmpeg-checkout>`
+```bash
+deps/ffmpeg-patches/verify.sh /path/to/FFmpeg
+```
 
-Install prefix used by the current validation plan:
-
-- `/usr/local`
-
-## Configure Contract
-
-Validation is expected to use the exact configure line from the host custom
-FFmpeg install being compared.
-
-The goal is parity with the current custom FFmpeg install at:
-
-- `/usr/local`
+Verification succeeds only when all seven patches apply and produce the exact
+expected Git tree. Runtime validation is provided by `demos/cuda-overlay` and
+`demos/mixer`, whose Dockerfiles build this series against FFmpeg `n7.1.5`.

@@ -22,8 +22,39 @@
 #include <EGL/egl.h>
 #include "EGL/eglext.h"
 
-struct CUeglFrame_st;
-typedef struct CUeglFrame_st CUeglFrame;
+typedef enum CUeglFrameType_enum {
+    CU_EGL_FRAME_TYPE_ARRAY = 0,
+    CU_EGL_FRAME_TYPE_PITCH = 1,
+} CUeglFrameType;
+
+typedef enum CUeglColorFormat_enum {
+    CU_EGL_COLOR_FORMAT_RGB = 0x04,
+    CU_EGL_COLOR_FORMAT_BGR = 0x05,
+    CU_EGL_COLOR_FORMAT_ARGB = 0x06,
+    CU_EGL_COLOR_FORMAT_RGBA = 0x07,
+    CU_EGL_COLOR_FORMAT_ABGR = 0x0E,
+    CU_EGL_COLOR_FORMAT_BGRA = 0x0F,
+} CUeglColorFormat;
+
+#ifndef MAX_PLANES
+#define MAX_PLANES 3
+#endif
+
+typedef struct CUeglFrame_st {
+    union {
+        CUarray pArray[MAX_PLANES];
+        void *pPitch[MAX_PLANES];
+    } frame;
+    unsigned int width;
+    unsigned int height;
+    unsigned int depth;
+    unsigned int pitch;
+    unsigned int planeCount;
+    unsigned int numChannels;
+    CUeglFrameType frameType;
+    CUeglColorFormat eglColorFormat;
+    CUarray_format cuFormat;
+} CUeglFrame;
 
 /************************************
  **

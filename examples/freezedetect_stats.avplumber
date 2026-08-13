@@ -25,7 +25,7 @@
 #     (mirrors examples/remux_analyze_audio.avplumber).
 
 # >>> EDIT THIS URL to your input source (RTMP or file path) <<<
-node.add { "type": "input", "url": "/home/teowoz/tly/eka-recorder/avplumber/examples/freezedetect_test.mp4", "dst": "in0", "options": { "probesize": 3000000, "analyzeduration": 3000000 }, "group": "all", "auto_restart": "group", "name": "input", "timeout": 5, "initial_timeout": 8 }
+node.add { "type": "input", "url": "<path>/freezedetect_test.mp4", "dst": "in0", "options": { "probesize": 3000000, "analyzeduration": 3000000 }, "group": "all", "auto_restart": "group", "name": "input", "timeout": 5, "initial_timeout": 8 }
 
 node.add { "type": "demux", "src": "in0", "routing": { "v:0": "v_in", "a:0": "a_in" }, "group": "all", "auto_restart": "group" }
 

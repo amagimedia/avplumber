@@ -22,6 +22,8 @@ __pycache__/
 /shaky-samples/
 /tools/web-ui/frontend/dist/
 /tools/web-ui/node_modules/
+/artifacts/
+/.uncommitted-from-old-ai-studio.patch
 /neural-demo/.generated-models*/
 /neural-demo/.docker-build-inputs*/
 /neural-demo/.model-build-cache*/

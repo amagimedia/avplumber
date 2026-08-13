@@ -14,31 +14,19 @@ export interface AppliedSwitch {
 }
 
 /**
- * Configures Chromium command-line switches for hardware-accelerated video
- * decoding and offscreen capture on Linux + patched Electron/Chromium.
+ * Configures Chromium command-line switches for offscreen DMA-BUF capture on
+ * Linux + Electron/Chromium.
  *
- * Reads `DMA_BROWSER_*` env vars. The default feature set expects the
- * NVIDIA dmabuf patches from the S3 Electron 41 / Chrome 146 build.
+ * Reads `DMA_BROWSER_*` env vars. The NVIDIA launcher adds the custom
+ * native-handle feature through `DMA_BROWSER_CHROMIUM_EXTRA_FEATURES` only
+ * after it detects NVIDIA.
  */
 export class HwAccelConfigurator {
-  private static readonly ENABLED_FEATURES_BASE: readonly string[] = [
-    'AcceleratedVideoDecoder',
-    'AcceleratedVideoDecodeLinuxGL',
-    'VaapiOnNvidiaGPUs',
-    'VaapiIgnoreDriverChecks',
-    'UseChromeOSDirectVideoDecoder',
-    'RenderableMappableSharedImageForceScanout',
-    'VaapiNvidiaSyncSurfaceBeforeOutput',
-    'VaapiNvidiaOutputBufferTuning:output_frame_pool_size/11',
-    'ReduceHardwareVideoDecoderBuffers',
-  ];
-
   private static readonly DISABLED_FEATURES_BASE: readonly string[] = [
     'CompressionDictionaryTransport',
     'DefaultANGLEVulkan',
     'DrmOverlayManager',
     'SharedDictionaryCache',
-    'VideoDecodeBatching',
     'Vulkan',
     'VulkanFromANGLE',
   ];
@@ -60,21 +48,20 @@ export class HwAccelConfigurator {
     const glBackend = envString(this.env, 'DMA_BROWSER_GL_BACKEND', 'angle');
     this.appendSwitch('use-gl', glBackend);
     if (glBackend === 'angle') {
-      this.appendSwitch(
-        'use-angle',
-        envString(this.env, 'DMA_BROWSER_ANGLE_BACKEND', 'gl-egl'),
-      );
+      this.appendSwitch('use-angle', envString(this.env, 'DMA_BROWSER_ANGLE_BACKEND', 'gl-egl'));
     }
 
     this.appendSwitch('disable-vulkan');
     this.appendSwitch('disable-hardware-overlays');
+    this.appendSwitch('disable-accelerated-video-decode');
     this.appendSwitch('ignore-gpu-blocklist');
 
-    const enabled = HwAccelConfigurator.dedupe([
-      ...HwAccelConfigurator.ENABLED_FEATURES_BASE,
-      ...envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
-    ]);
-    this.appendSwitch('enable-features', enabled.join(','));
+    const enabled = HwAccelConfigurator.dedupe(
+      envList(this.env, 'DMA_BROWSER_CHROMIUM_EXTRA_FEATURES'),
+    );
+    if (enabled.length > 0) {
+      this.appendSwitch('enable-features', enabled.join(','));
+    }
 
     const disabled = HwAccelConfigurator.dedupe([
       ...HwAccelConfigurator.DISABLED_FEATURES_BASE,
@@ -88,10 +75,7 @@ export class HwAccelConfigurator {
       this.appendSwitch(
         'vmodule',
         [
-          '*video_decoder_pipeline*=2',
-          'video_decoder_pipeline=1',
-          '*vaapi_video_decoder*=3',
-          'vaapi_video_decoder=3',
+          '*renderable_mappable_shared_image_video_frame_pool*=2',
           '*native_pixmap_frame_resource*=2',
           'native_pixmap_frame_resource=1',
         ].join(','),

@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <map>
 #include <sstream>
 #include "../common/infer_trt_base.hpp"
@@ -67,6 +68,7 @@ protected:
     std::map<int, uint64_t> detection_count_histogram_;
     std::array<uint64_t, 10> conf_histogram_{}; // buckets: [0.0,0.1), [0.1,0.2), ... [0.9,1.0]
     bool seg_decoders_initialized_ = false;
+    std::string node_label_ = "<unnamed>";
 
 public:
     CudaInferYolo(std::unique_ptr<Source<av::VideoFrame>> source,
@@ -113,6 +115,11 @@ public:
             return;
         }
         if (!frm) return;
+        auto process_start = std::chrono::steady_clock::now();
+        int64_t process_init_ms = 0;
+        bool process_reinit = false;
+        bool process_context_match = false;
+        bool process_preinit = wasPreinitializedFromHWAccel();
 
         ++frame_counter_;
         if (infer_every_n_ > 1 && (frame_counter_ % (uint64_t)infer_every_n_) != 0) {
@@ -125,8 +132,29 @@ public:
             sink_->put(frm);
             return;
         }
-        if (!ensureInitialized(frm)) {
+        if (!initialized_) {
+            auto init_start = std::chrono::steady_clock::now();
+            bool ok = ensureInitialized(frm);
+            auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+            logstream << "neural_node_init"
+                      << " status=" << (ok ? "ok" : "error")
+                      << " type=cuda_infer_yolo"
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << init_ms
+                      << " frame=" << frame_counter_
+                      << " models=" << models_.size();
+            if (!ok) {
+                return;
+            }
+            process_init_ms = init_ms;
+        } else if (!ensureInitialized(frm)) {
             return;
+        } else {
+            process_init_ms = lastContextInitMs();
+            process_reinit = lastContextReinitialized();
+            process_context_match = lastContextMatched();
         }
         // Initialize segmentation decoders after engine loading (needs output tensor dims)
         if (!seg_decoders_initialized_) {
@@ -179,7 +207,17 @@ public:
                 output_dims.push_back(ot.dims);
             }
 
-            DecodeParams dp{(int)mi, conf_thresh_, model.output_box_format, model.class_index_remap};
+            DecodeParams dp{
+                (int)mi,
+                conf_thresh_,
+                model.output_box_format,
+                model.class_index_remap,
+                model.nms_iou_thresh,
+                model.nms_class_agnostic,
+                model.boxes_normalized,
+                model.input_w,
+                model.input_h
+            };
 
             if (model.task_type == TaskType::Detection && model.det_decoder) {
                 DetectionResult dr = model.det_decoder->decode(host_outputs, output_dims, dp);
@@ -385,6 +423,20 @@ public:
         }
 
         sink_->put(frm);
+        auto process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - process_start).count();
+        if (frame_counter_ == 1 || process_init_ms > 0 || process_reinit) {
+            logstream << "neural_process"
+                      << " status=ok"
+                      << " type=cuda_infer_yolo"
+                      << " node=" << node_label_
+                      << " frame=" << frame_counter_
+                      << " preinit=" << (process_preinit ? 1 : 0)
+                      << " context_match=" << (process_context_match ? 1 : 0)
+                      << " reinit=" << (process_reinit ? 1 : 0)
+                      << " init_ms=" << process_init_ms
+                      << " process_ms=" << process_ms;
+        }
     }
 
     std::string buildDetectionMetadata(const std::vector<Detection>& dets) const {
@@ -441,6 +493,12 @@ public:
 
         auto r = std::make_shared<CudaInferYolo>(
             src->makeSource(), dst->makeSink(), std::move(sink_seg));
+        r->node_label_ = params.value("name", std::string("<unnamed>"));
+        std::shared_ptr<HWAccelDevice> debug_hwaccel;
+        if (params.count("hwaccel")) {
+            debug_hwaccel = InstanceSharedObjects<HWAccelDevice>::get(nci.instance, params["hwaccel"]);
+        }
+        r->setCudaContextDebugInfo("cuda_infer_yolo", r->node_label_, debug_hwaccel);
 
         // Parse global params
         if (params.count("conf_thresh")) r->conf_thresh_ = params["conf_thresh"];
@@ -495,6 +553,10 @@ public:
                 model.output_box_format = parseFmt(mp["output_box_format"].get<std::string>());
             }
 
+            if (mp.count("boxes_normalized")) {
+                model.boxes_normalized = mp["boxes_normalized"].get<bool>();
+            }
+
             if (mp.count("include_in_detection_metadata")) {
                 model.include_in_detection_metadata = mp["include_in_detection_metadata"].get<bool>();
             }
@@ -526,6 +588,15 @@ public:
                     model.class_index_remap.push_back(cls_item.get<int>());
                 }
             }
+            if (mp.count("nms_iou_thresh")) {
+                model.nms_iou_thresh = mp["nms_iou_thresh"].get<float>();
+                if (model.nms_iou_thresh < 0.0f || model.nms_iou_thresh > 1.0f) {
+                    throw Error("cuda_infer_yolo: nms_iou_thresh must be in [0,1]");
+                }
+            }
+            if (mp.count("nms_class_agnostic")) {
+                model.nms_class_agnostic = mp["nms_class_agnostic"].get<bool>();
+            }
 
             int num_classes = -1;
             if (mp.count("num_classes")) {
@@ -547,6 +618,9 @@ public:
             }
 
             r->models_.push_back(std::move(model));
+        }
+        if (debug_hwaccel) {
+            r->preinitializeFromHWAccel();
         }
 
         return r;

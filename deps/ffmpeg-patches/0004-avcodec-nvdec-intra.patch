@@ -1,0 +1,30 @@
+From 100f0aa5a67eb5500a1c38576e4003db59255f4b Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 12 Aug 2026 15:54:13 +0000
+Subject: [PATCH 4/7] avcodec/nvdec: handle intra-only streams
+
+Preserve the legacy CUVID handling required for intra-only decoded streams.
+
+Original-commit: 4bb0479af64eab3994fecbbda2911609db892f22
+---
+ libavcodec/cuviddec.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/libavcodec/cuviddec.c b/libavcodec/cuviddec.c
+index 3fae9c1..7ad59f1 100644
+--- a/libavcodec/cuviddec.c
++++ b/libavcodec/cuviddec.c
+@@ -342,6 +342,13 @@ static int CUDAAPI cuvid_handle_video_sequence(void *opaque, CUVIDEOFORMAT* form
+     cuinfo.bitDepthMinus8 = format->bit_depth_luma_minus8;
+     cuinfo.DeinterlaceMode = ctx->deint_mode_current;
+ 
++    if(avctx->gop_size == 100000) {
++       av_log(avctx, AV_LOG_INFO, "init decoder intra only\n");
++       cuinfo.ulIntraDecodeOnly = 1;
++    }
++
++    av_log(avctx, AV_LOG_INFO, "init decoder %d %d\n", ctx->nb_surfaces, avctx->refs);
++
+     if (ctx->deint_mode_current != cudaVideoDeinterlaceMode_Weave && !ctx->drop_second_field)
+         avctx->framerate = av_mul_q(avctx->framerate, (AVRational){2, 1});
+ 

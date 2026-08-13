@@ -25,6 +25,39 @@ protected:
     int current_seek_table_index_ = 0;
     bool should_close_ = false;
     int errors_ = 0;
+    void commitPendingSeekEntries() {
+        if (seek_table_entries_.empty()) {
+            return;
+        }
+        if (seek_table_text_[current_seek_table_index_].is_open()) {
+            seek_table_text_[current_seek_table_index_] << seek_table_text_stream_.rdbuf();
+        }
+        if (seek_table_bin_[current_seek_table_index_].is_open()) {
+            seek_table_bin_[current_seek_table_index_].write(
+                reinterpret_cast<char*>(seek_table_entries_.data()),
+                seek_table_entries_.size() * sizeof(SeekTableEntry));
+        }
+        seek_table_entries_.clear();
+        seek_table_text_stream_.str("");
+        seek_table_text_stream_.clear();
+    }
+    void publishCurrentSeekTables() {
+        if (seek_table_text_[current_seek_table_index_].is_open()) {
+            seek_table_text_[current_seek_table_index_].flush();
+        }
+        if (seek_table_bin_[current_seek_table_index_].is_open()) {
+            seek_table_bin_[current_seek_table_index_].flush();
+        }
+        auto publish = [this](const std::string& url) {
+            if (url.empty()) {
+                return;
+            }
+            unlink(url.c_str());
+            symlink((url + "." + std::to_string(current_seek_table_index_)).c_str(), url.c_str());
+        };
+        publish(seek_table_url_);
+        publish(seek_table_text_url_);
+    }
 public:
     using NodeSingleInput<av::Packet>::NodeSingleInput;
     av::FormatContext& ctx() {
@@ -61,26 +94,9 @@ public:
 
                     if (seek_table_entries_.size() >= MAX_SEEK_TABLE_ENTRIES) {
                         // rotate seek table files
-                        unlink(seek_table_url_.c_str());
-                        unlink(seek_table_text_url_.c_str());
-                        if (seek_table_text_[current_seek_table_index_].is_open()) {
-                            seek_table_text_[current_seek_table_index_] << seek_table_text_stream_.rdbuf();
-                        }
-                        if (seek_table_bin_[current_seek_table_index_].is_open()) {
-                            seek_table_bin_[current_seek_table_index_].write(reinterpret_cast<char*>(seek_table_entries_.data()), seek_table_entries_.size() * sizeof(SeekTableEntry));
-                        }
-                        seek_table_entries_.clear();
-                        seek_table_text_stream_.clear();
+                        commitPendingSeekEntries();
                         current_seek_table_index_ = (current_seek_table_index_ + 1) % SEEK_TABLE_FILES_COUNT;
-
-                        if (seek_table_text_[current_seek_table_index_].is_open()) {
-                            seek_table_text_[current_seek_table_index_].flush();
-                        }
-                        if (seek_table_bin_[current_seek_table_index_].is_open()) {
-                            seek_table_bin_[current_seek_table_index_].flush();
-                        }
-                        symlink((seek_table_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_url_.c_str());
-                        symlink((seek_table_text_url_ + "." + std::to_string(current_seek_table_index_)).c_str(), seek_table_text_url_.c_str());
+                        publishCurrentSeekTables();
                     }
                 }
                 octx_.writePacket(pkt);
@@ -95,6 +111,14 @@ public:
         }
     }
     virtual void flush() {
+        if (should_close_) {
+            return;
+        }
+        should_close_ = true;
+        if (write_seek_table_) {
+            commitPendingSeekEntries();
+            publishCurrentSeekTables();
+        }
         octx_.writeTrailer();
         octx_.close();
         this->finished_ = true;

@@ -3,6 +3,7 @@
 #include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
 #include "yolo_side_data.hpp"
+#include "decode_types.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -43,6 +44,12 @@ inline int check_cu(CUresult err, const char *func) {
 }
 #define CUDA_CHECK_CU(x) yolo_base::check_cu((x), #x)
 
+void logCudaContextPointers(const char* node_type,
+                            const std::string& node_label,
+                            const av::VideoFrame& frm,
+                            CUcontext frame_cu_ctx,
+                            const std::shared_ptr<HWAccelDevice>& hwaccel);
+
 // --- TensorRT logger ---
 class TRTLogger : public nvinfer1::ILogger {
 public:
@@ -55,21 +62,10 @@ public:
 
 // --- Enums ---
 enum class TaskType { Detection, Segmentation, Pose };
-enum class OutputBoxFormat { EndToEndXYXY, RawCXCYWH };
-
-// --- Detection struct ---
-struct Detection {
-    float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
-    float conf = 0.0f;
-    int cls = -1;
-    int model_index = -1;
-};
+// OutputBoxFormat, Detection, DetectionResult and DecodeParams are defined in
+// decode_types.hpp (kept dependency-light so the decoder is unit-testable).
 
 // --- Decode results ---
-struct DetectionResult {
-    std::vector<Detection> detections;
-};
-
 struct SegmentationResult : DetectionResult {
     AVBufferRef* gpu_mask_buf = nullptr;
     int mask_proto_w = 0, mask_proto_h = 0;
@@ -81,13 +77,6 @@ struct SegmentationResult : DetectionResult {
 struct PoseResult : DetectionResult {
     std::vector<float> keypoints;  // flat [x, y, conf, x, y, conf, ...] per detection
     int num_keypoints = 0;         // keypoints per detection (e.g. 34)
-};
-
-struct DecodeParams {
-    int model_index;
-    float conf_thresh;
-    OutputBoxFormat box_format;
-    const std::vector<int>& class_index_remap;
 };
 
 // --- Utility functions ---
@@ -120,6 +109,7 @@ inline size_t elementSize(nvinfer1::DataType dt) {
         case nvinfer1::DataType::kFLOAT: return 4;
         case nvinfer1::DataType::kHALF: return 2;
         case nvinfer1::DataType::kINT8: return 1;
+        case nvinfer1::DataType::kUINT8: return 1;
         case nvinfer1::DataType::kINT32: return 4;
         case nvinfer1::DataType::kINT64: return 8;
         case nvinfer1::DataType::kBOOL: return 1;
@@ -189,7 +179,7 @@ struct ModelRunner {
     std::string input_tensor_name;
     nvinfer1::Dims input_dims{};
     nvinfer1::DataType input_dtype = nvinfer1::DataType::kFLOAT;
-    int input_w = 0, input_h = 0;
+    int input_w = 0, input_h = 0, input_c = 0;
 
     // Outputs (vector: detection has 1, segmentation has 2)
     std::vector<OutputTensor> outputs;
@@ -218,6 +208,11 @@ struct ModelRunner {
     OutputBoxFormat output_box_format = OutputBoxFormat::EndToEndXYXY;
     TaskType task_type = TaskType::Detection;
     bool include_in_detection_metadata = true;
+    float nms_iou_thresh = 0.0f;
+    bool nms_class_agnostic = false;
+    // Model emits box coordinates normalized to [0,1] (e.g. DeepStream/Triton-style
+    // YOLO exports). Decoder rescales them to model-space pixels.
+    bool boxes_normalized = false;
     std::vector<std::string> class_names;
     std::vector<int> class_index_remap;
 
@@ -236,22 +231,37 @@ protected:
     TRTLogger trt_logger_;
     std::vector<ModelRunner> models_;
     int input_w_ = 0, input_h_ = 0;
+    int expected_input_channels_ = 3;
     nvinfer1::DataType input_dtype_ = nvinfer1::DataType::kFLOAT;
     bool input_bgr_order_ = false;
     CUmodule preprocess_module_ = nullptr;
     bool initialized_ = false;
     bool use_cuda_graph_ = false;
+    std::shared_ptr<HWAccelDevice> debug_hwaccel_;
+    std::string cuda_context_log_type_ = "cuda_infer_trt";
+    std::string cuda_context_log_node_ = "<unnamed>";
+    bool preinitialized_from_hwaccel_ = false;
+    bool frame_context_checked_ = false;
+    bool last_context_reinit_ = false;
+    bool last_context_match_ = false;
+    int64_t last_context_init_ms_ = 0;
 
     // Cached metadata JSON fragment for static model info
     std::string cached_models_json_;
 
     bool initCudaContextFromFrame(const av::VideoFrame& frm);
+    bool initCudaContextFromHWAccel(const std::shared_ptr<HWAccelDevice>& hwaccel);
+    bool frameCudaContext(const av::VideoFrame& frm, CUcontext& ctx, AVCUDADeviceContext** dev_ctx = nullptr) const;
     bool loadPreprocessModule();
     bool parseEngine(ModelRunner& model);
     bool allocateBindings(ModelRunner& model);
     bool ensureCompatibleInput(const ModelRunner& model, size_t model_index);
+    bool configureRunnerStream(ModelRunner& model);
     bool configureRunnerPreprocess(ModelRunner& model);
+    bool initializeModelsInCurrentContext();
+    void resetContextBoundState();
     bool ensureInitialized(const av::VideoFrame& frm);
+    bool preinitializeFromHWAccel();
 
     bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model);
     bool runInference(ModelRunner& model);
@@ -269,6 +279,13 @@ protected:
 
 public:
     virtual ~CudaInferTrtBase();
+    void setCudaContextDebugInfo(const std::string& node_type,
+                                 const std::string& node_label,
+                                 std::shared_ptr<HWAccelDevice> hwaccel);
+    bool wasPreinitializedFromHWAccel() const { return preinitialized_from_hwaccel_; }
+    bool lastContextReinitialized() const { return last_context_reinit_; }
+    bool lastContextMatched() const { return last_context_match_; }
+    int64_t lastContextInitMs() const { return last_context_init_ms_; }
 };
 
 } // namespace yolo_base

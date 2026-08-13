@@ -411,8 +411,10 @@ public:
             logstream << "drm2cuda: unsupported DRM fourcc";
             return;
         } */
-        // swfmt_from_fourcc not needed - texture is normalized to RGBA during texture copy
-        AVPixelFormat swfmt = AV_PIX_FMT_RGBA;
+        // The GL copy produces four packed bytes per pixel. The fourth byte is
+        // deliberately ignored by this node, so advertise RGB0 rather than an
+        // alpha-bearing RGBA frame to downstream CUDA filters and compositors.
+        AVPixelFormat swfmt = AV_PIX_FMT_RGB0;
 
         av::VideoFrame out;
         out.setTimeBase(in.timeBase());
@@ -491,5 +493,4 @@ public:
 };
 
 DECLNODE(drm_prime_to_cuda, DRMPrimeToCUDA);
-
 

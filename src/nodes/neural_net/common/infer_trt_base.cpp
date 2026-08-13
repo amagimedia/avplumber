@@ -3,6 +3,7 @@
 #include "../yolo/decode_segmentation.hpp"
 #include "../yolo/decode_pose.hpp"
 #include <mutex>
+#include <utility>
 
 // PTX blob for NV12->NCHW preprocess kernel.
 #include "../../../../objs/src/nodes/neural_net/preprocess/nv12_to_nchw.ptx.h"
@@ -24,8 +25,61 @@ ModelRunner::~ModelRunner() = default;
 ModelRunner::ModelRunner(ModelRunner&&) noexcept = default;
 ModelRunner& ModelRunner::operator=(ModelRunner&&) noexcept = default;
 
+void logCudaContextPointers(const char* node_type,
+                            const std::string& node_label,
+                            const av::VideoFrame& frm,
+                            CUcontext frame_cu_ctx,
+                            const std::shared_ptr<HWAccelDevice>& hwaccel) {
+    AVBufferRef* frame_hw_frames_ref = frm.raw() ? frm.raw()->hw_frames_ctx : nullptr;
+    AVHWFramesContext* frame_hw_frames_ctx =
+        (frame_hw_frames_ref && frame_hw_frames_ref->data)
+            ? (AVHWFramesContext*)frame_hw_frames_ref->data
+            : nullptr;
+    AVHWDeviceContext* frame_device_ctx =
+        frame_hw_frames_ctx ? frame_hw_frames_ctx->device_ctx : nullptr;
+
+    AVBufferRef* hwaccel_device_ref = hwaccel ? hwaccel->deviceContext() : nullptr;
+    AVHWDeviceContext* hwaccel_device_ctx =
+        (hwaccel_device_ref && hwaccel_device_ref->data)
+            ? (AVHWDeviceContext*)hwaccel_device_ref->data
+            : nullptr;
+    AVCUDADeviceContext* hwaccel_cuda_dev_ctx =
+        (hwaccel_device_ctx && hwaccel_device_ctx->type == AV_HWDEVICE_TYPE_CUDA)
+            ? (AVCUDADeviceContext*)hwaccel_device_ctx->hwctx
+            : nullptr;
+    CUcontext hwaccel_cu_ctx =
+        hwaccel_cuda_dev_ctx ? hwaccel_cuda_dev_ctx->cuda_ctx : nullptr;
+
+    CUcontext current_cu_ctx = nullptr;
+    const bool current_ok =
+        cuCtxGetCurrent && (cuCtxGetCurrent(&current_cu_ctx) == CUDA_SUCCESS);
+
+    logstream << "neural_cuda_context"
+              << " type=" << (node_type ? node_type : "<unknown>")
+              << " node=" << node_label
+              << " frame_hw_frames_ref=" << (const void*)frame_hw_frames_ref
+              << " frame_hw_frames_ctx=" << (const void*)frame_hw_frames_ctx
+              << " frame_device_ref=" << (const void*)(frame_hw_frames_ctx ? frame_hw_frames_ctx->device_ref : nullptr)
+              << " frame_device_ctx=" << (const void*)frame_device_ctx
+              << " frame_cuda_ctx=" << (const void*)frame_cu_ctx
+              << " current_cuda_ctx=" << (current_ok ? (const void*)current_cu_ctx : nullptr)
+              << " current_match_frame=" << (current_ok && current_cu_ctx == frame_cu_ctx ? 1 : 0)
+              << " hwaccel_device_ref=" << (const void*)hwaccel_device_ref
+              << " hwaccel_device_ctx=" << (const void*)hwaccel_device_ctx
+              << " hwaccel_cuda_ctx=" << (const void*)hwaccel_cu_ctx
+              << " hwaccel_match_frame=" << (hwaccel_cu_ctx && hwaccel_cu_ctx == frame_cu_ctx ? 1 : 0);
+}
+
 CudaInferTrtBase::~CudaInferTrtBase() {
     cleanupAll();
+}
+
+void CudaInferTrtBase::setCudaContextDebugInfo(const std::string& node_type,
+                                               const std::string& node_label,
+                                               std::shared_ptr<HWAccelDevice> hwaccel) {
+    cuda_context_log_type_ = node_type;
+    cuda_context_log_node_ = node_label;
+    debug_hwaccel_ = std::move(hwaccel);
 }
 
 void CudaInferTrtBase::cleanupAll() {
@@ -77,26 +131,47 @@ void CudaInferTrtBase::cleanupModel(ModelRunner& model) {
 
 bool CudaInferTrtBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
     if (cu_ctx_) return true;
-    if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) {
+    CUcontext frame_ctx = nullptr;
+    AVCUDADeviceContext* frame_dev_ctx = nullptr;
+    if (!frameCudaContext(frm, frame_ctx, &frame_dev_ctx)) {
         logstream << "cuda_infer_yolo: missing hw_frames_ctx";
         return false;
     }
-    AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
-    if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) {
-        logstream << "cuda_infer_yolo: missing device_ctx/hwctx in frame";
-        return false;
-    }
-    cuda_dev_ctx_ = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
-    if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) {
-        logstream << "cuda_infer_yolo: missing cuda context in frame";
-        return false;
-    }
-    cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
+    cuda_dev_ctx_ = frame_dev_ctx;
+    cu_ctx_ = frame_ctx;
     if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
         logstream << "cuda_infer_yolo: cuCtxSetCurrent failed";
         return false;
     }
+    logCudaContextPointers(cuda_context_log_type_.c_str(),
+                           cuda_context_log_node_,
+                           frm,
+                           cu_ctx_,
+                           debug_hwaccel_);
     return true;
+}
+
+bool CudaInferTrtBase::frameCudaContext(const av::VideoFrame& frm, CUcontext& ctx, AVCUDADeviceContext** dev_ctx) const {
+    ctx = nullptr;
+    if (dev_ctx) *dev_ctx = nullptr;
+    if (!frm.raw() || !frm.raw()->hw_frames_ctx || !frm.raw()->hw_frames_ctx->data) return false;
+    AVHWFramesContext* fctx = (AVHWFramesContext*)frm.raw()->hw_frames_ctx->data;
+    if (!fctx || !fctx->device_ctx || !fctx->device_ctx->hwctx) return false;
+    AVCUDADeviceContext* cuda_dev_ctx = (AVCUDADeviceContext*)fctx->device_ctx->hwctx;
+    if (!cuda_dev_ctx || !cuda_dev_ctx->cuda_ctx) return false;
+    ctx = cuda_dev_ctx->cuda_ctx;
+    if (dev_ctx) *dev_ctx = cuda_dev_ctx;
+    return true;
+}
+
+bool CudaInferTrtBase::initCudaContextFromHWAccel(const std::shared_ptr<HWAccelDevice>& hwaccel) {
+    if (!hwaccel || !hwaccel->deviceContext() || !hwaccel->deviceContext()->data) return false;
+    AVHWDeviceContext* devctx = (AVHWDeviceContext*)hwaccel->deviceContext()->data;
+    if (!devctx || devctx->type != AV_HWDEVICE_TYPE_CUDA || !devctx->hwctx) return false;
+    cuda_dev_ctx_ = (AVCUDADeviceContext*)devctx->hwctx;
+    if (!cuda_dev_ctx_ || !cuda_dev_ctx_->cuda_ctx) return false;
+    cu_ctx_ = cuda_dev_ctx_->cuda_ctx;
+    return CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_)) == 0;
 }
 
 bool CudaInferTrtBase::loadPreprocessModule() {
@@ -206,9 +281,10 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
 
         if (is_input) {
             ++input_count;
+            const int expected_c = expected_input_channels_;
             const bool is_image_input =
-                (dims.nbDims == 3 && dims.d[0] == 3) ||
-                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == 3);
+                (dims.nbDims == 3 && dims.d[0] == expected_c) ||
+                (dims.nbDims == 4 && dims.d[0] == 1 && dims.d[1] == expected_c);
             if (model.input_tensor_name.empty()) {
                 model.input_tensor_name = tensor_name;
                 model.input_dims = dims;
@@ -248,14 +324,17 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
         return false;
     }
 
-    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == 3) {
+    if (model.input_dims.nbDims == 3 && model.input_dims.d[0] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[0];
         model.input_h = model.input_dims.d[1];
         model.input_w = model.input_dims.d[2];
-    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == 3) {
+    } else if (model.input_dims.nbDims == 4 && model.input_dims.d[0] == 1 && model.input_dims.d[1] == expected_input_channels_) {
+        model.input_c = model.input_dims.d[1];
         model.input_h = model.input_dims.d[2];
         model.input_w = model.input_dims.d[3];
     } else {
-        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor for " << model.engine_path
+        logstream << "cuda_infer_yolo: expected CHW or NCHW input tensor with "
+                  << expected_input_channels_ << " channels for " << model.engine_path
                   << " (engine inputs: " << input_count << ")";
         return false;
     }
@@ -277,8 +356,10 @@ bool CudaInferTrtBase::allocateBindings(ModelRunner& model) {
     }
 
     model.input_dtype = model.trt_engine->getTensorDataType(model.input_tensor_name.c_str());
-    if (!(model.input_dtype == nvinfer1::DataType::kFLOAT || model.input_dtype == nvinfer1::DataType::kHALF)) {
-        logstream << "cuda_infer_yolo: input datatype must be float/half for " << model.engine_path;
+    if (!(model.input_dtype == nvinfer1::DataType::kFLOAT ||
+          model.input_dtype == nvinfer1::DataType::kHALF ||
+          model.input_dtype == nvinfer1::DataType::kUINT8)) {
+        logstream << "cuda_infer_yolo: input datatype must be float/half/uint8 for " << model.engine_path;
         return false;
     }
 
@@ -313,13 +394,20 @@ bool CudaInferTrtBase::ensureCompatibleInput(const ModelRunner& model, size_t mo
 }
 
 bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
-    const char* kname = (model.input_dtype == nvinfer1::DataType::kHALF)
-        ? "kNV12_to_NCHW_fp16"
-        : "kNV12_to_NCHW_fp32";
+    const char* kname;
+    switch (model.input_dtype) {
+        case nvinfer1::DataType::kHALF:  kname = "kNV12_to_NCHW_fp16"; break;
+        case nvinfer1::DataType::kUINT8: kname = "kNV12_to_NCHW_u8";   break;
+        default:                         kname = "kNV12_to_NCHW_fp32"; break;
+    }
     if (CUDA_CHECK_CU(cuModuleGetFunction(&model.preprocess_kernel, preprocess_module_, kname))) {
         logstream << "cuda_infer_yolo: failed to get preprocess kernel for " << model.engine_path;
         return false;
     }
+    return configureRunnerStream(model);
+}
+
+bool CudaInferTrtBase::configureRunnerStream(ModelRunner& model) {
     unsigned int stream_flags = use_cuda_graph_ ? kCudaStreamNonBlocking : kCudaStreamDefault;
     if (CUDA_CHECK_CU(cuStreamCreate(&model.stream, stream_flags))) {
         logstream << "cuda_infer_yolo: failed to create CUDA stream for " << model.engine_path;
@@ -341,8 +429,60 @@ bool CudaInferTrtBase::configureRunnerPreprocess(ModelRunner& model) {
 }
 
 bool CudaInferTrtBase::ensureInitialized(const av::VideoFrame& frm) {
-    if (initialized_) return true;
+    last_context_reinit_ = false;
+    last_context_match_ = false;
+    last_context_init_ms_ = 0;
+    if (initialized_) {
+        if (preinitialized_from_hwaccel_ && !frame_context_checked_) {
+            CUcontext frame_ctx = nullptr;
+            AVCUDADeviceContext* frame_dev_ctx = nullptr;
+            const bool have_frame_ctx = frameCudaContext(frm, frame_ctx, &frame_dev_ctx);
+            last_context_match_ = have_frame_ctx && frame_ctx == cu_ctx_;
+            if (last_context_match_) {
+                frame_context_checked_ = true;
+                logstream << "neural_context_check"
+                          << " status=ok"
+                          << " type=" << cuda_context_log_type_
+                          << " node=" << cuda_context_log_node_
+                          << " preinit=1"
+                          << " match=1"
+                          << " reinit=0"
+                          << " frame_cuda_ctx=" << (const void*)frame_ctx
+                          << " init_cuda_ctx=" << (const void*)cu_ctx_;
+                return true;
+            }
+
+            auto init_start = std::chrono::steady_clock::now();
+            resetContextBoundState();
+            bool ok = false;
+            if (have_frame_ctx) {
+                cuda_dev_ctx_ = frame_dev_ctx;
+                cu_ctx_ = frame_ctx;
+                ok = CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_)) == 0 && initializeModelsInCurrentContext();
+            }
+            last_context_init_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+            last_context_reinit_ = true;
+            frame_context_checked_ = ok;
+            logstream << "neural_context_check"
+                      << " status=" << (ok ? "ok" : "error")
+                      << " type=" << cuda_context_log_type_
+                      << " node=" << cuda_context_log_node_
+                      << " preinit=1"
+                      << " match=0"
+                      << " reinit=1"
+                      << " reinit_ms=" << last_context_init_ms_
+                      << " frame_cuda_ctx=" << (const void*)frame_ctx
+                      << " init_cuda_ctx=" << (const void*)cu_ctx_;
+            return ok;
+        }
+        return true;
+    }
     if (!initCudaContextFromFrame(frm)) return false;
+    return initializeModelsInCurrentContext();
+}
+
+bool CudaInferTrtBase::initializeModelsInCurrentContext() {
     if (!loadPreprocessModule()) return false;
     for (size_t i = 0; i < models_.size(); ++i) {
         ModelRunner& model = models_[i];
@@ -357,6 +497,43 @@ bool CudaInferTrtBase::ensureInitialized(const av::VideoFrame& frm) {
     }
     initialized_ = true;
     return true;
+}
+
+void CudaInferTrtBase::resetContextBoundState() {
+    cleanupAll();
+    cuda_dev_ctx_ = nullptr;
+    cu_ctx_ = nullptr;
+    preprocess_module_ = nullptr;
+    initialized_ = false;
+    preinitialized_from_hwaccel_ = false;
+    frame_context_checked_ = false;
+    input_w_ = 0;
+    input_h_ = 0;
+}
+
+bool CudaInferTrtBase::preinitializeFromHWAccel() {
+    auto init_start = std::chrono::steady_clock::now();
+    bool ok = false;
+    if (debug_hwaccel_ && initCudaContextFromHWAccel(debug_hwaccel_)) {
+        ok = initializeModelsInCurrentContext();
+    }
+    const auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - init_start).count();
+    if (!ok) {
+        resetContextBoundState();
+    } else {
+        preinitialized_from_hwaccel_ = true;
+        frame_context_checked_ = false;
+    }
+    logstream << "neural_preinit"
+              << " status=" << (ok ? "ok" : "error")
+              << " type=" << cuda_context_log_type_
+              << " node=" << cuda_context_log_node_
+              << " preinit=1"
+              << " init_ms=" << init_ms
+              << " cuda_ctx=" << (const void*)cu_ctx_
+              << " models=" << models_.size();
+    return ok;
 }
 
 AVPixelFormat CudaInferTrtBase::hwSwFormat(const av::VideoFrame& frm) const {

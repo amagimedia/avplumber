@@ -1,0 +1,3928 @@
+From 7bc571c2fdfcc90943f7d4c98ed99822fe181c71 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@gmail.com>
+Date: Wed, 12 Aug 2026 15:53:55 +0000
+Subject: [PATCH 2/7] avfilter: add CUDA composition filter suite
+
+Add and register the CUDA pad, convert, crop, overlay-many, and transition filters used by avplumber composition graphs. Include runtime overlay descriptors, procedural transitions, scale edge fixes, overlay context propagation, and CUDA architecture compatibility.
+
+This squashes the incomplete registration, missing-file, compatibility, and follow-up patches into the complete feature they implement.
+
+Original-commits: 3f0a41055cfc542662ce7ad68b131dbda2ed0bc4 1a54abb0cad9fd5992166ae23649bda9e9b14753 aa3aff11d4a032bda6ba2dffd6418969e66df953 534042a4c5b297fe7baca2adf9c231acb171ee12 de361ec1e6d9f8169f4ed8ebf0e9cbc469c57027 8a109d1d41400391ea3c3ac9ee6faeb925c402be 58a00475094535b234aa2a5b360fd8460b72fb86 ae1c26b083fbeb885b9850e1c54ec97ee9873d2a 2105ce91bf8f27d423d2ed55f49be0b4cf3557b4 0a384ecc48ba46ff8e5f15d960dd9bb652ea7b52 c3474bdec62f807fd4283669d9d5405f46da1390 5d0ac856ccf9738f6e84853172ea2656082f176c 1bbd5e268f460893dd900c2d7ba541f44446a350 b3c7f6584796fdd2d0dc439ba8cf8dc4746fb27a
+
+Co-authored-by: Teodor Wozniak <teodor.wozniak@amagi.com>
+---
+ configure                           |   5 +-
+ doc/filters.texi                    |  47 +++
+ libavfilter/Makefile                |   9 +
+ libavfilter/allfilters.c            |   5 +
+ libavfilter/vf_convert_cuda.c       | 511 +++++++++++++++++++++++
+ libavfilter/vf_convert_cuda.cu      | 273 ++++++++++++
+ libavfilter/vf_crop_cuda.c          | 561 +++++++++++++++++++++++++
+ libavfilter/vf_overlay_cuda.c       |   1 +
+ libavfilter/vf_overlay_many_cuda.c  | 559 +++++++++++++++++++++++++
+ libavfilter/vf_overlay_many_cuda.cu | 252 +++++++++++
+ libavfilter/vf_overlay_many_cuda.h  |  68 +++
+ libavfilter/vf_pad_cuda.c           | 538 ++++++++++++++++++++++++
+ libavfilter/vf_pad_cuda.cu          |  37 ++
+ libavfilter/vf_scale_cuda.c         |   5 +
+ libavfilter/vf_scale_cuda.cu        | 104 ++++-
+ libavfilter/vf_transition_cuda.c    | 621 ++++++++++++++++++++++++++++
+ libavfilter/vf_transition_cuda.cu   |  56 +++
+ libavutil/hwcontext_cuda.c          |   1 +
+ 18 files changed, 3636 insertions(+), 17 deletions(-)
+ create mode 100644 libavfilter/vf_convert_cuda.c
+ create mode 100644 libavfilter/vf_convert_cuda.cu
+ create mode 100644 libavfilter/vf_crop_cuda.c
+ create mode 100644 libavfilter/vf_overlay_many_cuda.c
+ create mode 100644 libavfilter/vf_overlay_many_cuda.cu
+ create mode 100644 libavfilter/vf_overlay_many_cuda.h
+ create mode 100644 libavfilter/vf_pad_cuda.c
+ create mode 100644 libavfilter/vf_pad_cuda.cu
+ create mode 100644 libavfilter/vf_transition_cuda.c
+ create mode 100644 libavfilter/vf_transition_cuda.cu
+
+diff --git a/configure b/configure
+index 1652b0d..2cd7884 100755
+--- a/configure
++++ b/configure
+@@ -3309,6 +3309,8 @@ chromakey_cuda_filter_deps="ffnvcodec"
+ chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ colorspace_cuda_filter_deps="ffnvcodec"
+ colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
++crop_cuda_filter_deps="ffnvcodec"
++crop_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ hwupload_cuda_filter_deps="ffnvcodec"
+ scale_npp_filter_deps="ffnvcodec libnpp"
+ scale2ref_npp_filter_deps="ffnvcodec libnpp"
+@@ -3319,6 +3321,7 @@ thumbnail_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ transpose_npp_filter_deps="ffnvcodec libnpp"
+ overlay_cuda_filter_deps="ffnvcodec"
+ overlay_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
++overlay_many_cuda_filter_deps="ffnvcodec cuda_nvcc"
+ sharpen_npp_filter_deps="ffnvcodec libnpp"
+ 
+ ddagrab_filter_deps="d3d11va IDXGIOutput1 DXGI_OUTDUPL_FRAME_INFO"
+@@ -4705,7 +4708,7 @@ set_default nvcc
+ 
+ if enabled cuda_nvcc; then
+     if $nvcc $nvccflags_default 2>&1 | grep -qi unsupported; then
+-        nvccflags_default="-gencode arch=compute_60,code=sm_60 -O2"
++        nvccflags_default="-gencode arch=compute_75,code=sm_75 -O2"
+     fi
+ fi
+ 
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 428986a..a4ae86c 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -19050,6 +19050,53 @@ See @ref{framesync}.
+ 
+ This filter also supports the @ref{framesync} options.
+ 
++@anchor{overlay_many_cuda}
++@section overlay_many_cuda
++
++Overlay several CUDA video streams on top of a main CUDA video stream.
++
++The first input is the main video. Every subsequent input is a full-frame
++overlay, applied in input order. The filter supports between 2 and 16 total
++inputs. Unavailable overlay frames are skipped independently; the main frame is
++passed through unchanged only when no overlay frame is available.
++
++The supported software-format combinations inside the CUDA frames are:
++
++@itemize
++@item
++@code{yuv420p} main with @code{yuva420p} overlays;
++@item
++@code{yuv420p} main with @code{yuva444p} overlays;
++@item
++@code{yuv444p} main with @code{yuva444p} overlays.
++@end itemize
++
++All overlays must use the same software format and must be at least as large as
++the main input. Composition starts at the top-left corner. Processing remains
++on the CUDA device and uses the stream associated with the main input.
++
++This filter requires CUDA Toolkit 11.7 or newer and a GPU with compute
++capability 7.0 or newer.
++
++It accepts the following options:
++
++@table @option
++@item inputs
++Set the total number of inputs, including the main input. The accepted range is
++2 to 16. The default is 2.
++
++@item eof_action
++See @ref{framesync}.
++
++@item shortest
++See @ref{framesync}.
++
++@item repeatlast
++See @ref{framesync}.
++@end table
++
++This filter also supports the @ref{framesync} options.
++
+ @section owdenoise
+ 
+ Apply Overcomplete Wavelet denoiser.
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 91487af..c80bece 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -247,6 +247,8 @@ OBJS-$(CONFIG_COLORSPACE_CUDA_FILTER)        += vf_colorspace_cuda.o \
+                                                 vf_colorspace_cuda.ptx.o \
+                                                 cuda/load_helper.o
+ OBJS-$(CONFIG_COLORTEMPERATURE_FILTER)       += vf_colortemperature.o
++OBJS-$(CONFIG_CONVERT_CUDA_FILTER)           += vf_convert_cuda.o vf_convert_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_CONVOLUTION_FILTER)            += vf_convolution.o
+ OBJS-$(CONFIG_CONVOLUTION_OPENCL_FILTER)     += vf_convolution_opencl.o opencl.o \
+                                                 opencl/convolution.o
+@@ -256,6 +258,7 @@ OBJS-$(CONFIG_COREIMAGE_FILTER)              += vf_coreimage.o
+ OBJS-$(CONFIG_CORR_FILTER)                   += vf_corr.o framesync.o
+ OBJS-$(CONFIG_COVER_RECT_FILTER)             += vf_cover_rect.o lavfutils.o
+ OBJS-$(CONFIG_CROP_FILTER)                   += vf_crop.o
++OBJS-$(CONFIG_CROP_CUDA_FILTER)              += vf_crop_cuda.o
+ OBJS-$(CONFIG_CROPDETECT_FILTER)             += vf_cropdetect.o edge_common.o
+ OBJS-$(CONFIG_CUE_FILTER)                    += f_cue.o
+ OBJS-$(CONFIG_CURVES_FILTER)                 += vf_curves.o
+@@ -410,6 +413,9 @@ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
+ OBJS-$(CONFIG_OVERLAY_FILTER)                += vf_overlay.o framesync.o
+ OBJS-$(CONFIG_OVERLAY_CUDA_FILTER)           += vf_overlay_cuda.o framesync.o vf_overlay_cuda.ptx.o \
+                                                 cuda/load_helper.o
++OBJS-$(CONFIG_OVERLAY_MANY_CUDA_FILTER)      += vf_overlay_many_cuda.o framesync.o \
++                                                vf_overlay_many_cuda.ptx.o cuda/load_helper.o
++
+ OBJS-$(CONFIG_OVERLAY_OPENCL_FILTER)         += vf_overlay_opencl.o opencl.o \
+                                                 opencl/overlay.o framesync.o
+ OBJS-$(CONFIG_OVERLAY_QSV_FILTER)            += vf_overlay_qsv.o framesync.o
+@@ -417,6 +423,7 @@ OBJS-$(CONFIG_OVERLAY_VAAPI_FILTER)          += vf_overlay_vaapi.o framesync.o v
+ OBJS-$(CONFIG_OVERLAY_VULKAN_FILTER)         += vf_overlay_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_OWDENOISE_FILTER)              += vf_owdenoise.o
+ OBJS-$(CONFIG_PAD_FILTER)                    += vf_pad.o
++OBJS-$(CONFIG_PAD_CUDA_FILTER)               += vf_pad_cuda.o vf_pad_cuda.ptx.o cuda/load_helper.o
+ OBJS-$(CONFIG_PAD_OPENCL_FILTER)             += vf_pad_opencl.o opencl.o opencl/pad.o
+ OBJS-$(CONFIG_PALETTEGEN_FILTER)             += vf_palettegen.o palette.o
+ OBJS-$(CONFIG_PALETTEUSE_FILTER)             += vf_paletteuse.o framesync.o palette.o
+@@ -528,6 +535,8 @@ OBJS-$(CONFIG_TONEMAP_OPENCL_FILTER)         += vf_tonemap_opencl.o opencl.o \
+                                                 opencl/tonemap.o opencl/colorspace_common.o
+ OBJS-$(CONFIG_TONEMAP_VAAPI_FILTER)          += vf_tonemap_vaapi.o vaapi_vpp.o
+ OBJS-$(CONFIG_TPAD_FILTER)                   += vf_tpad.o
++OBJS-$(CONFIG_TRANSITION_CUDA_FILTER)        += vf_transition_cuda.o framesync.o vf_transition_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_TRANSPOSE_FILTER)              += vf_transpose.o
+ OBJS-$(CONFIG_TRANSPOSE_NPP_FILTER)          += vf_transpose_npp.o
+ OBJS-$(CONFIG_TRANSPOSE_OPENCL_FILTER)       += vf_transpose_opencl.o opencl.o opencl/transpose.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 9819f0f..640b3f8 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -226,6 +226,7 @@ extern const AVFilter ff_vf_colormatrix;
+ extern const AVFilter ff_vf_colorspace;
+ extern const AVFilter ff_vf_colorspace_cuda;
+ extern const AVFilter ff_vf_colortemperature;
++extern const AVFilter ff_vf_convert_cuda;
+ extern const AVFilter ff_vf_convolution;
+ extern const AVFilter ff_vf_convolution_opencl;
+ extern const AVFilter ff_vf_convolve;
+@@ -234,6 +235,7 @@ extern const AVFilter ff_vf_coreimage;
+ extern const AVFilter ff_vf_corr;
+ extern const AVFilter ff_vf_cover_rect;
+ extern const AVFilter ff_vf_crop;
++extern const AVFilter ff_vf_crop_cuda;
+ extern const AVFilter ff_vf_cropdetect;
+ extern const AVFilter ff_vf_cue;
+ extern const AVFilter ff_vf_curves;
+@@ -390,8 +392,10 @@ extern const AVFilter ff_vf_overlay_qsv;
+ extern const AVFilter ff_vf_overlay_vaapi;
+ extern const AVFilter ff_vf_overlay_vulkan;
+ extern const AVFilter ff_vf_overlay_cuda;
++extern const AVFilter ff_vf_overlay_many_cuda;
+ extern const AVFilter ff_vf_owdenoise;
+ extern const AVFilter ff_vf_pad;
++extern const AVFilter ff_vf_pad_cuda;
+ extern const AVFilter ff_vf_pad_opencl;
+ extern const AVFilter ff_vf_palettegen;
+ extern const AVFilter ff_vf_paletteuse;
+@@ -497,6 +501,7 @@ extern const AVFilter ff_vf_tonemap;
+ extern const AVFilter ff_vf_tonemap_opencl;
+ extern const AVFilter ff_vf_tonemap_vaapi;
+ extern const AVFilter ff_vf_tpad;
++extern const AVFilter ff_vf_transition_cuda;
+ extern const AVFilter ff_vf_transpose;
+ extern const AVFilter ff_vf_transpose_npp;
+ extern const AVFilter ff_vf_transpose_opencl;
+diff --git a/libavfilter/vf_convert_cuda.c b/libavfilter/vf_convert_cuda.c
+new file mode 100644
+index 0000000..12f9299
+--- /dev/null
++++ b/libavfilter/vf_convert_cuda.c
+@@ -0,0 +1,511 @@
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++#include "libavutil/eval.h"
++#include "libavutil/colorspace.h"
++
++#include "avfilter.h"
++#include "formats.h"
++#include "avfilter_internal.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++
++static enum AVPixelFormat supported_in_formats[] = {
++    AV_PIX_FMT_YUVA444P12LE, AV_PIX_FMT_YUVA444P,
++    AV_PIX_FMT_ARGB, AV_PIX_FMT_RGBA, AV_PIX_FMT_ABGR, AV_PIX_FMT_BGRA,
++    AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P,
++};
++
++static enum AVPixelFormat supported_out_formats[] = {
++    AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUVA444P,
++    AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P,
++};
++
++#define BLOCK_X 32
++#define BLOCK_Y 16
++
++#define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, cu, x)
++#define ARRAY_COUNT(x) (sizeof(x)/sizeof(*(x)))
++
++typedef struct ConvertCUDAContext {
++    const AVClass *class;
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++    
++    AVBufferRef *frames_ctx;
++    AVFrame *frame;
++    AVFrame *tmp_frame;
++
++    CUmodule cu_module;
++    // cu_functions is an array where we load handles to CUDA shader functions.
++    // For some in/out format combinations we do the whole convert with 1 shader.
++    // For others we need to use 2 separate shaders (mostly for 444p... -> 420p).
++    // This is organized in this way to minimize the final number of shaders needed by this filter.
++    CUfunction cu_functions[2];
++    CUstream cu_stream;
++
++    char *format_str;
++
++    enum AVPixelFormat format_in;
++    enum AVPixelFormat format_out;
++} ConvertCUDAContext;
++
++
++
++static int format_input_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_in_formats); i++)
++        if (supported_in_formats[i] == fmt) return 1;
++    return 0;
++}
++
++static int format_output_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_out_formats); i++)
++        if (supported_out_formats[i] == fmt) return 1;
++    return 0;
++}
++
++static av_cold int init(AVFilterContext *avctx)
++{
++    ConvertCUDAContext *ctx = avctx->priv;
++
++    ctx->frame = av_frame_alloc();
++    if (!ctx->frame)
++        return AVERROR(ENOMEM);
++
++    ctx->tmp_frame = av_frame_alloc();
++    if (!ctx->tmp_frame)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static av_cold void uninit(AVFilterContext *avctx)
++{
++    ConvertCUDAContext *ctx = avctx->priv;
++
++    if (ctx->hwctx && ctx->cu_module) {
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++        CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++        ctx->cu_module = NULL;
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    av_frame_free(&ctx->frame);
++    av_buffer_unref(&ctx->frames_ctx);
++    av_frame_free(&ctx->tmp_frame);
++}
++
++static av_cold int output_config_props(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_convert_cuda_ptx_data[];
++    extern const unsigned int ff_vf_convert_cuda_ptx_len;
++
++    FilterLink       *outl = ff_filter_link(outlink);
++    AVFilterContext *avctx = outlink->src;
++    AVFilterLink *inlink = outlink->src->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    ConvertCUDAContext *ctx  = avctx->priv;
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
++    int ret;
++    
++    if (!frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->format_in = frames_ctx->sw_format;
++    if (!format_input_is_supported(ctx->format_in)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s\n",
++               av_get_pix_fmt_name(ctx->format_in));
++        return AVERROR(ENOSYS);
++    }
++
++    if (!ctx->format_str || !strlen(ctx->format_str)) {
++        av_log(ctx, AV_LOG_ERROR, "Specify output pixel format argument (example: format=yuva420p, format=yuva444p)\n");
++        return AVERROR(ENOSYS);
++    }
++    
++    ctx->format_out = av_get_pix_fmt(ctx->format_str);
++    if (!format_output_is_supported(ctx->format_out)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported output format: %s (%s)\n",
++                av_get_pix_fmt_name(ctx->format_out), ctx->format_str);
++        return AVERROR(ENOSYS);
++    }
++
++
++    // initialize
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext*)ctx->hw_device_ctx->data)->hwctx;
++    ctx->cu_stream = ctx->hwctx->stream;
++
++    // load cuda functions
++    {
++        CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++        const char *fmt_str_in[2] = {0};
++        const char *fmt_str_out = 0;
++        static_assert(ARRAY_COUNT(fmt_str_in) == ARRAY_COUNT(ctx->cu_functions));
++
++        ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++        if (ret < 0) {
++            return ret;
++        }
++
++        ret = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module, ff_vf_convert_cuda_ptx_data, ff_vf_convert_cuda_ptx_len);
++        if (ret < 0) {
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return ret;
++        }
++        
++        switch (ctx->format_in) {
++            case AV_PIX_FMT_ARGB: fmt_str_in[0] = "ARGB"; break;
++            case AV_PIX_FMT_RGBA: fmt_str_in[0] = "RGBA"; break;
++            case AV_PIX_FMT_BGRA: fmt_str_in[0] = "BGRA"; break;
++            case AV_PIX_FMT_ABGR: fmt_str_in[0] = "ABGR"; break;
++
++            case AV_PIX_FMT_YUVA444P12LE:
++                fmt_str_in[0] = "YUVA444P12LE_ya";
++                fmt_str_in[1] = "YUVA444P12LE_uv";
++                break;
++
++            case AV_PIX_FMT_YUVA444P:
++                fmt_str_in[0] = "YUVA444P_ya";
++                fmt_str_in[1] = "YUVA444P_uv";
++                break;
++
++            case AV_PIX_FMT_NV12:
++                fmt_str_in[0] = "NV12_y";
++                fmt_str_in[1] = "NV12_uv";
++                break;
++
++            case AV_PIX_FMT_YUV420P:
++                fmt_str_in[0] = "YUV420P_y";
++                fmt_str_in[1] = "YUV420P_uv";
++                break;
++        }
++
++        switch (ctx->format_out) {
++            case AV_PIX_FMT_YUVA420P: fmt_str_out = "YUVA420P"; break;
++            case AV_PIX_FMT_YUVA444P: fmt_str_out = "YUVA444P"; break;
++            case AV_PIX_FMT_NV12:     fmt_str_out = "NV12"; break;
++            case AV_PIX_FMT_YUV420P:  fmt_str_out = "YUV420P"; break;
++        }
++        
++        for (int i = 0; i < ARRAY_COUNT(fmt_str_in); i++) {
++            if (fmt_str_in[i] && fmt_str_out) {
++                char func_name[256];
++                snprintf(func_name, sizeof(func_name), "Convert_%s_to_%s", fmt_str_in[i], fmt_str_out);
++                ret = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_functions[i], ctx->cu_module, func_name));
++
++                if (ret < 0) {
++                    av_log(ctx, AV_LOG_FATAL, "CUDA function %s wasn't implemented\n", func_name);
++                    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                    return ret;
++                }
++            }
++        }
++        
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    outlink->w = inlink->w;
++    outlink->h = inlink->h;
++
++    // prepare output buffer
++    {
++        AVHWFramesContext *out_ctx;
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext*)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = ctx->format_out;
++        out_ctx->width = FFALIGN(inlink->w, 32);
++        out_ctx->height = FFALIGN(inlink->h, 32);
++        
++        ret = av_hwframe_ctx_init(out_ref);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        av_frame_unref(ctx->frame);
++        ret = av_hwframe_get_buffer(out_ref, ctx->frame, 0);
++        if (ret < 0)
++            goto output_buffer_fail;
++        
++        ctx->frame->width = inlink->w;
++        ctx->frame->height = inlink->h;
++
++        ctx->frames_ctx = out_ref;
++
++        if (ret < 0) {
++output_buffer_fail:
++            av_buffer_unref(&out_ref);
++            return ret;
++        }
++
++        outl->hw_frames_ctx = av_buffer_ref(ctx->frames_ctx);
++        if (!outl->hw_frames_ctx)
++            return AVERROR(ENOMEM);
++    }
++
++    return 0;
++}
++
++static int fill_buffers(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
++{
++    ConvertCUDAContext *ctx = avctx->priv;
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++    CUcontext dummy;
++    int ret;
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++    if (ret < 0) return ret;
++
++
++#define LaunchKernelBlock(Func, Width, Height, BlockX, BlockY) CHECK_CU(cu->cuLaunchKernel(\
++    Func, DIV_UP((Width), (BlockX)), DIV_UP((Height), (BlockY)), 1,\
++    (BlockX), (BlockY), 1, 0, ctx->cu_stream, kernel_args, NULL))
++
++#define LaunchKernel(Func, Width, Height) LaunchKernelBlock(Func, Width, Height, BLOCK_X, BLOCK_Y)
++
++    switch (ctx->format_in)
++    {
++        case AV_PIX_FMT_ARGB:
++        case AV_PIX_FMT_RGBA:
++        case AV_PIX_FMT_ABGR:
++        case AV_PIX_FMT_BGRA: {
++            void *kernel_args[] = {
++                &in->data[0], &in->linesize[0],
++                &out->data[0], &out->linesize[0],
++                &out->data[1], &out->linesize[1],
++                &out->data[2], &out->linesize[2],
++                &out->data[3], &out->linesize[3],
++            };
++
++            unsigned int out_width = out->width;
++            unsigned int out_height = out->height;
++            unsigned int block_width = BLOCK_X;
++            unsigned int block_height = BLOCK_Y;
++            if (ctx->format_out == AV_PIX_FMT_YUVA420P) {
++                out_width /= 2;
++                out_height /= 2;
++                block_width /= 2;
++                block_height /= 2;
++            }
++
++            ret = LaunchKernelBlock(ctx->cu_functions[0],
++                out_width, out_height,
++                block_width, block_height);
++            if (ret < 0) return ret;
++        } break;
++
++        case AV_PIX_FMT_YUVA444P:
++        case AV_PIX_FMT_YUVA444P12LE: {
++            unsigned int out_uv_width = out->width;
++            unsigned int out_uv_height = out->height;
++            if (ctx->format_out == AV_PIX_FMT_YUVA420P) {
++                out_uv_width /= 2;
++                out_uv_height /= 2;
++            }
++
++            { // y
++                void *kernel_args[] = {
++                    &out->data[0], &out->linesize[0],
++                    &in->data[0], &in->linesize[0]
++                };
++                ret = LaunchKernel(ctx->cu_functions[0], out->width, out->height);
++                if (ret < 0) return ret;
++            }
++            { // u
++                void *kernel_args[] = {
++                    &out->data[1], &out->linesize[1],
++                    &in->data[1], &in->linesize[1]
++                };
++                ret = LaunchKernel(ctx->cu_functions[1], out_uv_width, out_uv_height);
++                if (ret < 0) return ret;
++            }
++            { // v
++                void *kernel_args[] = {
++                    &out->data[2], &out->linesize[2],
++                    &in->data[2], &in->linesize[2]
++                };
++                ret = LaunchKernel(ctx->cu_functions[1], out_uv_width, out_uv_height);
++                if (ret < 0) return ret;
++            }
++            { // alpha
++                void *kernel_args[] = {
++                    &out->data[3], &out->linesize[3],
++                    &in->data[3], &in->linesize[3]
++                };
++                ret = LaunchKernel(ctx->cu_functions[0], out->width, out->height);
++                if (ret < 0) return ret;
++            }
++        } break;
++
++        case AV_PIX_FMT_NV12: {
++            // Y plane: copy verbatim
++            {
++                void *kernel_args[] = {
++                    &out->data[0], &out->linesize[0],
++                    &in->data[0],  &in->linesize[0],
++                };
++                ret = LaunchKernel(ctx->cu_functions[0], out->width, out->height);
++                if (ret < 0) return ret;
++            }
++            // UV plane: deinterleave NV12 UV -> separate YUV420P U and V
++            {
++                void *kernel_args[] = {
++                    &out->data[1], &out->linesize[1],
++                    &out->data[2], &out->linesize[2],
++                    &in->data[1],  &in->linesize[1],
++                };
++                ret = LaunchKernel(ctx->cu_functions[1], out->width / 2, out->height / 2);
++                if (ret < 0) return ret;
++            }
++        } break;
++
++        case AV_PIX_FMT_YUV420P: {
++            // Y plane: copy verbatim
++            {
++                void *kernel_args[] = {
++                    &out->data[0], &out->linesize[0],
++                    &in->data[0],  &in->linesize[0],
++                };
++                ret = LaunchKernel(ctx->cu_functions[0], out->width, out->height);
++                if (ret < 0) return ret;
++            }
++            // UV plane: interleave YUV420P U and V -> NV12 UV
++            {
++                void *kernel_args[] = {
++                    &out->data[1], &out->linesize[1],
++                    &in->data[1],  &in->linesize[1],
++                    &in->data[2],  &in->linesize[2],
++                };
++                ret = LaunchKernel(ctx->cu_functions[1], out->width / 2, out->height / 2);
++                if (ret < 0) return ret;
++            }
++        } break;
++
++        default: {
++            av_log(ctx, AV_LOG_ERROR, "Unexpected lack of support for pixel format %s\n",
++                   av_get_pix_fmt_name(ctx->format_in));
++            av_frame_free(&out);
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return AVERROR_BUG;
++        } break;
++    }
++
++    ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    if (ret < 0) return ret;
++
++    return 0;
++}
++
++static int filter_frame(AVFilterLink *link, AVFrame *in)
++{
++    AVFilterContext *avctx = link->dst;
++    ConvertCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    AVFrame *out = NULL;
++    CUcontext dummy;
++    int ret = 0;
++
++    out = av_frame_alloc();
++    if (!out) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++    if (ret < 0)
++        goto fail;
++
++    // fill and prepare the output frame
++    {
++        ret = fill_buffers(avctx, ctx->frame, in);
++        if (ret < 0)
++            return ret;
++
++        ret = av_hwframe_get_buffer(ctx->frame->hw_frames_ctx, ctx->tmp_frame, 0);
++        if (ret < 0)
++            return ret;
++
++        av_frame_move_ref(out, ctx->frame);
++        av_frame_move_ref(ctx->frame, ctx->tmp_frame);
++
++        ctx->frame->width  = outlink->w;
++        ctx->frame->height = outlink->h;
++
++        ret = av_frame_copy_props(out, in);
++        if (ret < 0)
++            return ret;
++    }
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    if (ret < 0)
++        goto fail;
++
++    av_frame_free(&in);
++    return ff_filter_frame(outlink, out);
++fail:
++    av_frame_free(&in);
++    av_frame_free(&out);
++    return ret;
++}
++
++
++
++#define OFFSET(x) offsetof(ConvertCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM)
++
++static const AVOption convert_cuda_options[] = {
++    { "format", "Output pixel format", OFFSET(format_str), AV_OPT_TYPE_STRING, { .str = "" }, 0, 0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(convert_cuda);
++
++static const AVFilterPad inputs[] = {
++    {
++        .name        = "default",
++        .type        = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = filter_frame,
++    },
++};
++
++static const AVFilterPad outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = output_config_props,
++    },
++};
++
++const AVFilter ff_vf_convert_cuda = {
++    .name = "convert_cuda",
++    .description = NULL_IF_CONFIG_SMALL("CUDA accelerated pixel format conversion"),
++    .priv_size = sizeof(ConvertCUDAContext),
++    .priv_class = &convert_cuda_class,
++    .init = init,
++    .uninit = uninit,
++    FILTER_INPUTS(inputs),
++    FILTER_OUTPUTS(outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_convert_cuda.cu b/libavfilter/vf_convert_cuda.cu
+new file mode 100644
+index 0000000..beabc0c
+--- /dev/null
++++ b/libavfilter/vf_convert_cuda.cu
+@@ -0,0 +1,273 @@
++typedef unsigned char uint8_t;
++typedef unsigned short uint16_t;
++
++// @todo: 3 shaders here are indentical to Convert_YUVA444P12LE_ya_to_YUVA420P
++// Boilerplate/organization code in vf_convert_cuda.c
++// could be refactored a bit so there is less copypasta.
++
++
++//
++// Color constants for converting from RGB to YUV
++// in this file are following BT709 color profile.
++// They are derived from libavutil/colorspace.h
++//
++
++// offsets into color components 
++// <0, 1, 2, 3> for argb
++// <3, 2, 1, 0> for bgra
++template<int ai, int ri, int gi, int bi>
++__device__ static inline void convert_templated_argb_to_yuva420p(
++    uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize,
++    uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize,
++    uint8_t *out_a, int out_a_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    int x2 = x*2;
++    int y2 = y*2;
++
++    uint8_t *pixel0 = &in_argb[(x2    )*4 + (y2    )*in_linesize];
++    uint8_t *pixel1 = &in_argb[(x2 + 1)*4 + (y2    )*in_linesize];
++    uint8_t *pixel2 = &in_argb[(x2    )*4 + (y2 + 1)*in_linesize];
++    uint8_t *pixel3 = &in_argb[(x2 + 1)*4 + (y2 + 1)*in_linesize];
++
++    uint8_t r0 = pixel0[ri]; uint8_t g0 = pixel0[gi]; uint8_t b0 = pixel0[bi];
++    uint8_t r1 = pixel1[ri]; uint8_t g1 = pixel1[gi]; uint8_t b1 = pixel1[bi];
++    uint8_t r2 = pixel2[ri]; uint8_t g2 = pixel2[gi]; uint8_t b2 = pixel2[bi];
++    uint8_t r3 = pixel3[ri]; uint8_t g3 = pixel3[gi]; uint8_t b3 = pixel3[bi];
++
++    // calculate Y for 4 pixels
++    out_y[(x2    ) + (y2    )*out_y_linesize] = lroundf(0.18258588f*r0 + 0.6142305882f*g0 + 0.062007059f*b0 + 16.f);
++    out_y[(x2 + 1) + (y2    )*out_y_linesize] = lroundf(0.18258588f*r1 + 0.6142305882f*g1 + 0.062007059f*b1 + 16.f);
++    out_y[(x2    ) + (y2 + 1)*out_y_linesize] = lroundf(0.18258588f*r2 + 0.6142305882f*g2 + 0.062007059f*b2 + 16.f);
++    out_y[(x2 + 1) + (y2 + 1)*out_y_linesize] = lroundf(0.18258588f*r3 + 0.6142305882f*g3 + 0.062007059f*b3 + 16.f);
++
++    // copy alpha as is for 4 pixels
++    out_a[(x2    ) + (y2    )*out_a_linesize] = pixel0[ai];
++    out_a[(x2 + 1) + (y2    )*out_a_linesize] = pixel1[ai];
++    out_a[(x2    ) + (y2 + 1)*out_a_linesize] = pixel2[ai];
++    out_a[(x2 + 1) + (y2 + 1)*out_a_linesize] = pixel3[ai];
++
++    // average out 4 rgb pixels
++    uint8_t avg_r = (uint8_t)((r0 + r1 + r2 + r3)/4);
++    uint8_t avg_g = (uint8_t)((g0 + g1 + g2 + g3)/4);
++    uint8_t avg_b = (uint8_t)((b0 + b1 + b2 + b3)/4);
++
++    // write out U and V
++    out_u[x + (y * out_u_linesize)] = lroundf((-0.100641882f*avg_r - 0.3385738039f*avg_g + 0.439215686f*avg_b) + 128.f);
++    out_v[x + (y * out_v_linesize)] = lroundf(( 0.439215686f*avg_r - 0.3989396078f*avg_g - 0.040276078f*avg_b) + 128.f);
++}
++
++
++// offsets into color components 
++// <0, 1, 2, 3> for argb
++// <3, 2, 1, 0> for bgra
++template<int ai, int ri, int gi, int bi>
++__device__ static inline void convert_templated_argb_to_yuva444p(
++    uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize,
++    uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize,
++    uint8_t *out_a, int out_a_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    uint8_t *pixel0 = &in_argb[x*4 + y*in_linesize];
++    uint8_t r0 = pixel0[ri]; uint8_t g0 = pixel0[gi]; uint8_t b0 = pixel0[bi];
++
++    // write out Y and A
++    out_y[x + y*out_y_linesize] = lroundf(0.18258588f*r0 + 0.6142305882f*g0 + 0.062007059f*b0 + 16.f);
++    out_a[x + y*out_a_linesize] = pixel0[ai];
++
++    // write out U and V
++    out_u[x + y*out_u_linesize] = lroundf((-0.100641882f*r0 - 0.3385738039f*g0 + 0.439215686f*b0) + 128.f);
++    out_v[x + y*out_v_linesize] = lroundf(( 0.439215686f*r0 - 0.3989396078f*g0 - 0.040276078f*b0) + 128.f);
++}
++
++
++
++extern "C" {
++
++// ARGB (+variants) -> YUVA420P
++__global__ void Convert_ARGB_to_YUVA420P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva420p<0,1,2,3>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_RGBA_to_YUVA420P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva420p<3,0,1,2>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_BGRA_to_YUVA420P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva420p<3,2,1,0>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize, 
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_ABGR_to_YUVA420P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva420p<0,3,2,1>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++
++
++
++// ARGB (+variants) -> YUVA444P
++__global__ void Convert_ARGB_to_YUVA444P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva444p<0,1,2,3>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_RGBA_to_YUVA444P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva444p<3,0,1,2>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_BGRA_to_YUVA444P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva444p<3,2,1,0>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize, 
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++__global__ void Convert_ABGR_to_YUVA444P(uint8_t *in_argb, int in_linesize,
++    uint8_t *out_y, int out_y_linesize, uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize, uint8_t *out_a, int out_a_linesize)
++{
++    convert_templated_argb_to_yuva444p<0,3,2,1>(in_argb, in_linesize,
++        out_y, out_y_linesize, out_u, out_u_linesize,
++        out_v, out_v_linesize, out_a, out_a_linesize);
++}
++
++
++
++
++// YUVA444P12LE -> YUVA420P
++__global__ void Convert_YUVA444P12LE_ya_to_YUVA420P(
++    uint8_t *main, int main_linesize,
++    uint16_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x + y*(overlay_linesize/2)] >> 4;
++}
++
++__global__ void Convert_YUVA444P12LE_uv_to_YUVA420P(
++    uint8_t *main, int main_linesize,
++    uint16_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x*2 + (y*2)*(overlay_linesize/2)] >> 4;
++}
++
++// YUVA444P12LE -> YUVA444P
++__global__ void Convert_YUVA444P12LE_ya_to_YUVA444P(
++    uint8_t *main, int main_linesize,
++    uint16_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x + y*(overlay_linesize/2)] >> 4;
++}
++
++__global__ void Convert_YUVA444P12LE_uv_to_YUVA444P(
++    uint8_t *main, int main_linesize,
++    uint16_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x + y*(overlay_linesize/2)] >> 4;
++}
++
++// NV12 to YUV420P
++__global__ void Convert_NV12_y_to_YUV420P(
++    uint8_t *out_y, int out_y_linesize,
++    uint8_t *in_y,  int in_y_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    out_y[x + y * out_y_linesize] = in_y[x + y * in_y_linesize];
++}
++
++__global__ void Convert_NV12_uv_to_YUV420P(
++    uint8_t *out_u, int out_u_linesize,
++    uint8_t *out_v, int out_v_linesize,
++    uint8_t *in_uv, int in_uv_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    out_u[x + y * out_u_linesize] = in_uv[x * 2     + y * in_uv_linesize];
++    out_v[x + y * out_v_linesize] = in_uv[x * 2 + 1 + y * in_uv_linesize];
++}
++
++// YUV420P to NV12
++__global__ void Convert_YUV420P_y_to_NV12(
++    uint8_t *out_y, int out_y_linesize,
++    uint8_t *in_y,  int in_y_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    out_y[x + y * out_y_linesize] = in_y[x + y * in_y_linesize];
++}
++
++__global__ void Convert_YUV420P_uv_to_NV12(
++    uint8_t *out_uv, int out_uv_linesize,
++    uint8_t *in_u,   int in_u_linesize,
++    uint8_t *in_v,   int in_v_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    out_uv[x * 2     + y * out_uv_linesize] = in_u[x + y * in_u_linesize];
++    out_uv[x * 2 + 1 + y * out_uv_linesize] = in_v[x + y * in_v_linesize];
++}
++
++// YUVA444P -> YUVA420P
++__global__ void Convert_YUVA444P_ya_to_YUVA420P(
++    uint8_t *main, int main_linesize,
++    uint8_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x + y*(overlay_linesize)];
++}
++
++__global__ void Convert_YUVA444P_uv_to_YUVA420P(
++    uint8_t *main, int main_linesize,
++    uint8_t *overlay, int overlay_linesize)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    main[x + y*main_linesize] = overlay[x*2 + (y*2)*(overlay_linesize)];
++}
++
++}
+diff --git a/libavfilter/vf_crop_cuda.c b/libavfilter/vf_crop_cuda.c
+new file mode 100644
+index 0000000..d08dc38
+--- /dev/null
++++ b/libavfilter/vf_crop_cuda.c
+@@ -0,0 +1,561 @@
++/*
++ * Copyright (c) 2019 - 2022
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <stdio.h>
++
++#include "avfilter.h"
++#include "filters.h"
++#include "video.h"
++#include "libavutil/avstring.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/eval.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/imgutils.h"
++#include "libavutil/internal.h"
++#include "libavutil/libm.h"
++#include "libavutil/mathematics.h"
++#include "libavutil/opt.h"
++
++static const char *const var_names[] = {
++    "in_w", "iw",
++    "in_h", "ih",
++    "out_w", "ow",
++    "out_h", "oh",
++    "a",
++    "sar",
++    "dar",
++    "hsub",
++    "vsub",
++    "x",
++    "y",
++    "n",
++#if FF_API_FRAME_PKT
++    "pos",
++#endif
++    "t",
++    NULL
++};
++
++enum var_name {
++    VAR_IN_W,  VAR_IW,
++    VAR_IN_H,  VAR_IH,
++    VAR_OUT_W, VAR_OW,
++    VAR_OUT_H, VAR_OH,
++    VAR_A,
++    VAR_SAR,
++    VAR_DAR,
++    VAR_HSUB,
++    VAR_VSUB,
++    VAR_X,
++    VAR_Y,
++    VAR_N,
++#if FF_API_FRAME_PKT
++    VAR_POS,
++#endif
++    VAR_T,
++    VAR_VARS_NB
++};
++
++typedef struct CropCUDAContext {
++    const AVClass *class;
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++
++    AVBufferRef *frames_ctx;
++    AVFrame *frame;
++    AVFrame *tmp_frame;
++
++    enum AVPixelFormat sw_format;
++
++    int x;
++    int y;
++    int w;
++    int h;
++
++    AVRational out_sar;
++    int keep_aspect;
++    int exact;
++
++    int max_step[4];
++    int hsub, vsub;
++    char *x_expr, *y_expr, *w_expr, *h_expr;
++    AVExpr *x_pexpr, *y_pexpr;
++    double var_values[VAR_VARS_NB];
++} CropCUDAContext;
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(s, cu, x)
++
++static av_cold int init(AVFilterContext *ctx)
++{
++    CropCUDAContext *s = ctx->priv;
++
++    s->frame = av_frame_alloc();
++    if (!s->frame)
++        return AVERROR(ENOMEM);
++
++    s->tmp_frame = av_frame_alloc();
++    if (!s->tmp_frame)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static av_cold void uninit(AVFilterContext *ctx)
++{
++    CropCUDAContext *s = ctx->priv;
++
++    av_expr_free(s->x_pexpr);
++    s->x_pexpr = NULL;
++    av_expr_free(s->y_pexpr);
++    s->y_pexpr = NULL;
++
++    av_frame_free(&s->frame);
++    av_buffer_unref(&s->hw_device_ctx);
++    av_buffer_unref(&s->frames_ctx);
++    av_frame_free(&s->tmp_frame);
++}
++
++static inline int normalize_double(int *n, double d)
++{
++    int ret = 0;
++
++    if (isnan(d)) {
++        ret = AVERROR(EINVAL);
++    } else if (d > INT_MAX || d < INT_MIN) {
++        *n = d > INT_MAX ? INT_MAX : INT_MIN;
++        ret = AVERROR(EINVAL);
++    } else {
++        *n = lrint(d);
++    }
++
++    return ret;
++}
++
++static int config_input(AVFilterLink *link)
++{
++    FilterLink *l = ff_filter_link(link);
++    AVFilterContext *ctx = link->dst;
++    CropCUDAContext *s = ctx->priv;
++    AVHWFramesContext *frames_ctx;
++    const AVPixFmtDescriptor *pix_desc;
++    int ret;
++    const char *expr;
++    double res;
++
++    if (!l->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++    frames_ctx = (AVHWFramesContext *)l->hw_frames_ctx->data;
++
++    s->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!s->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    s->hwctx = ((AVHWDeviceContext *)s->hw_device_ctx->data)->hwctx;
++
++    s->sw_format = frames_ctx->sw_format;
++    pix_desc = av_pix_fmt_desc_get(s->sw_format);
++
++    s->var_values[VAR_IN_W]  = s->var_values[VAR_IW] = ctx->inputs[0]->w;
++    s->var_values[VAR_IN_H]  = s->var_values[VAR_IH] = ctx->inputs[0]->h;
++    s->var_values[VAR_A]     = (float)link->w / link->h;
++    s->var_values[VAR_SAR]   = link->sample_aspect_ratio.num ? av_q2d(link->sample_aspect_ratio) : 1;
++    s->var_values[VAR_DAR]   = s->var_values[VAR_A] * s->var_values[VAR_SAR];
++    s->var_values[VAR_HSUB]  = 1 << pix_desc->log2_chroma_w;
++    s->var_values[VAR_VSUB]  = 1 << pix_desc->log2_chroma_h;
++    s->var_values[VAR_X]     = NAN;
++    s->var_values[VAR_Y]     = NAN;
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = NAN;
++    s->var_values[VAR_OUT_H] = s->var_values[VAR_OH] = NAN;
++    s->var_values[VAR_N]     = 0;
++    s->var_values[VAR_T]     = NAN;
++#if FF_API_FRAME_PKT
++    s->var_values[VAR_POS]   = NAN;
++#endif
++
++    av_image_fill_max_pixsteps(s->max_step, NULL, pix_desc);
++
++    s->hsub = pix_desc->log2_chroma_w;
++    s->vsub = pix_desc->log2_chroma_h;
++
++    av_expr_parse_and_eval(&res, (expr = s->w_expr),
++                           var_names, s->var_values,
++                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = res;
++    if ((ret = av_expr_parse_and_eval(&res, (expr = s->h_expr),
++                                      var_names, s->var_values,
++                                      NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        goto fail_expr;
++    s->var_values[VAR_OUT_H] = s->var_values[VAR_OH] = res;
++    if ((ret = av_expr_parse_and_eval(&res, (expr = s->w_expr),
++                                      var_names, s->var_values,
++                                      NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        goto fail_expr;
++
++    s->var_values[VAR_OUT_W] = s->var_values[VAR_OW] = res;
++    if (normalize_double(&s->w, s->var_values[VAR_OUT_W]) < 0 ||
++        normalize_double(&s->h, s->var_values[VAR_OUT_H]) < 0) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Too big value or invalid expression for out_w/ow or out_h/oh. "
++               "Maybe the expression for out_w:'%s' or for out_h:'%s' is self-referencing.\n",
++               s->w_expr, s->h_expr);
++        return AVERROR(EINVAL);
++    }
++
++    if (!s->exact) {
++        s->w &= ~((1 << s->hsub) - 1);
++        s->h &= ~((1 << s->vsub) - 1);
++    }
++
++    av_expr_free(s->x_pexpr);
++    av_expr_free(s->y_pexpr);
++    s->x_pexpr = s->y_pexpr = NULL;
++    if ((ret = av_expr_parse(&s->x_pexpr, s->x_expr, var_names,
++                             NULL, NULL, NULL, NULL, 0, ctx)) < 0 ||
++        (ret = av_expr_parse(&s->y_pexpr, s->y_expr, var_names,
++                             NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++        return AVERROR(EINVAL);
++
++    if (s->keep_aspect) {
++        AVRational dar = av_mul_q(link->sample_aspect_ratio,
++                                  (AVRational){ link->w, link->h });
++        av_reduce(&s->out_sar.num, &s->out_sar.den,
++                  (int64_t)dar.num * s->h, (int64_t)dar.den * s->w, INT_MAX);
++    } else {
++        s->out_sar = link->sample_aspect_ratio;
++    }
++
++    av_log(ctx, AV_LOG_VERBOSE, "w:%d h:%d sar:%d/%d -> w:%d h:%d sar:%d/%d\n",
++           link->w, link->h, link->sample_aspect_ratio.num, link->sample_aspect_ratio.den,
++           s->w, s->h, s->out_sar.num, s->out_sar.den);
++
++    if (s->w <= 0 || s->h <= 0 || s->w > link->w || s->h > link->h) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Invalid too big or non positive size for width '%d' or height '%d'\n",
++               s->w, s->h);
++        return AVERROR(EINVAL);
++    }
++
++    s->x = (link->w - s->w) / 2;
++    s->y = (link->h - s->h) / 2;
++    if (!s->exact) {
++        s->x &= ~((1 << s->hsub) - 1);
++        s->y &= ~((1 << s->vsub) - 1);
++    }
++
++    {
++        FilterLink *outl = ff_filter_link(ctx->outputs[0]);
++        AVHWFramesContext *out_ctx;
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(s->hw_device_ctx);
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext *)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = s->sw_format;
++        out_ctx->width = FFALIGN(s->w, 32);
++        out_ctx->height = FFALIGN(s->h, 32);
++
++        ret = av_hwframe_ctx_init(out_ref);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        av_frame_unref(s->frame);
++        ret = av_hwframe_get_buffer(out_ref, s->frame, 0);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        s->frame->width = s->w;
++        s->frame->height = s->h;
++
++        av_buffer_unref(&s->frames_ctx);
++        s->frames_ctx = out_ref;
++
++        if (ret < 0) {
++output_buffer_fail:
++            av_buffer_unref(&out_ref);
++            return ret;
++        }
++
++        av_buffer_unref(&outl->hw_frames_ctx);
++        outl->hw_frames_ctx = av_buffer_ref(s->frames_ctx);
++        if (!outl->hw_frames_ctx)
++            return AVERROR(ENOMEM);
++    }
++
++    return 0;
++
++fail_expr:
++    av_log(ctx, AV_LOG_ERROR, "Error when evaluating the expression '%s'\n", expr);
++    return ret;
++}
++
++static int config_output(AVFilterLink *link)
++{
++    CropCUDAContext *s = link->src->priv;
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
++
++    if (desc->flags & AV_PIX_FMT_FLAG_HWACCEL && link->format != AV_PIX_FMT_CUDA) {
++        /* Hardware frames adjust the cropping regions rather than changing the frame size. */
++    } else {
++        link->w = s->w;
++        link->h = s->h;
++    }
++    link->sample_aspect_ratio = s->out_sar;
++
++    return 0;
++}
++
++static int filter_frame(AVFilterLink *link, AVFrame *frame_in)
++{
++    FilterLink *l = ff_filter_link(link);
++    AVFilterContext *ctx = link->dst;
++    CropCUDAContext *s = ctx->priv;
++    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
++    AVFrame *frame_end;
++    int ret;
++
++    frame_end = av_frame_alloc();
++    if (!frame_end)
++        return AVERROR(ENOMEM);
++
++    s->var_values[VAR_N] = l->frame_count_out;
++    s->var_values[VAR_T] = frame_in->pts == AV_NOPTS_VALUE ?
++        NAN : frame_in->pts * av_q2d(link->time_base);
++#if FF_API_FRAME_PKT
++FF_DISABLE_DEPRECATION_WARNINGS
++    s->var_values[VAR_POS] = frame_in->pkt_pos == -1 ? NAN : frame_in->pkt_pos;
++FF_ENABLE_DEPRECATION_WARNINGS
++#endif
++    s->var_values[VAR_X] = av_expr_eval(s->x_pexpr, s->var_values, NULL);
++    s->var_values[VAR_Y] = av_expr_eval(s->y_pexpr, s->var_values, NULL);
++    s->var_values[VAR_X] = av_expr_eval(s->x_pexpr, s->var_values, NULL);
++
++    normalize_double(&s->x, s->var_values[VAR_X]);
++    normalize_double(&s->y, s->var_values[VAR_Y]);
++
++    if (s->x < 0)
++        s->x = 0;
++    if (s->y < 0)
++        s->y = 0;
++    if ((unsigned)s->x + (unsigned)s->w > link->w)
++        s->x = link->w - s->w;
++    if ((unsigned)s->y + (unsigned)s->h > link->h)
++        s->y = link->h - s->h;
++    if (!s->exact) {
++        s->x &= ~((1 << s->hsub) - 1);
++        s->y &= ~((1 << s->vsub) - 1);
++    }
++
++    av_log(ctx, AV_LOG_TRACE, "n:%d t:%f x:%d y:%d x+w:%d y+h:%d\n",
++           (int)s->var_values[VAR_N], s->var_values[VAR_T],
++           s->x, s->y, s->x + s->w, s->y + s->h);
++
++    {
++        CUcontext cuda_ctx = s->hwctx->cuda_ctx;
++        CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++        CUstream cu_stream = s->hwctx->stream;
++        CUcontext dummy;
++        AVFrame *frame_out = s->frame;
++        int src_y_in_bytes = s->y * frame_in->linesize[0];
++        int src_x_in_bytes = s->x * s->max_step[0];
++        int err;
++        CUDA_MEMCPY2D cpy = {
++            .dstMemoryType = CU_MEMORYTYPE_DEVICE,
++            .dstPitch = frame_out->linesize[0],
++            .dstDevice = (CUdeviceptr)frame_out->data[0],
++            .srcMemoryType = CU_MEMORYTYPE_DEVICE,
++            .srcPitch = frame_in->linesize[0],
++            .srcDevice = (CUdeviceptr)(frame_in->data[0] + src_y_in_bytes + src_x_in_bytes),
++            .WidthInBytes = s->w * s->max_step[0],
++            .Height = s->h,
++        };
++
++        err = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++        if (err < 0) {
++            av_frame_free(&frame_end);
++            return err;
++        }
++
++        err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++        if (err < 0) {
++            av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [0]\n");
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            av_frame_free(&frame_end);
++            return err;
++        }
++
++        if (!(desc->flags & AV_PIX_FMT_FLAG_PAL)) {
++            for (int i = 1; i < 3; i++) {
++                if (frame_in->data[i]) {
++                    src_y_in_bytes = (s->y >> s->vsub) * frame_in->linesize[i];
++                    src_x_in_bytes = (s->x * s->max_step[i]) >> s->hsub;
++
++                    cpy.dstPitch = frame_out->linesize[i];
++                    cpy.dstDevice = (CUdeviceptr)frame_out->data[i];
++                    cpy.srcPitch = frame_in->linesize[i];
++                    cpy.srcDevice = (CUdeviceptr)(frame_in->data[i] + src_y_in_bytes + src_x_in_bytes);
++                    cpy.WidthInBytes = (s->w * s->max_step[i]) >> s->hsub;
++                    cpy.Height = s->h >> s->vsub;
++
++                    err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++                    if (err < 0) {
++                        av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [%d]\n", i);
++                        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                        av_frame_free(&frame_end);
++                        return err;
++                    }
++                }
++            }
++        }
++
++        if (frame_in->data[3]) {
++            src_y_in_bytes = s->y * frame_in->linesize[3];
++            src_x_in_bytes = s->x * s->max_step[3];
++
++            cpy.dstPitch = frame_out->linesize[3];
++            cpy.dstDevice = (CUdeviceptr)frame_out->data[3];
++            cpy.srcPitch = frame_in->linesize[3];
++            cpy.srcDevice = (CUdeviceptr)(frame_in->data[3] + src_y_in_bytes + src_x_in_bytes);
++            cpy.WidthInBytes = s->w * s->max_step[3];
++            cpy.Height = s->h;
++
++            err = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, cu_stream));
++            if (err < 0) {
++                av_log(ctx, AV_LOG_ERROR, "cuMemcpy2D error on plane [3]\n");
++                CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++                av_frame_free(&frame_end);
++                return err;
++            }
++        }
++
++        err = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        if (err < 0) {
++            av_frame_free(&frame_end);
++            return err;
++        }
++    }
++
++    ret = av_hwframe_get_buffer(s->frame->hw_frames_ctx, s->tmp_frame, 0);
++    if (ret < 0) {
++        av_frame_free(&frame_end);
++        return ret;
++    }
++
++    av_frame_move_ref(frame_end, s->frame);
++    av_frame_move_ref(s->frame, s->tmp_frame);
++
++    s->frame->width  = s->w;
++    s->frame->height = s->h;
++
++    ret = av_frame_copy_props(frame_end, frame_in);
++    if (ret < 0) {
++        av_frame_free(&frame_in);
++        av_frame_free(&frame_end);
++        return ret;
++    }
++
++    av_frame_free(&frame_in);
++    return ff_filter_frame(ctx->outputs[0], frame_end);
++}
++
++static int process_command(AVFilterContext *ctx, const char *cmd, const char *args,
++                           char *res, int res_len, int flags)
++{
++    CropCUDAContext *s = ctx->priv;
++    int ret;
++
++    if (!strcmp(cmd, "out_w") || !strcmp(cmd, "w") ||
++        !strcmp(cmd, "out_h") || !strcmp(cmd, "h") ||
++        !strcmp(cmd, "x") || !strcmp(cmd, "y")) {
++        int old_x = s->x;
++        int old_y = s->y;
++        int old_w = s->w;
++        int old_h = s->h;
++        AVFilterLink *outlink = ctx->outputs[0];
++        AVFilterLink *inlink = ctx->inputs[0];
++
++        av_opt_set(s, cmd, args, 0);
++
++        if ((ret = config_input(inlink)) < 0) {
++            s->x = old_x;
++            s->y = old_y;
++            s->w = old_w;
++            s->h = old_h;
++            return ret;
++        }
++
++        ret = config_output(outlink);
++    } else {
++        ret = AVERROR(ENOSYS);
++    }
++
++    return ret;
++}
++
++#define OFFSET(x) offsetof(CropCUDAContext, x)
++#define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
++#define TFLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_RUNTIME_PARAM
++
++static const AVOption crop_cuda_options[] = {
++    { "out_w",       "set the width crop area expression",  OFFSET(w_expr), AV_OPT_TYPE_STRING, { .str = "iw" }, 0, 0, TFLAGS },
++    { "w",           "set the width crop area expression",  OFFSET(w_expr), AV_OPT_TYPE_STRING, { .str = "iw" }, 0, 0, TFLAGS },
++    { "out_h",       "set the height crop area expression", OFFSET(h_expr), AV_OPT_TYPE_STRING, { .str = "ih" }, 0, 0, TFLAGS },
++    { "h",           "set the height crop area expression", OFFSET(h_expr), AV_OPT_TYPE_STRING, { .str = "ih" }, 0, 0, TFLAGS },
++    { "x",           "set the x crop area expression",      OFFSET(x_expr), AV_OPT_TYPE_STRING, { .str = "(in_w-out_w)/2" }, 0, 0, TFLAGS },
++    { "y",           "set the y crop area expression",      OFFSET(y_expr), AV_OPT_TYPE_STRING, { .str = "(in_h-out_h)/2" }, 0, 0, TFLAGS },
++    { "keep_aspect", "keep aspect ratio",                   OFFSET(keep_aspect), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "exact",       "do exact cropping",                   OFFSET(exact), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(crop_cuda);
++
++static const AVFilterPad crop_cuda_inputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = filter_frame,
++        .config_props = config_input,
++    },
++};
++
++static const AVFilterPad crop_cuda_outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = config_output,
++    },
++};
++
++const AVFilter ff_vf_crop_cuda = {
++    .name            = "crop_cuda",
++    .description     = NULL_IF_CONFIG_SMALL("Crop the input CUDA video."),
++    .priv_size       = sizeof(CropCUDAContext),
++    .priv_class      = &crop_cuda_class,
++    .init            = init,
++    .uninit          = uninit,
++    FILTER_INPUTS(crop_cuda_inputs),
++    FILTER_OUTPUTS(crop_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .process_command = process_command,
++    .flags_internal  = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_overlay_cuda.c b/libavfilter/vf_overlay_cuda.c
+index a35f6ed..ac5a789 100644
+--- a/libavfilter/vf_overlay_cuda.c
++++ b/libavfilter/vf_overlay_cuda.c
+@@ -495,6 +495,7 @@ static int overlay_cuda_config_output(AVFilterLink *outlink)
+     ctx->hwctx = ((AVHWDeviceContext*)ctx->hw_device_ctx->data)->hwctx;
+ 
+     cuda_ctx = ctx->hwctx->cuda_ctx;
++    ctx->cu_ctx = cuda_ctx;
+     ctx->fs.time_base = inlink->time_base;
+ 
+     ctx->cu_stream = ctx->hwctx->stream;
+diff --git a/libavfilter/vf_overlay_many_cuda.c b/libavfilter/vf_overlay_many_cuda.c
+new file mode 100644
+index 0000000..da5b915
+--- /dev/null
++++ b/libavfilter/vf_overlay_many_cuda.c
+@@ -0,0 +1,559 @@
++/**
++ * @file
++ * Overlay multiple videos on top of each other using CUDA hardware acceleration
++ */
++
++#include <stdint.h>
++#include <string.h>
++
++#include "libavutil/avstring.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/log.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "avfilter_internal.h"
++#include "filters.h"
++#include "framesync.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++#include "vf_overlay_many_cuda.h"
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, ctx->hwctx->internal->cuda_dl, x)
++#define DIV_UP(a, b) (((a) + (b) - 1) / (b))
++
++#define BLOCK_X 32
++#define BLOCK_Y 16
++
++#define MAX_OVERLAY_COUNT OVERLAY_MANY_CUDA_MAX_OVERLAYS
++#define MAX_INPUT_COUNT (MAX_OVERLAY_COUNT + 1)
++
++static const enum AVPixelFormat supported_main_formats[] = {
++    AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_YUV444P,
++    AV_PIX_FMT_NONE,
++};
++
++static const enum AVPixelFormat supported_overlay_formats[] = {
++    AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUVA444P,
++    AV_PIX_FMT_NONE,
++};
++
++typedef struct OverlayManyCUDAContext {
++    const AVClass *class;
++
++    AVBufferRef *hw_device_ctx;
++    AVBufferRef *frames_ctx;
++    AVCUDADeviceContext *hwctx;
++
++    CUcontext cu_ctx;
++    CUmodule cu_module;
++    CUfunction cu_func;
++    CUstream cu_stream;
++
++    FFFrameSync fs;
++
++    int nb_inputs;
++    enum AVPixelFormat format_main;
++    enum AVPixelFormat format_overlay;
++} OverlayManyCUDAContext;
++
++static int format_is_supported(const enum AVPixelFormat formats[],
++                               enum AVPixelFormat format)
++{
++    for (int i = 0; formats[i] != AV_PIX_FMT_NONE; i++) {
++        if (formats[i] == format)
++            return 1;
++    }
++    return 0;
++}
++
++static int formats_match(enum AVPixelFormat format_main,
++                         enum AVPixelFormat format_overlay)
++{
++    switch (format_main) {
++    case AV_PIX_FMT_YUV420P:
++        return format_overlay == AV_PIX_FMT_YUVA420P ||
++               format_overlay == AV_PIX_FMT_YUVA444P;
++    case AV_PIX_FMT_YUV444P:
++        return format_overlay == AV_PIX_FMT_YUVA444P;
++    default:
++        return 0;
++    }
++}
++
++static int pack_frame(OverlayManyCUDAFrame *descriptor,
++                      const AVFrame *frame, int plane_count)
++{
++    for (int plane = 0; plane < plane_count; plane++) {
++        if (!frame->data[plane] || frame->linesize[plane] <= 0)
++            return AVERROR(EINVAL);
++
++        descriptor->plane[plane].ptr = (uint64_t)(uintptr_t)frame->data[plane];
++        descriptor->plane[plane].pitch = frame->linesize[plane];
++    }
++
++    return 0;
++}
++
++static int pack_launch_params(OverlayManyCUDAParams *params,
++                              const AVFrame *output,
++                              const AVFrame *main,
++                              AVFrame *const overlays[],
++                              unsigned int overlay_count)
++{
++    int ret;
++
++    if (main->width <= 0 || main->height <= 0 ||
++        overlay_count > MAX_OVERLAY_COUNT)
++        return AVERROR(EINVAL);
++
++    memset(params, 0, sizeof(*params));
++    params->width = main->width;
++    params->height = main->height;
++    params->overlay_count = overlay_count;
++
++    ret = pack_frame(&params->dst, output, 3);
++    if (ret < 0)
++        return ret;
++    ret = pack_frame(&params->main, main, 3);
++    if (ret < 0)
++        return ret;
++
++    for (unsigned int i = 0; i < overlay_count; i++) {
++        if (overlays[i]->width < main->width ||
++            overlays[i]->height < main->height)
++            return AVERROR(EINVAL);
++
++        ret = pack_frame(&params->overlay[i], overlays[i], 4);
++        if (ret < 0)
++            return ret;
++    }
++
++    for (int dst_plane = 0; dst_plane < 3; dst_plane++) {
++        for (int src_plane = 0; src_plane < 3; src_plane++) {
++            if (output->data[dst_plane] == main->data[src_plane])
++                return AVERROR(EINVAL);
++        }
++        for (unsigned int i = 0; i < overlay_count; i++) {
++            for (int src_plane = 0; src_plane < 4; src_plane++) {
++                if (output->data[dst_plane] == overlays[i]->data[src_plane])
++                    return AVERROR(EINVAL);
++            }
++        }
++    }
++
++    return 0;
++}
++
++static int overlay_many_cuda_blend(FFFrameSync *fs)
++{
++    AVFilterContext *avctx = fs->parent;
++    OverlayManyCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUcontext dummy;
++    AVFrame *main = NULL;
++    AVFrame *output = NULL;
++    AVFrame *overlays[MAX_OVERLAY_COUNT];
++    OverlayManyCUDAParams params;
++    unsigned int overlay_count = 0;
++    int context_pushed = 0;
++    int ret;
++
++    ret = ff_framesync_get_frame(fs, 0, &main, 1);
++    if (ret < 0)
++        return ret;
++    if (!main)
++        return AVERROR_BUG;
++
++    for (int i = 1; i < ctx->nb_inputs; i++) {
++        AVFrame *overlay = NULL;
++
++        ret = ff_framesync_get_frame(fs, i, &overlay, 0);
++        if (ret < 0)
++            goto fail;
++        if (overlay)
++            overlays[overlay_count++] = overlay;
++    }
++
++    main->pts = av_rescale_q(fs->pts, fs->time_base, outlink->time_base);
++    if (avctx->is_disabled)
++        overlay_count = 0;
++
++    output = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!output) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++
++    ret = av_frame_copy_props(output, main);
++    if (ret < 0)
++        goto fail;
++
++    ret = pack_launch_params(&params, output, main, overlays, overlay_count);
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Invalid CUDA frame layout for overlay\n");
++        goto fail;
++    }
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++    if (ret < 0)
++        goto fail;
++    context_pushed = 1;
++
++    {
++        void *kernel_args[] = { &params };
++
++        ret = CHECK_CU(cu->cuLaunchKernel(
++            ctx->cu_func,
++            DIV_UP(params.width, BLOCK_X),
++            DIV_UP(params.height, BLOCK_Y),
++            1, BLOCK_X, BLOCK_Y, 1,
++            0, ctx->cu_stream, kernel_args, NULL));
++    }
++
++    {
++        int pop_ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++        context_pushed = 0;
++        if (ret >= 0)
++            ret = pop_ret;
++    }
++
++    if (ret < 0)
++        goto fail;
++
++    av_frame_free(&main);
++    return ff_filter_frame(outlink, output);
++
++fail:
++    if (context_pushed) {
++        int pop_ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++        if (ret >= 0)
++            ret = pop_ret;
++    }
++    av_frame_free(&main);
++    av_frame_free(&output);
++    return ret;
++}
++
++static av_cold int overlay_many_cuda_init(AVFilterContext *avctx)
++{
++    OverlayManyCUDAContext *ctx = avctx->priv;
++
++    ctx->fs.on_event = overlay_many_cuda_blend;
++
++    for (int i = 0; i < ctx->nb_inputs; i++) {
++        AVFilterPad pad = { 0 };
++        int ret;
++
++        pad.type = AVMEDIA_TYPE_VIDEO;
++        pad.name = av_asprintf("input%d", i);
++        if (!pad.name)
++            return AVERROR(ENOMEM);
++
++        ret = ff_append_inpad_free_name(avctx, &pad);
++        if (ret < 0)
++            return ret;
++    }
++
++    return 0;
++}
++
++static av_cold void overlay_many_cuda_uninit(AVFilterContext *avctx)
++{
++    OverlayManyCUDAContext *ctx = avctx->priv;
++
++    ff_framesync_uninit(&ctx->fs);
++
++    if (ctx->hwctx && ctx->cu_module) {
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++        int ret;
++
++        ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++        if (ret >= 0) {
++            CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        }
++    }
++
++    av_buffer_unref(&ctx->frames_ctx);
++    av_buffer_unref(&ctx->hw_device_ctx);
++    ctx->hwctx = NULL;
++}
++
++static int overlay_many_cuda_activate(AVFilterContext *avctx)
++{
++    OverlayManyCUDAContext *ctx = avctx->priv;
++
++    return ff_framesync_activate(&ctx->fs);
++}
++
++static int overlay_many_cuda_config_output(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_overlay_many_cuda_ptx_data[];
++    extern const unsigned int ff_vf_overlay_many_cuda_ptx_len;
++
++    FilterLink *outl = ff_filter_link(outlink);
++    AVFilterContext *avctx = outlink->src;
++    OverlayManyCUDAContext *ctx = avctx->priv;
++    AVFilterLink *inlink_main = avctx->inputs[0];
++    FilterLink *inl_main = ff_filter_link(inlink_main);
++    AVHWFramesContext *frames_ctx_main;
++    CudaFunctions *cu;
++    CUcontext dummy;
++    const char *function_name;
++    int err;
++
++    if (avctx->nb_inputs != ctx->nb_inputs) {
++        av_log(ctx, AV_LOG_ERROR,
++               "The inputs option (%d) does not match the input pad count (%d)\n",
++               ctx->nb_inputs, avctx->nb_inputs);
++        return AVERROR_BUG;
++    }
++
++    if (!inl_main->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hardware frame context on main input\n");
++        return AVERROR(EINVAL);
++    }
++    frames_ctx_main = (AVHWFramesContext *)inl_main->hw_frames_ctx->data;
++    if (!frames_ctx_main->device_ref) {
++        av_log(ctx, AV_LOG_ERROR, "No CUDA device context on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->format_main = frames_ctx_main->sw_format;
++    if (!format_is_supported(supported_main_formats, ctx->format_main)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported main input format: %s\n",
++               av_get_pix_fmt_name(ctx->format_main));
++        return AVERROR(ENOSYS);
++    }
++
++    for (int i = 1; i < ctx->nb_inputs; i++) {
++        AVFilterLink *inlink_overlay = avctx->inputs[i];
++        FilterLink *inl_overlay = ff_filter_link(inlink_overlay);
++        AVHWFramesContext *frames_ctx_overlay;
++
++        if (!inl_overlay->hw_frames_ctx) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "No hardware frame context on overlay input %d\n", i);
++            return AVERROR(EINVAL);
++        }
++        frames_ctx_overlay =
++            (AVHWFramesContext *)inl_overlay->hw_frames_ctx->data;
++        if (!frames_ctx_overlay->device_ref) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "No CUDA device context on overlay input %d\n", i);
++            return AVERROR(EINVAL);
++        }
++
++        if (!format_is_supported(supported_overlay_formats,
++                                 frames_ctx_overlay->sw_format)) {
++            av_log(ctx, AV_LOG_ERROR, "Unsupported overlay input %d format: %s\n",
++                   i, av_get_pix_fmt_name(frames_ctx_overlay->sw_format));
++            return AVERROR(ENOSYS);
++        }
++
++        if (i == 1)
++            ctx->format_overlay = frames_ctx_overlay->sw_format;
++        else if (ctx->format_overlay != frames_ctx_overlay->sw_format) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "All overlay inputs must use the same software format\n");
++            return AVERROR(EINVAL);
++        }
++
++        if (frames_ctx_overlay->device_ref->data !=
++            frames_ctx_main->device_ref->data) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "Overlay input %d uses a different CUDA device context\n", i);
++            return AVERROR(EINVAL);
++        }
++
++        if (inlink_overlay->w < inlink_main->w ||
++            inlink_overlay->h < inlink_main->h) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "Overlay input %d (%dx%d) is smaller than the main input "
++                   "(%dx%d)\n",
++                   i, inlink_overlay->w, inlink_overlay->h,
++                   inlink_main->w, inlink_main->h);
++            return AVERROR(ENOSYS);
++        }
++    }
++
++    if (!formats_match(ctx->format_main, ctx->format_overlay)) {
++        av_log(ctx, AV_LOG_ERROR, "Cannot overlay %s on %s\n",
++               av_get_pix_fmt_name(ctx->format_overlay),
++               av_get_pix_fmt_name(ctx->format_main));
++        return AVERROR(EINVAL);
++    }
++
++    outlink->w = inlink_main->w;
++    outlink->h = inlink_main->h;
++    outlink->time_base = inlink_main->time_base;
++    outlink->sample_aspect_ratio = inlink_main->sample_aspect_ratio;
++    ff_filter_link(outlink)->frame_rate =
++        ff_filter_link(inlink_main)->frame_rate;
++
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx_main->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext *)ctx->hw_device_ctx->data)->hwctx;
++    ctx->cu_ctx = ctx->hwctx->cuda_ctx;
++    ctx->cu_stream = ctx->hwctx->stream;
++    cu = ctx->hwctx->internal->cuda_dl;
++
++    {
++        int compute_major;
++
++        err = CHECK_CU(cu->cuDeviceGetAttribute(
++            &compute_major,
++            75 /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR */,
++            ctx->hwctx->internal->cuda_device));
++        if (err < 0)
++            return err;
++        if (compute_major < 7) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "overlay_many_cuda requires CUDA compute capability 7.0 "
++                   "or newer\n");
++            return AVERROR(ENOSYS);
++        }
++    }
++
++    {
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
++        AVHWFramesContext *out_ctx;
++
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext *)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = ctx->format_main;
++        out_ctx->width = outlink->w;
++        out_ctx->height = outlink->h;
++
++        err = av_hwframe_ctx_init(out_ref);
++        if (err < 0) {
++            av_buffer_unref(&out_ref);
++            return err;
++        }
++
++        ctx->frames_ctx = out_ref;
++        outl->hw_frames_ctx = av_buffer_ref(ctx->frames_ctx);
++        if (!outl->hw_frames_ctx)
++            return AVERROR(ENOMEM);
++    }
++
++    if (ctx->format_main == AV_PIX_FMT_YUV420P &&
++        ctx->format_overlay == AV_PIX_FMT_YUVA420P)
++        function_name = "OverlayMany420";
++    else if (ctx->format_main == AV_PIX_FMT_YUV444P)
++        function_name = "OverlayMany444";
++    else
++        function_name = "OverlayMany420From444";
++
++    err = CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++    if (err < 0)
++        return err;
++
++    err = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module,
++                              ff_vf_overlay_many_cuda_ptx_data,
++                              ff_vf_overlay_many_cuda_ptx_len);
++    if (err >= 0) {
++        err = CHECK_CU(cu->cuModuleGetFunction(
++            &ctx->cu_func, ctx->cu_module, function_name));
++        if (err < 0)
++            av_log(ctx, AV_LOG_FATAL, "CUDA function %s is unavailable\n",
++                   function_name);
++    }
++
++    {
++        int pop_ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++        if (err >= 0)
++            err = pop_ret;
++    }
++    if (err < 0)
++        return err;
++
++    {
++        FFFrameSync *fs = &ctx->fs;
++
++        err = ff_framesync_init(fs, avctx, ctx->nb_inputs);
++        if (err < 0)
++            return err;
++
++        fs->in[0].time_base = avctx->inputs[0]->time_base;
++        fs->in[0].sync = ctx->nb_inputs;
++        fs->in[0].before = EXT_STOP;
++        fs->in[0].after = EXT_INFINITY;
++
++        for (int i = 1; i < ctx->nb_inputs; i++) {
++            fs->in[i].time_base = avctx->inputs[i]->time_base;
++            fs->in[i].sync = ctx->nb_inputs - i;
++            fs->in[i].before = EXT_NULL;
++            fs->in[i].after = EXT_INFINITY;
++        }
++    }
++
++    return ff_framesync_configure(&ctx->fs);
++}
++
++#define OFFSET(x) offsetof(OverlayManyCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++
++static const AVOption overlay_many_cuda_options[] = {
++    { "inputs", "set number of inputs", OFFSET(nb_inputs), AV_OPT_TYPE_INT,
++        { .i64 = 2 }, 2, MAX_INPUT_COUNT, FLAGS },
++    { "eof_action", "action on secondary input EOF",
++        OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT,
++        { .i64 = EOF_ACTION_REPEAT }, EOF_ACTION_REPEAT, EOF_ACTION_PASS,
++        FLAGS, "eof_action" },
++        { "repeat", "repeat the previous frame", 0, AV_OPT_TYPE_CONST,
++            { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS,
++            .unit = "eof_action" },
++        { "endall", "end both streams", 0, AV_OPT_TYPE_CONST,
++            { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS,
++            .unit = "eof_action" },
++        { "pass", "pass through the main input", 0, AV_OPT_TYPE_CONST,
++            { .i64 = EOF_ACTION_PASS }, .flags = FLAGS,
++            .unit = "eof_action" },
++    { "shortest", "force termination when the shortest input terminates",
++        OFFSET(fs.opt_shortest), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "repeatlast", "repeat the last overlay frame",
++        OFFSET(fs.opt_repeatlast), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
++    { NULL }
++};
++
++FRAMESYNC_DEFINE_CLASS(overlay_many_cuda, OverlayManyCUDAContext, fs);
++
++static const AVFilterPad overlay_many_cuda_outputs[] = {
++    {
++        .name = "default",
++        .type = AVMEDIA_TYPE_VIDEO,
++        .config_props = overlay_many_cuda_config_output,
++    },
++};
++
++const AVFilter ff_vf_overlay_many_cuda = {
++    .name = "overlay_many_cuda",
++    .description = NULL_IF_CONFIG_SMALL(
++        "Overlay multiple videos on top of each other using CUDA"),
++    .priv_size = sizeof(OverlayManyCUDAContext),
++    .priv_class = &overlay_many_cuda_class,
++    .init = overlay_many_cuda_init,
++    .uninit = overlay_many_cuda_uninit,
++    .activate = overlay_many_cuda_activate,
++    FILTER_OUTPUTS(overlay_many_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .preinit = overlay_many_cuda_framesync_preinit,
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_overlay_many_cuda.cu b/libavfilter/vf_overlay_many_cuda.cu
+new file mode 100644
+index 0000000..46d45df
+--- /dev/null
++++ b/libavfilter/vf_overlay_many_cuda.cu
+@@ -0,0 +1,252 @@
++/*
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include "vf_overlay_many_cuda.h"
++
++#if !defined(__CUDACC_VER_MAJOR__) || \
++    (__CUDACC_VER_MAJOR__ < 11) || \
++    (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ < 7)
++#error "overlay_many_cuda requires CUDA Toolkit 11.7 or newer"
++#endif
++
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
++#error "overlay_many_cuda requires compute capability 7.0 or newer"
++#endif
++
++static __device__ __forceinline__ const unsigned char *
++plane_src(const OverlayManyCUDAPlane &plane)
++{
++    return (const unsigned char *)(uintptr_t)plane.ptr;
++}
++
++static __device__ __forceinline__ unsigned char *
++plane_dst(const OverlayManyCUDAPlane &plane)
++{
++    return (unsigned char *)(uintptr_t)plane.ptr;
++}
++
++static __device__ __forceinline__ unsigned int
++load_sample(const OverlayManyCUDAPlane &plane, unsigned int x, unsigned int y)
++{
++    return plane_src(plane)[x + (size_t)y * plane.pitch];
++}
++
++static __device__ __forceinline__ void
++store_sample(const OverlayManyCUDAPlane &plane, unsigned int x, unsigned int y,
++             unsigned int value)
++{
++    plane_dst(plane)[x + (size_t)y * plane.pitch] = (unsigned char)value;
++}
++
++static __device__ __forceinline__ unsigned int
++blend_sample(unsigned int background, unsigned int foreground,
++             unsigned int alpha)
++{
++    unsigned int sum = alpha * foreground + (255U - alpha) * background;
++    unsigned int rounded = sum + 128U;
++
++    /* Exact rounded division by 255 without an integer division. */
++    return (rounded + (rounded >> 8)) >> 8;
++}
++
++static __device__ __forceinline__ unsigned int
++alpha_420(const OverlayManyCUDAFrame &overlay, unsigned int x, unsigned int y,
++          unsigned int width, unsigned int height)
++{
++    const OverlayManyCUDAPlane &alpha = overlay.plane[3];
++    unsigned int sum = load_sample(alpha, x, y);
++    unsigned int count = 1;
++
++    if (x + 1 < width) {
++        sum += load_sample(alpha, x + 1, y);
++        count++;
++    }
++    if (y + 1 < height) {
++        sum += load_sample(alpha, x, y + 1);
++        count++;
++        if (x + 1 < width) {
++            sum += load_sample(alpha, x + 1, y + 1);
++            count++;
++        }
++    }
++
++    return (sum + count / 2) / count;
++}
++
++extern "C" {
++
++__global__ void OverlayMany420(
++    const __grid_constant__ OverlayManyCUDAParams params)
++{
++    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
++    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    if (x >= params.width || y >= params.height)
++        return;
++
++    unsigned int luma = load_sample(params.main.plane[0], x, y);
++
++    for (unsigned int i = 0; i < params.overlay_count; i++) {
++        const OverlayManyCUDAFrame &overlay = params.overlay[i];
++        unsigned int alpha = load_sample(overlay.plane[3], x, y);
++
++        luma = blend_sample(luma, load_sample(overlay.plane[0], x, y), alpha);
++    }
++    store_sample(params.dst.plane[0], x, y, luma);
++
++    if ((x & 1) || (y & 1))
++        return;
++
++    unsigned int cx = x >> 1;
++    unsigned int cy = y >> 1;
++    unsigned int chroma_u = load_sample(params.main.plane[1], cx, cy);
++    unsigned int chroma_v = load_sample(params.main.plane[2], cx, cy);
++
++    for (unsigned int i = 0; i < params.overlay_count; i++) {
++        const OverlayManyCUDAFrame &overlay = params.overlay[i];
++        unsigned int alpha = alpha_420(overlay, x, y,
++                                       params.width, params.height);
++
++        chroma_u = blend_sample(chroma_u,
++                                load_sample(overlay.plane[1], cx, cy), alpha);
++        chroma_v = blend_sample(chroma_v,
++                                load_sample(overlay.plane[2], cx, cy), alpha);
++    }
++
++    store_sample(params.dst.plane[1], cx, cy, chroma_u);
++    store_sample(params.dst.plane[2], cx, cy, chroma_v);
++}
++
++__global__ void OverlayMany444(
++    const __grid_constant__ OverlayManyCUDAParams params)
++{
++    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
++    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    if (x >= params.width || y >= params.height)
++        return;
++
++    unsigned int luma = load_sample(params.main.plane[0], x, y);
++    unsigned int chroma_u = load_sample(params.main.plane[1], x, y);
++    unsigned int chroma_v = load_sample(params.main.plane[2], x, y);
++
++    for (unsigned int i = 0; i < params.overlay_count; i++) {
++        const OverlayManyCUDAFrame &overlay = params.overlay[i];
++        unsigned int alpha = load_sample(overlay.plane[3], x, y);
++
++        luma = blend_sample(luma, load_sample(overlay.plane[0], x, y), alpha);
++        chroma_u = blend_sample(chroma_u,
++                                load_sample(overlay.plane[1], x, y), alpha);
++        chroma_v = blend_sample(chroma_v,
++                                load_sample(overlay.plane[2], x, y), alpha);
++    }
++
++    store_sample(params.dst.plane[0], x, y, luma);
++    store_sample(params.dst.plane[1], x, y, chroma_u);
++    store_sample(params.dst.plane[2], x, y, chroma_v);
++}
++
++__global__ void OverlayMany420From444(
++    const __grid_constant__ OverlayManyCUDAParams params)
++{
++    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
++    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    if (x >= params.width || y >= params.height)
++        return;
++
++    unsigned int luma = load_sample(params.main.plane[0], x, y);
++
++    for (unsigned int i = 0; i < params.overlay_count; i++) {
++        const OverlayManyCUDAFrame &overlay = params.overlay[i];
++        unsigned int alpha = load_sample(overlay.plane[3], x, y);
++
++        luma = blend_sample(luma, load_sample(overlay.plane[0], x, y), alpha);
++    }
++    store_sample(params.dst.plane[0], x, y, luma);
++
++    if ((x & 1) || (y & 1))
++        return;
++
++    unsigned int cx = x >> 1;
++    unsigned int cy = y >> 1;
++    unsigned int base_u = load_sample(params.main.plane[1], cx, cy);
++    unsigned int base_v = load_sample(params.main.plane[2], cx, cy);
++
++    /*
++     * Compose all four 4:4:4 chroma positions independently, then downsample
++     * the final values. Downsampling each layer first changes alpha semantics.
++     */
++    unsigned int u00 = base_u;
++    unsigned int u01 = base_u;
++    unsigned int u10 = base_u;
++    unsigned int u11 = base_u;
++    unsigned int v00 = base_v;
++    unsigned int v01 = base_v;
++    unsigned int v10 = base_v;
++    unsigned int v11 = base_v;
++    bool has_x1 = x + 1 < params.width;
++    bool has_y1 = y + 1 < params.height;
++
++    for (unsigned int i = 0; i < params.overlay_count; i++) {
++        const OverlayManyCUDAFrame &overlay = params.overlay[i];
++        unsigned int alpha = load_sample(overlay.plane[3], x, y);
++
++        u00 = blend_sample(u00, load_sample(overlay.plane[1], x, y), alpha);
++        v00 = blend_sample(v00, load_sample(overlay.plane[2], x, y), alpha);
++
++        if (has_x1) {
++            alpha = load_sample(overlay.plane[3], x + 1, y);
++            u01 = blend_sample(u01,
++                               load_sample(overlay.plane[1], x + 1, y), alpha);
++            v01 = blend_sample(v01,
++                               load_sample(overlay.plane[2], x + 1, y), alpha);
++        }
++
++        if (has_y1) {
++            alpha = load_sample(overlay.plane[3], x, y + 1);
++            u10 = blend_sample(u10,
++                               load_sample(overlay.plane[1], x, y + 1), alpha);
++            v10 = blend_sample(v10,
++                               load_sample(overlay.plane[2], x, y + 1), alpha);
++
++            if (has_x1) {
++                alpha = load_sample(overlay.plane[3], x + 1, y + 1);
++                u11 = blend_sample(
++                    u11, load_sample(overlay.plane[1], x + 1, y + 1), alpha);
++                v11 = blend_sample(
++                    v11, load_sample(overlay.plane[2], x + 1, y + 1), alpha);
++            }
++        }
++    }
++
++    unsigned int sample_count = (1U + has_x1) * (1U + has_y1);
++    unsigned int sum_u = u00 + (has_x1 ? u01 : 0) +
++                         (has_y1 ? u10 : 0) +
++                         (has_x1 && has_y1 ? u11 : 0);
++    unsigned int sum_v = v00 + (has_x1 ? v01 : 0) +
++                         (has_y1 ? v10 : 0) +
++                         (has_x1 && has_y1 ? v11 : 0);
++
++    store_sample(params.dst.plane[1], cx, cy,
++                 (sum_u + sample_count / 2) / sample_count);
++    store_sample(params.dst.plane[2], cx, cy,
++                 (sum_v + sample_count / 2) / sample_count);
++}
++
++} /* extern "C" */
+diff --git a/libavfilter/vf_overlay_many_cuda.h b/libavfilter/vf_overlay_many_cuda.h
+new file mode 100644
+index 0000000..4f42b88
+--- /dev/null
++++ b/libavfilter/vf_overlay_many_cuda.h
+@@ -0,0 +1,68 @@
++/*
++ * CUDA overlay-many launch descriptor
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#ifndef AVFILTER_VF_OVERLAY_MANY_CUDA_H
++#define AVFILTER_VF_OVERLAY_MANY_CUDA_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define OVERLAY_MANY_CUDA_MAX_OVERLAYS 15
++
++typedef struct OverlayManyCUDAPlane {
++    uint64_t ptr;
++    uint32_t pitch;
++    uint32_t reserved;
++} OverlayManyCUDAPlane;
++
++typedef struct OverlayManyCUDAFrame {
++    OverlayManyCUDAPlane plane[4];
++} OverlayManyCUDAFrame;
++
++typedef struct OverlayManyCUDAParams {
++    OverlayManyCUDAFrame dst;
++    OverlayManyCUDAFrame main;
++    uint32_t width;
++    uint32_t height;
++    uint32_t overlay_count;
++    uint32_t reserved;
++    OverlayManyCUDAFrame overlay[OVERLAY_MANY_CUDA_MAX_OVERLAYS];
++} OverlayManyCUDAParams;
++
++#ifdef __CUDACC__
++#define OVERLAY_MANY_CUDA_STATIC_ASSERT static_assert
++#else
++#define OVERLAY_MANY_CUDA_STATIC_ASSERT _Static_assert
++#endif
++
++OVERLAY_MANY_CUDA_STATIC_ASSERT(sizeof(OverlayManyCUDAPlane) == 16,
++                                "unexpected CUDA plane descriptor layout");
++OVERLAY_MANY_CUDA_STATIC_ASSERT(sizeof(uintptr_t) <= sizeof(uint64_t),
++                                "CUDA device pointers do not fit the descriptor");
++OVERLAY_MANY_CUDA_STATIC_ASSERT(sizeof(OverlayManyCUDAFrame) == 64,
++                                "unexpected CUDA frame descriptor layout");
++OVERLAY_MANY_CUDA_STATIC_ASSERT(offsetof(OverlayManyCUDAParams, overlay) == 144,
++                                "unexpected CUDA overlay array offset");
++OVERLAY_MANY_CUDA_STATIC_ASSERT(sizeof(OverlayManyCUDAParams) == 1104,
++                                "unexpected CUDA launch parameter size");
++
++#undef OVERLAY_MANY_CUDA_STATIC_ASSERT
++
++#endif /* AVFILTER_VF_OVERLAY_MANY_CUDA_H */
+diff --git a/libavfilter/vf_pad_cuda.c b/libavfilter/vf_pad_cuda.c
+new file mode 100644
+index 0000000..7daa227
+--- /dev/null
++++ b/libavfilter/vf_pad_cuda.c
+@@ -0,0 +1,538 @@
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++#include "libavutil/eval.h"
++#include "libavutil/colorspace.h"
++
++#include "avfilter.h"
++#include "formats.h"
++#include "avfilter_internal.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++
++#define BLOCK_X 32
++#define BLOCK_Y 16
++
++enum var_name {
++    VAR_IN_W,   VAR_IW,
++    VAR_IN_H,   VAR_IH,
++    VAR_OUT_W,  VAR_OW,
++    VAR_OUT_H,  VAR_OH,
++    VAR_X,
++    VAR_Y,
++    VAR_A,
++    VAR_SAR,
++    VAR_DAR,
++    VARS_NB
++};
++
++static const char *const var_names[] = {
++    "in_w",   "iw",
++    "in_h",   "ih",
++    "out_w",  "ow",
++    "out_h",  "oh",
++    "x",
++    "y",
++    "a",
++    "sar",
++    "dar",
++    NULL
++};
++
++static enum AVPixelFormat supported_formats[] = {
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVA444P,
++};
++
++#define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
++#define BLOCKX 32
++#define BLOCKY 16
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, cu, x)
++
++typedef struct PadCUDAContext {
++    const AVClass *class;
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++    
++    AVBufferRef *frames_ctx;
++    AVFrame *frame;
++    AVFrame *tmp_frame;
++
++    CUmodule cu_module;
++    CUfunction cu_func;
++    CUstream cu_stream;
++
++    enum AVPixelFormat sw_format;
++
++    char *w_expr, *h_expr, *x_expr, *y_expr;
++    AVRational aspect;
++    int w, h, x, y;
++    uint8_t pad_rgba[4];
++    uint8_t pad_color[4];
++} PadCUDAContext;
++
++
++
++static int format_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++)
++        if (supported_formats[i] == fmt)
++            return 1;
++    return 0;
++}
++
++static av_cold int pad_cuda_init(AVFilterContext *avctx)
++{
++    PadCUDAContext *ctx = avctx->priv;
++
++    ctx->frame = av_frame_alloc();
++    if (!ctx->frame)
++        return AVERROR(ENOMEM);
++
++    ctx->tmp_frame = av_frame_alloc();
++    if (!ctx->tmp_frame)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static av_cold void pad_cuda_uninit(AVFilterContext *avctx)
++{
++    PadCUDAContext *ctx = avctx->priv;
++
++    if (ctx->hwctx && ctx->cu_module) {
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++        CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    av_frame_free(&ctx->frame);
++    av_buffer_unref(&ctx->hw_device_ctx);
++    av_buffer_unref(&ctx->frames_ctx);
++    av_frame_free(&ctx->tmp_frame);
++		ctx->hwctx = NULL;
++}
++
++static av_cold int pad_cuda_output_config_props(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_pad_cuda_ptx_data[];
++    extern const unsigned int ff_vf_pad_cuda_ptx_len;
++
++    FilterLink       *outl = ff_filter_link(outlink);
++    AVFilterContext *avctx = outlink->src;
++    AVFilterLink *inlink = outlink->src->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    PadCUDAContext *ctx  = avctx->priv;
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
++    
++    AVRational adjusted_aspect = ctx->aspect;
++    double var_values[VARS_NB], res;
++    int err, ret;
++    
++    if (!frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->sw_format = frames_ctx->sw_format;
++    if (!format_is_supported(ctx->sw_format)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s\n",
++               av_get_pix_fmt_name(ctx->sw_format));
++        return AVERROR(ENOSYS);
++    }
++
++    // initialize
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext*)frames_ctx->device_ref->data)->hwctx;
++    ctx->cu_stream = ctx->hwctx->stream;
++
++    // load functions
++    {
++        CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        err = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++        if (err < 0) {
++            return err;
++        }
++
++        err = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module, ff_vf_pad_cuda_ptx_data, ff_vf_pad_cuda_ptx_len);
++        if (err < 0) {
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return err;
++        }
++
++        err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func, ctx->cu_module, "Pad_Cuda"));
++        if (err < 0) {
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++            return err;
++        }
++
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    // process filter parameters
++    {
++        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(ctx->sw_format);
++
++        var_values[VAR_IN_W]  = var_values[VAR_IW] = inlink->w;
++        var_values[VAR_IN_H]  = var_values[VAR_IH] = inlink->h;
++        var_values[VAR_OUT_W] = var_values[VAR_OW] = NAN;
++        var_values[VAR_OUT_H] = var_values[VAR_OH] = NAN;
++        var_values[VAR_A]     = (double) inlink->w / inlink->h;
++        var_values[VAR_SAR]   = inlink->sample_aspect_ratio.num ?
++            (double) inlink->sample_aspect_ratio.num / inlink->sample_aspect_ratio.den : 1;
++        var_values[VAR_DAR]   = var_values[VAR_A] * var_values[VAR_SAR];
++
++        av_expr_parse_and_eval(&res, ctx->w_expr,
++                            var_names, var_values,
++                            NULL, NULL, NULL, NULL, NULL, 0, ctx);
++        ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = res;
++        if ((ret = av_expr_parse_and_eval(&res, ctx->h_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = res;
++        if (!ctx->h)
++            var_values[VAR_OUT_H] = var_values[VAR_OH] = ctx->h = inlink->h;
++
++        /* evaluate the width again, as it may depend on the evaluated output height */
++        if ((ret = av_expr_parse_and_eval(&res, ctx->w_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = res;
++        if (!ctx->w)
++            var_values[VAR_OUT_W] = var_values[VAR_OW] = ctx->w = inlink->w;
++
++        if (adjusted_aspect.num && adjusted_aspect.den) {
++            adjusted_aspect = av_div_q(adjusted_aspect, inlink->sample_aspect_ratio);
++            if (ctx->h < av_rescale(ctx->w, adjusted_aspect.den, adjusted_aspect.num)) {
++                ctx->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = av_rescale(ctx->w, adjusted_aspect.den, adjusted_aspect.num);
++            } else {
++                ctx->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = av_rescale(ctx->h, adjusted_aspect.num, adjusted_aspect.den);
++            }
++        }
++
++        /* evaluate x and y */
++        av_expr_parse_and_eval(&res, ctx->x_expr,
++                            var_names, var_values,
++                            NULL, NULL, NULL, NULL, NULL, 0, ctx);
++        ctx->x = var_values[VAR_X] = res;
++        if ((ret = av_expr_parse_and_eval(&res, ctx->y_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->y = var_values[VAR_Y] = res;
++        /* evaluate x again, as it may depend on the evaluated y value */
++        if ((ret = av_expr_parse_and_eval(&res, ctx->x_expr,
++                                        var_names, var_values,
++                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        ctx->x = var_values[VAR_X] = res;
++
++        if (ctx->x < 0 || ctx->x + inlink->w > ctx->w)
++            ctx->x = var_values[VAR_X] = (ctx->w - inlink->w) / 2;
++        if (ctx->y < 0 || ctx->y + inlink->h > ctx->h)
++            ctx->y = var_values[VAR_Y] = (ctx->h - inlink->h) / 2;
++
++        /* sanity check params */
++        if (ctx->w < inlink->w || ctx->h < inlink->h) {
++            av_log(ctx, AV_LOG_ERROR, "Padded dimensions cannot be smaller than input dimensions.\n");
++            return AVERROR(EINVAL);
++        }
++
++        // Align x, y offsets between planes
++        ctx->x &= ~((1 << desc->log2_chroma_w) - 1);
++        ctx->y &= ~((1 << desc->log2_chroma_h) - 1);
++
++        ctx->pad_color[0] = RGB_TO_Y_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2]);
++        ctx->pad_color[1] = RGB_TO_U_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2], 0);
++        ctx->pad_color[2] = RGB_TO_V_BT709(ctx->pad_rgba[0], ctx->pad_rgba[1], ctx->pad_rgba[2], 0);
++        ctx->pad_color[3] = ctx->pad_rgba[3];
++    }
++
++
++    outlink->w = ctx->w;
++    outlink->h = ctx->h;
++
++
++    // prepare output buffer
++    {
++        AVHWFramesContext *out_ctx;
++        AVBufferRef *out_ref = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
++        if (!out_ref)
++            return AVERROR(ENOMEM);
++
++        out_ctx = (AVHWFramesContext*)out_ref->data;
++        out_ctx->format = AV_PIX_FMT_CUDA;
++        out_ctx->sw_format = ctx->sw_format;
++        out_ctx->width = FFALIGN(ctx->w, 32);
++        out_ctx->height = FFALIGN(ctx->h, 32);
++        
++        ret = av_hwframe_ctx_init(out_ref);
++        if (ret < 0)
++            goto output_buffer_fail;
++
++        av_frame_unref(ctx->frame);
++        ret = av_hwframe_get_buffer(out_ref, ctx->frame, 0);
++        if (ret < 0)
++            goto output_buffer_fail;
++        
++        ctx->frame->width = ctx->w;
++        ctx->frame->height = ctx->h;
++
++        ctx->frames_ctx = out_ref;
++
++        if (ret < 0) {
++output_buffer_fail:
++            av_buffer_unref(&out_ref);
++            return ret;
++        }
++
++	outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++	if (!outl->hw_frames_ctx) {
++            return AVERROR(ENOMEM);
++        }
++    }
++
++    return 0;
++}
++
++static int pad_cuda_call_kernel(
++    PadCUDAContext *ctx,
++    uint8_t *main_data, int main_linesize,
++    int main_width, int main_height,
++    uint8_t *overlay_data, int overlay_linesize,
++    int overlay_width, int overlay_height,
++    int offset_x, int offset_y,
++    uint8_t fill_color1, uint8_t fill_color2) {
++
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    void* kernel_args[] = {
++        &main_data, &main_linesize,
++        &overlay_data, &overlay_linesize,
++        &overlay_width, &overlay_height,
++        &offset_x, &offset_y,
++        &fill_color1, &fill_color2
++    };
++
++    return CHECK_CU(cu->cuLaunchKernel(
++        ctx->cu_func,
++        DIV_UP(main_width, BLOCK_X), DIV_UP(main_height, BLOCK_Y), 1,
++        BLOCK_X, BLOCK_Y, 1,
++        0, ctx->cu_stream, kernel_args, NULL));
++}
++
++static int pad_cuda_fill_buffers(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
++{
++    PadCUDAContext *ctx = avctx->priv;
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUcontext cuda_ctx = ctx->hwctx->cuda_ctx;
++    CUcontext dummy;
++    int ret;
++    uint8_t color_y = ctx->pad_color[0];
++    uint8_t color_u = ctx->pad_color[1];
++    uint8_t color_v = ctx->pad_color[2];
++    uint8_t color_a = ctx->pad_color[3];
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++    if (ret < 0)
++        return ret;
++
++    // overlay first plane
++    pad_cuda_call_kernel(ctx,
++        out->data[0], out->linesize[0],
++        out->width, out->height,
++        in->data[0], in->linesize[0],
++        in->width, in->height,
++        ctx->x, ctx->y,
++        color_y, color_y);
++
++    // overlay color offset planes depending on the pixel format
++    switch(ctx->sw_format) {
++    case AV_PIX_FMT_NV12:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width, out->height / 2,
++            in->data[1], in->linesize[1],
++            in->width, in->height / 2,
++            ctx->x, ctx->y / 2,
++            color_u, color_v);
++        break;
++
++    case AV_PIX_FMT_YUV420P:
++    case AV_PIX_FMT_YUVA420P:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width / 2, out->height / 2,
++            in->data[1], in->linesize[1],
++            in->width / 2, in->height / 2,
++            ctx->x / 2, ctx->y / 2,
++            color_u, color_u);
++        pad_cuda_call_kernel(ctx,
++            out->data[2], out->linesize[2],
++            out->width / 2, out->height / 2,
++            in->data[2], in->linesize[2],
++            in->width / 2, in->height / 2,
++            ctx->x / 2, ctx->y / 2,
++            color_v, color_v);
++        break;
++
++    case AV_PIX_FMT_YUV444P:
++    case AV_PIX_FMT_YUVA444P:
++        pad_cuda_call_kernel(ctx,
++            out->data[1], out->linesize[1],
++            out->width, out->height,
++            in->data[1], in->linesize[1],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_u, color_u);
++        pad_cuda_call_kernel(ctx,
++            out->data[2], out->linesize[2],
++            out->width, out->height,
++            in->data[2], in->linesize[2],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_v, color_v);
++        break;
++
++    default:
++        av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
++        av_frame_free(&out);
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return AVERROR_BUG;
++    }
++
++    if (in->data[3]) {
++        pad_cuda_call_kernel(ctx,
++            out->data[3], out->linesize[3],
++            out->width, out->height,
++            in->data[3], in->linesize[3],
++            in->width, in->height,
++            ctx->x, ctx->y,
++            color_a, color_a);
++    }
++    
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    return 0;
++}
++
++static int pad_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
++{
++    AVFilterContext *avctx = link->dst;
++    PadCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    AVFrame *out = NULL;
++    CUcontext dummy;
++    int ret = 0;
++
++    out = av_frame_alloc();
++    if (!out) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->hwctx->cuda_ctx));
++    if (ret < 0)
++        goto fail;
++
++    // fill and prepare the output frame
++    {
++        ret = pad_cuda_fill_buffers(avctx, ctx->frame, in);
++        if (ret < 0)
++            return ret;
++
++        ret = av_hwframe_get_buffer(ctx->frame->hw_frames_ctx, ctx->tmp_frame, 0);
++        if (ret < 0)
++            return ret;
++
++        av_frame_move_ref(out, ctx->frame);
++        av_frame_move_ref(ctx->frame, ctx->tmp_frame);
++
++        ctx->frame->width  = outlink->w;
++        ctx->frame->height = outlink->h;
++
++        ret = av_frame_copy_props(out, in);
++        if (ret < 0)
++            return ret;
++    }
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    if (ret < 0)
++        goto fail;
++
++    av_reduce(&out->sample_aspect_ratio.num, &out->sample_aspect_ratio.den,
++              (int64_t)in->sample_aspect_ratio.num * outlink->h * link->w,
++              (int64_t)in->sample_aspect_ratio.den * outlink->w * link->h,
++              INT_MAX);
++
++    av_frame_free(&in);
++    return ff_filter_frame(outlink, out);
++fail:
++    av_frame_free(&in);
++    av_frame_free(&out);
++    return ret;
++}
++
++
++
++#define OFFSET(x) offsetof(PadCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM)
++
++static const AVOption pad_cuda_options[] = {
++    { "width",  "set the pad area width",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
++    { "w",      "set the pad area width",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
++    { "height", "set the pad area height",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
++    { "h",      "set the pad area height",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
++    { "x",      "set the x offset for the input image position", OFFSET(x_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, INT16_MAX, FLAGS },
++    { "y",      "set the y offset for the input image position", OFFSET(y_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, INT16_MAX, FLAGS },
++    { "color",  "set the color of the padded area border", OFFSET(pad_rgba), AV_OPT_TYPE_COLOR, { .str = "black" }, 0, 0, FLAGS },
++    { "aspect", "pad to fit an aspect instead of a resolution", OFFSET(aspect), AV_OPT_TYPE_RATIONAL, {.dbl = 0}, 0, INT16_MAX, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(pad_cuda);
++
++static const AVFilterPad pad_cuda_inputs[] = {
++    {
++        .name        = "default",
++        .type        = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = pad_cuda_filter_frame,
++    },
++};
++
++static const AVFilterPad pad_cuda_outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = pad_cuda_output_config_props,
++    },
++};
++
++const AVFilter ff_vf_pad_cuda = {
++    .name = "pad_cuda",
++    .description = NULL_IF_CONFIG_SMALL("Pad CUDA accelerated video using solid color"),
++    .priv_size = sizeof(PadCUDAContext),
++    .priv_class = &pad_cuda_class,
++    .init = pad_cuda_init,
++    .uninit = pad_cuda_uninit,
++    FILTER_INPUTS(pad_cuda_inputs),
++    FILTER_OUTPUTS(pad_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_pad_cuda.cu b/libavfilter/vf_pad_cuda.cu
+new file mode 100644
+index 0000000..62f7988
+--- /dev/null
++++ b/libavfilter/vf_pad_cuda.cu
+@@ -0,0 +1,37 @@
++extern "C" {
++
++__global__ void Pad_Cuda(
++    unsigned char* main, int main_linesize,
++    unsigned char* overlay, int overlay_linesize,
++    int overlay_w, int overlay_h,
++    int offset_x, int offset_y,
++    unsigned char fill_color1, unsigned char fill_color2)
++{
++    //
++    // We pass two colors to handle NV12 plane with interleaved UV.
++    // So fill_color1 would correspond to U and fill_color2 to V.
++    // For other formats both fill_colors should be the same.
++    //
++    unsigned char color[2] = {fill_color1, fill_color2};
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    unsigned char *m = &main[x + y*main_linesize];
++
++    if (x < offset_x ||
++        y < offset_y ||
++        x >= overlay_w + offset_x ||
++        y >= overlay_h + offset_y)
++    {
++        // Picking colors[0] for even value of x; and colors[1] for odd value of x;
++        *m = color[x & 1];
++    }
++    else
++    {
++        int overlay_x = x - offset_x;
++        int overlay_y = y - offset_y;
++        *m = overlay[overlay_x + overlay_y*overlay_linesize];
++    }
++}
++
++}
+diff --git a/libavfilter/vf_scale_cuda.c b/libavfilter/vf_scale_cuda.c
+index 54a3409..2db84dd 100644
+--- a/libavfilter/vf_scale_cuda.c
++++ b/libavfilter/vf_scale_cuda.c
+@@ -446,6 +446,11 @@ static int scalecuda_resize(AVFilterContext *ctx,
+ 
+     for (i = 0; i < s->in_planes; i++) {
+         CUDA_TEXTURE_DESC tex_desc = {
++            .addressMode = {
++                CU_TR_ADDRESS_MODE_CLAMP,
++                CU_TR_ADDRESS_MODE_CLAMP,
++                CU_TR_ADDRESS_MODE_CLAMP,
++            },
+             .filterMode = s->interp_use_linear ?
+                           CU_TR_FILTER_MODE_LINEAR :
+                           CU_TR_FILTER_MODE_POINT,
+diff --git a/libavfilter/vf_scale_cuda.cu b/libavfilter/vf_scale_cuda.cu
+index de06ba9..414649e 100644
+--- a/libavfilter/vf_scale_cuda.cu
++++ b/libavfilter/vf_scale_cuda.cu
+@@ -1013,24 +1013,29 @@ struct Convert_rgb0_rgba
+ 
+ typedef float4 (*coeffs_function_t)(float, float);
+ 
+-__device__ static inline float4 lanczos_coeffs(float x, float param)
++__device__ static inline float lanczos_sinc(float x)
+ {
+     const float pi = 3.141592654f;
+ 
++    if (fabsf(x) < 1.0e-5f)
++        return 1.0f;
++
++    x *= pi;
++    return __sinf(x) / x;
++}
++
++__device__ static inline float lanczos_kernel(float x)
++{
++    return lanczos_sinc(x) * lanczos_sinc(x / 2.0f);
++}
++
++__device__ static inline float4 lanczos_coeffs(float x, float param)
++{
+     float4 res = make_float4(
+-        pi * (x + 1),
+-        pi * x,
+-        pi * (x - 1),
+-        pi * (x - 2));
+-
+-    res.x = res.x == 0.0f ? 1.0f :
+-        __sinf(res.x) * __sinf(res.x / 2.0f) / (res.x * res.x / 2.0f);
+-    res.y = res.y == 0.0f ? 1.0f :
+-        __sinf(res.y) * __sinf(res.y / 2.0f) / (res.y * res.y / 2.0f);
+-    res.z = res.z == 0.0f ? 1.0f :
+-        __sinf(res.z) * __sinf(res.z / 2.0f) / (res.z * res.z / 2.0f);
+-    res.w = res.w == 0.0f ? 1.0f :
+-        __sinf(res.w) * __sinf(res.w / 2.0f) / (res.w * res.w / 2.0f);
++        lanczos_kernel(x + 1),
++        lanczos_kernel(x),
++        lanczos_kernel(x - 1),
++        lanczos_kernel(x - 2));
+ 
+     return res / (res.x + res.y + res.z + res.w);
+ }
+@@ -1059,6 +1064,71 @@ __device__ static inline V apply_coeffs(float4 coeffs, V c0, V c1, V c2, V c3)
+     return res;
+ }
+ 
++__device__ static inline float clamp_texture_coord(float v, int size)
++{
++    return fminf(fmaxf(v, 0.0f), (float)(size - 1));
++}
++
++__device__ static inline uchar clip_float_to_uchar(float v)
++{
++    return (uchar)fminf(fmaxf(v, 0.0f), 255.0f);
++}
++
++__device__ static inline ushort clip_float_to_ushort(float v)
++{
++    return (ushort)fminf(fmaxf(v, 0.0f), 65535.0f);
++}
++
++template<typename T, typename V>
++__device__ static inline T from_scaled_floatN(const V &v)
++{
++    return from_floatN<T, V>(v);
++}
++
++template<>
++__device__ inline uchar from_scaled_floatN<uchar, float>(const float &v)
++{
++    return clip_float_to_uchar(v);
++}
++
++template<>
++__device__ inline uchar2 from_scaled_floatN<uchar2, float2>(const float2 &v)
++{
++    return make_uchar2(clip_float_to_uchar(v.x),
++                       clip_float_to_uchar(v.y));
++}
++
++template<>
++__device__ inline uchar4 from_scaled_floatN<uchar4, float4>(const float4 &v)
++{
++    return make_uchar4(clip_float_to_uchar(v.x),
++                       clip_float_to_uchar(v.y),
++                       clip_float_to_uchar(v.z),
++                       clip_float_to_uchar(v.w));
++}
++
++template<>
++__device__ inline ushort from_scaled_floatN<ushort, float>(const float &v)
++{
++    return clip_float_to_ushort(v);
++}
++
++template<>
++__device__ inline ushort2 from_scaled_floatN<ushort2, float2>(const float2 &v)
++{
++    return make_ushort2(clip_float_to_ushort(v.x),
++                        clip_float_to_ushort(v.y));
++}
++
++template<>
++__device__ inline ushort4 from_scaled_floatN<ushort4, float4>(const float4 &v)
++{
++    return make_ushort4(clip_float_to_ushort(v.x),
++                        clip_float_to_ushort(v.y),
++                        clip_float_to_ushort(v.z),
++                        clip_float_to_ushort(v.w));
++}
++
+ template<typename T>
+ __device__ static inline T Subsample_Nearest(cudaTextureObject_t tex,
+                                              int xo, int yo,
+@@ -1126,9 +1196,11 @@ __device__ static inline T Subsample_Bicubic(cudaTextureObject_t tex,
+     float4 coeffsX = coeffs_function(fx, param);
+     float4 coeffsY = coeffs_function(fy, param);
+ 
+-#define PIX(x, y) tex2D<floatT>(tex, (x), (y))
++#define PIX(x, y) tex2D<floatT>(tex, \
++                                clamp_texture_coord((x), src_width), \
++                                clamp_texture_coord((y), src_height))
+ 
+-    return from_floatN<T, floatT>(
++    return from_scaled_floatN<T>(
+         apply_coeffs<floatT>(coeffsY,
+             apply_coeffs<floatT>(coeffsX, PIX(px - 1, py - 1), PIX(px, py - 1), PIX(px + 1, py - 1), PIX(px + 2, py - 1)),
+             apply_coeffs<floatT>(coeffsX, PIX(px - 1, py    ), PIX(px, py    ), PIX(px + 1, py    ), PIX(px + 2, py    )),
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+new file mode 100644
+index 0000000..44a198f
+--- /dev/null
++++ b/libavfilter/vf_transition_cuda.c
+@@ -0,0 +1,621 @@
++/*
++ * Copyright (c) 2020 Yaroslav Pogrebnyak <yyyaroslav@gmail.com>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Overlay one video on top of another or transition between them using cuda hardware acceleration
++ */
++
++#include "libavutil/log.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/eval.h"
++
++#include "avfilter.h"
++#include "framesync.h"
++#include "avfilter_internal.h"
++
++#include "cuda/load_helper.h"
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, ctx->hwctx->internal->cuda_dl, x)
++#define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
++
++#define BLOCK_X 32
++#define BLOCK_Y 16
++
++#define MAIN    0
++#define OVERLAY 1
++
++static const enum AVPixelFormat supported_main_formats[] = {
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_NONE,
++};
++
++static const enum AVPixelFormat supported_overlay_formats[] = {
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_NONE,
++};
++
++enum var_name {
++    VAR_MAIN_W,    VAR_MW,
++    VAR_MAIN_H,    VAR_MH,
++    VAR_OVERLAY_W, VAR_OW,
++    VAR_OVERLAY_H, VAR_OH,
++    VAR_ALPHA,
++    VAR_N,
++    VAR_POS,
++    VAR_T,
++    VAR_VARS_NB
++};
++
++enum EvalMode {
++    EVAL_MODE_INIT,
++    EVAL_MODE_FRAME,
++    EVAL_MODE_NB
++};
++
++enum TransitionMode {
++    TRANSITION_MODE_FADE,
++    TRANSITION_MODE_WIPE_LEFT,
++    TRANSITION_MODE_WIPE_RIGHT,
++    TRANSITION_MODE_WIPE_DOWN,
++    TRANSITION_MODE_WIPE_UP,
++    TRANSITION_MODE_NB
++};
++
++static const char *const var_names[] = {
++    "main_w",    "W", ///< width  of the main    video
++    "main_h",    "H", ///< height of the main    video
++    "overlay_w", "w", ///< width  of the overlay video
++    "overlay_h", "h", ///< height of the overlay video
++    "alpha",
++    "n",            ///< number of frame
++    "pos",          ///< position in the file
++    "t",            ///< timestamp expressed in seconds
++    NULL
++};
++
++/**
++ * TransitionCUDAContext
++ */
++typedef struct TransitionCUDAContext {
++    const AVClass      *class;
++
++    enum AVPixelFormat in_format_overlay;
++    enum AVPixelFormat in_format_main;
++
++    AVBufferRef *hw_device_ctx;
++    AVCUDADeviceContext *hwctx;
++
++    CUcontext cu_ctx;
++    CUmodule cu_module;
++    CUfunction cu_func;
++    CUstream cu_stream;
++
++    FFFrameSync fs;
++
++    int eval_mode;
++    int transition_mode;
++    float alpha_coef;
++
++    double var_values[VAR_VARS_NB];
++    char *alpha_expr;
++
++    AVExpr *alpha_pexpr;
++} TransitionCUDAContext;
++
++/**
++ * Helper to find out if provided format is supported by filter
++ */
++static int format_is_supported(const enum AVPixelFormat formats[], enum AVPixelFormat fmt)
++{
++    for (int i = 0; formats[i] != AV_PIX_FMT_NONE; i++)
++        if (formats[i] == fmt)
++            return 1;
++    return 0;
++}
++
++static void eval_expr(AVFilterContext *ctx)
++{
++    TransitionCUDAContext *s = ctx->priv;
++
++    s->var_values[VAR_ALPHA] = av_expr_eval(s->alpha_pexpr, s->var_values, NULL);
++    s->alpha_coef = (float)s->var_values[VAR_ALPHA];
++
++    if (isnan(s->alpha_coef) || s->alpha_coef > 1.f)
++        s->alpha_coef = 1.f;
++
++    if (s->alpha_coef < 0.f)
++        s->alpha_coef = 0.f;
++}
++
++static int set_expr(AVExpr **pexpr, const char *expr, const char *option, void *log_ctx)
++{
++    int ret;
++    AVExpr *old = NULL;
++
++    if (*pexpr)
++        old = *pexpr;
++    ret = av_expr_parse(pexpr, expr, var_names,
++                        NULL, NULL, NULL, NULL, 0, log_ctx);
++    if (ret < 0) {
++        av_log(log_ctx, AV_LOG_ERROR,
++               "Error when evaluating the expression '%s' for %s\n",
++               expr, option);
++        *pexpr = old;
++        return ret;
++    }
++
++    av_expr_free(old);
++    return 0;
++}
++
++/**
++ * Helper checks if we can process main and overlay pixel formats
++ */
++static int formats_match(const enum AVPixelFormat format_main, const enum AVPixelFormat format_overlay) {
++    switch(format_main) {
++    case AV_PIX_FMT_NV12:
++        return format_overlay == AV_PIX_FMT_NV12;
++    case AV_PIX_FMT_YUV420P:
++        return format_overlay == AV_PIX_FMT_YUV420P ||
++               format_overlay == AV_PIX_FMT_YUVA420P;
++    default:
++        return 0;
++    }
++}
++
++/**
++ * Call transition kernell for a plane
++ */
++static int transition_cuda_call_kernel(
++    TransitionCUDAContext *ctx,
++    uint8_t* main_data, int main_linesize,
++    int main_width, int main_height,
++    uint8_t* overlay_data, int overlay_linesize,
++    int overlay_width, int overlay_height,
++    uint8_t* alpha_data, int alpha_linesize,
++    int alpha_adj_x, int alpha_adj_y,
++    float alpha_coef,
++    int transition_mode) {
++
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    void* kernel_args[] = {
++        &main_data, &main_linesize,
++        &overlay_data, &overlay_linesize,
++        &overlay_width, &overlay_height,
++        &alpha_data, &alpha_linesize,
++        &alpha_adj_x, &alpha_adj_y,
++        &alpha_coef,
++        &transition_mode
++    };
++
++    return CHECK_CU(cu->cuLaunchKernel(
++        ctx->cu_func,
++        DIV_UP(main_width, BLOCK_X), DIV_UP(main_height, BLOCK_Y), 1,
++        BLOCK_X, BLOCK_Y, 1,
++        0, ctx->cu_stream, kernel_args, NULL));
++}
++
++/**
++ * Perform blend overlay picture over main picture
++ */
++static int transition_cuda_blend(FFFrameSync *fs)
++{
++    int ret;
++
++    AVFilterContext *avctx = fs->parent;
++    TransitionCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    AVFilterLink *inlink = avctx->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUcontext dummy, cuda_ctx = ctx->hwctx->cuda_ctx;
++
++    AVFrame *input_main, *input_overlay;
++
++    ctx->cu_ctx = cuda_ctx;
++
++    // read main and overlay frames from inputs
++    ret = ff_framesync_dualinput_get(fs, &input_main, &input_overlay);
++    if (ret < 0)
++        return ret;
++
++    if (!input_main)
++        return AVERROR_BUG;
++
++    if (!input_overlay)
++        return ff_filter_frame(outlink, input_main);
++
++    ret = av_frame_make_writable(input_main);
++    if (ret < 0) {
++        av_frame_free(&input_main);
++        return ret;
++    }
++
++    // push cuda context
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++    if (ret < 0) {
++        av_frame_free(&input_main);
++        return ret;
++    }
++
++    if (ctx->eval_mode == EVAL_MODE_FRAME) {
++        int pos = input_main->pkt_pos;
++        ctx->var_values[VAR_N] = inl->frame_count_out;
++        ctx->var_values[VAR_T] = input_main->pts == AV_NOPTS_VALUE ?
++            NAN : input_main->pts * av_q2d(inlink->time_base);
++        ctx->var_values[VAR_POS] = pos == -1 ? NAN : pos;
++        ctx->var_values[VAR_OVERLAY_W] = ctx->var_values[VAR_OW] = input_overlay->width;
++        ctx->var_values[VAR_OVERLAY_H] = ctx->var_values[VAR_OH] = input_overlay->height;
++        ctx->var_values[VAR_MAIN_W   ] = ctx->var_values[VAR_MW] = input_main->width;
++        ctx->var_values[VAR_MAIN_H   ] = ctx->var_values[VAR_MH] = input_main->height;
++
++        eval_expr(avctx);
++
++        av_log(avctx, AV_LOG_DEBUG, "n:%f t:%f pos:%f alpha: %f\n",
++               ctx->var_values[VAR_N], ctx->var_values[VAR_T], ctx->var_values[VAR_POS],
++               ctx->alpha_coef);
++    }
++
++    // overlay first plane
++
++    transition_cuda_call_kernel(ctx,
++        input_main->data[0], input_main->linesize[0],
++        input_main->width, input_main->height,
++        input_overlay->data[0], input_overlay->linesize[0],
++        input_overlay->width, input_overlay->height,
++        input_overlay->data[3], input_overlay->linesize[3], 1, 1,
++        ctx->alpha_coef, ctx->transition_mode);
++
++    // overlay rest planes depending on pixel format
++
++    switch(ctx->in_format_overlay) {
++    case AV_PIX_FMT_NV12:
++        transition_cuda_call_kernel(ctx,
++            input_main->data[1], input_main->linesize[1],
++            input_main->width, input_main->height / 2,
++            input_overlay->data[1], input_overlay->linesize[1],
++            input_overlay->width, input_overlay->height / 2,
++            0, 0, 0, 0,
++            ctx->alpha_coef, ctx->transition_mode);
++        break;
++    case AV_PIX_FMT_YUV420P:
++    case AV_PIX_FMT_YUVA420P:
++        transition_cuda_call_kernel(ctx,
++            input_main->data[1], input_main->linesize[1],
++            input_main->width / 2, input_main->height / 2,
++            input_overlay->data[1], input_overlay->linesize[1],
++            input_overlay->width / 2, input_overlay->height / 2,
++            input_overlay->data[3], input_overlay->linesize[3], 2, 2,
++            ctx->alpha_coef, ctx->transition_mode);
++
++        transition_cuda_call_kernel(ctx,
++            input_main->data[2], input_main->linesize[2],
++            input_main->width / 2, input_main->height / 2,
++            input_overlay->data[2], input_overlay->linesize[2],
++            input_overlay->width / 2, input_overlay->height / 2,
++            input_overlay->data[3], input_overlay->linesize[3], 2, 2,
++            ctx->alpha_coef, ctx->transition_mode);
++        break;
++    default:
++        av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
++        av_frame_free(&input_main);
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return AVERROR_BUG;
++    }
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++    return ff_filter_frame(outlink, input_main);
++}
++
++static int config_input_overlay(AVFilterLink *inlink)
++{
++    AVFilterContext *ctx  = inlink->dst;
++    TransitionCUDAContext  *s = inlink->dst->priv;
++    int ret;
++
++
++    /* Finish the configuration by evaluating the expressions
++       now when both inputs are configured. */
++    s->var_values[VAR_MAIN_W   ] = s->var_values[VAR_MW] = ctx->inputs[MAIN   ]->w;
++    s->var_values[VAR_MAIN_H   ] = s->var_values[VAR_MH] = ctx->inputs[MAIN   ]->h;
++    s->var_values[VAR_OVERLAY_W] = s->var_values[VAR_OW] = ctx->inputs[OVERLAY]->w;
++    s->var_values[VAR_OVERLAY_H] = s->var_values[VAR_OH] = ctx->inputs[OVERLAY]->h;
++    s->var_values[VAR_ALPHA] = NAN;
++    s->var_values[VAR_N]     = 0;
++    s->var_values[VAR_T]     = NAN;
++    s->var_values[VAR_POS]   = NAN;
++
++    if ((ret = set_expr(&s->alpha_pexpr, s->alpha_expr, "alpha", ctx)) < 0)
++        return ret;
++
++    if (s->eval_mode == EVAL_MODE_INIT) {
++        eval_expr(ctx);
++        av_log(ctx, AV_LOG_VERBOSE, "alpha: %f\n", s->alpha_coef);
++    }
++
++    return 0;
++}
++
++/**
++ * Initialize transition_cuda
++ */
++static av_cold int transition_cuda_init(AVFilterContext *avctx)
++{
++    TransitionCUDAContext* ctx = avctx->priv;
++    ctx->fs.on_event = &transition_cuda_blend;
++    return 0;
++}
++
++/**
++ * Uninitialize transition_cuda
++ */
++static av_cold void transition_cuda_uninit(AVFilterContext *avctx)
++{
++    TransitionCUDAContext* ctx = avctx->priv;
++
++    ff_framesync_uninit(&ctx->fs);
++
++    if (ctx->hwctx && ctx->cu_module) {
++        CUcontext dummy;
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++        CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    av_expr_free(ctx->alpha_pexpr); ctx->alpha_pexpr = NULL;
++    av_buffer_unref(&ctx->hw_device_ctx);
++    ctx->hwctx = NULL;
++}
++
++/**
++ * Activate transition_cuda
++ */
++static int transition_cuda_activate(AVFilterContext *avctx)
++{
++    TransitionCUDAContext *ctx = avctx->priv;
++    return ff_framesync_activate(&ctx->fs);
++}
++
++/**
++ * Configure output
++ */
++static int transition_cuda_config_output(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_transition_cuda_ptx_data[];
++    extern const unsigned int ff_vf_transition_cuda_ptx_len;
++
++    int err;
++    FilterLink       *outl = ff_filter_link(outlink);
++    AVFilterContext *avctx = outlink->src;
++    TransitionCUDAContext *ctx = avctx->priv;
++
++    AVFilterLink *inlink = avctx->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
++
++    AVFilterLink *inlink_overlay = avctx->inputs[1];
++    FilterLink *inl_overlay = ff_filter_link(inlink_overlay);
++    AVHWFramesContext *frames_ctx_overlay = (AVHWFramesContext*)inl_overlay->hw_frames_ctx->data;
++
++    CUcontext dummy, cuda_ctx;
++    CudaFunctions *cu;
++
++    // check main input formats
++
++    if (!frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->in_format_main = frames_ctx->sw_format;
++    if (!format_is_supported(supported_main_formats, ctx->in_format_main)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported main input format: %s\n",
++               av_get_pix_fmt_name(ctx->in_format_main));
++        return AVERROR(ENOSYS);
++    }
++
++    // check transition input formats
++
++    if (!frames_ctx_overlay) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on transition input\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->in_format_overlay = frames_ctx_overlay->sw_format;
++    if (!format_is_supported(supported_overlay_formats, ctx->in_format_overlay)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported overlay input format: %s\n",
++            av_get_pix_fmt_name(ctx->in_format_overlay));
++        return AVERROR(ENOSYS);
++    }
++
++    // check we can overlay pictures with those pixel formats
++
++    if (!formats_match(ctx->in_format_main, ctx->in_format_overlay)) {
++        av_log(ctx, AV_LOG_ERROR, "Can't overlay %s on %s \n",
++            av_get_pix_fmt_name(ctx->in_format_overlay), av_get_pix_fmt_name(ctx->in_format_main));
++        return AVERROR(EINVAL);
++    }
++
++    // initialize
++    
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext*)ctx->hw_device_ctx->data)->hwctx;
++
++    cuda_ctx = ctx->hwctx->cuda_ctx;
++    ctx->fs.time_base = inlink->time_base;
++
++    ctx->cu_stream = ctx->hwctx->stream;
++
++    outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++    if (!outl->hw_frames_ctx)
++        return AVERROR(ENOMEM);
++
++    // load functions
++
++    cu = ctx->hwctx->internal->cuda_dl;
++
++    err = CHECK_CU(cu->cuCtxPushCurrent(cuda_ctx));
++    if (err < 0) {
++        return err;
++    }
++
++    err = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module, ff_vf_transition_cuda_ptx_data, ff_vf_transition_cuda_ptx_len);
++    if (err < 0) {
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return err;
++    }
++
++    err = CHECK_CU(cu->cuModuleGetFunction(&ctx->cu_func, ctx->cu_module, "Transition_Cuda"));
++    if (err < 0) {
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        return err;
++    }
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++    // init dual input
++
++    err = ff_framesync_init_dualinput(&ctx->fs, avctx);
++    if (err < 0) {
++        return err;
++    }
++
++    return ff_framesync_configure(&ctx->fs);
++}
++
++static int transition_cuda_process_command(AVFilterContext *avctx,
++                                           const char *cmd,
++                                           const char *args,
++                                           char *res,
++                                           int res_len,
++                                           int flags)
++{
++    TransitionCUDAContext *ctx = avctx->priv;
++    AVExpr *new_expr = NULL;
++    char *new_alpha_expr;
++    int ret;
++
++    (void)res;
++    (void)res_len;
++    (void)flags;
++
++    if (!strcmp(cmd, "mode"))
++        return av_opt_set(ctx, "mode", args, 0);
++
++    if (strcmp(cmd, "alpha"))
++        return AVERROR(ENOSYS);
++
++    ret = set_expr(&new_expr, args, "alpha", avctx);
++    if (ret < 0)
++        return ret;
++
++    new_alpha_expr = av_strdup(args);
++    if (!new_alpha_expr) {
++        av_expr_free(new_expr);
++        return AVERROR(ENOMEM);
++    }
++
++    av_expr_free(ctx->alpha_pexpr);
++    ctx->alpha_pexpr = new_expr;
++    av_freep(&ctx->alpha_expr);
++    ctx->alpha_expr = new_alpha_expr;
++    return 0;
++}
++
++
++#define OFFSET(x) offsetof(TransitionCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++#define RUNTIME_FLAGS (FLAGS | AV_OPT_FLAG_RUNTIME_PARAM)
++
++static const AVOption transition_cuda_options[] = {
++    { "alpha", "set the alpha expression of overlay in range [0.0-1.0] (default is 1.0)", OFFSET(alpha_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, 0, 0, RUNTIME_FLAGS },
++    { "mode", "set the CUDA transition mode", OFFSET(transition_mode), AV_OPT_TYPE_INT, { .i64 = TRANSITION_MODE_FADE }, 0, TRANSITION_MODE_NB - 1, RUNTIME_FLAGS, "mode" },
++        { "fade",       "crossfade",             0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_FADE },       .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_left",  "wipe from left",        0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_LEFT },  .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_right", "wipe from right",       0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_RIGHT }, .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_down",  "wipe from top to bottom", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_DOWN }, .flags = RUNTIME_FLAGS, .unit = "mode" },
++        { "wipe_up",    "wipe from bottom to top", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSITION_MODE_WIPE_UP },   .flags = RUNTIME_FLAGS, .unit = "mode" },
++    { "eof_action", "Action to take when encountering EOF from secondary input ",
++        OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
++        EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
++        { "repeat", "Repeat the previous frame.",   0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS, "eof_action" },
++        { "endall", "End both streams.",            0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS, "eof_action" },
++        { "pass",   "Pass through the main input.", 0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_PASS },   .flags = FLAGS, "eof_action" },
++    { "eval", "specify when to evaluate expressions", OFFSET(eval_mode), AV_OPT_TYPE_INT, { .i64 = EVAL_MODE_FRAME }, 0, EVAL_MODE_NB - 1, FLAGS, "eval" },
++         { "init",  "eval expressions once during initialization", 0, AV_OPT_TYPE_CONST, { .i64=EVAL_MODE_INIT },  .flags = FLAGS, .unit = "eval" },
++         { "frame", "eval expressions per-frame",                  0, AV_OPT_TYPE_CONST, { .i64=EVAL_MODE_FRAME }, .flags = FLAGS, .unit = "eval" },
++    { "shortest", "force termination when the shortest input terminates", OFFSET(fs.opt_shortest), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
++    { "repeatlast", "repeat overlay of the last overlay frame", OFFSET(fs.opt_repeatlast), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
++    { NULL },
++};
++
++FRAMESYNC_DEFINE_CLASS(transition_cuda, TransitionCUDAContext, fs);
++
++static const AVFilterPad transition_cuda_inputs[] = {
++    {
++        .name         = "main",
++        .type         = AVMEDIA_TYPE_VIDEO,
++    },
++    {
++        .name         = "overlay",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = config_input_overlay,
++    },
++};
++
++static const AVFilterPad transition_cuda_outputs[] = {
++    {
++        .name          = "default",
++        .type          = AVMEDIA_TYPE_VIDEO,
++        .config_props  = &transition_cuda_config_output,
++    },
++};
++
++const AVFilter ff_vf_transition_cuda = {
++    .name            = "transition_cuda",
++    .description     = NULL_IF_CONFIG_SMALL("Transition between videos using CUDA"),
++    .priv_size       = sizeof(TransitionCUDAContext),
++    .priv_class      = &transition_cuda_class,
++    .init            = &transition_cuda_init,
++    .uninit          = &transition_cuda_uninit,
++    .activate        = &transition_cuda_activate,
++    .process_command = &transition_cuda_process_command,
++    FILTER_INPUTS(transition_cuda_inputs),
++    FILTER_OUTPUTS(transition_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .preinit         = transition_cuda_framesync_preinit,
++    .flags_internal  = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_transition_cuda.cu b/libavfilter/vf_transition_cuda.cu
+new file mode 100644
+index 0000000..c688e66
+--- /dev/null
++++ b/libavfilter/vf_transition_cuda.cu
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (c) 2020 Yaroslav Pogrebnyak <yyyaroslav@gmail.com>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++extern "C" {
++
++__global__ void Transition_Cuda(
++    unsigned char* main, int main_linesize,
++    unsigned char* overlay, int overlay_linesize,
++    int overlay_w, int overlay_h,
++    unsigned char* overlay_alpha, int alpha_linesize,
++    int alpha_adj_x, int alpha_adj_y,
++    float alpha_coef, int transition_mode)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++
++    if (x >= overlay_w ||
++        y >= overlay_h) {
++        return;
++    }
++
++    float alpha = alpha_coef;
++    if (transition_mode == 1) {
++        alpha = (x + 0.5f) / overlay_w <= alpha_coef;
++    } else if (transition_mode == 2) {
++        alpha = (x + 0.5f) / overlay_w >= 1.f - alpha_coef;
++    } else if (transition_mode == 3) {
++        alpha = (y + 0.5f) / overlay_h <= alpha_coef;
++    } else if (transition_mode == 4) {
++        alpha = (y + 0.5f) / overlay_h >= 1.f - alpha_coef;
++    }
++    if (alpha_linesize) {
++        alpha *= overlay_alpha[alpha_adj_x * x  + alpha_adj_y * y * alpha_linesize] / 255.f;
++    }
++
++    main[x + y*main_linesize] = alpha * overlay[x + y*overlay_linesize] + (1.f - alpha) * main[x + y*main_linesize];
++}
++
++}
+diff --git a/libavutil/hwcontext_cuda.c b/libavutil/hwcontext_cuda.c
+index 3de3847..f8ff9a4 100644
+--- a/libavutil/hwcontext_cuda.c
++++ b/libavutil/hwcontext_cuda.c
+@@ -44,6 +44,7 @@ static const enum AVPixelFormat supported_formats[] = {
+     AV_PIX_FMT_NV12,
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUVA444P,
+     AV_PIX_FMT_YUV444P,
+     AV_PIX_FMT_P010,
+     AV_PIX_FMT_P016,

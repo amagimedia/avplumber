@@ -1,0 +1,15 @@
+services:
+  test:
+    build:
+      context: ../..
+      dockerfile: demos/cuda-overlay/Dockerfile
+      args:
+        AVPLUMBER_REVISION: ${AVPLUMBER_REVISION:-workspace}
+        FFMPEG_TAG: n7.1.5
+    image: avplumber-cuda-overlay-demo:local
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ./artifacts:/artifacts

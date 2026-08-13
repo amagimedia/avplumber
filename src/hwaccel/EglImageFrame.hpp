@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <memory>
+#include <string>
 #include <avcpp/timestamp.h>
 #include <avcpp/rational.h>
 
@@ -22,7 +24,8 @@ private:
 	int height_ = 0;
 	av::Timestamp pts_;
 	av::Rational tb_;
-	std::shared_ptr<void> holder_; // keeps producer-owned resources alive until consumer releases
+	std::shared_ptr<void> allocation_holder_;
+	std::shared_ptr<void> frame_holder_;
 	std::map<std::string, std::string> metadata_;
 public:
 	EglImageFrame() = default;
@@ -31,8 +34,10 @@ public:
 	              int height,
 	              av::Timestamp pts = {},
 	              av::Rational tb = {},
-	              std::shared_ptr<void> holder = nullptr)
-	    : image_(image), width_(width), height_(height), pts_(pts), tb_(tb), holder_(std::move(holder)) {}
+	              std::shared_ptr<void> allocation_holder = nullptr,
+	              std::shared_ptr<void> frame_holder = nullptr)
+	    : image_(image), width_(width), height_(height), pts_(pts), tb_(tb),
+	      allocation_holder_(std::move(allocation_holder)), frame_holder_(std::move(frame_holder)) {}
 
 	bool isComplete() const {
 		return image_ != nullptr && width_ > 0 && height_ > 0;
@@ -51,9 +56,12 @@ public:
 	// Underlying EGL image handle
 	EGLImageKHR image() const { return image_; }
 
-	// Holder accessor (for advanced lifetime coordination if needed)
-	const std::shared_ptr<void>& holder() const { return holder_; }
-	void setHolder(std::shared_ptr<void> h) { holder_ = std::move(h); }
+	// Allocation lifetime may be cached across frames. Per-frame lifetime must
+	// end after the last consumer read so a producer can safely reuse its buffer.
+	const std::shared_ptr<void>& holder() const { return allocation_holder_; }
+	void setHolder(std::shared_ptr<void> h) { allocation_holder_ = std::move(h); }
+	const std::shared_ptr<void>& frameHolder() const { return frame_holder_; }
+	void setFrameHolder(std::shared_ptr<void> h) { frame_holder_ = std::move(h); }
 
 	// Metadata accessor
 	void setMetadata(const std::string& key, const std::string& value) { metadata_[key] = value; }
@@ -68,5 +76,3 @@ public:
 		}
 	}
 };
-
-

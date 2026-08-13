@@ -279,7 +279,15 @@ public:
         // Copy from the edge queue, but keep the packet queued until the
         // decoder accepts it. FFmpeg send_packet(EAGAIN) means retry same input.
         av::Packet pkt;
-        if (!this->source_->tryPeek(pkt, 0)) {
+        // Blocking poll: park the decoder thread until a packet arrives instead of
+        // busy-spinning. Measured ~41% CPU vs ~100% (full core) with non-blocking
+        // ,0 on a starved live source. wait_peek() is event-woken by the producer's
+        // enqueue and by finishConsumer() (stop / flushAndSeek), so shutdown, flush
+        // and seek all wake it cleanly. Safe for the OBS switcher/playlist path: each
+        // clip is a fresh graph (new edges reset finish_consumer_), so the post-seek
+        // busy-poll degradation only affects in-place seeks (ssgw replay), where it
+        // is merely no worse than the non-blocking form.
+        if (!this->source_->tryPeek(pkt)) {
             //flush();
             return;
         }
