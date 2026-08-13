@@ -1,53 +1,27 @@
 #ifdef PYTHON_MODULE
 #include "../node_common.hpp"
-#include "../../graph_interfaces.hpp"
-#include <pybind11/gil.h>
-
-namespace py = pybind11;
+#include "python_node_mixin.hpp"
 
 template<typename T>
-class PythonNodeSIMO: public NodeSingleInput<T>, public NodeMultiOutput<T>, public IPythonNode {
-private:
-    py::object python_node_;
-
+class PythonNodeSIMO: public NodeSingleInput<T>, public NodeMultiOutput<T>, public PythonNodeMixin {
 public:
     using NodeSingleInput<T>::NodeSingleInput;
 
-    ~PythonNodeSIMO() override {
-        py::gil_scoped_acquire gil;
-        python_node_ = py::object();
-    }
-
-    void set_python_node(py::object python_node) override {
-        py::gil_scoped_acquire gil;
-        python_node_ = std::move(python_node);
-    }
-
     void process() override {
-        py::gil_scoped_acquire gil;
-        if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-            throw Error("Python node is not set");
-        }
-        python_node_.attr("process")();
+        callProcess();
     }
 
     void stop() override {
-        std::exception_ptr stop_error;
-        {
-            py::gil_scoped_acquire gil;
-            try {
-                if (python_node_.ptr() == nullptr || python_node_.is_none()) {
-                    throw Error("Python node is not set");
-                }
-                python_node_.attr("doStop")();
-            } catch (...) {
-                stop_error = std::current_exception();
-            }
-        }
+        std::exception_ptr stop_error = captureStop();
         NodeSingleInput<T>::stop();
         if (stop_error) {
             std::rethrow_exception(stop_error);
         }
+    }
+
+    void onEofConsumed() override {
+        callDoStopOnce();
+        this->emitEof();
     }
 
     static std::shared_ptr<PythonNodeSIMO> create(NodeCreationInfo &nci) {

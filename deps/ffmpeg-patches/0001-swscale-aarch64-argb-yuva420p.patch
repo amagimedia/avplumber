@@ -1,0 +1,451 @@
+From 127f4c991739e9af8cdc5ac1315511c5e1bd85ef Mon Sep 17 00:00:00 2001
+From: Teodor Wozniak <teodor.wozniak@amagi.com>
+Date: Wed, 12 Aug 2026 15:53:23 +0000
+Subject: [PATCH 1/7] swscale/aarch64: add fast ARGB to YUVA420P conversion
+
+Add an unscaled NEON conversion path for ARGB input to YUVA420P output.
+
+Original-commit: 3708bfab707a6eeb151829fd5c92807470c0f6d8
+---
+ libswscale/aarch64/input.S                 |  36 ++++
+ libswscale/aarch64/swscale.c               |   6 +
+ libswscale/aarch64/swscale_unscaled.c      | 125 +++++++++++++
+ libswscale/aarch64/swscale_unscaled_neon.S | 200 +++++++++++++++++++++
+ 4 files changed, 367 insertions(+)
+
+diff --git a/libswscale/aarch64/input.S b/libswscale/aarch64/input.S
+index 5cb1871..bab2700 100644
+--- a/libswscale/aarch64/input.S
++++ b/libswscale/aarch64/input.S
+@@ -313,3 +313,39 @@ rgbToUV_neon bgr24, rgb24, element=3
+ rgbToUV_neon bgra32, rgba32, element=4
+ 
+ rgbToUV_neon abgr32, argb32, element=4, alpha_first=1
++
++// void ff_argb32ToA_neon(uint8_t *dst, const uint8_t *src, const uint8_t *unused1,
++//                        const uint8_t *unused2, int width, uint32_t *unused, void *opq)
++// dst stores one int16_t per pixel with the same scaling as abgrToA_c:
++// dst = (A << 6) | (A >> 2)
++function ff_argb32ToA_neon, export=1
++        cmp             w4, #0
++        b.le            3f
++
++        cmp             w4, #16
++        b.lt            2f
++1:
++        ld4             {v16.16b, v17.16b, v18.16b, v19.16b}, [x1], #64
++        uxtl            v20.8h, v16.8b
++        uxtl2           v21.8h, v16.16b
++        shl             v22.8h, v20.8h, #6
++        shl             v23.8h, v21.8h, #6
++        ushr            v20.8h, v20.8h, #2
++        ushr            v21.8h, v21.8h, #2
++        orr             v22.16b, v22.16b, v20.16b
++        orr             v23.16b, v23.16b, v21.16b
++        stp             q22, q23, [x0], #32
++        subs            w4, w4, #16
++        b.gt            1b
++        cbz             w4, 3f
++2:
++        ldrb            w8, [x1], #4
++        subs            w4, w4, #1
++        lsl             w9, w8, #6
++        lsr             w10, w8, #2
++        orr             w9, w9, w10
++        strh            w9, [x0], #2
++        cbnz            w4, 2b
++3:
++        ret
++endfunc
+diff --git a/libswscale/aarch64/swscale.c b/libswscale/aarch64/swscale.c
+index eb90728..a2abfe5 100644
+--- a/libswscale/aarch64/swscale.c
++++ b/libswscale/aarch64/swscale.c
+@@ -217,6 +217,8 @@ NEON_INPUT(bgr24);
+ NEON_INPUT(bgra32);
+ NEON_INPUT(rgb24);
+ NEON_INPUT(rgba32);
++void ff_argb32ToA_neon(uint8_t *dst, const uint8_t *src, const uint8_t *,
++                       const uint8_t *, int w, uint32_t *coeffs, void *opq);
+ 
+ void ff_lumRangeFromJpeg_neon(int16_t *dst, int width);
+ void ff_chrRangeFromJpeg_neon(int16_t *dstU, int16_t *dstV, int width);
+@@ -256,6 +258,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsContext *c)
+                 c->chrToYV12 = ff_abgr32ToUV_half_neon;
+             else
+                 c->chrToYV12 = ff_abgr32ToUV_neon;
++            if (c->needAlpha)
++                c->alpToYV12 = ff_argb32ToA_neon;
+             break;
+ 
+         case AV_PIX_FMT_ARGB:
+@@ -264,6 +268,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsContext *c)
+                 c->chrToYV12 = ff_argb32ToUV_half_neon;
+             else
+                 c->chrToYV12 = ff_argb32ToUV_neon;
++            if (c->needAlpha)
++                c->alpToYV12 = ff_argb32ToA_neon;
+             break;
+         case AV_PIX_FMT_BGR24:
+             c->lumToYV12 = ff_bgr24ToY_neon;
+diff --git a/libswscale/aarch64/swscale_unscaled.c b/libswscale/aarch64/swscale_unscaled.c
+index 9dfccc0..9626dd3 100644
+--- a/libswscale/aarch64/swscale_unscaled.c
++++ b/libswscale/aarch64/swscale_unscaled.c
+@@ -21,6 +21,13 @@
+ #include "libswscale/swscale_internal.h"
+ #include "libavutil/aarch64/cpu.h"
+ 
++void ff_argb_to_yuv420p_neon(const uint8_t *src, uint8_t *ydst,
++                             uint8_t *udst, uint8_t *vdst, int width,
++                             int height, int lumStride, int chromStride,
++                             int srcStride, int32_t *rgb2yuv);
++void ff_argb_to_a8_neon(const uint8_t *src, uint8_t *dst, int width,
++                        int height, int srcStride, int dstStride);
++
+ #define YUV_TO_RGB_TABLE                                                                    \
+         c->yuv2rgb_v2r_coeff,                                                               \
+         c->yuv2rgb_u2g_coeff,                                                               \
+@@ -164,6 +171,115 @@ static int nv24_to_yuv420p_neon_wrapper(SwsContext *c, const uint8_t *src[],
+     return srcSliceH;
+ }
+ 
++static av_always_inline void argb_to_yuva420p_c(const uint8_t *src, uint8_t *ydst,
++                                                uint8_t *udst, uint8_t *vdst,
++                                                uint8_t *adst, int width,
++                                                int height, int lumStride,
++                                                int chromStride, int srcStride,
++                                                int alphaStride, int32_t *rgb2yuv)
++{
++    const int32_t ry = rgb2yuv[RY_IDX], gy = rgb2yuv[GY_IDX], by = rgb2yuv[BY_IDX];
++    const int32_t ru = rgb2yuv[RU_IDX], gu = rgb2yuv[GU_IDX], bu = rgb2yuv[BU_IDX];
++    const int32_t rv = rgb2yuv[RV_IDX], gv = rgb2yuv[GV_IDX], bv = rgb2yuv[BV_IDX];
++    const int chromWidth = width >> 1;
++    const uint8_t *src1 = src;
++    const uint8_t *src2 = src + srcStride;
++    uint8_t *ydst1 = ydst;
++    uint8_t *ydst2 = ydst + lumStride;
++    uint8_t *adst1 = adst;
++    uint8_t *adst2 = adst + alphaStride;
++
++    for (int y = 0; y < height; y += 2) {
++        if (y + 1 == height) {
++            ydst2 = ydst1;
++            adst2 = adst1;
++            src2  = src1;
++        }
++
++        for (int i = 0; i < chromWidth; i++) {
++            const unsigned int a11 = src1[8 * i + 0];
++            const unsigned int r11 = src1[8 * i + 1];
++            const unsigned int g11 = src1[8 * i + 2];
++            const unsigned int b11 = src1[8 * i + 3];
++            const unsigned int a12 = src1[8 * i + 4];
++            const unsigned int r12 = src1[8 * i + 5];
++            const unsigned int g12 = src1[8 * i + 6];
++            const unsigned int b12 = src1[8 * i + 7];
++            const unsigned int a21 = src2[8 * i + 0];
++            const unsigned int r21 = src2[8 * i + 1];
++            const unsigned int g21 = src2[8 * i + 2];
++            const unsigned int b21 = src2[8 * i + 3];
++            const unsigned int a22 = src2[8 * i + 4];
++            const unsigned int r22 = src2[8 * i + 5];
++            const unsigned int g22 = src2[8 * i + 6];
++            const unsigned int b22 = src2[8 * i + 7];
++
++            const unsigned int Y11 = ((ry * r11 + gy * g11 + by * b11) >> RGB2YUV_SHIFT) + 16;
++            const unsigned int Y12 = ((ry * r12 + gy * g12 + by * b12) >> RGB2YUV_SHIFT) + 16;
++            const unsigned int Y21 = ((ry * r21 + gy * g21 + by * b21) >> RGB2YUV_SHIFT) + 16;
++            const unsigned int Y22 = ((ry * r22 + gy * g22 + by * b22) >> RGB2YUV_SHIFT) + 16;
++
++            const unsigned int bx = (b11 + b12 + b21 + b22) >> 2;
++            const unsigned int gx = (g11 + g12 + g21 + g22) >> 2;
++            const unsigned int rx = (r11 + r12 + r21 + r22) >> 2;
++
++            const unsigned int U = ((ru * rx + gu * gx + bu * bx) >> RGB2YUV_SHIFT) + 128;
++            const unsigned int V = ((rv * rx + gv * gx + bv * bx) >> RGB2YUV_SHIFT) + 128;
++
++            ydst1[2 * i + 0] = Y11;
++            ydst1[2 * i + 1] = Y12;
++            ydst2[2 * i + 0] = Y21;
++            ydst2[2 * i + 1] = Y22;
++            adst1[2 * i + 0] = a11;
++            adst1[2 * i + 1] = a12;
++            adst2[2 * i + 0] = a21;
++            adst2[2 * i + 1] = a22;
++            udst[i] = U;
++            vdst[i] = V;
++        }
++
++        src1  += srcStride * 2;
++        src2  += srcStride * 2;
++        ydst1 += lumStride * 2;
++        ydst2 += lumStride * 2;
++        adst1 += alphaStride * 2;
++        adst2 += alphaStride * 2;
++        udst  += chromStride;
++        vdst  += chromStride;
++    }
++}
++
++static int argb_to_yuva420p_neon_wrapper(SwsContext *c, const uint8_t *src[],
++                                         int srcStride[], int srcSliceY, int srcSliceH,
++                                         uint8_t *dst[], int dstStride[])
++{
++    const int width_aligned = c->srcW & ~15;
++    const uint8_t *src_ptr = src[0];
++    uint8_t *ydst = dst[0] + srcSliceY * dstStride[0];
++    uint8_t *udst = dst[1] + (srcSliceY >> 1) * dstStride[1];
++    uint8_t *vdst = dst[2] + (srcSliceY >> 1) * dstStride[2];
++    uint8_t *adst = dst[3] + srcSliceY * dstStride[3];
++
++    /* Keep strict gating in wrapper too, so odd slice boundaries or non-16 widths
++     * never hit the assembly fast path. */
++    if ((srcSliceY & 1) || (srcSliceH & 1) || (c->srcW & 15)) {
++        argb_to_yuva420p_c(src_ptr, ydst, udst, vdst, adst,
++                           c->srcW, srcSliceH, dstStride[0], dstStride[1],
++                           srcStride[0], dstStride[3], c->input_rgb2yuv_table);
++        return srcSliceH;
++    }
++
++    if (width_aligned > 0) {
++        ff_argb_to_yuv420p_neon(src_ptr, ydst, udst, vdst, width_aligned,
++                                srcSliceH, dstStride[0], dstStride[1],
++                                srcStride[0], c->input_rgb2yuv_table);
++        ff_argb_to_a8_neon(src_ptr, adst, width_aligned, srcSliceH,
++                           srcStride[0], dstStride[3]);
++    }
++
++    return srcSliceH;
++}
++
+ #define DECLARE_FF_NVX_TO_ALL_RGBX_FUNCS(nvx)                                               \
+ DECLARE_FF_NVX_TO_RGBX_FUNCS(nvx, argb)                                                     \
+ DECLARE_FF_NVX_TO_RGBX_FUNCS(nvx, rgba)                                                     \
+@@ -207,6 +323,15 @@ static void get_unscaled_swscale_neon(SwsContext *c) {
+         (c->srcFormat == AV_PIX_FMT_NV24 || c->srcFormat == AV_PIX_FMT_NV42) &&
+         !(c->srcH & 1) && !(c->srcW & 15) && !accurate_rnd)
+         c->convert_unscaled = nv24_to_yuv420p_neon_wrapper;
++
++    if (c->srcFormat == AV_PIX_FMT_ARGB &&
++        c->dstFormat == AV_PIX_FMT_YUVA420P &&
++        !(c->srcH & 1) &&
++        !(c->srcW & 15) &&
++        !(c->srcW & 1) && !accurate_rnd) {
++        c->convert_unscaled = argb_to_yuva420p_neon_wrapper;
++        c->dst_slice_align = 2;
++    }
+ }
+ 
+ void ff_get_unscaled_swscale_aarch64(SwsContext *c)
+diff --git a/libswscale/aarch64/swscale_unscaled_neon.S b/libswscale/aarch64/swscale_unscaled_neon.S
+index a074b18..0c961ad 100644
+--- a/libswscale/aarch64/swscale_unscaled_neon.S
++++ b/libswscale/aarch64/swscale_unscaled_neon.S
+@@ -20,6 +20,206 @@
+ 
+ #include "libavutil/aarch64/asm.S"
+ 
++#define RGB2YUV_COEFFS 16*4+16*32
++#define BY v0.h[0]
++#define GY v0.h[1]
++#define RY v0.h[2]
++#define BU v1.h[0]
++#define GU v1.h[1]
++#define RU v1.h[2]
++#define BV v2.h[0]
++#define GV v2.h[1]
++#define RV v2.h[2]
++#define Y_OFFSET  v22
++#define UV_OFFSET v23
++
++// convert rgb to 16-bit y, u, or v
++// uses v3 and v4
++.macro rgbconv16 dst, b, g, r, bc, gc, rc
++        smull           v3.4s, \b\().4h, \bc
++        smlal           v3.4s, \g\().4h, \gc
++        smlal           v3.4s, \r\().4h, \rc
++        smull2          v4.4s, \b\().8h, \bc
++        smlal2          v4.4s, \g\().8h, \gc
++        smlal2          v4.4s, \r\().8h, \rc
++        shrn            \dst\().4h, v3.4s, #7
++        shrn2           \dst\().8h, v4.4s, #7
++.endm
++
++// void ff_argb_to_yuv420p_neon(const uint8_t *src, uint8_t *ydst, uint8_t *udst,
++//                              uint8_t *vdst, int width, int height, int lumStride,
++//                              int chromStride, int srcStride, int32_t *rgb2yuv);
++function ff_argb_to_yuv420p_neon, export=1
++// x0  const uint8_t *src
++// x1  uint8_t *ydst
++// x2  uint8_t *udst
++// x3  uint8_t *vdst
++// w4  int width
++// w5  int height
++// w6  int lumStride
++// w7  int chromStride
++        ldrsw           x9, [sp]                    // srcStride
++        ldr             x14, [sp, #8]               // rgb2yuv
++
++        // extend width and stride parameters
++        uxtw            x4, w4
++        sxtw            x6, w6
++        sxtw            x7, w7
++
++        // src1 = x0
++        // src2 = x10
++        add             x10, x0,  x9                // x10 = src + srcStride
++        lsl             x9,  x9,  #1                // srcStride *= 2
++        lsl             x11, x4,  #2                // x11 = 4 * width
++        sub             x9,  x9,  x11               // srcPadding = (2 * srcStride) - (4 * width)
++
++        // ydst1 = x1
++        // ydst2 = x11
++        add             x11, x1,  x6                // x11 = ydst + lumStride
++        lsl             x6,  x6,  #1                // lumStride *= 2
++        sub             x6,  x6,  x4                // lumPadding = (2 * lumStride) - width
++
++        sub             x7,  x7,  x4, lsr #1        // chromPadding = chromStride - (width / 2)
++
++        // load rgb2yuv coefficients into v0, v1, and v2
++        add             x14, x14, #RGB2YUV_COEFFS
++        ld1             {v0.8h-v2.8h}, [x14]
++
++        // load offset constants
++        movi            Y_OFFSET.8h,  #0x10, lsl #8
++        movi            UV_OFFSET.8h, #0x80, lsl #8
++
++1:
++        mov             w14, w4                     // w14 = width
++
++2:
++        // load first line (ARGB)
++        ld4             {v26.16b, v27.16b, v28.16b, v29.16b}, [x0], #64
++
++        // widen first line to 16-bit (B,G,R)
++        uxtl            v16.8h, v29.8b
++        uxtl            v17.8h, v28.8b
++        uxtl            v18.8h, v27.8b
++        uxtl2           v19.8h, v29.16b
++        uxtl2           v20.8h, v28.16b
++        uxtl2           v21.8h, v27.16b
++
++        // calculate Y values for first line
++        rgbconv16       v24, v16, v17, v18, BY, GY, RY
++        rgbconv16       v25, v19, v20, v21, BY, GY, RY
++
++        // load second line (ARGB)
++        ld4             {v26.16b, v27.16b, v28.16b, v29.16b}, [x10], #64
++
++        // pairwise add and save rgb values to calculate average
++        addp            v5.8h, v16.8h, v19.8h
++        addp            v6.8h, v17.8h, v20.8h
++        addp            v7.8h, v18.8h, v21.8h
++
++        // widen second line to 16-bit (B,G,R)
++        uxtl            v16.8h, v29.8b
++        uxtl            v17.8h, v28.8b
++        uxtl            v18.8h, v27.8b
++        uxtl2           v19.8h, v29.16b
++        uxtl2           v20.8h, v28.16b
++        uxtl2           v21.8h, v27.16b
++
++        // calculate Y values for second line
++        rgbconv16       v30, v16, v17, v18, BY, GY, RY
++        rgbconv16       v31, v19, v20, v21, BY, GY, RY
++
++        // pairwise add rgb values to calculate average
++        addp            v16.8h, v16.8h, v19.8h
++        addp            v17.8h, v17.8h, v20.8h
++        addp            v18.8h, v18.8h, v21.8h
++
++        // calculate average for chroma
++        add             v16.8h, v16.8h, v5.8h
++        add             v17.8h, v17.8h, v6.8h
++        add             v18.8h, v18.8h, v7.8h
++        ushr            v16.8h, v16.8h, #2
++        ushr            v17.8h, v17.8h, #2
++        ushr            v18.8h, v18.8h, #2
++
++        // calculate U and V values
++        rgbconv16       v28, v16, v17, v18, BU, GU, RU
++        rgbconv16       v29, v16, v17, v18, BV, GV, RV
++
++        // add offsets and narrow all values
++        addhn           v24.8b, v24.8h, Y_OFFSET.8h
++        addhn           v25.8b, v25.8h, Y_OFFSET.8h
++        addhn           v30.8b, v30.8h, Y_OFFSET.8h
++        addhn           v31.8b, v31.8h, Y_OFFSET.8h
++        addhn           v28.8b, v28.8h, UV_OFFSET.8h
++        addhn           v29.8b, v29.8h, UV_OFFSET.8h
++
++        subs            w14, w14, #16
++
++        // store output
++        st1             {v24.8b, v25.8b}, [x1], #16
++        st1             {v30.8b, v31.8b}, [x11], #16
++        st1             {v28.8b}, [x2], #8
++        st1             {v29.8b}, [x3], #8
++
++        b.gt            2b
++
++        subs            w5,  w5,  #2
++
++        // row += 2
++        add             x0,  x0,  x9
++        add             x10, x10, x9
++        add             x1,  x1,  x6
++        add             x11, x11, x6
++        add             x2,  x2,  x7
++        add             x3,  x3,  x7
++        b.gt            1b
++
++        ret
++endfunc
++
++// void ff_argb_to_a8_neon(const uint8_t *src, uint8_t *dst, int width, int height,
++//                         int srcStride, int dstStride);
++function ff_argb_to_a8_neon, export=1
++// x0  const uint8_t *src
++// x1  uint8_t *dst
++// w2  int width
++// w3  int height
++// w4  int srcStride
++// w5  int dstStride
++        cmp             w2, #0
++        b.le            4f
++        cmp             w3, #0
++        b.le            4f
++
++        sub             w4, w4, w2, lsl #2          // srcPadding = srcStride - width * 4
++        sub             w5, w5, w2                  // dstPadding = dstStride - width
++
++1:
++        mov             w6, w2
++2:
++        cmp             w6, #16
++        b.lt            3f
++        ld4             {v0.16b, v1.16b, v2.16b, v3.16b}, [x0], #64
++        st1             {v0.16b}, [x1], #16
++        sub             w6, w6, #16
++        b               2b
++3:
++        cbz             w6, 5f
++6:
++        ldrb            w7, [x0], #4
++        subs            w6, w6, #1
++        strb            w7, [x1], #1
++        b.gt            6b
++5:
++        subs            w3, w3, #1
++        b.eq            4f
++        add             x0, x0, w4, sxtw
++        add             x1, x1, w5, sxtw
++        b               1b
++4:
++        ret
++endfunc
++
+ function ff_nv24_to_yuv420p_chroma_neon, export=1
+ // x0  uint8_t *dst1
+ // x1  int dstStride1

@@ -9,8 +9,7 @@ From repository root:
 ```bash
 cd avplumber
 make -j8 \
-  NEURAL_NET_COMMON=1 \
-  NEURAL_NET_SPECIFIC=1 \
+  NEURAL_NET=1 \
   HAVE_CUDA=1 \
   HAVE_NVOF_FRUC=1 \
   HAVE_NVCC=1 \
@@ -19,7 +18,8 @@ make -j8 \
   PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
   CXXFLAGS+=' -I/usr/local/include -I/usr/local/cuda-13.0/include -I/usr/local/cuda-13.0/targets/x86_64-linux/include' \
   LFLAGS+=' -L/usr/local/lib -Wl,-rpath,/usr/local/lib -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/cuda-13.0/targets/x86_64-linux/lib' \
-  python_module```
+  python_module
+```
 
 This script runs `make ... python_module` with CUDA/TensorRT-related flags used in this repo.
 
@@ -38,10 +38,10 @@ From Python you can:
 
 ## 2) Project setup pattern
 
-The sample scripts live in `pyplumber/examples/`. See
-[`pyplumber/examples/README.md`](pyplumber/examples/README.md) for example usage,
-dependencies, and notes on PyTorch, CUDA, torchvision, BlazeFace, and the live
-tracker graph.
+The minimal framework sample lives in `pyplumber/examples/`. Reusable Python
+neural nodes and their examples are grouped by purpose under
+`src/nodes/neural_net/`. See
+[`pyplumber/examples/README.md`](pyplumber/examples/README.md) for the index.
 
 Those scripts add the local package to `sys.path` before importing `pyplumber`:
 

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Download avplumber demo</title>
+    <style>
+      body {
+        max-width: 42rem;
+        margin: 4rem auto;
+        padding: 0 1.25rem;
+        font: 1rem/1.5 system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Download avplumber demo</h1>
+    <p id="status">Preparing the download…</p>
+    <p><a id="download" hidden>Download the MP4</a></p>
+
+    <script>
+      "use strict";
+
+      const status = document.getElementById("status");
+      const download = document.getElementById("download");
+      const file = new URLSearchParams(window.location.search).get("file") || "";
+      const segments = file.split("/");
+      const valid =
+        file.length > 0 &&
+        !file.includes("\\") &&
+        segments[0] === "demos" &&
+        segments.every((segment) => segment && segment !== "." && segment !== "..") &&
+        segments.at(-1).toLowerCase().endsWith(".mp4");
+
+      if (!valid) {
+        status.textContent = "Invalid demo download path.";
+      } else {
+        const encodedPath = segments.map(encodeURIComponent).join("/");
+        const target = new URL(encodedPath, document.baseURI);
+
+        if (target.origin !== window.location.origin) {
+          status.textContent = "Invalid demo download origin.";
+        } else {
+          download.href = target.href;
+          download.download = segments.at(-1);
+          download.textContent = `Download ${segments.at(-1)}`;
+          download.hidden = false;
+          status.textContent = "Your download should start automatically.";
+          window.requestAnimationFrame(() => download.click());
+        }
+      }
+    </script>
+  </body>
+</html>

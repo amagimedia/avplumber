@@ -505,6 +505,9 @@ Format of binary seek table: 16-byte records containing:
 
 Format of text seek table: values as above separated by space, each record in one line
 
+Pending seek-table entries are flushed and the canonical seek-table links are
+published when a finite input reaches EOF, including a final partial batch.
+
 ### `jack_sink`
 
 1 input: `av::AudioSamples` (sample format must be `fltp`, sample rate must be equal to JACK's)
@@ -726,6 +729,7 @@ Receive GPU frames via a UNIX domain socket with FD passing (DMA-BUF). Produces 
 Parameters:
 -   `socket` (string, required) - path to the UNIX domain socket
 -   `hwaccel` (string, optional) - name of `hwaccel` object; when set, a matching `hw_frames_ctx` is attached for downstream filters/encoders
+-   `fps` (rational string, optional) - publishes the sender's requested frame rate to downstream nodes; frame timestamps use a `1/1000000` time base
 
 ### `ipc_socket_audio_source`
 
@@ -776,10 +780,11 @@ Parameters:
     -   `class_names` (array of strings, optional) - class-label mapping by index
     -   `class_index_remap` (array of ints, optional) - remap decoded class IDs (e.g. `[1, 0]` swaps class 0 and 1)
     -   `output_box_format` (string, optional, default `end2end_xyxy`) - `end2end_xyxy` or `raw_cxcywh`
+    -   `boxes_normalized` (bool, optional, default `false`) - set `true` for DeepStream/Triton-style YOLO exports whose box coordinates are normalized to `[0,1]`. The decoder rescales them to model-space pixels using the engine input dimensions, so downstream consumers keep receiving `coord_space = "model"` pixel coordinates.
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `metadata_key_out` (string, optional, default `yolo_detections_v1`) - output frame metadata key for detections JSON
 -   `input_format` (string, optional, default `RGB`) - tensor channel order expected by model (`RGB` or `BGR`)
--   TensorRT input binding datatype may be `float32` or `float16`; node preprocess supports both and selects matching CUDA kernel automatically.
+-   TensorRT input binding datatype may be `float32`, `float16`, or `uint8`; node preprocess selects the matching CUDA kernel automatically. `float32`/`float16` inputs are normalized to `[0,1]`; `uint8` inputs receive raw `0..255` values (for engines whose ONNX graph bakes in the `/255` normalization).
 -   `conf_thresh` (float, optional, default `0.25`) - confidence threshold
 -   `iou_thresh` (float, optional, default `0.45`) - NMS IoU threshold
 -   `max_det` (int, optional, default `300`) - max detections per frame after NMS
@@ -791,6 +796,36 @@ Detection coordinates in metadata are emitted in model space (`coord_space = "mo
 
 Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
 - `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
+
+### `tracknet_ball`
+
+Run a TrackNet-style triplet model on CUDA NV12 frames using a prebuilt TensorRT engine.
+
+1 input: `av::VideoFrame` (expects CUDA frame, NV12 sw_format), 1 output: `av::VideoFrame`
+
+By default the node preserves the existing compact detection behavior and expects an output tensor compatible with `[x1, y1, x2, y2, score, visible]`. Pipelines that keep postprocessing and tracking in the application can use `output_mode: "raw"` to emit TensorRT output tensors as JSON metadata instead of requiring the compact detection contract.
+
+Parameters:
+- `engine` (string, required) - TensorRT engine path, or use `models[0].engine`
+- `metadata_key` / `metadata_key_detection` (string, optional, default `yolo_ball`) - compact detection metadata key
+- `output_mode` (string, optional, default `detection`) - `detection`, `raw`, or `both`
+- `metadata_key_raw` / `raw_metadata_key` (string, optional, default `tracknet_raw`) - raw tensor metadata key
+- `triplet_alignment` (string, optional, default `center`) - `center` preserves the live/legacy buffering; `latest` emits each frame using triplets `[0,0,0]`, `[0,0,1]`, then `[t-2,t-1,t]`
+- `normalization_mode` (string, optional, default `imagenet`) - `imagenet` applies ImageNet mean/std normalization; `zero_one` emits RGB values directly in `[0, 1]`
+- `auto_sample_min_fps` / `tracknet_auto_sample_min_fps` / `auto_sample_fps_threshold` (number or ratio string, optional, default `0`) - enable automatic input-FPS-based TrackNet sampling at or above this FPS; `0` disables auto sampling. The node estimates FPS from incoming frame PTS and keeps every source frame on output with its original PTS/timebase.
+- `auto_sample_every_n` / `tracknet_auto_sample_every_n` / `auto_sample_divisor` (int, optional, default `1`) - when auto sampling is active, build TrackNet triplets from every Nth source frame. Non-sampled frames do not receive TrackNet metadata. Values greater than `1` require `triplet_alignment: "latest"`.
+- `sample_fill_mode` / `tracknet_sample_fill_mode` (string, optional, default `none`) - `none` leaves skipped frames without TrackNet metadata; `hold` copies the most recent inferred TrackNet metadata onto skipped frames.
+- `raw_output_max_elements_per_tensor` (int, optional, default `0`) - cap raw JSON values per tensor; `0` emits all values
+- `target_label` / `label` (string, optional, default `ball`) - compact detection label
+- `conf_thresh` (float, optional, default `0.5`) - compact detection score threshold
+- `visible_thresh` (float, optional, default `0.5`) - compact detection visible threshold
+- `emit_invisible` (bool, optional, default `false`) - allow compact detections below `visible_thresh`
+- `output_model_width`, `output_model_height` (int, optional, default source frame size) - compact detection coordinate dimensions
+- `use_cuda_graph` (bool, optional, default `false`) - enable TensorRT CUDA graph replay when supported
+- `debug_log_metadata` (bool, optional, default `false`) - log compact metadata or raw metadata size periodically
+- `debug_log_every_n` (int, optional, default `0`) - debug log period
+
+Raw metadata schema is `tracknet_raw_outputs_v1` with input tensor info and an `outputs` array of `{name, dtype, dims, size, values}`.
 
 ### `cuda_infer_rtdetr`
 
@@ -831,11 +866,49 @@ Supported DRM formats (layer0/plane0 only):
 - `DRM_FORMAT_ARGB8888`
 
 Cache behavior:
-- Maintains an internal cache keyed by the incoming DMA-BUF FD number.
-- Cache entries are evicted when an FD is not seen for `ttl` seconds, and the whole cache is purged when resolution changes.
+- Identifies a physical allocation by `st_dev`, `st_ino`, dimensions, DRM fourcc,
+  modifier, plane offset, and plane pitch. FD integers are not identity because
+  they can be reused.
+- Keeps a duplicated DMA-BUF FD alive with every cached `EGLImageKHR`.
+- Reuses the same immutable `EGLImageKHR` when that allocation returns. The
+  producer/consumer protocol must retain each delivered frame until downstream
+  GPU reads finish; `ipc_dmabuf_source` provides that ordering through release
+  acknowledgements.
+- Evicts idle entries after `ttl` and the least-recently-used entry at the configured limit.
 
 Parameters:
-- `ttl` (float seconds, optional, default `5.0`) - cache entry time-to-live
+- `cache_mode` (string, optional, default `"reuse"`) - `reuse` or `off`
+- `ttl` (float seconds, optional, default `3.0`) - cache entry time-to-live
+- `max_cache_entries` (integer, optional, default `64`) - maximum retained imports
+- `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate cache counters
+
+### `egl_image_cuda_overlay`
+
+Scale and compose multiple cached `EglImageFrame` inputs directly into one
+pitched CUDA RGB0 frame. Each stable input image is registered once with
+`cuGraphicsEGLRegisterImage`; its `CUeglFrame` and CUDA texture object are then
+kept for that physical allocation. CUDA EGL image resources do not require
+per-frame map/unmap. Every output tick samples the cached texture objects with
+bilinear scaling and writes the configured rectangles directly. There are no
+per-input CUDA frames, scale filters, or pixel copies.
+
+The node owns its output clock. It keeps the latest frame independently for
+each input, so a stalled input repeats its last image without blocking other
+inputs or the program output. The frame lifetime holders are released only
+after a CUDA event confirms that the sampling kernels have completed.
+
+N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 software format
+
+Parameters:
+- `src` (array of edge names, required) - input EGL image edges
+- `dst` (string, required) - output CUDA video edge
+- `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+- `width`, `height` (integers, required) - output canvas dimensions
+- `layers` (array, required, one per input) - objects containing `dst_x`, `dst_y`, `dst_w`, and `dst_h`
+- `fps` (ratio string, optional, default `"60/1"`) - independent compositor output rate
+- `cache_ttl` (float seconds, optional, default `3.0`) - idle interop-slot lifetime
+- `max_cache_entries` (integer, optional, default `440`) - maximum registered slots
+- `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate compositor counters
 
 ### `jittergen`
 

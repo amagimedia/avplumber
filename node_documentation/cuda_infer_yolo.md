@@ -110,6 +110,8 @@ Masks are in the same order as detections in the JSON metadata.
   - `output_box_format` (optional) — `"end2end_xyxy"` (default) or `"raw_cxcywh"`.
   - `class_names` (optional) — array of class-name strings, mapped to class IDs by index.
   - `class_index_remap` (optional) — integer array used to remap decoded class IDs.
+  - `nms_iou_thresh` (optional) — IoU threshold for decoder-side NMS. Default `0.0` disables NMS. This is useful for raw YOLO exports without TensorRT NMS.
+  - `nms_class_agnostic` (optional) — apply NMS across classes when `true`. Default `false`.
   - `include_in_detection_metadata` (optional) — boolean, defaults to `true`. When `false`, the model still runs and can emit masks/side data, but its decoded detections are excluded from the shared JSON metadata list.
 
   All models must share the same input dimensions and data type.
@@ -180,7 +182,7 @@ node.add { "type": "cuda_infer_yolo", "src": "v_pre_yolo", "dst": "v_post_yolo",
   "input_format": "RGB", "conf_thresh": 0.20, "max_det": 20,
   "mask_gpu_every_n": 1, "mask_cpu_every_n": 3, "mask_cpu_resolution": 120,
   "models": [
-    { "engine": "/models/ball.plan", "task_type": "detection", "class_names": ["basketball"], "output_box_format": "end2end_xyxy" },
+    { "engine": "/models/detector.plan", "task_type": "detection", "class_names": ["object"], "output_box_format": "end2end_xyxy" },
     { "engine": "/models/yolo-seg.plan", "task_type": "segmentation", "class_names": ["person"], "output_box_format": "raw_cxcywh" }
   ]
 }

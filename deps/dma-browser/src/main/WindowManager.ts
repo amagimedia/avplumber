@@ -1,21 +1,13 @@
-import type {
-  IManagedWindow,
-  IManagedWindowFactory,
-} from './ManagedWindow';
+import type { IManagedWindow, IManagedWindowFactory } from './ManagedWindow';
 import type { WindowConfig, WindowSnapshot } from './config/WindowConfig';
 import { CapacityError, ConflictError, NotFoundError } from './rest/errors';
+import type { StatusReport, WindowControl } from './WindowControl';
 
 export interface WindowManagerOptions {
   readonly maxWindows: number;
 }
 
-export interface StatusReport {
-  readonly windows: readonly WindowSnapshot[];
-  readonly count: number;
-  readonly maxWindows: number;
-}
-
-export class WindowManager {
+export class WindowManager implements WindowControl {
   private readonly factory: IManagedWindowFactory;
   private readonly maxWindows: number;
   private readonly windows = new Map<string, IManagedWindow>();

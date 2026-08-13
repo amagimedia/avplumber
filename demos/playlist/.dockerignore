@@ -1,0 +1,9 @@
+test-media/*.mp4
+test-media/*.tmp
+test-media/contact-sheet.jpg
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+tui-mockup.html

@@ -1,0 +1,25 @@
+general: {
+	events = true
+}
+
+avplumber-program: {
+	type = "rtp"
+	id = 1
+	description = "avplumber program WebRTC preview"
+	metadata = "{\"source\":\"avplumber\",\"video\":\"h264\",\"audio\":\"opus\"}"
+	audio = __JANUS_AUDIO_ENABLED__
+	video = true
+	audioport = __JANUS_AUDIO_PORT__
+	audiortcpport = __JANUS_AUDIO_RTCP_PORT__
+	audioiface = "127.0.0.1"
+	audiopt = 111
+	audiocodec = "opus"
+	audiofmtp = "stereo=1"
+	videoport = __JANUS_VIDEO_PORT__
+	videortcpport = __JANUS_VIDEO_RTCP_PORT__
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=42e028;packetization-mode=1"
+	secret = "avpsecret"
+}

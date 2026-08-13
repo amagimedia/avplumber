@@ -27,6 +27,16 @@ const instances = new Map();
 const HEARTBEAT_TIMEOUT_MS = 30000; // 30 seconds
 const HEARTBEAT_CLEANUP_INTERVAL_MS = 5000; // Check every 5 seconds
 
+// The address a recorder is reachable on is the source IP of its own
+// registration/heartbeat connection, NOT the `host` it self-reports (the avplumber
+// engine hardcodes "127.0.0.1"). Under host-networking (the dev box) the source IP IS
+// 127.0.0.1, so this is a no-op there; across pods/hosts it yields the routable IP the
+// control proxy must dial. Strips the IPv4-mapped-IPv6 prefix ("::ffff:10.0.0.1").
+function peerHost(req) {
+  const addr = (req && req.socket && req.socket.remoteAddress) || '';
+  return addr.replace(/^::ffff:/, '');
+}
+
 function addInstance(def, usesHeartbeat = false) {
   if (!def) throw new Error('instance definition required');
   const host = def.host || '127.0.0.1';
@@ -238,6 +248,8 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const obj = JSON.parse(body || '{}');
+        const peer = peerHost(req);
+        if (peer) obj.host = peer;
         const inst = addInstance(obj);
         // start per-instance log tailing if logfile provided
         startLogTailForInstance(inst);
@@ -263,6 +275,8 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const obj = JSON.parse(body || '{}');
+        const peer = peerHost(req);
+        if (peer) obj.host = peer;
         const { inst, wasNew } = updateInstanceHeartbeat(obj);
         // start per-instance log tailing if logfile provided and not already started
         startLogTailForInstance(inst);

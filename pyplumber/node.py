@@ -74,11 +74,7 @@ class PythonNode(NodeBase):
         data_type = args.get("data_type", "VideoFrame")
         self._src_data_type = args.get("src_data_type", data_type)
         self._dst_data_type = args.get("dst_data_type", data_type)
-        if self.TYPE == "python_node_audio_to_metadata":
-            self._src_data_type = args.get("src_data_type", "AudioSamples")
-            self._dst_data_type = args.get("dst_data_type", "MetadataFrame")
-
-        params = args | { "type": self.TYPE }
+        params = args | { "type": self.TYPE, "type_python": self.__class__.__name__ }
         super().__init__(params)
         self._wrapper = None
 
@@ -109,17 +105,6 @@ class PythonNode(NodeBase):
             for dst_edge in dst_edges:
                 self._dst[dst_edge] = self._avplumber.getEdge(dst_edge, self._dst_data_type)
                 assert self._dst[dst_edge] is not None, f"Destination edge {dst_edge} not found"
-
-
-class AudioToMetadataPythonNode(PythonNode):
-    TYPE = "python_node_audio_to_metadata"
-
-    def __init__(self, args: dict):
-        params = {
-            "src_data_type": "AudioSamples",
-            "dst_data_type": "MetadataFrame",
-        } | args | {"type": self.TYPE}
-        super().__init__(params)
 
 
 class InternalNode(NodeBase):
@@ -195,6 +180,18 @@ class DrmPrimeToCuda(InternalNode):
     TYPE = "drm_prime_to_cuda"
 
 
+class DrmPrimeToEglImage(InternalNode):
+    TYPE = "drm_prime_to_egl_image"
+
+
+class EglImageCudaOverlay(InternalNode):
+    TYPE = "egl_image_cuda_overlay"
+
+
+class CudaToEglImage(InternalNode):
+    TYPE = "cuda_to_egl_image"
+
+
 class Split(InternalNode):
     TYPE = "split"
 
@@ -203,24 +200,44 @@ class CudaInferYolo(InternalNode):
     TYPE = "cuda_infer_yolo"
 
 
+class TrackNetBall(InternalNode):
+    TYPE = "tracknet_ball"
+
+
+class DoctrOcr(InternalNode):
+    TYPE = "doctr_ocr"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
-
-
-class ShotClassifier(InternalNode):
-    TYPE = "shot_classifier"
 
 
 class PlayerTracker(InternalNode):
     TYPE = "player_tracker"
 
 
-class BallTracker(InternalNode):
-    TYPE = "ball_tracker"
+class LumaDiff(InternalNode):
+    TYPE = "luma_diff"
 
 
-class BallHandler(InternalNode):
-    TYPE = "ball_handler"
+class HogDiff(InternalNode):
+    TYPE = "hog_diff"
+
+
+class CudaSceneDiff(InternalNode):
+    TYPE = "cuda_scene_diff"
+
+
+class CudaCameraMotion(InternalNode):
+    TYPE = "cuda_camera_motion"
+
+
+class LumaSceneCut(InternalNode):
+    TYPE = "luma_scene_cut"
+
+
+class CudaInferSceneCutOnnx(InternalNode):
+    TYPE = "cuda_infer_scene_cut_onnx"
 
 
 class DrawTrail(InternalNode):
@@ -233,6 +250,14 @@ class DrawBBox(InternalNode):
 
 class DrawBBoxLabels(InternalNode):
     TYPE = "draw_bbox_labels"
+
+
+class DrawSegMask(InternalNode):
+    TYPE = "draw_segmask"
+
+
+class DrawKeypoints(InternalNode):
+    TYPE = "draw_keypoints"
 
 
 class SmoothTimestamps(InternalNode):
@@ -259,8 +284,16 @@ class EncVideo(InternalNode):
     TYPE = "enc_video"
 
 
+class NvjpegEnc(InternalNode):
+    TYPE = "nvjpeg_enc"
+
+
 class Bsf(InternalNode):
     TYPE = "bsf"
+
+
+class PacketRelay(InternalNode):
+    TYPE = "packet_relay"
 
 
 class Mux(InternalNode):
@@ -292,3 +325,23 @@ class WriteAudioEnvelope(InternalNode):
 
 class NullSink(InternalNode):
     TYPE = "null_sink"
+
+
+class SentinelVideo(InternalNode):
+    TYPE = "sentinel_video"
+
+
+class SentinelAudio(InternalNode):
+    TYPE = "sentinel_audio"
+
+
+class PictureBufferSink(InternalNode):
+    TYPE = "picture_buffer_sink"
+
+
+class FakeVideoFormat(InternalNode):
+    TYPE = "fake_video_format"
+
+
+class FakeAudioMetadata(InternalNode):
+    TYPE = "fake_audio_metadata"

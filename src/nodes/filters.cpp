@@ -10,6 +10,7 @@ extern "C" {
 #include "../audio_parameters.hpp"
 #include "../hwaccel.hpp"
 #include <avcpp/channellayout.h>
+#include <chrono>
 
 template<typename T> struct FilterMediaSpecific {
 };
@@ -84,7 +85,7 @@ template<> struct FilterMediaSpecific<av::AudioSamples> {
     }
 };
 
-template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource {
+template<typename Child, typename T, AVMediaType media_type> class FilterNode: public NodeMultiInput<T>, public NodeMultiOutput<T>, public ReportsFinishByFlag, public ITimeBaseSource, public IInputsObjects {
     friend struct FilterMediaSpecific<T>;
 protected:
     using MediaSpecific = FilterMediaSpecific<T>;
@@ -291,6 +292,7 @@ protected:
     const AVFilterContext* out_ctx_ = nullptr;
     TSEqualizer eq_;
     std::string graph_desc_;
+    std::string node_label_ = "<unnamed>";
     bool do_shift_ = true;
     bool defer_preliminary_init_ = false;
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -350,7 +352,7 @@ protected:
         sinks_.resize(this->sink_edges_.size());
         input_eof_.resize(this->source_edges_.size(), false);
     }
-    bool maybeInitFilterGraph() {
+    bool maybeInitFilterGraph(bool frame_waiting = false) {
         if (filter_graph_ != nullptr) {
             freeFilterGraph();
         }
@@ -361,7 +363,21 @@ protected:
                 return false;
             }
         }
-        
+
+        auto init_start = std::chrono::steady_clock::now();
+        auto elapsed_ms = [&init_start]() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - init_start).count();
+        };
+        auto log_init = [this, frame_waiting](const char* status, int64_t init_ms) {
+            logstream << "filter_graph_init"
+                      << " status=" << status
+                      << " node=" << node_label_
+                      << " init_ms=" << init_ms
+                      << " frame_wait_ms=" << (frame_waiting ? init_ms : 0)
+                      << " graph=\"" << graph_desc_ << "\"";
+        };
+
         filter_graph_ = avfilter_graph_alloc();
         
         AVFilterInOut* inputs = nullptr;
@@ -370,6 +386,7 @@ protected:
         int ret;
         ret = avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), &inputs, &outputs);
         if (ret < 0) {
+            log_init("error_parse", elapsed_ms());
             throw Error("Couldn't parse filter graph");
         }
         
@@ -432,10 +449,12 @@ protected:
         
         ret = avfilter_graph_config(filter_graph_, nullptr);
         if (ret < 0) {
+            log_init("error_config", elapsed_ms());
             throw Error("avfilter_graph_config error");
         }
         for (Port &port: sinks_) {
             if (!port.checkSinkFilterMediaType()) {
+                log_init("error_output_media_type", elapsed_ms());
                 freeFilterGraph();
                 throw Error("Filter outputs invalid media type");
             }
@@ -443,9 +462,11 @@ protected:
         if (sinks_.size()==1) {
             out_ctx_ = sinks_[0].getFilterContext();
         } else {
+            log_init("error_output_count", elapsed_ms());
             freeFilterGraph();
             throw Error("Exactly one destination is needed");
         }
+        log_init("ok", elapsed_ms());
         return true;
     }
     void preliminaryInit() {
@@ -465,7 +486,7 @@ protected:
             typename MediaSpecific::Parameters params = MediaSpecific::parametersFromNodeInterface(*mdsrc);
             sources_[i].checkParameters(params, nullptr, tbsrc->timeBase(), edge);
         }
-        maybeInitFilterGraph();
+        maybeInitFilterGraph(false);
     }
     bool allInputsEof() const {
         for (bool e : input_eof_) {
@@ -592,7 +613,7 @@ public:
                 }
                 source_port.captureInitialHWFramesCtxFromFrame(*frmin);
                 if (filter_graph_==nullptr) {
-                    maybeInitFilterGraph();
+                    maybeInitFilterGraph(true);
                 }
                 if (filter_graph_!=nullptr) {
                     if (do_shift_) {
@@ -623,7 +644,7 @@ public:
                             }
                             p2.captureInitialHWFramesCtxFromFrame(*f2);
                             if (filter_graph_==nullptr) {
-                                maybeInitFilterGraph();
+                                maybeInitFilterGraph(true);
                             }
                             if (filter_graph_==nullptr)
                                 continue;
@@ -665,7 +686,7 @@ public:
                             sources_[i].captureInitialHWFramesCtxFromFrame(*fi);
                         }
                     }
-                    maybeInitFilterGraph();
+                    maybeInitFilterGraph(true);
                     if (filter_graph_ == nullptr) {
                         this->waitForInput();
                     }
@@ -683,6 +704,28 @@ public:
         }
     }
 public:
+    void setObject(const std::string key, const Parameters& value) override {
+        if (key != "filter_command")
+            throw Error("filter node: unknown object key: " + key);
+        if (!value.is_object())
+            throw Error("filter_command must be an object");
+        if (!filter_graph_)
+            throw Error("filter_command requires an initialized filter graph");
+
+        const std::string target = value.value("target", std::string("all"));
+        const std::string command = value.at("command").get<std::string>();
+        const std::string argument = value.value("argument", std::string(""));
+        char response[1024] = {};
+        const int ret = avfilter_graph_send_command(
+            filter_graph_, target.c_str(), command.c_str(), argument.c_str(),
+            response, sizeof(response), 0);
+        if (ret < 0) {
+            throw Error(
+                "filter_command " + target + "." + command + " failed: " +
+                av::error2string(ret));
+        }
+    }
+
     virtual void initDefaults(const Parameters &params) = 0;
     static std::shared_ptr<Child> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
@@ -693,6 +736,7 @@ public:
             shift = params["shift"].get<bool>();
         }
         std::shared_ptr<Child> result = std::make_shared<Child>(graph_desc, shift);
+        result->node_label_ = params.value("name", std::string("<unnamed>"));
         if (params.count("defer_preliminary_init")==1) {
             result->defer_preliminary_init_ = params["defer_preliminary_init"].get<bool>();
         }
@@ -781,8 +825,12 @@ public:
     }
     virtual av::Rational frameRate() {
         if (out_ctx_) {
-            return av_buffersink_get_frame_rate(out_ctx_);
-        } else if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
+            av::Rational frame_rate = av_buffersink_get_frame_rate(out_ctx_);
+            if (frame_rate.getNumerator() > 0 && frame_rate.getDenominator() > 0) {
+                return frame_rate;
+            }
+        }
+        if (default_frame_rate_.getNumerator()>0 && default_frame_rate_.getDenominator()>0) {
             return default_frame_rate_;
         } else {
             throw Error("unknown filter output frame rate");
