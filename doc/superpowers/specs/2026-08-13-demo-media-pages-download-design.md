@@ -8,14 +8,14 @@ Release, add a gallery UI, or otherwise change the README's existing content.
 
 ## Published surface
 
-GitHub Pages acts only as a static demo-media host. A Pages workflow publishes:
+GitHub Pages acts only as a static demo-media host. The dedicated `gh-pages`
+branch publishes:
 
 - files below `demos/*/docs/`, preserving their repository-relative paths;
 - one reusable `download.html` bridge at the Pages site root.
 
-The workflow does not publish the repository root, source code, or generated
-documentation. It deploys from `basketball-demo` when published demo media,
-the bridge, or the workflow changes, and also supports a manual dispatch.
+The site does not publish the repository root, source code, or generated
+documentation.
 
 ## Download bridge
 
@@ -43,12 +43,11 @@ rest of `demos/dmabuf-browser/README.md` remain unchanged.
 
 ## Deployment
 
-The workflow uses GitHub's supported Pages actions with `pages: write` and
-`id-token: write` permissions. Its build step creates a fresh staging
-directory, copies only the approved media tree and bridge, uploads that
-directory as the Pages artifact, and deploys it to the `github-pages`
-environment. Repository Pages is configured for workflow-based deployment;
-no release or long-lived deployment branch is created.
+The published tree is assembled from `.github/pages/download.html` and files
+below `demos/*/docs/`, then committed to the dedicated `gh-pages` branch.
+Repository Pages uses its built-in branch deployment. This remains compatible
+with organizations whose IP allow list blocks API access from GitHub-hosted
+Actions runners. No GitHub Release is created.
 
 ## Validation
 
