@@ -5,12 +5,12 @@ headlessly in Electron, export each frame as a GPU **DMA-BUF** (zero-copy), feed
 it into an **avplumber** graph, and stream it to **Janus** for WebRTC preview in
 a browser.
 
-NVIDIA needs one allocation change in Electron's Chromium: the renderable
-SharedImage must not request CPU access. This directory provides a
-runtime-gated Electron patch and a script that builds Electron with it. The
-same binary retains upstream behavior when the feature is disabled. An
-`LD_PRELOAD` GBM shim makes the corresponding GBM allocation change when using
-an unpatched Electron binary.
+NVIDIA needs Chromium's renderable SharedImage without the CPU-linear
+allocation constraint. The recommended route is the supplied GBM shim with a
+stock Electron binary; it has been exercised with Electron 41 / Chromium 146
+and Electron 43 / Chromium 150. Users who do not want `LD_PRELOAD` can build
+Electron with the two source patches in this directory. Do not combine the two
+routes.
 
 ```
  ┌─────────┐   wayland    ┌──────────────┐  dmabuf fd (unix socket)  ┌───────────┐   RTP    ┌────────┐  WebRTC  ┌─────────────┐
@@ -20,94 +20,66 @@ an unpatched Electron binary.
                           └──────────────┘
 ```
 
-## Why NVIDIA needs SCANOUT without CPU access
+## How DMA-BUF sharing reached Electron
+
+The browser did not always expose a reusable GPU allocation to embedders.
+Reito OvO's [Chromium CL 5276423](https://chromium-review.googlesource.com/c/chromium/src/+/5276423)
+first let capture write RGBA into an existing native GPU texture. The related
+[CL 5265077](https://chromium-review.googlesource.com/c/chromium/src/+/5265077)
+then added native-texture GPU-memory-buffer output to
+`FrameSinkVideoCapturer`, explicitly for accelerated consumers such as CEF
+OSR, Electron, and OBS. Their
+[Chromium change history](https://chromium-review.googlesource.com/q/author:reito@chromium.org+or+author:carolwolfking@gmail.com)
+contains the follow-up tests and format fixes.
+
+Electron's `useSharedTexture` offscreen API builds on that work. On Linux it
+delivers a `NativePixmap` containing the DMA-BUF file descriptor plus its
+stride, offset, and DRM modifier. avplumber keeps the buffer on the GPU and
+imports those fields through EGL; it does not assume that the pixels are laid
+out linearly.
+
+## The NVIDIA allocation problem
+
+Electron 41 and 43 request `kPreferMappableSharedImage`. On Linux that leads to
+`SCANOUT_CPU_READ_WRITE`, which includes `GBM_BO_USE_LINEAR`. This is useful
+when a CPU may need to map the buffer, but the affected NVIDIA GBM path cannot
+also use that linear allocation as Chromium's render target. NVIDIA instead
+needs a native tiled/block-linear allocation whose modifier is exported with
+the DMA-BUF.
 
 [Chromium CL 6681354](https://chromium-review.googlesource.com/c/chromium/src/+/6681354),
-landed as
-[commit `a531c83a`](https://chromium.googlesource.com/chromium/src/+/a531c83a9bbb552fa13ceeaf73d0a19d1203cc12)
-in August 2025, introduced the relevant upstream behavior. On Linux,
-`gfx::BufferUsage::SCANOUT_CPU_READ_WRITE` implies `GBM_BO_USE_LINEAR`.
-NVIDIA's GBM driver cannot use that allocation as the render target required by
-the offscreen shared-texture path.
+landed in August 2025 as
+[commit `a531c83a`](https://chromium.googlesource.com/chromium/src/+/a531c83a9bbb552fa13ceeaf73d0a19d1203cc12),
+added the internal `kPreferSharedImageWithNativeHandle` choice. It sets
+`requires_cpu_access=false`, so the pool requests `SCANOUT` rather than
+`SCANOUT_CPU_READ_WRITE` and does not imply `GBM_BO_USE_LINEAR`.
 
-The Chromium change added the internal Mojo enum
-`kPreferSharedImageWithNativeHandle`. A capture consumer selecting that
-preference sets `requires_cpu_access=false`, which makes the renderable
-SharedImage pool choose `gfx::BufferUsage::SCANOUT`. This avoids
-`GBM_BO_USE_LINEAR` while retaining the rendering, scanout, and texturing usage
-needed by this pipeline.
+This is a consumer-level C++/Mojo API: “consumer” means Electron's internal OSR
+capture component, not a web page or command-line user. Chromium kept the
+mappable default because Chrome may need a CPU-readable buffer for software
+encoder fallback, and the review found that changing the policy globally broke
+other GPU configurations. Consequently, stock Chrome and Electron have no
+official flag that selects the NVIDIA-friendly allocation.
 
-This was deliberately added as a caller preference, not a global policy. The
-review records that globally changing the allocation broke Chrome tests on
-Intel and NVIDIA, and that Chrome normally needs mappable buffers for software
-video-encoder fallback. “Caller” or “consumer” here means the internal C++
-component receiving captured frames, such as Electron's OSR consumer; it is not
-a web API or a user-selectable Chrome setting. The review does not document a
-rejected command-line flag; the landed interface is an internal C++/Mojo choice
-for embedders.
+Two pieces were then lost in translation:
 
-Chromium 146 and 150 contain that upstream choice, but
-[Electron 43.4.0 still selects `kPreferMappableSharedImage`](https://github.com/electron/electron/blob/v43.4.0/shell/browser/osr/osr_video_consumer.cc#L80-L87)
-for `useSharedTexture`. Released Electron and standalone Chrome expose no
-runtime option that changes this preference.
+1. Electron 41 and 43 still select
+   [`kPreferMappableSharedImage`](https://github.com/electron/electron/blob/v43.4.0/shell/browser/osr/osr_video_consumer.cc#L80-L87).
+2. CL 6681354 allocated the native handle but did not add that new preference
+   to `FrameSinkVideoCapturerImpl`'s GPU texture/blit-result condition. The
+   follow-up [Chromium CL 8220427](https://chromium-review.googlesource.com/c/chromium/src/+/8220427)
+   fixes this; it was still under review on 2026-08-13.
 
-The bundled
-[`electron-offscreen-native-handle.patch`](chromium/electron-offscreen-native-handle.patch)
-adds the disabled-by-default feature
-`RenderableMappableSharedImageForceScanout` to Electron's OSR consumer. When
-the feature is enabled, and only for an OSR window using `useSharedTexture`,
-Electron selects `kPreferSharedImageWithNativeHandle`. It does not change
-Chromium's general video-frame-pool policy. Without the feature flag, the same
-Electron build behaves like upstream on every GPU vendor. No video-decoder
-changes are included.
+This is why changing only Electron's enum is incomplete, and why the source
+build below carries two patches.
 
-### Build patched Electron (no shim)
+## Recommended: stock Electron with the GBM shim
 
-Install the prerequisites from Electron's
-[Linux build instructions](https://www.electronjs.org/docs/latest/development/build-instructions-linux),
-then run:
-
-```bash
-cd demos/dmabuf-browser/chromium
-BUILD_JOBS=8 ./build-electron.sh
-```
-
-The default is Electron 41.3.0 / Chromium 146.0.7680.188, matching
-`deps/dma-browser/package.json`. To build an Electron release containing
-Chromium 150, pass the Electron version explicitly; for example:
-
-```bash
-BUILD_JOBS=8 ./build-electron.sh 43.4.0
-```
-
-[`build-electron.sh`](chromium/build-electron.sh) creates an isolated checkout
-under `chromium/work/`, syncs the requested Electron tag and its Chromium
-revision, applies only the bundled
-patch to Electron's OSR consumer, builds `electron:electron_dist_zip`, and
-writes the zip and checksum to `chromium/artifacts/`. It refuses to reset,
-retarget, or patch a dirty existing checkout. At completion it prints the exact
-`ELECTRON_BIN=... bin/run.sh` command for running the demo.
-
-Keep the Electron version in `deps/dma-browser/package.json` and the `fdpass`
-native-addon rebuild target aligned with the custom binary. The patched binary
-must be started with:
-
-```text
---enable-features=RenderableMappableSharedImageForceScanout
-```
-
-`deps/dma-browser/bin/run.sh` adds this feature only after detecting NVIDIA (or
-when `DMA_BROWSER_FORCE_NVIDIA=1` is set). An unpatched Electron binary ignores
-the unknown feature name. Intel/AMD runs do not receive the flag.
-
-### Use unpatched Electron with a GBM shim
-
-An allocation shim can avoid rebuilding Electron. Here “unpatched Electron”
-means a stock Electron binary with its embedded Chromium, not the standalone
-Google Chrome application: this demo depends on Electron's offscreen
-shared-texture API. The shim is below Chromium's allocation policy and is not
-tied to a Chromium source revision; it has been exercised with stock Electron
-43.4.0 / Chromium 150 as well as Electron 41 / Chromium 146.
+The shim avoids a Chromium build. “Stock Electron” here means an official
+Electron binary with its unmodified embedded Chromium, not standalone Google
+Chrome: the demo needs Electron's offscreen shared-texture API. The path has
+been exercised with Electron 41.3.0 / Chromium 146 and Electron 43.4.0 /
+Chromium 150.
 
 For example:
 
@@ -121,23 +93,79 @@ ELECTRON_BIN=<path-to-stock-electron> \
 deps/dma-browser/bin/run.sh
 ```
 
-Always run `rebuild:shim` on the target host; the generated `.so` is native to
-that host's CPU architecture and is intentionally ignored by Git. On the
-NVIDIA path, load it with `LD_PRELOAD` and set
-`GBM_LINEAR_SHIM_ADD_SCANOUT=1`. For the GBM buffer and surface allocation
-entry points that carry usage flags, it:
+Always compile the C source on the target host; the generated `.so` is native
+to that host's CPU architecture and is intentionally ignored by Git. Once it is
+preloaded, the shim intercepts `gbm_bo_create`,
+`gbm_bo_create_with_modifiers2`, `gbm_surface_create`, and
+`gbm_surface_create_with_modifiers2`. For each allocation it performs exactly:
 
-1. clears `GBM_BO_USE_LINEAR`;
-2. adds `GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING`;
-3. forwards the rewritten request to the real GBM library.
+```c
+flags &= ~GBM_BO_USE_LINEAR;    // clear 0x10
+flags |= GBM_BO_USE_SCANOUT;    // set 0x01
+flags |= GBM_BO_USE_RENDERING;  // set 0x04
+```
 
-It does not add a Chromium feature or otherwise change Chromium. NVIDIA remains
-free to allocate a tiled/block-linear DMA-BUF. The avplumber graph therefore
-imports the buffer through EGL with its DRM modifier. The single-source graph
-uses `drm_prime_to_cuda`; the scaling graph samples the cached EGLImage
-directly from CUDA. `GBM_LINEAR_SHIM_LOG=1` prints the original and rewritten
-allocation flags. Do not use the shim on Intel/AMD paths, where rewriting GBM
-allocation flags can change working behavior.
+It then calls the real GBM function through `RTLD_NEXT`. The shim does not
+allocate pixels, copy a frame, change Chromium's feature registry, or touch
+video decoding. Stock Electron remains on its established mappable
+texture/blit path; only the final GBM request loses the CPU-linear constraint.
+NVIDIA can therefore choose a renderable tiled allocation, Electron exports
+its DRM modifier, and avplumber imports it correctly through EGL.
+
+The trade-off is scope: `LD_PRELOAD` changes every matching GBM allocation in
+that Electron process, and the shim itself does not detect the GPU vendor. Load
+it only for the NVIDIA browser process. `GBM_LINEAR_SHIM_LOG=1` prints original
+and rewritten flags. The source is
+[`gbm_linear_shim.c`](../../deps/dma-browser/native/gbm-linear-shim/gbm_linear_shim.c).
+
+## Alternative: build Electron without the shim
+
+The source route is narrower at runtime and remains vendor-neutral when its
+feature is disabled. It needs both bundled patches:
+
+- [`chromium-native-handle-texture-capture.patch`](chromium/chromium-native-handle-texture-capture.patch)
+  carries the production part of CL 8220427, making Chromium use its GPU
+  texture/blit path for the native-handle preference.
+- [`electron-offscreen-native-handle.patch`](chromium/electron-offscreen-native-handle.patch)
+  gives only Electron's `useSharedTexture` OSR consumer a disabled-by-default
+  runtime choice between the upstream mappable behavior and the native-handle
+  behavior.
+
+Install the prerequisites from Electron's
+[Linux build instructions](https://www.electronjs.org/docs/latest/development/build-instructions-linux),
+then run:
+
+```bash
+cd demos/dmabuf-browser/chromium
+BUILD_JOBS=8 ./build-electron.sh
+```
+
+The default is Electron 41.3.0 / Chromium 146.0.7680.188, matching
+`deps/dma-browser/package.json`. For Electron 43.4.0 / Chromium 150.0.7871.224:
+
+```bash
+BUILD_JOBS=8 ./build-electron.sh 43.4.0
+```
+
+[`build-electron.sh`](chromium/build-electron.sh) creates an isolated checkout
+under `chromium/work/`, syncs the requested Electron and Chromium revisions,
+applies both patches, builds `electron:electron_dist_zip`, and writes the zip
+and checksum to `chromium/artifacts/`. It refuses to reset, retarget, or patch a
+dirty checkout. Both patches are source-application checked against the exact
+146 and 150 versions above; the stock-shim path is the one runtime-tested here.
+
+The patched binary needs:
+
+```text
+--enable-features=RenderableMappableSharedImageForceScanout
+```
+
+`deps/dma-browser/bin/run.sh` adds that feature only after detecting NVIDIA (or
+when `DMA_BROWSER_FORCE_NVIDIA=1` is set). With the feature disabled, the same
+binary follows upstream behavior on Intel, AMD, and NVIDIA; neither patch
+hardcodes a GPU vendor or CPU architecture. Keep the Electron version in
+`deps/dma-browser/package.json` and the `fdpass` native-addon rebuild target
+aligned with the custom binary.
 
 ## The settings that actually matter
 

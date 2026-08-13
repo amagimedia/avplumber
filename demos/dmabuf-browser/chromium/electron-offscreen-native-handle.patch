@@ -17,6 +17,11 @@ The native-handle preference and its SCANOUT allocation behavior come from
 Chromium CL 6681354:
 https://chromium-review.googlesource.com/c/chromium/src/+/6681354
 
+This selector also requires the companion Chromium texture-capture patch based
+on CL 8220427. CL 6681354 did not add the native-handle preference to
+FrameSinkVideoCapturerImpl's GPU texture/blit-result condition:
+https://chromium-review.googlesource.com/c/chromium/src/+/8220427
+
 ---
  shell/browser/osr/osr_video_consumer.cc | 21 ++++++++++++++++-----
  1 file changed, 16 insertions(+), 5 deletions(-)
