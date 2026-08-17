@@ -174,10 +174,13 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/doctr_ocr.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/ocr_trt_runner.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/doctr_recognizer.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/ocr/scoreboard_two_stage_ocr.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_preprocess.cu,avpl_doctr_preprocess_ptx,objs/src/nodes/neural_net/ocr/doctr_ocr.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_doctr_preprocess.cu,avpl_doctr_preprocess_ptx,objs/src/nodes/neural_net/ocr/doctr_ocr.o objs/src/nodes/neural_net/ocr/scoreboard_two_stage_ocr.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/tracking/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/tracking/tracknet_ball.o))
 endif

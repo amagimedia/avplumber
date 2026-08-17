@@ -69,3 +69,72 @@ extern "C" __global__ void kNV12_doctr_crop_resize_pad_f32(
     out_nchw[out_idx + 1 * plane] = (g - mean_g) / std_g;
     out_nchw[out_idx + 2 * plane] = (b - mean_b) / std_b;
 }
+extern "C" __global__ void kNV12_scoreboard_letterbox_f32(
+    const uint8_t* __restrict__ y_plane, int y_pitch,
+    const uint8_t* __restrict__ uv_plane, int uv_pitch,
+    float* __restrict__ out_nchw,
+    const int* __restrict__ box_xywh,
+    int dst_h, int dst_w, float pad_value)
+{
+    int dx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int dy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (dx >= dst_w || dy >= dst_h) return;
+
+    int sx0 = box_xywh[0], sy0 = box_xywh[1];
+    int sw = box_xywh[2], sh = box_xywh[3];
+    int plane = dst_w * dst_h;
+    int out_idx = dy * dst_w + dx;
+    float scale = fminf((float)dst_w / fmaxf(1.0f, (float)sw),
+                        (float)dst_h / fmaxf(1.0f, (float)sh));
+    int content_w = max(1, min(dst_w, (int)floorf((float)sw * scale + 0.5f)));
+    int content_h = max(1, min(dst_h, (int)floorf((float)sh * scale + 0.5f)));
+    int pad_x = (dst_w - content_w) / 2;
+    int pad_y = (dst_h - content_h) / 2;
+
+    float r = pad_value, g = pad_value, b = pad_value;
+    if (dx >= pad_x && dx < pad_x + content_w && dy >= pad_y && dy < pad_y + content_h) {
+        float sx = (float)sx0 + ((float)(dx - pad_x) + 0.5f) * ((float)sw / (float)content_w) - 0.5f;
+        float sy = (float)sy0 + ((float)(dy - pad_y) + 0.5f) * ((float)sh / (float)content_h) - 0.5f;
+        int px = max(sx0, min(sx0 + sw - 1, (int)floorf(sx + 0.5f)));
+        int py = max(sy0, min(sy0 + sh - 1, (int)floorf(sy + 0.5f)));
+        nv12_rgb01_doctr(y_plane, y_pitch, uv_plane, uv_pitch, px, py, r, g, b);
+    }
+    out_nchw[out_idx] = r;
+    out_nchw[out_idx + plane] = g;
+    out_nchw[out_idx + 2 * plane] = b;
+}
+
+extern "C" __global__ void kNV12_scoreboard_letterbox_u8(
+    const uint8_t* __restrict__ y_plane, int y_pitch,
+    const uint8_t* __restrict__ uv_plane, int uv_pitch,
+    uint8_t* __restrict__ out_nchw,
+    const int* __restrict__ box_xywh,
+    int dst_h, int dst_w)
+{
+    int dx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int dy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (dx >= dst_w || dy >= dst_h) return;
+
+    int sx0 = box_xywh[0], sy0 = box_xywh[1];
+    int sw = box_xywh[2], sh = box_xywh[3];
+    int plane = dst_w * dst_h;
+    int out_idx = dy * dst_w + dx;
+    float scale = fminf((float)dst_w / fmaxf(1.0f, (float)sw),
+                        (float)dst_h / fmaxf(1.0f, (float)sh));
+    int content_w = max(1, min(dst_w, (int)floorf((float)sw * scale + 0.5f)));
+    int content_h = max(1, min(dst_h, (int)floorf((float)sh * scale + 0.5f)));
+    int pad_x = (dst_w - content_w) / 2;
+    int pad_y = (dst_h - content_h) / 2;
+
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    if (dx >= pad_x && dx < pad_x + content_w && dy >= pad_y && dy < pad_y + content_h) {
+        float sx = (float)sx0 + ((float)(dx - pad_x) + 0.5f) * ((float)sw / (float)content_w) - 0.5f;
+        float sy = (float)sy0 + ((float)(dy - pad_y) + 0.5f) * ((float)sh / (float)content_h) - 0.5f;
+        int px = max(sx0, min(sx0 + sw - 1, (int)floorf(sx + 0.5f)));
+        int py = max(sy0, min(sy0 + sh - 1, (int)floorf(sy + 0.5f)));
+        nv12_rgb01_doctr(y_plane, y_pitch, uv_plane, uv_pitch, px, py, r, g, b);
+    }
+    out_nchw[out_idx] = (uint8_t)floorf(r * 255.0f + 0.5f);
+    out_nchw[out_idx + plane] = (uint8_t)floorf(g * 255.0f + 0.5f);
+    out_nchw[out_idx + 2 * plane] = (uint8_t)floorf(b * 255.0f + 0.5f);
+}
