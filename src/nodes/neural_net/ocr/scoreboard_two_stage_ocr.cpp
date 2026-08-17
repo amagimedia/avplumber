@@ -2,6 +2,7 @@
 #include "../common/infer_trt_base.hpp"
 #include "doctr_recognizer.hpp"
 #include "ocr_trt_runner.hpp"
+#include "scoreboard_post_process.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>
@@ -34,9 +35,7 @@ const char* const kClassNames[kClassCount] = {
     "game_clock", "shot_clock", "quarter",
 };
 
-struct Box {
-    float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
-};
+using Box = scoreboard_post::Box;
 
 struct Detection {
     Box box;
@@ -48,15 +47,7 @@ struct Detection {
 };
 
 float boxIou(const Box& a, const Box& b) {
-    const float x1 = std::max(a.x1, b.x1);
-    const float y1 = std::max(a.y1, b.y1);
-    const float x2 = std::min(a.x2, b.x2);
-    const float y2 = std::min(a.y2, b.y2);
-    const float intersection = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
-    const float area_a = std::max(0.0f, a.x2 - a.x1) * std::max(0.0f, a.y2 - a.y1);
-    const float area_b = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
-    const float denominator = area_a + area_b - intersection;
-    return denominator > 0.0f ? intersection / denominator : 0.0f;
+    return scoreboard_post::iou(a, b);
 }
 
 float centerX(const Box& box) { return (box.x1 + box.x2) * 0.5f; }
@@ -133,8 +124,10 @@ class ScoreboardTwoStageOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, p
     int edge_margin_px_ = 0;
     std::vector<float> region_x_;
     int debug_log_every_n_ = 0;
+    bool post_process_ = false;
     uint64_t frame_counter_ = 0;
     uint64_t sample_counter_ = 0;
+    scoreboard_post::PostProcessor post_processor_;
 
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVCUDADeviceContext* cuda_device_context_ = nullptr;
@@ -480,22 +473,27 @@ public:
         launchLevel1(frame);
         Detection scoreboard;
         if (!decodeLevel1(width, height, scoreboard)) {
+            if (post_process_) post_processor_.clear();
             const Parameters output = emptyPayload(true, "scoreboard_not_detected");
             av_dict_set(&frame.raw()->metadata, metadata_key_.c_str(), output.dump().c_str(), 0);
             this->sink_->put(frame);
             return;
         }
 
+        const Box raw_scoreboard_box = scoreboard.box;
+        bool level1_relocated = false;
+        if (post_process_) {
+            const auto level1_update = post_processor_.updateLevel1(scoreboard.box);
+            scoreboard.box = clampBox(level1_update.box, width, height);
+            level1_relocated = level1_update.relocated;
+        }
+        // Padding already absorbs small Level-1 jitter. Keep the current raw box for
+        // the Level-2 crop so temporal output smoothing cannot change model sampling.
+        const auto level2_crop = scoreboard_post::PostProcessor::level2Crop(
+            raw_scoreboard_box, width, height, vertical_padding_);
         int crop[4] = {
-            0,
-            std::max(0, (int)std::floor(scoreboard.box.y1) - vertical_padding_),
-            width,
-            0,
+            level2_crop[0], level2_crop[1], level2_crop[2], level2_crop[3],
         };
-        crop[1] &= ~1;
-        int crop_bottom = std::min(height, (int)std::ceil(scoreboard.box.y2) + vertical_padding_);
-        crop_bottom = std::min(height, (crop_bottom + 1) & ~1);
-        crop[3] = std::max(1, crop_bottom - crop[1]);
         launchLevel2(frame, crop);
         std::vector<Detection> detections = decodeLevel2(crop, width, height);
 
@@ -515,15 +513,29 @@ public:
             {"det_conf", scoreboard.confidence},
             {"label", "scoreboard"},
         };
+        if (post_process_) {
+            output["post_process"] = {
+                {"enabled", true},
+                {"level1_relocated", level1_relocated},
+                {"raw_level1_bbox", {raw_scoreboard_box.x1, raw_scoreboard_box.y1,
+                                      raw_scoreboard_box.x2, raw_scoreboard_box.y2}},
+                {"raw_level2_detections", Parameters::array()},
+            };
+        }
         output["level2_crop"] = {crop[0], crop[1], crop[2], crop[3]};
 
         const bool ambiguous = countClass(detections, 3) > 2 || countClass(detections, 4) > 1;
         output["detections"] = Parameters::array();
         output["draw_detections"] = Parameters::array();
         if (ambiguous) {
+            if (post_process_) post_processor_.clearComponents();
             output["reason"] = "ambiguous_multiple_games";
             for (const Detection& detection : detections) {
                 output["draw_detections"].push_back(detectionJson(detection));
+                if (post_process_) {
+                    output["post_process"]["raw_level2_detections"].push_back(
+                        detectionJson(detection));
+                }
             }
         } else {
             keepSingleton(detections, 4);
@@ -535,6 +547,15 @@ public:
             }
             keepHighestPerLabel(detections);
             recognizeText(frame, detections, width, height);
+            if (post_process_) {
+                for (Detection& detection : detections) {
+                    output["post_process"]["raw_level2_detections"].push_back(
+                        detectionJson(detection));
+                    detection.box = clampBox(
+                        post_processor_.updateComponent(detection.label, detection.box),
+                        width, height);
+                }
+            }
             std::sort(detections.begin(), detections.end(), [](const Detection& a, const Detection& b) {
                 if (a.label != b.label) return a.label < b.label;
                 return a.confidence > b.confidence;
@@ -594,6 +615,7 @@ public:
             }
         }
         if (params.count("debug_log_every_n")) result->debug_log_every_n_ = std::max(0, params["debug_log_every_n"].get<int>());
+        if (params.count("post_process")) result->post_process_ = params["post_process"].get<bool>();
         result->preinitialize();
         return result;
     }
