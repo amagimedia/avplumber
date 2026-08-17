@@ -473,7 +473,7 @@ public:
         launchLevel1(frame);
         Detection scoreboard;
         if (!decodeLevel1(width, height, scoreboard)) {
-            if (post_process_) post_processor_.clear();
+            if (post_process_) post_processor_.missLevel1();
             const Parameters output = emptyPayload(true, "scoreboard_not_detected");
             av_dict_set(&frame.raw()->metadata, metadata_key_.c_str(), output.dump().c_str(), 0);
             this->sink_->put(frame);
@@ -528,10 +528,9 @@ public:
         output["detections"] = Parameters::array();
         output["draw_detections"] = Parameters::array();
         if (ambiguous) {
-            if (post_process_) post_processor_.clearComponents();
+            if (post_process_) post_processor_.missComponents();
             output["reason"] = "ambiguous_multiple_games";
             for (const Detection& detection : detections) {
-                output["draw_detections"].push_back(detectionJson(detection));
                 if (post_process_) {
                     output["post_process"]["raw_level2_detections"].push_back(
                         detectionJson(detection));

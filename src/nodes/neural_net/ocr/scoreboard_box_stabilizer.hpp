@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 
 namespace scoreboard_post {
 
@@ -47,28 +49,61 @@ public:
 
     Update update(const Box& current) {
         if (!valid_) {
-            value_ = current;
-            valid_ = true;
+            reset(current);
             return {value_, false, false};
         }
         if (iou(value_, current) < min_iou_) {
-            value_ = current;
+            reset(current);
             return {value_, false, true};
         }
+        const Box observation = robustObservation(current);
         value_ = {
-            blend(value_.x1, current.x1),
-            blend(value_.y1, current.y1),
-            blend(value_.x2, current.x2),
-            blend(value_.y2, current.y2),
+            blend(value_.x1, observation.x1),
+            blend(value_.y1, observation.y1),
+            blend(value_.x2, observation.x2),
+            blend(value_.y2, observation.y2),
         };
         return {value_, true, false};
     }
 
-    void clear() { valid_ = false; }
+    void clear() {
+        valid_ = false;
+        observation_count_ = 0;
+    }
     bool valid() const { return valid_; }
     const Box& value() const { return value_; }
 
 private:
+    static constexpr std::size_t kObservationWindow = 3;
+
+    static float median(float a, float b, float c) {
+        return std::max(std::min(a, b), std::min(std::max(a, b), c));
+    }
+
+    void reset(const Box& current) {
+        value_ = current;
+        observations_[0] = current;
+        observation_count_ = 1;
+        valid_ = true;
+    }
+
+    Box robustObservation(const Box& current) {
+        if (observation_count_ < kObservationWindow) {
+            observations_[observation_count_++] = current;
+        } else {
+            observations_[0] = observations_[1];
+            observations_[1] = observations_[2];
+            observations_[2] = current;
+        }
+        if (observation_count_ < kObservationWindow) return current;
+        return {
+            median(observations_[0].x1, observations_[1].x1, observations_[2].x1),
+            median(observations_[0].y1, observations_[1].y1, observations_[2].y1),
+            median(observations_[0].x2, observations_[1].x2, observations_[2].x2),
+            median(observations_[0].y2, observations_[1].y2, observations_[2].y2),
+        };
+    }
+
     float blend(float previous, float current) const {
         return previous + alpha_ * (current - previous);
     }
@@ -76,6 +111,8 @@ private:
     float alpha_;
     float min_iou_;
     Box value_;
+    std::array<Box, kObservationWindow> observations_{};
+    std::size_t observation_count_ = 0;
     bool valid_ = false;
 };
 

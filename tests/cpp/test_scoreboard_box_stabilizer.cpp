@@ -47,6 +47,54 @@ static void test_overlapping_boxes_are_smoothed() {
           std::fabs(center_x(second) - center_x(first)));
 }
 
+static void test_third_observation_uses_coordinate_median() {
+    BoxStabilizer stabilizer(0.25f, 0.5f);
+    const Box first{0.10f, 0.20f, 0.40f, 0.50f};
+    const Box second{0.11f, 0.20f, 0.41f, 0.50f};
+    const Box in_track_outlier{0.18f, 0.20f, 0.48f, 0.50f};
+
+    stabilizer.update(first);
+    stabilizer.update(second);
+    const auto update = stabilizer.update(in_track_outlier);
+
+    CHECK(update.matched);
+    CHECK(!update.relocated);
+    // The median observation is the second box, not the outlier.
+    CHECK_NEAR(update.box.x1, 0.104375f, 1e-6);
+    CHECK_NEAR(update.box.x2, 0.404375f, 1e-6);
+}
+
+static void test_isolated_in_track_outlier_is_rejected() {
+    BoxStabilizer stabilizer(0.25f, 0.5f);
+    const Box anchor{0.10f, 0.20f, 0.40f, 0.50f};
+    const Box outlier{0.16f, 0.20f, 0.46f, 0.50f};
+
+    stabilizer.update(anchor);
+    stabilizer.update(anchor);
+    stabilizer.update(anchor);
+    const auto update = stabilizer.update(outlier);
+
+    CHECK(update.matched);
+    CHECK_NEAR(update.box.x1, anchor.x1, 1e-6);
+    CHECK_NEAR(update.box.x2, anchor.x2, 1e-6);
+}
+
+static void test_moderate_sustained_move_has_one_observation_delay() {
+    BoxStabilizer stabilizer(0.25f, 0.5f);
+    const Box anchor{0.10f, 0.20f, 0.30f, 0.40f};
+    const Box moved{0.13f, 0.20f, 0.33f, 0.40f};
+
+    stabilizer.update(anchor);
+    stabilizer.update(anchor);
+    stabilizer.update(anchor);
+    const auto first_moved = stabilizer.update(moved);
+    const auto second_moved = stabilizer.update(moved);
+
+    CHECK_NEAR(first_moved.box.x1, anchor.x1, 1e-6);
+    CHECK(second_moved.box.x1 > anchor.x1);
+    CHECK(second_moved.box.x1 < moved.x1);
+}
+
 static void test_relocation_resets_without_blending() {
     BoxStabilizer stabilizer;
     stabilizer.update({0.05f, 0.05f, 0.20f, 0.20f});
@@ -89,6 +137,35 @@ static void test_random_positions_and_scales_reduce_jitter() {
     }
 }
 
+static void test_random_layouts_reject_single_in_track_outlier() {
+    std::mt19937 random(0x4D3D1A3u);
+    std::uniform_real_distribution<float> position(0.02f, 0.75f);
+    std::uniform_real_distribution<float> size(0.06f, 0.22f);
+    std::uniform_real_distribution<float> x_shift(-0.15f, 0.15f);
+    std::uniform_real_distribution<float> y_shift(-0.05f, 0.05f);
+
+    for (int scenario = 0; scenario < 500; ++scenario) {
+        const float width = size(random);
+        const float height = size(random);
+        const float x = std::min(position(random), 0.98f - width);
+        const float y = std::min(position(random), 0.98f - height);
+        const Box anchor{x, y, x + width, y + height};
+        const float dx = x_shift(random) * width;
+        const float dy = y_shift(random) * height;
+        const Box outlier{x + dx, y + dy, x + width + dx, y + height + dy};
+
+        BoxStabilizer stabilizer(0.25f, 0.5f);
+        stabilizer.update(anchor);
+        stabilizer.update(anchor);
+        stabilizer.update(anchor);
+        const auto update = stabilizer.update(outlier);
+
+        CHECK(update.matched);
+        CHECK_NEAR(center_x(update.box), center_x(anchor), 1e-6);
+        CHECK_NEAR(center_y(update.box), center_y(anchor), 1e-6);
+    }
+}
+
 static void test_clear_forgets_previous_layout() {
     BoxStabilizer stabilizer;
     stabilizer.update({0.10f, 0.10f, 0.30f, 0.30f});
@@ -121,6 +198,8 @@ static void test_post_processor_resets_components_on_level1_relocation() {
 static void test_level1_horizontal_extent_change_is_not_relocation() {
     PostProcessor post;
     post.updateLevel1({0.70f, 0.70f, 0.95f, 0.90f});
+    post.updateLevel1({0.70f, 0.70f, 0.95f, 0.90f});
+    post.updateLevel1({0.70f, 0.70f, 0.95f, 0.90f});
     post.updateComponent("clock", {0.80f, 0.75f, 0.86f, 0.82f});
     post.updateComponent("clock", {0.81f, 0.75f, 0.87f, 0.82f});
 
@@ -129,8 +208,97 @@ static void test_level1_horizontal_extent_change_is_not_relocation() {
     const Box output = post.updateComponent("clock", current_component);
 
     CHECK(!update.relocated);
+    CHECK_NEAR(update.box.x1, 0.70f, 1e-6);
+    CHECK_NEAR(update.box.x2, 0.95f, 1e-6);
     CHECK(output.x1 < current_component.x1);
     CHECK(output.x2 < current_component.x2);
+}
+
+static void test_one_level1_miss_retains_geometry_history() {
+    PostProcessor post;
+    const Box level1{0.70f, 0.70f, 0.95f, 0.90f};
+    const Box anchor{0.80f, 0.75f, 0.86f, 0.82f};
+    const Box current{0.81f, 0.75f, 0.87f, 0.82f};
+    post.updateLevel1(level1);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+
+    post.missLevel1();
+    const auto reacquired = post.updateLevel1(level1);
+    const Box output = post.updateComponent("clock", current);
+
+    CHECK(!reacquired.relocated);
+    CHECK_NEAR(output.x1, anchor.x1, 1e-6);
+    CHECK_NEAR(output.x2, anchor.x2, 1e-6);
+}
+
+static void test_two_level1_misses_clear_geometry_history() {
+    PostProcessor post;
+    const Box level1{0.70f, 0.70f, 0.95f, 0.90f};
+    const Box anchor{0.80f, 0.75f, 0.86f, 0.82f};
+    const Box current{0.81f, 0.75f, 0.87f, 0.82f};
+    post.updateLevel1(level1);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+
+    post.missLevel1();
+    post.missLevel1();
+    post.updateLevel1(level1);
+    const Box output = post.updateComponent("clock", current);
+
+    CHECK_NEAR(output.x1, current.x1, 1e-6);
+    CHECK_NEAR(output.x2, current.x2, 1e-6);
+}
+
+static void test_relocation_after_one_miss_clears_geometry_history() {
+    PostProcessor post;
+    post.updateLevel1({0.70f, 0.70f, 0.95f, 0.90f});
+    const Box anchor{0.80f, 0.75f, 0.86f, 0.82f};
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+
+    post.missLevel1();
+    const auto relocated = post.updateLevel1({0.70f, 0.05f, 0.95f, 0.25f});
+    const Box current{0.80f, 0.10f, 0.86f, 0.17f};
+    const Box output = post.updateComponent("clock", current);
+
+    CHECK(relocated.relocated);
+    CHECK_NEAR(output.x1, current.x1, 1e-6);
+    CHECK_NEAR(output.y1, current.y1, 1e-6);
+}
+
+static void test_one_ambiguous_component_sample_retains_geometry_history() {
+    PostProcessor post;
+    const Box anchor{0.80f, 0.75f, 0.86f, 0.82f};
+    const Box outlier{0.81f, 0.75f, 0.87f, 0.82f};
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+
+    post.missComponents();
+    const Box output = post.updateComponent("clock", outlier);
+
+    CHECK_NEAR(output.x1, anchor.x1, 1e-6);
+    CHECK_NEAR(output.x2, anchor.x2, 1e-6);
+}
+
+static void test_two_ambiguous_component_samples_clear_geometry_history() {
+    PostProcessor post;
+    const Box anchor{0.80f, 0.75f, 0.86f, 0.82f};
+    const Box current{0.81f, 0.75f, 0.87f, 0.82f};
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+    post.updateComponent("clock", anchor);
+
+    post.missComponents();
+    post.missComponents();
+    const Box output = post.updateComponent("clock", current);
+
+    CHECK_NEAR(output.x1, current.x1, 1e-6);
+    CHECK_NEAR(output.x2, current.x2, 1e-6);
 }
 
 static void test_level2_crop_is_layout_independent_and_even_aligned() {
@@ -159,11 +327,20 @@ static void test_level2_crop_is_layout_independent_and_even_aligned() {
 
 int main() {
     test_overlapping_boxes_are_smoothed();
+    test_third_observation_uses_coordinate_median();
+    test_isolated_in_track_outlier_is_rejected();
+    test_moderate_sustained_move_has_one_observation_delay();
     test_relocation_resets_without_blending();
     test_random_positions_and_scales_reduce_jitter();
+    test_random_layouts_reject_single_in_track_outlier();
     test_clear_forgets_previous_layout();
     test_post_processor_resets_components_on_level1_relocation();
     test_level1_horizontal_extent_change_is_not_relocation();
+    test_one_level1_miss_retains_geometry_history();
+    test_two_level1_misses_clear_geometry_history();
+    test_relocation_after_one_miss_clears_geometry_history();
+    test_one_ambiguous_component_sample_retains_geometry_history();
+    test_two_ambiguous_component_samples_clear_geometry_history();
     test_level2_crop_is_layout_independent_and_even_aligned();
     if (g_failures == 0) {
         std::printf("OK: all scoreboard stabilizer tests passed\n");
