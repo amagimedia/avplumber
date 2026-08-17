@@ -1,5 +1,7 @@
 #include "../../node_common.hpp"
 #include "../common/infer_trt_base.hpp"
+#include "doctr_recognizer.hpp"
+#include "ocr_trt_runner.hpp"
 
 extern "C" {
 #include <libavutil/dict.h>
@@ -15,7 +17,6 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 #include <deque>
-#include <fstream>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -25,40 +26,6 @@ namespace {
 constexpr int kDetBatch = 4;
 constexpr int kDetH = 200;
 constexpr int kDetW = 768;
-constexpr int kRecH = 32;
-constexpr int kRecW = 128;
-
-// doctr's VOCABS["french"], verbatim and EXACTLY 126 codepoints. This is the vocab
-// the recognizer ONNX (PARSeq) was trained/exported with: its inference head emits
-// 127 classes = these 126 chars (indices 0..125) plus <eos> at index 126. The vocab
-// must match byte-for-byte or the tail indices (currency/accents) decode to the wrong
-// glyph and the <eos> stop index drifts. NOTE: doctr's french has NO space between the
-// "~" punctuation block and the "°" currency block — an extra space here shifts every
-// later index by one and makes <eos> unreachable (the whole string decodes as garbage
-// after the real word). Keep this in sync with doctr.datasets.VOCABS["french"].
-const std::string kFrenchVocab =
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    R"(!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~)"
-    "°£€¥¢฿"
-    "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ";
-
-std::vector<std::string> splitUtf8Codepoints(const std::string& text) {
-    std::vector<std::string> out;
-    for (size_t i = 0; i < text.size();) {
-        unsigned char c = (unsigned char)text[i];
-        size_t len = 1;
-        if ((c & 0x80) == 0x00) len = 1;
-        else if ((c & 0xE0) == 0xC0) len = 2;
-        else if ((c & 0xF0) == 0xE0) len = 3;
-        else if ((c & 0xF8) == 0xF0) len = 4;
-        if (i + len > text.size()) break;
-        out.push_back(text.substr(i, len));
-        i += len;
-    }
-    return out;
-}
-
-const std::vector<std::string> kFrenchTokens = splitUtf8Codepoints(kFrenchVocab);
 
 struct Region {
     int x = 0, y = 0, w = 0, h = 0;
@@ -149,116 +116,6 @@ int autoRegionHeight(int W, int H) {
     int h = (int)std::lround((double)region_w * (double)kDetH / (double)kDetW);
     return std::max(1, std::min(h, H));
 }
-
-class DoctrLogger : public nvinfer1::ILogger {
-public:
-    void log(Severity severity, const char* msg) noexcept override {
-        if (severity <= Severity::kWARNING) logstream << "doctr_ocr tensorrt: " << (msg ? msg : "");
-    }
-};
-
-struct TrtRunner {
-    std::string path;
-    std::string input_name;
-    std::vector<std::string> tensor_names;
-    std::vector<CUdeviceptr> ptrs;
-    std::vector<size_t> bytes;
-    std::vector<float> output;
-    int input_index = -1;
-    int output_index = -1;
-    int n = 0, c = 0, h = 0, w = 0;
-    int n_classes = 0;
-    nvinfer1::IRuntime* runtime = nullptr;
-    nvinfer1::ICudaEngine* engine = nullptr;
-    nvinfer1::IExecutionContext* ctx = nullptr;
-    CUstream stream = nullptr;
-
-    void cleanup() {
-        if (stream) { CUDA_CHECK_CU(cuStreamSynchronize(stream)); CUDA_CHECK_CU(cuStreamDestroy(stream)); stream = nullptr; }
-        for (CUdeviceptr p : ptrs) if (p) CUDA_CHECK_CU(cuMemFree(p));
-        ptrs.clear(); bytes.clear(); tensor_names.clear(); output.clear();
-        if (ctx) { delete ctx; ctx = nullptr; }
-        if (engine) { delete engine; engine = nullptr; }
-        if (runtime) { delete runtime; runtime = nullptr; }
-    }
-
-    bool init(DoctrLogger& logger, int want_n, int want_c, int want_h, int want_w) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) { logstream << "doctr_ocr: cannot open engine " << path; return false; }
-        f.seekg(0, std::ios::end);
-        std::streamsize sz = f.tellg();
-        f.seekg(0, std::ios::beg);
-        std::vector<char> blob((size_t)sz);
-        if (sz <= 0 || !f.read(blob.data(), sz)) { logstream << "doctr_ocr: failed reading engine " << path; return false; }
-        runtime = nvinfer1::createInferRuntime(logger);
-        if (!runtime) return false;
-        engine = runtime->deserializeCudaEngine(blob.data(), blob.size());
-        if (!engine) return false;
-        ctx = engine->createExecutionContext();
-        if (!ctx) return false;
-        if (CUDA_CHECK_CU(cuStreamCreate(&stream, 0))) return false;
-
-        int nb = engine->getNbIOTensors();
-        ptrs.assign((size_t)nb, 0);
-        bytes.assign((size_t)nb, 0);
-        for (int i = 0; i < nb; ++i) {
-            std::string name = engine->getIOTensorName(i);
-            tensor_names.push_back(name);
-            if (engine->getTensorIOMode(name.c_str()) == nvinfer1::TensorIOMode::kINPUT) {
-                input_index = i;
-                input_name = name;
-                nvinfer1::Dims4 dims(want_n, want_c, want_h, want_w);
-                ctx->setInputShape(name.c_str(), dims);
-            }
-        }
-        for (int i = 0; i < nb; ++i) {
-            const std::string& name = tensor_names[(size_t)i];
-            nvinfer1::Dims dims = ctx->getTensorShape(name.c_str());
-            if (dims.nbDims <= 0) dims = engine->getTensorShape(name.c_str());
-            size_t vol = yolo_base::volume(dims);
-            size_t esz = yolo_base::elementSize(engine->getTensorDataType(name.c_str()));
-            if (vol == 0 || esz == 0) {
-                logstream << "doctr_ocr: unsupported tensor shape for " << path << " tensor=" << name;
-                return false;
-            }
-            bytes[(size_t)i] = vol * esz;
-            if (CUDA_CHECK_CU(cuMemAlloc(&ptrs[(size_t)i], bytes[(size_t)i]))) return false;
-            if (!ctx->setTensorAddress(name.c_str(), reinterpret_cast<void*>(ptrs[(size_t)i]))) return false;
-            if (engine->getTensorIOMode(name.c_str()) == nvinfer1::TensorIOMode::kOUTPUT) {
-                output_index = i;
-                output.assign(vol, 0.0f);
-            }
-        }
-        if (input_index < 0 || output_index < 0) return false;
-        // Read actual n from the bound input shape (the plan's static batch dim),
-        // not from want_n — they differ when max_boxes != plan batch size.
-        {
-            nvinfer1::Dims in_dims = ctx->getTensorShape(tensor_names[(size_t)input_index].c_str());
-            n = (in_dims.nbDims > 0) ? (int)in_dims.d[0] : want_n;
-        }
-        c = want_c; h = want_h; w = want_w;
-        // Read n_classes from the last dim of the output tensor.
-        {
-            nvinfer1::Dims out_dims = ctx->getTensorShape(tensor_names[(size_t)output_index].c_str());
-            n_classes = (out_dims.nbDims > 0) ? (int)out_dims.d[out_dims.nbDims - 1] : 0;
-        }
-        logstream << "doctr_ocr: loaded engine=" << path << " input=" << n << "x" << c << "x" << h << "x" << w
-                  << " n_classes=" << n_classes;
-        return true;
-    }
-
-    CUdeviceptr inputPtr() const { return ptrs[(size_t)input_index]; }
-
-    bool infer() {
-        if (!ctx->enqueueV3(reinterpret_cast<cudaStream_t>(stream))) {
-            logstream << "doctr_ocr: enqueue failed for " << path;
-            return false;
-        }
-        if (CUDA_CHECK_CU(cuMemcpyDtoHAsync(output.data(), ptrs[(size_t)output_index], bytes[(size_t)output_index], stream))) return false;
-        if (CUDA_CHECK_CU(cuStreamSynchronize(stream))) return false;
-        return true;
-    }
-};
 
 std::vector<uint8_t> morphOpen3x3(const std::vector<uint8_t>& src, int W, int H) {
     std::vector<uint8_t> er(src.size(), 0), out(src.size(), 0);
@@ -360,44 +217,6 @@ std::vector<TextBox> boxesFromDetector(const std::vector<float>& logits, const s
     return boxes;
 }
 
-std::pair<std::string, float> decodeParseq(const float* logits, int steps, int classes) {
-    std::string text;
-    float conf_sum = 0.0f;
-    int conf_n = 0;
-    // PARSeq inference head emits |vocab| + 1 classes: vocab tokens at indices
-    // [0, eos) and the <eos> stop token at index eos == |vocab|. Decoding stops at
-    // the first <eos>; anything after it is padding the model is free to fill with
-    // noise (this is what produced the repeated-glyph garbage tail when eos was
-    // mis-set to an unreachable index). One-time guard: if the runtime class count
-    // disagrees with the vocab, the vocab is out of sync with the engine.
-    const int eos = (int)kFrenchTokens.size();
-    if (classes != eos + 1) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            logstream << "DoctrOcr: recognizer emits " << classes << " classes but vocab "
-                      << "implies " << (eos + 1) << " (|vocab|=" << eos << " + <eos>); "
-                      << "kFrenchVocab is out of sync with the model — decode will be wrong";
-        }
-    }
-    for (int t = 0; t < steps; ++t) {
-        const float* row = logits + t * classes;
-        int best = 0;
-        float maxv = row[0];
-        for (int c = 1; c < classes; ++c) if (row[c] > maxv) { maxv = row[c]; best = c; }
-        float denom = 0.0f;
-        for (int c = 0; c < classes; ++c) denom += std::exp(row[c] - maxv);
-        float prob = denom > 0.0f ? 1.0f / denom : 0.0f;
-        if (best == eos) break;
-        if (best >= 0 && best < eos) {
-            text += kFrenchTokens[(size_t)best];
-            conf_sum += prob;
-            ++conf_n;
-        }
-    }
-    return {text, conf_n ? conf_sum / (float)conf_n : 0.0f};
-}
-
 } // namespace
 
 class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public ReportsFinishByFlag {
@@ -433,9 +252,9 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     bool last_context_reinit_ = false;
     bool last_context_match_ = false;
     int64_t last_context_init_ms_ = 0;
-    DoctrLogger logger_;
-    TrtRunner det_;
-    TrtRunner rec_;
+    ocr::TrtLogger logger_;
+    ocr::TrtRunner det_;
+    ocr::DoctrRecognizer recognizer_;
 
     bool frameCudaContext(const av::VideoFrame& frm, CUcontext& ctx, AVCUDADeviceContext** dev_ctx = nullptr) const {
         ctx = nullptr;
@@ -466,7 +285,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
     void cleanupContextBoundState() {
         if (cu_ctx_) CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_));
         det_.cleanup();
-        rec_.cleanup();
+        recognizer_.cleanup();
         if (d_boxes_) { CUDA_CHECK_CU(cuMemFree(d_boxes_)); d_boxes_ = 0; }
         if (preprocess_module_) { CUDA_CHECK_CU(cuModuleUnload(preprocess_module_)); preprocess_module_ = nullptr; }
         cuda_dev_ctx_ = nullptr;
@@ -482,11 +301,11 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         const std::string ptx(avpl_doctr_preprocess_ptx, avpl_doctr_preprocess_ptx + avpl_doctr_preprocess_ptx_len);
         if (CUDA_CHECK_CU(cuModuleLoadDataEx(&preprocess_module_, ptx.c_str(), 0, nullptr, nullptr))) return false;
         if (CUDA_CHECK_CU(cuModuleGetFunction(&preprocess_kernel_, preprocess_module_, "kNV12_doctr_crop_resize_pad_f32"))) return false;
-        det_.path = detector_engine_;
-        rec_.path = recognizer_engine_;
-        if (!det_.init(logger_, kDetBatch, 3, kDetH, kDetW)) return false;
-        if (!rec_.init(logger_, max_boxes_, 3, kRecH, kRecW)) return false;
-        if (CUDA_CHECK_CU(cuMemAlloc(&d_boxes_, (size_t)rec_.n * 4 * sizeof(int)))) return false;
+        det_.init(logger_, detector_engine_,
+                  ocr::TensorContract{"", nvinfer1::DataType::kFLOAT, {kDetBatch, 3, kDetH, kDetW}},
+                  ocr::TensorContract{"", nvinfer1::DataType::kFLOAT, {}});
+        recognizer_.init(logger_, preprocess_module_, recognizer_engine_, max_boxes_);
+        if (CUDA_CHECK_CU(cuMemAlloc(&d_boxes_, (size_t)kDetBatch * 4 * sizeof(int)))) return false;
         initialized_ = true;
         return true;
     }
@@ -570,15 +389,15 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         return initInCurrentContext();
     }
 
-    void launchPreprocess(const av::VideoFrame& frm, TrtRunner& runner, const std::vector<int>& boxes,
+    void launchPreprocess(const av::VideoFrame& frm, ocr::TrtRunner& runner, const std::vector<int>& boxes,
                           float mr, float mg, float mb, float sr, float sg, float sb) {
-        CUDA_CHECK_CU(cuMemcpyHtoDAsync(d_boxes_, boxes.data(), boxes.size() * sizeof(int), runner.stream));
+        CUDA_CHECK_CU(cuMemcpyHtoDAsync(d_boxes_, boxes.data(), boxes.size() * sizeof(int), runner.stream()));
         CUdeviceptr dY = (CUdeviceptr)(uintptr_t)frm.raw()->data[0];
         CUdeviceptr dUV = (CUdeviceptr)(uintptr_t)frm.raw()->data[1];
         int pitchY = frm.raw()->linesize[0];
         int pitchUV = frm.raw()->linesize[1];
         CUdeviceptr out = runner.inputPtr();
-        int batch = runner.n, h = runner.h, w = runner.w;
+        int batch = runner.inputDim(0), h = runner.inputDim(2), w = runner.inputDim(3);
         void* args[] = {
             &dY, &pitchY, &dUV, &pitchUV, &out, &d_boxes_, &batch, &h, &w,
             &mr, &mg, &mb, &sr, &sg, &sb
@@ -586,7 +405,7 @@ class DoctrOcr : public NodeSISO<av::VideoFrame, av::VideoFrame>, public Reports
         unsigned int bx = 16, by = 16;
         unsigned int gx = (unsigned int)((w + (int)bx - 1) / (int)bx);
         unsigned int gy = (unsigned int)((h + (int)by - 1) / (int)by);
-        CUDA_CHECK_CU(cuLaunchKernel(preprocess_kernel_, gx, gy, (unsigned int)batch, bx, by, 1, 0, runner.stream, args, nullptr));
+        CUDA_CHECK_CU(cuLaunchKernel(preprocess_kernel_, gx, gy, (unsigned int)batch, bx, by, 1, 0, runner.stream(), args, nullptr));
     }
 
     Parameters emptyPayload(bool sampled, const std::string& reason) {
@@ -665,42 +484,34 @@ public:
             det_boxes.insert(det_boxes.end(), {regions[(size_t)i].x, regions[(size_t)i].y, regions[(size_t)i].w, regions[(size_t)i].h});
         }
         launchPreprocess(frm, det_, det_boxes, 0.798f, 0.785f, 0.772f, 0.264f, 0.2749f, 0.287f);
-        bool ok = det_.infer();
-        std::vector<TextBox> boxes = ok
-            ? boxesFromDetector(det_.output, regions, det_bin_thresh_, det_box_thresh_, edge_margin_, edge_margin_px_,
-                                rec_.n)
-            : std::vector<TextBox>();
+        det_.infer();
+        std::vector<TextBox> boxes = boxesFromDetector(
+            det_.output(), regions, det_bin_thresh_, det_box_thresh_, edge_margin_, edge_margin_px_,
+            recognizer_.batchSize());
 
         int raw_kept = (int)boxes.size();
         if (!boxes.empty()) {
-            std::vector<int> rec_boxes((size_t)rec_.n * 4, 0);
-            for (size_t i = 0; i < boxes.size() && i < (size_t)rec_.n; ++i) {
+            std::vector<ocr::PixelBox> rec_boxes;
+            rec_boxes.reserve(boxes.size());
+            for (size_t i = 0; i < boxes.size(); ++i) {
                 int x1 = std::max(0, (int)std::floor(boxes[i].x1));
                 int y1 = std::max(0, (int)std::floor(boxes[i].y1));
                 int x2 = std::min(W, (int)std::ceil(boxes[i].x2));
                 int y2 = std::min(H, (int)std::ceil(boxes[i].y2));
-                rec_boxes[i * 4 + 0] = x1;
-                rec_boxes[i * 4 + 1] = y1;
-                rec_boxes[i * 4 + 2] = std::max(1, x2 - x1);
-                rec_boxes[i * 4 + 3] = std::max(1, y2 - y1);
+                rec_boxes.push_back({x1, y1, std::max(x1 + 1, x2), std::max(y1 + 1, y2)});
             }
-            launchPreprocess(frm, rec_, rec_boxes, 0.694f, 0.695f, 0.693f, 0.299f, 0.296f, 0.301f);
-            if (rec_.infer()) {
-                const int steps = 33;
-                const int classes = (rec_.n_classes > 0)
-                    ? rec_.n_classes
-                    : ((int)kFrenchTokens.size() + 1);
-                for (size_t i = 0; i < boxes.size(); ++i) {
-                    auto decoded = decodeParseq(rec_.output.data() + i * steps * classes, steps, classes);
-                    boxes[i].text = decoded.first;
-                    boxes[i].reco_conf = decoded.second;
-                }
+            const std::vector<ocr::Recognition> recognized = recognizer_.recognize(frm, rec_boxes);
+            for (size_t i = 0; i < boxes.size(); ++i) {
+                boxes[i].text = recognized[i].text;
+                boxes[i].reco_conf = recognized[i].confidence;
             }
         }
 
         Parameters out;
         out["schema"] = "doctr_ocr_v1";
         out["ocr_sampled"] = true;
+        out["frame_width"] = frm.raw()->width;
+        out["frame_height"] = frm.raw()->height;
         out["regions"] = Parameters::array();
         for (int i = 0; i < std::min((int)regions.size(), kDetBatch); ++i) {
             Parameters r;
@@ -728,7 +539,7 @@ public:
         out["stats"] = {
             {"raw_boxes", raw_kept},
             {"recognized", recognized},
-            {"max_boxes", rec_.n},
+            {"max_boxes", recognizer_.batchSize()},
             {"sample_every_n", sample_every_n_},
             {"target_fps", target_fps_},
             {"elapsed_ms", ms}
