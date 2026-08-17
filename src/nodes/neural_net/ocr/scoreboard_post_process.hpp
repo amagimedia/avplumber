@@ -18,6 +18,7 @@ public:
     };
 
     Level1Update updateLevel1(const Box& current) {
+        level1_misses_ = 0;
         // Level-2 consumes a full-width strip, so Level-1 X/width variation does
         // not identify a different scoreboard. Only a move to another vertical
         // band invalidates component and temporal state.
@@ -25,13 +26,14 @@ public:
             && verticalIou(level1_.value(), current) < 0.5f;
         if (relocated) {
             level1_.clear();
-            components_.clear();
+            clearComponents();
         }
         const BoxStabilizer::Update update = level1_.update(current);
         return {update.box, relocated};
     }
 
     Box updateComponent(const std::string& label, const Box& current) {
+        component_misses_ = 0;
         auto [entry, inserted] = components_.try_emplace(label);
         (void)inserted;
         return entry->second.update(current).box;
@@ -39,10 +41,24 @@ public:
 
     void clear() {
         level1_.clear();
-        components_.clear();
+        clearComponents();
+        level1_misses_ = 0;
     }
 
-    void clearComponents() { components_.clear(); }
+    void missLevel1() {
+        ++level1_misses_;
+        if (level1_misses_ >= 2) clear();
+    }
+
+    void missComponents() {
+        ++component_misses_;
+        if (component_misses_ >= 2) clearComponents();
+    }
+
+    void clearComponents() {
+        components_.clear();
+        component_misses_ = 0;
+    }
 
     static std::array<int, 4> level2Crop(const Box& scorebug, int frame_width,
                                          int frame_height, int vertical_padding) {
@@ -61,6 +77,8 @@ private:
     // matches, smooth all four coordinates even if horizontal extent changes.
     BoxStabilizer level1_{0.25f, 0.0f};
     std::unordered_map<std::string, BoxStabilizer> components_;
+    int level1_misses_ = 0;
+    int component_misses_ = 0;
 };
 
 } // namespace scoreboard_post
