@@ -208,6 +208,10 @@ class DoctrOcr(InternalNode):
     TYPE = "doctr_ocr"
 
 
+class ScoreboardTwoStageOcr(InternalNode):
+    TYPE = "scoreboard_two_stage_ocr"
+
+
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
