@@ -50,13 +50,8 @@ SRCDIR = src
 NODES_SRC = $(shell find $(SRCDIR)/nodes -maxdepth 1 -name '*.cpp')
 PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp')
 
-# Out-of-tree nodes:
-# Downstream projects can inject extra node sources via
-# EXTRA_NODES_SRC without forking. generate_node_list is path-agnostic, so DECLNODE()
-# macros there are picked up automatically. EXTRA_NODES_INCLUDES adds -I flags so the
-# extra files can resolve upstream headers like 'node_common.hpp'.
-NODES_SRC += $(EXTRA_NODES_SRC)
-override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
+# Out-of-tree nodes are injected after the optional CUDA/PTX helpers and built-in
+# source lists are defined. See the EXTRA_NODES_MK include near CPPSRC_LIB.
 
 # Python node sources are needed in the node list/factories only for the python_module goal.
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
@@ -288,6 +283,18 @@ ifeq ($(HAVE_GL),1)
 override CXXFLAGS += -DHAVE_GL=1
 override LIBS_FLAGS += -lGL -lEGL -lGLESv2
 endif
+
+# Downstream projects can inject node sources without forking. A fragment passed
+# through EXTRA_NODES_MK may use ptx_kernel(), add sources/include directories, and
+# exclude a built-in migration copy. Direct EXTRA_NODES_SRC/EXTRA_NODES_INCLUDES
+# arguments remain supported. generate_node_list is path-agnostic, so DECLNODE()
+# macros in external sources are registered automatically.
+ifneq ($(strip $(EXTRA_NODES_MK)),)
+include $(EXTRA_NODES_MK)
+endif
+NODES_SRC += $(EXTRA_NODES_SRC)
+NODES_SRC := $(filter-out $(EXTRA_NODES_EXCLUDE_SRC),$(NODES_SRC))
+override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
 
 EXE = avplumber
 STATIC_LIBRARY = libavplumber.a
