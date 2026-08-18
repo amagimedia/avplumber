@@ -39,7 +39,7 @@ static nvinfer1::Dims dims3(int a, int b, int c) {
     return d;
 }
 
-// --- Test 1: pixel-space passthrough (L1 scoreboard style), no rescale ---
+// --- Test 1: pixel-space passthrough, no rescale ---
 static void test_pixel_passthrough() {
     std::vector<float> out = {
         10, 20, 110, 220, 0.9f, 0,   // kept

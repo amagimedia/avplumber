@@ -84,7 +84,7 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
 -   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
--   NEURAL_NET=1: enable retained neural drawing, tracking, inference, scene-cut, OCR, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
+-   NEURAL_NET=1: enable retained neural drawing, tracking, inference, scene-cut, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
 -   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)

@@ -17,7 +17,7 @@ HAVE_NVCC = 0
 # toolkits. Enable the node independently from the other CUDA nodes.
 HAVE_NVJPEG ?= 0
 HAVE_TENSORRT ?= 0
-# Build all retained neural inference, drawing, tracking, scene-cut, OCR, and
+# Build all retained neural inference, drawing, tracking, scene-cut, and
 # reframing nodes. Optional hardware integrations still use their HAVE_* flags.
 # The old split flags remain aliases for downstream build compatibility.
 NEURAL_NET_COMMON ?= 0
@@ -280,15 +280,14 @@ override LIBS_FLAGS += -lGL -lEGL -lGLESv2
 endif
 
 # Downstream projects can inject node sources without forking. A fragment passed
-# through EXTRA_NODES_MK may use ptx_kernel(), add sources/include directories, and
-# exclude a built-in migration copy. Direct EXTRA_NODES_SRC/EXTRA_NODES_INCLUDES
-# arguments remain supported. generate_node_list is path-agnostic, so DECLNODE()
-# macros in external sources are registered automatically.
+# through EXTRA_NODES_MK may use ptx_kernel() and add sources/include directories.
+# Direct EXTRA_NODES_SRC/EXTRA_NODES_INCLUDES arguments remain supported.
+# generate_node_list is path-agnostic, so DECLNODE() macros in external sources
+# are registered automatically.
 ifneq ($(strip $(EXTRA_NODES_MK)),)
 include $(EXTRA_NODES_MK)
 endif
 NODES_SRC += $(EXTRA_NODES_SRC)
-NODES_SRC := $(filter-out $(EXTRA_NODES_EXCLUDE_SRC),$(NODES_SRC))
 override CXXFLAGS += $(addprefix -I,$(EXTRA_NODES_INCLUDES))
 
 EXE = avplumber
