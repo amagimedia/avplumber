@@ -2,6 +2,7 @@
 #include "../common/infer_trt_base.hpp"
 #include "doctr_recognizer.hpp"
 #include "ocr_trt_runner.hpp"
+#include "scoreboard_component_filter.hpp"
 #include "scoreboard_post_process.hpp"
 
 extern "C" {
@@ -541,6 +542,7 @@ public:
             keepSingleton(detections, 5);
             keepSingleton(detections, 6);
             assignTeamLabels(detections);
+            scoreboard_components::dropUnassignedTeamText(detections);
             for (Detection& detection : detections) {
                 if (detection.cls == 4) detection.label = "clock";
             }
