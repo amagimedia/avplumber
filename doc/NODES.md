@@ -797,35 +797,21 @@ Detection coordinates in metadata are emitted in model space (`coord_space = "mo
 Example graph (RTMP -> CUVID decode -> CUDA preprocess -> YOLO -> null sink):
 - `library_examples/obs-avplumber-source/examples/rtmp_input_hw_dec_cuda_yolo.txt`
 
-### `tracknet_ball`
+### `object_tracker`
 
-Run a TrackNet-style triplet model on CUDA NV12 frames using a prebuilt TensorRT engine.
+Apply ByteTrack to object detections already attached to a video frame. The node is
+model- and domain-neutral: by default it tracks every detection in `yolo_detections`.
 
-1 input: `av::VideoFrame` (expects CUDA frame, NV12 sw_format), 1 output: `av::VideoFrame`
-
-By default the node preserves the existing compact detection behavior and expects an output tensor compatible with `[x1, y1, x2, y2, score, visible]`. Pipelines that keep postprocessing and tracking in the application can use `output_mode: "raw"` to emit TensorRT output tensors as JSON metadata instead of requiring the compact detection contract.
+1 input: `av::VideoFrame`, 1 output: the same frame with track annotations added
 
 Parameters:
-- `engine` (string, required) - TensorRT engine path, or use `models[0].engine`
-- `metadata_key` / `metadata_key_detection` (string, optional, default `yolo_ball`) - compact detection metadata key
-- `output_mode` (string, optional, default `detection`) - `detection`, `raw`, or `both`
-- `metadata_key_raw` / `raw_metadata_key` (string, optional, default `tracknet_raw`) - raw tensor metadata key
-- `triplet_alignment` (string, optional, default `center`) - `center` preserves the live/legacy buffering; `latest` emits each frame using triplets `[0,0,0]`, `[0,0,1]`, then `[t-2,t-1,t]`
-- `normalization_mode` (string, optional, default `imagenet`) - `imagenet` applies ImageNet mean/std normalization; `zero_one` emits RGB values directly in `[0, 1]`
-- `auto_sample_min_fps` / `tracknet_auto_sample_min_fps` / `auto_sample_fps_threshold` (number or ratio string, optional, default `0`) - enable automatic input-FPS-based TrackNet sampling at or above this FPS; `0` disables auto sampling. The node estimates FPS from incoming frame PTS and keeps every source frame on output with its original PTS/timebase.
-- `auto_sample_every_n` / `tracknet_auto_sample_every_n` / `auto_sample_divisor` (int, optional, default `1`) - when auto sampling is active, build TrackNet triplets from every Nth source frame. Non-sampled frames do not receive TrackNet metadata. Values greater than `1` require `triplet_alignment: "latest"`.
-- `sample_fill_mode` / `tracknet_sample_fill_mode` (string, optional, default `none`) - `none` leaves skipped frames without TrackNet metadata; `hold` copies the most recent inferred TrackNet metadata onto skipped frames.
-- `raw_output_max_elements_per_tensor` (int, optional, default `0`) - cap raw JSON values per tensor; `0` emits all values
-- `target_label` / `label` (string, optional, default `ball`) - compact detection label
-- `conf_thresh` (float, optional, default `0.5`) - compact detection score threshold
-- `visible_thresh` (float, optional, default `0.5`) - compact detection visible threshold
-- `emit_invisible` (bool, optional, default `false`) - allow compact detections below `visible_thresh`
-- `output_model_width`, `output_model_height` (int, optional, default source frame size) - compact detection coordinate dimensions
-- `use_cuda_graph` (bool, optional, default `false`) - enable TensorRT CUDA graph replay when supported
-- `debug_log_metadata` (bool, optional, default `false`) - log compact metadata or raw metadata size periodically
-- `debug_log_every_n` (int, optional, default `0`) - debug log period
-
-Raw metadata schema is `tracknet_raw_outputs_v1` with input tensor info and an `outputs` array of `{name, dtype, dims, size, values}`.
+- `metadata_key` (string, optional, default `yolo_detections`) - detection payload to update
+- `target_labels` (array of strings, optional) - track only matching labels
+- `target_class` (int, optional) - track only this class ID
+- `min_conf` (number, optional, default `0.01`) - minimum detection confidence
+- `frame_rate`, `track_buffer`, `track_thresh`, `high_thresh`, `match_thresh`, `low_match_thresh` - ByteTrack tuning
+- `camera_shot_metadata_key` (string, optional) - reset tracks on shot transitions
+- `predict_on_empty`, `emit_lost_tracks` (bool, optional) - lost-track output behavior
 
 ### `cuda_infer_rtdetr`
 

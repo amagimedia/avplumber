@@ -23,8 +23,8 @@ deployment rather than committed.
 
 ## Graph ownership
 
-Generic inference nodes such as `cuda_infer_yolo`, `cuda_infer_rtdetr`,
-and `tracknet_ball` accept engine paths and metadata keys as node parameters.
+Generic inference nodes such as `cuda_infer_yolo` and `cuda_infer_rtdetr`
+accept engine paths and metadata keys as node parameters.
 Model-specific graphs and class names do not belong in this framework
 repository.
 

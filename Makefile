@@ -58,7 +58,7 @@ ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
 ifeq ($(NEURAL_NET),1)
-NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/player_tracker.cpp
+NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/object_tracker.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 NODES_SRC += $(SRCDIR)/nodes/neural_net/reframing/smooth_crop_viewport.cpp
@@ -164,7 +164,6 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/draw/draw_trail.cu,avpl_draw
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
-NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/tracknet_ball.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
@@ -172,7 +171,6 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/tracking/tracknet_ball_preprocess.cu,avpl_tracknet_ball_preprocess_ptx,objs/src/nodes/neural_net/tracking/tracknet_ball.o))
 endif
 
 ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_NVCC),111)
