@@ -762,6 +762,9 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `drop_alpha` (bool, default `true`) - advertise imported ABGR/ARGB pixels as
+    `RGB0` for encoder compatibility; set `false` to retain `RGBA`/`BGRA` alpha
+    for CUDA composition
 
 ### `cuda_infer_yolo`
 

@@ -8,11 +8,11 @@ composition and media-input workflows.
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg`
 - Upstream tag: `n7.1.5`
 - Upstream commit: `3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`
-- Expected patched tree: `52361f7251069ef74fbb41460e6e1b65d6f9947c`
+- Expected patched tree: `6f477dd70315a21c5000f91cd190eab1ddbc1ae3`
 
 ## Series
 
-The seven patches are ordered by filename and grouped by feature rather than by
+The eight patches are ordered by filename and grouped by feature rather than by
 the chronology of incomplete ports and follow-up fixes:
 
 1. `0001-swscale-aarch64-argb-yuva420p.patch` — AArch64 fast color conversion.
@@ -25,6 +25,8 @@ the chronology of incomplete ports and follow-up fixes:
    handling.
 6. `0006-avdevice-v4l2-compat.patch` — V4L2 timestamp compatibility.
 7. `0007-avdevice-ndi-v5.patch` — NDI v5 device registration and documentation.
+8. `0008-avfilter-add-bottom-band-CUDA-blur.patch` — zero-copy NV12 bottom-band
+   blur, gradient feather, and luma roll-off for lower-third cleanup.
 
 Each patch message lists the original exported FFmpeg commits it replaces.
 
@@ -51,6 +53,6 @@ the checkout's active branch:
 deps/ffmpeg-patches/verify.sh /path/to/FFmpeg
 ```
 
-Verification succeeds only when all seven patches apply and produce the exact
+Verification succeeds only when all eight patches apply and produce the exact
 expected Git tree. Runtime validation is provided by `demos/cuda-overlay` and
 `demos/mixer`, whose Dockerfiles build this series against FFmpeg `n7.1.5`.

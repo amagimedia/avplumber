@@ -24,6 +24,8 @@ protected:
     AVBufferRef* hw_frames_ctx_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+    AVPixelFormat sw_format_ = AV_PIX_FMT_NONE;
+    bool drop_alpha_ = true;
 
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
@@ -226,6 +228,7 @@ protected:
         bool need = false;
         if (!hw_frames_ctx_) need = true;
         if (!need && (w != width_ || h != height_)) need = true;
+        if (!need && swfmt != sw_format_) need = true;
         if (!need) return true;
 
         if (hw_frames_ctx_) {
@@ -251,6 +254,7 @@ protected:
         }
         width_ = w;
         height_ = h;
+        sw_format_ = swfmt;
         createTextures();
 
         // Cache CUDA device ctx pointer for stream & context switches
@@ -404,17 +408,15 @@ public:
             return;
         }
 
-        // single-plane ABGR/ARGB only for now
-        /* uint32_t fourcc = desc->layers[0].format;
-        AVPixelFormat swfmt = swfmt_from_fourcc(fourcc);
-        if (swfmt == AV_PIX_FMT_NONE) {
+        // single-plane ABGR/ARGB only for now. Keep RGB0 as the default for
+        // existing encoder pipelines, but let compositors retain browser alpha.
+        const uint32_t fourcc = desc->layers[0].format;
+        const AVPixelFormat source_swfmt = swfmt_from_fourcc(fourcc);
+        if (source_swfmt == AV_PIX_FMT_NONE) {
             logstream << "drm2cuda: unsupported DRM fourcc";
             return;
-        } */
-        // The GL copy produces four packed bytes per pixel. The fourth byte is
-        // deliberately ignored by this node, so advertise RGB0 rather than an
-        // alpha-bearing RGBA frame to downstream CUDA filters and compositors.
-        AVPixelFormat swfmt = AV_PIX_FMT_RGB0;
+        }
+        const AVPixelFormat swfmt = drop_alpha_ ? AV_PIX_FMT_RGB0 : source_swfmt;
 
         av::VideoFrame out;
         out.setTimeBase(in.timeBase());
@@ -488,9 +490,11 @@ public:
         if (!r->cuda_dev_ctx_) {
             throw Error("drm_prime_to_cuda: CUDA device context missing");
         }
+        if (params.count("drop_alpha")) {
+            r->drop_alpha_ = params["drop_alpha"].get<bool>();
+        }
         return r;
     }
 };
 
 DECLNODE(drm_prime_to_cuda, DRMPrimeToCUDA);
-

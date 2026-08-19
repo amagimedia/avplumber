@@ -2,8 +2,8 @@
 set -euo pipefail
 
 base_commit=3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587
-expected_tree=52361f7251069ef74fbb41460e6e1b65d6f9947c
-expected_patch_count=7
+expected_tree=6f477dd70315a21c5000f91cd190eab1ddbc1ae3
+expected_patch_count=8
 
 if [[ $# -ne 1 ]]; then
     echo "usage: $0 /path/to/FFmpeg" >&2
