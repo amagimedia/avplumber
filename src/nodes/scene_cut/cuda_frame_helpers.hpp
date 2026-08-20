@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../node_common.hpp"
+#include "../node_common.hpp"
 
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 

@@ -12,18 +12,18 @@ python3 pyplumber/examples/simple-node.py
 ```
 
 Common variables are `AVP_INPUT`, `AVP_OUTPUT`, `AVP_OUTPUT_FORMAT`, and
-`AVP_USE_REALTIME`. Reusable neural nodes and their examples live beside the
-native neural sources under `src/nodes/neural_net`.
+`AVP_USE_REALTIME`. Reusable Python nodes and their examples live beside the
+related native sources.
 
 ## Examples
 
 - `simple-node.py`: minimal `PythonNode` frame-processing graph.
 
-Neural examples:
+Feature-specific examples:
 
+- `src/nodes/scene_cut/example.py`: CUDA scene-change detection;
 - `src/nodes/neural_net/examples`: generic PyTorch, torchvision, and
   BlazeFace examples;
-- `src/nodes/neural_net/scene_cut/example.py`: CUDA scene-change detection;
 - `src/nodes/neural_net/tracking/example.py`: Ultralytics with ByteTrack;
 - `src/nodes/neural_net/vlm/molmo/example.py`: Molmo video-window inference.
 
