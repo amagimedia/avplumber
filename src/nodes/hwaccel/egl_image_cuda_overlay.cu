@@ -22,14 +22,14 @@ __device__ __forceinline__ float channel(const float4 &pixel, int lane)
 }
 
 extern "C" __global__ void clear_rgb0(
-	uint8_t *destination, size_t destination_pitch, int width, int height)
+	uint8_t *destination, size_t destination_pitch, int width, int height, int alpha)
 {
 	const int x = blockIdx.x * blockDim.x + threadIdx.x;
 	const int y = blockIdx.y * blockDim.y + threadIdx.y;
 	if (x >= width || y >= height)
 		return;
 	auto *row = reinterpret_cast<uchar4 *>(destination + static_cast<size_t>(y) * destination_pitch);
-	row[x] = make_uchar4(0, 0, 0, 255);
+	row[x] = make_uchar4(0, 0, 0, static_cast<uint8_t>(alpha));
 }
 
 extern "C" __global__ void composite_rgba_texture(
@@ -42,7 +42,9 @@ extern "C" __global__ void composite_rgba_texture(
 	int destination_height,
 	int red_lane,
 	int green_lane,
-	int blue_lane)
+	int blue_lane,
+	int alpha_lane,
+	int output_alpha)
 {
 	const int local_x = blockIdx.x * blockDim.x + threadIdx.x;
 	const int local_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -61,5 +63,5 @@ extern "C" __global__ void composite_rgba_texture(
 		toByte(channel(pixel, red_lane)),
 		toByte(channel(pixel, green_lane)),
 		toByte(channel(pixel, blue_lane)),
-		255);
+		output_alpha && alpha_lane >= 0 ? toByte(channel(pixel, alpha_lane)) : 255);
 }
