@@ -17,8 +17,8 @@ HAVE_NVCC = 0
 # toolkits. Enable the node independently from the other CUDA nodes.
 HAVE_NVJPEG ?= 0
 HAVE_TENSORRT ?= 0
-# Build all retained neural inference, drawing, tracking, scene-cut, and
-# reframing nodes. Optional hardware integrations still use their HAVE_* flags.
+# Build all retained neural inference, drawing, tracking, learned scene-cut,
+# and reframing nodes. Optional hardware integrations still use their HAVE_* flags.
 # The old split flags remain aliases for downstream build compatibility.
 NEURAL_NET_COMMON ?= 0
 NEURAL_NET_SPECIFIC ?= 0
@@ -62,8 +62,6 @@ NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/object_tracker.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include
 NODES_SRC += $(SRCDIR)/nodes/neural_net/reframing/smooth_crop_viewport.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cpp
 endif
 
 # hwaccel nodes moved from nodes/cuda to nodes/hwaccel
@@ -167,15 +165,17 @@ ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/common/infer_trt_base.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/yolo/infer_yolo.cpp
 NODES_SRC += $(SRCDIR)/nodes/neural_net/rtdetr/infer_rtdetr.cpp
-NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cpp
+NODES_SRC += $(SRCDIR)/nodes/scene_cut/cuda_infer_scene_cut_onnx.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/nv12_to_nchw.cu,avpl_yolo_preprocess_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,avpl_yolo_mask_assemble_ptx,objs/src/nodes/neural_net/common/infer_trt_base.o objs/src/nodes/neural_net/yolo/infer_yolo.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/cuda_infer_scene_cut_onnx.cu,avpl_scene_cut_onnx_ptx,objs/src/nodes/scene_cut/cuda_infer_scene_cut_onnx.o))
 endif
 
-ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_NVCC),111)
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/neural_net/scene_cut/luma_diff.o))
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/hog_diff.cu,avpl_hog_diff_ptx,objs/src/nodes/neural_net/scene_cut/hog_diff.o))
+ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
+NODES_SRC += $(SRCDIR)/nodes/scene_cut/luma_diff.cpp
+NODES_SRC += $(SRCDIR)/nodes/scene_cut/hog_diff.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/scene_cut/luma_diff.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/hog_diff.cu,avpl_hog_diff_ptx,objs/src/nodes/scene_cut/hog_diff.o))
 endif
 
 CUDA_ROOT ?= /usr/local/cuda
@@ -221,14 +221,14 @@ endif
 HAVE_NVOF ?= 0
 HAVE_OPENCV ?= 0
 NVOF_DENSE_HEADERS = $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface/nvOpticalFlowCuda.h
-ifeq ($(HAVE_CUDA)$(HAVE_NVOF)$(NEURAL_NET),111)
+ifeq ($(HAVE_CUDA)$(HAVE_NVOF),11)
 ifneq (,$(wildcard $(NVOF_DENSE_HEADERS)))
-NODES_SRC += $(SRCDIR)/nodes/neural_net/scene_cut/cuda_camera_motion.cpp
+NODES_SRC += $(SRCDIR)/nodes/scene_cut/cuda_camera_motion.cpp
 override CXXFLAGS += -DHAVE_NVOF=1 -I$(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFInterface
 override LIBS_FLAGS += -lnvidia-opticalflow
 ifeq ($(HAVE_NVCC),1)
 override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=1
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/scene_cut/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/neural_net/scene_cut/cuda_camera_motion.o))
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/cuda_camera_motion.cu,avpl_camera_motion_ptx,objs/src/nodes/scene_cut/cuda_camera_motion.o))
 else
 override CXXFLAGS += -DHAVE_CCM_GPU_IRLS=0
 endif
