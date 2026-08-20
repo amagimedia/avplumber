@@ -3,7 +3,7 @@
 # All detection runs directly on NV12 CUDA frames — no hwdownload/CPU round-trip.
 #
 # Usage:
-#   AVP_INPUT=/path/to/video.mp4 python3 -m src.nodes.neural_net.scene_cut.example
+#   AVP_INPUT=/path/to/video.mp4 python3 -m src.nodes.scene_cut.example
 #
 # Tunables (environment variables):
 #
@@ -54,7 +54,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 import pyplumber
@@ -78,7 +78,7 @@ from pyplumber.node import (
 )
 from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
-from src.nodes.neural_net.scene_cut.cuda_scene_detect import CudaSceneDetectNode
+from src.nodes.scene_cut.cuda_scene_detect import CudaSceneDetectNode
 
 
 JANUS_DEFAULT_HOST = "127.0.0.1"

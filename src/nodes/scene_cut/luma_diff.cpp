@@ -1,5 +1,5 @@
-#include "../../node_common.hpp"
-#include "../../../hwaccel.hpp"
+#include "../node_common.hpp"
+#include "../../hwaccel.hpp"
 #include "cuda_frame_helpers.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
@@ -21,7 +21,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#include "../../../../objs/src/nodes/neural_net/scene_cut/luma_diff.ptx.h"
+#include "../../../objs/src/nodes/scene_cut/luma_diff.ptx.h"
 
 #define LUMA_DIFF_CHECK_CU(x) scene_cut_cuda::checkCuda((x), "luma_diff", #x)
 
