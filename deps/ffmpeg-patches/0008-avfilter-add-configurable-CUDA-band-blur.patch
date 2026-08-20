@@ -1,102 +1,121 @@
-From 05c07912f4b0dfb7c41992a187e66a11520136b0 Mon Sep 17 00:00:00 2001
+From 53dfc47a02349c6c0e6d839c4920b06697d4daf8 Mon Sep 17 00:00:00 2001
 From: Codex <codex@local>
 Date: Wed, 19 Aug 2026 16:45:26 +0200
-Subject: [PATCH] avfilter: add bottom-band CUDA blur
+Subject: [PATCH] avfilter: add configurable CUDA band blur
 
-Add an NV12-only cleanup filter for obscuring clipped source graphics beneath a redesigned lower third. The filter copies the upper frame unchanged, downsamples and separably blurs only the bottom band in persistent CUDA scratch, then fuses feathered upsampling with mild luma reduction.
 ---
- configure                          |   1 +
- doc/filters.texi                   |  26 ++
- libavfilter/Makefile               |   2 +
- libavfilter/allfilters.c           |   1 +
- libavfilter/vf_bottom_blur_cuda.c  | 432 +++++++++++++++++++++++++++++
- libavfilter/vf_bottom_blur_cuda.cu | 208 ++++++++++++++
- 6 files changed, 670 insertions(+)
- create mode 100644 libavfilter/vf_bottom_blur_cuda.c
- create mode 100644 libavfilter/vf_bottom_blur_cuda.cu
+ configure                        |   1 +
+ doc/filters.texi                 |  46 ++++
+ libavfilter/Makefile             |   2 +
+ libavfilter/allfilters.c         |   1 +
+ libavfilter/vf_band_blur_cuda.c  | 456 +++++++++++++++++++++++++++++++
+ libavfilter/vf_band_blur_cuda.cu | 220 +++++++++++++++
+ 6 files changed, 726 insertions(+)
+ create mode 100644 libavfilter/vf_band_blur_cuda.c
+ create mode 100644 libavfilter/vf_band_blur_cuda.cu
 
 diff --git a/configure b/configure
-index 5ae4594..8a32659 100755
+index 5ae4594..14eea28 100755
 --- a/configure
 +++ b/configure
 @@ -3309,6 +3309,7 @@ bilateral_cuda_filter_deps="ffnvcodec"
  bilateral_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  chromakey_cuda_filter_deps="ffnvcodec"
  chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
-+bottom_blur_cuda_filter_deps="ffnvcodec cuda_nvcc"
++band_blur_cuda_filter_deps="ffnvcodec cuda_nvcc"
  colorspace_cuda_filter_deps="ffnvcodec"
  colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  crop_cuda_filter_deps="ffnvcodec"
 diff --git a/doc/filters.texi b/doc/filters.texi
-index a4ae86c..0d3ae0c 100644
+index a4ae86c..556885a 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -26995,6 +26995,32 @@ For the alpha plane, a 3x3 box radius will be run 7 times.
+@@ -26995,6 +26995,52 @@ For the alpha plane, a 3x3 box radius will be run 7 times.
  @end example
  @end itemize
  
-+@section bottom_blur_cuda
++@section band_blur_cuda
 +
-+Apply a vertically feathered blur and luma reduction to the bottom band of an
-+NV12 CUDA frame. The upper image is copied unchanged. The bottom band is
-+downsampled by two, blurred in two separable passes, and blended back with a
-+smooth vertical gradient. Processing and persistent scratch storage remain on
-+the CUDA device.
++Apply configurable blur and luma gradients to a vertical band of an NV12 CUDA
++frame. Pixels outside the band are copied unchanged. The selected band is
++downsampled by two, blurred in two separable passes, and blended back on the
++CUDA device using persistent scratch storage.
 +
 +It accepts the following options:
 +
 +@table @option
-+@item start
-+Normalized image height where the feather begins. The range is 0 to 0.95 and
-+the default is 0.70.
++@item y_start
++Normalized top coordinate of the band, from 0 to 0.95. The default is 0.70.
 +
-+@item full
-+Normalized image height where the blur reaches full strength. The value must
-+be greater than @option{start}. The default is 1.0.
++@item y_end
++Normalized exclusive lower coordinate of the band, from 0.05 to 1.0. It must
++be greater than @option{y_start}. The default is 1.0.
++
++@item blur_start
++Blurred-image mix at the top of the band, from 0 to 1. The default is 0.
++
++@item blur_end
++Blurred-image mix at the bottom of the band, from 0 to 1. The default is 1.
++
++@item luma_start
++Luma multiplier at the top of the band, from 0 to 2. The default is 1.
++
++@item luma_end
++Luma multiplier at the bottom of the band, from 0 to 2. The default is 0.86.
 +
 +@item radius
 +Blur radius at half resolution, from 1 to 12. The default is 6.
 +
-+@item bottom_luma
-+Luma multiplier at full strength, from 0.5 to 1.0. The default is 0.86.
++@item gradient
++Interpolation curve. Accepted values are @code{linear} and @code{smoothstep}.
++The default is @code{smoothstep}.
++
++@item gradient_power
++Bias applied after the interpolation curve, from 0.1 to 10. The default is 1.
 +@end table
++
++For a top-edge fade, reverse the blur and luma endpoints:
++
++@example
++band_blur_cuda=y_start=0:y_end=.3:blur_start=1:blur_end=0:luma_start=.86:luma_end=1
++@end example
 +
  @section colorkey_opencl
  RGB colorspace color keying.
  
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index c80bece..7b27c88 100644
+index c80bece..36d0911 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
 @@ -201,6 +201,8 @@ OBJS-$(CONFIG_AVGBLUR_OPENCL_FILTER)         += vf_avgblur_opencl.o opencl.o \
  OBJS-$(CONFIG_AVGBLUR_VULKAN_FILTER)         += vf_avgblur_vulkan.o vulkan.o vulkan_filter.o
  OBJS-$(CONFIG_BACKGROUNDKEY_FILTER)          += vf_backgroundkey.o
  OBJS-$(CONFIG_BBOX_FILTER)                   += bbox.o vf_bbox.o
-+OBJS-$(CONFIG_BOTTOM_BLUR_CUDA_FILTER)       += vf_bottom_blur_cuda.o vf_bottom_blur_cuda.ptx.o \
++OBJS-$(CONFIG_BAND_BLUR_CUDA_FILTER)       += vf_band_blur_cuda.o vf_band_blur_cuda.ptx.o \
 +                                                cuda/load_helper.o
  OBJS-$(CONFIG_BENCH_FILTER)                  += f_bench.o
  OBJS-$(CONFIG_BILATERAL_FILTER)              += vf_bilateral.o
  OBJS-$(CONFIG_BILATERAL_CUDA_FILTER)         += vf_bilateral_cuda.o vf_bilateral_cuda.ptx.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index 640b3f8..6108443 100644
+index 640b3f8..7573034 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
 @@ -186,6 +186,7 @@ extern const AVFilter ff_vf_avgblur_opencl;
  extern const AVFilter ff_vf_avgblur_vulkan;
  extern const AVFilter ff_vf_backgroundkey;
  extern const AVFilter ff_vf_bbox;
-+extern const AVFilter ff_vf_bottom_blur_cuda;
++extern const AVFilter ff_vf_band_blur_cuda;
  extern const AVFilter ff_vf_bench;
  extern const AVFilter ff_vf_bilateral;
  extern const AVFilter ff_vf_bilateral_cuda;
-diff --git a/libavfilter/vf_bottom_blur_cuda.c b/libavfilter/vf_bottom_blur_cuda.c
+diff --git a/libavfilter/vf_band_blur_cuda.c b/libavfilter/vf_band_blur_cuda.c
 new file mode 100644
-index 0000000..430a2a2
+index 0000000..c55ec99
 --- /dev/null
-+++ b/libavfilter/vf_bottom_blur_cuda.c
-@@ -0,0 +1,432 @@
++++ b/libavfilter/vf_band_blur_cuda.c
+@@ -0,0 +1,456 @@
 +/*
-+ * Bottom-band CUDA blur for subtle scorebug cleanup.
++ * Configurable vertical-band CUDA blur and luma gradient.
 + *
 + * This file is part of FFmpeg.
 + */
@@ -121,7 +140,7 @@ index 0000000..430a2a2
 +#define DIV_UP(a, b) (((a) + (b) - 1) / (b))
 +#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, ctx->hwctx->internal->cuda_dl, x)
 +
-+typedef struct BottomBlurCUDAContext {
++typedef struct BandBlurCUDAContext {
 +    const AVClass *class;
 +
 +    AVCUDADeviceContext *hwctx;
@@ -143,21 +162,26 @@ index 0000000..430a2a2
 +    CUdeviceptr scratch_uv_a;
 +    CUdeviceptr scratch_uv_b;
 +
-+    float start;
-+    float full;
-+    float bottom_luma;
++    float y_start;
++    float y_end;
++    float blur_start;
++    float blur_end;
++    float luma_start;
++    float luma_end;
++    float gradient_power;
 +    int radius;
++    int gradient;
 +
 +    int width;
 +    int height;
 +    int start_y;
-+    int full_y;
++    int end_y;
 +    int down_width;
 +    int down_height;
 +    int down_uv_height;
-+} BottomBlurCUDAContext;
++} BandBlurCUDAContext;
 +
-+static int copy_plane(BottomBlurCUDAContext *ctx,
++static int copy_plane(BandBlurCUDAContext *ctx,
 +                      uint8_t *dst, int dst_pitch,
 +                      const uint8_t *src, int src_pitch,
 +                      int width, int height)
@@ -176,7 +200,7 @@ index 0000000..430a2a2
 +    return CHECK_CU(cu->cuMemcpy2DAsync(&copy, ctx->cu_stream));
 +}
 +
-+static int launch(BottomBlurCUDAContext *ctx, CUfunction function,
++static int launch(BandBlurCUDAContext *ctx, CUfunction function,
 +                  int width, int height, void **args)
 +{
 +    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
@@ -188,10 +212,10 @@ index 0000000..430a2a2
 +        0, ctx->cu_stream, args, NULL));
 +}
 +
-+static int bottom_blur_cuda_filter_frame(AVFilterLink *inlink, AVFrame *in)
++static int band_blur_cuda_filter_frame(AVFilterLink *inlink, AVFrame *in)
 +{
 +    AVFilterContext *avctx = inlink->dst;
-+    BottomBlurCUDAContext *ctx = avctx->priv;
++    BandBlurCUDAContext *ctx = avctx->priv;
 +    AVFilterLink *outlink = avctx->outputs[0];
 +    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
 +    AVFrame *out = NULL;
@@ -294,11 +318,13 @@ index 0000000..430a2a2
 +        void *args[] = {
 +            &src, &src_pitch, &dst, &dst_pitch,
 +            &ctx->scratch_y_a, &ctx->down_width, &ctx->down_height,
-+            &ctx->width, &ctx->height, &ctx->start_y, &ctx->full_y,
-+            &ctx->bottom_luma,
++            &ctx->width, &ctx->height, &ctx->start_y, &ctx->end_y,
++            &ctx->blur_start, &ctx->blur_end,
++            &ctx->luma_start, &ctx->luma_end,
++            &ctx->gradient, &ctx->gradient_power,
 +        };
 +        ret = launch(ctx, ctx->composite_y,
-+                     ctx->width, ctx->height - ctx->start_y, args);
++                     ctx->width, ctx->end_y - ctx->start_y, args);
 +        if (ret < 0)
 +            goto pop;
 +    }
@@ -310,10 +336,12 @@ index 0000000..430a2a2
 +        void *args[] = {
 +            &src, &src_pitch, &dst, &dst_pitch,
 +            &ctx->scratch_uv_a, &ctx->down_width, &ctx->down_uv_height,
-+            &ctx->width, &ctx->height, &ctx->start_y, &ctx->full_y,
++            &ctx->width, &ctx->height, &ctx->start_y, &ctx->end_y,
++            &ctx->blur_start, &ctx->blur_end,
++            &ctx->gradient, &ctx->gradient_power,
 +        };
 +        ret = launch(ctx, ctx->composite_uv,
-+                     ctx->width / 2, (ctx->height - ctx->start_y) / 2, args);
++                     ctx->width / 2, (ctx->end_y - ctx->start_y) / 2, args);
 +    }
 +
 +pop:
@@ -337,7 +365,7 @@ index 0000000..430a2a2
 +    return ret;
 +}
 +
-+static av_cold int get_function(BottomBlurCUDAContext *ctx,
++static av_cold int get_function(BandBlurCUDAContext *ctx,
 +                                CUfunction *function, const char *name)
 +{
 +    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
@@ -348,13 +376,13 @@ index 0000000..430a2a2
 +    return ret;
 +}
 +
-+static av_cold int bottom_blur_cuda_config_output(AVFilterLink *outlink)
++static av_cold int band_blur_cuda_config_output(AVFilterLink *outlink)
 +{
-+    extern const unsigned char ff_vf_bottom_blur_cuda_ptx_data[];
-+    extern const unsigned int ff_vf_bottom_blur_cuda_ptx_len;
++    extern const unsigned char ff_vf_band_blur_cuda_ptx_data[];
++    extern const unsigned int ff_vf_band_blur_cuda_ptx_len;
 +
 +    AVFilterContext *avctx = outlink->src;
-+    BottomBlurCUDAContext *ctx = avctx->priv;
++    BandBlurCUDAContext *ctx = avctx->priv;
 +    AVFilterLink *inlink = avctx->inputs[0];
 +    FilterLink *inl = ff_filter_link(inlink);
 +    FilterLink *outl = ff_filter_link(outlink);
@@ -370,27 +398,28 @@ index 0000000..430a2a2
 +    }
 +    frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
 +    if (frames_ctx->sw_format != AV_PIX_FMT_NV12) {
-+        av_log(ctx, AV_LOG_ERROR, "bottom_blur_cuda requires NV12, got %s\n",
++        av_log(ctx, AV_LOG_ERROR, "band_blur_cuda requires NV12, got %s\n",
 +               av_get_pix_fmt_name(frames_ctx->sw_format));
 +        return AVERROR(ENOSYS);
 +    }
 +    if ((inlink->w & 1) || (inlink->h & 1) || inlink->w < 8 || inlink->h < 8) {
-+        av_log(ctx, AV_LOG_ERROR, "bottom_blur_cuda requires even dimensions\n");
++        av_log(ctx, AV_LOG_ERROR, "band_blur_cuda requires even dimensions\n");
 +        return AVERROR(EINVAL);
 +    }
-+    if (ctx->full <= ctx->start) {
-+        av_log(ctx, AV_LOG_ERROR, "full must be greater than start\n");
++    if (ctx->y_end <= ctx->y_start) {
++        av_log(ctx, AV_LOG_ERROR, "y_end must be greater than y_start\n");
 +        return AVERROR(EINVAL);
 +    }
 +
 +    ctx->width = inlink->w;
 +    ctx->height = inlink->h;
-+    ctx->start_y = ((int)(ctx->start * ctx->height)) & ~1;
-+    ctx->full_y = FFMIN(ctx->height,
-+                        FFMAX(ctx->start_y + 2, (int)(ctx->full * ctx->height)));
++    ctx->start_y = ((int)(ctx->y_start * ctx->height)) & ~1;
++    ctx->end_y = FFMIN(ctx->height,
++                       FFMAX(ctx->start_y + 2,
++                             ((int)(ctx->y_end * ctx->height)) & ~1));
 +    ctx->down_width = ctx->width / 2;
-+    ctx->down_height = (ctx->height - ctx->start_y) / 2;
-+    ctx->down_uv_height = ctx->down_height / 2;
++    ctx->down_height = (ctx->end_y - ctx->start_y + 1) / 2;
++    ctx->down_uv_height = ((ctx->end_y - ctx->start_y) / 2 + 1) / 2;
 +    if (ctx->down_uv_height < 1)
 +        return AVERROR(EINVAL);
 +
@@ -408,17 +437,17 @@ index 0000000..430a2a2
 +    context_pushed = 1;
 +
 +    ret = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module,
-+                              ff_vf_bottom_blur_cuda_ptx_data,
-+                              ff_vf_bottom_blur_cuda_ptx_len);
++                              ff_vf_band_blur_cuda_ptx_data,
++                              ff_vf_band_blur_cuda_ptx_len);
 +    if (ret < 0)
 +        goto done;
-+    if ((ret = get_function(ctx, &ctx->downsample_y, "BottomBlurDownsampleY")) < 0 ||
-+        (ret = get_function(ctx, &ctx->downsample_uv, "BottomBlurDownsampleUV")) < 0 ||
-+        (ret = get_function(ctx, &ctx->blur_horizontal_y, "BottomBlurHorizontalY")) < 0 ||
-+        (ret = get_function(ctx, &ctx->blur_horizontal_uv, "BottomBlurHorizontalUV")) < 0 ||
-+        (ret = get_function(ctx, &ctx->blur_vertical, "BottomBlurVertical")) < 0 ||
-+        (ret = get_function(ctx, &ctx->composite_y, "BottomBlurCompositeY")) < 0 ||
-+        (ret = get_function(ctx, &ctx->composite_uv, "BottomBlurCompositeUV")) < 0)
++    if ((ret = get_function(ctx, &ctx->downsample_y, "BandBlurDownsampleY")) < 0 ||
++        (ret = get_function(ctx, &ctx->downsample_uv, "BandBlurDownsampleUV")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_horizontal_y, "BandBlurHorizontalY")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_horizontal_uv, "BandBlurHorizontalUV")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_vertical, "BandBlurVertical")) < 0 ||
++        (ret = get_function(ctx, &ctx->composite_y, "BandBlurCompositeY")) < 0 ||
++        (ret = get_function(ctx, &ctx->composite_uv, "BandBlurCompositeUV")) < 0)
 +        goto done;
 +
 +    ret = CHECK_CU(cu->cuMemAlloc(&ctx->scratch_y_a,
@@ -456,9 +485,9 @@ index 0000000..430a2a2
 +    return 0;
 +}
 +
-+static av_cold void bottom_blur_cuda_uninit(AVFilterContext *avctx)
++static av_cold void band_blur_cuda_uninit(AVFilterContext *avctx)
 +{
-+    BottomBlurCUDAContext *ctx = avctx->priv;
++    BandBlurCUDAContext *ctx = avctx->priv;
 +
 +    if (ctx->hwctx) {
 +        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
@@ -482,59 +511,73 @@ index 0000000..430a2a2
 +    ctx->hwctx = NULL;
 +}
 +
-+#define OFFSET(x) offsetof(BottomBlurCUDAContext, x)
++#define OFFSET(x) offsetof(BandBlurCUDAContext, x)
 +#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
 +
-+static const AVOption bottom_blur_cuda_options[] = {
-+    { "start", "normalized height where feather begins", OFFSET(start),
++static const AVOption band_blur_cuda_options[] = {
++    { "y_start", "normalized top coordinate of the vertical band", OFFSET(y_start),
 +        AV_OPT_TYPE_FLOAT, { .dbl = 0.70 }, 0.0, 0.95, FLAGS },
-+    { "full", "normalized height where blur reaches full strength", OFFSET(full),
++    { "y_end", "normalized exclusive lower coordinate of the vertical band", OFFSET(y_end),
 +        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.05, 1.0, FLAGS },
++    { "blur_start", "blur mix at the top of the band", OFFSET(blur_start),
++        AV_OPT_TYPE_FLOAT, { .dbl = 0.0 }, 0.0, 1.0, FLAGS },
++    { "blur_end", "blur mix at the bottom of the band", OFFSET(blur_end),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.0, 1.0, FLAGS },
++    { "luma_start", "luma multiplier at the top of the band", OFFSET(luma_start),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.0, 2.0, FLAGS },
++    { "luma_end", "luma multiplier at the bottom of the band", OFFSET(luma_end),
++        AV_OPT_TYPE_FLOAT, { .dbl = 0.86 }, 0.0, 2.0, FLAGS },
 +    { "radius", "half-resolution box blur radius", OFFSET(radius),
 +        AV_OPT_TYPE_INT, { .i64 = 6 }, 1, 12, FLAGS },
-+    { "bottom_luma", "luma multiplier at full strength", OFFSET(bottom_luma),
-+        AV_OPT_TYPE_FLOAT, { .dbl = 0.86 }, 0.5, 1.0, FLAGS },
++    { "gradient", "gradient interpolation curve", OFFSET(gradient),
++        AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, FLAGS, .unit = "gradient" },
++    { "linear", "linear interpolation", 0,
++        AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, .unit = "gradient" },
++    { "smoothstep", "smoothstep interpolation", 0,
++        AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "gradient" },
++    { "gradient_power", "bias applied after the gradient curve", OFFSET(gradient_power),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.1, 10.0, FLAGS },
 +    { NULL }
 +};
 +
-+AVFILTER_DEFINE_CLASS(bottom_blur_cuda);
++AVFILTER_DEFINE_CLASS(band_blur_cuda);
 +
-+static const AVFilterPad bottom_blur_cuda_inputs[] = {
++static const AVFilterPad band_blur_cuda_inputs[] = {
 +    {
 +        .name = "default",
 +        .type = AVMEDIA_TYPE_VIDEO,
-+        .filter_frame = bottom_blur_cuda_filter_frame,
++        .filter_frame = band_blur_cuda_filter_frame,
 +    },
 +};
 +
-+static const AVFilterPad bottom_blur_cuda_outputs[] = {
++static const AVFilterPad band_blur_cuda_outputs[] = {
 +    {
 +        .name = "default",
 +        .type = AVMEDIA_TYPE_VIDEO,
-+        .config_props = bottom_blur_cuda_config_output,
++        .config_props = band_blur_cuda_config_output,
 +    },
 +};
 +
-+const AVFilter ff_vf_bottom_blur_cuda = {
-+    .name = "bottom_blur_cuda",
++const AVFilter ff_vf_band_blur_cuda = {
++    .name = "band_blur_cuda",
 +    .description = NULL_IF_CONFIG_SMALL(
-+        "Feathered bottom-band CUDA blur and luma reduction"),
-+    .priv_size = sizeof(BottomBlurCUDAContext),
-+    .priv_class = &bottom_blur_cuda_class,
-+    .uninit = bottom_blur_cuda_uninit,
-+    FILTER_INPUTS(bottom_blur_cuda_inputs),
-+    FILTER_OUTPUTS(bottom_blur_cuda_outputs),
++        "Configurable vertical-band CUDA blur and luma gradient"),
++    .priv_size = sizeof(BandBlurCUDAContext),
++    .priv_class = &band_blur_cuda_class,
++    .uninit = band_blur_cuda_uninit,
++    FILTER_INPUTS(band_blur_cuda_inputs),
++    FILTER_OUTPUTS(band_blur_cuda_outputs),
 +    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
 +    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 +};
-diff --git a/libavfilter/vf_bottom_blur_cuda.cu b/libavfilter/vf_bottom_blur_cuda.cu
+diff --git a/libavfilter/vf_band_blur_cuda.cu b/libavfilter/vf_band_blur_cuda.cu
 new file mode 100644
-index 0000000..dde8ebb
+index 0000000..9aeabe1
 --- /dev/null
-+++ b/libavfilter/vf_bottom_blur_cuda.cu
-@@ -0,0 +1,208 @@
++++ b/libavfilter/vf_band_blur_cuda.cu
+@@ -0,0 +1,220 @@
 +/*
-+ * Bottom-band CUDA blur for subtle scorebug cleanup.
++ * Configurable vertical-band CUDA blur and luma gradient.
 + *
 + * This file is part of FFmpeg.
 + */
@@ -551,12 +594,15 @@ index 0000000..dde8ebb
 +    return (unsigned char)clamp_int((int)(value + 0.5f), 0, 255);
 +}
 +
-+static __device__ __forceinline__ float smooth_strength(int y, int start_y,
-+                                                         int full_y)
++static __device__ __forceinline__ float gradient_value(int index, int count,
++                                                        int gradient,
++                                                        float gradient_power)
 +{
-+    float value = (float)(y - start_y) / (float)max(1, full_y - start_y);
++    float value = (float)index / (float)max(1, count - 1);
 +    value = fminf(1.0f, fmaxf(0.0f, value));
-+    return value * value * (3.0f - 2.0f * value);
++    if (gradient == 1)
++        value = value * value * (3.0f - 2.0f * value);
++    return powf(value, gradient_power);
 +}
 +
 +static __device__ float sample_byte(const unsigned char *source,
@@ -581,7 +627,7 @@ index 0000000..dde8ebb
 +
 +extern "C" {
 +
-+__global__ void BottomBlurDownsampleY(
++__global__ void BandBlurDownsampleY(
 +    const unsigned char *source, int source_pitch, int source_width,
 +    int source_height, int start_y, unsigned char *destination,
 +    int destination_width, int destination_height)
@@ -602,7 +648,7 @@ index 0000000..dde8ebb
 +    destination[y * destination_width + x] = (unsigned char)((sum + 2) / 4);
 +}
 +
-+__global__ void BottomBlurDownsampleUV(
++__global__ void BandBlurDownsampleUV(
 +    const unsigned char *source, int source_pitch, int source_width,
 +    int source_height, int start_y, unsigned char *destination,
 +    int destination_width, int destination_height)
@@ -635,7 +681,7 @@ index 0000000..dde8ebb
 +    destination[destination_offset + 1] = (unsigned char)((sum_v + 2) / 4);
 +}
 +
-+__global__ void BottomBlurHorizontalY(
++__global__ void BandBlurHorizontalY(
 +    const unsigned char *source, unsigned char *destination,
 +    int width, int height, int radius)
 +{
@@ -651,7 +697,7 @@ index 0000000..dde8ebb
 +        (unsigned char)((sum + radius) / (radius * 2 + 1));
 +}
 +
-+__global__ void BottomBlurHorizontalUV(
++__global__ void BandBlurHorizontalUV(
 +    const unsigned char *source, unsigned char *destination,
 +    int width, int height, int radius)
 +{
@@ -676,7 +722,7 @@ index 0000000..dde8ebb
 +        (unsigned char)((sum_v + radius) / count);
 +}
 +
-+__global__ void BottomBlurVertical(
++__global__ void BandBlurVertical(
 +    const unsigned char *source, unsigned char *destination,
 +    int width, int height, int radius)
 +{
@@ -692,42 +738,51 @@ index 0000000..dde8ebb
 +        (unsigned char)((sum + radius) / (radius * 2 + 1));
 +}
 +
-+__global__ void BottomBlurCompositeY(
++__global__ void BandBlurCompositeY(
 +    const unsigned char *source, int source_pitch,
 +    unsigned char *destination, int destination_pitch,
 +    const unsigned char *blurred, int blurred_width, int blurred_height,
-+    int width, int height, int start_y, int full_y, float bottom_luma)
++    int width, int height, int start_y, int end_y,
++    float blur_start, float blur_end,
++    float luma_start, float luma_end,
++    int gradient, float gradient_power)
 +{
 +    const int x = blockIdx.x * blockDim.x + threadIdx.x;
 +    const int band_y = blockIdx.y * blockDim.y + threadIdx.y;
 +    const int y = start_y + band_y;
-+    if (x >= width || y >= height)
++    if (x >= width || y >= height || y >= end_y)
 +        return;
 +
-+    const float strength = smooth_strength(y, start_y, full_y);
++    const float position = gradient_value(
++        band_y, end_y - start_y, gradient, gradient_power);
++    const float blur_mix = blur_start + (blur_end - blur_start) * position;
++    const float luma = luma_start + (luma_end - luma_start) * position;
 +    const float blur = sample_byte(blurred, blurred_width, blurred_height,
 +                                   x * 0.5f, band_y * 0.5f, 1, 0);
 +    const float sharp = source[y * source_pitch + x];
-+    const float mixed = sharp + (blur - sharp) * strength;
-+    const float luma = 1.0f + (bottom_luma - 1.0f) * strength;
++    const float mixed = sharp + (blur - sharp) * blur_mix;
 +    destination[y * destination_pitch + x] = rounded_byte(mixed * luma);
 +}
 +
-+__global__ void BottomBlurCompositeUV(
++__global__ void BandBlurCompositeUV(
 +    const unsigned char *source, int source_pitch,
 +    unsigned char *destination, int destination_pitch,
 +    const unsigned char *blurred, int blurred_width, int blurred_height,
-+    int width, int height, int start_y, int full_y)
++    int width, int height, int start_y, int end_y,
++    float blur_start, float blur_end,
++    int gradient, float gradient_power)
 +{
 +    const int x = blockIdx.x * blockDim.x + threadIdx.x;
 +    const int band_y = blockIdx.y * blockDim.y + threadIdx.y;
 +    const int pairs = width / 2;
 +    const int source_y = start_y / 2 + band_y;
-+    if (x >= pairs || source_y >= height / 2)
++    const int band_height = (end_y - start_y) / 2;
++    if (x >= pairs || band_y >= band_height || source_y >= height / 2)
 +        return;
 +
-+    const float strength = smooth_strength(start_y + band_y * 2,
-+                                            start_y, full_y);
++    const float position = gradient_value(
++        band_y, band_height, gradient, gradient_power);
++    const float blur_mix = blur_start + (blur_end - blur_start) * position;
 +    const int source_offset = source_y * source_pitch + x * 2;
 +    const int destination_offset = source_y * destination_pitch + x * 2;
 +    for (int component = 0; component < 2; component++) {
@@ -736,7 +791,7 @@ index 0000000..dde8ebb
 +            x * 0.5f, band_y * 0.5f, 2, component);
 +        const float sharp = source[source_offset + component];
 +        destination[destination_offset + component] =
-+            rounded_byte(sharp + (blur - sharp) * strength);
++            rounded_byte(sharp + (blur - sharp) * blur_mix);
 +    }
 +}
 +

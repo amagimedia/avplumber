@@ -2,7 +2,7 @@
 set -euo pipefail
 
 base_commit=3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587
-expected_tree=6f477dd70315a21c5000f91cd190eab1ddbc1ae3
+expected_tree=ac461ac62fae9f027871e18a53e4859336abfad4
 expected_patch_count=8
 
 if [[ $# -ne 1 ]]; then

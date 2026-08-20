@@ -8,7 +8,7 @@ composition and media-input workflows.
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg`
 - Upstream tag: `n7.1.5`
 - Upstream commit: `3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`
-- Expected patched tree: `6f477dd70315a21c5000f91cd190eab1ddbc1ae3`
+- Expected patched tree: `ac461ac62fae9f027871e18a53e4859336abfad4`
 
 ## Series
 
@@ -25,8 +25,9 @@ the chronology of incomplete ports and follow-up fixes:
    handling.
 6. `0006-avdevice-v4l2-compat.patch` — V4L2 timestamp compatibility.
 7. `0007-avdevice-ndi-v5.patch` — NDI v5 device registration and documentation.
-8. `0008-avfilter-add-bottom-band-CUDA-blur.patch` — zero-copy NV12 bottom-band
-   blur, gradient feather, and luma roll-off for lower-third cleanup.
+8. `0008-avfilter-add-configurable-CUDA-band-blur.patch` — zero-copy NV12
+   vertical-band blur with independent blur/luma endpoints and configurable
+   gradient interpolation.
 
 Each patch message lists the original exported FFmpeg commits it replaces.
 
