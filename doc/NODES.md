@@ -762,9 +762,6 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
--   `drop_alpha` (bool, default `true`) - advertise imported ABGR/ARGB pixels as
-    `RGB0` for encoder compatibility; set `false` to retain `RGBA`/`BGRA` alpha
-    for CUDA composition
 
 ### `cuda_infer_yolo`
 
@@ -886,7 +883,8 @@ each input, so a stalled input repeats its last image without blocking other
 inputs or the program output. The frame lifetime holders are released only
 after a CUDA event confirms that the sampling kernels have completed.
 
-N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 software format
+N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 or RGBA
+software format
 
 Parameters:
 - `src` (array of edge names, required) - input EGL image edges
@@ -895,6 +893,11 @@ Parameters:
 - `width`, `height` (integers, required) - output canvas dimensions
 - `layers` (array, required, one per input) - objects containing `dst_x`, `dst_y`, `dst_w`, and `dst_h`
 - `fps` (ratio string, optional, default `"60/1"`) - independent compositor output rate
+- `output_alpha` (boolean, optional, default `false`) - preserve the composed
+  alpha channel and advertise RGBA output. The default keeps the established
+  opaque RGB0 output contract for encoder compatibility. When enabled, pixels
+  outside all layers are transparent and each layer contributes its imported
+  alpha when the source EGL format exposes one.
 - `cache_ttl` (float seconds, optional, default `3.0`) - idle interop-slot lifetime
 - `max_cache_entries` (integer, optional, default `440`) - maximum registered slots
 - `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate compositor counters
