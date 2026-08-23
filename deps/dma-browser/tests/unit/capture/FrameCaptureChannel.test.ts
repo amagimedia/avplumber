@@ -6,7 +6,9 @@ import { FrameCaptureChannel } from '../../../src/main/capture/FrameCaptureChann
 import type { LogSink } from '../../../src/main/support/Logger';
 
 const fdpass = vi.hoisted(() => ({
-  broadcastFd: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  broadcastFd: vi
+    .fn<(socketPath: string, fd: number, header: Buffer) => Promise<void>>()
+    .mockResolvedValue(undefined),
   closeServer: vi.fn(),
   createServer: vi.fn().mockReturnValue(true),
   monotonicTimeNs: vi.fn().mockReturnValue(93_000_000_000_000n),
@@ -14,7 +16,12 @@ const fdpass = vi.hoisted(() => ({
   setServerLogger: vi.fn(),
 }));
 
+const electron = vi.hoisted(() => ({
+  ipcMain: { on: vi.fn(), removeListener: vi.fn() },
+}));
+
 vi.mock('fdpass', () => fdpass);
+vi.mock('electron', () => electron);
 
 function logSink(): LogSink {
   return {
@@ -56,6 +63,51 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fdpass.broadcastFd.mockResolvedValue(undefined);
+  });
+
+  it('binds one renderer trace to the next paint and emits the 120-byte header', async () => {
+    const channel = new FrameCaptureChannel({
+      socketPath: '/tmp/dma-page/scoreboard.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']),
+      log: logSink(),
+      retainedFramePoolSize: 3,
+      windowId: 'scoreboard',
+      traceProtocol: true,
+    });
+    const webContents = Object.assign(new EventEmitter(), { send: vi.fn() }) as WebContents &
+      EventEmitter & { send: ReturnType<typeof vi.fn> };
+    channel.attach(webContents);
+    await channel.start();
+    const traceHandler = electron.ipcMain.on.mock.calls[0]![1] as (
+      event: { sender: WebContents },
+      payload: Record<string, unknown>,
+    ) => void;
+    traceHandler(
+      { sender: webContents },
+      {
+        windowId: 'scoreboard',
+        traceId: 77n,
+        sequence: 9n,
+        sourcePtsMs: 12_345n,
+        rendererReceivedNs: 10n,
+        rafNs: 20n,
+        domAppliedNs: 30n,
+      },
+    );
+
+    webContents.emit('paint', makeTexture(8), {}, image());
+    await Promise.resolve();
+
+    const header = fdpass.broadcastFd.mock.calls[0]![2];
+    expect(header.length).toBe(120);
+    expect(header.readBigUInt64LE(56)).toBe(77n);
+    expect(header.readBigUInt64LE(64)).toBe(9n);
+    expect(header.readBigInt64LE(72)).toBe(12_345n);
+    expect(webContents.send).toHaveBeenCalledWith(
+      'dma-browser:trace-painted',
+      expect.objectContaining({ traceIdStr: '77', sequenceStr: '9' }),
+    );
+    await channel.stop();
   });
 
   it('holds transmitted textures until ACK and drops new frames at the in-flight limit', async () => {

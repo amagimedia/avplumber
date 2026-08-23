@@ -72,6 +72,7 @@ export interface ManagedWindowOptions {
   readonly allowedDims: AllowedDims;
   readonly loadWatchdogMs: number;
   readonly retainedFramePoolSize: number;
+  readonly traceProtocol: boolean;
 }
 
 export interface IManagedWindow {
@@ -115,6 +116,8 @@ export class ManagedWindow implements IManagedWindow {
       allowedDims: this.opts.allowedDims,
       log,
       retainedFramePoolSize: this.opts.retainedFramePoolSize,
+      windowId: this.id,
+      traceProtocol: this.opts.traceProtocol,
     });
     await this.frameChannel.start();
 

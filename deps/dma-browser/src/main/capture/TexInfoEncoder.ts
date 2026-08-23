@@ -11,10 +11,24 @@ export interface TexInfo {
   readonly frameNumber: bigint;
 }
 
+export interface TraceTexInfo extends TexInfo {
+  readonly traceId: bigint;
+  readonly sequence: bigint;
+  readonly sourcePtsMs: bigint;
+  readonly rendererReceivedNs: bigint;
+  readonly rafNs: bigint;
+  readonly domAppliedNs: bigint;
+  readonly paintNs: bigint;
+  readonly dmabufSendNs: bigint;
+}
+
 const PIX_FMT_BGRA = 0x42475241; // "BGRA" little-endian
 const PIX_FMT_RGBA = 0x52474241; // "RGBA" little-endian
 
 export const TEX_INFO_HEADER_BYTES = 48;
+export const TRACE_TEX_INFO_MAGIC = 0x31544253; // "SBT1" little-endian
+export const TRACE_TEX_INFO_VERSION = 1;
+export const TRACE_TEX_INFO_HEADER_BYTES = 120;
 
 /**
  * Encodes a 48-byte little-endian header sent ahead of every dmabuf FD.
@@ -42,6 +56,23 @@ export class TexInfoEncoder {
     buf.writeBigUInt64LE(info.offset, 24);
     buf.writeBigUInt64LE(info.timestampNs, 32);
     buf.writeBigUInt64LE(info.frameNumber, 40);
+    return buf;
+  }
+
+  public encodeTrace(info: TraceTexInfo): Buffer {
+    const buf = Buffer.allocUnsafe(TRACE_TEX_INFO_HEADER_BYTES);
+    this.encode(info).copy(buf, 0);
+    buf.writeUInt32LE(TRACE_TEX_INFO_MAGIC, 48);
+    buf.writeUInt16LE(TRACE_TEX_INFO_VERSION, 52);
+    buf.writeUInt16LE(TRACE_TEX_INFO_HEADER_BYTES, 54);
+    buf.writeBigUInt64LE(info.traceId, 56);
+    buf.writeBigUInt64LE(info.sequence, 64);
+    buf.writeBigInt64LE(info.sourcePtsMs, 72);
+    buf.writeBigUInt64LE(info.rendererReceivedNs, 80);
+    buf.writeBigUInt64LE(info.rafNs, 88);
+    buf.writeBigUInt64LE(info.domAppliedNs, 96);
+    buf.writeBigUInt64LE(info.paintNs, 104);
+    buf.writeBigUInt64LE(info.dmabufSendNs, 112);
     return buf;
   }
 

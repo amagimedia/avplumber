@@ -23,6 +23,7 @@ export interface ApplicationConfig {
   readonly loadWatchdogMs: number;
   readonly allowedDims: AllowedDims;
   readonly dmabufPoolSize: number;
+  readonly traceProtocol: boolean;
 }
 
 export class Application {
@@ -72,6 +73,7 @@ export class Application {
           allowedDims: this.cfg.allowedDims,
           loadWatchdogMs: this.cfg.loadWatchdogMs,
           retainedFramePoolSize: this.cfg.dmabufPoolSize,
+          traceProtocol: this.cfg.traceProtocol,
         }),
     };
 
@@ -135,6 +137,7 @@ export class Application {
       loadWatchdogMs,
       allowedDims,
       dmabufPoolSize,
+      traceProtocol: envFlag(this.env, 'DMA_BROWSER_TRACE_PROTOCOL', false),
     };
   }
 

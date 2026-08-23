@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_FRAME_CHANNEL, type AudioFrameMessage } from '../shared/ipc-contracts';
+import {
+  AUDIO_FRAME_CHANNEL,
+  TRACE_FRAME_CHANNEL,
+  TRACE_PAINTED_CHANNEL,
+  type AudioFrameMessage,
+  type TraceFrameMessage,
+  type TracePaintedMessage,
+} from '../shared/ipc-contracts';
 
 /**
  * Exposed in the renderer as `window.dmaBrowser`.
@@ -16,11 +23,30 @@ export interface WireAudioFrame {
   readonly timestampNsStr: string;
 }
 
+export interface WireTraceFrame {
+  readonly windowId: string;
+  readonly traceIdStr: string;
+  readonly sequenceStr: string;
+  readonly sourcePtsMsStr: string;
+  readonly rendererReceivedNsStr: string;
+  readonly rafNsStr: string;
+  readonly domAppliedNsStr: string;
+}
+
 export class IpcBridge {
   public install(): void {
     contextBridge.exposeInMainWorld('dmaBrowser', {
       sendAudioFrame: (frame: WireAudioFrame): void => {
         ipcRenderer.send(AUDIO_FRAME_CHANNEL, this.hydrate(frame));
+      },
+      monotonicTimeNs: (): string => process.hrtime.bigint().toString(),
+      markTraceFrame: (frame: WireTraceFrame): void => {
+        ipcRenderer.send(TRACE_FRAME_CHANNEL, this.hydrateTrace(frame));
+      },
+      onTracePainted: (callback: (message: TracePaintedMessage) => void): void => {
+        ipcRenderer.on(TRACE_PAINTED_CHANNEL, (_event, message: TracePaintedMessage) => {
+          callback(message);
+        });
       },
     });
   }
@@ -40,6 +66,18 @@ export class IpcBridge {
       sampleRate: frame.sampleRate,
       channels: frame.channels,
       timestampNs: BigInt(frame.timestampNsStr),
+    };
+  }
+
+  private hydrateTrace(frame: WireTraceFrame): TraceFrameMessage {
+    return {
+      windowId: frame.windowId,
+      traceId: BigInt(frame.traceIdStr),
+      sequence: BigInt(frame.sequenceStr),
+      sourcePtsMs: BigInt(frame.sourcePtsMsStr),
+      rendererReceivedNs: BigInt(frame.rendererReceivedNsStr),
+      rafNs: BigInt(frame.rafNsStr),
+      domAppliedNs: BigInt(frame.domAppliedNsStr),
     };
   }
 }

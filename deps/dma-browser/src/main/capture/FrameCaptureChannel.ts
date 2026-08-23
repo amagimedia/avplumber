@@ -1,10 +1,18 @@
 import * as fs from 'node:fs';
 import * as fdpass from 'fdpass';
 import type { WebContents } from 'electron';
+import type { IpcMainEvent } from 'electron';
+import { ipcMain } from 'electron';
 import type { LogSink } from '../support/Logger';
 import type { AllowedDims } from './AllowedDims';
 import type { CaptureStats, ICaptureChannel } from './ICaptureChannel';
 import { TexInfoEncoder, type PixelFormat } from './TexInfoEncoder';
+import {
+  TRACE_FRAME_CHANNEL,
+  TRACE_PAINTED_CHANNEL,
+  type TraceFrameMessage,
+  type TracePaintedMessage,
+} from '../../shared/ipc-contracts';
 
 interface PaintEventLike {
   texture?: PaintTextureLike | null;
@@ -49,6 +57,17 @@ export interface FrameCaptureChannelOptions {
   readonly paintDiag?: boolean;
   /** Maximum frames sent but not yet released by consumer acknowledgement. */
   readonly retainedFramePoolSize?: number;
+  readonly windowId?: string;
+  readonly traceProtocol?: boolean;
+}
+
+interface PendingTrace {
+  readonly traceId: bigint;
+  readonly sequence: bigint;
+  readonly sourcePtsMs: bigint;
+  readonly rendererReceivedNs: bigint;
+  readonly rafNs: bigint;
+  readonly domAppliedNs: bigint;
 }
 
 /**
@@ -74,13 +93,15 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private readonly retainedFrames = new Map<bigint, RetainedFrame>();
   private readonly retainedFramePoolSize: number;
   private nextFrameNumber = 0n;
+  private pendingTrace: PendingTrace | null = null;
+  private readonly boundTraceHandler = (event: IpcMainEvent, payload: TraceFrameMessage) =>
+    this.handleTraceFrame(event, payload);
   private readonly boundHandler = (event: unknown, _dirty: unknown, img: unknown) =>
     this.handlePaint(event as PaintEventLike, img as PaintImageLike);
 
   constructor(opts: FrameCaptureChannelOptions) {
     this.opts = opts;
-    this.retainedFramePoolSize =
-      opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
+    this.retainedFramePoolSize = opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
   }
 
   public start(): Promise<void> {
@@ -89,6 +110,9 @@ export class FrameCaptureChannel implements ICaptureChannel {
       this.releaseRetainedFrameNumber(frameNumber);
     });
     const ok = fdpass.createServer(this.opts.socketPath);
+    if (this.opts.traceProtocol) {
+      ipcMain.on(TRACE_FRAME_CHANNEL, this.boundTraceHandler);
+    }
     this.opts.log.write(
       `fdpass.createServer(${this.opts.socketPath}) => ${String(ok)}; releaseMode=ack`,
     );
@@ -112,6 +136,9 @@ export class FrameCaptureChannel implements ICaptureChannel {
   }
 
   public stop(): Promise<void> {
+    if (this.opts.traceProtocol) {
+      ipcMain.removeListener(TRACE_FRAME_CHANNEL, this.boundTraceHandler);
+    }
     if (this.socketMonitor) {
       clearInterval(this.socketMonitor);
       this.socketMonitor = null;
@@ -226,16 +253,44 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const pixelFormat = this.pixelFormatOf(info);
 
         const frameNumber = this.nextFrameNumber++;
-        const header = this.encoder.encode({
+        const paintNs = fdpass.monotonicTimeNs();
+        const dmabufSendNs = this.opts.traceProtocol ? fdpass.monotonicTimeNs() : paintNs;
+        const base = {
           codedWidth: codedW,
           codedHeight: codedH,
           stride,
           pixelFormat,
           modifier: meta.modifierBig,
           offset: meta.offsetBig,
-          timestampNs: fdpass.monotonicTimeNs(),
+          timestampNs: paintNs,
           frameNumber,
-        });
+        };
+        const trace = this.pendingTrace;
+        this.pendingTrace = null;
+        const header = this.opts.traceProtocol
+          ? this.encoder.encodeTrace({
+              ...base,
+              traceId: trace?.traceId ?? 0n,
+              sequence: trace?.sequence ?? 0n,
+              sourcePtsMs: trace?.sourcePtsMs ?? 0n,
+              rendererReceivedNs: trace?.rendererReceivedNs ?? 0n,
+              rafNs: trace?.rafNs ?? 0n,
+              domAppliedNs: trace?.domAppliedNs ?? 0n,
+              paintNs,
+              dmabufSendNs,
+            })
+          : this.encoder.encode(base);
+
+        if (trace && this.boundContents) {
+          const painted: TracePaintedMessage = {
+            traceIdStr: trace.traceId.toString(),
+            sequenceStr: trace.sequence.toString(),
+            frameNumberStr: frameNumber.toString(),
+            paintNsStr: paintNs.toString(),
+            dmabufSendNsStr: dmabufSendNs.toString(),
+          };
+          this.boundContents.send(TRACE_PAINTED_CHANNEL, painted);
+        }
 
         retained = this.retainTexture(tex, frameNumber);
         fdpass.broadcastFd(this.opts.socketPath, meta.fd, header).then(
@@ -264,6 +319,20 @@ export class FrameCaptureChannel implements ICaptureChannel {
         this.releaseTexture(tex);
       }
     }
+  }
+
+  private handleTraceFrame(event: IpcMainEvent, payload: TraceFrameMessage): void {
+    if (!this.opts.traceProtocol || payload.windowId !== this.opts.windowId) return;
+    if (!this.boundContents || event.sender !== this.boundContents) return;
+    if (payload.traceId <= 0n || payload.sequence < 0n || payload.sourcePtsMs < 0n) return;
+    this.pendingTrace = {
+      traceId: payload.traceId,
+      sequence: payload.sequence,
+      sourcePtsMs: payload.sourcePtsMs,
+      rendererReceivedNs: payload.rendererReceivedNs,
+      rafNs: payload.rafNs,
+      domAppliedNs: payload.domAppliedNs,
+    };
   }
 
   private normalizeTextureInfo(info: Record<string, unknown>): TextureMeta {

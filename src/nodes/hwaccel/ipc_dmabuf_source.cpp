@@ -1,6 +1,7 @@
 #include "../node_common.hpp"
 extern "C" {
 #include <libavutil/buffer.h>
+#include <libavutil/dict.h>
 #include <libavutil/hwcontext_drm.h>
 #include <libavutil/mem.h>
 #include <libdrm/drm_fourcc.h>
@@ -36,7 +37,34 @@ struct TexInfo {
     uint64_t timestamp; // nanoseconds
     uint64_t frame_count;
 };
+
+static constexpr uint32_t SCOREBOARD_TRACE_MAGIC = 0x31544253; // "SBT1"
+static constexpr uint16_t SCOREBOARD_TRACE_VERSION = 1;
+
+struct TraceTexInfo {
+    TexInfo base;
+    uint32_t magic;
+    uint16_t version;
+    uint16_t header_bytes;
+    uint64_t trace_id;
+    uint64_t sequence;
+    int64_t source_pts_ms;
+    uint64_t renderer_received_ns;
+    uint64_t raf_ns;
+    uint64_t dom_applied_ns;
+    uint64_t paint_ns;
+    uint64_t dmabuf_send_ns;
+};
 #pragma pack(pop)
+
+static_assert(sizeof(TexInfo) == 48, "default DMA-BUF header changed");
+static_assert(sizeof(TraceTexInfo) == 120, "scoreboard trace DMA-BUF header changed");
+
+static uint64_t monotonicNs() {
+    struct timespec ts {};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 class DmabufReleaseAckQueue {
     struct PendingAck {
@@ -217,14 +245,16 @@ public:
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    bool recvTexInfoAndFD(TexInfo &info, int &received_fd, uint64_t &connection_generation) {
+    bool recvTexInfoAndFD(TexInfo &info, TraceTexInfo *trace_info,
+                          int &received_fd, uint64_t &connection_generation) {
         received_fd = -1;
         connection_generation = 0;
         // Prepare to receive payload + a single FD via SCM_RIGHTS
         char control[CMSG_SPACE(sizeof(int))];
         struct iovec iov;
-        iov.iov_base = &info;
-        iov.iov_len = sizeof(info);
+        iov.iov_base = trace_info ? static_cast<void*>(trace_info)
+                                  : static_cast<void*>(&info);
+        iov.iov_len = trace_info ? sizeof(*trace_info) : sizeof(info);
         struct msghdr msg;
         while (true) {
             // Ensure we have a connection
@@ -303,13 +333,15 @@ public:
                     closeConnection();
                     return false;
                 }
-                if (static_cast<size_t>(r) < sizeof(TexInfo)) {
-                    logstream << "fdpass: metadata too small (" << r << ")";
+                if (static_cast<size_t>(r) != iov.iov_len || (msg.msg_flags & MSG_TRUNC)) {
+                    logstream << "fdpass: DMA-BUF protocol mismatch (received=" << r
+                              << " expected=" << iov.iov_len << ")";
                     close(received_fd);
                     received_fd = -1;
                     closeConnection();
                     return false;
                 }
+                if (trace_info) info = trace_info->base;
                 connection_generation = connection_generation_;
                 return true;
             }
@@ -359,6 +391,8 @@ protected:
     av::Rational frame_rate_{0, 1};
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
+    bool trace_protocol_ = false;
+    std::string trace_metadata_key_ = "scoreboard_dmabuf_trace_v1";
 
     static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
         switch (pixel_format) {
@@ -419,11 +453,23 @@ public:
     }
     virtual void process() {
         TexInfo ti{};
+        TraceTexInfo trace_info{};
         int dmabuf_fd = -1;
         uint64_t connection_generation = 0;
-        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd, connection_generation)) {
+        if (!receiver_.recvTexInfoAndFD(
+                ti, trace_protocol_ ? &trace_info : nullptr,
+                dmabuf_fd, connection_generation)) {
             wallclock.sleepms(5);
             return;
+        }
+        const uint64_t receipt_ns = monotonicNs();
+        if (trace_protocol_ &&
+            (trace_info.magic != SCOREBOARD_TRACE_MAGIC ||
+             trace_info.version != SCOREBOARD_TRACE_VERSION ||
+             trace_info.header_bytes != sizeof(TraceTexInfo))) {
+            close(dmabuf_fd);
+            receiver_.releaseFrame(connection_generation, ti.frame_count);
+            throw Error("ipc_dmabuf_source: scoreboard trace protocol mismatch");
         }
 
         uint64_t object_size = 0;
@@ -500,6 +546,24 @@ public:
         vfrm.setTimeBase({1, 1000000});
         vfrm.raw()->pts = ti.timestamp / 1000;
 
+        if (trace_protocol_ && trace_info.trace_id != 0) {
+            Parameters trace_metadata = {
+                {"schema", "scoreboard.dmabuf.trace.v1"},
+                {"trace_id", trace_info.trace_id},
+                {"sequence", trace_info.sequence},
+                {"source_pts_ms", trace_info.source_pts_ms},
+                {"renderer_received_ns", trace_info.renderer_received_ns},
+                {"raf_ns", trace_info.raf_ns},
+                {"dom_applied_ns", trace_info.dom_applied_ns},
+                {"paint_ns", trace_info.paint_ns},
+                {"dmabuf_send_ns", trace_info.dmabuf_send_ns},
+                {"receipt_ns", receipt_ns},
+                {"frame_number", ti.frame_count},
+            };
+            av_dict_set(&vfrm.raw()->metadata, trace_metadata_key_.c_str(),
+                        trace_metadata.dump().c_str(), 0);
+        }
+
         if (hw_frames_ctx_) {
             vfrm.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
         }
@@ -534,6 +598,12 @@ public:
         }
         if (params.count("fps")) {
             r->frame_rate_ = parseRatio(params["fps"]);
+        }
+        if (params.count("trace_protocol")) {
+            r->trace_protocol_ = params["trace_protocol"].get<bool>();
+        }
+        if (params.count("trace_metadata_key")) {
+            r->trace_metadata_key_ = params["trace_metadata_key"].get<std::string>();
         }
         return r;
     }
