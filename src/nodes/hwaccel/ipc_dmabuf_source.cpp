@@ -39,7 +39,7 @@ struct TexInfo {
 };
 
 static constexpr uint32_t SCOREBOARD_TRACE_MAGIC = 0x31544253; // "SBT1"
-static constexpr uint16_t SCOREBOARD_TRACE_VERSION = 1;
+static constexpr uint16_t SCOREBOARD_TRACE_VERSION = 2;
 
 struct TraceTexInfo {
     TexInfo base;
@@ -392,7 +392,7 @@ protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
     AVBufferRef* hw_frames_ctx_ = nullptr;
     bool trace_protocol_ = false;
-    std::string trace_metadata_key_ = "scoreboard_dmabuf_trace_v1";
+    std::string trace_metadata_key_ = "scoreboard_dmabuf_trace_v2";
 
     static AVPixelFormat swFormatFromTexInfo(uint32_t pixel_format) {
         switch (pixel_format) {
@@ -548,7 +548,7 @@ public:
 
         if (trace_protocol_ && trace_info.trace_id != 0) {
             Parameters trace_metadata = {
-                {"schema", "scoreboard.dmabuf.trace.v1"},
+                {"schema", "scoreboard.dmabuf.trace.v2"},
                 {"trace_id", trace_info.trace_id},
                 {"sequence", trace_info.sequence},
                 {"source_pts_ms", trace_info.source_pts_ms},

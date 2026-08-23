@@ -27,7 +27,7 @@ const PIX_FMT_RGBA = 0x52474241; // "RGBA" little-endian
 
 export const TEX_INFO_HEADER_BYTES = 48;
 export const TRACE_TEX_INFO_MAGIC = 0x31544253; // "SBT1" little-endian
-export const TRACE_TEX_INFO_VERSION = 1;
+export const TRACE_TEX_INFO_VERSION = 2;
 export const TRACE_TEX_INFO_HEADER_BYTES = 120;
 
 /**

@@ -66,6 +66,7 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
   });
 
   it('binds one renderer trace to the next paint and emits the 120-byte header', async () => {
+    fdpass.monotonicTimeNs.mockReturnValueOnce(100n).mockReturnValueOnce(220n);
     const channel = new FrameCaptureChannel({
       socketPath: '/tmp/dma-page/scoreboard.sock',
       allowedDims: AllowedDims.fromList(['1080x1920']),
@@ -103,9 +104,46 @@ describe('FrameCaptureChannel retained frame lifetime', () => {
     expect(header.readBigUInt64LE(56)).toBe(77n);
     expect(header.readBigUInt64LE(64)).toBe(9n);
     expect(header.readBigInt64LE(72)).toBe(12_345n);
+    expect(header.readBigUInt64LE(104)).toBe(100n);
+    expect(header.readBigUInt64LE(112)).toBe(220n);
     expect(webContents.send).toHaveBeenCalledWith(
       'dma-browser:trace-painted',
-      expect.objectContaining({ traceIdStr: '77', sequenceStr: '9' }),
+      expect.objectContaining({ status: 'painted', traceIdStr: '77', sequenceStr: '9' }),
+    );
+    await channel.stop();
+  });
+
+  it('reports a pending renderer trace superseded before paint', async () => {
+    const channel = new FrameCaptureChannel({
+      socketPath: '/tmp/dma-page/scoreboard.sock',
+      allowedDims: AllowedDims.fromList(['1080x1920']),
+      log: logSink(),
+      windowId: 'scoreboard',
+      traceProtocol: true,
+    });
+    const webContents = Object.assign(new EventEmitter(), { send: vi.fn() }) as WebContents &
+      EventEmitter & { send: ReturnType<typeof vi.fn> };
+    channel.attach(webContents);
+    await channel.start();
+    const traceHandler = electron.ipcMain.on.mock.calls[0]![1] as (
+      event: { sender: WebContents },
+      payload: Record<string, unknown>,
+    ) => void;
+    const payload = {
+      windowId: 'scoreboard',
+      traceId: 10n,
+      sequence: 1n,
+      sourcePtsMs: 1n,
+      rendererReceivedNs: 2n,
+      rafNs: 3n,
+      domAppliedNs: 4n,
+    };
+    traceHandler({ sender: webContents }, payload);
+    traceHandler({ sender: webContents }, { ...payload, traceId: 11n, sequence: 2n });
+
+    expect(webContents.send).toHaveBeenCalledWith(
+      'dma-browser:trace-painted',
+      expect.objectContaining({ status: 'superseded', traceIdStr: '10', sequenceStr: '1' }),
     );
     await channel.stop();
   });

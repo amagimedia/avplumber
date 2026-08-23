@@ -27,6 +27,7 @@ export interface TraceFrameMessage {
 }
 
 export interface TracePaintedMessage {
+  readonly status: 'painted' | 'superseded';
   readonly traceIdStr: string;
   readonly sequenceStr: string;
   readonly frameNumberStr: string;

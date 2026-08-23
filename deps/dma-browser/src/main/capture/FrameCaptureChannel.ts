@@ -175,6 +175,9 @@ export class FrameCaptureChannel implements ICaptureChannel {
   private handlePaint(event: PaintEventLike, img: PaintImageLike): void {
     this.stats.paintCount++;
     this.stats.lastPaintTsMs = Date.now();
+    // Capture the Electron paint callback boundary before texture validation
+    // and preparation. The later send timestamp deliberately includes that work.
+    const tracePaintNs = this.opts.traceProtocol ? fdpass.monotonicTimeNs() : null;
     let tex: PaintTextureLike | null | undefined;
     let retained: RetainedFrame | null = null;
     try {
@@ -253,8 +256,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const pixelFormat = this.pixelFormatOf(info);
 
         const frameNumber = this.nextFrameNumber++;
-        const paintNs = fdpass.monotonicTimeNs();
-        const dmabufSendNs = this.opts.traceProtocol ? fdpass.monotonicTimeNs() : paintNs;
+        const paintNs = tracePaintNs ?? fdpass.monotonicTimeNs();
         const base = {
           codedWidth: codedW,
           codedHeight: codedH,
@@ -267,6 +269,10 @@ export class FrameCaptureChannel implements ICaptureChannel {
         };
         const trace = this.pendingTrace;
         this.pendingTrace = null;
+        retained = this.retainTexture(tex, frameNumber);
+        // This is the benchmark send-start boundary: all texture/header inputs
+        // are ready and the next operations encode and submit the final packet.
+        const dmabufSendNs = this.opts.traceProtocol ? fdpass.monotonicTimeNs() : paintNs;
         const header = this.opts.traceProtocol
           ? this.encoder.encodeTrace({
               ...base,
@@ -281,8 +287,10 @@ export class FrameCaptureChannel implements ICaptureChannel {
             })
           : this.encoder.encode(base);
 
+        const transmission = fdpass.broadcastFd(this.opts.socketPath, meta.fd, header);
         if (trace && this.boundContents) {
           const painted: TracePaintedMessage = {
+            status: 'painted',
             traceIdStr: trace.traceId.toString(),
             sequenceStr: trace.sequence.toString(),
             frameNumberStr: frameNumber.toString(),
@@ -292,8 +300,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
           this.boundContents.send(TRACE_PAINTED_CHANNEL, painted);
         }
 
-        retained = this.retainTexture(tex, frameNumber);
-        fdpass.broadcastFd(this.opts.socketPath, meta.fd, header).then(
+        transmission.then(
           () => {
             this.stats.txFrameCount++;
           },
@@ -325,6 +332,17 @@ export class FrameCaptureChannel implements ICaptureChannel {
     if (!this.opts.traceProtocol || payload.windowId !== this.opts.windowId) return;
     if (!this.boundContents || event.sender !== this.boundContents) return;
     if (payload.traceId <= 0n || payload.sequence < 0n || payload.sourcePtsMs < 0n) return;
+    if (this.pendingTrace) {
+      const superseded: TracePaintedMessage = {
+        status: 'superseded',
+        traceIdStr: this.pendingTrace.traceId.toString(),
+        sequenceStr: this.pendingTrace.sequence.toString(),
+        frameNumberStr: '',
+        paintNsStr: '0',
+        dmabufSendNsStr: '0',
+      };
+      this.boundContents.send(TRACE_PAINTED_CHANNEL, superseded);
+    }
     this.pendingTrace = {
       traceId: payload.traceId,
       sequence: payload.sequence,
