@@ -64,7 +64,7 @@ class UltralyticsByteTrackNode(PythonNode):
     The node writes AVPlumber's standard YOLO-style detection metadata onto the
     input frame and forwards that same frame downstream. It is intended as a
     reusable Python/prototyping node; use AVPlumber's native cuda_infer_yolo and
-    player_tracker nodes for the high-throughput CUDA/TensorRT path.
+    object_tracker nodes for the high-throughput CUDA/TensorRT path.
     """
 
     def __init__(self, args: dict[str, Any]):

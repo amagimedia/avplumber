@@ -38,10 +38,10 @@ float computeIoU(const std::vector<float>& a_tlbr, float bx1, float by1, float b
 
 } // anonymous namespace
 
-class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
+class ObjectTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public IInputReset, public ReportsFinishByFlag {
 
-    std::string metadata_key_ = "yolo_players";
-    std::vector<std::string> target_labels_ = {"player"};
+    std::string metadata_key_ = "yolo_detections";
+    std::vector<std::string> target_labels_;
     int target_class_ = -1;
     bool label_case_sensitive_ = false;
     double min_conf_ = 0.01;
@@ -103,7 +103,7 @@ class PlayerTracker : public NodeSISO<av::VideoFrame, av::VideoFrame>, public II
                 }
             }
         }
-        return false;
+        return target_class_ < 0 && target_labels_.empty();
     }
 
     bool readShotInfo(const av::VideoFrame& frm, std::string& shot_type_out, bool& transition_out) const {
@@ -195,11 +195,11 @@ public:
 
     void resetInput() override { resetState(); }
 
-    ~PlayerTracker() {
+    ~ObjectTracker() {
         uint64_t total_output = stat_matched_ + stat_unmatched_ + stat_predicted_ + stat_lost_emitted_;
         if (stat_total_frames_ == 0) return;
 
-        logstream << "player_tracker: === tracking summary ===";
+        logstream << "object_tracker: === tracking summary ===";
         logstream << "  total frames:        " << stat_total_frames_;
         logstream << "  shot resets:         " << stat_resets_;
         logstream << "  raw target dets:     " << stat_total_target_dets_;
@@ -238,7 +238,7 @@ public:
             resetTrackerState();
             stat_resets_++;
             if (debug_log_every_n_ > 0) {
-                logstream << "player_tracker: frame=" << frame_counter_
+                logstream << "object_tracker: frame=" << frame_counter_
                           << " reset (shot transition to " << (shot_type.empty() ? std::string("?") : shot_type) << ")";
             }
         }
@@ -303,7 +303,7 @@ public:
             stat_total_target_dets_ += target_dets.size();
 
             if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-                logstream << "player_tracker: frame=" << frame_counter_
+                logstream << "object_tracker: frame=" << frame_counter_
                           << " suppressed shot_type=" << (shot_type.empty() ? std::string("<missing>") : shot_type)
                           << " targets=" << target_dets.size();
             }
@@ -441,7 +441,7 @@ public:
         av_dict_set(&frm.raw()->metadata, metadata_key_.c_str(), serialized.c_str(), 0);
 
         if (debug_log_every_n_ > 0 && (frame_counter_ % (uint64_t)debug_log_every_n_) == 0) {
-            logstream << "player_tracker: frame=" << frame_counter_
+            logstream << "object_tracker: frame=" << frame_counter_
                       << " targets=" << target_dets.size()
                       << " tracked=" << output_tracks.size()
                       << " lost=" << tracker_->get_lost_stracks().size();
@@ -450,17 +450,17 @@ public:
         this->sink_->put(frm);
     }
 
-    static std::shared_ptr<PlayerTracker> create(NodeCreationInfo& nci) {
+    static std::shared_ptr<ObjectTracker> create(NodeCreationInfo& nci) {
         EdgeManager& edges = nci.edges;
         const Parameters& params = nci.params;
-        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<PlayerTracker>(edges, params);
+        auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<ObjectTracker>(edges, params);
         r->auto_eof_ = false;
 
         if (params.count("camera_shot_metadata_key")) r->camera_shot_metadata_key_ = params["camera_shot_metadata_key"].get<std::string>();
         if (params.count("require_wide_shot")) r->require_wide_shot_ = params["require_wide_shot"].get<bool>();
         if (params.count("metadata_key")) r->metadata_key_ = params["metadata_key"].get<std::string>();
         if (params.count("target_labels")) {
-            if (!params["target_labels"].is_array()) throw Error("player_tracker: target_labels must be a string array");
+            if (!params["target_labels"].is_array()) throw Error("object_tracker: target_labels must be a string array");
             r->target_labels_.clear();
             for (const auto& l : params["target_labels"]) {
                 r->target_labels_.push_back(l.get<std::string>());
@@ -485,4 +485,4 @@ public:
     }
 };
 
-DECLNODE(player_tracker, PlayerTracker)
+DECLNODE(object_tracker, ObjectTracker)

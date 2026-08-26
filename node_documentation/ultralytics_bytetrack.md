@@ -13,7 +13,7 @@ model.track(source=image, persist=True, tracker="bytetrack.yaml")
 Use this node for prototyping, VOD tools, and graphs that need to reuse an
 existing `.pt` Ultralytics model without exporting it to TensorRT. For
 high-throughput CUDA/TensorRT production graphs, prefer the native split:
-`cuda_infer_yolo` for inference followed by `player_tracker` for C++ tracking.
+`cuda_infer_yolo` for inference followed by `object_tracker` for C++ tracking.
 
 ## Data Flow
 

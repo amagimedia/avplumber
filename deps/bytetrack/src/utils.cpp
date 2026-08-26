@@ -174,27 +174,18 @@ vector<vector<float> > BYTETracker::ious(vector<vector<float> > &atlbrs, vector<
 	//bbox_ious
 	for (size_t k = 0; k < btlbrs.size(); k++)
 	{
-		float box_area = (btlbrs[k][2] - btlbrs[k][0] + 1)*(btlbrs[k][3] - btlbrs[k][1] + 1);
+		float box_width = max(0.0f, btlbrs[k][2] - btlbrs[k][0]);
+		float box_height = max(0.0f, btlbrs[k][3] - btlbrs[k][1]);
+		float box_area = box_width * box_height;
 		for (size_t n = 0; n < atlbrs.size(); n++)
 		{
-			float iw = min(atlbrs[n][2], btlbrs[k][2]) - max(atlbrs[n][0], btlbrs[k][0]) + 1;
-			if (iw > 0)
-			{
-				float ih = min(atlbrs[n][3], btlbrs[k][3]) - max(atlbrs[n][1], btlbrs[k][1]) + 1;
-				if(ih > 0)
-				{
-					float ua = (atlbrs[n][2] - atlbrs[n][0] + 1)*(atlbrs[n][3] - atlbrs[n][1] + 1) + box_area - iw * ih;
-					ious[n][k] = iw * ih / ua;
-				}
-				else
-				{
-					ious[n][k] = 0.0;
-				}
-			}
-			else
-			{
-				ious[n][k] = 0.0;
-			}
+			float iw = max(0.0f, min(atlbrs[n][2], btlbrs[k][2]) - max(atlbrs[n][0], btlbrs[k][0]));
+			float ih = max(0.0f, min(atlbrs[n][3], btlbrs[k][3]) - max(atlbrs[n][1], btlbrs[k][1]));
+			float intersection = iw * ih;
+			float area_width = max(0.0f, atlbrs[n][2] - atlbrs[n][0]);
+			float area_height = max(0.0f, atlbrs[n][3] - atlbrs[n][1]);
+			float union_area = area_width * area_height + box_area - intersection;
+			ious[n][k] = union_area > 0.0f ? intersection / union_area : 0.0f;
 		}
 	}
 
