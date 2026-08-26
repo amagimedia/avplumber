@@ -135,6 +135,7 @@ public:
                 logstream << "Detected discontinuity: " << next_out_ts_ << " -> " << in_samples.pts();
                 next_out_ts_ = NOTS;
             }
+            av::frame::ensure_default_channel_layout(in_samples.raw());
             if (sourceChanged(in_samples) || discontinuity) {
                 flushInternal();
                 AudioParameters prev_params = src_params_;
