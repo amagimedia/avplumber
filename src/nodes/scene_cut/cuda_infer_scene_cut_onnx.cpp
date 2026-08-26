@@ -1,4 +1,4 @@
-#include "../../node_common.hpp"
+#include "../node_common.hpp"
 
 // Pairwise CNN-embedding scene-cut detector. Unlike luma_diff/hog_diff (raw
 // CUDA metrics requiring an external
@@ -19,7 +19,7 @@
 // "current" into "previous" with a cheap device-to-device memcpy each call,
 // then overwrites "current" with the freshly preprocessed frame. This avoids
 // re-running the NV12->RGB preprocess kernel on the previous frame every time.
-#include "../../../hwaccel.hpp"
+#include "../../hwaccel.hpp"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -37,7 +37,7 @@ extern "C" {
 #include <unordered_map>
 #include <vector>
 
-#include "../../../../objs/src/nodes/neural_net/scene_cut/cuda_infer_scene_cut_onnx.ptx.h"
+#include "../../../objs/src/nodes/scene_cut/cuda_infer_scene_cut_onnx.ptx.h"
 
 static int check_cu(CUresult err, const char *func) {
     if (err == CUDA_SUCCESS) return 0;

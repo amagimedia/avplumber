@@ -51,7 +51,9 @@ Feature gates (node only built when all conditions met):
 - `cuda_to_egl_image`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`
 - `drm_prime_to_cuda`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`
 - `nvjpeg_enc`: `HAVE_CUDA=1 HAVE_NVJPEG=1`
+- `luma_diff`, `hog_diff`: `HAVE_CUDA=1 HAVE_NVCC=1`
 - TensorRT inference nodes: `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`
+- `cuda_camera_motion`: `HAVE_CUDA=1 HAVE_NVOF=1` plus dense NVOF headers; `HAVE_NVCC=1` enables GPU IRLS
 - `HAVE_GL` auto-enabled by `HAVE_VAAPI=1`
 
 Static library: `make static_library` → `libavplumber.a`. Public API: `src/avplumber.hpp`.

@@ -200,20 +200,12 @@ class CudaInferYolo(InternalNode):
     TYPE = "cuda_infer_yolo"
 
 
-class TrackNetBall(InternalNode):
-    TYPE = "tracknet_ball"
-
-
-class DoctrOcr(InternalNode):
-    TYPE = "doctr_ocr"
-
-
 class JoinMetadata(InternalNode):
     TYPE = "join_metadata"
 
 
-class PlayerTracker(InternalNode):
-    TYPE = "player_tracker"
+class ObjectTracker(InternalNode):
+    TYPE = "object_tracker"
 
 
 class LumaDiff(InternalNode):

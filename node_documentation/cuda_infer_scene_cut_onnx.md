@@ -20,7 +20,7 @@ so no external Python threshold/debounce decider node is needed downstream.
 5. Runs TensorRT inference and reads the `int64`/`int32` `scene_cut_flag` output.
 6. Writes `{"camera_shot_transition": bool, "camera_shot_type": "unknown"}` onto the
    output frame's metadata (schema-compatible with the `luma_scene_cut` Python node's
-   output, so downstream consumers — `player_tracker`'s `camera_shot_metadata_key`,
+   output, so downstream consumers — `object_tracker`'s `camera_shot_metadata_key`,
    a metadata consumer or debug scene-cut counter — need no changes).
 
 ## Input Requirements
