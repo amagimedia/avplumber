@@ -497,7 +497,7 @@ public:
     }
 };
 
-template <typename T> class PTSCorrectorNode: public NodeSISO<T, T>, public ISentinel, public IPreferredFormatReceiver, public ReportsFinishByFlag {
+template <typename T> class PTSCorrectorNode: public NodeSISO<T, T>, public ISentinel, public IPreferredFormatReceiver, public ReportsFinishByFlag, public IReturnsObjects {
 protected:
     std::shared_ptr<PTSCorrectorCommon> corr_;
     av::Rational timebase_;
@@ -1074,6 +1074,13 @@ public:
     }
     template<typename ...Args> void setFrameTimestamps(Args...) {
         // NOOP
+    }
+
+    Parameters getObject(const std::string name) override {
+        if (name == "stats") {
+            return corr_->getStats();
+        }
+        throw Error("Unknown object to get: " + name);
     }
 
     static std::shared_ptr<PTSCorrectorNode> create(NodeCreationInfo &nci) {

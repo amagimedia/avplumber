@@ -100,7 +100,9 @@
     input: ['streams', 'programs'],
     input_rec: ['streams', 'programs', 'stream-limits'],
     speed_video: ['info'],
-    speed_audio: ['info']
+    speed_audio: ['info'],
+    sentinel_video: ['stats'],
+    sentinel_audio: ['stats']
   };
   let autoRefreshNodeObjects = true;
   let nodeObjectsRefreshMs = 2000;

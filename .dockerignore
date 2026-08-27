@@ -24,14 +24,6 @@ deps/dma-browser/dist/
 deps/dma-browser/addons/fdpass/build/
 deps/dma-browser/addons/fdpass/node_modules/
 demos/cuda-overlay/artifacts/
-deps/libklvanc/autom4te.cache/
-deps/libklvanc/src/.libs/
-deps/libklvanc/tools/.libs/
-deps/libklscte35/autom4te.cache/
-deps/libklscte35/src/.libs/
-deps/libklscte35/tools/.libs/
-deps/libklvanc/**/*.o
-deps/libklscte35/**/*.o
 join_*_pts.csv
 crop_offsets_debug.log
 neural-demo/*.tgz

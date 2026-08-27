@@ -110,7 +110,6 @@ RUN make -j"$(nproc)" python_module \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
         HAVE_NVJPEG=0 \
-        HAVE_SCTE35=0 \
         HAVE_TENSORRT=0 \
         NEURAL_NET=0 \
         CUDA_MODULE_IMAGE_FORMAT=ptx \
