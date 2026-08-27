@@ -4,8 +4,6 @@ HAVE_CUDA = 1
 HAVE_VAAPI = 0
 HAVE_DRM = 0
 # Optional bundled deps/features
-# - HAVE_SCTE35 controls whether we build/link libklvanc + libklscte35 and enable the SCTE-35 parser node.
-HAVE_SCTE35 = 1
 # Build NvOFFRUC-based frame interpolation node (requires CUDA + Optical_Flow_SDK_5.0.7 headers at build time,
 # and libNvOFFRUC.so available at runtime)
 HAVE_NVOF_FRUC ?= 1
@@ -84,15 +82,6 @@ CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz
-
-ifeq ($(HAVE_SCTE35),1)
-DEPS_LIBS += deps/libklscte35/src/.libs/libklscte35.a deps/libklvanc/src/.libs/libklvanc.a
-override CXXFLAGS += -DHAVE_SCTE35=1
-else
-# The SCTE-35 node is the only thing that needs these libs; dropping it avoids building the autotools deps.
-NODES_SRC := $(filter-out $(SRCDIR)/nodes/scte35_parse.cpp,$(NODES_SRC))
-override CXXFLAGS += -DHAVE_SCTE35=0
-endif
 
 ifeq ($(HAVE_JACK),1)
 NODES_SRC += $(shell find $(SRCDIR)/nodes/jack -maxdepth 1 -name '*.cpp')
@@ -370,8 +359,6 @@ clean_deps:
 	rm -r deps/cpr/build || true
 	rm -r deps/avcpp/build || true
 	rm deps/cuda_loader/*.o || true
-	cd deps/libklvanc && git clean -xdf || true
-	cd deps/libklscte35 && git clean -xdf || true
 
 deps/cpr/build/lib/libcpr.a:
 	mkdir -p deps/cpr/build
@@ -382,14 +369,6 @@ deps/avcpp/build/src/libavcpp.a:
 	mkdir -p deps/avcpp/build
 	cd deps/avcpp/build && PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCMAKE_CXX_FLAGS="$(CXXFLAGS)" -DCMAKE_EXE_LINKER_FLAGS="$(LFLAGS)" -DCMAKE_AR=`which gcc-ar` -DCMAKE_RANLIB=`which gcc-ranlib` ..
 	$(MAKE) -C deps/avcpp/build avcpp-static VERBOSE=1
-
-deps/libklvanc/src/.libs/libklvanc.a:
-	cd deps/libklvanc && git clean -xdf || true
-	cd deps/libklvanc && ./autogen.sh --build && ./configure --enable-shared=no --enable-static && make
-
-deps/libklscte35/src/.libs/libklscte35.a: deps/libklvanc/src/.libs/libklvanc.a
-	cd deps/libklscte35 && git clean -xdf || true
-	export CFLAGS="-I$(shell readlink -f deps/include)" && export LDFLAGS="-L$(shell readlink -f deps/libklvanc/src/.libs)" && cd deps/libklscte35 && ./autogen.sh --build && ./configure --enable-shared=no --libdir=$(shell readlink -f deps/libklvanc/src/.libs) && make
 
 deps/cuda_loader/cuda_drvapi_dynlink.o: deps/cuda_loader/cuda_drvapi_dynlink.c
 	$(CXX) $(CXXFLAGS) -c -o $@ $<

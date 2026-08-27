@@ -87,7 +87,6 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   NEURAL_NET=1: enable retained neural drawing, tracking, inference, learned scene-cut, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff`, `hog_diff`, and TensorRT inference. Requires `nvcc`.
--   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
@@ -98,7 +97,6 @@ Feature gates:
 -   TensorRT inference nodes build only when `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
 -   `cuda_camera_motion` builds only when `HAVE_CUDA=1 HAVE_NVOF=1` and the dense NVOF headers are available; `HAVE_NVCC=1` additionally enables its GPU IRLS backend.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
--   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
 
 ### Using as a library
