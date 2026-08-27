@@ -44,7 +44,6 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 | `NEURAL_NET=1` | Retained neural nodes; legacy `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` act as aliases |
 | `HAVE_JACK=1` | `jack_sink`. Links `-ljack` |
 | `HAVE_NVCC=1` | Compile CUDA PTX for CUDA processing nodes. Requires `nvcc` |
-| `HAVE_SCTE35=1` | `scte35_parse` node |
 | `EMBED_IN=obs` | OBS source plugin build |
 
 Feature gates (node only built when all conditions met):
