@@ -18,7 +18,7 @@ stream URLs are examples; adjust them before running a graph.
 - `cuda_dec_scale_enc.avplumber` — CUDA decode, scale, and encode.
 - `optical_flow.avplumber` — NVIDIA Optical Flow frame interpolation.
 - `from_dmabuf_hwdownload.avplumber` — explicit DMA-BUF to CPU interoperability.
-- `extract_cc_data.avplumber` and `extract_scte_35.avplumber` — ancillary metadata extraction.
+- `extract_cc_data.avplumber` — ancillary metadata extraction.
 
 Model-specific and sport-analysis graphs live in their application
 repositories. Python neural examples remain under `pyplumber/examples/` when

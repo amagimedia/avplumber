@@ -5,7 +5,7 @@
 #
 # Build context = the avplumber repo root:
 #   docker build -t avplumber-dmabuf-consumer -f demos/dmabuf-browser/consumer/Dockerfile .
-ARG AVP_FLAGS="HAVE_CUDA=0 HAVE_NVCC=0 HAVE_NVJPEG=0 HAVE_TENSORRT=0 NEURAL_NET=0 HAVE_NVOF=0 HAVE_OPENCV=0 HAVE_SCTE35=0 HAVE_GL=0 HAVE_DRM=1"
+ARG AVP_FLAGS="HAVE_CUDA=0 HAVE_NVCC=0 HAVE_NVJPEG=0 HAVE_TENSORRT=0 NEURAL_NET=0 HAVE_NVOF=0 HAVE_OPENCV=0 HAVE_GL=0 HAVE_DRM=1"
 
 FROM fedora:42 AS builder
 ARG AVP_FLAGS
