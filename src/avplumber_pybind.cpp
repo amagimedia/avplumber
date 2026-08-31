@@ -608,15 +608,27 @@ PYBIND11_MODULE(_avplumber, m) {
         .def(py::init<>())
         .def("addNode", [](NodeManager &nm, py::dict &parameters, bool early_create=false, bool start=false, py::object node_obj=py::none()) {
             Parameters json_parameters = pyjson::to_json(parameters);
+            // Same GIL-release rationale as the NodeGroup bindings below:
+            // createNode takes the manager's and the target group's busy_
+            // locks, and createNode()/start() reacquire the GIL for python
+            // nodes, so holding the GIL across them deadlocks against GM
+            // threads. setPythonNodeObject must keep the GIL (py::object).
             if (node_obj.is_none()) {
+                py::gil_scoped_release release;
                 return nm.createNode(json_parameters, early_create, start);
             }
-            auto result = nm.createNode(json_parameters, false, false);
+            std::shared_ptr<NodeWrapper> result;
+            {
+                py::gil_scoped_release release;
+                result = nm.createNode(json_parameters, false, false);
+            }
             result->setPythonNodeObject(node_obj);
             if (early_create) {
+                py::gil_scoped_release release;
                 result->createNode();
             }
             if (start) {
+                py::gil_scoped_release release;
                 result->start();
             }
             return result;
@@ -653,7 +665,9 @@ PYBIND11_MODULE(_avplumber, m) {
             // across node creation on GM threads while they reacquire the GIL
             // (NodeGroup::doWithNodes -> NodeWrapper::createNode). Holding the
             // GIL here while waiting for that lock is a lock-order inversion
-            // that deadlocks against those threads.
+            // that deadlocks against those threads. sortedNodes() returns a
+            // copy made under busy_, so iterating it below without the lock
+            // is safe against concurrent graph mutation.
             std::list<std::weak_ptr<NodeWrapper>> nodes_copy;
             {
                 py::gil_scoped_release release;
