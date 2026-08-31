@@ -648,8 +648,19 @@ PYBIND11_MODULE(_avplumber, m) {
         .def("restartNodes", &NodeGroup::restartNodes,
              py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("sortedNodes", [](NodeGroup &ng) -> py::list {
+            // Same GIL-release rationale as startNodes/stopNodes/restartNodes
+            // above: sortedNodes() takes the group's busy_ lock, which is held
+            // across node creation on GM threads while they reacquire the GIL
+            // (NodeGroup::doWithNodes -> NodeWrapper::createNode). Holding the
+            // GIL here while waiting for that lock is a lock-order inversion
+            // that deadlocks against those threads.
+            std::list<std::weak_ptr<NodeWrapper>> nodes_copy;
+            {
+                py::gil_scoped_release release;
+                nodes_copy = ng.sortedNodes();
+            }
             py::list sorted_nodes;
-            for (auto &weak_node: ng.sortedNodes()) {
+            for (auto &weak_node: nodes_copy) {
                 auto node = weak_node.lock();
                 if (node) {
                     sorted_nodes.append(node);
