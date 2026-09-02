@@ -134,13 +134,13 @@ bool CudaInferTrtBase::initCudaContextFromFrame(const av::VideoFrame& frm) {
     CUcontext frame_ctx = nullptr;
     AVCUDADeviceContext* frame_dev_ctx = nullptr;
     if (!frameCudaContext(frm, frame_ctx, &frame_dev_ctx)) {
-        logstream << "cuda_infer_yolo: missing hw_frames_ctx";
+        logstream << cuda_context_log_type_ << ": missing hw_frames_ctx";
         return false;
     }
     cuda_dev_ctx_ = frame_dev_ctx;
     cu_ctx_ = frame_ctx;
     if (CUDA_CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
-        logstream << "cuda_infer_yolo: cuCtxSetCurrent failed";
+        logstream << cuda_context_log_type_ << ": cuCtxSetCurrent failed";
         return false;
     }
     logCudaContextPointers(cuda_context_log_type_.c_str(),
@@ -189,35 +189,35 @@ bool CudaInferTrtBase::loadPreprocessModule() {
 bool CudaInferTrtBase::parseEngine(ModelRunner& model) {
     std::ifstream f(model.engine_path, std::ios::binary);
     if (!f) {
-        logstream << "cuda_infer_yolo: cannot open engine file " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": cannot open engine file " << model.engine_path;
         return false;
     }
     f.seekg(0, std::ios::end);
     std::streamsize size = f.tellg();
     if (size <= 0) {
-        logstream << "cuda_infer_yolo: invalid engine size for " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": invalid engine size for " << model.engine_path;
         return false;
     }
     f.seekg(0, std::ios::beg);
     std::vector<char> blob((size_t)size);
     if (!f.read(blob.data(), size)) {
-        logstream << "cuda_infer_yolo: failed reading engine file " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": failed reading engine file " << model.engine_path;
         return false;
     }
 
     model.trt_runtime = nvinfer1::createInferRuntime(trt_logger_);
     if (!model.trt_runtime) {
-        logstream << "cuda_infer_yolo: createInferRuntime failed for " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": createInferRuntime failed for " << model.engine_path;
         return false;
     }
     model.trt_engine = model.trt_runtime->deserializeCudaEngine(blob.data(), blob.size());
     if (!model.trt_engine) {
-        logstream << "cuda_infer_yolo: deserializeCudaEngine failed for " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": deserializeCudaEngine failed for " << model.engine_path;
         return false;
     }
     model.trt_ctx = model.trt_engine->createExecutionContext();
     if (!model.trt_ctx) {
-        logstream << "cuda_infer_yolo: createExecutionContext failed for " << model.engine_path;
+        logstream << cuda_context_log_type_ << ": createExecutionContext failed for " << model.engine_path;
         return false;
     }
     return true;
@@ -381,13 +381,15 @@ bool CudaInferTrtBase::ensureCompatibleInput(const ModelRunner& model, size_t mo
         return true;
     }
     if (model.input_w != input_w_ || model.input_h != input_h_) {
-        logstream << "cuda_infer_yolo: all engines must share the same input size, model[0]="
+        logstream << cuda_context_log_type_
+                  << ": all engines must share the same input size, model[0]="
                   << input_w_ << "x" << input_h_ << " model[" << model_index << "]="
                   << model.input_w << "x" << model.input_h;
         return false;
     }
     if (model.input_dtype != input_dtype_) {
-        logstream << "cuda_infer_yolo: all engines must share the same input dtype";
+        logstream << cuda_context_log_type_
+                  << ": all engines must share the same input dtype";
         return false;
     }
     return true;
@@ -581,7 +583,7 @@ bool CudaInferTrtBase::enqueueInference(ModelRunner& model) {
         model.trt_ctx->setAuxStreams(model.aux_streams.data(), (int32_t)model.aux_streams.size());
     }
     if (!model.trt_ctx->enqueueV3(reinterpret_cast<cudaStream_t>(model.stream))) {
-        logstream << "cuda_infer_yolo: enqueueV3 failed for " << model.engine_name;
+        logstream << cuda_context_log_type_ << ": enqueueV3 failed for " << model.engine_name;
         return false;
     }
     return true;
@@ -611,7 +613,7 @@ bool CudaInferTrtBase::copyOutputsToHost(ModelRunner& model) {
 void CudaInferTrtBase::disableCudaGraph(ModelRunner& model, const std::string& reason) {
     model.cuda_graph_disabled = true;
     if (!model.cuda_graph_disable_logged) {
-        logstream << "cuda_infer_yolo: CUDA graph disabled for " << model.engine_name
+        logstream << cuda_context_log_type_ << ": CUDA graph disabled for " << model.engine_name
                   << ": " << reason << "; falling back to normal TensorRT enqueue";
         model.cuda_graph_disable_logged = true;
     }
@@ -678,7 +680,7 @@ bool CudaInferTrtBase::ensureCudaGraph(ModelRunner& model) {
     model.cuda_graph_exec = graph_exec;
     model.cuda_graph_ready = true;
     if (!model.cuda_graph_capture_logged) {
-        logstream << "cuda_infer_yolo: CUDA graph captured for " << model.engine_name;
+        logstream << cuda_context_log_type_ << ": CUDA graph captured for " << model.engine_name;
         model.cuda_graph_capture_logged = true;
     }
     return true;
