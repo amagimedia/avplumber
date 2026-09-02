@@ -289,3 +289,6 @@ public:
 };
 
 } // namespace yolo_base
+
+// Neutral name for non-YOLO native nodes that share the TensorRT/CUDA runner.
+namespace neural_infer = yolo_base;
