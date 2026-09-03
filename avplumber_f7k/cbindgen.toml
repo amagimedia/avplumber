@@ -1,0 +1,24 @@
+language = "C"
+header = "/* Generated from src/graph/capability.rs by cbindgen. Do not edit. */"
+include_guard = "AVPLUMBER_IDS_H"
+pragma_once = false
+cpp_compat = true
+include_version = false
+documentation = true
+documentation_style = "c99"
+style = "both"
+usize_is_size_t = true
+no_includes = true
+sys_includes = ["stdint.h"]
+
+[export]
+include = ["AvpInterfaceId", "AvpServiceId"]
+item_types = ["enums"]
+
+[parse]
+parse_deps = false
+
+[enum]
+prefix_with_name = true
+rename_variants = "ScreamingSnakeCase"
+enum_class = false
