@@ -1,0 +1,26 @@
+[package]
+name = "avplumber_f7k"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = []
+# Real AVFrame/AVPacket via rsmpeg. Requires FFmpeg 8.0 dev libs.
+ffmpeg = ["dep:rusty_ffmpeg", "dep:rsmpeg"]
+async = ["dep:tokio"]
+
+[build-dependencies]
+cbindgen = "0.29"
+
+[dependencies]
+petgraph = "0.8.3"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+arc-swap = "1.7"
+rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["ffmpeg8", "link_system_ffmpeg"] }
+rsmpeg = { version = "0.18.0", optional = true, default-features = false, features = ["ffmpeg8"] }
+tokio = { version = "1.53.1", optional = true, default-features = false, features = ["rt", "net", "sync", "io-util", "time", "macros"] }

@@ -24,7 +24,6 @@
   * in C++ code, prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
 
 ## Framework changes
-* Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof. Or when we're in a middle of refactor that needs it.
 * Call out framework-wide behavior changes explicitly; don't make incidental edits during nodes work.
 * In particular, do not modify the framework as a workaround that could be done more properly by introducing a new node, new interface, new shared object etc., or improving existing ones.
 
