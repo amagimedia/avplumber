@@ -56,7 +56,7 @@ fn group_status_and_restart_errors_are_available_through_c_abi() {
 }
 
 #[test]
-fn checked_c_group_add_reports_duplicate_policy_membership() {
+fn checked_c_group_add_reports_duplicate_membership() {
     let _guard = TEST_LOCK.lock().unwrap();
     FACTORY_CALLS.store(0, Ordering::SeqCst);
     FIRST_HANDLE.store(0, Ordering::SeqCst);
@@ -127,6 +127,7 @@ static VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(process),
     poll: None,
     query_interface: None,
+    direct_poll_is_infallible: 0,
 };
 
 extern "C" fn push_process(_handle: *mut c_void) -> i32 {
@@ -146,6 +147,7 @@ static PUSH_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(push_process),
     poll: None,
     query_interface: None,
+    direct_poll_is_infallible: 0,
 };
 
 extern "C" fn helper_process(_handle: *mut c_void) -> i32 {
@@ -160,6 +162,7 @@ static HELPER_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(helper_process),
     poll: None,
     query_interface: None,
+    direct_poll_is_infallible: 0,
 };
 
 extern "C" fn error_process(_handle: *mut c_void) -> i32 {
@@ -173,6 +176,7 @@ static ERROR_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(error_process),
     poll: None,
     query_interface: None,
+    direct_poll_is_infallible: 0,
 };
 
 extern "C" fn push_factory(
@@ -752,6 +756,10 @@ impl Node for DirectEndpoint {
 
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
+    }
+
+    fn direct_poll_is_infallible(&self) -> bool {
+        true
     }
 
     fn bind_source(&self, _name: &str, edge: Arc<dyn Edge>) {

@@ -17,15 +17,34 @@ fn media(pts: i64) -> Media {
     }
 }
 
-fn spec() -> Spec {
+fn spec_with_width(width: i32) -> Spec {
     Spec::Video {
-        width: 8,
+        width,
         height: 8,
         pix_fmt: 0,
         frame_rate: AvpRational { num: 25, den: 1 },
         sar: AvpRational { num: 1, den: 1 },
         time_base: AvpRational { num: 1, den: 1000 },
     }
+}
+
+fn spec() -> Spec {
+    spec_with_width(8)
+}
+
+fn expect_spec_width(edge: &dyn Edge, expected: i32) {
+    assert!(matches!(
+        edge.try_take(),
+        Some(EdgeItem::Event(EdgeEvent::Spec(Spec::Video { width, .. })))
+            if width == expected
+    ));
+}
+
+fn expect_buffer_pts(edge: &dyn Edge, expected: i64) {
+    assert!(matches!(
+        edge.try_take(),
+        Some(EdgeItem::Buffer(buf)) if buf.ts().val == expected
+    ));
 }
 
 fn wait_for_group_generation(group: &Group, generation: u64) {
@@ -86,7 +105,7 @@ fn internal_restart_clears_data_and_control_but_rearms_latched_spec() {
     logical.restart(1, 2, EdgeRestart::Internal);
 
     assert!(!logical.is_closed());
-    assert_eq!(logical.occupied(), 0);
+    assert_eq!(logical.occupied(), 1);
     assert!(matches!(
         logical.try_take(),
         Some(EdgeItem::Event(EdgeEvent::Spec(_)))
@@ -96,6 +115,80 @@ fn internal_restart_clears_data_and_control_but_rearms_latched_spec() {
         generation_writer(logical.clone(), 2).push(media(3)),
         Push::Accepted
     );
+}
+
+#[test]
+fn spec_events_keep_queue_order_and_are_delivered_once() {
+    let edge: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+    edge.push_event(EdgeEvent::Spec(spec_with_width(8)));
+    expect_spec_width(&*edge, 8);
+    assert_eq!(edge.push(media(1)), Push::Accepted);
+    edge.push_event(EdgeEvent::Spec(spec_with_width(16)));
+
+    expect_buffer_pts(&*edge, 1);
+    expect_spec_width(&*edge, 16);
+    assert!(edge.try_take().is_none());
+}
+
+#[test]
+fn rearmed_spec_is_readable_and_pop_consumes_only_the_replay() {
+    let edge: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+    edge.push_event(EdgeEvent::Spec(spec()));
+    expect_spec_width(&*edge, 8);
+    assert_eq!(edge.push(media(2)), Push::Accepted);
+
+    edge.rearm_spec();
+
+    assert_eq!(edge.occupied(), 2);
+    assert!(matches!(
+        edge.peek_clone(0),
+        Some(EdgeItem::Event(EdgeEvent::Spec(Spec::Video {
+            width: 8,
+            ..
+        })))
+    ));
+    edge.pop();
+    expect_buffer_pts(&*edge, 2);
+    assert!(edge.try_take().is_none());
+}
+
+#[test]
+fn ingress_restart_replays_the_format_active_for_the_first_queued_buffer() {
+    let edge: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+    edge.push_event(EdgeEvent::Spec(spec_with_width(8)));
+    expect_spec_width(&*edge, 8);
+    assert_eq!(edge.push(media(3)), Push::Accepted);
+    edge.push_event(EdgeEvent::Spec(spec_with_width(16)));
+    assert_eq!(edge.push(media(4)), Push::Accepted);
+    edge.push_event(EdgeEvent::Eof);
+
+    edge.reset_for_restart(EdgeRestart::Ingress);
+
+    expect_spec_width(&*edge, 8);
+    expect_buffer_pts(&*edge, 3);
+    expect_spec_width(&*edge, 16);
+    expect_buffer_pts(&*edge, 4);
+    assert!(edge.try_take().is_none());
+    assert!(!edge.is_closed());
+}
+
+#[test]
+fn egress_restart_preserves_queued_format_transitions_without_replay() {
+    let edge: Arc<dyn Edge> = Arc::new(BufferedEdge::new(2));
+    edge.push_event(EdgeEvent::Spec(spec_with_width(8)));
+    expect_spec_width(&*edge, 8);
+    assert_eq!(edge.push(media(5)), Push::Accepted);
+    edge.push_event(EdgeEvent::Spec(spec_with_width(16)));
+    assert_eq!(edge.push(media(6)), Push::Accepted);
+    edge.push_event(EdgeEvent::Eof);
+
+    edge.reset_for_restart(EdgeRestart::Egress);
+
+    expect_buffer_pts(&*edge, 5);
+    expect_spec_width(&*edge, 16);
+    expect_buffer_pts(&*edge, 6);
+    assert!(edge.try_take().is_none());
+    assert!(!edge.is_closed());
 }
 
 #[test]
@@ -375,7 +468,7 @@ fn direct_internal_restart_clears_events_and_inflight_but_rearms_spec() {
     logical.restart(1, 2, EdgeRestart::Internal);
 
     assert!(!logical.is_closed());
-    assert_eq!(logical.occupied(), 0);
+    assert_eq!(logical.occupied(), 1);
     assert!(matches!(
         logical.try_take(),
         Some(EdgeItem::Event(EdgeEvent::Spec(_)))
@@ -444,12 +537,28 @@ struct PollNode {
     received: Option<Arc<AtomicUsize>>,
 }
 
+struct FalliblePollNode {
+    name: String,
+}
+
+impl Node for FalliblePollNode {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn kind(&self) -> NodeKind {
+        NodeKind::Poll
+    }
+}
+
 impl Node for PollNode {
     fn name(&self) -> &str {
         &self.name
     }
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
+    }
+    fn direct_poll_is_infallible(&self) -> bool {
+        true
     }
     fn pads(&self) -> NodePads {
         if self.received.is_some() {
@@ -496,7 +605,7 @@ fn vertex(name: &str, node: Arc<dyn Node>) -> Vertex {
 }
 
 #[test]
-fn direct_requires_same_group_and_exec_context_before_start() {
+fn direct_constraints_are_rechecked_before_start() {
     let mut graph = Graph::new();
     let producer: Arc<dyn Node> = Arc::new(PollNode {
         name: "producer".into(),
@@ -532,10 +641,33 @@ fn direct_requires_same_group_and_exec_context_before_start() {
     );
     assert!(boundary.start().unwrap_err().contains("group boundary"));
 
-    let contexts = Group::new("contexts".into(), graph);
+    let contexts = Group::new("contexts".into(), graph.clone());
     contexts.add("producer", ExecCtxId::EventLoop { name: "a".into() });
     contexts.add("consumer", ExecCtxId::EventLoop { name: "b".into() });
     assert!(contexts.start().unwrap_err().contains("same ExecCtxId"));
+
+    graph.lock().unwrap().vertex_mut("consumer").unwrap().node = Arc::new(FalliblePollNode {
+        name: "consumer".into(),
+    });
+    let fallible = Group::new("fallible".into(), graph);
+    fallible.add(
+        "producer",
+        ExecCtxId::EventLoop {
+            name: "loop".into(),
+        },
+    );
+    fallible.add(
+        "consumer",
+        ExecCtxId::EventLoop {
+            name: "loop".into(),
+        },
+    );
+    assert!(
+        fallible
+            .start()
+            .unwrap_err()
+            .contains("no longer guarantees infallible polling")
+    );
 }
 
 #[test]
@@ -651,6 +783,9 @@ impl Node for RestartDirectConsumer {
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
     }
+    fn direct_poll_is_infallible(&self) -> bool {
+        true
+    }
     fn pads(&self) -> NodePads {
         NodePads {
             sources: vec![PadDecl {
@@ -697,6 +832,9 @@ impl Node for RestartDirectForward {
     }
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
+    }
+    fn direct_poll_is_infallible(&self) -> bool {
+        true
     }
     fn pads(&self) -> NodePads {
         NodePads {

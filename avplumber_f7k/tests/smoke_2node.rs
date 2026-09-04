@@ -39,6 +39,7 @@ static C_FACTORY_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(c_factory_process),
     poll: None,
     query_interface: None,
+    direct_poll_is_infallible: 0,
 };
 
 extern "C" fn c_factory(
@@ -500,7 +501,7 @@ impl Node for PollNop {
 }
 
 #[test]
-fn direct_edge_rejects_blocking_endpoints() {
+fn direct_edge_rejects_blocking_or_fallible_endpoints() {
     let inst = avplumber_f7k::Instance::new();
     register_factory(&inst, "blk", |name, _| {
         Ok(Arc::new(StubSource::new(name.to_string())))
@@ -536,6 +537,28 @@ fn direct_edge_rejects_blocking_endpoints() {
         }
         Err(other) => panic!("expected Invalid, got {other}"),
         Ok(_) => panic!("DirectEdge must not connect a blocking node"),
+    }
+
+    inst.create_node(avplumber_f7k::NodeRequest::new(
+        "polln",
+        "poll_src",
+        serde_json::json!({}),
+    ))
+    .unwrap();
+    let result = inst.connect_edge(
+        "e2",
+        "poll_src",
+        "out",
+        "dst",
+        "in",
+        avplumber_f7k::EdgeKind::Direct,
+    );
+    match result {
+        Err(avplumber_f7k::CoreError::Invalid(msg)) => {
+            assert!(msg.contains("direct_poll_is_infallible"), "{msg}");
+        }
+        Err(other) => panic!("expected Invalid, got {other}"),
+        Ok(_) => panic!("DirectEdge must not connect a fallible Poll consumer"),
     }
 }
 

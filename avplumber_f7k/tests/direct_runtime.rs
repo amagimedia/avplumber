@@ -26,6 +26,9 @@ impl SisoNode for Ident {
     fn name(&self) -> &str {
         &self.name
     }
+    fn direct_poll_is_infallible(&self) -> bool {
+        true
+    }
     fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
         Ok(((), spec.clone()))
     }

@@ -57,6 +57,12 @@ pub trait Node: Send + Sync + 'static {
     fn kind(&self) -> NodeKind {
         NodeKind::Blocking
     }
+    /// Opts a Poll node into use as a Direct-edge consumer. Returning `true`
+    /// promises that its fused `poll` path cannot fail, because Direct
+    /// execution has no `NodeError` channel back to the supervisor.
+    fn direct_poll_is_infallible(&self) -> bool {
+        false
+    }
     fn pads(&self) -> NodePads {
         NodePads::default()
     }

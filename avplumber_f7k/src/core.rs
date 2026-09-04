@@ -988,6 +988,11 @@ impl Instance {
                 "DirectEdge requires Poll producer and consumer".into(),
             ));
         }
+        if matches!(coupling, EdgeKind::Direct) && !consumer_node.direct_poll_is_infallible() {
+            return Err(CoreError::Invalid(format!(
+                "DirectEdge consumer `{consumer}` must explicitly guarantee infallible polling with `Node::direct_poll_is_infallible`; use BufferedEdge for a fallible consumer"
+            )));
+        }
         let edge: Arc<dyn Edge> = match coupling {
             EdgeKind::Direct => {
                 let hop = Arc::new(DirectEdge::new());
@@ -1147,28 +1152,23 @@ impl Instance {
             kind: "node",
             name: node_name.to_string(),
         })?;
-        if node.restart != RestartPolicy::Off || node.on_error.is_some() {
-            let groups = self.groups.lock().unwrap();
-            if let Some(other) = groups.values().find(|candidate| {
-                candidate.name() != group_name
-                    && candidate.members().iter().any(|member| member == node_name)
-            }) {
-                return Err(CoreError::Invalid(format!(
-                    "policy-bearing node `{node_name}` must belong to exactly one group; already belongs to `{}`",
-                    other.name()
-                )));
-            }
-        }
-        let group = self
-            .groups
-            .lock()
-            .unwrap()
+        let groups = self.groups.lock().unwrap();
+        let group = groups
             .get(group_name)
             .cloned()
             .ok_or_else(|| CoreError::NotFound {
                 kind: "group",
                 name: group_name.to_string(),
             })?;
+        if let Some(other) = groups.values().find(|candidate| {
+            candidate.name() != group_name
+                && candidate.members().iter().any(|member| member == node_name)
+        }) {
+            return Err(CoreError::Invalid(format!(
+                "node `{node_name}` must belong to exactly one group; already belongs to supervisor group `{}`",
+                other.name()
+            )));
+        }
         if group.state() != crate::GroupState::Idle || group.has_active_reconstruction() {
             return Err(CoreError::Invalid(format!(
                 "cannot add node `{node_name}` to running group `{group_name}`"
@@ -1182,24 +1182,14 @@ impl Instance {
             node.on_error,
             node.service_hint,
         );
+        drop(groups);
         Ok(())
     }
 
-    fn validate_group_policy_membership(&self, group: &Group) -> Result<(), CoreError> {
+    fn validate_group_membership(&self, group: &Group) -> Result<(), CoreError> {
         let members = group.members();
-        let nodes = self.nodes.lock().unwrap();
-        let policy_members = members
-            .iter()
-            .filter(|name| {
-                nodes.get(*name).is_some_and(|node| {
-                    node.restart != RestartPolicy::Off || node.on_error.is_some()
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        drop(nodes);
         let groups = self.groups.lock().unwrap();
-        for node_name in policy_members {
+        for node_name in members {
             let memberships = groups
                 .values()
                 .filter(|candidate| {
@@ -1211,7 +1201,7 @@ impl Instance {
                 .count();
             if memberships != 1 {
                 return Err(CoreError::Invalid(format!(
-                    "policy-bearing node `{node_name}` must belong to exactly one group before start or restart; found {memberships}"
+                    "node `{node_name}` must belong to exactly one supervisor group before start or restart; found {memberships}"
                 )));
             }
         }
@@ -1249,7 +1239,7 @@ impl Instance {
                 kind: "group",
                 name: name.to_string(),
             })?;
-        self.validate_group_policy_membership(&group)?;
+        self.validate_group_membership(&group)?;
         if group.generation() != 0 && group.state() == crate::GroupState::Idle {
             self.reconstruct_group(name)?;
         }
@@ -1276,7 +1266,7 @@ impl Instance {
             kind: "group",
             name: name.to_string(),
         })?;
-        self.validate_group_policy_membership(&group)?;
+        self.validate_group_membership(&group)?;
         group.restart().map_err(CoreError::Operation)
     }
 

@@ -47,6 +47,11 @@ pub trait SisoNode: Send + Sync + 'static {
     type Inner: Send;
 
     fn name(&self) -> &str;
+    /// Opts `SisoPollAdapter` into Direct input. Return `true` only when
+    /// `on_spec` and `process` are guaranteed not to return `Err`.
+    fn direct_poll_is_infallible(&self) -> bool {
+        false
+    }
     fn on_spec(&self, spec: &Spec) -> Result<(Self::Inner, Spec), String>;
     fn process(&self, inner: &mut Self::Inner, buf: Media) -> Result<Option<Media>, String>;
     fn on_flush(&self, _inner: &mut Self::Inner) {}
@@ -226,8 +231,9 @@ impl<F: SisoNode> Node for SisoAdapter<F> {
 /// Output backpressure stashes the produced buffer and waits writable.
 /// That stash is the Poll cost of not keeping locals across a park.
 /// Use this as a Direct consumer only when `on_spec` and `process` are
-/// infallible; scheduled Poll bodies propagate their errors to supervision,
-/// while the fused Direct `Node::poll` contract cannot carry `NodeError`.
+/// infallible, and opt in with `SisoNode::direct_poll_is_infallible`; scheduled
+/// Poll bodies propagate their errors to supervision, while the fused Direct
+/// `Node::poll` contract cannot carry `NodeError`.
 pub struct SisoPollAdapter<F: SisoNode> {
     io: SisoIo<F>,
     pending: Mutex<Option<Media>>,
@@ -297,6 +303,9 @@ impl<F: SisoNode> Node for SisoPollAdapter<F> {
     }
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
+    }
+    fn direct_poll_is_infallible(&self) -> bool {
+        self.io.f.direct_poll_is_infallible()
     }
 
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {

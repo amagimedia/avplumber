@@ -19,6 +19,7 @@ pub struct AvpNodeVtable {
     pub process: Option<extern "C" fn(*mut c_void) -> i32>,
     pub poll: Option<extern "C" fn(*mut c_void) -> i32>,
     pub query_interface: Option<extern "C" fn(*mut c_void, u32) -> *const c_void>,
+    pub direct_poll_is_infallible: i32,
 }
 
 pub struct FfiNode {
@@ -184,6 +185,9 @@ impl Node for FfiNode {
         } else {
             NodeKind::Poll
         }
+    }
+    fn direct_poll_is_infallible(&self) -> bool {
+        self.vtable.direct_poll_is_infallible != 0
     }
     fn start(&self) {
         if let Some(f) = self.vtable.start {

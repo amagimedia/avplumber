@@ -174,6 +174,10 @@ typedef struct {
     /* Capability discovery. Returns a const per-interface vtable, or NULL.
      * Query this node only; there is no upstream walk. */
     const void* (*query_interface)(AvpNode*, uint32_t iface_id);
+
+    /* Nonzero opts a poll node into Direct-edge input and promises poll()
+     * cannot return AVP_FLOW_ERROR. Keep zero for fallible consumers. */
+    int direct_poll_is_infallible;
 } AvpNodeVtable;
 
 /* The core calls this to attach the C++/Rust object + vtable to the AvpNode. */
@@ -225,8 +229,8 @@ void  avp_shared_put(AvpCore*, const char* type_key, const char* name,
  * only by explicit construction, not inferred from co-location. Direct is
  * zero-queue: offer runs the consumer; backpressure is the end of a
  * Direct-only chain. Both endpoints must be cooperative poll nodes, and the
- * fused consumer callbacks must be infallible. Put a buffered edge before a
- * node whose callback can return AVP_FLOW_ERROR. */
+ * fused consumer callbacks must set direct_poll_is_infallible and never return
+ * AVP_FLOW_ERROR. Put a buffered edge before a fallible consumer. */
 typedef struct {
     int is_direct;   /* 0 = BufferedEdge; 1 = DirectEdge (capacity 0) */
     size_t capacity;  /* 0 = core default (64); ignored when is_direct */
@@ -241,14 +245,14 @@ AvpEdge* avp_create_edge(AvpCore*, const char* name,
                          AvpNode* consumer, const char* in_pad,
                          const AvpEdgeCoupling* coupling /* NULL = default */);
 
-/* Groups: ordered lifecycle and generation-fenced restart policy. A node with
- * a non-default restart/error action must belong to exactly one group before
- * start/restart. JSON actions: off, group/restart_group, panic, exit.
+/* Groups: ordered lifecycle and generation-fenced restart policy. Every
+ * runnable node must belong to exactly one group before start/restart. JSON
+ * actions: off, group/restart_group, panic, exit.
  * on, boolean true, and restart_node retain their isolated-node meaning and
  * are rejected until isolated restart is implemented. */
 AvpGroup* avp_create_group (AvpCore*, const char* name);
 /* Compatibility wrapper: logs rejected membership. New code should use the
- * checked form so lifecycle and exactly-one-group policy errors are visible. */
+ * checked form so lifecycle and exactly-one-group errors are visible. */
 void      avp_group_add    (AvpGroup*, AvpNode*);
 int       avp_group_add_checked(AvpGroup*, AvpNode*, const char** err);
 void      avp_group_remove (AvpGroup*, AvpNode*);

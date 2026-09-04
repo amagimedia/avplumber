@@ -51,9 +51,10 @@ pub enum Push {
 /// - [`Direct`](EdgeKind::Direct) — capacity 0. `offer` runs the consumer
 ///   (and the rest of a Direct-only chain) on the same executor;
 ///   `Push::Full` is congestion at the first Buffered edge or sink after the
-///   chain. Direct consumers must be lightweight and infallible because the
-///   fused `Node::poll` contract cannot return `NodeError`. Never fuse across
-///   a blocking or async node. Explicit `connect_edge` only.
+///   chain. Direct consumers must be lightweight and opt in through
+///   `Node::direct_poll_is_infallible` because the fused `Node::poll` contract
+///   cannot return `NodeError`. Never fuse across a blocking or async node.
+///   Explicit `connect_edge` only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeKind {
     Buffered { capacity: usize },
@@ -177,7 +178,8 @@ pub(crate) struct EdgeQueue {
     queue: VecDeque<QueueEntry>,
     buffer_capacity: usize,
     latched_spec: Option<Spec>,
-    spec_delivered: bool,
+    delivered_spec: Option<Spec>,
+    pending_replay: Option<Spec>,
     closed: bool,
     interrupted: bool,
     readable_waker: Option<Box<dyn EdgeWaker>>,
@@ -195,7 +197,8 @@ impl EdgeQueue {
             queue: VecDeque::with_capacity(buffer_capacity),
             buffer_capacity,
             latched_spec: None,
-            spec_delivered: true,
+            delivered_spec: None,
+            pending_replay: None,
             closed: false,
             interrupted: false,
             readable_waker: None,
@@ -253,7 +256,6 @@ impl EdgeQueue {
             }
             EdgeEvent::Spec(spec) => {
                 self.latched_spec = Some(spec.clone());
-                self.spec_delivered = false;
             }
             EdgeEvent::Eof => self.closed = true,
             _ => {}
@@ -265,42 +267,31 @@ impl EdgeQueue {
     }
 
     pub fn try_peek(&self) -> Option<EdgeItem> {
-        if !self.spec_delivered {
-            if let Some(spec) = self.latched_spec.clone() {
-                return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
-            }
+        if let Some(spec) = self.pending_replay.clone() {
+            return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
         }
         self.queue.front().map(|entry| entry.item.clone())
     }
 
     pub fn try_take(&mut self) -> Option<EdgeItem> {
-        if !self.spec_delivered {
-            if let Some(spec) = self.latched_spec.clone() {
-                self.spec_delivered = true;
-                return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
-            }
+        if let Some(spec) = self.pending_replay.take() {
+            self.delivered_spec = Some(spec.clone());
+            return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
         }
         let entry = self.queue.pop_front()?;
         let item = entry.item;
-        if matches!(item, EdgeItem::Event(EdgeEvent::Spec(_))) {
-            self.spec_delivered = true;
+        if let EdgeItem::Event(EdgeEvent::Spec(spec)) = &item {
+            self.delivered_spec = Some(spec.clone());
         }
         Some(item)
     }
 
     pub fn pop(&mut self) {
-        if let Some(entry) = self.queue.pop_front() {
-            let item = entry.item;
-            if matches!(item, EdgeItem::Event(EdgeEvent::Spec(_))) {
-                self.spec_delivered = true;
-            }
-        } else if !self.spec_delivered {
-            self.spec_delivered = true;
-        }
+        let _ = self.try_take();
     }
 
     pub fn occupied(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + usize::from(self.pending_replay.is_some())
     }
     pub fn is_closed(&self) -> bool {
         self.closed
@@ -311,10 +302,13 @@ impl EdgeQueue {
     pub fn current_spec(&self) -> Option<Spec> {
         self.latched_spec.clone()
     }
-    pub fn rearm_spec(&mut self) {
-        if self.latched_spec.is_some() {
-            self.spec_delivered = false;
-        }
+    pub fn rearm_spec(&mut self) -> bool {
+        self.pending_replay = match self.queue.front().map(|entry| &entry.item) {
+            Some(EdgeItem::Event(EdgeEvent::Spec(_))) => None,
+            Some(_) => self.delivered_spec.clone(),
+            None => self.latched_spec.clone(),
+        };
+        self.pending_replay.is_some()
     }
 
     pub fn reset_for_restart(&mut self, kind: EdgeRestart) {
@@ -325,15 +319,28 @@ impl EdgeQueue {
                         discarded.store(true, Ordering::Release);
                     }
                 }
+                self.rearm_spec();
             }
-            EdgeRestart::Egress | EdgeRestart::Ingress => {
-                self.queue
-                    .retain(|entry| matches!(entry.item, EdgeItem::Buffer(_)));
+            EdgeRestart::Egress => {
+                self.queue.retain(|entry| {
+                    matches!(
+                        entry.item,
+                        EdgeItem::Buffer(_) | EdgeItem::Event(EdgeEvent::Spec(_))
+                    )
+                });
+            }
+            EdgeRestart::Ingress => {
+                self.queue.retain(|entry| {
+                    matches!(
+                        entry.item,
+                        EdgeItem::Buffer(_) | EdgeItem::Event(EdgeEvent::Spec(_))
+                    )
+                });
+                self.rearm_spec();
             }
         }
         self.closed = false;
         self.interrupted = false;
-        self.rearm_spec();
     }
 
     pub fn interrupt(&mut self) {

@@ -175,7 +175,7 @@ pub extern "C" fn avp_group_add(group: *mut AvpGroup, node: *mut AvpNode) {
 }
 
 /// Fallible group membership API. Returns 0 on success, -1 with a
-/// caller-freed error on invalid handles, lifecycle, or policy membership.
+/// caller-freed error on invalid handles, lifecycle, or duplicate membership.
 #[unsafe(no_mangle)]
 pub extern "C" fn avp_group_add_checked(
     group: *mut AvpGroup,

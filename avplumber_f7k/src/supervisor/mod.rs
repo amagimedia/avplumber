@@ -829,7 +829,7 @@ fn build_generation(
     let assignment = config.assignment.lock().unwrap();
     let hints = config.service_group.lock().unwrap();
     let graph = config.graph.lock().unwrap();
-    validate_direct_edges(&members, &assignment, graph.links())?;
+    validate_direct_edges(&members, &assignment, &graph)?;
     let order = topo::topo_sort(&members, graph.links())?;
     let mut executors: HashMap<ExecCtxId, Arc<dyn Executor>> = HashMap::new();
     let mut executor_order = Vec::new();
@@ -921,10 +921,10 @@ fn remember_attempt_identities(
 fn validate_direct_edges(
     members: &[String],
     assignment: &HashMap<String, ExecCtxId>,
-    links: &[crate::graph::EdgeLink],
+    graph: &Graph,
 ) -> Result<(), String> {
     let members = members.iter().map(String::as_str).collect::<HashSet<_>>();
-    for link in links.iter().filter(|link| link.edge.is_direct()) {
+    for link in graph.links().iter().filter(|link| link.edge.is_direct()) {
         let producer_inside = members.contains(link.producer.as_str());
         let consumer_inside = members.contains(link.consumer.as_str());
         if producer_inside != consumer_inside {
@@ -938,6 +938,28 @@ fn validate_direct_edges(
                 "Direct edge `{}` requires producer and consumer in the same ExecCtxId",
                 link.name
             ));
+        }
+        if producer_inside {
+            let producer = graph
+                .vertex(&link.producer)
+                .ok_or_else(|| format!("Direct edge `{}` has no producer node", link.name))?;
+            let consumer = graph
+                .vertex(&link.consumer)
+                .ok_or_else(|| format!("Direct edge `{}` has no consumer node", link.name))?;
+            if producer.node.kind() != crate::NodeKind::Poll
+                || consumer.node.kind() != crate::NodeKind::Poll
+            {
+                return Err(format!(
+                    "Direct edge `{}` requires Poll producer and consumer",
+                    link.name
+                ));
+            }
+            if !consumer.node.direct_poll_is_infallible() {
+                return Err(format!(
+                    "Direct edge `{}` consumer `{}` no longer guarantees infallible polling",
+                    link.name, link.consumer
+                ));
+            }
         }
     }
     Ok(())
