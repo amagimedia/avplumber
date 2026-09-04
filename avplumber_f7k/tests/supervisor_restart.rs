@@ -278,16 +278,19 @@ fn failure_with_off_marks_failed_without_egress_eof() {
 }
 
 #[test]
-fn policy_node_must_belong_to_exactly_one_native_group() {
+fn node_must_belong_to_exactly_one_native_group() {
     let inst = Instance::new();
     register_factory(&inst, "membership_node", |name, _| {
         Ok(Arc::new(RunningNode {
             name: name.to_string(),
         }))
     });
-    let mut request = NodeRequest::new("membership_node", "worker", serde_json::json!({}));
-    request.restart = Some(RestartPolicy::RestartGroup);
-    inst.create_node(request).unwrap();
+    inst.create_node(NodeRequest::new(
+        "membership_node",
+        "worker",
+        serde_json::json!({}),
+    ))
+    .unwrap();
     inst.create_group("one").unwrap();
     inst.create_group("two").unwrap();
 

@@ -121,7 +121,15 @@ impl Edge for BufferedEdge {
         self.inner.lock().unwrap().current_spec()
     }
     fn rearm_spec(&self) {
-        self.inner.lock().unwrap().rearm_spec();
+        let callback = {
+            let mut queue = self.inner.lock().unwrap();
+            if !queue.rearm_spec() {
+                return;
+            }
+            queue.take_readable_cb()
+        };
+        self.readable.notify();
+        Self::fire(callback);
     }
     fn notify_readable(&self, node: Box<dyn EdgeWaker>) {
         self.inner.lock().unwrap().set_readable_cb(node);
