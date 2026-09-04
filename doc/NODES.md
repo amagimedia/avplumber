@@ -320,7 +320,8 @@ Sentinel's output has "ideal" timestamps with tolerance specified in sentinel's 
     -   `false` (default): start all output streams at exact PTS = `start_ts`
 -   `max_streams_diff` (float, seconds) - default `0.001`, tolerance in seconds
 -   `start_ts` (float, seconds) - default `10`, first output timestamp
--   `lock_timeshift` (bool) - after receiving first PTS, maintain constant input-output PTS difference. Disabled by default. Enable only if you're sure that input timestamps are synchronized to real-time clock.
+-   `lock_timeshift` (bool) - after receiving first PTS, maintain constant input-output PTS difference. Disabled by default. Enable only if you're sure that input timestamps are synchronized to a real-time clock.
+-   `eof_passthrough` (bool) - default `false`. When `true`, an upstream EOF marker is forwarded downstream and this node finishes instead of treating EOF as a stall and generating backup frames. Use for VOD / faster-than-realtime graphs that need encoder flush and output trailers. Live graphs should leave this off.
 -   `reporting_url` (optional, string of URL) - if specified, correction
     time shift changes will be reported to this URL as HTTP POST with
     JSON body:

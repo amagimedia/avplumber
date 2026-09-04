@@ -424,11 +424,15 @@ public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void process() {
         T* ptr = this->source_->peek();
-        if (ptr!=nullptr) {
-            T data = *ptr;
-            this->sink_->put(data);
-            this->source_->pop();
+        if (ptr==nullptr) return;
+        if (isEofMarker(*ptr)) {
+            // Leave the EOF marker in the queue so consumeEofIfPresent() forwards
+            // it via NodeSISO::onEofConsumed() and the dumb-node loop exits.
+            return;
         }
+        T data = *ptr;
+        this->sink_->put(data);
+        this->source_->pop();
     }
     virtual ~TransparentNode() {
     }
