@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
 use crate::graph::edge::{
-    Edge, EdgeEvent, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push, Wakeup,
+    Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push,
+    Wakeup,
 };
 use crate::graph::media::Media;
 use crate::graph::spec::Spec;
@@ -22,6 +23,9 @@ pub struct BufferedEdge {
     inner: Mutex<EdgeQueue>,
     readable: Wakeup,
     writable: Wakeup,
+    /// Outside `inner`: hints are not part of the ordered path, and staying out
+    /// of the queue is also what makes them survive `reset_for_restart`.
+    hints: EdgeHintCell,
     writer_generation: AtomicU64,
 }
 
@@ -32,6 +36,7 @@ impl BufferedEdge {
             inner: Mutex::new(EdgeQueue::new(cap)),
             readable: Wakeup::new(),
             writable: Wakeup::new(),
+            hints: EdgeHintCell::default(),
             writer_generation: AtomicU64::new(1),
         }
     }
@@ -72,6 +77,22 @@ impl Edge for BufferedEdge {
         drop(g);
         self.readable.notify();
         Self::fire(cb);
+    }
+
+    fn post_hint(&self, hint: EdgeHint) {
+        self.hints.post(hint);
+        // Same wake pattern as `push_event`, mirrored to the producer side.
+        let cb = self.inner.lock().unwrap().take_writable_cb();
+        self.writable.notify();
+        Self::fire(cb);
+    }
+
+    fn take_hints(&self) -> Vec<EdgeHint> {
+        self.hints.take()
+    }
+
+    fn has_hints(&self) -> bool {
+        self.hints.pending()
     }
 
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
@@ -205,6 +226,9 @@ impl Edge for BufferedEdge {
             g.reset_for_restart(kind);
             (g.take_readable_cb(), g.take_writable_cb())
         };
+        // Hints outlive the queue reset; re-arm them because the restart may
+        // have replaced the producer that already drained them.
+        self.hints.rearm();
         self.readable.notify();
         self.writable.notify();
         Self::fire(readable);
@@ -225,6 +249,7 @@ impl Edge for BufferedEdge {
             queue.reset_for_restart(kind);
             (queue.take_readable_cb(), queue.take_writable_cb())
         };
+        self.hints.rearm();
         self.readable.notify();
         self.writable.notify();
         Self::fire(callbacks.0);

@@ -91,6 +91,19 @@ fn node_add(core: &Instance, rest: &str) -> Result<String, String> {
         }
     }
     let env = NodeEnvelope::extract(obj)?;
+    // Put the envelope keys back, exactly like `NodeRequest::from_json` does for
+    // the C ABI: a node type may need them (`mux` numbers its output streams by
+    // the order of `src`), and both entry points must produce the same canonical
+    // params, since that string is what a reconstruction rebuilds from.
+    if let Some(group) = env.group.as_ref() {
+        obj.insert("group".into(), Value::String(group.clone()));
+    }
+    if let Some(src) = env.src.as_ref() {
+        obj.insert("src".into(), src.clone());
+    }
+    if let Some(dst) = env.dst.as_ref() {
+        obj.insert("dst".into(), dst.clone());
+    }
     let remainder = Value::Object(obj.clone());
     let name = env.name.clone();
     let group = env.group.clone();

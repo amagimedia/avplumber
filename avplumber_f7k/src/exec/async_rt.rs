@@ -122,6 +122,7 @@ impl Executor for AsyncExecutor {
         let mut g = self.inner.lock().unwrap();
         g.state = ExecutorState::Stopping;
         for slot in &g.nodes {
+            slot.node.interrupt();
             for src in &slot.sources {
                 src.interrupt();
             }

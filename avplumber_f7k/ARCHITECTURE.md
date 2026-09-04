@@ -37,6 +37,7 @@ avplumber_f7k/
 │   │   ├── media.rs            owned payloads and timestamp access
 │   │   ├── spec.rs             native stream/container descriptions
 │   │   ├── timebase.rs         the only timestamp rescaling implementation
+│   │   ├── routing.rs          the `routing` key grammar over a catalog (libav-free)
 │   │   ├── edge.rs             event/flow contract and shared queue state
 │   │   ├── buffered_edge.rs    queued cross-domain transport
 │   │   ├── direct_edge.rs      capacity-one implementation; explicit only
@@ -55,13 +56,33 @@ avplumber_f7k/
 │   │   ├── topo.rs             group-local topological ordering
 │   │   └── mod.rs              membership, placement, start/stop ownership
 │   ├── factory/mod.rs          JSON envelope, BuildCtx, factory erasure
+│   ├── nodes/
+│   │   ├── input.rs            container open + demux into one packet stream
+│   │   ├── demux.rs            catalog → per-stream edges (Poll)
+│   │   ├── decode.rs           dec_video / dec_audio
+│   │   ├── encode.rs           enc_video / enc_audio
+│   │   ├── mux.rs              least-DTS interleave of N packet inputs (Poll)
+│   │   ├── output.rs           container create/write/finalize
+│   │   ├── null_sink.rs        counting sink, for tests
+│   │   └── mod.rs              register_media_nodes, nothing else
+│   ├── libav/
+│   │   ├── codec.rs            codec lookup, Spec ⇄ AVCodecContext/codecpar
+│   │   ├── dict.rs             JSON ⇄ AVDictionary, leftover-option logging
+│   │   ├── pump.rs             the send/receive/EAGAIN protocol dec+enc share
+│   │   ├── error.rs            AVERROR classification
+│   │   └── mod.rs              libav-facing helpers; no node logic
 │   ├── services/
 │   │   ├── clock.rs            source-time to monotonic-time snapshots
 │   │   ├── correction.rs       shared reference plus per-member cursors
 │   │   ├── timeline.rs         named PTS-indexed JSON histories
 │   │   └── mod.rs              typed and C-vtable registries
 │   ├── control/mod.rs          script parser and graph-construction commands
-│   ├── scaffold.rs             SisoNode + blocking/poll/async one-in/one-out adapters
+│   ├── scaffold/
+│   │   ├── siso.rs             SisoNode + blocking/poll/async one-in/one-out adapters
+│   │   ├── park.rs             a blocking body's wait-for-room condvar + push_blocking
+│   │   ├── body.rs             BlockingStep/PollStep: the fallible step of a node
+│   │   ├── edge_slot.rs        one rebindable edge, for single-in/single-out nodes
+│   │   └── mod.rs              node-authoring helpers; convenience, never contracts
 │   └── abi/
 │       ├── types.rs            flat AvpSpec / AvpBuffer / EdgeCoupling
 │       ├── ffi_node.rs         C vtable wrapped as Node
@@ -73,7 +94,11 @@ avplumber_f7k/
 │       ├── control.rs          C wrapper over the Rust control parser
 │       └── mod.rs              opaque C handles and exported symbols
 ├── include/                    C ABI: handwritten API + generated avplumber_ids.h
-├── tests/smoke_2node.rs        legacy substrate smoke coverage
+├── tests/
+│   ├── smoke_2node.rs          legacy substrate smoke coverage
+│   ├── demux_packets.rs        input → demux → null_sink against ffprobe
+│   ├── transcode_file.rs       the full transcode, driven through control lines
+│   └── common/mod.rs           ffmpeg/ffprobe fixtures and ground truth
 └── parked/                     deliberately excluded nodes/shims/seek work
 ```
 
@@ -380,11 +405,14 @@ through the C boundary transfers ownership; it is not a borrowed view.
 not an alternative internal model.
 
 `AvpSpec` is intentionally lossy. The native audio representation can retain a
-custom channel map, whereas the flat C struct cannot. The current native
-`PacketSpec` is still only `codec_id` plus extradata; it does **not** yet own a
-complete FFmpeg `AVCodecParameters`, despite the design target. Code that needs
-codec parameters must close this gap rather than smuggle an
-`AVFormatContext` through a capability query.
+custom channel map, whereas the flat C struct cannot. With the `ffmpeg` feature
+`PacketSpec` owns a deep-copied `AVCodecParameters`; `codec_id` plus extradata
+remain for the non-ffmpeg build and for the flat projection, and
+`PacketSpec::from_codecpar` keeps the two in sync. That owned copy is what lets
+`enc_* → mux → output` describe a container over an edge instead of smuggling an
+`AVFormatContext` through a capability query — which remains forbidden. It also
+makes `Spec` `Send` but not `Sync`; a `Spec` only ever lives behind an edge
+mutex, so do not put one in an `ArcSwap` or a shared read-mostly cell.
 
 Timestamps on media edges are source-time. Clock services map that timeline to
 release time; they do not rewrite queued timestamps. A future Sentinel is the
@@ -418,10 +446,25 @@ Buffered uses `EdgeQueue` for both events and media. `FlushStart` discards
 queued buffers, keeps events, then appends itself. EOF closes later buffer
 `offer`s but remains an item for the consumer.
 
-`Spec` is queued and latched. `rearm_spec` makes the last format visible
-again to a newly attached consumer. The present implementation can expose
-the latched Spec separately from the queued Spec event — do not depend on
-exact delivery count without a test.
+`Spec` is queued and latched, and delivered **exactly once**: the queue counts
+its own queued `Spec` entries and synthesises from the latch only when that
+count is zero, so a pushed `Spec` is not seen twice and does not multiply along
+a chain of forwarding nodes. `rearm_spec` deliberately adds one more delivery,
+which is how a newly attached or restarted consumer learns the format. Nodes
+still treat an identical re-delivered `Spec` as a no-op (see the media node
+layer below) rather than trusting the count. `pop` is `take` with the item
+dropped in both edge kinds; a separate precedence rule there is what used to let
+`peek` return an event while `pop` ate a buffer.
+
+Hints travel the other way: a consumer calls `post_hint` and the producer
+`take_hints`. They are *state*, not events — latched per variant, replaced
+rather than queued, outside `EdgeQueue` (so both edge kinds behave alike and no
+precedence question arises), and they consume no capacity. `post_hint` fires the
+producer's writable wake and `has_hints` is part of writable readiness, so a
+producer blocked on a full edge still answers. Restart re-marks the latched
+hints for delivery (`EdgeHintCell::rearm`, the counterpart of `rearm_spec`),
+because the endpoint being rebuilt may be the *producer*, and then nobody is
+going to re-post what the surviving consumer already asked for.
 
 Blocking `take(timeout < 0)` parks on a condvar. Poll/async use
 `EdgeReady` (register waker, recheck) so an item that arrives between the
@@ -461,6 +504,13 @@ completion with policy Off emits EOF once, while a RestartGroup boundary is
 fenced and reconstructed without exposing an intermediate EOF. Nodes should
 not reproduce that lifecycle rule.
 
+`Group::status` (and `group.status`) reports both `last_outcome`, a single slot
+each report overwrites, and `outcomes`, every outcome of the **current**
+generation in arrival order. Reports reach the manager over a channel from
+several executors, so arrival order is not finishing order: a question like "has
+node X finished?" must read the list, because the slot can be overwritten between
+two polls by a node that finished earlier.
+
 `Group` assigns members to executors after a group-local topological sort. All
 Blocking members share a `BlockingExecutor` object, which then creates one
 thread per body. Each distinct EventLoop or TickSource ID receives a separate
@@ -470,6 +520,161 @@ runtime.
 Service-group names can inform default placement, but explicit placement is
 legal even when it differs. The supervisor logs that situation; it must not
 reject it.
+
+## Media node layer
+
+`src/nodes/` is node logic only — one node per file, nothing copied between
+files. Shared work belongs to `src/libav/` (codec lookup, dictionaries, the
+send/receive pump), to `src/scaffold/` (the helpers nodes are *written* with:
+`Park`, `push_blocking`, `BlockingStep`/`PollStep`, `EdgeSlot`), to
+`graph/media.rs` (`PacketExt`/`FrameExt`) or to `graph/timebase.rs`, which is
+still the only rescaling implementation. `graph/routing.rs` holds the `routing`
+key grammar rather than `demux`, because it is a query over `CatalogStream` and
+its `AVMEDIA_TYPE_*` constants shadow that struct's encoding. Nodes that call
+libav are compiled only with a `ffmpeg*` feature; `mux`, `null_sink` and
+`graph/routing.rs` need none and build in the default configuration, which is
+what lets their ordering and grammar rules be tested without FFmpeg.
+
+`Instance::new` registers **no** media node. An embedder calls
+`nodes::register_media_nodes(&inst)` explicitly, so a substrate-only build pays
+nothing for libav. The feature selectors (`ffmpeg6`, `ffmpeg7`, `ffmpeg7_1`,
+`ffmpeg8`) pick the ABI; `ffmpeg` alone is a code gate and fails the build.
+Version-divergent libav API belongs behind a cfg-gated helper in `src/libav/`,
+never in a node.
+
+### Spec flow replaces `findNodeUp`
+
+C++ nodes reached *up* the graph for typed interfaces (`IVideoFormatSource`,
+`ITimeBaseSource`, `IFrameRateSource`, the muxer's `AVFormatContext`). Here every
+format description travels forward on the edge as a latched `EdgeEvent::Spec`,
+and a node opens when its own arrives:
+
+| Publisher | `Spec` | Consumer |
+| --- | --- | --- |
+| `input` | `Catalog { filter, streams }` — every container stream, each annotated with the `streams_filter` verdict | `demux` |
+| `demux` | `Packet(PacketSpec)`, once per routed output | `dec_*` |
+| `dec_*` | `Video` / `Audio`, from the first decoded frame plus the context | `enc_*` |
+| `enc_*` | `Packet(PacketSpec)` of the opened encoder, extradata included | `mux` |
+| `mux` | `Mux { streams }` — the whole output container, in stream-index order | `output` |
+
+Two rules keep that stable, and every media node obeys both:
+
+- An **identical** re-delivered `Spec` is a no-op (`libav::codec::same_spec`):
+  do not reopen a codec, do not rebuild a context, do not write a second file.
+  Restart re-delivers by design, so this is the normal case, not an edge case.
+- A **changed** `Spec` reconfigures. `dec_*`/`enc_*` reopen and log; `output`
+  fails, because its header is on disk and names the streams — failing lets the
+  supervisor restart the group, which is what reopens the file.
+
+Consequences worth knowing before touching these nodes: `enc_*` cannot see the
+container, so it always sets `AV_CODEC_FLAG_GLOBAL_HEADER` and extradata reaches
+`output` through the spec; `mux` owns no `AVFormatContext`, so its timestamp
+fixing runs in each packet's own time base and `output` guards DTS monotonicity a
+second time after rescaling into the time base the muxer settled on; `output` is
+the only node that can ask a container whether it accepts a codec, and it is
+where that check now lives.
+
+Timestamps are carried, never inferred: producers stamp `pkt.time_base`
+(libavformat and libavcodec leave it unset or disagree across versions) and
+consumers rescale explicitly through `Ts`.
+
+The one upstream flow is the `EdgeHint` back-channel: `demux` posts its
+`streams_filter` and then the stream selection it resolved, and `input` answers
+by annotating the catalog and setting `AVDISCARD_ALL` on everything unrouted, so
+libavformat never demuxes it. Both directions are bounded typed messages on an
+edge both nodes already hold — not a revived graph walk.
+
+### Placement and bodies
+
+`input`, `dec_*`, `enc_*` and `output` are Blocking: they call libav, which can
+block. `demux` and `mux` are Poll, because each services several edges, so a
+graph containing them needs `--features async` for the `AsyncExecutor`.
+
+Nodes implement the crate-private `BlockingStep` / `PollStep`
+(`scaffold/body.rs`) and hand the executor a fallible body through
+`blocking_body` / `poll_body`, so a `NodeError` propagates to the supervisor
+instead of being logged and swallowed. A Blocking producer that finds its output
+edge full parks on the node's own `Park` (`scaffold/park.rs`, `push_blocking`)
+with a short timeout, and `Node::interrupt` — which both
+executors call from `stop()` — is what releases it; a libav call that could block
+for a whole timeout also honours it through `input`'s interrupt callback.
+
+### Node state layout
+
+Every media node is one struct split into an immutable half and a single
+`Mutex<State>`:
+
+```rust
+pub struct Decoder {
+    name: String,
+    media: AvpMediaType,
+    params: DecoderParams,                 // the script's parameters, whole
+    pixel_format: Option<Arc<PixelFormatRequest>>,   // derived at build
+    park: Arc<Park>,                       // own synchronization, reachable
+    input: EdgeSlot,                       // while the state lock is held
+    out: EdgeSlot,
+    state: Mutex<State>,                   // everything mutable, one lock
+}
+```
+
+The outer shape is not a style choice. `Node: Send + Sync` and every method takes
+`&self` on a shared `Arc`, while rsmpeg's context wrappers are `Send` but **not**
+`Sync`: a node owning an `AVCodecContext` is `Sync` only because that context sits
+behind a lock. What was open was how many locks, and the answer is one per node,
+because the mutable fields carry invariants that span them. `State::input_spec`
+means "the spec `ctx` was opened for", which is exactly what makes an identical
+re-delivered `Spec` a no-op; under separate locks, a reopened context paired with
+a stale spec would be a legal state. One lock is also one acquisition per
+iteration on a per-packet path rather than one per field.
+
+What stays *outside* `State` matters more than the grouping:
+
+- Build-time configuration — the parameters struct, see below — so reading it
+  never contends with a step.
+- `park` and the `EdgeSlot`s, because they must be reachable **while** the state
+  lock is held. `step()` holds that lock across blocking libav calls; if `park`
+  lived in `State`, `Node::interrupt` from the executor's `stop()` would block
+  behind the very call it exists to abort, and shutdown would deadlock.
+  `bind_source`/`bind_sink` from the control thread need the same freedom, which
+  is why `EdgeSlot` carries its own `Mutex<Option<Arc<dyn Edge>>>`.
+- Anything a raw libav pointer refers to. `Decoder::pixel_format` is an
+  `Arc<PixelFormatRequest>` on the node because the `AVCodecContext`'s `opaque`
+  holds a pointer to it, which must stay valid for every `get_format` callback
+  the context will make.
+
+The build-time half is the deserialized `*Params`/`*Spec` struct held **whole**,
+read as `self.params.<field>` at runtime, rather than copied field by field into
+the node. A parameter is then declared exactly once, with its doc comment, and
+adding one cannot silently do nothing because the node forgot to carry it over.
+Only values that had to be *derived* get their own field: `pixel_format` parsed
+into the shape the `get_format` callback reads, `demux`'s parsed `routes`,
+`input`'s validated `eof_drain`/`timeout_s`, `mux`'s `pad_names` and millisecond
+`sync_wait_max_ms`. The cost is that build-time-only fields stay visible on the
+node — the rejected `hwaccel`/`seek_table`, the raw `pixel_format` string the
+parsed one supersedes — so every such field says "build-time only" in its doc
+comment, and runtime code reads the derived field, never the raw one.
+
+`start()` is then the one readable statement of a node's restart semantics: one
+block resetting the run-scoped fields, with the deliberate survivors commented in
+place — `dec_*` keeps `input_spec`/`output_spec` so the re-armed latched spec is
+recognised as unchanged instead of reopening the codec. Spread those fields over
+the node struct and that decision becomes invisible.
+
+`Mutex<State>` versus `Mutex<Option<State>>` tracks whether a libav object is
+required for the state to mean anything. `input` holds a non-optional
+`AVFormatContextInput` opened at build time, so the whole `State` is the `Option`;
+`Decoder` always has a `State` whose `ctx` is the `Option`, because the codec
+cannot open before the spec arrives.
+
+### Deferrals
+
+`hwaccel` and `seek_table` are declared and **rejected** with "not implemented
+in the Rust core yet", so a script asking for them fails at `node.add` instead of
+quietly transcoding on the CPU or losing a seek table. The seek-only decoder
+params (`flush_magic`, `waiting_for_frame`) are not declared at all and are
+ignored like any other unknown key — they mean nothing without the `discardUntil`
+machinery. Sentinel, realtime pacing, filters/rescale/resample and the C++ shim
+are not in this layer yet at all.
 
 ## Shared services
 
@@ -582,10 +787,16 @@ The following are implementation facts, not roadmap speculation:
 - Clock pause/resume and concurrent offset joins still need focused tests.
 - The smoke test exercises the blocking ABI path and verifies that native
   control creates no ABI handles. It does not validate Poll/Async scheduling,
-  richer factory metadata, or cross-thread services.
+  richer factory metadata, or cross-thread services. Poll scheduling now has
+  end-to-end coverage from the media tests (`demux_packets.rs`,
+  `transcode_file.rs`, which run `demux`/`mux` on the async executor), but only
+  in the one placement those nodes need; Async-node scheduling, factory
+  metadata and cross-thread services are still untested from a real graph.
 
-Address these seams before building nodes that would encode accidental
-behavior into their contracts.
+The media node layer is built on the parts of the substrate that these tests do
+cover. Address the remaining seams before relying on the rest, and
+before writing nodes that would encode accidental behavior into their
+contracts.
 
 ## Where to enter for common changes
 
@@ -594,6 +805,10 @@ behavior into their contracts.
   consumes the result before writing the node. If a type is named
   “node”, check **Vertex and other node-like objects** before adding
   another record.
+- **New media node:** read **Media node layer** first, then copy the state layout
+  of the closest existing node — the parameters struct held whole plus
+  `park`/`EdgeSlot`s on the node, everything mutable in one `Mutex<State>` — and
+  put shared libav work in `src/libav/`, not in a second node.
 - **Backpressure or event behavior:** start with `graph/edge.rs`; both edge
   implementations must remain protocol-equivalent.
 - **Scheduling behavior:** trace `Group::start` into `Executor::add_node`, then

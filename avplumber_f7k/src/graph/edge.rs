@@ -9,7 +9,7 @@ use std::task::{Context, Poll as TaskPoll, Waker};
 use std::time::Duration;
 
 use crate::graph::media::Media;
-use crate::graph::spec::Spec;
+use crate::graph::spec::{Spec, StreamSelection};
 
 #[derive(Clone, Debug)]
 pub enum EdgeEvent {
@@ -172,11 +172,103 @@ pub trait EdgeWaker: Send + Sync {
     fn wake(&self);
 }
 
+/// Consumer → producer back-channel, the inverse direction of
+/// [`EdgeEvent::Spec`] on the same edge. Hints are **state, not events**: they
+/// consume no capacity, have no position in the stream, and posting twice
+/// replaces instead of piling up. They also survive a restart — a hint is
+/// consumer configuration, and a rebuilt consumer re-posts it anyway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdgeHint {
+    /// The consumer's `streams_filter`. Only the node owning the container can
+    /// evaluate a stream specifier, so the specifier travels to it.
+    StreamsFilter(String),
+    /// The streams the consumer resolved and wants; the producer discards the
+    /// rest instead of demuxing them.
+    Streams(StreamSelection),
+}
+
+#[derive(Default)]
+struct HintState {
+    filter: Option<String>,
+    streams: Option<StreamSelection>,
+    filter_dirty: bool,
+    streams_dirty: bool,
+}
+
+/// Per-variant latch for [`EdgeHint`], one implementation shared by every edge
+/// kind. Deliberately *not* part of [`EdgeQueue`]: that struct is the ordered
+/// path, and a `DirectEdge` keeps one only for control events, so hints living
+/// there would be a `BufferedEdge`-only feature — and would inherit the
+/// precedence questions that ordered storage brings with it.
+#[derive(Default)]
+pub struct EdgeHintCell {
+    inner: Mutex<HintState>,
+}
+
+impl EdgeHintCell {
+    pub fn post(&self, hint: EdgeHint) {
+        let mut g = self.inner.lock().unwrap();
+        match hint {
+            EdgeHint::StreamsFilter(filter) => {
+                g.filter = Some(filter);
+                g.filter_dirty = true;
+            }
+            EdgeHint::Streams(streams) => {
+                g.streams = Some(streams);
+                g.streams_dirty = true;
+            }
+        }
+    }
+
+    /// Whether a drain would return anything. The readiness predicates consult
+    /// this so a producer parked on a *full* edge is re-run to answer the hint
+    /// instead of being sent straight back to sleep.
+    pub fn pending(&self) -> bool {
+        let g = self.inner.lock().unwrap();
+        g.filter_dirty || g.streams_dirty
+    }
+
+    /// Re-marks every latched hint for delivery, the hint counterpart of
+    /// [`EdgeQueue::rearm_spec`]. A restart may hand this edge a *fresh*
+    /// producer that has never drained the cell, and the consumer that posted
+    /// the hint is not necessarily the endpoint being rebuilt — without this,
+    /// an egress restart would leave the new producer unaware of a filter or a
+    /// stream selection nobody is going to re-post.
+    pub fn rearm(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.filter_dirty |= g.filter.is_some();
+        g.streams_dirty |= g.streams.is_some();
+    }
+
+    /// Only what changed since the last call, so a producer can drain on every
+    /// iteration for the cost of one uncontended lock.
+    pub fn take(&self) -> Vec<EdgeHint> {
+        let mut g = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        if std::mem::take(&mut g.filter_dirty)
+            && let Some(filter) = &g.filter
+        {
+            out.push(EdgeHint::StreamsFilter(filter.clone()));
+        }
+        if std::mem::take(&mut g.streams_dirty)
+            && let Some(streams) = &g.streams
+        {
+            out.push(EdgeHint::Streams(streams.clone()));
+        }
+        out
+    }
+}
+
 pub(crate) struct EdgeQueue {
     queue: VecDeque<QueueEntry>,
     buffer_capacity: usize,
     latched_spec: Option<Spec>,
+    /// The latched `Spec` still owes the consumer a delivery. Suppressed while
+    /// `spec_queued > 0`: the queued entry is that delivery, and synthesising
+    /// from the latch as well would hand the same `Spec` over twice.
     spec_delivered: bool,
+    /// `Spec` entries currently sitting in `queue`.
+    spec_queued: usize,
     closed: bool,
     interrupted: bool,
     readable_waker: Option<Box<dyn EdgeWaker>>,
@@ -195,6 +287,7 @@ impl EdgeQueue {
             buffer_capacity,
             latched_spec: None,
             spec_delivered: true,
+            spec_queued: 0,
             closed: false,
             interrupted: false,
             readable_waker: None,
@@ -253,6 +346,7 @@ impl EdgeQueue {
             EdgeEvent::Spec(spec) => {
                 self.latched_spec = Some(spec.clone());
                 self.spec_delivered = false;
+                self.spec_queued += 1;
             }
             EdgeEvent::Eof => self.closed = true,
             _ => {}
@@ -263,39 +357,38 @@ impl EdgeQueue {
         });
     }
 
+    /// The latch owes the consumer a delivery that no queued entry will make.
+    fn undelivered_latched_spec(&self) -> Option<&Spec> {
+        if self.spec_delivered || self.spec_queued > 0 {
+            return None;
+        }
+        self.latched_spec.as_ref()
+    }
+
     pub fn try_peek(&self) -> Option<EdgeItem> {
-        if !self.spec_delivered {
-            if let Some(spec) = self.latched_spec.clone() {
-                return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
-            }
+        if let Some(spec) = self.undelivered_latched_spec() {
+            return Some(EdgeItem::Event(EdgeEvent::Spec(spec.clone())));
         }
         self.queue.front().map(|entry| entry.item.clone())
     }
 
     pub fn try_take(&mut self) -> Option<EdgeItem> {
-        if !self.spec_delivered {
-            if let Some(spec) = self.latched_spec.clone() {
-                self.spec_delivered = true;
-                return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
-            }
+        if let Some(spec) = self.undelivered_latched_spec().cloned() {
+            self.spec_delivered = true;
+            return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
         }
-        let entry = self.queue.pop_front()?;
-        let item = entry.item;
+        let item = self.queue.pop_front()?.item;
         if matches!(item, EdgeItem::Event(EdgeEvent::Spec(_))) {
             self.spec_delivered = true;
+            self.spec_queued = self.spec_queued.saturating_sub(1);
         }
         Some(item)
     }
 
+    /// Removes exactly what [`Self::try_peek`] just returned. Defined in terms
+    /// of `try_take` so the two cannot drift apart.
     pub fn pop(&mut self) {
-        if let Some(entry) = self.queue.pop_front() {
-            let item = entry.item;
-            if matches!(item, EdgeItem::Event(EdgeEvent::Spec(_))) {
-                self.spec_delivered = true;
-            }
-        } else if !self.spec_delivered {
-            self.spec_delivered = true;
-        }
+        let _ = self.try_take();
     }
 
     pub fn occupied(&self) -> usize {
@@ -330,6 +423,9 @@ impl EdgeQueue {
                     .retain(|entry| matches!(entry.item, EdgeItem::Buffer(_)));
             }
         }
+        // Both arms removed every event entry, `Spec` included; the latch is
+        // what re-delivers it, via the `rearm_spec` below.
+        self.spec_queued = 0;
         self.closed = false;
         self.interrupted = false;
         self.rearm_spec();
@@ -362,15 +458,23 @@ pub struct EdgeReady<'a> {
     writable: bool,
 }
 
+impl EdgeReady<'_> {
+    /// A pending hint counts: the producer is what answers it, so parking it on
+    /// a full edge would be the deadlock.
+    fn writable_ready(&self) -> bool {
+        !self.edge.is_full() || self.edge.is_closed() || self.edge.has_hints()
+    }
+}
+
 impl Future for EdgeReady<'_> {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> TaskPoll<()> {
         if self.writable {
-            if !self.edge.is_full() || self.edge.is_closed() {
+            if self.writable_ready() {
                 return TaskPoll::Ready(());
             }
             self.edge.register_writable_waker(cx.waker().clone());
-            if !self.edge.is_full() || self.edge.is_closed() {
+            if self.writable_ready() {
                 return TaskPoll::Ready(());
             }
         } else {
@@ -397,6 +501,18 @@ pub trait Edge: Send + Sync {
         }
     }
     fn push_event(&self, ev: EdgeEvent);
+    /// Consumer side. Wakes the producer as `push_event` wakes the consumer, so
+    /// a producer parked on a full edge still answers promptly.
+    ///
+    /// Required, with no default: an edge kind that silently swallowed a hint
+    /// would hang a consumer waiting for the answer.
+    fn post_hint(&self, hint: EdgeHint);
+    /// Producer side: the hints that changed since the last call.
+    fn take_hints(&self) -> Vec<EdgeHint>;
+    /// Whether [`Self::take_hints`] would return anything. Part of writable
+    /// readiness: a full edge is still "ready" for a producer that owes an
+    /// answer.
+    fn has_hints(&self) -> bool;
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem>;
     fn peek_clone(&self, timeout_ms: i32) -> Option<EdgeItem>;
     fn pop(&self);
@@ -484,6 +600,17 @@ impl Edge for GenerationReader {
     }
     fn push_event(&self, ev: EdgeEvent) {
         self.edge.push_event(ev);
+    }
+    /// Not fenced by generation: a hint is current state, and a rebuilt
+    /// consumer re-posts it.
+    fn post_hint(&self, hint: EdgeHint) {
+        self.edge.post_hint(hint);
+    }
+    fn take_hints(&self) -> Vec<EdgeHint> {
+        self.edge.take_hints()
+    }
+    fn has_hints(&self) -> bool {
+        self.edge.has_hints()
     }
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
         self.edge.take_generation(self.generation, timeout_ms)
@@ -590,6 +717,17 @@ impl Edge for GenerationWriter {
     }
     fn push_event(&self, ev: EdgeEvent) {
         self.edge.push_event_generation(self.generation, ev);
+    }
+    /// Not fenced by generation: a hint is current state, and a rebuilt
+    /// consumer re-posts it.
+    fn post_hint(&self, hint: EdgeHint) {
+        self.edge.post_hint(hint);
+    }
+    fn take_hints(&self) -> Vec<EdgeHint> {
+        self.edge.take_hints()
+    }
+    fn has_hints(&self) -> bool {
+        self.edge.has_hints()
     }
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
         self.edge.take(timeout_ms)

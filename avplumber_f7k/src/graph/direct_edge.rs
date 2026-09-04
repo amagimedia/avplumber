@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::Waker;
 
 use crate::graph::edge::{
-    Edge, EdgeEvent, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push, Wakeup,
+    Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push,
+    Wakeup,
 };
 use crate::graph::media::Media;
 use crate::graph::node::{Node, Tick};
@@ -31,6 +32,9 @@ pub struct DirectEdge {
     tail: Mutex<Option<Arc<dyn Edge>>>,
     readable: Wakeup,
     writable: Wakeup,
+    /// Outside `state`: hints are not part of the ordered path, and staying out
+    /// of the event queue is also what makes them survive a restart.
+    hints: EdgeHintCell,
     writer_generation: AtomicU64,
 }
 
@@ -85,6 +89,7 @@ impl DirectEdge {
             tail: Mutex::new(None),
             readable: Wakeup::new(),
             writable: Wakeup::new(),
+            hints: EdgeHintCell::default(),
             writer_generation: AtomicU64::new(1),
         }
     }
@@ -209,23 +214,12 @@ impl DirectEdge {
             .or_else(|| state.inflight.clone().map(EdgeItem::Buffer))
     }
 
+    /// Removes exactly what [`Self::try_peek_checked`] would return, which the
+    /// events-before-`inflight` order makes non-obvious: popping the `inflight`
+    /// buffer while an event is still queued would drop that buffer *and* tell
+    /// the producer it was consumed. Delegating keeps one precedence rule.
     fn pop_checked(&self, generation: Option<u64>) {
-        let (removed_inflight, cb) = {
-            let mut state = self.state.lock().unwrap();
-            if generation.is_some_and(|value| self.writer_generation() != value) {
-                return;
-            }
-            if state.take_inflight().is_some() {
-                (true, None)
-            } else {
-                state.events.pop();
-                (false, state.events.take_writable_cb())
-            }
-        };
-        self.writable.notify();
-        if !removed_inflight {
-            Self::fire(cb);
-        }
+        let _ = self.try_take_checked(generation);
     }
 }
 
@@ -248,6 +242,22 @@ impl Edge for DirectEdge {
         };
         self.readable.notify();
         Self::fire(cb);
+    }
+
+    fn post_hint(&self, hint: EdgeHint) {
+        self.hints.post(hint);
+        // Same wake pattern as `push_event`, mirrored to the producer side.
+        let cb = self.state.lock().unwrap().events.take_writable_cb();
+        self.writable.notify();
+        Self::fire(cb);
+    }
+
+    fn take_hints(&self) -> Vec<EdgeHint> {
+        self.hints.take()
+    }
+
+    fn has_hints(&self) -> bool {
+        self.hints.pending()
     }
 
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
@@ -369,6 +379,9 @@ impl Edge for DirectEdge {
                 state.events.take_writable_cb(),
             )
         };
+        // Hints outlive the queue reset; re-arm them because the restart may
+        // have replaced the producer that already drained them.
+        self.hints.rearm();
         self.readable.notify();
         self.writable.notify();
         Self::fire(readable);
@@ -393,6 +406,7 @@ impl Edge for DirectEdge {
                 state.events.take_writable_cb(),
             )
         };
+        self.hints.rearm();
         self.readable.notify();
         self.writable.notify();
         Self::fire(callbacks.0);
@@ -573,10 +587,7 @@ mod tests {
     }
 
     fn stub(pts: i64) -> Media {
-        Media::Stub {
-            kind: AvpMediaType::VIDEO,
-            pts,
-        }
+        crate::graph::media::test_media(AvpMediaType::VIDEO, pts)
     }
 
     fn video_spec() -> Spec {
@@ -648,7 +659,6 @@ mod tests {
         (d1, d2, buf, a, b)
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn offer_fuses_into_consumer_and_stores_nothing() {
         let hop = Arc::new(DirectEdge::new());
@@ -666,7 +676,6 @@ mod tests {
         assert!(!hop.is_full());
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn offer_returns_full_when_consumer_does_not_take() {
         let hop = Arc::new(DirectEdge::new());
@@ -685,7 +694,6 @@ mod tests {
         assert!(hop.try_take().is_none());
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn chain_is_full_when_buffered_tail_is_full() {
         let (d1, d2, buf, _a, _b) = two_hop_direct_chain();
@@ -703,7 +711,6 @@ mod tests {
         assert_eq!(buffer_pts(&*buf), vec![0]);
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn writable_wait_on_head_wakes_when_tail_drains() {
         let (d1, d2, buf, _a, _b) = two_hop_direct_chain();
@@ -732,7 +739,6 @@ mod tests {
         assert_eq!(ready.as_mut().poll(&mut cx), TaskPoll::Ready(()));
     }
 
-    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn closed_offer_is_closed() {
         let hop = DirectEdge::new();

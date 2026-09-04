@@ -727,7 +727,9 @@ than desyncing A/V in production.
 
 Detailed in a follow-up section of the implementation plan; the shape is:
 
-- **Refcount, under ASan, `--features ffmpeg`** (plan-v2 §8.2.1's requirement):
+- **Refcount, under ASan, `--features ffmpeg6` or another ABI selector**
+  (`ffmpeg` on its own is only the code gate and fails the build; plan-v2
+  §8.2.1's requirement):
   fan-out balance across N edges; flush balance via `FlushStart` mid-queue; CoW
   split; `into_raw`→C→`from_raw` round-trip asserting the refcount is unchanged.
 - **Adapter**, targeting the silent-corruption modes above: timebase round-trip

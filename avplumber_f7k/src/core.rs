@@ -389,10 +389,11 @@ impl Instance {
             .ok_or_else(|| {
                 CoreError::Operation(format!("unknown node type: {}", request.type_name))
             })?;
-        let built = crate::factory::with_build_generation(1, || {
+        let mut built = crate::factory::with_build_generation(1, || {
             factory.build(self, &request.name, &params_json)
         })
         .map_err(CoreError::Operation)?;
+        let self_bindings = std::mem::take(&mut built.bindings);
         let recipe = ConstructionRecipe {
             factory,
             requested_placement: request.placement,
@@ -462,7 +463,17 @@ impl Instance {
         self.nodes
             .lock()
             .unwrap()
-            .insert(request.name, native.clone());
+            .insert(request.name.clone(), native.clone());
+
+        // Bindings the node declared itself go through the same `bind_edge` path
+        // as an envelope's `src`/`dst`, now that the vertex exists. A failure
+        // leaves no half-created node behind, like `node.add`'s own rollback.
+        for (direction, pad, edge_name) in self_bindings {
+            if let Err(error) = self.bind_edge(&request.name, &pad, direction, &edge_name) {
+                let _ = self.destroy_node(&request.name);
+                return Err(error);
+            }
+        }
         Ok(native)
     }
 

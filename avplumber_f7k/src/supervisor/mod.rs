@@ -33,6 +33,14 @@ pub struct GroupStatus {
     pub restart_count: u64,
     pub last_error: Option<String>,
     pub last_outcome: Option<String>,
+    /// Every outcome the *current* generation has reported, in arrival order.
+    ///
+    /// `last_outcome` is a single slot: the node that finished before the last
+    /// one is gone from it, so "has node X finished?" cannot be answered by
+    /// polling it — a client can miss the window between two completions
+    /// entirely. This list is monotonic within a generation and reset by the
+    /// first outcome of the next one.
+    pub outcomes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +133,11 @@ struct GroupMetrics {
     restart_count: u64,
     last_error: Option<String>,
     last_outcome: Option<String>,
+    /// [`GroupStatus::outcomes`] and the generation they belong to. Only the
+    /// manager thread writes them, and it records an outcome only when it
+    /// matches the generation it is running, so the two never disagree.
+    outcomes: Vec<String>,
+    outcomes_generation: Generation,
 }
 
 enum ManagerCommand {
@@ -326,13 +339,21 @@ impl Group {
     }
 
     pub fn status(&self) -> GroupStatus {
+        let generation = self.generation();
         let metrics = self.metrics.lock().unwrap();
         GroupStatus {
             state: self.state(),
-            generation: self.generation(),
+            generation,
             restart_count: metrics.restart_count,
             last_error: metrics.last_error.clone(),
             last_outcome: metrics.last_outcome.clone(),
+            // A generation that has started but reported nothing yet must not
+            // show the previous one's list.
+            outcomes: if metrics.outcomes_generation == generation {
+                metrics.outcomes.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -588,8 +609,14 @@ fn manager_loop(
                     continue;
                 }
                 {
+                    let summary = outcome_summary(&outcome);
                     let mut metrics = metrics.lock().unwrap();
-                    metrics.last_outcome = Some(outcome_summary(&outcome));
+                    if metrics.outcomes_generation != runtime.generation {
+                        metrics.outcomes_generation = runtime.generation;
+                        metrics.outcomes.clear();
+                    }
+                    metrics.outcomes.push(summary.clone());
+                    metrics.last_outcome = Some(summary);
                     metrics.last_error = outcome_error(&outcome);
                 }
                 let policy = config

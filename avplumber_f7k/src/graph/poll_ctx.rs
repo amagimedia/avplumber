@@ -78,7 +78,10 @@ impl NodePollContext {
                 .readable
                 .iter()
                 .any(|e| e.occupied() > 0 || e.is_closed())
-            || self.writable.iter().any(|e| !e.is_full() || e.is_closed())
+            || self
+                .writable
+                .iter()
+                .any(|e| !e.is_full() || e.is_closed() || e.has_hints())
     }
 
     #[allow(dead_code)]
@@ -93,8 +96,10 @@ impl NodePollContext {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn clear_park(&mut self) {
+    /// Drops waiters registered during the last poll. Executors call this
+    /// between steps; a test that drives a poll body by hand does the same,
+    /// otherwise a park from one step leaks into the next.
+    pub fn clear_park(&mut self) {
         self.waiting = false;
         self.deadline = None;
         self.readable.clear();

@@ -1,0 +1,29 @@
+[package]
+name = "avplumber_nodes"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Mirrors `avplumber_f7k`'s selectors and forwards them: `ffmpeg` is only the
+# code gate, and each selector picks the ABI in this crate, in the framework and
+# in the two libav crates at once, so a mixed set is impossible.
+ffmpeg = ["avplumber_f7k/ffmpeg", "dep:rusty_ffmpeg", "dep:rsmpeg"]
+ffmpeg6 = ["ffmpeg", "avplumber_f7k/ffmpeg6", "rsmpeg/ffmpeg6", "rusty_ffmpeg/ffmpeg6"]
+ffmpeg7 = ["ffmpeg", "avplumber_f7k/ffmpeg7", "rsmpeg/ffmpeg7", "rusty_ffmpeg/ffmpeg7"]
+ffmpeg7_1 = ["ffmpeg", "avplumber_f7k/ffmpeg7_1", "rsmpeg/ffmpeg7_1", "rusty_ffmpeg/ffmpeg7_1"]
+ffmpeg8 = ["ffmpeg", "avplumber_f7k/ffmpeg8", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
+async = ["avplumber_f7k/async"]
+
+[dependencies]
+avplumber_f7k = { path = "../avplumber_f7k" }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["link_system_ffmpeg"] }
+rsmpeg = { version = "0.18.0", optional = true, default-features = false }
+
+[dev-dependencies]
+# `mux`'s unit tests drive edges with `graph::media::test_media`, which the
+# framework compiles only for tests.
+avplumber_f7k = { path = "../avplumber_f7k", features = ["testing"] }

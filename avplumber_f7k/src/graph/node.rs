@@ -62,7 +62,18 @@ pub trait Node: Send + Sync + 'static {
     }
 
     fn start(&self) {}
+    /// Teardown, on the body's own thread once it has returned.
     fn stop(&self) {}
+    /// Asynchronous "come back now" request, C++ `IInterruptible::interrupt`.
+    ///
+    /// Called by an executor from [`Executor::stop`](crate::exec::Executor::stop)
+    /// — another thread, while the body may be parked inside libav or on an edge
+    /// — so it must not block, and may arrive more than once or before the body
+    /// starts. Interrupting the node's *source* edges is not enough for a node
+    /// that has none, like `input`: only the node itself can be told to abandon
+    /// a blocking read. [`Self::stop`] keeps its meaning; this is a request, that
+    /// is the teardown.
+    fn interrupt(&self) {}
     fn set_generation(&self, _generation: u64) {}
     fn on_spec(&self, spec: &Spec) -> Result<Spec, String> {
         Ok(spec.clone())

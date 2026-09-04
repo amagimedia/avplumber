@@ -189,6 +189,11 @@ impl Executor for BlockingExecutor {
         let mut g = self.inner.lock().unwrap();
         g.state = ExecutorState::Stopping;
         for slot in g.running.iter().chain(g.nodes.iter()) {
+            // Edges only unblock a node parked on one; a node parked inside
+            // libav (a source-less `input`) has to be told directly. `interrupt`
+            // is idempotent, so hitting a node twice through `running`/`nodes`
+            // is harmless.
+            slot.node.interrupt();
             for src in &slot.sources {
                 src.interrupt();
             }

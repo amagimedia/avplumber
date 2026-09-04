@@ -8,9 +8,20 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 default = []
-# Real AVFrame/AVPacket via rsmpeg. Requires FFmpeg 8.0 dev libs.
+# Real AVFrame/AVPacket via rsmpeg. `ffmpeg` is only the code gate: it does not
+# pick an ABI, so build with one of the selectors below (each implies `ffmpeg`).
+# The upstream features are additive (ffmpeg6 ⊂ ffmpeg7 ⊂ ffmpeg7_1 ⊂ ffmpeg8);
+# bindings are generated from the system headers either way, so the selector
+# must match the FFmpeg the crate is linked against.
 ffmpeg = ["dep:rusty_ffmpeg", "dep:rsmpeg"]
+ffmpeg6 = ["ffmpeg", "rsmpeg/ffmpeg6", "rusty_ffmpeg/ffmpeg6"]
+ffmpeg7 = ["ffmpeg", "rsmpeg/ffmpeg7", "rusty_ffmpeg/ffmpeg7"]
+ffmpeg7_1 = ["ffmpeg", "rsmpeg/ffmpeg7_1", "rusty_ffmpeg/ffmpeg7_1"]
+ffmpeg8 = ["ffmpeg", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
 async = ["dep:tokio"]
+# Compiles `graph::media::test_media` for dependents' unit tests. Only ever
+# enabled through a dev-dependency, so it costs a release build nothing.
+testing = []
 
 [build-dependencies]
 cbindgen = "0.29"
@@ -21,6 +32,6 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 arc-swap = "1.7"
-rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["ffmpeg8", "link_system_ffmpeg"] }
-rsmpeg = { version = "0.18.0", optional = true, default-features = false, features = ["ffmpeg8"] }
+rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["link_system_ffmpeg"] }
+rsmpeg = { version = "0.18.0", optional = true, default-features = false }
 tokio = { version = "1.53.1", optional = true, default-features = false, features = ["rt", "net", "sync", "io-util", "time", "macros"] }

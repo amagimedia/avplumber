@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use crate::graph::buffer::{AVP_NOPTS, AvpMediaType, AvpMediaVtable, AvpRational};
-use crate::graph::timebase::{rescale, ts_cmp};
+use crate::graph::timebase::{finer, rescale, ts_cmp};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ts {
@@ -34,6 +34,26 @@ impl Ts {
         Ts {
             val: rescale(self.val, self.tb, to),
             tb: to,
+        }
+    }
+}
+
+/// Sum in the finer of the two time bases, like C++ `addTS`. An invalid operand
+/// makes the sum invalid: `NOPTS + shift` is not a timestamp.
+///
+/// To stay in one specific time base — a packet's own, say — rescale the other
+/// operand into it first, which makes this the `addTSSameTB` of C++.
+impl std::ops::Add for Ts {
+    type Output = Ts;
+
+    fn add(self, other: Ts) -> Ts {
+        if !self.is_valid() || !other.is_valid() {
+            return Ts::invalid();
+        }
+        let tb = finer(self.tb, other.tb);
+        Ts {
+            val: rescale(self.val, self.tb, tb) + rescale(other.val, other.tb, tb),
+            tb,
         }
     }
 }
@@ -173,6 +193,72 @@ impl Media {
     }
 }
 
+/// A buffer carrying nothing but a timestamp, for unit tests.
+///
+/// Cfg-paired so one test body works in either build — an empty libav frame or
+/// packet with the feature, [`Media::Stub`] without — and stamped in the same
+/// `1/1000` `Stub` reports, so ordering and counting come out identical.
+///
+/// Compiled for this crate's own tests, and for anyone who asks with the
+/// `testing` feature — which is how the node crates' unit tests reach it,
+/// through a dev-dependency, so a release build still carries none of it.
+#[cfg(all(any(test, feature = "testing"), not(feature = "ffmpeg")))]
+pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
+    Media::Stub { kind, pts }
+}
+
+#[cfg(all(any(test, feature = "testing"), feature = "ffmpeg"))]
+pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
+    use crate::graph::spec::ChannelLayout;
+    use rusty_ffmpeg::ffi;
+
+    let ts = Ts {
+        val: pts,
+        tb: AvpRational { num: 1, den: 1_000 },
+    };
+    // Smallest real buffer of each kind, not an empty one: `av_frame_clone` and
+    // `av_packet_ref` need something to reference, and an edge may clone what it
+    // carries (`peek_clone`).
+    match kind {
+        AvpMediaType::PACKET => {
+            let mut packet = rsmpeg::avcodec::AVPacket::new();
+            // rsmpeg has no payload allocator, and `av_new_packet` is what makes
+            // a packet reference-counted, hence clonable.
+            let ret =
+                unsafe { ffi::av_new_packet(rsmpeg::UnsafeDerefMut::deref_mut(&mut packet), 1) };
+            assert!(ret >= 0, "one-byte test packet: av_new_packet failed");
+            packet.set_ts_dts(ts, ts);
+            Media::Packet(packet)
+        }
+        AvpMediaType::VIDEO => {
+            let mut frame = rsmpeg::avutil::AVFrame::new();
+            frame.set_width(2);
+            frame.set_height(2);
+            frame.set_format(ffi::AV_PIX_FMT_GRAY8);
+            frame.alloc_buffer().expect("2x2 gray8 test frame");
+            frame.set_ts(ts);
+            Media::Video(frame)
+        }
+        AvpMediaType::AUDIO => {
+            let mut frame = rsmpeg::avutil::AVFrame::new();
+            frame.set_nb_samples(1);
+            frame.set_sample_rate(48_000);
+            frame.set_format(ffi::AV_SAMPLE_FMT_S16);
+            let mono = ChannelLayout::from_mask(
+                ffi::AV_CHANNEL_ORDER_NATIVE as i32,
+                1,
+                ffi::AV_CH_LAYOUT_MONO,
+            );
+            unsafe { mono.apply_to(&mut rsmpeg::UnsafeDerefMut::deref_mut(&mut frame).ch_layout) }
+                .expect("mono layout");
+            frame.alloc_buffer().expect("one-sample mono test frame");
+            frame.set_ts(ts);
+            Media::Audio(frame)
+        }
+        other => panic!("{other:?} has no libav buffer to stand in for it"),
+    }
+}
+
 impl Clone for Media {
     fn clone(&self) -> Self {
         match self {
@@ -226,14 +312,63 @@ impl FrameExt for rsmpeg::avutil::AVFrame {
     }
 }
 
+/// Timestamps as [`Ts`] plus the flag tests the container nodes need.
+///
+/// `stream_index` is deliberately absent: the field is readable through `Deref`
+/// and rsmpeg already has an inherent `set_stream_index`. Both timestamps are
+/// set together because one packet carries a single time base, and adding a
+/// second `set_dts(Ts)` here would be shadowed by that inherent setter.
 #[cfg(feature = "ffmpeg")]
 pub trait PacketExt {
     fn clone_ref(&self) -> rsmpeg::avcodec::AVPacket;
+    fn ts(&self) -> Ts;
+    fn dts(&self) -> Ts;
+    /// Sets PTS, DTS *and* the packet's own time base — libavformat leaves the
+    /// latter unset, and everything downstream reads timestamps through it.
+    /// `dts` is rescaled into `pts`'s time base.
+    fn set_ts_dts(&mut self, pts: Ts, dts: Ts);
+    fn is_key(&self) -> bool;
+    fn is_corrupt(&self) -> bool;
 }
 
 #[cfg(feature = "ffmpeg")]
 impl PacketExt for rsmpeg::avcodec::AVPacket {
     fn clone_ref(&self) -> rsmpeg::avcodec::AVPacket {
         clone_packet(self)
+    }
+    fn ts(&self) -> Ts {
+        Ts {
+            val: self.pts,
+            tb: AvpRational {
+                num: self.time_base.num,
+                den: self.time_base.den,
+            },
+        }
+    }
+    fn dts(&self) -> Ts {
+        Ts {
+            val: self.dts,
+            tb: AvpRational {
+                num: self.time_base.num,
+                den: self.time_base.den,
+            },
+        }
+    }
+    fn set_ts_dts(&mut self, pts: Ts, dts: Ts) {
+        self.set_pts(pts.val);
+        self.set_dts(dts.rescale(pts.tb).val);
+        // rsmpeg has no `set_time_base` for packets, only for frames.
+        unsafe {
+            rsmpeg::UnsafeDerefMut::deref_mut(self).time_base = rusty_ffmpeg::ffi::AVRational {
+                num: pts.tb.num,
+                den: pts.tb.den,
+            }
+        };
+    }
+    fn is_key(&self) -> bool {
+        self.flags & rusty_ffmpeg::ffi::AV_PKT_FLAG_KEY as i32 != 0
+    }
+    fn is_corrupt(&self) -> bool {
+        self.flags & rusty_ffmpeg::ffi::AV_PKT_FLAG_CORRUPT as i32 != 0
     }
 }

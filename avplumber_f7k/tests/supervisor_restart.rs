@@ -12,6 +12,22 @@ use avplumber_f7k::{
     NodeRequest, NodeSpec, PadDecl, RestartPolicy, Vertex, register_factory, register_spec,
 };
 
+/// Any buffer at all. The one push in this suite goes to a closed edge and is
+/// rejected before anything looks inside it, so an empty packet does; the pair is
+/// cfg'd because `Media::Stub` exists only when libav is compiled out.
+#[cfg(feature = "ffmpeg")]
+fn any_buffer() -> avplumber_f7k::Media {
+    avplumber_f7k::Media::Packet(rsmpeg::avcodec::AVPacket::new())
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn any_buffer() -> avplumber_f7k::Media {
+    avplumber_f7k::Media::Stub {
+        kind: AvpMediaType::VIDEO,
+        pts: 1,
+    }
+}
+
 struct FailingNode {
     name: String,
 }
@@ -48,17 +64,19 @@ impl Node for RunningNode {
     }
 }
 
-fn worker_vertex() -> Vertex {
+fn named_vertex(name: &str) -> Vertex {
     Vertex {
-        name: "worker".into(),
-        node: Arc::new(RunningNode {
-            name: "worker".into(),
-        }),
+        name: name.into(),
+        node: Arc::new(RunningNode { name: name.into() }),
         sources: Default::default(),
         sinks: Default::default(),
         source_media: Default::default(),
         sink_media: Default::default(),
     }
+}
+
+fn worker_vertex() -> Vertex {
+    named_vertex("worker")
 }
 
 fn worker_graph() -> Arc<Mutex<Graph>> {
@@ -252,6 +270,82 @@ fn clean_completion_with_off_propagates_one_natural_eof() {
         "EOF must be propagated exactly once"
     );
     assert_eq!(group.state(), GroupState::Running);
+    group.stop();
+}
+
+/// `last_outcome` holds one summary, so the node that finished before the last
+/// one is unobservable through it — a client polling for "did node X finish?"
+/// can miss X entirely between two polls. `outcomes` is the generation's whole
+/// list, in arrival order, and is what such a client must read.
+#[test]
+fn every_outcome_of_a_generation_is_recorded_not_only_the_last() {
+    let mut graph = Graph::new();
+    graph.add_vertex(worker_vertex()).unwrap();
+    graph.add_vertex(named_vertex("second")).unwrap();
+    let group = Group::new("test".into(), Arc::new(Mutex::new(graph)));
+    group.add_with_policy("worker", ExecCtxId::Blocking, RestartPolicy::Off);
+    group.add_with_policy("second", ExecCtxId::Blocking, RestartPolicy::Off);
+    group.start().unwrap();
+    let generation = group.generation();
+
+    for name in ["worker", "second"] {
+        group.report_outcome(NodeOutcome::Completed {
+            name: name.into(),
+            generation,
+        });
+    }
+    drain_manager_queue(&group);
+
+    let status = group.status();
+    assert_eq!(
+        status.outcomes,
+        vec![
+            format!("completed:worker:generation={generation}"),
+            format!("completed:second:generation={generation}"),
+        ]
+    );
+    assert_eq!(
+        status.last_outcome,
+        Some(format!("completed:second:generation={generation}")),
+        "the single slot keeps only the newest, which is the whole point of the list"
+    );
+    group.stop();
+}
+
+/// The list describes one generation, so a restarted group does not report the
+/// previous generation's completions as if its own nodes had finished.
+#[test]
+fn a_restarted_generation_starts_with_an_empty_outcome_list() {
+    let graph = worker_graph();
+    let group = running_group_on(graph.clone());
+    group.set_restart_hook(Arc::new(move |request| {
+        let mut graph = graph.lock().unwrap();
+        graph.remove_vertex("worker");
+        graph.add_vertex(worker_vertex())?;
+        Ok(request.reconstructed())
+    }));
+    let generation = group.generation();
+
+    group.report_outcome(NodeOutcome::Completed {
+        name: "worker".into(),
+        generation,
+    });
+    wait_until(&group, "the restarted generation", |g| {
+        g.generation() == generation + 1 && g.state() == GroupState::Running
+    });
+
+    let status = group.status();
+    assert!(
+        status.outcomes.is_empty(),
+        "generation {} reported nothing yet, but its status lists {:?}",
+        status.generation,
+        status.outcomes
+    );
+    assert_eq!(
+        status.last_outcome,
+        Some(format!("completed:worker:generation={generation}")),
+        "the slot is not generation-scoped, which is why the list has to be"
+    );
     group.stop();
 }
 
@@ -1272,13 +1366,7 @@ fn idle_binding_after_stop_is_rebound_to_the_next_fresh_generation() {
 
     inst.start_group("g").unwrap();
     let generation_2 = source_edges.lock().unwrap()[1].clone();
-    assert_eq!(
-        generation_1.push(avplumber_f7k::Media::Stub {
-            kind: AvpMediaType::VIDEO,
-            pts: 1,
-        }),
-        avplumber_f7k::Push::Closed
-    );
+    assert_eq!(generation_1.push(any_buffer()), avplumber_f7k::Push::Closed);
     assert_eq!(generation_2.writer_generation(), 2);
     assert_eq!(sink_edges.lock().unwrap().len(), 2);
     inst.stop_group("g").unwrap();

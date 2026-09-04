@@ -1,8 +1,9 @@
 //! Direct backpressure through `connect_edge` + the poll executor.
 //!
-//! Requires `--features async` (Poll nodes run on `AsyncExecutor`).
+//! Requires `--features async` (Poll nodes run on `AsyncExecutor`), and the
+//! default build for `Media::Stub`, which exists only when libav is compiled out.
 
-#![cfg(feature = "async")]
+#![cfg(all(feature = "async", not(feature = "ffmpeg")))]
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};

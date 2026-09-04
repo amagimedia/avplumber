@@ -119,6 +119,10 @@ pub struct BuiltNode {
     pub correction_group: Option<String>,
     pub restart: RestartPolicy,
     pub on_error: Option<RestartPolicy>,
+    /// Edges the node names itself, from [`NodeSpec::bindings`]. Applied once by
+    /// `create_node`; a reconstruction rebinds from the graph links those
+    /// bindings created, so this field is not consulted again.
+    pub bindings: Vec<(crate::core::PadDirection, String, String)>,
 }
 
 impl BuiltNode {
@@ -135,6 +139,7 @@ impl BuiltNode {
             correction_group: None,
             restart: RestartPolicy::Off,
             on_error: None,
+            bindings: Vec::new(),
         }
     }
 }
@@ -231,6 +236,14 @@ pub trait NodeSpec: DeserializeOwned {
     const TYPE_NAME: &'static str;
     type Node: Node + 'static;
     fn build(self, name: &str, ctx: &BuildCtx<'_>) -> Result<Self::Node, String>;
+
+    /// Edges this node names in its own parameters, as
+    /// `(direction, pad, edge_name)`. `demux` derives them from `routing`, so a
+    /// script does not repeat the edge names in `src`/`dst`; everything else
+    /// keeps the default and is bound by the envelope.
+    fn bindings(&self) -> Vec<(crate::core::PadDirection, String, String)> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -374,7 +387,10 @@ impl FactoryRegistry {
             S::TYPE_NAME.to_string(),
             Arc::new(|name, params, ctx| {
                 let spec: S = serde_json::from_str(params).map_err(|e| e.to_string())?;
-                Ok(BuiltNode::from_node(Arc::new(spec.build(name, ctx)?)))
+                let bindings = spec.bindings();
+                let mut built = BuiltNode::from_node(Arc::new(spec.build(name, ctx)?));
+                built.bindings = bindings;
+                Ok(built)
             }),
         );
     }

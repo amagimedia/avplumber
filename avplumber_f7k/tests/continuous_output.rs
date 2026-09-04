@@ -1,4 +1,6 @@
-#![cfg(feature = "async")]
+// `--features async` for the Poll nodes, and the default build for `Media::Stub`,
+// which the crate defines only when libav is compiled out.
+#![cfg(all(feature = "async", not(feature = "ffmpeg")))]
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};

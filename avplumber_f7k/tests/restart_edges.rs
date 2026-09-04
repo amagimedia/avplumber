@@ -1,3 +1,8 @@
+// The buffers here are `Media::Stub`, which the crate defines only when libav is
+// compiled out, so this substrate suite runs in the default build. Nothing in it
+// touches media: `--features ffmpeg` changes only the shape of the enum.
+#![cfg(not(feature = "ffmpeg"))]
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
@@ -36,6 +41,9 @@ fn wait_for_group_generation(group: &Group, generation: u64) {
     }
 }
 
+/// Only the live-chain tests wait on another thread, and those need the poll
+/// executor.
+#[cfg(feature = "async")]
 fn wait_until(timeout: Duration, pred: impl Fn() -> bool, what: &str) {
     let deadline = Instant::now() + timeout;
     while !pred() {

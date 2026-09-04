@@ -11,6 +11,7 @@ pub mod media;
 pub mod node;
 pub mod pad;
 pub mod poll_ctx;
+pub mod routing;
 pub mod spec;
 pub mod timebase;
 
@@ -19,15 +20,15 @@ pub use buffered_edge::BufferedEdge;
 pub use capability::{AvpInterfaceId, AvpServiceId};
 pub use direct_edge::DirectEdge;
 pub use edge::{
-    Edge, EdgeEvent, EdgeItem, EdgeKind, EdgeRestart, EdgeWaker, Push, Wakeup, generation_reader,
-    generation_writer,
+    Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeKind, EdgeRestart, EdgeWaker, Push,
+    Wakeup, generation_reader, generation_writer,
 };
 pub use error::{NodeError, NodePhase};
 pub use media::{Media, OpaqueFrame, Ts};
 pub use node::{Blocked, Node, NodeBody, NodeFuture, NodeKind, Tick};
 pub use pad::{In, NodePads, Out, PadDecl, check_pad_media};
 pub use poll_ctx::NodePollContext;
-pub use spec::{ChannelLayout, PacketSpec, Spec};
+pub use spec::{CatalogStream, ChannelLayout, MuxStream, PacketSpec, Spec, StreamSelection};
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -16,6 +16,33 @@ use avplumber_f7k::{
     NodeError, NodeOutcome, NodePhase, NodeRequest, RestartPolicy, register_factory,
 };
 
+/// One ABI buffer, freshly owned. [`avp_edge_push`] adopts the pointer whether
+/// the edge accepts it or not, so every push needs its own — and with libav
+/// compiled in the pointer really is an `AVFrame` that the push will free, which
+/// is why this is cfg-paired rather than a dangling address in both builds.
+fn abi_buffer() -> AvpBuffer {
+    #[cfg(feature = "ffmpeg")]
+    {
+        let mut frame = rsmpeg::avutil::AVFrame::new();
+        frame.set_width(2);
+        frame.set_height(2);
+        frame.set_format(rusty_ffmpeg::ffi::AV_PIX_FMT_GRAY8);
+        frame.alloc_buffer().expect("2x2 gray8 abi frame");
+        AvpBuffer {
+            media: AvpMediaType::VIDEO,
+            ptr: frame.into_raw().as_ptr() as *mut c_void,
+        }
+    }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        // `Media::Stub` carries the address as a timestamp and never reads it.
+        AvpBuffer {
+            media: AvpMediaType::VIDEO,
+            ptr: std::ptr::dangling_mut(),
+        }
+    }
+}
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
 static DESTROYS: AtomicUsize = AtomicUsize::new(0);
@@ -126,10 +153,7 @@ static VTABLE: AvpNodeVtable = AvpNodeVtable {
 
 extern "C" fn push_process(_handle: *mut c_void) -> i32 {
     let edge = PUSH_EDGE.load(Ordering::SeqCst) as *mut AvpEdge;
-    let buffer = AvpBuffer {
-        media: AvpMediaType::VIDEO,
-        ptr: std::ptr::dangling_mut(),
-    };
+    let buffer = abi_buffer();
     PUSH_FLOW.store(avp_edge_push(edge, &buffer) as usize, Ordering::SeqCst);
     0
 }
@@ -391,16 +415,15 @@ fn create_edge_handle_rejects_writes_after_producer_generation_changes() {
         std::ptr::null(),
     );
     let logical = unsafe { &*core }.edge_link("created").unwrap().edge;
-    let buffer = AvpBuffer {
-        media: AvpMediaType::VIDEO,
-        ptr: std::ptr::dangling_mut(),
-    };
-    assert_eq!(avp_edge_push(edge, &buffer) as usize, 0);
+    let accepted = abi_buffer();
+    assert_eq!(avp_edge_push(edge, &accepted) as usize, 0);
 
     logical.restart(1, 2, EdgeRestart::Egress);
 
+    // A second buffer, not the same one again: the push above adopted the first.
+    let fenced = abi_buffer();
     assert_eq!(
-        avp_edge_push(edge, &buffer) as usize,
+        avp_edge_push(edge, &fenced) as usize,
         3,
         "the returned create-edge writer lease must be generation-fenced"
     );
@@ -445,19 +468,13 @@ fn stale_c_helper_thread_is_fenced_by_generation_lease() {
         avp_node_bind_sink(producer, c"helper-edge".as_ptr(), AvpMediaType::VIDEO, 4) as usize;
     assert_ne!(old_lease, new_lease);
     let stale_flow = std::thread::spawn(move || {
-        let buffer = AvpBuffer {
-            media: AvpMediaType::VIDEO,
-            ptr: std::ptr::dangling_mut(),
-        };
+        let buffer = abi_buffer();
         avp_edge_push(old_lease as *mut AvpEdge, &buffer) as usize
     })
     .join()
     .unwrap();
     let fresh_flow = std::thread::spawn(move || {
-        let buffer = AvpBuffer {
-            media: AvpMediaType::VIDEO,
-            ptr: std::ptr::dangling_mut(),
-        };
+        let buffer = abi_buffer();
         avp_edge_push(new_lease as *mut AvpEdge, &buffer) as usize
     })
     .join()

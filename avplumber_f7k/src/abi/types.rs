@@ -64,9 +64,23 @@ impl From<&Spec> for AvpSpec {
                 time_base: p.time_base,
                 ..AvpSpec::zeroed()
             },
+            // Both container-level variants project as lossily as `Spec::Packet`:
+            // the C ABI has one flat spec, so only the first stream's time base
+            // survives. `to_native()` therefore never rebuilds them.
+            Spec::Catalog { streams, .. } => AvpSpec {
+                media: AvpMediaType::PACKET,
+                time_base: streams
+                    .first()
+                    .map(|s| s.spec.time_base)
+                    .unwrap_or_default(),
+                ..AvpSpec::zeroed()
+            },
             Spec::Mux { streams } => AvpSpec {
                 media: AvpMediaType::PACKET,
-                time_base: streams.first().map(|s| s.time_base).unwrap_or_default(),
+                time_base: streams
+                    .first()
+                    .map(|s| s.spec.time_base)
+                    .unwrap_or_default(),
                 ..AvpSpec::zeroed()
             },
         }

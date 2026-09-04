@@ -1,11 +1,28 @@
 //! avplumber_f7k — Rust core for avplumber.
 
+#[cfg(all(
+    feature = "ffmpeg",
+    not(any(
+        feature = "ffmpeg6",
+        feature = "ffmpeg7",
+        feature = "ffmpeg7_1",
+        feature = "ffmpeg8"
+    ))
+))]
+compile_error!(
+    "feature `ffmpeg` selects no ABI on its own: build with `ffmpeg6`, `ffmpeg7`, \
+     `ffmpeg7_1` or `ffmpeg8` (each implies `ffmpeg`), matching the FFmpeg this \
+     crate links against"
+);
+
 pub mod abi;
 pub mod control;
 pub mod core;
 pub mod exec;
 pub mod factory;
 pub mod graph;
+#[cfg(feature = "ffmpeg")]
+pub mod libav;
 pub mod scaffold;
 pub mod services;
 pub mod supervisor;
@@ -26,10 +43,11 @@ pub use factory::{
 };
 pub use graph::{
     AVP_NOPTS, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpRational, AvpServiceId, Blocked,
-    BufferedEdge, ChannelLayout, DirectEdge, Edge, EdgeEvent, EdgeItem, EdgeKind, EdgeLink,
-    EdgeRestart, EdgeWaker, Graph, Media, Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase,
-    NodePollContext, PacketSpec, Pad, PadDecl, Push, Spec, Tick, Ts, Vertex, Wakeup,
-    generation_reader, generation_writer,
+    BufferedEdge, CatalogStream, ChannelLayout, DirectEdge, Edge, EdgeEvent, EdgeHint,
+    EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Graph, Media, MuxStream,
+    Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, PacketSpec, Pad,
+    PadDecl, Push, Spec, StreamSelection, Tick, Ts, Vertex, Wakeup, generation_reader,
+    generation_writer,
 };
 pub use scaffold::{SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter};
 pub use services::ServiceRegistry;

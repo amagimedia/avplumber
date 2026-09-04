@@ -373,18 +373,7 @@ mod tests {
     }
 
     fn stub(pts: i64) -> Media {
-        #[cfg(not(feature = "ffmpeg"))]
-        {
-            Media::Stub {
-                kind: AvpMediaType::VIDEO,
-                pts,
-            }
-        }
-        #[cfg(feature = "ffmpeg")]
-        {
-            let _ = pts;
-            panic!("scaffold tests expect the default (non-ffmpeg) Media::Stub");
-        }
+        crate::graph::media::test_media(AvpMediaType::VIDEO, pts)
     }
 
     fn bind_pair<N: Node>(node: &N) -> (Arc<dyn Edge>, Arc<dyn Edge>) {
