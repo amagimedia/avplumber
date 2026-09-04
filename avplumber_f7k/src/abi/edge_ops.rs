@@ -1,6 +1,6 @@
 //! Edge ops C ABI. take + peek guard over owned Media.
 
-use crate::abi::convert::media_to_avp;
+use crate::abi::convert::{clone_avp_buffer, media_as_avp, media_to_avp, release_avp_buffer};
 use crate::abi::{AvpBuffer, AvpSpec};
 use crate::abi::{AvpEdge, AvpNode};
 use crate::graph::edge::{EdgeEvent, EdgeItem, Push};
@@ -70,11 +70,11 @@ fn event_to_c(ev: &EdgeEvent) -> AvpEdgeEvent {
     }
 }
 
-fn item_to_c(item: EdgeItem) -> AvpItem {
+fn owned_item_to_c(item: EdgeItem) -> AvpItem {
     match item {
         EdgeItem::Buffer(m) => AvpItem {
             is_event: 0,
-            buffer: media_to_avp(m, &Default::default()),
+            buffer: media_to_avp(m),
             event: AvpEdgeEvent {
                 r#type: AvpEventType::Eof,
                 spec: AvpSpec::zeroed(),
@@ -88,6 +88,24 @@ fn item_to_c(item: EdgeItem) -> AvpItem {
     }
 }
 
+fn borrowed_item_to_c(item: &EdgeItem) -> AvpItem {
+    match item {
+        EdgeItem::Buffer(media) => AvpItem {
+            is_event: 0,
+            buffer: media_as_avp(media),
+            event: AvpEdgeEvent {
+                r#type: AvpEventType::Eof,
+                spec: AvpSpec::zeroed(),
+            },
+        },
+        EdgeItem::Event(event) => AvpItem {
+            is_event: 1,
+            buffer: AvpBuffer::null(crate::graph::AvpMediaType::VIDEO),
+            event: event_to_c(event),
+        },
+    }
+}
+
 pub struct AvpPeek {
     pub edge: std::sync::Arc<dyn crate::graph::Edge>,
     pub cloned: Option<EdgeItem>,
@@ -96,10 +114,13 @@ pub struct AvpPeek {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn avp_edge_push(edge: *mut AvpEdge, buf: *const AvpBuffer) -> AvpFlow {
+    if edge.is_null() || buf.is_null() {
+        return AvpFlow::Error;
+    }
     let edge = unsafe { &*edge };
     let buf = unsafe { *buf };
-    // Without Instance we cannot reconstruct Opaque vtables; ffmpeg/stub adopt the pointer.
-    let Some(media) = avp_to_media_loose(buf) else {
+    let opaque_vtable = edge.media_vtables.lock().unwrap().get(&buf.media).copied();
+    let Some(media) = clone_avp_buffer(buf, opaque_vtable) else {
         return AvpFlow::Error;
     };
     let result = match crate::abi::ffi_node::callback_generation() {
@@ -109,45 +130,11 @@ pub extern "C" fn avp_edge_push(edge: *mut AvpEdge, buf: *const AvpBuffer) -> Av
         },
         None => edge.edge.push(media),
     };
+    if result == Push::Accepted {
+        let released = release_avp_buffer(buf, opaque_vtable);
+        debug_assert!(released);
+    }
     push_to_c(result)
-}
-
-fn avp_to_media_loose(buf: AvpBuffer) -> Option<crate::graph::Media> {
-    #[cfg(feature = "ffmpeg")]
-    {
-        use crate::graph::Media;
-        if buf.is_null() {
-            return None;
-        }
-        match buf.media {
-            crate::graph::AvpMediaType::PACKET => {
-                let p = std::ptr::NonNull::new(buf.ptr as *mut rusty_ffmpeg::ffi::AVPacket)?;
-                Some(Media::Packet(unsafe {
-                    rsmpeg::avcodec::AVPacket::from_raw(p)
-                }))
-            }
-            crate::graph::AvpMediaType::VIDEO => {
-                let p = std::ptr::NonNull::new(buf.ptr as *mut rusty_ffmpeg::ffi::AVFrame)?;
-                Some(Media::Video(unsafe {
-                    rsmpeg::avutil::AVFrame::from_raw(p)
-                }))
-            }
-            crate::graph::AvpMediaType::AUDIO => {
-                let p = std::ptr::NonNull::new(buf.ptr as *mut rusty_ffmpeg::ffi::AVFrame)?;
-                Some(Media::Audio(unsafe {
-                    rsmpeg::avutil::AVFrame::from_raw(p)
-                }))
-            }
-            _ => None,
-        }
-    }
-    #[cfg(not(feature = "ffmpeg"))]
-    {
-        Some(crate::graph::Media::Stub {
-            kind: buf.media,
-            pts: buf.ptr as usize as i64,
-        })
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -178,7 +165,7 @@ pub extern "C" fn avp_edge_take(edge: *mut AvpEdge, timeout_ms: i32, out: *mut A
     match item {
         Some(item) => {
             unsafe {
-                *out = item_to_c(item);
+                *out = owned_item_to_c(item);
             }
             1
         }
@@ -201,7 +188,7 @@ pub extern "C" fn avp_edge_peek(
     match item {
         Some(item) => {
             unsafe {
-                *out = item_to_c(item.clone());
+                *out = borrowed_item_to_c(&item);
             }
             Box::into_raw(Box::new(AvpPeek {
                 edge: edge.edge.clone(),
@@ -234,13 +221,13 @@ pub extern "C" fn avp_edge_peek_consume(peek: *mut AvpPeek, out: *mut AvpBuffer)
     } else {
         p.edge.pop();
     }
-    if !out.is_null() {
-        if let Some(EdgeItem::Buffer(m)) = p.cloned {
-            unsafe {
-                *out = media_to_avp(m, &Default::default());
-            }
-            return 1;
+    if !out.is_null()
+        && let Some(EdgeItem::Buffer(m)) = p.cloned
+    {
+        unsafe {
+            *out = media_to_avp(m);
         }
+        return 1;
     }
     0
 }

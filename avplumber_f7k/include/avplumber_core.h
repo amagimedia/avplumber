@@ -118,8 +118,9 @@ typedef enum {
     AVP_FLOW_ERROR        = 4
 } AvpFlow;
 
-/* Producer side. push transfers the buffer's ref into the edge on PUSHED; on
- * BACKPRESSURE/DROP the caller retains ownership. Events never drop. */
+/* Producer side. push transfers the buffer's ref into the edge only on
+ * PUSHED; on every other result the caller retains ownership. Events never
+ * drop. */
 AvpFlow avp_edge_push(AvpEdge*, const AvpBuffer* buf);
 void    avp_edge_push_event(AvpEdge*, const AvpEdgeEvent* ev);
 
@@ -223,7 +224,9 @@ void  avp_shared_put(AvpCore*, const char* type_key, const char* name,
 /* Edge coupling hint (NULL = core default: buffered). DirectEdge is selected
  * only by explicit construction, not inferred from co-location. Direct is
  * zero-queue: offer runs the consumer; backpressure is the end of a
- * Direct-only chain. Both endpoints must be cooperative poll nodes. */
+ * Direct-only chain. Both endpoints must be cooperative poll nodes, and the
+ * fused consumer callbacks must be infallible. Put a buffered edge before a
+ * node whose callback can return AVP_FLOW_ERROR. */
 typedef struct {
     int is_direct;   /* 0 = BufferedEdge; 1 = DirectEdge (capacity 0) */
     size_t capacity;  /* 0 = core default (64); ignored when is_direct */
