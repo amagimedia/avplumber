@@ -75,7 +75,20 @@ impl From<&Spec> for AvpSpec {
 
 impl AvpSpec {
     pub fn zeroed() -> Self {
-        unsafe { std::mem::zeroed() }
+        Self {
+            media: AvpMediaType::VIDEO,
+            width: 0,
+            height: 0,
+            pixel_format: 0,
+            frame_rate: AvpRational::default(),
+            sample_aspect_ratio: AvpRational::default(),
+            sample_rate: 0,
+            sample_format: 0,
+            channel_order: 0,
+            nb_channels: 0,
+            channel_mask: 0,
+            time_base: AvpRational::default(),
+        }
     }
 
     /// Lossy ABI → native. CUSTOM channel maps are not recovered.

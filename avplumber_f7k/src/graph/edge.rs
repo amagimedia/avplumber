@@ -51,8 +51,9 @@ pub enum Push {
 /// - [`Direct`](EdgeKind::Direct) — capacity 0. `offer` runs the consumer
 ///   (and the rest of a Direct-only chain) on the same executor;
 ///   `Push::Full` is congestion at the first Buffered edge or sink after the
-///   chain. Never fuse across a blocking or async node. Explicit
-///   `connect_edge` only.
+///   chain. Direct consumers must be lightweight and infallible because the
+///   fused `Node::poll` contract cannot return `NodeError`. Never fuse across
+///   a blocking or async node. Explicit `connect_edge` only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeKind {
     Buffered { capacity: usize },

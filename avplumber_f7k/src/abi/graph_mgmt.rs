@@ -124,6 +124,7 @@ pub extern "C" fn avp_create_edge(
         Box::new(AvpEdge {
             name: edge_name.clone(),
             edge: logical.clone(),
+            media_vtables: inst.media_vtables.clone(),
         }),
     );
     let generation = inst
@@ -133,6 +134,7 @@ pub extern "C" fn avp_create_edge(
     let mut lease = Box::new(AvpEdge {
         name: edge_name.clone(),
         edge: generation_writer(logical, generation),
+        media_vtables: inst.media_vtables.clone(),
     });
     let ptr = lease.as_mut() as *mut AvpEdge;
     unsafe { &mut *producer }.producer_leases.push(lease);

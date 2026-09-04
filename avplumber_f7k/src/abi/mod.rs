@@ -77,6 +77,11 @@ pub struct AvpNode {
 pub struct AvpEdge {
     pub(crate) name: String,
     pub(crate) edge: Arc<dyn Edge>,
+    pub(crate) media_vtables: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<crate::graph::AvpMediaType, crate::graph::AvpMediaVtable>,
+        >,
+    >,
 }
 
 #[unsafe(no_mangle)]
