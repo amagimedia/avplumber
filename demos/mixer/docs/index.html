@@ -33,6 +33,7 @@
     <h1>AVPlumber <span>Live mixer</span></h1>
     <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Code &amp; setup guide</a>
   </header>
+  <p><strong>60 fps throughout: all 16 native 1920×1080 inputs → 1080×1920 portrait output at 60 fps.</strong> Input files and encoded output are 60 fps; per-source frame continuity is qualified below.</p>
   <p><strong>Current 1080p input benchmark:</strong> sixteen native 1920×1080@60 H.264 inputs, steady 16-box composition, and 1080×1920@60 NVENC output at 8 Mbit/s. Over 30 seconds on a Tesla T4: <strong>8.0% GPU compute, 76.7% NVDEC decoder, 23.0% NVENC encoder, and 0.58 AVPlumber CPU cores</strong>; GPU memory was 1,958 MiB. These are separate activity measurements: 8% is not total GPU capacity usage. <a href="runtime-load-1080p.json">Samples and conditions</a>.</p>
   <p><strong>Fullscreen, with all sixteen sources still active:</strong> 7.0% GPU compute · 76.5% NVDEC · 22.2% NVENC · 0.53 CPU cores, measured separately over 30 seconds.</p>
   <p><strong>Continuity limitation:</strong> a separate 11.4-second pixel check had regular 60 fps output timestamps and no RTP loss, but one source repeated 33.43% and skipped 33.28% of frames; the other fifteen had 0% repeats/skips. Per-source timing remains unresolved. <a href="continuity-1080p.json">Both short capture results and method</a>.</p>
