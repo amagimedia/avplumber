@@ -27,14 +27,13 @@ from dmabuf_browser_common import (
     make_dmabuf_cuda_input_nodes,
     make_dmabuf_egl_input_nodes,
     make_janus_h264_output_nodes,
+    wait_for_edge,
 )
 from dmabuf_output_config import resolve_output_config
 from dmabuf_scale_layout import MAX_COMPOSITOR_INPUTS, fit_filter_graph, fit_rect, grid_cells
 
 
-DEFAULT_SOURCE_URL = (
-    "https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=16:9"
-)
+DEFAULT_SOURCE_URL = "file:///opt/dma-browser/tests/fixtures/smoke.html"
 
 
 def env_int(name, default, minimum=1):
@@ -102,14 +101,6 @@ def wait_for_sockets(paths, timeout_sec):
             time.sleep(0.25)
     if missing:
         raise RuntimeError(f"DMA-BUF sockets did not appear: {sorted(missing)}")
-
-
-def wait_for_edge(avp, edge, timeout_sec, data_type=None):
-    deadline = time.monotonic() + timeout_sec
-    while avp.getEdge(edge, data_type).occupied == 0:
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"Timed out waiting for the first frame on {edge}")
-        time.sleep(0.05)
 
 
 def wait_with_heartbeats(avp, duration_sec):

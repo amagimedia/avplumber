@@ -34,3 +34,8 @@ __pycache__/
 /demos/replay/docs/*.mp4
 /demos/replay/docs/*.jpg
 /demos/replay/docs/*.png
+
+# DMA-BUF demo media is published as release assets.
+/demos/dmabuf-browser/docs/dmabuf-demo.mp4
+/demos/dmabuf-browser/docs/dmabuf-demo.jpg
+/demos/dmabuf-browser/docs/dmabuf-graph.png

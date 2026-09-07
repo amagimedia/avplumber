@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Sixteen Singular browser pages captured through GPU DMA-BUF, composed in CUDA, and encoded by NVENC, with the live processing graph.">
+  <title>DMA-BUF browser demo · AVPlumber</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1280px; margin: auto; padding: 36px 24px 64px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -1px; margin: 0; }
+    h1 span, a { color: #57dbc2; }
+    a { text-underline-offset: 4px; }
+    p { color: #b5c4d8; line-height: 1.6; max-width: 75ch; }
+    video, figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
+    video { aspect-ratio: 16 / 9; margin-top: 24px; }
+    .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    button { font: inherit; color: #edf4ff; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:hover, button:focus-visible { background: #25423f; border-color: #57dbc2; }
+    h2 { margin-top: 44px; font-size: 26px; }
+    figure { margin: 20px 0 0; }
+    figcaption { color: #a4b4ca; line-height: 1.6; margin-top: 12px; }
+    footer { margin-top: 36px; border-top: 1px solid #26354a; padding-top: 20px; color: #a4b4ca; }
+    @media (max-width: 600px) { main { padding: 24px 14px; } header { align-items: start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AVPlumber <span>DMA-BUF browser</span></h1>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">Code &amp; setup guide</a>
+  </header>
+  <p>Sixteen independent Singular pages, each configured for 1920×1080 at 60 fps, composed into one 4×4 GPU grid. The video shows the actual page graphics, scrolling tickers, and source-frame counters.</p>
+  <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.jpg">
+    <source src="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4" type="video/mp4">
+    <a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.jpg" alt="Sixteen Singular pages in a 4×4 grid; click to download the MP4."></a>
+  </video>
+  <nav class="chapters" aria-label="Jump within the demonstration">
+    <button data-seek="0">Play from start</button>
+    <button data-seek="3">3 seconds</button>
+    <button data-seek="6">6 seconds</button>
+  </nav>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4" download>Download the MP4</a> · 10 seconds · 15.1 MB · silent H.264 video · 1920×1080 at 60 fps. The existing 600-frame NVENC recording is shown unchanged.</p>
+
+  <h2>The complete processing graph</h2>
+  <p>The live sixteen-source graph from the Ubuntu validation run: DMA-BUF inputs, modifier-aware EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible. In this run, sources delivered about 39–40 new frames/s each and the compositor produced 60 fps.</p>
+  <figure>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png"><img src="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png" alt="Live AVPlumber web UI showing the sixteen DMA-BUF source branches, GPU compositor, encoder, RTP output, and queue statistics." loading="lazy"></a>
+    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png">Open the full-resolution screenshot</a> to read every node and queue. The table shows queue fill, capacity, throughput, timestamps, and counters at capture time.</figcaption>
+  </figure>
+  <footer>
+    <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/tools/web-ui">Web UI</a> ·
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/dmabuf-browser/docs/validation.md">Validation &amp; Ubuntu GBM findings</a>
+  </footer>
+</main>
+<script>
+  const video = document.querySelector('#demo');
+  for (const button of document.querySelectorAll('[data-seek]')) {
+    button.addEventListener('click', () => {
+      video.currentTime = Number(button.dataset.seek);
+      video.play().catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>

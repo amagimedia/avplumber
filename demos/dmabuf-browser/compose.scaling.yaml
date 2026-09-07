@@ -13,7 +13,7 @@ services:
       TEST_MODE: ${DMABUF_TEST_MODE:-grid}
       SOURCE_COUNT: ${DMABUF_SOURCE_COUNT:-8}
       COMPOSITOR_BACKEND: ${DMABUF_COMPOSITOR_BACKEND:-egl_cuda}
-      SOURCE_URL: ${DMABUF_SOURCE_URL:-https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=16:9}
+      SOURCE_URL: ${DMABUF_SOURCE_URL:-file:///opt/dma-browser/tests/fixtures/smoke.html}
       SOURCE_WIDTH: ${DMABUF_SOURCE_WIDTH:-1920}
       SOURCE_HEIGHT: ${DMABUF_SOURCE_HEIGHT:-1080}
       FPS: ${DMABUF_SOURCE_FPS:-60}
@@ -32,7 +32,7 @@ services:
       USE_DRM_HWACCEL: "0"
       VIDEO_BITRATE: ${DMABUF_VIDEO_BITRATE:-8000k}
     volumes:
-      - ./graph:/opt/avplumber/dmabuf-browser-graph:ro
+      - ./graph:/opt/avplumber/dmabuf-browser-graph:ro,z
     command:
       [
         "python3",

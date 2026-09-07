@@ -5,20 +5,21 @@ headlessly in Electron, export each frame as a GPU **DMA-BUF** (zero-copy), feed
 it into an **avplumber** graph, and stream it to **Janus** for WebRTC preview in
 a browser.
 
-[![Sixteen 1080p60 browser sources composed into one 4x4 GPU grid](docs/16-input-grid.png)](https://amagimedia.github.io/avplumber/download.html?file=demos%2Fdmabuf-browser%2Fdocs%2F16-input-grid-10s.mp4)
+[![Watch sixteen Singular pages composed into one GPU grid](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.jpg)](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/)
 
-[Watch or download the 10-second MP4 demo](https://amagimedia.github.io/avplumber/download.html?file=demos%2Fdmabuf-browser%2Fdocs%2F16-input-grid-10s.mp4). It shows
-16 independent 1920x1080@60 browser captures, grouped as two Electron processes
-with eight windows each, composed into one 1920x1080@60 output. The file contains
-exactly 600 consecutive frames encoded by NVENC at about 12 Mbit/s. DMA-BUF
-import, scaling, composition, and encoding stay on the GPU; only the compressed
-H.264 packets reach the file muxer. The reference run used about **42% GPU
-utilization**
-on the single 70 W Tesla T4 supplied by an entry-level AWS EC2
-G4dn instance; no larger GPU was required. That leaves headroom for a second
-16-source scene—**32 independent 60 fps browser captures** in total. Treat that as
-a capacity target rather than a universal limit because Chromium rendering
-cost depends on page content.
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png)
+
+The existing 10-second recording shows 16 independent Singular pages configured for
+1920×1080@60, grouped into two Electron processes with eight windows each and composed
+into one 1920×1080@60 output. It contains 600 NVENC-encoded frames (15.1 MB).
+The demo page includes a live web UI graph screenshot from the Ubuntu validation
+run: about 39–40 new frames/s per source, composed at 60 fps. Media is hosted
+as public release assets, outside Git.
+
+The [validation notes](docs/validation.md) cover real rendered pixels,
+three single-source cold starts, all sixteen animated grid tiles, and the
+NVIDIA GBM settings needed on the tested Ubuntu host. Benchmark the intended
+page before making capacity claims.
 
 NVIDIA needs Chromium's renderable SharedImage without the CPU-linear
 allocation constraint. The recommended route is the supplied GBM shim with a
@@ -209,7 +210,7 @@ NVIDIA container runtime can mount it. A **compute-only** driver
 ### 3. Container NVIDIA EGL/GBM wiring (both wayland + dma-browser)
 Each GPU container needs:
 - `NVIDIA_DRIVER_CAPABILITIES=all` (must include `graphics`), `--gpus all`, `--privileged`, `--device /dev/dri`.
-- The EGL vendor ICD and NVIDIA GBM backend (`nvidia-drm_gbm.so`). Current NVIDIA Container Toolkit versions inject both when graphics capabilities are enabled. Older installations may need the host's matching `libnvidia-egl-gbm` mounted manually; do not bind over paths already injected by the runtime.
+- The EGL vendor ICD and NVIDIA GBM backend (`nvidia-drm_gbm.so`). The Compose stack selects `runtime: nvidia` with graphics capabilities so NVIDIA Container Toolkit injects these files. `gpus: all` alone may provide only part of the graphics setup when Docker defaults to `runc`. The Fedora images search both Ubuntu and Fedora GBM library directories; no manual driver-library mounts are needed.
 - Env: `GBM_BACKEND=nvidia-drm`, `__GLX_VENDOR_LIBRARY_NAME=nvidia`, `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`.
 - **Do not** bake the NVIDIA driver into the container (version must match the host kernel module — let the runtime mount it).
 
@@ -240,13 +241,26 @@ CPU pacing paths.
 
 ## Run
 
+Start with the [NVIDIA host setup](../README.md#nvidia-host-setup). The Docker
+build downloads official Electron releases and compiles the bundled GBM shim;
+no custom Electron download or company account is required. The default page
+is an animated HTML fixture included in the image.
+
+From the repository root:
+
 ```bash
-cp .env.example .env      # set JANUS_HOST_IP + HTML_OVERLAY_URL
+cd demos/dmabuf-browser
+cp .env.example .env      # set JANUS_HOST_IP for access from another machine
 ./up.sh                   # builds + starts wayland, dma-browser, janus, janus-preview, graph
 # watch in a browser:
-open http://<JANUS_HOST_IP>:8080     # janus-preview
+# http://127.0.0.1:8080 (or http://<host>:8080 for a remote host)
 ./down.sh
 ```
+
+Set `HTML_OVERLAY_URL` in `.env` to capture your own page. Scaling tests use
+the same bundled animation by default; set `DMABUF_SOURCE_URL` to change it.
+The measured graphics workload shown above differs from this simple fixture,
+so benchmark your intended page before drawing capacity conclusions.
 
 The Compose stack passes `HTML_OVERLAY_FPS` to both dma-browser and avplumber,
 so their timestamp rates cannot drift apart. Use an externally reachable
