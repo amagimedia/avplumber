@@ -47,6 +47,7 @@
 
   <h2>The complete processing graph</h2>
   <p>The live sixteen-source graph from the Ubuntu validation run: DMA-BUF inputs, modifier-aware EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible. In this run, sources delivered about 39–40 new frames/s each and the compositor produced 60 fps.</p>
+  <p>A Tesla T4 runtime snapshot showed <strong>36% GPU utilization and 3,381 MiB (3.3 GiB) of GPU memory in use</strong> with all sixteen pages running. These are observed values, not measured peaks or minimum hardware requirements; workload depends on page content and source frame rate.</p>
   <figure>
     <a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png"><img src="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png" alt="Live AVPlumber web UI showing the sixteen DMA-BUF source branches, GPU compositor, encoder, RTP output, and queue statistics." loading="lazy"></a>
     <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png">Open the full-resolution screenshot</a> to read every node and queue. The table shows queue fill, capacity, throughput, timestamps, and counters at capture time.</figcaption>
