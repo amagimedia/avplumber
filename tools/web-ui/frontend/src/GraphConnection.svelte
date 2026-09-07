@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Position } from 'rete-area-plugin';
   import { queueStatsByName } from './graphStores';
+  import { summarizeQueueFlow } from './queueFlow.mjs';
 
   // Rete classic connection fields are spread into this component.
   // We use sourceOutput (queue name) to look up live stats in a store.
@@ -40,7 +41,7 @@
   $: label =
     queueName && q && q.capacity > 0
       ? `${queueName}: ${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)${
-          pps > 0 ? `, ${pps.toFixed(1)} pps${q?.aggregate ? ' total' : ''}` : ''
+          pps > 0 ? `, ${pps.toFixed(1)} items/s${q?.aggregate ? ' total' : ''}` : ''
         }${fiqLine ? `\n${fiqLine}` : ''}${q?.aggregate ? `\n${q.members.join('\n')}` : ''}`
       : queueName
         ? queueName
@@ -48,7 +49,7 @@
   $: hoverText =
     pct !== null
       ? `${fiq && fiq.min != null && fiq.max != null ? `min=${fiq.min} avg=${fiqAvg} max=${fiq.max}` : ''}${
-          pps > 0 ? ` · ${pps.toFixed(1)} pps${q?.aggregate ? ' total' : ''}` : ''
+          pps > 0 ? ` · ${pps.toFixed(1)} items/s${q?.aggregate ? ' total' : ''}` : ''
         }`
       : '';
 
@@ -60,7 +61,7 @@
   $: barX = -barW / 2;
   $: barY = -14;
   $: barFillW = pct !== null ? Math.round(barW * pct) : 0;
-  $: barFillColor = pct !== null ? colorFor(pct) : '#60a5fa';
+  $: barFillColor = stroke;
   $: barText =
     q && q.capacity > 0
       ? `${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)`
@@ -69,49 +70,15 @@
         : '';
   $: hoverBadgeY = -hoverBadgeH / 2;
 
-  const HEX2 = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
-  const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v);
-  const rgbToHex = (r: number, g: number, b: number) =>
-    `#${HEX2[clamp255(Math.round(r))]}${HEX2[clamp255(Math.round(g))]}${HEX2[clamp255(Math.round(b))]}`;
-
-  function colorFor(p: number) {
-    // blue (empty) -> green -> orange -> red, with fuzzy/smooth transitions.
-    // p is expected to be queue occupancy ratio in [0..1], but we clamp defensively.
-    if (!Number.isFinite(p)) return '#60a5fa';
-    const x = Math.max(0, Math.min(1, p));
-
-    const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
-    const smoothstep = (edge0: number, edge1: number, v: number) => {
-      const t = clamp01((v - edge0) / (edge1 - edge0));
-      return t * t * (3 - 2 * t);
-    };
-
-    // Numeric RGB blending (avoid hex string parsing on every call).
-    const blue = { r: 0x3b, g: 0x82, b: 0xf6 };
-    const green = { r: 0x22, g: 0xc5, b: 0x5e };
-    const orange = { r: 0xf9, g: 0x73, b: 0x16 };
-    const red = { r: 0xdc, g: 0x26, b: 0x26 };
-
-    const mixInto = (cur: { r: number; g: number; b: number }, to: { r: number; g: number; b: number }, t: number) => {
-      const k = clamp01(t);
-      cur.r = cur.r + (to.r - cur.r) * k;
-      cur.g = cur.g + (to.g - cur.g) * k;
-      cur.b = cur.b + (to.b - cur.b) * k;
-    };
-
-    // Transition bands (overlapping ranges => "fuzzy" thresholds).
-    const tBG = smoothstep(0.0, 0.08, x); // empty/nearly-empty => blue
-    const tGO = smoothstep(0.45, 0.62, x);
-    const tOR = smoothstep(0.76, 0.9, x);
-
-    const c = { r: blue.r, g: blue.g, b: blue.b };
-    mixInto(c, green, tBG);
-    mixInto(c, orange, tGO);
-    mixInto(c, red, tOR);
-    return rgbToHex(c.r, c.g, c.b);
-  }
-
-  $: stroke = pct === null ? (queueName ? '#a78bfa' : '#60a5fa') : colorFor(pct);
+  $: flow = q?.flowSummary || summarizeQueueFlow(q ? [q] : []);
+  $: stroke = {flowing: '#60a5fa', backlog: '#fbbf24', dropped: '#f87171', idle: '#64748b', unknown: '#475569'}[flow.state];
+  $: flowText = `${flow.active}/${flow.total} active · ${flow.growing} accumulating · ${flow.held} not draining · ${flow.dropped} new drops · ${flow.total - flow.known} unknown`;
+  $: detail = `${label}${q ? `\n${flowText}\nEnqueue ${Number(q.enq_pps || 0).toFixed(1)} / dequeue ${pps.toFixed(1)} items/s\nFullest queue ${Math.round(flow.maxFill * 100)}%` : '\nNo fresh queue samples'}`;
+  // Reuse the destination segment; never measure paths during telemetry updates.
+  $: lastRoute = __route[__route.length - 1] || [start, end];
+  $: tip = lastRoute[lastRoute.length - 1] || end;
+  $: approach = lastRoute[lastRoute.length - 2] || start;
+  $: angle = Math.atan2(tip.y - approach.y, tip.x - approach.x) * 180 / Math.PI;
   $: width = hovered ? 5 : 2.5;
   $: mid = {
     x: (start.x + end.x) / 2,
@@ -119,7 +86,7 @@
   };
 </script>
 
-<svg data-testid="connection">
+<svg data-testid="connection" data-flow-state={flow.state}>
   <defs><marker id={`arrow-${id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
     <path d="M 0 0 L 10 5 L 0 10 z" style={`fill: ${stroke}; pointer-events: none`} />
   </marker></defs>
@@ -137,9 +104,16 @@
     on:mouseleave={() => (hovered = false)}
   >
     {#if label}
-      <title>{label}</title>
+      <title>{detail}</title>
     {/if}
   </path>
+
+  {#if q}
+    <g class="fill-marker" transform={`translate(${tip.x}, ${tip.y}) rotate(${angle})`} aria-hidden="true">
+      <rect x="-26" y="-3" width="16" height="6" rx="2" fill="#0f172a" stroke={stroke} stroke-width="1" />
+      <rect x="-25" y="-2" width={14 * flow.maxFill} height="4" rx="1" fill={stroke} />
+    </g>
+  {/if}
 
   {#if hovered && pct !== null}
     <g transform={`translate(${mid.x}, ${mid.y})`}>
@@ -171,6 +145,8 @@
     pointer-events: auto;
     cursor: default;
   }
+
+  .fill-marker { pointer-events: none; }
 
   .badge-bg {
     fill: rgba(2, 6, 23, 0.9);

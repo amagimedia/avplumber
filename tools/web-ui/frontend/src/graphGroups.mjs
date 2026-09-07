@@ -1,3 +1,5 @@
+import { summarizeQueueFlow } from './queueFlow.mjs';
+
 const refs = (value) => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter(v => typeof v === 'string') : [];
 export const sourceQueues = (params = {}) => refs(params.src);
 export const destinationQueues = (params = {}) => [...new Set([
@@ -58,9 +60,13 @@ export function groupGraph(nodes = [], queues = [], expanded = new Set()) {
     const name = bundle.names.length === 1 ? bundle.names[0] : `${++index}: ${bundle.names.length} queues`;
     for (const owner of bundle.producers) visible.get(owner).params.dst.push(name);
     for (const owner of bundle.consumers) visible.get(owner).params.src.push(name);
-    const samples = bundle.names.map(n => stats.get(n)).filter(Boolean);
+    const members = bundle.names.map(n => stats.get(n) || stats.get(n.startsWith('@') ? n.slice(1) : `@${n}`));
+    const samples = members.filter(Boolean);
     const sum = key => samples.reduce((total, q) => total + (Number(q[key]) || 0), 0);
-    projectedQueues.push({ name, capacity: sum('capacity'), occupied: sum('occupied'), pps: sum('pps'),
+    projectedQueues.push({ ...(bundle.names.length === 1 ? samples[0] : {}),
+      name, capacity: sum('capacity'), occupied: sum('occupied'), pps: sum('pps'),
+      enq_pps: sum('enq_pps'), deq_pps: sum('deq_pps'),
+      flowSummary: summarizeQueueFlow(members),
       members: bundle.names, aggregate: bundle.names.length > 1 });
   }
   for (const [key, group] of membership) {

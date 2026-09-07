@@ -73,6 +73,9 @@
   </div>
 
   <div class="hint breadcrumb">
+    <span class="flow-legend" title="Sampled queue activity, not frame uniqueness or timing. Amber can be intentional buffering. Fill marker shows the fullest constituent queue.">{liveQueueStats && c.queueStatsFresh ? 'Flow: blue active · gray idle/unknown · amber accumulating/not draining · red new drops' : 'Flow: paused or awaiting fresh queue samples'}</span>
+  </div>
+  <div class="hint breadcrumb">
     <span class="graph-native-counts" data-nodes={overview.nodeCount} data-queues={overview.queueCount}>{overview.nodeCount} native nodes · {overview.queueCount} defined queues</span>
     {#if grouped}
       {#if family || focused}
@@ -98,7 +101,7 @@
       nodes={grouped ? projection.nodes : c.nodes}
       queues={grouped ? projection.queues : c.queues}
       selectedNodeName={c.selectedNodeName}
-      liveQueueStats={liveQueueStats}
+      liveQueueStats={liveQueueStats && c.queueStatsFresh}
       on:selectNode={(e) => selectGraphNode(e?.detail?.name || '')}
     />
     {#if grouped && focused}<div class="hint breadcrumb">Drag to pan · Scroll to zoom · Click a node to inspect · Boundary rates are totals</div>{/if}

@@ -155,6 +155,10 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await evaluate('document.querySelector(".graph-grouped-toggle").click()');
     await wait(`${view('full')} && ${ready} && document.querySelectorAll('[data-testid=node]').length === ${nativeCount}`);
     await inspectBoxes('full graph');
+    // Queue telemetry must update Svelte attributes/text without replacing Rete sockets.
+    await evaluate('window.__graphTestNodes = [...document.querySelectorAll("[data-testid=node]")]; window.__graphTestSockets = [...document.querySelectorAll("[data-testid=socket]")]');
+    await delay(2200);
+    assert(await evaluate('window.__graphTestNodes.every(n => n.isConnected) && window.__graphTestSockets.every(n => n.isConnected)'), 'queue updates replaced nodes or sockets');
     await call('Emulation.setDeviceMetricsOverride', {width:Number(process.env.FULL_WIDTH || 6000),height:Number(process.env.FULL_HEIGHT || 4000),deviceScaleFactor:1,mobile:false});
     await evaluate('document.querySelector(".graph-grouped-toggle").click()');
     await wait(`${view('overview')} && ${ready} && document.querySelectorAll('[data-testid=node]').length === ${initial}`);

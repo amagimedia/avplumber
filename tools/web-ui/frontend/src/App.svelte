@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
+  import { sampleQueueFlow } from './queueFlow.mjs';
   import DockHost from './DockHost.svelte';
   import GraphPanel from './panels/GraphPanel.svelte';
   import NodesPanel from './panels/NodesPanel.svelte';
@@ -19,6 +20,10 @@
 
   let nodes = [];
   let queues = [];
+  let queuesObservedAt = 0;
+  let queuesFresh = false;
+  let queuesInstance = null;
+  $: queueStatsFresh = wsConnected && autoRefreshQueues && queuesFresh && queuesInstance === currentInstanceId;
   let queuesText = '';
   let statsByInstance = {};
   let currentStatsPrettyText = '';
@@ -222,9 +227,15 @@
               appendConsole(`nodes.json parse error: ${e}`);
             }
           } else if (id === 'queues.json') {
+            if (msg.instanceId && msg.instanceId !== currentInstanceId) return;
             try {
               const arr = JSON.parse(body || '[]');
-              queues = Array.isArray(arr) ? arr : [];
+              const now = Date.now();
+              const previous = queuesInstance === currentInstanceId && now - queuesObservedAt <= autoRefreshMs * 3 ? queues : [];
+              queues = sampleQueueFlow(Array.isArray(arr) ? arr : [], previous);
+              queuesObservedAt = now;
+              queuesFresh = true;
+              queuesInstance = currentInstanceId;
               queuesText = '';
             } catch (e) {
               appendConsole(`queues.json parse error: ${e}`);
@@ -447,6 +458,7 @@
     }, 1000);
 
     const t = setInterval(() => {
+      if (queuesFresh && Date.now() - queuesObservedAt > autoRefreshMs * 3) queuesFresh = false;
       if (!autoRefreshQueues) return;
       if (!wsConnected) return;
       if (!currentInstanceId) return;
@@ -740,6 +752,7 @@
     nodes,
     queues,
     queuesText,
+    queueStatsFresh,
 
     selectedNodeName,
     selectedNode,
