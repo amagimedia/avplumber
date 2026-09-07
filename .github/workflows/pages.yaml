@@ -27,17 +27,17 @@ jobs:
           ref: gh-pages
           path: legacy-pages
       - name: Assemble site with release media
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           mkdir -p _site
           git -C legacy-pages archive HEAD | tar -x -C _site
           mkdir -p _site/demos/replay/docs
           cp demos/replay/docs/index.html _site/demos/replay/docs/
-          gh release download replay-demo-media-2026-09 \
-            --pattern replay-demo.mp4 --pattern replay-demo.jpg --pattern replay-graph.png \
-            --dir _site/demos/replay/docs
+          for asset in replay-demo.mp4 replay-demo.jpg replay-graph.png; do
+            curl --fail --location --retry 3 \
+              --output "_site/demos/replay/docs/$asset" \
+              "https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/$asset"
+          done
           cp demos/replay/docs/media.sha256 _site/demos/replay/docs/
           cd _site/demos/replay/docs
           sha256sum --check media.sha256
