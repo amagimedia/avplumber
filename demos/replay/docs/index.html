@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="AVPlumber Replay: real video and terminal controls, with the complete processing graph and live queue statistics.">
+  <title>Replay demo · AVPlumber</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1280px; margin: auto; padding: 36px 24px 64px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -1px; margin: 0; }
+    h1 span, a { color: #57dbc2; }
+    a { text-underline-offset: 4px; }
+    p { color: #b5c4d8; line-height: 1.6; max-width: 75ch; }
+    video, figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
+    video { aspect-ratio: 16 / 9; margin-top: 24px; }
+    .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    button { font: inherit; color: #edf4ff; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:hover, button:focus-visible { background: #25423f; border-color: #57dbc2; }
+    h2 { margin-top: 44px; font-size: 26px; }
+    figure { margin: 20px 0 0; }
+    figcaption { color: #a4b4ca; line-height: 1.6; margin-top: 12px; }
+    footer { margin-top: 36px; border-top: 1px solid #26354a; padding-top: 20px; color: #a4b4ca; }
+    @media (max-width: 600px) { main { padding: 24px 14px; } header { align-items: start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AVPlumber <span>Replay</span></h1>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/replay">Code &amp; setup guide</a>
+  </header>
+  <p>Real terminal controls beside their live Janus/WebRTC output. The source frame counter makes pauses, exact frame steps, time seeks, and playback speed visible.</p>
+  <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg">
+    <source src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4" type="video/mp4">
+    <a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg" alt="Replay video beside terminal controls; click to download the MP4."></a>
+  </video>
+  <nav class="chapters" aria-label="Jump to a demonstration">
+    <button data-seek="0">Play</button>
+    <button data-seek="3">Pause</button>
+    <button data-seek="5">Frame steps</button>
+    <button data-seek="10">Time seek</button>
+    <button data-seek="14.5">UTC seek</button>
+    <button data-seek="17">0.25× → 2×</button>
+    <button data-seek="29">Scrub</button>
+    <button data-seek="35.5">EOF &amp; seek again</button>
+    <button data-seek="46">Reverse</button>
+  </nav>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4" download>Download the MP4</a> · 49 seconds · 1.7 MB · silent H.264 video. Recorded on an NVIDIA T4 using generated media.</p>
+
+  <h2>The complete processing graph</h2>
+  <p>The same running player, inspected through AVPlumber’s web UI: all 14 nodes and 13 queues. Flow runs left to right, from the recording through decoding and transport controls to encoding and RTP output.</p>
+  <figure>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png"><img src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png" alt="Live AVPlumber web UI showing all Replay nodes, their connections, and the queue statistics table." loading="lazy"></a>
+    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png">Open the full-resolution screenshot</a> to read every node and queue. The table shows queue fill, capacity, throughput, timestamps, and counters at capture time.</figcaption>
+  </figure>
+  <footer>
+    <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/tools/web-ui">Web UI</a>
+  </footer>
+</main>
+<script>
+  const video = document.querySelector('#demo');
+  for (const button of document.querySelectorAll('[data-seek]')) {
+    button.addEventListener('click', () => {
+      video.currentTime = Number(button.dataset.seek);
+      video.play().catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
