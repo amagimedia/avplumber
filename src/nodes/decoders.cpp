@@ -62,7 +62,23 @@ protected:
         }
         last_pts_ = frm.pts();
         bool put = true;
-        {
+        if (flush_magic_ && waiting_for_frame_ > 0) {
+            if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
+                logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
+                waiting_for_frame_ = 0;
+            } else {
+                waiting_for_frame_++;
+                put = false;
+            }
+            if (waiting_for_frame_ > 5) {
+                logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
+                waiting_for_frame_ = 0;
+                put = true;
+            }
+        }
+        // Only frames that survived flush magic may consume the discard target: a
+        // stale frame left in the decoder queue after a seek must not clear it.
+        if (put) {
             auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
             if (discard_until_.isValid()) {
                 if (frm.pts() >= discard_until_) {
@@ -71,21 +87,6 @@ protected:
                 } else {
                     put = false;
                 }
-            }
-        }
-        if (flush_magic_ && waiting_for_frame_ > 0) {
-            if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
-                logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
-                waiting_for_frame_ = 0;
-                put &= true;
-            } else {
-                waiting_for_frame_++;
-                put = false;
-            }
-            if (waiting_for_frame_ > 5) {
-                logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
-                waiting_for_frame_ = 0;
-                put &= true;
             }
         }
         if (put) {

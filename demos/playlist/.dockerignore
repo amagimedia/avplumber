@@ -6,4 +6,3 @@ __pycache__/
 .pytest_cache/
 *.pyc
 *.pyo
-tui-mockup.html

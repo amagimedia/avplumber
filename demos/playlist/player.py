@@ -1,576 +1,410 @@
 #!/usr/bin/env python3
-"""Clickable single-playlist regression UI with no terminal log panel."""
+"""Playlist terminal UI.
+
+Attaches to a running ``server.py`` over AVPlumber's control port, or runs a
+``--dry-run`` against an in-memory controller with no video.  Two action bars:
+one for the playlist, one for the selected element.
+"""
 
 from __future__ import annotations
 
 import argparse
-import ctypes
-import os
+import asyncio
 import sys
-import threading
 import time
 from pathlib import Path
+from typing import Optional
 
-from playlist import (Clip, ElementMode, InMemoryBackend, PlaylistController,
-                      PlaylistMode, TransportState)
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Input, Label, Select, Static
 
-PLAYLIST_MODES = list(PlaylistMode)
-ELEMENT_MODES = list(ElementMode)
-FIXTURE_NAMES = (
-    "01-testsrc2.mp4",
-    "02-smpte.mp4",
-    "03-smpte-hd.mp4",
-    "04-rgb.mp4",
-    "05-yuv.mp4",
-)
+from control import LocalClient, RemoteClient, Snapshot
+from playlist import ElementMode, InMemoryBackend, PlaylistController, PlaylistMode, Transition
+
+MODES = [(m.value, m.value) for m in PlaylistMode]
+TRANSITIONS = [(t.value, t.value) for t in Transition]
+ENDS = [m.value for m in ElementMode]
+END_LABEL = {"PlayToEnd": "Play", "Timed": "Timed", "LoopSelf": "Loop"}
+COLUMNS = (" ", "#", "Name", "Cue in", "Cue out", "Length", "End", "Speed")
 
 
-def demo_clips(media_dir: Path | None = None) -> list[Clip]:
-    directory = media_dir or Path(__file__).with_name("test-media")
-    modes = (
-        (ElementMode.PLAY_TO_END, None),
-        (ElementMode.TIMED, 7000),
-        (ElementMode.LOOP_SELF, None),
-        (ElementMode.PLAY_TO_END, None),
-        (ElementMode.TIMED, 10_000),
-    )
-    return [
-        Clip(
-            url=str((directory / filename).resolve()),
-            name=filename,
-            item_id=f"fixture-{index + 1}",
-            element_mode=mode,
-            duration_ms=duration,
-        )
-        for index, (filename, (mode, duration)) in enumerate(zip(FIXTURE_NAMES, modes))
+def clock(ms: Optional[int], blank: str = "") -> str:
+    if ms is None:
+        return blank
+    minutes, rest = divmod(max(0, int(ms)), 60_000)
+    return f"{minutes}:{rest // 1000:02d}.{rest % 1000:03d}"
+
+
+def bar(position: Optional[int], start: int, end: Optional[int], width: int = 16) -> str:
+    if position is None or end is None or end <= start:
+        return "-" * width
+    filled = round(min(1.0, max(0.0, (position - start) / (end - start))) * (width - 1))
+    return "=" * filled + "|" + "-" * (width - 1 - filled)
+
+
+class EditScreen(ModalScreen):
+    """Element settings; on Save posts ``edit`` (existing) or ``add`` (new)."""
+
+    DEFAULT_CSS = """
+    EditScreen { align: center middle; }
+    #dialog { width: 76; height: auto; border: ascii $primary; background: $surface; padding: 1 2; }
+    #dialog .field { height: 3; }
+    #dialog .field Label { width: 26; margin-top: 1; color: $text-muted; }
+    #dialog .field Input { width: 1fr; }
+    #dialog-actions { height: auto; margin-top: 1; }
+    #dialog-actions Button { margin-right: 1; }
+    #dialog-error { color: $error; height: auto; }
+    """
+
+    FIELDS = (("name", "Name", ""), ("url", "Path", ""), ("cue_in", "Cue in (ms)", "0"),
+              ("cue_out", "Cue out (ms, blank = end)", ""), ("duration", "Timed length (ms)", ""),
+              ("speed", "Speed", "1.0"))
+
+    def __init__(self, clip: Optional[dict], index: Optional[int]):
+        super().__init__()
+        self.clip, self.index = clip, index
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("Edit element" if self.clip else "Add element", classes="title")
+            for key, label, default in self.FIELDS:
+                value = default if self.clip is None else self.clip.get(key)
+                with Horizontal(classes="field"):
+                    yield Label(label)
+                    yield Input(value="" if value is None else str(value), id=f"field-{key}")
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Save", id="save", variant="primary")
+                yield Button("Cancel", id="cancel")
+
+    def values(self) -> dict:
+        data = {key: self.query_one(f"#field-{key}", Input).value.strip() for key, _, _ in self.FIELDS}
+        if not data["url"]:
+            raise ValueError("path is required")
+        for key in ("cue_in", "cue_out", "duration"):
+            data[key] = int(data[key]) if data[key] else None
+        data["cue_in"] = data["cue_in"] or 0
+        data["speed"] = float(data["speed"] or 1.0)
+        if self.clip:
+            data["end"] = self.clip["end"]
+            data["disabled"] = self.clip["disabled"]
+        return data
+
+    @on(Button.Pressed, "#save")
+    def save(self) -> None:
+        try:
+            self.dismiss(self.values())
+        except ValueError as exc:
+            self.query_one("#dialog-error", Static).update(str(exc))
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PlaylistTui(App):
+    TITLE = "Playlist"
+    CSS = """
+    Screen { layout: vertical; }
+    #top { height: 1fr; }
+    #clips { width: 1fr; }
+    #onair { width: 38; border: ascii $primary-darken-2; padding: 0 1; }
+    #onair .big { text-style: bold; }
+    #onair .live { color: $success; }
+    #onair .dead { color: $error; }
+    .bar { height: auto; border: ascii $primary-darken-2; padding: 0 1; }
+    .bar Button { width: 11; min-width: 11; margin-right: 1; border: none; height: 3; }
+    #dialog Button { border: none; height: 3; }
+    #el-up, #el-down { width: 6; min-width: 6; }
+    .bar Select { width: 14; margin-right: 1; }
+    .bar Input { width: 9; }
+    .bar Label { margin: 1 1 0 0; color: $text-muted; }
+    #el-take { background: $error-darken-2; }
+    #error { height: 1; color: $error; padding: 0 1; }
+    #hints { height: 1; color: $text-muted; padding: 0 1; }
+    """
+    BINDINGS = [
+        Binding("space", "toggle", "play/pause", show=False),
+        Binding("s", "pl('stop')", show=False),
+        Binding("n", "pl('next')", show=False),
+        Binding("p", "pl('prev')", show=False),
+        Binding("u", "el('hold')", show=False),
+        Binding("x", "el('park')", show=False),
+        Binding("e", "edit", show=False),
+        Binding("m", "cycle_end", show=False),
+        Binding("o", "toggle_enabled", show=False),
+        Binding("a", "add", show=False),
+        Binding("delete", "el('remove')", show=False),
+        Binding("q", "quit", show=False),
     ]
 
+    def __init__(self, client, poll_interval: float = 0.1):
+        super().__init__()
+        self.client = client
+        self.poll_interval = poll_interval
+        self.snapshot: Optional[Snapshot] = None
+        self._row_keys: list = []
+        self._shown_selected: Optional[int] = None
 
-def stop_application_bounded(application, timeout: float) -> bool:
-    error = []
+    # ---- layout --------------------------------------------------------
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="top"):
+            yield DataTable(id="clips", cursor_type="row", zebra_stripes=True)
+            with Vertical(id="onair"):
+                yield Static("", id="oa-name", classes="big")
+                yield Static("", id="oa-bar")
+                yield Static("", id="oa-next")
+                yield Static("", id="oa-transition")
+                yield Static("")
+                yield Static("", id="oa-mode")
+                yield Static("", id="oa-janus")
+        with Horizontal(id="bar-playlist", classes="bar"):
+            yield Button("Play", id="pl-play")
+            yield Button("Pause", id="pl-pause")
+            yield Button("Stop", id="pl-stop")
+            yield Button("Prev", id="pl-prev")
+            yield Button("Next", id="pl-next")
+            yield Label("Mode")
+            yield Select(MODES, value=PlaylistMode.LOOP_ALL.value, allow_blank=False, id="pl-mode")
+            yield Label("Transition")
+            yield Select(TRANSITIONS, value=Transition.CUT.value, allow_blank=False, id="pl-transition")
+            yield Input("500", id="pl-transition-ms", type="integer", tooltip="ms")
+        with Horizontal(id="bar-element", classes="bar"):
+            yield Button("Take", id="el-take")
+            yield Button("Pause", id="el-hold")
+            yield Button("Stop", id="el-park")
+            yield Button("Edit", id="el-edit")
+            yield Button("End: Play", id="el-end")
+            yield Button("Off", id="el-onoff")
+            yield Button("Up", id="el-up")
+            yield Button("Down", id="el-down")
+            yield Button("Add", id="el-add")
+            yield Button("Remove", id="el-remove")
+        yield Static("", id="error")
+        yield Static("space play/pause | s stop | n/p prev/next | enter take | u/x hold/park | e edit"
+                     " | a add | del remove | q quit", id="hints")
 
-    def stop():
+    def on_mount(self) -> None:
+        self.query_one("#bar-playlist").border_title = "PLAYLIST"
+        self.query_one("#onair").border_title = "ON AIR"
+        table = self.query_one("#clips", DataTable)
+        table.add_columns(*COLUMNS)
+        table.focus()
+        self.set_interval(self.poll_interval, self.refresh_status)
+        self.refresh_status()
+
+    # ---- polling -------------------------------------------------------
+    @work(exclusive=True, group="status")
+    async def refresh_status(self) -> None:
         try:
-            application.stop()
-        except Exception as exc:  # re-raised on the caller's thread
-            error.append(exc)
-
-    worker = threading.Thread(target=stop, name="playlist-stop", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        return False
-    if error:
-        raise error[0]
-    return True
-
-
-class FrameworkStdoutRedirect:
-    """Send native output to the log while Textual keeps its terminal stream."""
-
-    def __init__(self, log_file: str):
-        self.log_file = log_file
-        self._saved_fd = None
-        self._saved_stderr_fd = None
-        self._saved_stdout = None
-        self._saved_stderr = None
-        self._saved_dunder_stdout = None
-        self._saved_dunder_stderr = None
-        self._terminal_stream = None
-        self._terminal_stderr_stream = None
-        self._stream = None
-
-    def __enter__(self):
-        path = Path(self.log_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        sys.stdout.flush()
-        sys.stderr.flush()
-        self._saved_stdout = sys.stdout
-        self._saved_stderr = sys.stderr
-        self._saved_dunder_stdout = sys.__stdout__
-        self._saved_dunder_stderr = sys.__stderr__
-        self._terminal_stream = os.fdopen(
-            os.dup(1), "w", buffering=1,
-            encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
-            errors="replace",
-        )
-        self._terminal_stderr_stream = os.fdopen(
-            os.dup(2), "w", buffering=1,
-            encoding=getattr(sys.stderr, "encoding", None) or "utf-8",
-            errors="replace",
-        )
-        self._stream = path.open("a", buffering=1)
-        self._saved_fd = os.dup(1)
-        self._saved_stderr_fd = os.dup(2)
-        os.dup2(self._stream.fileno(), 1)
-        os.dup2(self._stream.fileno(), 2)
-        # Textual's terminal driver writes through sys.__stderr__ on Linux
-        # (sys.__stdout__ on other drivers). Ordinary Python diagnostics and
-        # native output continue to the log.
-        sys.stdout = self._stream
-        sys.stderr = self._stream
-        sys.__stdout__ = self._terminal_stream
-        sys.__stderr__ = self._terminal_stderr_stream
-        return self
-
-    def __exit__(self, _exception_type, _exception, _traceback):
-        if self._saved_fd is None:
+            if not self.client.connected:
+                await self.client.connect()
+            snapshot = await self.client.status()
+        except Exception as exc:  # noqa: BLE001
+            self.query_one("#error", Static).update(f"backend unreachable: {exc}")
             return
-        sys.stdout.flush()
-        sys.stderr.flush()
-        sys.__stdout__.flush()
-        sys.__stderr__.flush()
-        # AVPlumber writes command replies through std::cout. With the default
-        # synchronized iostreams, flushing libc drains those bytes before fd 1
-        # is restored to Textual's terminal.
-        ctypes.CDLL(None).fflush(None)
-        os.dup2(self._saved_fd, 1)
-        os.dup2(self._saved_stderr_fd, 2)
-        os.close(self._saved_fd)
-        os.close(self._saved_stderr_fd)
-        self._saved_fd = None
-        self._saved_stderr_fd = None
-        sys.stdout = self._saved_stdout
-        sys.stderr = self._saved_stderr
-        sys.__stdout__ = self._saved_dunder_stdout
-        sys.__stderr__ = self._saved_dunder_stderr
-        self._saved_stdout = None
-        self._saved_stderr = None
-        self._saved_dunder_stdout = None
-        self._saved_dunder_stderr = None
-        self._terminal_stream.close()
-        self._terminal_stream = None
-        self._terminal_stderr_stream.close()
-        self._terminal_stderr_stream = None
-        self._stream.close()
-        self._stream = None
+        self.snapshot = snapshot
+        try:
+            self.render_snapshot(snapshot)
+        except NoMatches:
+            pass                                      # screen torn down mid-refresh
 
-
-try:
-    from textual import on
-    from textual.app import App, ComposeResult
-    from textual.binding import Binding
-    from textual.containers import Horizontal, Vertical
-    from textual.screen import ModalScreen
-    from textual.widgets import Button, DataTable, Header, Input, Static
-except ImportError:
-    PlaylistTui = None
-else:
-    class ClipModal(ModalScreen):
-        """Add or edit one element without exposing backend command text."""
-
-        def __init__(self, callback, clip: Clip | None = None):
-            super().__init__()
-            self._callback = callback
-            self._clip = clip
-            self._mode = clip.element_mode if clip else ElementMode.PLAY_TO_END
-
-        def compose(self) -> ComposeResult:
-            clip = self._clip
-            with Vertical(id="clip-modal"):
-                yield Static("EDIT ELEMENT" if clip else "ADD ELEMENT", id="modal-title")
-                with Horizontal(classes="field-row"):
-                    yield Input(value=clip.url if clip else "",
-                                placeholder="media path", id="edit-url")
-                    yield Input(value=clip.name if clip else "",
-                                placeholder="display name", id="edit-name")
-                with Horizontal(classes="field-row"):
-                    yield Input(value=str(clip.play_from_ms) if clip else "0",
-                                placeholder="cue-in ms", id="edit-from")
-                    yield Input(value="" if clip is None or clip.play_to_ms is None
-                                else str(clip.play_to_ms), placeholder="cue-out ms",
-                                id="edit-to")
-                with Horizontal(classes="field-row"):
-                    yield Input(value="" if clip is None or clip.duration_ms is None
-                                else str(clip.duration_ms),
-                                placeholder="Timed duration ms", id="edit-duration")
-                    yield Input(value=str(clip.speed) if clip else "1.0",
-                                placeholder="speed", id="edit-speed")
-                with Horizontal(classes="control-row"):
-                    for mode in ELEMENT_MODES:
-                        yield Button(
-                            mode.value, id=f"edit_mode_{mode.name}",
-                            classes="edit-mode" + (" active" if mode is self._mode else ""))
-                with Horizontal(classes="control-row"):
-                    yield Button("SAVE", id="edit-save", variant="success")
-                    yield Button("CANCEL", id="edit-cancel")
-
-        @on(Button.Pressed, ".edit-mode")
-        def choose_mode(self, event):
-            self._mode = ElementMode[event.button.id[len("edit_mode_"):]]
-            for button in self.query(".edit-mode"):
-                button.set_class(button is event.button, "active")
-
-        @on(Button.Pressed, "#edit-cancel")
-        def cancel(self):
-            self.dismiss(None)
-
-        @on(Button.Pressed, "#edit-save")
-        def save(self):
-            def text(selector):
-                return self.query_one(selector, Input).value.strip()
-
-            def optional_int(selector):
-                value = text(selector)
-                return None if not value else int(value)
-
-            try:
-                url = text("#edit-url")
-                if not url:
-                    raise ValueError("media path is required")
-                duration = optional_int("#edit-duration")
-                if self._mode is ElementMode.TIMED and duration is None:
-                    raise ValueError("Timed element requires duration")
-                item_id = self._clip.item_id if self._clip else ""
-                values = dict(
-                    url=url,
-                    name=text("#edit-name"),
-                    element_mode=self._mode,
-                    play_from_ms=int(text("#edit-from") or "0"),
-                    play_to_ms=optional_int("#edit-to"),
-                    duration_ms=duration,
-                    speed=float(text("#edit-speed") or "1"),
-                )
-                if item_id:
-                    values["item_id"] = item_id
-                result = Clip(**values)
-            except ValueError as exc:
-                self.app.notify(str(exc), severity="error")
-                return
-            self._callback(result)
-            self.dismiss(result)
-
-
-    class PlaylistTui(App):
-        TITLE = "AVPlumber Playlist → Janus"
-        CSS = """
-        Screen { layout: vertical; }
-        #state { height: 4; border: heavy $success; padding: 0 1; }
-        #state.stopped { border: heavy $warning; }
-        #state.error { border: heavy $error; }
-        #clips { height: 1fr; }
-        #controls { height: 15; border: round $primary; padding: 0 1; }
-        .section-label { height: 1; color: $text-muted; }
-        .control-row { height: 3; }
-        Button { min-width: 10; margin-right: 1; }
-        Button.active { background: $primary; }
-        #clip-modal { width: 72; height: auto; border: heavy $primary;
-                      background: $surface; padding: 1; }
-        .field-row { height: 3; }
-        .field-row Input { width: 1fr; }
-        """
-        BINDINGS = [
-            Binding("q", "quit", "", show=False),
-            Binding("space", "list_toggle", "", show=False),
-            Binding("s", "list_stop", "", show=False),
-            Binding("n", "list_next", "", show=False),
-            Binding("p", "list_prev", "", show=False),
-            Binding("enter", "item_play", "", show=False),
-            Binding("u", "item_pause", "", show=False),
-            Binding("x", "item_stop", "", show=False),
-            Binding("m", "item_mode", "", show=False),
-            Binding("e", "item_enable", "", show=False),
-            Binding("a", "item_add", "", show=False),
-            Binding("delete", "item_remove", "", show=False),
-            Binding("1", "list_mode('PLAY_ALL')", "", show=False),
-            Binding("2", "list_mode('PLAY_CURRENT')", "", show=False),
-            Binding("3", "list_mode('LOOP_ALL')", "", show=False),
-            Binding("4", "list_mode('LOOP_CURRENT')", "", show=False),
-        ]
-
-        def __init__(self, controller: PlaylistController):
-            super().__init__()
-            self.controller = controller
-
-        def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
-            yield Static(id="state")
-            yield DataTable(id="clips")
-            with Vertical(id="controls"):
-                yield Static("PLAYLIST", classes="section-label")
-                with Horizontal(classes="control-row"):
-                    for button_id, label in (
-                        ("list-play", "LIST PLAY"),
-                        ("list-pause", "LIST PAUSE"),
-                        ("list-stop", "LIST STOP"),
-                        ("list-prev", "LIST PREV"),
-                        ("list-next", "LIST NEXT"),
-                    ):
-                        yield Button(label, id=button_id)
-                with Horizontal(classes="control-row"):
-                    for mode in PLAYLIST_MODES:
-                        yield Button(
-                            mode.value, id=f"list-mode-{mode.name}", classes="list-mode")
-                yield Static("SELECTED ELEMENT", classes="section-label")
-                item_controls = (
-                    ("item-play", "ITEM PLAY"),
-                    ("item-pause", "ITEM PAUSE"),
-                    ("item-stop", "ITEM STOP"),
-                    ("item-mode", "ITEM MODE"),
-                    ("item-edit", "EDIT"),
-                    ("item-enable", "ENABLE"),
-                    ("item-add", "ADD"),
-                    ("item-remove", "REMOVE"),
-                    ("item-up", "UP"),
-                    ("item-down", "DOWN"),
-                )
-                for row in (item_controls[:5], item_controls[5:]):
-                    with Horizontal(classes="control-row"):
-                        for button_id, label in row:
-                            yield Button(label, id=button_id)
-
-        def on_mount(self):
-            table = self.query_one("#clips", DataTable)
-            table.add_columns("state", "#", "name", "element mode",
-                              "cue-in", "cue-out/duration", "speed")
-            table.cursor_type = "row"
-            self._poll_timer = self.set_interval(0.05, self._poll)
-            self.refresh_state()
-
-        def on_unmount(self):
-            if hasattr(self, "_poll_timer"):
-                self._poll_timer.pause()
-
-        def _poll(self):
-            self.controller.poll(int(time.monotonic() * 1000))
-            if self.is_mounted and list(self.query("#state")):
-                self.refresh_state()
-
-        def _selected(self) -> int:
-            table = self.query_one("#clips", DataTable)
-            row = table.cursor_row
-            return 0 if row is None else min(row, len(self.controller.clips) - 1)
-
-        def _select_controller_row(self) -> int:
-            index = self._selected()
-            self.controller.select(index)
-            return index
-
-        def _do(self, operation, *args):
-            try:
-                operation(*args)
-            except Exception as exc:
-                self.controller.set_error(str(exc))
-                self.notify(str(exc), severity="error")
-            self.refresh_state()
-
-        def refresh_state(self):
-            status = self.controller.status()
-            state = self.query_one("#state", Static)
-            active = "-" if status.active_index is None else str(status.active_index + 1)
-            selected = "-" if status.selected_index is None else str(status.selected_index + 1)
-            pending = "-" if status.pending_index is None else str(status.pending_index + 1)
-            janus = "ALIVE" if status.output_alive else "NOT READY"
-            state.update(
-                f"PLAYLIST {status.mode.value}  {status.transport.value.upper()}  "
-                f"JANUS {janus}\nselected={selected} active={active} pending={pending}"
-                + (f"  ERROR: {status.error}" if status.error else "")
-            )
-            state.set_class(bool(status.error), "error")
-            state.set_class(
-                status.transport in (TransportState.STOPPED, TransportState.PAUSED)
-                and not status.error, "stopped")
-            for button in self.query(".list-mode"):
-                button.set_class(
-                    button.id == f"list-mode-{status.mode.name}", "active")
-            self._fill_table(status)
-
-        def _fill_table(self, status):
-            table = self.query_one("#clips", DataTable)
-            cursor = table.cursor_row
+    def render_snapshot(self, s: Snapshot) -> None:
+        clips = s.clips
+        table = self.query_one("#clips", DataTable)
+        keys = [c["id"] for c in clips]
+        rebuilt = keys != self._row_keys
+        if rebuilt:
             table.clear()
-            for index, clip in enumerate(self.controller.clips):
-                item_state = self.controller.element_state(index)
-                marker = {
-                    TransportState.PLAYING: "PLAY",
-                    TransportState.PAUSED: "PAUSE",
-                    TransportState.LOADING: "LOAD",
-                    TransportState.STOPPED: "STOP",
-                }[item_state]
-                if clip.disabled:
-                    marker = "OFF"
-                value = (f"{clip.duration_ms}ms" if clip.element_mode is ElementMode.TIMED
-                         else ("end" if clip.play_to_ms is None else f"{clip.play_to_ms}ms"))
-                table.add_row(marker, str(index + 1), clip.name,
-                              clip.element_mode.value, f"{clip.play_from_ms}ms",
-                              value, f"{clip.speed:g}")
-            if table.row_count:
-                desired = status.selected_index if cursor is None else cursor
-                table.move_cursor(row=min(desired or 0, table.row_count - 1))
+            for c in clips:
+                table.add_row(*self.row(c, s), key=c["id"])
+            self._row_keys = keys
+        else:
+            for c in clips:
+                for column, value in zip(table.columns, self.row(c, s)):
+                    table.update_cell(c["id"], column, value)
+        if s.selected is not None and (rebuilt or s.selected != self._shown_selected):
+            table.move_cursor(row=s.selected)      # backend-side selection change or table rebuild
+        self._shown_selected = s.selected
 
-        @on(DataTable.RowHighlighted, "#clips")
-        def row_highlighted(self, event):
-            if self.controller.clips and 0 <= event.cursor_row < len(self.controller.clips):
-                self.controller.select(event.cursor_row)
+        active = clips[s.active] if s.active is not None else None
+        self.query_one("#oa-name", Static).update(
+            f"ON AIR  {active['name']}" if active and s.playing else
+            f"PAUSED  {active['name']}" if active and s.transport == "Paused" else
+            f"LOADING {clips[s.pending]['name']}" if s.pending is not None else "STOPPED")
+        if active:
+            end = active["cue_out"] if active["end"] != "Timed" else None
+            if end is None and s.end_ms is not None and s.position_ms is not None:
+                end = s.position_ms + int((s.end_ms - s.now_ms) * active["speed"])
+            self.query_one("#oa-bar", Static).update(
+                f"{clock(s.position_ms, '-:--.---')} {bar(s.position_ms, active['cue_in'], end)} {clock(end, 'loop')}")
+        else:
+            self.query_one("#oa-bar", Static).update("")
+        nxt = clips[s.next] if s.next is not None else None
+        wait = s.seconds_to_next()
+        self.query_one("#oa-next", Static).update(
+            f"next   {nxt['name']}" + (f"  in {wait:4.1f} s" if wait is not None else "") if nxt else "next   —")
+        self.query_one("#oa-transition", Static).update(
+            f"{s.transition.lower():6} {s.transition_ms} ms" if s.transition != "Cut" else "cut    armed natively")
+        self.query_one("#oa-mode", Static).update(f"mode   {s.mode}")
+        janus = self.query_one("#oa-janus", Static)
+        janus.update(f"janus  {'live' if s.output_alive else 'no output'}")
+        janus.set_class(s.output_alive, "live")
+        janus.set_class(not s.output_alive, "dead")
 
-        # Playlist actions.
-        def action_list_toggle(self):
-            self._do(self.controller.toggle)
+        sel = clips[s.selected] if s.selected is not None else None
+        self.query_one("#bar-element").border_title = sel["name"].upper() if sel else "ELEMENT"
+        self.query_one("#el-end", Button).label = f"End: {END_LABEL[sel['end']]}" if sel else "End"
+        self.query_one("#el-onoff", Button).label = ("On" if sel["disabled"] else "Off") if sel else "Off"
+        self.query_one("#pl-play", Button).label = "Resume" if s.transport == "Paused" else "Play"
+        for widget_id, value in (("pl-mode", s.mode), ("pl-transition", s.transition)):
+            select = self.query_one(f"#{widget_id}", Select)
+            if select.value != value:
+                with select.prevent(Select.Changed):
+                    select.value = value
+        error = s.error
+        if error and s.error_index is not None:
+            error = f"{clips[s.error_index]['name']}: {error}"
+        self.query_one("#error", Static).update(error)
 
-        def action_list_stop(self):
-            self._do(self.controller.stop)
+    @staticmethod
+    def row(c: dict, s: Snapshot) -> tuple:
+        index = s.clips.index(c)
+        mark = ">" if index == s.active and s.transport != "Stopped" else \
+               "~" if index == s.pending else "*" if index == s.selected else "-" if c["disabled"] else " "
+        name = c["name"] + ("  off" if c["disabled"] else "")
+        length = c["duration"] if c["end"] == "Timed" else (
+            None if c["cue_out"] is None else int((c["cue_out"] - c["cue_in"]) / c["speed"]))
+        return (mark, str(index + 1), name, clock(c["cue_in"]), clock(c["cue_out"], "end"),
+                clock(length, "media"), END_LABEL[c["end"]], f"{c['speed']:g}x")
 
-        def action_list_next(self):
-            self._do(self.controller.next)
+    # ---- actions -------------------------------------------------------
+    @property
+    def selected(self) -> Optional[int]:
+        return None if self.snapshot is None else self.snapshot.selected
 
-        def action_list_prev(self):
-            self._do(self.controller.prev)
+    @work(group="send")
+    async def send(self, verb: str, **arg) -> None:
+        try:
+            await self.client.send(verb, **arg)
+        except Exception as exc:  # noqa: BLE001
+            self.query_one("#error", Static).update(str(exc))
+        self.refresh_status()
 
-        def action_list_mode(self, mode_name: str):
-            self._do(self.controller.set_mode, PlaylistMode[mode_name])
+    def action_toggle(self) -> None:
+        self.send("toggle")
 
-        # Selected-item actions.
-        def action_item_play(self):
-            self._do(self.controller.element_play, self._select_controller_row())
+    def action_pl(self, verb: str) -> None:
+        self.send(verb)
 
-        def action_item_pause(self):
-            self._do(self.controller.element_pause, self._select_controller_row())
+    def action_el(self, verb: str) -> None:
+        if self.selected is not None:
+            self.send(verb, index=self.selected)
 
-        def action_item_stop(self):
-            self._do(self.controller.element_stop, self._select_controller_row())
+    def action_cycle_end(self) -> None:
+        if self.snapshot is None or self.selected is None:
+            return
+        clip = self.snapshot.clips[self.selected]
+        end = ENDS[(ENDS.index(clip["end"]) + 1) % len(ENDS)]
+        duration = clip["duration"] or (clip["cue_out"] or 10_000) - clip["cue_in"]
+        self.send("end_mode", index=self.selected, end=end, duration=duration)
 
-        def action_item_mode(self):
-            index = self._select_controller_row()
-            current = self.controller.clips[index].element_mode
-            mode = ELEMENT_MODES[(ELEMENT_MODES.index(current) + 1) % len(ELEMENT_MODES)]
-            duration = self.controller.clips[index].duration_ms
-            if mode is ElementMode.TIMED and duration is None:
-                duration = 5000
-            self._do(self.controller.set_element_mode, index, mode, duration)
+    def action_toggle_enabled(self) -> None:
+        if self.snapshot is not None and self.selected is not None:
+            self.send("enable", index=self.selected, enabled=self.snapshot.clips[self.selected]["disabled"])
 
-        def action_item_enable(self):
-            index = self._select_controller_row()
-            self._do(self.controller.set_disabled, index,
-                     not self.controller.clips[index].disabled)
+    def action_edit(self) -> None:
+        if self.snapshot is None or self.selected is None:
+            return
+        index = self.selected
 
-        def action_item_add(self):
-            self.push_screen(ClipModal(self.controller.append_clip))
+        def done(values):
+            if values:
+                self.send("edit", index=index, clip=values)
+        self.push_screen(EditScreen(self.snapshot.clips[index], index), done)
 
-        def action_item_edit(self):
-            index = self._select_controller_row()
+    def action_add(self) -> None:
+        def done(values):
+            if values:
+                self.send("add", clip=values, index=None if self.selected is None else self.selected + 1)
+        self.push_screen(EditScreen(None, None), done)
 
-            def save(clip):
-                self.controller.replace_clip(index, clip)
+    @on(Button.Pressed)
+    def pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if not bid.startswith(("pl-", "el-")):
+            return                                    # dialog buttons handle themselves
+        self.screen_stack[0].query_one("#clips", DataTable).focus()   # keep arrow keys on the table
+        if bid.startswith("pl-"):
+            self.send(bid[3:])
+        elif bid == "el-edit":
+            self.action_edit()
+        elif bid == "el-add":
+            self.action_add()
+        elif bid == "el-end":
+            self.action_cycle_end()
+        elif bid == "el-onoff":
+            self.action_toggle_enabled()
+        elif bid in ("el-up", "el-down") and self.selected is not None:
+            to = self.selected + (-1 if bid == "el-up" else 1)
+            if 0 <= to < len(self.snapshot.clips):
+                self.send("move", index=self.selected, to=to)
+        elif bid.startswith("el-"):
+            self.action_el(bid[3:])
 
-            self.push_screen(ClipModal(save, self.controller.clips[index]))
+    @on(Select.Changed, "#pl-mode")
+    def mode_changed(self, event: Select.Changed) -> None:
+        if self.snapshot and event.value != self.snapshot.mode:
+            self.send("mode", mode=event.value)
 
-        def action_item_remove(self):
-            self._do(self.controller.remove_clip, self._select_controller_row())
+    @on(Select.Changed, "#pl-transition")
+    def transition_changed(self, event: Select.Changed) -> None:
+        if self.snapshot and event.value != self.snapshot.transition:
+            self.send("transition", transition=event.value)
 
-        def action_item_up(self):
-            index = self._select_controller_row()
-            if index > 0:
-                self._do(self.controller.reorder_clip, index, index - 1)
+    @on(Input.Submitted, "#pl-transition-ms")
+    def transition_ms_changed(self, event: Input.Submitted) -> None:
+        if event.value.isdigit() and self.snapshot:
+            self.send("transition", transition=self.snapshot.transition, duration_ms=int(event.value))
 
-        def action_item_down(self):
-            index = self._select_controller_row()
-            if index + 1 < len(self.controller.clips):
-                self._do(self.controller.reorder_clip, index, index + 1)
+    @on(DataTable.RowHighlighted, "#clips")
+    def highlighted(self, event: DataTable.RowHighlighted) -> None:
+        stale = event.cursor_row != event.data_table.cursor_row     # left over from a table rebuild
+        if self.snapshot is not None and not stale and event.cursor_row != self.snapshot.selected:
+            self.send("select", index=event.cursor_row)
 
-        @on(Button.Pressed)
-        def button_pressed(self, event):
-            button_id = event.button.id or ""
-            actions = {
-                "list-play": lambda: self._do(self.controller.play),
-                "list-pause": lambda: self._do(self.controller.pause),
-                "list-stop": self.action_list_stop,
-                "list-prev": self.action_list_prev,
-                "list-next": self.action_list_next,
-                "item-play": self.action_item_play,
-                "item-pause": self.action_item_pause,
-                "item-stop": self.action_item_stop,
-                "item-mode": self.action_item_mode,
-                "item-edit": self.action_item_edit,
-                "item-enable": self.action_item_enable,
-                "item-add": self.action_item_add,
-                "item-remove": self.action_item_remove,
-                "item-up": self.action_item_up,
-                "item-down": self.action_item_down,
-            }
-            if button_id in actions:
-                actions[button_id]()
-            elif button_id.startswith("list-mode-"):
-                self.action_list_mode(button_id[len("list-mode-"):])
-
-
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="run the non-printing in-memory backend")
-    parser.add_argument("--no-tui", action="store_true",
-                        help="perform a short headless control smoke")
-    parser.add_argument("--media-dir", type=Path,
-                        default=Path(__file__).with_name("test-media"))
-    parser.add_argument("--janus-host", default="127.0.0.1")
-    parser.add_argument("--janus-video-port", type=int, default=5004)
-    parser.add_argument("--janus-video-pt", type=int, default=96)
-    parser.add_argument("--janus-video-ssrc", type=lambda value: int(value, 0),
-                        default=0x41565001)
-    parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
-    parser.add_argument("--janus-rtcp-port", type=int, default=0)
-    parser.add_argument("--log-file", default="playlist-demo.log")
-    parser.add_argument("--control-timeout", type=float, default=10.0)
-    return parser.parse_args(argv)
+    @on(DataTable.RowSelected, "#clips")
+    def row_selected(self, event: DataTable.RowSelected) -> None:
+        self.send("take", index=event.cursor_row)
 
 
-def make_backend(args):
-    clips = demo_clips(args.media_dir)
-    if args.dry_run:
-        backend = InMemoryBackend()
-        controller = PlaylistController(backend, clips)
-        controller.play()
-        controller.poll(int(time.monotonic() * 1000))
-        return controller, None
+def dry_run_client(media_dir: Path) -> LocalClient:
+    from server import default_clips
+    now = lambda: time.monotonic_ns() // 1_000_000  # noqa: E731
+    ctl = PlaylistController(InMemoryBackend(clock=now), default_clips(media_dir))
+    return LocalClient(ctl)
 
-    from playlist_app import (JanusVideoConfig, PlaylistConfig,
-                              build_playlist_application)
-    config = PlaylistConfig(
-        clips=clips,
-        janus=JanusVideoConfig(
-            host=args.janus_host,
-            video_port=args.janus_video_port,
-            payload_type=args.janus_video_pt,
-            ssrc=args.janus_video_ssrc,
-            rtcp_bind=args.janus_rtcp_bind,
-            rtcp_port=args.janus_rtcp_port,
-        ),
-        control_timeout=args.control_timeout,
-        log_file=args.log_file,
-    )
-    application = build_playlist_application(config)
-    application.start()
-    return application.controller, application
+
+def parse_args(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=7778)
+    p.add_argument("--dry-run", action="store_true", help="in-memory controller, no backend")
+    p.add_argument("--media-dir", type=Path, default=Path(__file__).resolve().parent / "test-media")
+    return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    redirect = None
-    if not args.dry_run:
-        redirect = FrameworkStdoutRedirect(args.log_file)
-        redirect.__enter__()
-    application = None
-    try:
-        controller, application = make_backend(args)
-        if args.no_tui:
-            controller.next()
-            controller.poll(int(time.monotonic() * 1000))
-            controller.pause()
-            controller.play()
-            controller.stop()
-            return 0
-        if PlaylistTui is None:
-            raise RuntimeError("Textual is required; install demos/playlist/requirements.txt")
-        PlaylistTui(controller).run()
-        return 0
-    finally:
-        try:
-            if application is not None and not stop_application_bounded(
-                    application, args.control_timeout):
-                raise TimeoutError("playlist application shutdown timed out")
-        finally:
-            if redirect is not None:
-                redirect.__exit__(None, None, None)
+    client = dry_run_client(args.media_dir) if args.dry_run else RemoteClient(args.host, args.port)
+    PlaylistTui(client).run()
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

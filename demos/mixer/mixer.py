@@ -12,6 +12,9 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from avpmixer.inputs import build_input
+from avpmixer.janus import JanusVideoConfig, build_janus_output
+
 try:
     from .layouts import (
         CANONICAL_SOURCE_HEIGHT,
@@ -41,7 +44,6 @@ JANUS_DEFAULT_VIDEO_PORT = 5004
 JANUS_DEFAULT_VIDEO_PT = 96
 JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
 JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
-RTP_PACKET_SIZE = 1_200
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 
 
@@ -228,55 +230,11 @@ def _build_input(
     avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool
 ) -> str:
     group = _input_group(index)
-    packet_edge = f"input_{index}_packets"
-    video_packet_edge = f"input_{index}_video_packets"
-    decoded_edge = f"input_{index}_decoded"
-    realtime_edge = f"input_{index}_realtime"
-    fps_edge = f"input_{index}_fps"
-    normalized_edge = f"input_{index}_normalized"
-
-    avp.addNode(api.InputRec({
-        "name": f"input_{index}",
-        "url": url,
-        "dst": packet_edge,
-        "loop": loop,
-        "initial_timeout": 20,
-        "timeout": 3_942_000_000,
-        "group": group,
-    }))
-    avp.addNode(api.Demux({
-        "name": f"demux_{index}",
-        "src": packet_edge,
-        "routing": {"?v:0": video_packet_edge},
-        "wait_for_keyframe": False,
-        "auto_restart": "group",
-        "group": group,
-    }))
-    avp.addNode(api.DecVideo({
-        "name": f"decode_{index}",
-        "src": video_packet_edge,
-        "dst": decoded_edge,
-        "pixel_format": "?cuda",
-        "hwaccel": HWACCEL,
-        "auto_restart": "group",
-        "group": group,
-    }))
-    avp.addNode(api.Realtime({
-        "name": f"realtime_{index}",
-        "src": decoded_edge,
-        "dst": realtime_edge,
-        "set_pts": True,
-        "group": group,
-    }))
-    avp.addNode(api.ForceFPS({
-        "name": f"fps_{index}",
-        "src": realtime_edge,
-        "dst": fps_edge,
-        "fps": f"{fps}/{FPS_DEN}",
-        "group": group,
-    }))
+    fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
+                           fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
     if not normalize:
         return fps_edge
+    normalized_edge = f"input_{index}_normalized"
     avp.addNode(api.FilterVideo({
         "name": f"normalize_{index}",
         "src": fps_edge,
@@ -404,114 +362,6 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
     }))
 
 
-def _rtp_url(host: str, port: int, *, rtcp_port: int) -> str:
-    return (
-        f"rtp://{host}:{port}?pkt_size={RTP_PACKET_SIZE}"
-        f"&rtcp_port={rtcp_port}"
-    )
-
-
-def _build_janus_output(avp, api, options: GraphOptions, mixer_edge: str) -> None:
-    fps_edge = "janus_fps"
-    keyframe_edge = "janus_keyframed"
-    assumed_edge = "janus_video"
-    encoded_edge = "janus_encoded"
-    headers_edge = "janus_repeat_headers"
-    muxed_edge = "janus_video_rtp_mux"
-    bitrate = f"{options.janus_video_bitrate_kbps}k"
-
-    avp.addNode(api.ForceFPS({
-        "name": "janus_fps",
-        "src": mixer_edge,
-        "dst": fps_edge,
-        "fps": f"{options.fps}/{FPS_DEN}",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.ForceKeyFrame({
-        "name": "janus_force_keyframe",
-        "src": fps_edge,
-        "dst": keyframe_edge,
-        "interval_sec": "1/1",
-        "auto_restart": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.AssumeVideoFormat({
-        "name": "janus_format",
-        "src": keyframe_edge,
-        "dst": assumed_edge,
-        "width": CANVAS_WIDTH,
-        "height": CANVAS_HEIGHT,
-        "pixel_format": "cuda",
-        "real_pixel_format": "nv12",
-        "auto_restart": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.EncVideo({
-        "name": "janus_encoder",
-        "src": assumed_edge,
-        "dst": encoded_edge,
-        "codec": "h264_nvenc",
-        "hwaccel": HWACCEL,
-        "options": {
-            "b": bitrate,
-            "maxrate": bitrate,
-            "bufsize": bitrate,
-            "g": options.fps,
-            "bf": 0,
-            "preset": "p6",
-            "profile": "baseline",
-            "tune": "ull",
-            "rc": "cbr",
-            "rc-lookahead": 0,
-            "zerolatency": 1,
-            "delay": 0,
-            "forced-idr": 1,
-            "no-scenecut": 1,
-            "strict_gop": 1,
-            "aud": 1,
-            "spatial-aq": 1,
-            "temporal-aq": 0,
-        },
-        "auto_restart": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.Bsf({
-        "name": "janus_repeat_headers",
-        "src": encoded_edge,
-        "dst": headers_edge,
-        "bsf": "dump_extra=freq=keyframe",
-        "auto_restart": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.Mux({
-        "name": "janus_mux",
-        "src": [headers_edge],
-        "dst": muxed_edge,
-        "ts_sort_wait": 0,
-        "auto_restart": "on",
-        "on_error": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.Output({
-        "name": "janus_rtp_output",
-        "src": muxed_edge,
-        "url": _rtp_url(
-            options.janus_host,
-            options.janus_video_port,
-            rtcp_port=options.janus_video_port + 1,
-        ),
-        "format": "rtp",
-        "options": {
-            "payload_type": options.janus_video_pt,
-            "rtpflags": "skip_rtcp",
-            "ssrc": options.janus_video_ssrc,
-        },
-        "auto_restart": "on",
-        "on_error": "panic",
-        "group": OUTPUT_GROUP,
-    }))
-
-
 def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
     record_edge = mixer_edge
     janus_edge = mixer_edge
@@ -531,20 +381,16 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
     if not options.janus_output:
         return None
 
-    _build_janus_output(avp, api, options, janus_edge)
-
-    def trigger_keyframe(_request: str) -> None:
-        avp.executeCommandsFromString(
-            "node.object.set janus_force_keyframe trigger true"
-        )
-
-    return api.RtcpFeedbackListener(
-        bind_host=options.janus_rtcp_bind,
-        bind_port=options.janus_rtcp_port,
-        janus_host=options.janus_host,
-        janus_rtcp_port=options.janus_video_port + 1,
-        media_ssrc=options.janus_video_ssrc,
-        on_keyframe_request=trigger_keyframe,
+    return build_janus_output(
+        avp, api, janus_edge,
+        JanusVideoConfig(
+            host=options.janus_host, video_port=options.janus_video_port,
+            payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
+            bitrate_kbps=options.janus_video_bitrate_kbps,
+            rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
+        ),
+        fps=options.fps, fps_den=FPS_DEN, width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
+        hwaccel=HWACCEL, group=OUTPUT_GROUP,
     )
 
 

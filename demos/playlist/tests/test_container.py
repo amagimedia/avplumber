@@ -22,9 +22,11 @@ def test_runtime_uses_configurable_avplumber_base_and_packaged_dependencies():
     assert "FROM ${AVP_BASE_IMAGE} AS runtime" in source
     assert "COPY --from=python-dependencies /opt/playlist-python" in source
     assert "ENV PYTHONPATH=/opt/playlist-python:${PYTHONPATH}" in source
-    assert 'find_spec("pyplumber")' in source
+    assert 'find_spec("pyplumber")' in source and 'find_spec("avpmixer")' in source
     assert "import pyplumber" not in source
-    assert 'ENTRYPOINT ["python3", "player.py"]' in source
+    assert 'ENTRYPOINT ["python3", "server.py"]' in source
+    for module in ("server.py", "player.py", "playlist.py", "engine.py", "control.py"):
+        assert module in source
     assert '"--janus-host", "127.0.0.1"' in source
     assert '"--janus-video-port", "5004"' in source
     assert '"--log-file", "/tmp/playlist-demo.log"' in source
@@ -37,7 +39,7 @@ def test_build_context_excludes_local_artifacts_and_readme_documents_image():
         assert pattern in ignored
 
     readme = (DEMO_DIR / "README.md").read_text()
-    assert "AVP_BASE_IMAGE=<cuda-python-avplumber-image>" in readme
-    assert "docker build" in readme
-    assert "--gpus all" in readme
-    assert "--network host" in readme
+    guide = (DEMO_DIR / "docs" / "guide.md").read_text()
+    assert "AVP_BASE_IMAGE=<cuda-python-avplumber-image>" in guide
+    for text in ("docker build", "--gpus all", "--network host", "docs/guide.md"):
+        assert text in readme

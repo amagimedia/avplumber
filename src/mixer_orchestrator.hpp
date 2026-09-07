@@ -133,6 +133,8 @@ class MixerOrchestrator {
     std::string transition_edge_name_ = "trans_out";
 
 public:
+    /// Drop an armed or running transition and keep the current program picture (`mixer.interrupt`).
+    void interrupt() { interruptTransition(); }
     MixerOrchestrator(std::shared_ptr<NodeManager> nodes,
                       std::shared_ptr<MixerState> state,
                       std::shared_ptr<SharedTimeline> timeline,
