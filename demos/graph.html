@@ -13,6 +13,7 @@
     a { color: #57dbc2; }
     button { font: inherit; color: inherit; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
     button:hover, button:focus-visible { border-color: #57dbc2; }
+    select { font: inherit; color: inherit; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; }
     label { display: flex; align-items: center; gap: 8px; }
     main { overflow: auto; height: calc(100dvh - 100px); padding: 16px; }
     img { display: block; max-width: none; height: auto; }
@@ -22,6 +23,7 @@
 <body>
   <header>
     <h1>Processing graph</h1>
+    <label>Demo <select id="pick"></select></label>
     <a id="demo">Back to demo</a>
     <button id="fit">Fit</button><button id="actual">100%</button>
     <label>Zoom <input id="zoom" type="range" min="10" max="200" value="100"><output id="percent">100%</output></label>
@@ -35,6 +37,9 @@
     const key = Object.hasOwn(demos, requested) ? requested : 'mixer';
     const [name, asset] = demos[key];
     const graph = document.querySelector('#graph'), zoom = document.querySelector('#zoom');
+    const pick = document.querySelector('#pick');
+    for (const [id, [label]] of Object.entries(demos)) pick.add(new Option(label, id, false, id === key));
+    pick.addEventListener('change', () => { location.search = `?demo=${pick.value}`; });
     document.querySelector('h1').textContent = `AVPlumber ${name} · processing graph`;
     document.title = `${name} processing graph · AVPlumber`;
     document.querySelector('#demo').href = `${key}/docs/`;

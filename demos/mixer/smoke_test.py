@@ -7,16 +7,16 @@ import asyncio
 import json
 import time
 
+from avpmixer.control import AvpConnection
+
 try:
     from .control import (
-        AvpConnection,
         mixer_command,
         parse_mixer_status,
         parse_scene_list,
     )
 except ImportError:
     from control import (  # type: ignore[no-redef]
-        AvpConnection,
         mixer_command,
         parse_mixer_status,
         parse_scene_list,

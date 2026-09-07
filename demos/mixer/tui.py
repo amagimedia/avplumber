@@ -13,16 +13,16 @@ from textual.message import Message
 from textual.scrollbar import ScrollBarRender
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
+from avpmixer.control import AvpConnection
+
 try:
     from .control import (
-        AvpConnection,
         mixer_command,
         parse_mixer_status,
         parse_scene_list,
     )
 except ImportError:
     from control import (
-        AvpConnection,
         mixer_command,
         parse_mixer_status,
         parse_scene_list,

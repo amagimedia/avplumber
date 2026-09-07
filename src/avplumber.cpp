@@ -669,8 +669,18 @@ public:
             command_team_unlink<RealTimeTeam>(arg);
         };
         commands_["resume"] = [this](ClientStream &cs, std::string &arg) {
-            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), arg);
-            team->resume();
+            // resume <team> [at <wallclock_ms>]
+            std::stringstream ss(arg);
+            std::string t, command, at;
+            ss >> t >> command >> at;
+            std::shared_ptr<PauseControlTeam> team = InstanceSharedObjects<PauseControlTeam>::get(manager_->instanceData(), t);
+            if (command.empty()) {
+                team->resume();
+            } else if (command == "at" && !at.empty()) {
+                team->resumeAt(std::stoll(at));
+            } else {
+                throw Error("invalid command parameters");
+            }
         };
         commands_["output.start"] = [this](ClientStream &cs, std::string &args) {
             OutputControl::get(args, false)->start();
@@ -923,6 +933,13 @@ public:
             std::string scene_name = req.at("scene").get<std::string>();
             auto orch = mixerOrchestrator(mixer_name);
             orch.preview(scene_name);
+        };
+
+        // mixer.interrupt {"mixer":"mixer"}: drop an armed or running transition, keep the current picture
+        commands_["mixer.interrupt"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.interrupt", arg);
+            auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
+            orch.interrupt();
         };
 
         // mixer.cut {"mixer":"mixer","scene":"scene_name","start_pts_ms":123456789}

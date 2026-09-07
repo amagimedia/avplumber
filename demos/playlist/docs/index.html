@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AVPlumber Playlist demo</title>
+  <meta name="description" content="AVPlumber Playlist: clip playout on the native mixer engine with frame-exact scheduled cuts, real program video beside the terminal controls, and the complete processing graph.">
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    body { margin: 0 auto; max-width: 1200px; padding: 24px; }
+    h1 { font-size: 28px; margin: 0 0 8px; }
+    h2 { font-size: 20px; margin: 32px 0 8px; }
+    p { color: #b5c4d8; }
+    a { color: #57dbc2; }
+    video, img { display: block; width: 100%; height: auto; border: 1px solid #334157; border-radius: 8px; background: #000; }
+    .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    .chapters button { font: inherit; color: inherit; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    .chapters button:hover, .chapters button:focus-visible { border-color: #57dbc2; }
+    figure { margin: 16px 0; }
+    figcaption { color: #b5c4d8; font-size: 14px; margin-top: 8px; }
+    table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #26354a; }
+    th { color: #92a7c2; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <h1>AVPlumber Playlist</h1>
+  <p>Program video on the left, the real terminal controls on the right. Clips are mixer sources with resident decoders; every cut, fade or wipe is armed inside the engine at a wallclock time, so the boundary lands on the cue-out and cue-in frames.</p>
+
+  <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg">
+    <source src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" type="video/mp4">
+    <a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg" alt="Playlist program video beside terminal controls; click to download the MP4."></a>
+  </video>
+  <nav class="chapters" aria-label="Jump to a demonstration">
+    <!-- data-t values are filled in from the recording's chapter marks -->
+    <button data-t="0">Scheduled cuts through the playlist</button>
+    <button data-t="0">Manual take and Next</button>
+    <button data-t="0">Fade and interruption</button>
+    <button data-t="0">Pause and resume</button>
+    <button data-t="0">Edit cue points on air</button>
+    <button data-t="0">Cold element</button>
+  </nav>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · silent H.264 video · recorded on an NVIDIA T4 with generated 1080p30 clips. Chapter times and the duration/size line are set when the recording is published.</p>
+
+  <h2>Frame continuity</h2>
+  <p>Every fixture carries a 32-bit frame code. The published recording's program track was checked boundary by boundary with <code>tests/verify_recording.py</code>; the table is filled from that report.</p>
+  <table>
+    <thead><tr><th>Boundary</th><th>Last frame out</th><th>First frame in</th><th>Repeats</th><th>Gaps</th></tr></thead>
+    <tbody id="boundaries"><tr><td colspan="5">Pending the T4 run.</td></tr></tbody>
+  </table>
+
+  <h2>The processing graph</h2>
+  <figure>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/playlist-graph-grouped.png" alt="Grouped playlist graph: sixteen element chains, two compositor slots, transitions and RTP output. Click for the full ungrouped graph." loading="lazy"></a>
+    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the viewer to zoom and inspect every node. The grouped overview bundles the element chains; the ungrouped capture shows all of them.</figcaption>
+  </figure>
+
+  <p><a href="https://github.com/amagimedia/avplumber/tree/develop/demos/playlist">Source and README</a> · <a href="../../graph.html?demo=playlist">Graph viewer</a></p>
+
+  <script>
+    const video = document.querySelector('#demo');
+    document.querySelectorAll('.chapters button').forEach(b => b.addEventListener('click', () => { video.currentTime = Number(b.dataset.t); video.play(); }));
+  </script>
+</body>
+</html>

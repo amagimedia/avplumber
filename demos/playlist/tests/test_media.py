@@ -4,11 +4,12 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from player import FIXTURE_NAMES, demo_clips
+from server import FIXTURE_NAMES, default_clips as demo_clips
 
 
 MEDIA_DIR = Path(__file__).parents[1] / "test-media"
@@ -31,6 +32,7 @@ def test_generator_declares_distinct_patterns_frame_counter_and_pts_clock():
     assert "FRAME %{n}" in source
     assert "PTS %{pts\\\\:hms}" in source
     assert "-frames:v 300" in source
+    assert "frame_code_filter" in source and "geq=lum=" in source
     assert "size=1920x1080:rate=30" in source
     assert "basketball" not in source.lower()
 
@@ -61,3 +63,18 @@ def test_generated_files_are_unique_h264_1080p30_300_frame_ten_second_clips():
         }
         hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
     assert len(hashes) == 5
+
+
+def test_frame_code_round_trip():
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).parent))
+    from frame_codes import X0, CELL, ROW, encode, read_code
+    luma = np.zeros((1080, 1920), np.uint8)
+    code = encode(4, 299)
+    for bit in range(32):
+        on = bool(code & (1 << (31 - bit)))
+        luma[0:ROW, X0 + bit * CELL:X0 + (bit + 1) * CELL] = 240 if on else 16
+        luma[ROW:2 * ROW, X0 + bit * CELL:X0 + (bit + 1) * CELL] = 16 if on else 240
+    assert read_code(luma) == (4, 299)
+    luma[0:2 * ROW, X0:X0 + 32 * CELL] = 128           # blended frame -> unreadable
+    assert read_code(luma) is None
