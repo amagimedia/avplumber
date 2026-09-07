@@ -2,18 +2,14 @@
 
 [![Watch the mixer: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [Download MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Controls and reference](docs/guide.md)
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-graph-ungrouped.png)
 
-**15 seconds · 1600×900 · 60 fps · 0.95 MB.** Program output on the left,
-real terminal controls on the right. Direct mode stays on while selections
-switch between fullscreen, 16-box, 8-box, 4-box and 2-box using Cut, Fade and a
-transparent media-file Wipe.
-
-The program is recorded directly from the host's encoded output and combined
-with the TUI capture. All 900 program frames have evenly spaced 1/60-second
-RTP timestamps, with no packet gaps or consecutive identical decoded frames.
-Terminal updates come from the separate browser capture. Media lives in public
-release assets, outside Git history.
+The 15-second, 0.95 MB recording shows Direct editing with Cut, Fade and
+transparent media wipes, switching between fullscreen, 16-box, 8-box, 4-box
+and 2-box. Program output is on the left and real terminal controls on the
+right, in a 1600×900, 60 fps MP4. Click the first-frame preview to play it with
+chapter buttons and inspect the web UI graph. The page is hosted on GitHub
+Pages; media comes from public release assets, outside Git history.
 
 ## Run
 

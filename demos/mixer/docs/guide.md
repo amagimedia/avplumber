@@ -275,3 +275,22 @@ are warmed before the control server reports ready. Cut and Fade therefore
 change runtime parameters without rebuilding their FFmpeg filter graphs. Media
 Wipe uses a separate, predeclared graph that the native orchestrator starts for
 the selected clip and stops after its tail has drained.
+
+## Demo recording
+
+The [15-second demonstration](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+combines the host's encoded program output with a separate browser capture of
+the real TUI. Direct mode remains enabled through Cut, Fade and transparent
+media-file Wipe selections. The final silent H.264 MP4 is 1600×900 at 60 fps,
+contains 900 frames and is 947,203 bytes (about 0.51 Mbit/s).
+
+All 900 program frames have evenly spaced 1/60-second RTP timestamps, with no
+packet gaps or consecutive identical decoded frames. The final MP4 also has
+evenly spaced frame timestamps. Terminal updates come from the separate
+browser capture; this recording is not a click-to-display latency measurement.
+See the [latency measurements](latency.md) for the measurement method and
+its published baseline.
+
+The poster is the MP4's first frame. The grouped WebUI overview opens the
+full ungrouped graph in a new tab on the demo page. Video and images are public
+release assets; [media.sha256](media.sha256) records their checksums.
