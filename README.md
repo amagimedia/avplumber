@@ -50,10 +50,7 @@ Development on Windows can be done using Docker and VSCode Dev Containers.
 
 Development container comes with all required dependencies and clangd installed.
 
-### Demo
-
-[Watch the Replay demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) — video beside terminal controls,
-with frame/time seeks, pause, speed changes, reverse, and the processing graph.
+### Test stream demo
 
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
 
@@ -71,6 +68,23 @@ This demo uses [MediaMTX](https://github.com/bluenviron/mediamtx) as streaming s
 
     brew install docker docker-compose colima
     colima start
+
+## Demos
+
+Start with the [demo setup guide](demos/README.md) for public-source Docker
+builds, NVIDIA requirements, and a local WebRTC preview.
+
+| Demo | What it demonstrates | Requirements |
+| --- | --- | --- |
+| [Mixer](demos/mixer/README.md) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and CUDA wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
+| [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
+| [Browser capture](demos/dmabuf-browser/README.md) | Capture HTML through DMA-BUF and compose browser sources into a GPU grid with WebRTC preview. | NVIDIA graphics driver + DRM/EGL; Docker stack includes Electron and Janus. |
+| [CUDA overlay validation](demos/cuda-overlay/README.md) | Compare up to 16 composited inputs against a CPU reference; inspect images and a pass/fail report. | NVIDIA GPU; Docker generates the fixtures. |
+
+These demos produce video only. For smaller building blocks, see the
+[fixed graph examples](examples/README.md) and
+[Python examples](pyplumber/examples/README.md).
 
 ## Build process details
 
