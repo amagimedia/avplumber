@@ -31,10 +31,10 @@ generate_clip() {
 
     ffmpeg -hide_banner -loglevel error -y \
         -f lavfi -i "${pattern}=size=1920x1080:rate=30" \
-        -vf "drawtext=font='DejaVu Sans Mono':text='${clip_id}':fontcolor=white:fontsize=64:borderw=4:bordercolor=black:x=60:y=60,drawtext=font='DejaVu Sans Mono':text='FRAME %{n}   PTS %{pts\\:hms}':fontcolor=white:fontsize=52:borderw=4:bordercolor=black:x=60:y=h-th-60,$(frame_code_filter "$clip_index")" \
+        -vf "format=yuv420p,drawtext=font='DejaVu Sans Mono':text='${clip_id}':fontcolor=white:fontsize=64:borderw=4:bordercolor=black:x=60:y=60,drawtext=font='DejaVu Sans Mono':text='FRAME %{n}   PTS %{pts\\:hms}':fontcolor=white:fontsize=52:borderw=4:bordercolor=black:x=60:y=h-th-60,$(frame_code_filter "$clip_index")" \
         -frames:v 300 -an \
         -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
-        -g 30 -keyint_min 30 -sc_threshold 0 -movflags +faststart \
+        -g 30 -keyint_min 30 -bf 0 -sc_threshold 0 -movflags +faststart \
         -metadata title="${clip_id}" \
         -f mp4 "$temporary"
     mv -- "$temporary" "$output"

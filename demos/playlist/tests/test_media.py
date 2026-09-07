@@ -33,6 +33,7 @@ def test_generator_declares_distinct_patterns_frame_counter_and_pts_clock():
     assert "PTS %{pts\\\\:hms}" in source
     assert "-frames:v 300" in source
     assert "frame_code_filter" in source and "geq=lum=" in source
+    assert "-bf 0" in source and "format=yuv420p," in source   # frame-exact seeks, strip drawn in YUV
     assert "size=1920x1080:rate=30" in source
     assert "basketball" not in source.lower()
 

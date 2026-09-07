@@ -9,11 +9,12 @@
 # positive offset).  The program is never resampled in time: -r 30 matches its
 # native rate, so every program frame appears exactly once in the composite.
 set -euo pipefail
-program=$1; capture=$2; out=$3; offset=${4:-0}
+program=$1; capture=$2; out=$3; offset=${4:-0}; tui_crop=${5:-}   # optional W:H:X:Y of the terminal in the capture
+crop=""; [ -n "$tui_crop" ] && crop="crop=$tui_crop,"
 ffmpeg -hide_banner -loglevel error -y \
     -ss "$offset" -i "$program" \
     -framerate 30 -i "$capture/tui/%05d.jpg" \
-    -filter_complex "[0:v]scale=1000:-2:flags=lanczos,pad=1000:900:0:(oh-ih)/2:color=#080d17[left];[1:v]scale=600:900:flags=lanczos[right];[left][right]hstack=inputs=2,format=yuv420p" \
+    -filter_complex "[0:v]scale=900:-2:flags=lanczos,pad=900:900:0:(oh-ih)/2:color=#080d17[left];[1:v]${crop}scale=700:-2:flags=lanczos,pad=700:900:0:(oh-ih)/2:color=#080d17[right];[left][right]hstack=inputs=2:shortest=1,format=yuv420p" \
     -r 30 -c:v libx264 -preset slow -crf 20 -movflags +faststart -an -shortest "$out"
 ffmpeg -hide_banner -loglevel error -y -ss 1 -i "$out" -frames:v 1 -q:v 3 "${out%.mp4}.jpg"
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,nb_frames,duration -of csv=p=0 "$out"

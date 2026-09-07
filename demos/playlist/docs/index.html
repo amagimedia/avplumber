@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AVPlumber Playlist demo</title>
-  <meta name="description" content="AVPlumber Playlist: clip playout on the native mixer engine with frame-exact scheduled cuts, real program video beside the terminal controls, and the complete processing graph.">
+  <meta name="description" content="AVPlumber Playlist: clip playout on the native mixer engine with scheduled cuts, real program video beside the terminal controls, measured frame continuity, and the complete processing graph.">
   <style>
     :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; color: #edf4ff; background: #080d17; }
     body { margin: 0 auto; max-width: 1200px; padding: 24px; }
     h1 { font-size: 28px; margin: 0 0 8px; }
     h2 { font-size: 20px; margin: 32px 0 8px; }
-    p { color: #b5c4d8; }
+    p, li { color: #b5c4d8; }
     a { color: #57dbc2; }
     video, img { display: block; width: 100%; height: auto; border: 1px solid #334157; border-radius: 8px; background: #000; }
     .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
@@ -21,45 +21,61 @@
     table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
     th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #26354a; }
     th { color: #92a7c2; font-weight: 500; }
+    td.ok { color: #57dbc2; }
+    td.off { color: #ffb347; }
   </style>
 </head>
 <body>
   <h1>AVPlumber Playlist</h1>
-  <p>Program video on the left, the real terminal controls on the right. Clips are mixer sources with resident decoders; every cut, fade or wipe is armed inside the engine at a wallclock time, so the boundary lands on the cue-out and cue-in frames.</p>
+  <p>Program video on the left, the real terminal controls on the right. Clips are mixer sources with resident decoders; every cut and fade is armed inside the engine at a wallclock time. The recording shows a manual take, two scheduled cuts landing on the configured cue frames, and a fade, in a 1600×900, 30 fps MP4 recorded on a Tesla T4 with generated 1080p30 clips.</p>
 
   <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg">
     <source src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" type="video/mp4">
     <a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg" alt="Playlist program video beside terminal controls; click to download the MP4."></a>
   </video>
-  <nav class="chapters" aria-label="Jump to a demonstration">
-    <!-- data-t values are filled in from the recording's chapter marks -->
-    <button data-t="0">Scheduled cuts through the playlist</button>
-    <button data-t="0">Manual take and Next</button>
-    <button data-t="0">Fade and interruption</button>
-    <button data-t="0">Pause and resume</button>
-    <button data-t="0">Edit cue points on air</button>
-    <button data-t="0">Cold element</button>
-  </nav>
-  <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · silent H.264 video · recorded on an NVIDIA T4 with generated 1080p30 clips. Chapter times and the duration/size line are set when the recording is published.</p>
+  <nav class="chapters" aria-label="Jump to a demonstration" id="chapters"></nav>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · <span id="media-line">26 seconds · 2.3 MB · 1600×900 · 30 fps · silent H.264 video</span>. The program track is the engine's own recording of the program (never resampled in time); the terminal is a separate browser capture of the TUI served by ttyd.</p>
 
-  <h2>Frame continuity</h2>
-  <p>Every fixture carries a 32-bit frame code. The published recording's program track was checked boundary by boundary with <code>tests/verify_recording.py</code>; the table is filled from that report.</p>
+  <h2>Frame continuity, measured</h2>
+  <p>Every generated clip carries a 32-bit frame code. A separate 50-second LoopAll pass of the five fixtures was recorded by the engine and checked frame by frame with <code>tests/verify_recording.py</code>: 1,509 program frames, none unreadable. Each element boundary, as recorded:</p>
   <table>
-    <thead><tr><th>Boundary</th><th>Last frame out</th><th>First frame in</th><th>Repeats</th><th>Gaps</th></tr></thead>
-    <tbody id="boundaries"><tr><td colspan="5">Pending the T4 run.</td></tr></tbody>
+    <thead><tr><th>Boundary</th><th>Last frame out</th><th>First frame in</th><th>Expected</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>01-testsrc2 → 02-smpte</td><td>298</td><td>0</td><td>299 → 0</td><td class="off">out one frame early</td></tr>
+      <tr><td>02-smpte → 03-smpte-hd (cue 2.000 s)</td><td>299</td><td>60</td><td>299 → 60</td><td class="ok">exact</td></tr>
+      <tr><td>03-smpte-hd (cue-out 8.000 s) → 04-rgb</td><td>239</td><td>0</td><td>239 → 0</td><td class="ok">exact</td></tr>
+      <tr><td>04-rgb (Timed 4 s at 2×) → 05-yuv</td><td>238</td><td>0</td><td>· → 0</td><td class="ok">exact</td></tr>
+      <tr><td>05-yuv → 01-testsrc2</td><td>1</td><td>1</td><td>299 → 0</td><td class="off">one frame late</td></tr>
+      <tr><td>01-testsrc2 → 02-smpte</td><td>299</td><td>1</td><td>299 → 0</td><td class="off">in one frame late</td></tr>
+    </tbody>
   </table>
+  <ul>
+    <li>Cue points inside a file land exactly: element 3, cued 2.000 s to 8.000 s, goes on air on frame 60 and leaves on frame 239.</li>
+    <li>Elements cued at 0 land on frame 0 or frame 1. The mixer's ready cut fires on the first fresh incoming frame and switches on the next one; the frame before cue-in that this consumes has to come from the loop wrap, and the realtime resync at the wrap decides the race. This ±1 frame is the remaining known offset.</li>
+    <li>Inside elements the verifier found one repeated and one skipped frame about 0.8 s after each transition (at frame 21 to 24 of the incoming element), and three such pairs during the first element's start-up. No other repeats or gaps in 1,509 frames.</li>
+  </ul>
+  <p>The report itself, with every anomaly position, is <a href="verify-clean.json">verify-clean.json</a> (also a release asset); the fixture, verifier and recording procedure are described in the <a href="guide.md">reference</a>.</p>
 
   <h2>The processing graph</h2>
   <figure>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/playlist-graph-grouped.png" alt="Grouped playlist graph: sixteen element chains, two compositor slots, transitions and RTP output. Click for the full ungrouped graph." loading="lazy"></a>
-    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the viewer to zoom and inspect every node. The grouped overview bundles the element chains; the ungrouped capture shows all of them.</figcaption>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/playlist-graph-grouped.png" alt="Grouped playlist graph: element chains, two compositor slots, mixer core, wipe branch and outputs. Click for the full ungrouped graph." loading="lazy"></a>
+    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the viewer to zoom and inspect every node: five element chains (input, demux, NVDEC, speed, pause, realtime, fps), sixteen mixer inputs, both compositor slots, the transition and wipe branches, the Janus RTP output and the verification recorder. The grouped overview bundles the element chains.</figcaption>
   </figure>
 
-  <p><a href="https://github.com/amagimedia/avplumber/tree/develop/demos/playlist">Source and README</a> · <a href="../../graph.html?demo=playlist">Graph viewer</a></p>
+  <p><a href="https://github.com/amagimedia/avplumber/tree/develop/demos/playlist">Source and README</a> · <a href="guide.md">Reference</a> · <a href="../../graph.html?demo=playlist">Graph viewer</a></p>
 
   <script>
-    const video = document.querySelector('#demo');
-    document.querySelectorAll('.chapters button').forEach(b => b.addEventListener('click', () => { video.currentTime = Number(b.dataset.t); video.play(); }));
+    const chapters = [
+      {t: 3.6, title: "Manual take (cut)"},
+      {t: 10.6, title: "Scheduled cut at cue-out"},
+      {t: 14.6, title: "Scheduled cut after a Timed element"},
+      {t: 16.1, title: "Fade"},
+    ];
+    const video = document.querySelector('#demo'), nav = document.querySelector('#chapters');
+    for (const c of chapters) {
+      const b = document.createElement('button'); b.textContent = c.title;
+      b.addEventListener('click', () => { video.currentTime = c.t; video.play(); }); nav.append(b);
+    }
   </script>
 </body>
 </html>

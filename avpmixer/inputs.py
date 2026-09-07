@@ -16,7 +16,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 input_params: Optional[dict] = None,
                 speed_team: Optional[str] = None, speed: float = 1.0,
                 pause_team: Optional[str] = None, sync_team: Optional[str] = None,
-                realtime_params: Optional[dict] = None,
+                realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group") -> str:
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
 
@@ -42,6 +42,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
         "pixel_format": "?cuda", "hwaccel": hwaccel, "group": group, **restart,
+        **(decoder_params or {}),
     }))
     realtime_src = edge("decoded")
     if speed_team is not None:

@@ -63,6 +63,7 @@ class Report:
     boundaries: List[dict] = field(default_factory=list)
     unreadable: int = 0
     problems: List[str] = field(default_factory=list)
+    anomalies: List[dict] = field(default_factory=list)   # where repeats, gaps and unreadable runs sit
 
 
 def analyze(codes: List[Optional[Tuple[int, int]]], speed_of=None) -> Report:
@@ -73,6 +74,8 @@ def analyze(codes: List[Optional[Tuple[int, int]]], speed_of=None) -> Report:
     for index, code in enumerate(codes):
         if code is None:
             report.unreadable += 1
+            if pending_unreadable == 0:
+                report.anomalies.append({"at": index, "kind": "unreadable", "after": previous})
             pending_unreadable += 1
             continue
         clip, frame = code
@@ -87,8 +90,10 @@ def analyze(codes: List[Optional[Tuple[int, int]]], speed_of=None) -> Report:
             speed = 1.0 if speed_of is None else speed_of(clip)
             if step == 0 and speed >= 1.0:
                 segment.repeats += 1
+                report.anomalies.append({"at": index, "kind": "repeat", "frame": frame})
             elif step > max(1, round(speed)) + pending_unreadable * max(1, round(speed)) or step < 0:
                 segment.gaps += 1
+                report.anomalies.append({"at": index, "kind": "gap", "from": previous[1], "to": frame})
             segment.last, segment.frames = frame, segment.frames + 1
         pending_unreadable = 0
         previous = code
@@ -142,7 +147,7 @@ def main(argv=None) -> int:
     check_expectations(report, playlist, args.fps, args.transition_frames)
     summary = {"frames": len(codes), "unreadable": report.unreadable,
                "segments": [vars(s) for s in report.segments], "boundaries": report.boundaries,
-               "problems": report.problems}
+               "anomalies": report.anomalies, "problems": report.problems}
     text = json.dumps(summary, indent=2)
     if args.json:
         args.json.write_text(text)

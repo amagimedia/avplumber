@@ -284,7 +284,12 @@ class PlaylistEngine:
                     speed_team=f"pl_item_{slot}_speed", speed=clip.speed,
                     pause_team=slot_pause_team(slot), sync_team=slot_sync_team(slot),
                     realtime_params={"tick_period": f"1/{fps}", "negative_time_tolerance": 1 / fps,
-                                     "negative_time_discard": 1 / fps, "discontinuity_threshold": 3})
+                                     "negative_time_discard": 1 / fps, "discontinuity_threshold": 3},
+                    # Frame-exact seeks need the replay demo's decoder setup: flush the
+                    # NVDEC queue on seek so stale frames cannot leak past the discard target.
+                    decoder_params={"pixel_format": "cuda", "codec_map": {"h264": "h264_cuvid"},
+                                    "hwaccel_only_for_codecs": ["h264"], "flush_magic": True,
+                                    "options": {"flags": "low_delay"}})
         self._slot_of[clip.item_id] = slot
         self._bound[slot] = _fingerprint(clip)
         if clip.url not in self._lengths:
@@ -455,10 +460,26 @@ class PlaylistEngine:
             else:
                 self._remove_chain(slot)
 
+    def _park_target_ms(self, slot: int) -> int:
+        """One frame before cue-in, in loop order.
+
+        The mixer's ready cut fires on the first fresh frame of the incoming
+        element and switches on the next one, so the parked frame is only ever
+        shown in the preview slot.  An element cued at 0 parks on its last frame;
+        the realtime resync at the loop wrap then costs its frame 0 (measured).
+        Seeking to the very start of the file instead stalls the decoder after
+        the resume, which is worse."""
+        url, cue_in, cue_out, _speed = self._bound[slot]
+        frame_ms = 1000 // self.config.fps
+        if cue_in >= frame_ms:
+            return cue_in - frame_ms
+        end = cue_out if cue_out is not None else self._lengths.get(url)
+        return max(0, end - frame_ms) if end else 0
+
     def _park(self, slot: int) -> None:
-        """Pause, then seek the chain back to cue-in through its realtime sync team."""
-        cue_in = self._bound[slot][1]
-        self._exec(f"pause {slot_pause_team(slot)} now\nseek {slot_sync_team(slot)} now {hms(cue_in)}")
+        """Pause, then seek the chain to its park frame through the realtime sync team."""
+        self._exec(f"pause {slot_pause_team(slot)} now\n"
+                   f"seek {slot_sync_team(slot)} now {hms(self._park_target_ms(slot))}")
 
     def _disarm(self, item_id: str) -> None:
         armed = self._armed

@@ -26,12 +26,14 @@ app.whenReady().then(async () => {
     win.webContents.setFrameRate(fps);
     win.webContents.on('paint', (_e, _r, img) => paint = img);
     await win.loadURL(url);
-    for (let n = 0; n < 60; n++) {           // wait for xterm to render the table
-      const text = await win.webContents.executeJavaScript('document.body.innerText');
-      if (text.includes('PLAYLIST')) break;
+    for (let n = 0; n < 60; n++) {           // ttyd draws on a canvas: wait for the xterm element
+      const ready = await win.webContents.executeJavaScript(
+        '!!document.querySelector(".xterm-screen, .xterm, canvas")');
+      if (ready) break;
       if (n === 59) throw Error('TUI did not render');
       await sleep(500);
     }
+    await sleep(3000);                        // let Textual paint its first frame
     fs.mkdirSync(`${dir}/tui`, {recursive: true});
     const start = performance.now(), startWallclock = Date.now(), timings = [];
     for (let frame = 0; performance.now() - start < duration * 1000; frame++) {

@@ -56,11 +56,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--janus-bitrate-kbps", type=int, default=4500)
     p.add_argument("--janus-rtcp-bind", default="0.0.0.0")
     p.add_argument("--janus-rtcp-port", type=int, default=0)
-    p.add_argument("--preroll-ms", type=int, default=50)
+    p.add_argument("--preroll-ms", type=int, default=50,
+                   help="resume the incoming chain this early before its cut")
     p.add_argument("--switch-margin-ms", type=int, default=100)
     p.add_argument("--control-timeout", type=float, default=10.0)
     p.add_argument("--log-file", default="playlist-demo.log")
     p.add_argument("--record", help="Also write the program to this .mp4/.ts for verification")
+    p.add_argument("--webui-url", default="", help="Register with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     p.add_argument("--run-seconds", type=float, help="Exit after this long (smoke tests)")
     return p.parse_args(argv)
 
@@ -80,8 +82,9 @@ class PlaylistServer:
     """Owns the engine and controller; serializes control commands with the poll loop."""
 
     def __init__(self, avp, api, config: PlaylistConfig, clips: List[Clip], mode: PlaylistMode,
-                 transition: Transition, transition_ms: int):
+                 transition: Transition, transition_ms: int, webui_url: str = ""):
         self.avp = avp
+        self.webui_url = webui_url
         self.engine = PlaylistEngine(avp, api, config)
         self.controller = PlaylistController(self.engine, clips, mode, transition, transition_ms)
         self.config = config
@@ -116,6 +119,8 @@ class PlaylistServer:
         first = self.controller.clips[self.controller.selected_index]
         self.engine.build(first)
         self.register_commands()
+        if self.webui_url:
+            self.avp.registerWithWebUI(self.webui_url, "playlist", self.config.log_file)
         self.engine.start()
         with self._lock:
             if not self.controller.play():
@@ -136,9 +141,13 @@ class PlaylistServer:
 
     def run(self, run_seconds=None) -> None:
         end = None if run_seconds is None else time.monotonic() + run_seconds
+        beat = time.monotonic()
         while not self._stop.is_set() and (end is None or time.monotonic() < end):
             with self._lock:
                 self.controller.poll(now_ms())
+            if self.webui_url and time.monotonic() - beat >= 1.0:
+                self.avp.heartbeat()
+                beat = time.monotonic()
             time.sleep(POLL_SEC)
 
     def stop(self) -> None:
@@ -153,7 +162,8 @@ def main(argv=None) -> int:
     clips = load_clips(args.playlist) if args.playlist else default_clips(args.media_dir)
     api = load_avp_api()
     server = PlaylistServer(api.AVPlumber(), api, build_config(args), clips,
-                            PlaylistMode(args.mode), Transition(args.transition), args.transition_ms)
+                            PlaylistMode(args.mode), Transition(args.transition), args.transition_ms,
+                            webui_url=args.webui_url)
     signal.signal(signal.SIGINT, lambda *_: server.stop())
     signal.signal(signal.SIGTERM, lambda *_: server.stop())
     try:

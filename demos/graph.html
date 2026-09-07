@@ -32,6 +32,7 @@
   <main><img id="graph" alt="Complete AVPlumber processing graph with routed connections and arrowheads."></main>
   <script>
     const demos = { replay: ['Replay', 'replay-graph.png'], mixer: ['Mixer', 'mixer-graph-ungrouped.png'],
+      playlist: ['Playlist', 'playlist-graph.png'],
       'dmabuf-browser': ['DMA-BUF browser', 'dmabuf-graph.png'], 'cuda-overlay': ['CUDA overlay', 'cuda-overlay-graph.png'] };
     const requested = new URLSearchParams(location.search).get('demo');
     const key = Object.hasOwn(demos, requested) ? requested : 'mixer';

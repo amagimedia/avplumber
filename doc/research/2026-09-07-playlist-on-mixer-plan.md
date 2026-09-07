@@ -229,3 +229,26 @@ uses to terminate a 201 response, so the TUI client timed out.
 Not done yet because the GPU was handed to another task: the boundary
 verification of a recorded program, the side-by-side recording, WebUI graph
 captures and release assets.
+
+## Verification and publishing (2026-09-08)
+
+Measured on the T4 with `tests/verify_recording.py` over a recorded 50 s
+LoopAll pass (1,509 frames, 0 unreadable): cue points inside a file land
+exactly (element 3: frame 60 in, frame 239 out); elements cued at 0 land on
+frame 0 or 1 depending on the mixer's ready-cut race (it fires on the first
+fresh incoming frame and switches on the next one; for a cue at 0 the consumed
+frame must come from the loop wrap, where the realtime resync decides). One
+repeated and one skipped frame follow each transition by about 0.8 s.
+
+Fixes found by measurement: the decoder discard target was cleared by a stale
+NVDEC frame after a seek (flush magic now runs first, `src/nodes/decoders.cpp`);
+fixtures now have no B-frames and the RGB fixture's code strip is drawn in YUV;
+seeking to timestamp 0 stalls the decoder after the resume, so elements cued at
+0 park on their last frame. Rejected after measurement: switching by the mixer
+timeline key (`active` at PTS) caused post-cut repeats, deeper chain queues
+made continuity worse, and resuming the incoming chain after the cut showed the
+decoder's warm-up on air.
+
+Published: `playlist-demo-media-2026-09` (movie, poster) and the graph PNGs in
+`webui-graphs-2026-09`; `demos/graph.html` has the playlist entry; the TUI is
+ASCII-only so browser terminals without symbol fonts render it.

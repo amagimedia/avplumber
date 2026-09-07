@@ -42,9 +42,9 @@ def clock(ms: Optional[int], blank: str = "") -> str:
 
 def bar(position: Optional[int], start: int, end: Optional[int], width: int = 16) -> str:
     if position is None or end is None or end <= start:
-        return "─" * width
+        return "-" * width
     filled = round(min(1.0, max(0.0, (position - start) / (end - start))) * (width - 1))
-    return "━" * filled + "●" + "─" * (width - 1 - filled)
+    return "=" * filled + "|" + "-" * (width - 1 - filled)
 
 
 class EditScreen(ModalScreen):
@@ -52,7 +52,7 @@ class EditScreen(ModalScreen):
 
     DEFAULT_CSS = """
     EditScreen { align: center middle; }
-    #dialog { width: 76; height: auto; border: round $primary; background: $surface; padding: 1 2; }
+    #dialog { width: 76; height: auto; border: ascii $primary; background: $surface; padding: 1 2; }
     #dialog .field { height: 3; }
     #dialog .field Label { width: 26; margin-top: 1; color: $text-muted; }
     #dialog .field Input { width: 1fr; }
@@ -113,13 +113,14 @@ class PlaylistTui(App):
     Screen { layout: vertical; }
     #top { height: 1fr; }
     #clips { width: 1fr; }
-    #onair { width: 38; border: round $primary-darken-2; padding: 0 1; }
+    #onair { width: 38; border: ascii $primary-darken-2; padding: 0 1; }
     #onair .big { text-style: bold; }
     #onair .live { color: $success; }
     #onair .dead { color: $error; }
-    .bar { height: auto; border: round $primary-darken-2; padding: 0 1; }
-    .bar Button { width: 11; min-width: 11; margin-right: 1; }
-    #el-up, #el-down { width: 5; min-width: 5; }
+    .bar { height: auto; border: ascii $primary-darken-2; padding: 0 1; }
+    .bar Button { width: 11; min-width: 11; margin-right: 1; border: none; height: 3; }
+    #dialog Button { border: none; height: 3; }
+    #el-up, #el-down { width: 6; min-width: 6; }
     .bar Select { width: 14; margin-right: 1; }
     .bar Input { width: 9; }
     .bar Label { margin: 1 1 0 0; color: $text-muted; }
@@ -163,30 +164,30 @@ class PlaylistTui(App):
                 yield Static("", id="oa-mode")
                 yield Static("", id="oa-janus")
         with Horizontal(id="bar-playlist", classes="bar"):
-            yield Button("▶ Play", id="pl-play")
-            yield Button("⏸ Pause", id="pl-pause")
-            yield Button("■ Stop", id="pl-stop")
-            yield Button("⏮ Prev", id="pl-prev")
-            yield Button("⏭ Next", id="pl-next")
+            yield Button("Play", id="pl-play")
+            yield Button("Pause", id="pl-pause")
+            yield Button("Stop", id="pl-stop")
+            yield Button("Prev", id="pl-prev")
+            yield Button("Next", id="pl-next")
             yield Label("Mode")
             yield Select(MODES, value=PlaylistMode.LOOP_ALL.value, allow_blank=False, id="pl-mode")
             yield Label("Transition")
             yield Select(TRANSITIONS, value=Transition.CUT.value, allow_blank=False, id="pl-transition")
             yield Input("500", id="pl-transition-ms", type="integer", tooltip="ms")
         with Horizontal(id="bar-element", classes="bar"):
-            yield Button("▶ Take", id="el-take")
-            yield Button("⏸ Pause", id="el-hold")
-            yield Button("■ Stop", id="el-park")
-            yield Button("✎ Edit", id="el-edit")
+            yield Button("Take", id="el-take")
+            yield Button("Pause", id="el-hold")
+            yield Button("Stop", id="el-park")
+            yield Button("Edit", id="el-edit")
             yield Button("End: Play", id="el-end")
             yield Button("Off", id="el-onoff")
-            yield Button("↑", id="el-up")
-            yield Button("↓", id="el-down")
-            yield Button("+ Add", id="el-add")
-            yield Button("− Remove", id="el-remove")
+            yield Button("Up", id="el-up")
+            yield Button("Down", id="el-down")
+            yield Button("Add", id="el-add")
+            yield Button("Remove", id="el-remove")
         yield Static("", id="error")
-        yield Static("space play/pause · s stop · n/p prev/next · enter take · u/x hold/park · e edit"
-                     " · a add · del remove · q quit", id="hints")
+        yield Static("space play/pause | s stop | n/p prev/next | enter take | u/x hold/park | e edit"
+                     " | a add | del remove | q quit", id="hints")
 
     def on_mount(self) -> None:
         self.query_one("#bar-playlist").border_title = "PLAYLIST"
@@ -233,9 +234,9 @@ class PlaylistTui(App):
 
         active = clips[s.active] if s.active is not None else None
         self.query_one("#oa-name", Static).update(
-            f"▶ {active['name']}" if active and s.playing else
-            f"⏸ {active['name']}" if active and s.transport == "Paused" else
-            f"… {clips[s.pending]['name']}" if s.pending is not None else "■ stopped")
+            f"ON AIR  {active['name']}" if active and s.playing else
+            f"PAUSED  {active['name']}" if active and s.transport == "Paused" else
+            f"LOADING {clips[s.pending]['name']}" if s.pending is not None else "STOPPED")
         if active:
             end = active["cue_out"] if active["end"] != "Timed" else None
             if end is None and s.end_ms is not None and s.position_ms is not None:
@@ -252,7 +253,7 @@ class PlaylistTui(App):
             f"{s.transition.lower():6} {s.transition_ms} ms" if s.transition != "Cut" else "cut    armed natively")
         self.query_one("#oa-mode", Static).update(f"mode   {s.mode}")
         janus = self.query_one("#oa-janus", Static)
-        janus.update(f"janus  {'● live' if s.output_alive else '○ no output'}")
+        janus.update(f"janus  {'live' if s.output_alive else 'no output'}")
         janus.set_class(s.output_alive, "live")
         janus.set_class(not s.output_alive, "dead")
 
@@ -260,7 +261,7 @@ class PlaylistTui(App):
         self.query_one("#bar-element").border_title = sel["name"].upper() if sel else "ELEMENT"
         self.query_one("#el-end", Button).label = f"End: {END_LABEL[sel['end']]}" if sel else "End"
         self.query_one("#el-onoff", Button).label = ("On" if sel["disabled"] else "Off") if sel else "Off"
-        self.query_one("#pl-play", Button).label = "▶ Resume" if s.transport == "Paused" else "▶ Play"
+        self.query_one("#pl-play", Button).label = "Resume" if s.transport == "Paused" else "Play"
         for widget_id, value in (("pl-mode", s.mode), ("pl-transition", s.transition)):
             select = self.query_one(f"#{widget_id}", Select)
             if select.value != value:
@@ -274,13 +275,13 @@ class PlaylistTui(App):
     @staticmethod
     def row(c: dict, s: Snapshot) -> tuple:
         index = s.clips.index(c)
-        mark = "▶" if index == s.active and s.transport != "Stopped" else \
-               "…" if index == s.pending else "›" if index == s.selected else "·" if c["disabled"] else " "
+        mark = ">" if index == s.active and s.transport != "Stopped" else \
+               "~" if index == s.pending else "*" if index == s.selected else "-" if c["disabled"] else " "
         name = c["name"] + ("  off" if c["disabled"] else "")
         length = c["duration"] if c["end"] == "Timed" else (
             None if c["cue_out"] is None else int((c["cue_out"] - c["cue_in"]) / c["speed"]))
         return (mark, str(index + 1), name, clock(c["cue_in"]), clock(c["cue_out"], "end"),
-                clock(length, "media"), END_LABEL[c["end"]], f"{c['speed']:g}×")
+                clock(length, "media"), END_LABEL[c["end"]], f"{c['speed']:g}x")
 
     # ---- actions -------------------------------------------------------
     @property

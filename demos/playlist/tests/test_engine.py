@@ -63,6 +63,8 @@ class FakeAvp:
 
 
 class FakeMixer:
+    timeline = "mixer_tl"
+
     def __init__(self, avp, **kw):
         self.avp, self.kw, self.sources, self.scenes, self.log = avp, kw, [], {}, avp.log
 
@@ -147,6 +149,7 @@ def test_build_registers_sixteen_fullscreen_scenes_and_the_replay_style_chain(bu
     assert chain == ["input_pl0", "demux_pl0", "decode_pl0", "speed_pl0", "pause_pl0", "realtime_pl0", "fps_pl0"]
     assert by_name["input_pl0"]["pause_team"] == slot_pause_team(0) and by_name["input_pl0"]["loop"] is True
     assert by_name["input_pl0"]["start_ts"] == "00:00:00.000" and "auto_restart" not in by_name["decode_pl0"]
+    assert by_name["decode_pl0"]["flush_magic"] is True and by_name["decode_pl0"]["codec_map"] == {"h264": "h264_cuvid"}
     assert by_name["pause_pl0"] == {"type": "pause", "name": "pause_pl0", "src": "input_pl0_speeded",
                                     "dst": "input_pl0_paused", "team": "pl_item_0_pause",
                                     "sync_team": "pl_item_0_sync", "group": "pl_item_0"}
@@ -171,7 +174,7 @@ def test_scheduled_cue_primes_and_parks_then_arms_shortly_before_the_cut(built):
     cue(e, b, 7, 130_000)
     # prime: run to first frame, then pause + seek through the sync team
     assert avp.log == ["group.start pl_item_1", "pause pl_item_1_pause now",
-                       f"seek pl_item_1_sync now {hms(2000)}"]
+                       f"seek pl_item_1_sync now {hms(2000 - 33)}"]     # one frame before cue-in
     assert e._armed.issued is False                      # 30 s ahead: not armed yet
     Clock.now = 129_000
     e._tick()
@@ -220,7 +223,7 @@ def test_superseding_an_armed_element_interrupts_and_parks_it(built):
     avp.log.clear()
     cue(e, c, 2, None)
     assert avp.log[0] == 'mixer.interrupt {"mixer":"mixer"}'
-    assert avp.log[1:3] == ["pause pl_item_1_pause now", f"seek pl_item_1_sync now {hms(0)}"]
+    assert avp.log[1:3] == ["pause pl_item_1_pause now", f"seek pl_item_1_sync now {hms(10_000 - 33)}"]
     assert e._armed.item_id == c.item_id
 
 
@@ -232,7 +235,7 @@ def test_park_of_an_armed_element_disarms_and_re_cues_it(built):
     avp.log.clear()
     e._handle(eng._Task("park", b.item_id))
     assert e._armed is None and "mixer.interrupt" not in " ".join(avp.log)   # never issued
-    assert avp.log == ["pause pl_item_1_pause now", f"seek pl_item_1_sync now {hms(1500)}"]
+    assert avp.log == ["pause pl_item_1_pause now", f"seek pl_item_1_sync now {hms(1500 - 33)}"]
     e._handle(eng._Task("pause", b.item_id)); e._handle(eng._Task("resume", b.item_id))
     assert avp.log[-2:] == ["pause pl_item_1_pause now", "resume pl_item_1_pause"]
     e._handle(eng._Task("remove", b.item_id))
@@ -255,7 +258,7 @@ def test_cue_to_the_program_slot_restarts_it_from_cue_in(built):
     a = clips("a")[0]
     avp.log.clear()
     cue(e, a, 5, None)
-    assert avp.log == ["pause pl_item_0_pause now", f"seek pl_item_0_sync now {hms(0)}", "resume pl_item_0_pause"]
+    assert avp.log == ["pause pl_item_0_pause now", f"seek pl_item_0_sync now {hms(10_000 - 33)}", "resume pl_item_0_pause"]
     assert events(e) == [BackendEvent("on_air", a.item_id, 5, at_ms=100_000)]
 
 
