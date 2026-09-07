@@ -1,6 +1,13 @@
 # Replay VOD player demo
 
-<img src="docs/tui.svg" alt="The replay TUI showing playback status, transport, scrub, seek, speed, UTC, and regression controls" width="100%">
+[![Watch Replay: video beside terminal controls](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-demo.jpg)](https://amagimedia.github.io/avplumber/demos/replay/docs/)
+
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-graph.png)
+
+The 49-second, 1.7 MB recording shows frame/time/UTC seeks, pause, 0.25×–2× speed,
+scrubbing, reverse, and seeking after EOF. Click the first-frame preview to play
+it with chapter buttons and inspect the web UI graph. Media is hosted on GitHub
+Pages, outside Git history.
 
 ## Features
 

@@ -29,3 +29,8 @@ __pycache__/
 /neural-demo/.model-build-cache*/
 /neural-demo/.models_onnx.tgz
 /neural-demo/.tensorrt*.tgz
+
+# Replay media is published as release assets, never committed.
+/demos/replay/docs/*.mp4
+/demos/replay/docs/*.jpg
+/demos/replay/docs/*.png

@@ -1,0 +1,59 @@
+name: Publish demo pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - .github/workflows/pages.yaml
+      - demos/replay/docs/index.html
+      - demos/replay/docs/media.sha256
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read existing Pages content
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: legacy-pages
+      - name: Assemble site with release media
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p _site
+          git -C legacy-pages archive HEAD | tar -x -C _site
+          mkdir -p _site/demos/replay/docs
+          cp demos/replay/docs/index.html _site/demos/replay/docs/
+          gh release download replay-demo-media-2026-09 \
+            --pattern replay-demo.mp4 --pattern replay-demo.jpg --pattern replay-graph.png \
+            --dir _site/demos/replay/docs
+          cp demos/replay/docs/media.sha256 _site/demos/replay/docs/
+          cd _site/demos/replay/docs
+          sha256sum --check media.sha256
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy site
+        id: deployment
+        uses: actions/deploy-pages@v5

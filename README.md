@@ -52,6 +52,9 @@ Development container comes with all required dependencies and clangd installed.
 
 ### Demo
 
+[Watch the Replay demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) — video beside terminal controls,
+with frame/time seeks, pause, speed changes, reverse, and the processing graph.
+
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
 
     script=remux_analyze_audio.avplumber docker compose -f examples/compose/rtmp_test_source.yml up
