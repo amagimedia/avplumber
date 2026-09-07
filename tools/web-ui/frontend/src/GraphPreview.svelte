@@ -3,15 +3,22 @@
 
   import { NodeEditor, ClassicPreset } from 'rete';
   import { AreaPlugin, AreaExtensions } from 'rete-area-plugin';
-  import { AutoArrangePlugin, Presets as ArrangePresets } from 'rete-auto-arrange-plugin';
+  import { AutoArrangePlugin } from 'rete-auto-arrange-plugin';
   import { SveltePlugin, Presets as SveltePresets } from 'rete-svelte-plugin/svelte';
   import GraphConnection from './GraphConnection.svelte';
+  import GraphNode from './GraphNode.svelte';
+  import { sourceQueues as getSrcQueues, destinationQueues as getDstQueues } from './graphGroups.mjs';
   import { queueStatsByName } from './graphStores';
 
   export let nodes = [];
   export let queues = [];
   export let selectedNodeName = '';
   export let liveQueueStats = true;
+  export let groupedLayout = false;
+  export let focusedLayout = false;
+  export let minZoom = 0;
+  let rebuilding = false;
+  let rebuildRequested = false;
 
   const dispatch = createEventDispatcher();
 
@@ -26,14 +33,14 @@
   let arrange;
 
   let error = '';
+  let resizeObserver;
+  let compactFocus = false;
+  let verticalFlow = false;
   let lastGraphKey = '';
   let lastPublishedQueueStatsMode = '';
 
-  // Maps used for efficient queue-fill updates (no rebuild).
   const nodeByName = new Map(); // name -> ClassicPreset.Node
   const nodeNameById = new Map(); // nodeId -> avplumber node name
-  const outputsByQueue = new Map(); // queueName -> ClassicPreset.Output
-  const nodeIdByQueue = new Map(); // queueName -> nodeId (owner node to refresh)
 
   const socket = new ClassicPreset.Socket('queue');
 
@@ -89,57 +96,6 @@
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
 
-  function normalizeQueueRef(v) {
-    if (!v) return [];
-    if (typeof v === 'string') return [v];
-    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string');
-    // Some nodes may provide object syntax; ignore for now.
-    return [];
-  }
-
-  function getSrcQueues(params) {
-    const p = params || {};
-    return normalizeQueueRef(p.src);
-  }
-
-  function getDstQueues(params) {
-    const p = params || {};
-    const out = new Set(normalizeQueueRef(p.dst));
-
-    // demux commonly uses `routing` instead of `dst`
-    if (p.routing && typeof p.routing === 'object' && !Array.isArray(p.routing)) {
-      for (const v of Object.values(p.routing)) {
-        if (typeof v === 'string' && v) out.add(v);
-      }
-    }
-    return Array.from(out);
-  }
-
-  function guessNodeSize(node) {
-    // fallback if DOM measurement isn't ready yet
-    const baseW = 200;
-    const baseH = 48;
-    const inCount = node?.inputs ? Object.keys(node.inputs).length : 0;
-    const outCount = node?.outputs ? Object.keys(node.outputs).length : 0;
-    const ports = Math.max(inCount, outCount);
-    return { width: baseW, height: baseH + ports * 16 };
-  }
-
-  function nodeWidth(node) {
-    return Number(node?.width) || guessNodeSize(node).width;
-  }
-
-  function nodeHeight(node) {
-    return Number(node?.height) || guessNodeSize(node).height;
-  }
-
-  function queueFillLabel(queueName, q) {
-    if (!q || !q.capacity || q.capacity <= 0) return queueName;
-    const pct = Math.max(0, Math.min(100, (q.occupied / q.capacity) * 100));
-    // Compact label to keep nodes narrow. Full details are available on connection hover tooltip.
-    return `${queueName} ${Math.round(pct)}%`;
-  }
-
   function buildGraphKey(nodesArr) {
     if (!Array.isArray(nodesArr)) return '';
     // stable enough for our needs: node + src/dst topology
@@ -165,377 +121,119 @@
     return map;
   }
 
+  const socketPositions = new Map();
+
   async function measureAndApplyNodeSizes() {
+    await nextFrame();
+    await nextFrame();
     if (!area || !editor) return;
-
-    // Wait for render to mount node elements
-    await nextFrame();
-    await nextFrame();
-
+    socketPositions.clear();
+    const zoom = area.area.transform.k || 1;
     for (const node of editor.getNodes()) {
-      const view = area.nodeViews && area.nodeViews.get ? area.nodeViews.get(node.id) : null;
-      const el = view && view.element ? view.element : null;
-      if (!el || typeof el.getBoundingClientRect !== 'function') {
-        const fallback = guessNodeSize(node);
-        // eslint-disable-next-line no-param-reassign
-        node.width = fallback.width;
-        // eslint-disable-next-line no-param-reassign
-        node.height = fallback.height;
-        continue;
+      const el = area.nodeViews.get(node.id)?.element.querySelector('[data-testid="node"]');
+      if (!el) throw new Error('Node did not render: ' + node.label);
+      // Layout uses unscaled sizes; client rect dimensions include the old
+      // view's zoom and caused overlapping nodes after opening a group.
+      node.width = el.offsetWidth;
+      node.height = el.offsetHeight;
+      const bounds = el.getBoundingClientRect();
+      for (const side of ['input', 'output']) {
+        for (const key of Object.keys(node[side === 'input' ? 'inputs' : 'outputs'])) {
+          const row = [...el.querySelectorAll('[data-testid]')]
+            .find(item => item.getAttribute('data-testid') === `${side}-${key}`);
+          const socket = row?.querySelector(`[data-testid="${side}-socket"]`);
+          if (!socket) throw new Error('Socket did not render: ' + key);
+          const rect = socket.getBoundingClientRect();
+          socketPositions.set(`${node.id}:${side}:${key}`, {
+            x: ((rect.left + rect.right) / 2 - bounds.left) / zoom,
+            y: ((rect.top + rect.bottom) / 2 - bounds.top) / zoom,
+            width: 0, height: 0, side: verticalFlow
+              ? (side === 'input' ? 'NORTH' : 'SOUTH') : (side === 'input' ? 'WEST' : 'EAST')
+          });
+          row.title = key;
+        }
       }
-      const rect = el.getBoundingClientRect();
-      const w = Math.max(80, Math.ceil(rect.width));
-      const h = Math.max(40, Math.ceil(rect.height));
-      // Auto-arrange plugin and our own layout both rely on these fields.
-      // eslint-disable-next-line no-param-reassign
-      node.width = w;
-      // eslint-disable-next-line no-param-reassign
-      node.height = h;
-
-      // Keep area plugin in sync (helps when zooming/selection uses view bounds)
-      area.resize(node.id, w, h).catch(() => {});
+      await area.resize(node.id, node.width, node.height);
     }
   }
 
-  async function layoutDependencyOrder() {
+  async function layoutGraph() {
+    const { result } = await arrange.layout({ options: {
+      'elk.algorithm': 'layered', 'elk.direction': verticalFlow ? 'DOWN' : 'RIGHT',
+      'elk.edgeRouting': 'ORTHOGONAL',
+      'elk.layered.spacing.nodeNodeBetweenLayers': focusedLayout ? '44' : '90',
+      'elk.spacing.nodeNode': '44',
+      'elk.spacing.edgeNode': '24',
+      'elk.layered.spacing.edgeNodeBetweenLayers': '24',
+      'elk.spacing.edgeEdge': '12',
+      'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
+      'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+      'elk.padding': '[top=24,left=24,bottom=24,right=24]'
+    } });
     if (!area || !editor) return;
-
-    const nodesList = editor.getNodes();
-    const conns = editor.getConnections();
-
-    const byId = new Map(nodesList.map((n) => [n.id, n]));
-    const adj = new Map(); // id -> Set<id>
-    const indeg = new Map(); // id -> number
-
-    for (const n of nodesList) {
-      adj.set(n.id, new Set());
-      indeg.set(n.id, 0);
+    const connections = new Map(editor.getConnections().map(connection => [connection.id, connection]));
+    for (const edge of result.edges || []) {
+      const connection = connections.get(edge.id);
+      if (!connection) continue;
+      connection.__route = (edge.sections || []).map(section =>
+        [section.startPoint, ...(section.bendPoints || []), section.endPoint]);
+      await area.update('connection', connection.id);
     }
+    await fitGraph();
+  }
 
-    for (const c of conns) {
-      const s = c.source;
-      const t = c.target;
-      if (!byId.has(s) || !byId.has(t)) continue;
-      const set = adj.get(s);
-      if (!set.has(t)) {
-        set.add(t);
-        indeg.set(t, (indeg.get(t) || 0) + 1);
-      }
-    }
-
-    // Kahn topological order + longest-path level
-    const level = new Map(); // id -> int
-    const topoIndex = new Map(); // id -> int
-    const q = [];
-
-    for (const n of nodesList) {
-      level.set(n.id, 0);
-      if ((indeg.get(n.id) || 0) === 0) q.push(n.id);
-    }
-    // stable ordering for equal indegree
-    q.sort((a, b) => String(byId.get(a)?.label || a).localeCompare(String(byId.get(b)?.label || b)));
-
-    let idx = 0;
-    while (q.length) {
-      const id = q.shift();
-      topoIndex.set(id, idx++);
-      const base = level.get(id) || 0;
-      for (const nb of adj.get(id) || []) {
-        level.set(nb, Math.max(level.get(nb) || 0, base + 1));
-        indeg.set(nb, (indeg.get(nb) || 0) - 1);
-        if ((indeg.get(nb) || 0) === 0) {
-          q.push(nb);
-          q.sort((a, b) => String(byId.get(a)?.label || a).localeCompare(String(byId.get(b)?.label || b)));
-        }
-      }
-    }
-
-    // If cycle (shouldn't happen), fall back to label order
-    for (const n of nodesList) {
-      if (!topoIndex.has(n.id)) {
-        topoIndex.set(n.id, idx++);
-      }
-    }
-
-    // Crossing-minimizing ordering within each level (barycenter sweeps)
-    const groups = new Map(); // level -> node[]
-    let maxLevel = 0;
-    for (const n of nodesList) {
-      const l = level.get(n.id) || 0;
-      maxLevel = Math.max(maxLevel, l);
-      if (!groups.has(l)) groups.set(l, []);
-      groups.get(l).push(n);
-    }
-
-    // init order by topo index
-    for (const arr of groups.values()) arr.sort((a, b) => (topoIndex.get(a.id) || 0) - (topoIndex.get(b.id) || 0));
-
-    const preds = new Map(); // id -> Set<id>
-    const succs = new Map(); // id -> Set<id>
-    for (const n of nodesList) {
-      preds.set(n.id, new Set());
-      succs.set(n.id, new Set());
-    }
-    for (const c of conns) {
-      const s = c.source;
-      const t = c.target;
-      if (preds.has(t)) preds.get(t).add(s);
-      if (succs.has(s)) succs.get(s).add(t);
-    }
-
-    function indexMapForLevel(l) {
-      const arr = groups.get(l) || [];
-      const m = new Map();
-      arr.forEach((n, i) => m.set(n.id, i));
-      return m;
-    }
-
-    function barycenter(nodeId, neighborIndexMap, neighborIds) {
-      let sum = 0;
-      let cnt = 0;
-      for (const nb of neighborIds) {
-        const v = neighborIndexMap.get(nb);
-        if (typeof v === 'number') {
-          sum += v;
-          cnt++;
-        }
-      }
-      return cnt ? sum / cnt : null;
-    }
-
-    // A few sweeps are usually enough for small/medium graphs
-    for (let sweep = 0; sweep < 4; sweep++) {
-      // forward sweep (use predecessors in previous layer)
-      for (let l = 1; l <= maxLevel; l++) {
-        const prevIdx = indexMapForLevel(l - 1);
-        const arr = groups.get(l) || [];
-        arr.sort((a, b) => {
-          const ab = barycenter(a.id, prevIdx, preds.get(a.id) || []);
-          const bb = barycenter(b.id, prevIdx, preds.get(b.id) || []);
-          if (ab === null && bb === null) return (topoIndex.get(a.id) || 0) - (topoIndex.get(b.id) || 0);
-          if (ab === null) return 1;
-          if (bb === null) return -1;
-          if (ab !== bb) return ab - bb;
-          return (topoIndex.get(a.id) || 0) - (topoIndex.get(b.id) || 0);
-        });
-      }
-      // backward sweep (use successors in next layer)
-      for (let l = maxLevel - 1; l >= 0; l--) {
-        const nextIdx = indexMapForLevel(l + 1);
-        const arr = groups.get(l) || [];
-        arr.sort((a, b) => {
-          const ab = barycenter(a.id, nextIdx, succs.get(a.id) || []);
-          const bb = barycenter(b.id, nextIdx, succs.get(b.id) || []);
-          if (ab === null && bb === null) return (topoIndex.get(a.id) || 0) - (topoIndex.get(b.id) || 0);
-          if (ab === null) return 1;
-          if (bb === null) return -1;
-          if (ab !== bb) return ab - bb;
-          return (topoIndex.get(a.id) || 0) - (topoIndex.get(b.id) || 0);
-        });
-      }
-    }
-
-    // Keep layout compact so wide graphs can fit ~10 nodes across on typical screens.
-    const xGap = 80;
-    const yGap = 32;
-
-    // Compute max width per level to avoid overlaps horizontally
-    const levelWidth = new Map();
-    for (let l = 0; l <= maxLevel; l++) {
-      const arr = groups.get(l) || [];
-      let mw = 0;
-      for (const n of arr) mw = Math.max(mw, nodeWidth(n));
-      levelWidth.set(l, mw);
-    }
-    const xOffset = [];
-    let accX = 0;
-    for (let l = 0; l <= maxLevel; l++) {
-      xOffset[l] = accX;
-      accX += (levelWidth.get(l) || 260) + xGap;
-    }
-
-    function packedCentersForLevel(arr) {
-      const centers = new Map();
-      let y = 0;
-      for (const n of arr) {
-        const h = nodeHeight(n);
-        centers.set(n.id, y + h / 2);
-        y += h + yGap;
-      }
-      return centers;
-    }
-
-    function averageNeighborCenter(nodeId, neighborIds, centers) {
-      let sum = 0;
-      let cnt = 0;
-      for (const nb of neighborIds || []) {
-        const v = centers.get(nb);
-        if (typeof v === 'number' && Number.isFinite(v)) {
-          sum += v;
-          cnt++;
-        }
-      }
-      return cnt ? sum / cnt : null;
-    }
-
-    function resolveLevelPositions(arr, desiredCenters, existingCenters) {
-      if (!arr.length) return [];
-
-      const packedCenters = packedCentersForLevel(arr);
-      let shiftSum = 0;
-      let shiftCnt = 0;
-
-      for (const n of arr) {
-        const packed = packedCenters.get(n.id) || nodeHeight(n) / 2;
-        const desired = desiredCenters.get(n.id);
-        const existing = existingCenters.get(n.id);
-        const anchor =
-          typeof desired === 'number' && Number.isFinite(desired)
-            ? desired
-            : typeof existing === 'number' && Number.isFinite(existing)
-              ? existing
-              : null;
-        if (anchor !== null) {
-          shiftSum += anchor - packed;
-          shiftCnt++;
-        }
-      }
-
-      const shift = shiftCnt ? shiftSum / shiftCnt : 0;
-      const tops = arr.map((n) => {
-        const h = nodeHeight(n);
-        const packedTop = (packedCenters.get(n.id) || h / 2) - h / 2 + shift;
-        const desired = desiredCenters.get(n.id);
-        if (typeof desired !== 'number' || !Number.isFinite(desired)) return packedTop;
-
-        // Keep columns mostly packed, but let local neighbor pull shorten edges.
-        return packedTop + (desired - h / 2 - packedTop) * 0.45;
-      });
-
-      // Fixed-order overlap resolution. A forward/backward/forward pass keeps the
-      // column near the desired centers while preserving readable spacing.
-      for (let i = 1; i < arr.length; i++) {
-        const prevMin = tops[i - 1] + nodeHeight(arr[i - 1]) + yGap;
-        if (tops[i] < prevMin) tops[i] = prevMin;
-      }
-      for (let i = arr.length - 2; i >= 0; i--) {
-        const nextMax = tops[i + 1] - nodeHeight(arr[i]) - yGap;
-        if (tops[i] > nextMax) tops[i] = nextMax;
-      }
-      for (let i = 1; i < arr.length; i++) {
-        const prevMin = tops[i - 1] + nodeHeight(arr[i - 1]) + yGap;
-        if (tops[i] < prevMin) tops[i] = prevMin;
-      }
-
-      return tops;
-    }
-
-    function centersFromTops(topsById) {
-      const centers = new Map();
-      for (const n of nodesList) {
-        const top = topsById.get(n.id);
-        if (typeof top === 'number' && Number.isFinite(top)) {
-          centers.set(n.id, top + nodeHeight(n) / 2);
-        }
-      }
-      return centers;
-    }
-
-    const topsById = new Map();
-
-    // Initial compact placement gives the relaxation pass a stable baseline.
-    for (let l = 0; l <= maxLevel; l++) {
-      const arr = groups.get(l) || [];
-      let y = 0;
-      for (const n of arr) {
-        topsById.set(n.id, y);
-        y += nodeHeight(n) + yGap;
-      }
-    }
-
-    // Repeated vertical relaxation: keep dependency columns, but pull each node
-    // toward the vertical center of its adjacent producers/consumers.
-    for (let sweep = 0; sweep < 6; sweep++) {
-      let centers = centersFromTops(topsById);
-      for (let l = 1; l <= maxLevel; l++) {
-        const arr = groups.get(l) || [];
-        const desired = new Map();
-        for (const n of arr) {
-          const v = averageNeighborCenter(n.id, preds.get(n.id), centers);
-          if (v !== null) desired.set(n.id, v);
-        }
-        const tops = resolveLevelPositions(arr, desired, centers);
-        arr.forEach((n, i) => topsById.set(n.id, tops[i]));
-        centers = centersFromTops(topsById);
-      }
-
-      centers = centersFromTops(topsById);
-      for (let l = maxLevel - 1; l >= 0; l--) {
-        const arr = groups.get(l) || [];
-        const desired = new Map();
-        for (const n of arr) {
-          const v = averageNeighborCenter(n.id, succs.get(n.id), centers);
-          if (v !== null) desired.set(n.id, v);
-        }
-        const tops = resolveLevelPositions(arr, desired, centers);
-        arr.forEach((n, i) => topsById.set(n.id, tops[i]));
-        centers = centersFromTops(topsById);
-      }
-    }
-
-    let minY = 0;
-    for (const y of topsById.values()) minY = Math.min(minY, y);
-    if (minY < 0) {
-      for (const [id, y] of topsById.entries()) topsById.set(id, y - minY);
-    }
-
-    // Apply positions
-    for (let l = 0; l <= maxLevel; l++) {
-      const arr = groups.get(l) || [];
-      for (const n of arr) {
-        await area.translate(n.id, { x: xOffset[l], y: topsById.get(n.id) || 0 });
-      }
-    }
-
-    try {
-      await AreaExtensions.zoomAt(area, nodesList);
-    } catch (_) {
-      // ignore
+  async function fitGraph() {
+    if (!area || !editor || !editor.getNodes().length) return;
+    await AreaExtensions.zoomAt(area, editor.getNodes());
+    if (!area) return;
+    if (minZoom && area.area.transform.k < minZoom) {
+      await area.area.zoom(minZoom, 0, 0);
+      await area.area.translate(24, 24);
     }
   }
 
   async function rebuildGraph() {
-    if (!editor || !area) return;
+    rebuildRequested = true;
+    if (rebuilding || !editor || !area) return;
+    rebuilding = true;
+    try {
+      while (rebuildRequested && editor && area) {
+        rebuildRequested = false;
+        await rebuildGraphOnce(nodes.slice());
+      }
+    } catch (e) {
+      if (area) error = String(e?.message || e);
+    } finally { rebuilding = false; }
+  }
+
+  async function rebuildGraphOnce(graphNodes) {
+    error = '';
+    compactFocus = focusedLayout && container.clientWidth >= 1400;
+    verticalFlow = focusedLayout && !compactFocus;
 
     nodeByName.clear();
     nodeNameById.clear();
-    outputsByQueue.clear();
-    nodeIdByQueue.clear();
     clearNodeDomHandlers();
 
     await editor.clear();
 
-    const queueStats = liveQueueStats ? indexQueues(queues) : new Map();
-
     // 1) Create nodes with ports (queue names are port keys)
-    for (const n of nodes || []) {
+    for (const n of graphNodes) {
       if (!n || typeof n.name !== 'string') continue;
       const p = n.params || {};
       const srcQs = getSrcQueues(p);
       const dstQs = getDstQueues(p);
 
-      const label = `${n.name}\n${n.type || ''}${n.working ? '' : ' (OFF)'}`.trim();
+      const label = `${n.label || n.name}\n${n.type || ''}${n.working ? '' : ' (OFF)'}`.trim();
       const node = new ClassicPreset.Node(label);
+      node.width = compactFocus ? 180 : 300;
+      node.__vertical = verticalFlow;
 
       for (const qName of srcQs) {
         node.addInput(qName, new ClassicPreset.Input(socket, qName, true));
       }
       for (const qName of dstQs) {
-        const q = queueStats.get(qName);
-        const out = new ClassicPreset.Output(socket, queueFillLabel(qName, q), true);
-        node.addOutput(qName, out);
-        outputsByQueue.set(qName, out);
-        nodeIdByQueue.set(qName, node.id);
+        node.addOutput(qName, new ClassicPreset.Output(socket, qName, true));
       }
 
       await editor.addNode(node);
@@ -547,7 +245,7 @@
     const producers = new Map(); // queueName -> nodeName
     const consumers = new Map(); // queueName -> nodeName[]
 
-    for (const n of nodes || []) {
+    for (const n of graphNodes) {
       if (!n || typeof n.name !== 'string') continue;
       const p = n.params || {};
       for (const qName of getDstQueues(p)) {
@@ -581,32 +279,10 @@
 
     // 3) Measure and deterministic layout (dependency order)
     await measureAndApplyNodeSizes();
-    await layoutDependencyOrder();
+    await layoutGraph();
 
     // 4) Enable node selection by clicking node DOM
     await attachNodeClickHandlers();
-  }
-
-  async function updateQueueFills() {
-    if (!area) return;
-    const queueStats = liveQueueStats ? indexQueues(queues) : new Map();
-    const nodeIdsToUpdate = new Set();
-
-    for (const [qName, out] of outputsByQueue.entries()) {
-      const q = queueStats.get(qName);
-      const nextLabel = queueFillLabel(qName, q);
-      if (out.label === nextLabel) continue;
-      out.label = nextLabel;
-
-      const nodeId = nodeIdByQueue.get(qName);
-      if (nodeId) {
-        nodeIdsToUpdate.add(nodeId);
-      }
-    }
-
-    for (const nodeId of nodeIdsToUpdate) {
-      area.update('node', nodeId).catch(() => {});
-    }
   }
 
   function publishQueueStats() {
@@ -636,24 +312,37 @@
       render.addPreset(
         SveltePresets.classic.setup({
           customize: {
-            connection: () => GraphConnection
+            connection: () => GraphConnection,
+            node: () => GraphNode
           }
         })
       );
-      arrange.addPreset(ArrangePresets.classic.setup());
+      arrange.addPreset(() => ({
+        port: ({ nodeId, side, key }) => socketPositions.get(`${nodeId}:${side}:${key}`)
+      }));
 
       // Attach plugins
       editor.use(area);
       area.use(render);
       area.use(arrange);
+      // Read-only graph: preserve the routed layout while allowing pan/zoom.
+      area.addPipe(context => context.type === 'nodetranslate' && !rebuilding ? undefined : context);
 
       await rebuildGraph();
+      if (!area || !container) return;
+      resizeObserver = new ResizeObserver(() => {
+        if (rebuilding) return;
+        if ((focusedLayout && container.clientWidth >= 1400) !== compactFocus) rebuildGraph();
+        else fitGraph().catch(() => {});
+      });
+      resizeObserver.observe(container);
     } catch (e) {
       error = String(e && e.message ? e.message : e);
     }
   });
 
   onDestroy(() => {
+    resizeObserver?.disconnect();
     try {
       if (area) area.destroy();
     } catch (_) {
@@ -668,23 +357,16 @@
 
   // Rebuild when topology changes (nodes/src/dst changes)
   $: {
-    const key = buildGraphKey(nodes);
+    const key = `${groupedLayout}|${focusedLayout}|${minZoom}|${buildGraphKey(nodes)}`;
     if (key !== lastGraphKey) {
       lastGraphKey = key;
       rebuildGraph();
     }
   }
 
-  // Update labels when queue fill changes
-  $: {
-    // Trigger on any queues array assignment
-    queues;
-    liveQueueStats;
-    updateQueueFills();
-  }
-
   // Keep highlight in sync when selection changes from outside (nodes list)
   $: {
+    selectedNodeName;
     syncSelectedNodeHighlight();
   }
 
@@ -701,9 +383,10 @@
   {#if error}
     <div class="rete-error">Graph preview error: {error}</div>
   {/if}
+  {#if rebuilding}<div class="graph-loading">Arranging graph…</div>{/if}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="rete-container" bind:this={container} on:click={() => dispatch('selectNode', { name: '' })} />
+  <div class="rete-container" style:visibility={rebuilding ? "hidden" : "visible"} bind:this={container} on:click={() => dispatch('selectNode', { name: '' })} />
 </div>
 
 <style>
@@ -724,6 +407,8 @@
     min-height: 0;
     width: 100%;
   }
+
+  .graph-loading { position:absolute; padding:16px; color:#94a3b8; }
 
   .rete-error {
     position: absolute;

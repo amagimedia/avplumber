@@ -1,99 +1,53 @@
-# CUDA Overlay Demo — deterministic `overlay_many_cuda` validation
+# CUDA overlay demo
 
-![Sixteen colored and labeled layers composed by overlay_many_cuda](docs/overlay-many-cuda-16-input-1080p.png)
+[![One base plus fifteen transparent overlays composed on the GPU](https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png)](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/)
 
-One 1080p base and 15 transparent, labeled overlays composed on the GPU by
-`overlay_many_cuda`.
+[View the demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay) · [Reference](docs/guide.md)
 
-Build the repository's FFmpeg patch stack on public FFmpeg `n7.1.5`, run the
-patched `overlay_many_cuda` through a purpose-built PyPlumber graph, and compare
-every output plane against an independent CPU reference.
-
-The demo generates a labeled color-bar base plus 15 RGBA PNG overlays. The
-overlays contain alpha ramps, exact alpha edge values, overlapping regions, and
-markers on the final row and odd final column. It tests one through 15 overlays
-so the filter's complete `inputs=2` through `inputs=16` range is covered. The
-requested visual sweep is overlays 2 through 15; the one-overlay cases retain
-the minimum API boundary. Labels identify filter input indices: `L0` is the
-base, and `L1` through `L15` are the overlay inputs.
-
-## Covered CUDA paths
-
-- `yuv420p` main with `yuva420p` overlays (`420_420`)
-- `yuv420p` main with `yuva444p` overlays (`420_444`)
-- `yuv444p` main with `yuva444p` overlays (`444_444`)
-
-`yuv444p` with `yuva420p` is not a supported filter combination and is not
-presented as a fourth mode. The 641x360 canvas exercises a partial horizontal
-4:2:0 chroma block in all 45 cases. Odd height is intentionally excluded because
-FFmpeg n7.1.5's plain CUDA upload/download path does not preserve its final
-4:2:0 chroma row, before `overlay_many_cuda` is involved.
-
-## Requirements
-
-- Docker with Compose
-- NVIDIA Container Toolkit
-- an NVIDIA GPU with compute capability 7.0 or newer
-- a driver capable of running CUDA 11.7 applications
-
-The image deliberately compiles FFmpeg with CUDA Toolkit 11.7, the minimum
-supported version. It does not use the host CUDA toolkit. The demo build omits
-the unrelated `nvjpeg_enc` node because its NV12 encoder API requires a newer
-CUDA toolkit; all FFmpeg CUDA and NVCC support remains enabled.
+Compose one base image and up to fifteen transparent overlays with
+`overlay_many_cuda`. The generated labels, alpha ramps and overlapping shapes
+make layer order and transparency visible. Each result is compared pixel for
+pixel with an independent CPU reference. This is a static validation demo.
 
 ## Run
 
+Use Docker and the [shared NVIDIA setup](../README.md), with an NVIDIA GPU of
+compute capability 7.0 or newer. The image builds public FFmpeg sources with
+this repository's patches and CUDA 11.7; it uses its own toolkit.
+
 From the repository root:
 
-```bash
+```sh
 ./demos/cuda-overlay/run.sh
 ```
 
-To build without starting the matrix, run `./demos/cuda-overlay/build.sh`.
+For the sixteen-input 1080p example shown above:
 
-For a smaller diagnostic sweep:
-
-```bash
-./demos/cuda-overlay/run.sh --counts 1,2,8,15
-```
-
-For a native 1080p maximum-input run:
-
-```bash
+```sh
 ./demos/cuda-overlay/run.sh --width 1920 --height 1080 --counts 15
 ```
 
-Explicit dimensions apply to fixture generation, CUDA composition, the CPU
-reference, PNG conversion, and the report. The default remains 641x360 so the
-normal regression matrix retains its odd-width edge coverage.
+The default sweep checks 1–15 overlays in three supported YUV/alpha format
+combinations on a 641×360 canvas, including odd-width edge cases. Any pixel
+mismatch returns a failing exit status. See the [reference](docs/guide.md) for
+supported formats, a smaller sweep and build-only instructions.
 
-The command builds the image, generates fixtures, starts a fresh PyPlumber
-process per mode/count pair, and returns nonzero if any graph or exact comparison
-fails. There is no CPU fallback.
+## Processing graph
 
-## Artifacts
+[![CUDA overlay WebUI: source readers and decoders feed one GPU filter and raw output](https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/cuda-overlay-graph.png)](https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay)
 
-Each run creates a timestamped directory below `demos/cuda-overlay/artifacts/`
-containing:
+**50 nodes / 49 queues** for sixteen inputs. The capture shows the completed
+641×360 validation graph; click it to inspect every node. Software fixtures
+are uploaded once, composed on CUDA, and downloaded once for exact comparison.
+Those transfers are explicit validation boundaries.
 
-- `assets/png/`: the base and 15 source overlay PNGs;
-- `assets/raw/`: the exact planar input fixtures used by both implementations;
-- `assets/input-streams/`: two-frame repeats of each fixture used to give every
-  filter input deterministic PTS ordering before end-of-stream;
-- `gpu-raw/`: frames produced by `overlay_many_cuda`;
-- `reference-raw/`: frames produced by the CPU oracle;
-- `result-png/`: GPU results converted for inspection after comparison;
-- `contact-sheets/`: one source sheet and one sheet per supported mode;
-- `logs/`: one PyPlumber log per case;
-- `report.json`: environment, patch hashes, per-plane deltas, and final status.
+## Results
 
-Correctness is decided from the raw Y, U, and V planes. PNG conversion is only
-for display and cannot turn a mismatch into a pass.
+Each run writes a timestamped directory under `demos/cuda-overlay/artifacts/`:
+source images, GPU results, contact sheets, logs and `report.json` with per-plane
+comparison results. Raw Y/U/V data determines correctness; PNGs are previews.
 
-## Graph boundary
-
-The graph reads deterministic software frames, uploads each source once through
-a shared instance-scoped CUDA device inside one multi-input filter graph,
-composes on CUDA, then downloads once to inspect the result. Those transfers are
-explicit test boundaries; there is no upload/download round trip inside the
-CUDA composition path, and this graph is not a production-pipeline template.
+The [demo page](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) uses the same presentation as
+[Replay](../replay/README.md), [Mixer](../mixer/README.md) and
+[DMA-BUF browser capture](../dmabuf-browser/README.md). New preview media is hosted
+as public release assets, outside Git history.

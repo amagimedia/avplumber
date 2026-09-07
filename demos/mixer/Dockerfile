@@ -78,9 +78,7 @@ RUN cd /tmp/ffmpeg \
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
     && /usr/local/bin/ffmpeg -hide_banner -filters \
-       | awk '$2 == "transition_cuda" && $1 ~ /C/ { found = 1 } END { exit !found }' \
-    && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda 2>&1 \
-       | grep -q 'wipe_left'
+       | awk '$2 == "transition_cuda" && $1 ~ /C/ { found = 1 } END { exit !found }'
 
 WORKDIR /build
 
@@ -88,6 +86,7 @@ COPY deps /build/deps
 COPY Makefile generate_node_list /build/
 COPY src /build/src
 COPY pyplumber /build/pyplumber
+COPY avpmixer /build/avpmixer
 
 RUN git init --quiet /build \
     && git -C /build config user.name "mixer-demo builder" \

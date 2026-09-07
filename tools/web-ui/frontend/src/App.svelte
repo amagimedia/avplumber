@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
+  import { sampleQueueFlow } from './queueFlow.mjs';
   import DockHost from './DockHost.svelte';
   import GraphPanel from './panels/GraphPanel.svelte';
   import NodesPanel from './panels/NodesPanel.svelte';
@@ -16,9 +17,16 @@
 
   let instances = [];
   let currentInstanceId = null;
+  let requestedInstanceId = new URLSearchParams(window.location.search).get('instance');
+  let instanceGeneration = 0;
+  let requestedGeneration = -1;
 
   let nodes = [];
   let queues = [];
+  let queuesObservedAt = 0;
+  let queuesFresh = false;
+  let queuesInstance = null;
+  $: queueStatsFresh = wsConnected && autoRefreshQueues && queuesFresh && queuesInstance === currentInstanceId;
   let queuesText = '';
   let statsByInstance = {};
   let currentStatsPrettyText = '';
@@ -153,18 +161,19 @@
     autoRefreshQueues = false;
   }
 
+  function updateInstances(list) {
+    instances = Array.isArray(list) ? list : [];
+    const wanted = currentInstanceId || requestedInstanceId;
+    currentInstanceId = wanted
+      ? (instances.some(instance => instance.id === wanted) ? wanted : null)
+      : (instances[0]?.id || null);
+  }
+
   async function loadInstances() {
     try {
       const res = await fetch('/api/instances');
       const data = await res.json();
-      instances = Array.isArray(data.instances) ? data.instances : [];
-      if (instances.length > 0) {
-        if (!currentInstanceId) {
-          currentInstanceId = instances[0].id;
-        }
-      } else {
-        currentInstanceId = null;
-      }
+      updateInstances(data.instances);
     } catch (e) {
       appendConsole(`# Failed to load instances: ${e}`);
     }
@@ -196,49 +205,52 @@
 
       if (msg.type === 'response') {
         const { id, statusLine, body, error } = msg;
-        const resolver = id ? pending.get(id) : null;
+        const request = pending.get(id);
+        // Check ownership before settling a promise: a delayed reply must not
+        // complete a different instance's request or trigger its fallback.
+        if (!request || msg.instanceId !== request.instanceId ||
+            request.instanceId !== currentInstanceId || request.generation !== instanceGeneration) return;
+        pending.delete(id);
         const code = parseInt(statusLine, 10) || 0;
         const ok = code >= 200 && code < 300;
         const resp = { statusLine, body, error, ok };
-        if (resolver) {
-          pending.delete(id);
-          if (ok) {
-            resolver(resp);
-          } else {
-            // propagate non-2xx as rejection to allow fallbacks
-            resolver(Promise.reject(resp));
-          }
-        }
+        if (ok) request.resolve(resp);
+        else request.reject(resp);
         const header = statusLine || (error ? 'ERROR' : '');
         const text = [header, body || '', error || ''].filter(Boolean).join('\n');
         //if (text) appendConsole(`# [${id || '-'}]\n${text}`);
 
         if (ok) {
-          if (id === 'nodes.json') {
+          if (request.kind === 'nodes.json') {
             try {
               const arr = JSON.parse(body || '[]');
               nodes = Array.isArray(arr) ? arr : [];
             } catch (e) {
               appendConsole(`nodes.json parse error: ${e}`);
             }
-          } else if (id === 'queues.json') {
+          } else if (request.kind === 'queues.json') {
             try {
               const arr = JSON.parse(body || '[]');
-              queues = Array.isArray(arr) ? arr : [];
+              const now = Date.now();
+              const previous = queuesInstance === currentInstanceId && now - queuesObservedAt <= autoRefreshMs * 3 ? queues : [];
+              queues = sampleQueueFlow(Array.isArray(arr) ? arr : [], previous);
+              queuesObservedAt = now;
+              queuesFresh = true;
+              queuesInstance = currentInstanceId;
               queuesText = '';
             } catch (e) {
               appendConsole(`queues.json parse error: ${e}`);
             }
-          } else if (id === 'queues.stats') {
+          } else if (request.kind === 'queues.stats') {
             queuesText = body || '';
-          } else if (id === 'sync_groups.json') {
+          } else if (request.kind === 'sync_groups.json') {
             try {
               const arr = JSON.parse(body || '[]');
               syncGroups = Array.isArray(arr) ? arr : [];
             } catch (e) {
               appendConsole(`sync_groups.json parse error: ${e}`);
             }
-          } else if (id === 'correction_groups.json') {
+          } else if (request.kind === 'correction_groups.json') {
             try {
               const arr = JSON.parse(body || '[]');
               correctionGroups = Array.isArray(arr) ? arr : [];
@@ -257,16 +269,7 @@
       } else if (msg.type === 'log') {
         appendLog(msg.line);
       } else if (msg.type === 'instances') {
-        // Update instances list when backend notifies us
-        instances = Array.isArray(msg.instances) ? msg.instances : [];
-        // If current instance was removed, select first available or null
-        if (currentInstanceId && !instances.find(inst => inst.id === currentInstanceId)) {
-          currentInstanceId = instances.length > 0 ? instances[0].id : null;
-        }
-        // If no instance selected and instances are available, select first
-        if (!currentInstanceId && instances.length > 0) {
-          currentInstanceId = instances[0].id;
-        }
+        updateInstances(msg.instances);
       }
     };
   }
@@ -280,9 +283,10 @@
       appendConsole('# No instance selected');
       return Promise.reject(new Error('No instance selected'));
     }
-    const id = idOverride || `cmd-${nextId++}`;
-    return new Promise((resolve) => {
-      pending.set(id, resolve);
+    const id = `${idOverride || 'cmd'}-${nextId++}`;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject, kind: idOverride, instanceId: currentInstanceId,
+                        generation: instanceGeneration });
       ws.send(JSON.stringify({ type: 'command', id, command, instanceId: currentInstanceId }));
     });
   }
@@ -296,8 +300,10 @@
     sendCommand('nodes.json', 'nodes.json').catch(() => {});
   }
   function refreshQueues() {
+    const generation = instanceGeneration;
     // Prefer JSON stats; fall back to text if unsupported
     sendCommand('queues.json', 'queues.json').catch(() => {
+      if (generation !== instanceGeneration) return;
       sendCommand('queues.stats', 'queues.stats').catch(() => {});
     });
   }
@@ -308,11 +314,12 @@
     sendCommand('correction_groups.json', 'correction_groups.json').catch(() => {});
   }
   function resetQueueStats() {
+    const generation = instanceGeneration;
     // Reset queue occupancy stats in avplumber so we don't miss peaks between UI polls.
     sendCommand('queues.stats.reset', 'queues.stats.reset')
       .catch(() => {})
       .finally(() => {
-        refreshQueues();
+        if (generation === instanceGeneration) refreshQueues();
       });
   }
 
@@ -332,11 +339,13 @@
   }
 
   async function refreshSingleNodeObject(nodeName, objName) {
+    const generation = instanceGeneration;
     const now = Date.now();
     const cmd = `node.object.get ${nodeName} ${objName}`;
     const id = `obj-${encodeURIComponent(nodeName)}-${objName}-${now}`;
     try {
       const resp = await sendCommand(cmd, id);
+      if (generation !== instanceGeneration) return;
       let parsed = null;
       let parseOk = false;
       try {
@@ -358,6 +367,7 @@
         }
       };
     } catch (err) {
+      if (generation !== instanceGeneration) return;
       const msg =
         err && typeof err === 'object' ? err.error || err.statusLine || String(err) : String(err);
       nodeObjects = {
@@ -384,12 +394,14 @@
       return;
     }
 
+    const generation = instanceGeneration;
     nodeObjectsInFlight = true;
     try {
       // Sequential refresh: few calls, avoids state update races.
       for (const n of nodesSupportingObjects) {
         const objNames = objectNamesByType[n.type] || [];
         for (const objName of objNames) {
+          if (generation !== instanceGeneration) return;
           await refreshSingleNodeObject(n.name, objName);
         }
       }
@@ -409,9 +421,11 @@
     if (!currentInstanceId) return;
     if (!selectedNode || !selectedNode.name) return;
     if (!selectedNodeObjectNames || selectedNodeObjectNames.length === 0) return;
+    const generation = instanceGeneration;
     selectedNodeObjectsInFlight = true;
     try {
       for (const objName of selectedNodeObjectNames) {
+        if (generation !== instanceGeneration) return;
         await refreshSingleNodeObject(selectedNode.name, objName);
       }
     } finally {
@@ -447,6 +461,7 @@
     }, 1000);
 
     const t = setInterval(() => {
+      if (queuesFresh && Date.now() - queuesObservedAt > autoRefreshMs * 3) queuesFresh = false;
       if (!autoRefreshQueues) return;
       if (!wsConnected) return;
       if (!currentInstanceId) return;
@@ -481,10 +496,35 @@
   });
 
   $: {
-    if (wsConnected && currentInstanceId && currentInstanceId !== lastInstanceSeen) {
+    if (currentInstanceId !== lastInstanceSeen) {
       lastInstanceSeen = currentInstanceId;
+      instanceGeneration += 1;
+      for (const request of pending.values()) request.reject(new Error('Instance selection changed'));
+      pending.clear();
+      nodes = [];
+      queues = [];
+      queuesText = '';
+      queuesFresh = false;
+      queuesObservedAt = 0;
+      queuesInstance = null;
+      selectedNodeName = '';
+      clearNodeObjects();
+      syncGroups = [];
+      correctionGroups = [];
+      if (currentInstanceId) {
+        requestedInstanceId = currentInstanceId;
+        const url = new URL(window.location.href);
+        url.searchParams.set('instance', currentInstanceId);
+        window.history.replaceState(null, '', url);
+      }
+    }
+    if (!wsConnected) requestedGeneration = -1;
+    if (wsConnected && currentInstanceId && requestedGeneration !== instanceGeneration) {
+      requestedGeneration = instanceGeneration;
+      const generation = instanceGeneration;
       // give WS a tick in case selection happens during reconnect
       setTimeout(() => {
+        if (!wsConnected || generation !== instanceGeneration) return;
         refreshNodes();
         refreshQueues();
         clearNodeObjects();
@@ -740,6 +780,7 @@
     nodes,
     queues,
     queuesText,
+    queueStatsFresh,
 
     selectedNodeName,
     selectedNode,
@@ -804,15 +845,16 @@
         <label>
           Instance:
           <select bind:value={currentInstanceId}>
-            {#if instances.length === 0}
+            {#if !currentInstanceId && requestedInstanceId}
+              <option value={null}>Waiting for instance {requestedInstanceId}</option>
+            {:else if instances.length === 0}
               <option value="">no instances</option>
-            {:else}
-              {#each instances as inst}
+            {/if}
+            {#each instances as inst}
                 <option value={inst.id}>
                   {inst.name || inst.id} ({inst.host}:{inst.port})
                 </option>
-              {/each}
-            {/if}
+            {/each}
           </select>
         </label>
       </div>

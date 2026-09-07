@@ -294,12 +294,16 @@ def test_player_graph_is_single_source_cuda_and_janus_video_only(tmp_path):
     assert nodes["replay_input"]["timestamp_source"] == "wallclock"
     assert nodes["replay_input"]["preseek"] == 0
     assert nodes["replay_input"]["loop"] is True
+    assert nodes["replay_input"]["stop_on_eof"] is False
     assert nodes["replay_input"]["pause_team"] == "replay_pause"
     assert "speed_team" not in nodes["replay_input"]
     assert nodes["replay_demux"]["routing"] == {"v:0": "player_video_packets"}
+    assert nodes["replay_demux"]["stop_on_eof"] is False
     assert nodes["replay_decode"]["pixel_format"] == "cuda"
     assert nodes["replay_decode"]["hwaccel"] == "replay_gpu"
     assert nodes["replay_decode"]["flush_magic"] is True
+    assert nodes["replay_decode"]["hold_at_eof"] is True
+    assert nodes["replay_decode"]["options"] == {"flags": "low_delay"}
     assert nodes["replay_speed"]["team"] == "replay_speed"
     assert nodes["replay_transition_gate"]["type"] == "pause"
     assert nodes["replay_transition_gate"]["src"] == "player_speed_raw"

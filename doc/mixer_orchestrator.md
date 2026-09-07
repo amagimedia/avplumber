@@ -1,7 +1,7 @@
 # Video Mixer
 
 AVPlumber's mixer is a two-slot program/preview video switcher. The reusable
-graph builder is `pyplumber/mixer.py`; the native control implementation is in
+graph builder is `avpmixer/graph.py`; the native control implementation is in
 `src/mixer_orchestrator.cpp`; the maintained example is `demos/mixer/`.
 
 The mixer carries video frames only. It has no audio routing, VAD, speaker
@@ -11,19 +11,18 @@ selection, face tracking, or camera policy.
 
 Each source supplies one CUDA video-frame edge. A source can either fan out to
 the two mixer slots through `one_to_many`, or use `preheat_video_router` outputs
-when its geometry paths are kept hot.
+for a catalogue that exceeds the compositor input limit.
 
 ```text
 CUDA source frames
-  -> preheat_video_router
-  -> scale_cuda + pad_cuda geometry for slot A and slot B
+  -> source fanout (or catalogue router)
   -> cuda_rect_overlay A / cuda_rect_overlay B
   -> permanent transition_cuda
   -> source_switcher
   -> NVENC
 ```
 
-Each slot has its own geometry routes because an outgoing scene and incoming
+Each slot has its own layer rectangles because an outgoing scene and incoming
 scene must remain live at the same time during a transition. Scene changes are
 scheduled against a shared timeline so router selection, compositor inputs,
 and the program selector change at consistent frame timestamps.
@@ -35,15 +34,20 @@ input decode, output encoding/muxing, startup order, and shutdown.
 
 Applications that need immediate transitions must preheat the complete path:
 
-1. Start and pace all input groups.
-2. Start the preheat router with temporary valid routes.
-3. Start both copies of every geometry path and wait for frames on their output
-   edges.
-4. Publish the initial scene routes.
-5. Start both compositors and the mixer group.
-6. Temporarily feed both compositor outputs to `transition_cuda`, wait for a
+1. Start and pace all input groups; wait for input frames.
+2. Start the catalogue router if used, then publish initial scene routes.
+3. Start both compositors with the scaling kernel loaded and fixed output pools.
+4. Temporarily feed both compositor outputs to `transition_cuda`, wait for a
    transition output frame, then restore steady routing.
-7. Start the encoder/output group and declare the graph ready.
+5. Open the output gate for fresh frames, start the encoder/output group and
+   declare the graph ready.
+
+Sources registered with `default_graph=""` feed the compositors directly.
+Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and
+`fit` (`contain` or `stretch`). Dimensions and pitch are resolved from each
+frame. Optional `source_canvas: {"w": 1920, "h": 1080}` preserves letterboxing
+into that virtual source canvas without an intermediate GPU frame. Explicit
+FFmpeg preprocessing graphs remain available to existing callers.
 
 There is no useful cold fallback for a low-latency production graph. The
 generic demo fails startup when any required preheat stage times out.
@@ -56,20 +60,19 @@ The control protocol accepts JSON objects:
 mixer.preview {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.cut {"mixer":"mixer","scene":"grid_4_page_0"}
 mixer.fade {"mixer":"mixer","scene":"grid_4_page_0","duration_sec":0.5}
-mixer.cuda_wipe {"mixer":"mixer","scene":"grid_4_page_0","style":"wipe_left","duration_sec":0.5}
+mixer.wipe {"mixer":"mixer","scene":"grid_4_page_0","wipe_file":"<path>/wipe.mov"}
 ```
 
-Supported procedural wipe styles are `wipe_left`, `wipe_right`, `wipe_down`,
-and `wipe_up`. Fades and procedural wipes share one permanent CUDA transition
-filter. Runtime filter commands change its expression and mode; no transition
-node is created or initialized during a take.
+Cut, Fade and transparent media-file Wipe are supported. Fade uses the permanent
+CUDA transition filter. The media wipe graph is predeclared; the orchestrator
+loads the selected clip. A new take can interrupt an ongoing transition using
+the current output picture.
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state.
 `mixer.scenes <name>` lists registered scenes.
 
-The builder also retains an optional media-file wipe compatibility path. That
-path converts an alpha-bearing wipe asset in software before uploading it and
-is therefore not part of the zero-copy generic demo.
+The alpha media path decodes the wipe in software and uploads it to the mixer
+CUDA device. This is separate from the GPU-native program video path.
 
 ## Zero-copy contract
 
@@ -81,9 +84,9 @@ muxing, and control messages are not video-frame memory paths.
 
 The demo uses these CUDA operations:
 
-- `scale_cuda` and `pad_cuda` for normalization and layout geometry;
-- `cuda_rect_overlay` for scene composition;
-- `transition_cuda` for fades and procedural wipes;
+- optional `scale_cuda` and `pad_cuda` for homogeneous catalogue inputs;
+- `cuda_rect_overlay` for per-layer scaling and scene composition;
+- `transition_cuda` for fades;
 - NVDEC and NVENC at the graph boundaries.
 
 ## Generic demo

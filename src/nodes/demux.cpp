@@ -2,25 +2,30 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 #include <unordered_set>
+#include <atomic>
 #include "node_common.hpp"
 
-class StreamDemuxer: public NodeSingleInput<av::Packet>, public NodeWithOutputs<av::Packet>, public ReportsFinishByFlag {
+class StreamDemuxer: public NodeSingleInput<av::Packet>, public NodeWithOutputs<av::Packet>, public IReportsFinish {
 protected:
     std::unordered_map<int, std::shared_ptr<Edge<av::Packet>> > map_;
     std::unordered_set<int> video_streams_;
     bool report_unknown_stream_ = false; // TODO: setting this variable in factory function
     bool waiting_for_keyframe_ = false;
+    bool stop_on_eof_ = true;
+    std::atomic_bool finished_{false};
 public:
     using NodeSingleInput::NodeSingleInput;
     bool consumeEofIfPresent() override {
         return false;
     }
+    bool finished() override {
+        return finished_.load();
+    }
     void stop() override {
-        NodeSingleInput<av::Packet>::stop();
-        // The stop wake-up only releases a currently blocked source read. Without
-        // this, NodeWrapper may issue one final process() call and block forever
-        // waiting for a packet from an already-stopped input.
+        // Publish termination before waking the read: the wake-up is consumed
+        // once, so the worker must not enter another blocking read afterwards.
         finished_ = true;
+        NodeSingleInput<av::Packet>::stop();
     }
     void addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge, bool is_video) {
         if (map_.count(stream_index)!=0) {
@@ -32,6 +37,9 @@ public:
         }
     }
     virtual void process() {
+        if (finished()) {
+            return;
+        }
         av::Packet pkt = this->source_->get();
         if (isEofMarker(pkt)) {
             // eof marker
@@ -39,7 +47,11 @@ public:
             for (auto& m: map_) {
                 m.second->enqueue(createEofPacket(m.first));
             }
-            finished_ = true;
+            // EOF may arrive while stop() wakes a blocked read. Never undo
+            // that explicit stop when keeping an interactive input seekable.
+            if (stop_on_eof_) {
+                finished_ = true;
+            }
         } else {
             auto iter = map_.find(pkt.streamIndex());
             if (iter != map_.end()) {
@@ -74,6 +86,9 @@ public:
         in_edge->setConsumer(r);
         if (params.count("wait_for_keyframe")) {
             r->waiting_for_keyframe_ = params["wait_for_keyframe"];
+        }
+        if (params.count("stop_on_eof")) {
+            r->stop_on_eof_ = params["stop_on_eof"];
         }
         
         // find source of streams:

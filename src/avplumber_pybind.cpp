@@ -441,6 +441,7 @@ namespace {
             .def_property_readonly("capacity", [](Edge<T> &e) { return e.capacity(); })
             .def("clear", &Edge<T>::clear)
             .def_property_readonly("occupied", [](Edge<T> &e) { return e.occupied(); })
+            .def_property_readonly("enqueued_total", [](Edge<T> &e) { return e.enqueuedTotal(); })
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
             .def("enqueue", [](Edge<T> &e, const T &elem) {
                 py::gil_scoped_release release;

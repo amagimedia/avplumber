@@ -77,16 +77,29 @@ class AvpConnection:
         async with self._lock:
             if self.reader is None or self.writer is None:
                 raise ConnectionError("not connected")
+            request = asyncio.create_task(asyncio.wait_for(self._exchange(command), 5.0))
             try:
-                self.writer.write(command.encode("utf-8") + b"\n")
-                await self.writer.drain()
-                code, status, content = await self._read_response()
-            except Exception:
-                await self.disconnect()
+                return await asyncio.shield(request)
+            except asyncio.CancelledError:
+                # Finish an already-sent transaction before releasing the lock.
+                # A newer TUI worker can then reuse the connection safely.
+                try:
+                    await request
+                except Exception:
+                    pass  # _exchange disconnects on transport failure.
                 raise
-            if not 200 <= code < 300:
-                raise AvpProtocolError(f"{code} {status}")
-            return content
+
+    async def _exchange(self, command: str) -> str | None:
+        try:
+            self.writer.write(command.encode("utf-8") + b"\n")
+            await self.writer.drain()
+            code, status, content = await self._read_response()
+        except (Exception, asyncio.CancelledError):
+            await self.disconnect()
+            raise
+        if not 200 <= code < 300:
+            raise AvpProtocolError(f"{code} {status}")
+        return content
 
     async def _read_response(self) -> tuple[int, str, str | None]:
         if self.reader is None:

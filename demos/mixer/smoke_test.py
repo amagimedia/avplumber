@@ -88,6 +88,7 @@ async def _transition(
     scene: str,
     *,
     timeout: float,
+    hold_seconds: float = 0,
     **payload,
 ) -> dict[str, float]:
     started = time.monotonic()
@@ -103,10 +104,13 @@ async def _transition(
         lambda status: status.pgm_scene == scene and status.transition == "idle",
         timeout=timeout,
     )
-    return {
+    timing = {
         "command_ms": round(command_ms, 1),
         "settled_ms": round((time.monotonic() - started) * 1_000, 1),
     }
+    if hold_seconds:
+        await asyncio.sleep(hold_seconds)
+    return timing
 
 
 async def run(args: argparse.Namespace) -> dict:
@@ -151,6 +155,7 @@ async def run(args: argparse.Namespace) -> dict:
                 "cut",
                 "grid_2_page_0",
                 timeout=args.timeout,
+                hold_seconds=args.hold_seconds,
             ),
         }
         await _preview(
@@ -166,36 +171,54 @@ async def run(args: argparse.Namespace) -> dict:
             "grid_4_page_0",
             timeout=args.timeout,
             duration_sec=args.fade_duration,
+            hold_seconds=args.hold_seconds,
         )
         wipe_scenes = (
-            ("wipe_left", "grid_8_page_0"),
-            ("wipe_right", "grid_16_page_0"),
-            ("wipe_down", "fullscreen_0"),
-            ("wipe_up", "grid_2_page_0"),
+            "grid_8_page_0",
+            "grid_16_page_0",
+            "fullscreen_0",
+            "grid_2_page_0",
         )
-        for style, scene in wipe_scenes:
+        for scene in wipe_scenes:
             await _preview(
                 connection,
                 args.mixer,
                 scene,
                 timeout=args.timeout,
             )
-            transitions[style] = await _transition(
+            transitions[f"media_wipe_{scene}"] = await _transition(
                 connection,
                 args.mixer,
-                "cuda_wipe",
+                "wipe",
                 scene,
                 timeout=args.timeout,
-                style=style,
-                duration_sec=args.wipe_duration,
+                wipe_file=args.wipe_file,
+                hold_seconds=args.hold_seconds,
             )
-        return {
+        result = {
             "scene_count": len(scenes),
             "preview_command_ms": previews,
             "transitions": transitions,
         }
+        if args.strict_timing:
+            validate_timing(result, args.fade_duration, args.wipe_duration)
+        return result
     finally:
         await connection.disconnect()
+
+
+def validate_timing(result: dict, fade_duration: float, wipe_duration: float) -> None:
+    """Local-host acceptance limits; pixels/PTS require the recording test too."""
+    for scene, elapsed in result["preview_command_ms"].items():
+        if elapsed > 50:
+            raise AssertionError(f"preview {scene}: command took {elapsed} ms")
+    for name, timing in result["transitions"].items():
+        if timing["command_ms"] > 50:
+            raise AssertionError(f"{name}: command took {timing['command_ms']} ms")
+        duration_ms = 0 if name == "cut" else 1000 * (
+            fade_duration if name == "fade" else wipe_duration)
+        if timing["settled_ms"] > duration_ms + 120:
+            raise AssertionError(f"{name}: remained busy for {timing['settled_ms']} ms")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -205,8 +228,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mixer", default="mixer")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--fade-duration", type=float, default=0.25)
-    parser.add_argument("--wipe-duration", type=float, default=0.6)
+    parser.add_argument("--wipe-file", required=True,
+                        help="transparent clip path on the mixer backend")
+    parser.add_argument("--wipe-duration", type=float,
+                        help="actual clip duration for strict timing checks; does not override playback")
+    parser.add_argument("--strict-timing", action="store_true",
+                        help="check command/cleanup latency on a local control connection")
+    parser.add_argument("--hold-seconds", type=float, default=0,
+                        help="hold each completed scene for frame-continuity recording")
     args = parser.parse_args(argv)
+    if args.strict_timing and (args.wipe_duration is None or args.wipe_duration <= 0):
+        parser.error("--strict-timing requires the clip's positive --wipe-duration")
     print(json.dumps(asyncio.run(run(args)), indent=2, sort_keys=True))
 
 

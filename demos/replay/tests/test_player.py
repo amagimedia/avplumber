@@ -60,7 +60,8 @@ def test_shutdown_exception_is_not_hidden():
         stop_bounded(BrokenApplication(), 1)
 
 
-def test_headless_exercise_covers_v2_controls_from_observed_positions(monkeypatch):
+@pytest.mark.parametrize("nudge_fault", [None, "stale", "off_by_one"])
+def test_headless_exercise_covers_v2_controls_from_observed_positions(monkeypatch, nudge_fault):
     class SimController:
         def __init__(self):
             self.artifact = SimpleNamespace(
@@ -80,19 +81,23 @@ def test_headless_exercise_covers_v2_controls_from_observed_positions(monkeypatc
                 scrubbing_percent=0,
             )
             self.restore = None
+            self.serial = 0
+            self.markers = {0: self.state.frame_number}
 
         def status(self):
             return SimpleNamespace(**vars(self.state))
 
         def observation_marker(self):
-            return self.state.frame_number
+            return self.serial
 
         def observed_frames_since(self, marker):
-            return tuple(range(marker + 1, self.state.frame_number + 1))
+            return tuple(range(self.markers[marker] + 1, self.state.frame_number + 1))
 
         def position(self, milliseconds):
             self.state.position_ms = min(max(round(milliseconds), 0), self.artifact.duration_ms)
             self.state.frame_number = round(self.state.position_ms / 40)
+            self.serial += 1
+            self.markers[self.serial] = self.state.frame_number
 
         def execute(self, operation, value=None):
             if operation is Op.PAUSE:
@@ -102,6 +107,10 @@ def test_headless_exercise_covers_v2_controls_from_observed_positions(monkeypatc
             elif operation is Op.SEEK_MS:
                 self.position(value)
             elif operation is Op.SEEK_FRAMES:
+                if value == -1 and nudge_fault == "stale":
+                    return self.state
+                if value == -1 and nudge_fault == "off_by_one":
+                    value -= 1
                 self.position(self.state.position_ms + value * 40)
             elif operation is Op.SEEK_SECONDS:
                 self.position(self.state.position_ms + value * 1000)
@@ -144,7 +153,8 @@ def test_headless_exercise_covers_v2_controls_from_observed_positions(monkeypatc
     monkeypatch.setattr(player.time, "monotonic", lambda: clock.value)
 
     results = exercise_v2(controller, 1.0)
-    assert not [result for result in results if result.outcome == "FAIL"]
+    failures = [result.name for result in results if result.outcome == "FAIL"]
+    assert failures == (["nudge -1f"] if nudge_fault else [])
     assert {result.name for result in results} >= {
         "play advances", "pause stable", "absolute seek", "nudge -30f",
         "nudge +30s", "speed 50/100/200%",

@@ -1,0 +1,185 @@
+{
+  "seconds": 30,
+  "samples": [
+    {
+      "cpu_cores": 0.5699287178765311,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800293628259913,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899898486351554,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800003735193827,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5799919792922865,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.590003432638467,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5699919859133851,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800000823608779,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5900007339605817,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899987775225009,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5700295788337831,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5699869797874157,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800158263126737,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5900041158682593,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.589985917625537,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.589974595695272,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899960995355941,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5900123991100252,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800136448214263,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.579994566031298,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899915979280111,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800114801683947,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5799983574452968,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5900013859127371,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5700042767421578,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5799937900061167,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5800128293028045,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899999504415196,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5799923522211691,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    },
+    {
+      "cpu_cores": 0.5899921755232611,
+      "gpu_percent": 4,
+      "vram_mib": 689
+    }
+  ],
+  "summary": {
+    "cpu_cores": {
+      "min": 0.5699287178765311,
+      "mean": 0.5826649071285971,
+      "max": 0.5900123991100252
+    },
+    "gpu_percent": {
+      "min": 4,
+      "mean": 4,
+      "max": 4
+    },
+    "vram_mib": {
+      "min": 689,
+      "mean": 689,
+      "max": 689
+    }
+  },
+  "rss": "VmRSS:\t  556636 kB",
+  "conditions": {
+    "date": "2026-09-07",
+    "graph": "122 nodes / 140 queues",
+    "scene": "16-box, steady state",
+    "inputs": "16 generated 640x360 H.264 sources at 60 fps",
+    "output": "1080x1920 at 60 fps, H.264 NVENC, 8 Mbit/s",
+    "host": "Tesla T4, 16 vCPUs, automatic GPU clocks",
+    "gpu_scope": "Whole device; DMA-BUF browser workload stopped",
+    "cpu_scope": "AVPlumber process, in logical CPU cores",
+    "viewer": "Same-host Chromium preview remained open",
+    "note": "Separate steady-load phase, not sampled during the Cut trials."
+  }
+}

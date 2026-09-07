@@ -69,6 +69,7 @@ protected:
     std::atomic_bool notify_eof_ = false;
     std::atomic_bool eof_sent_ = false;
     bool send_eof_ = true;
+    bool stop_on_eof_ = true;
 
     std::string ts_offsets_url_;
     std::mutex ts_offsets_mutex_;
@@ -107,8 +108,8 @@ protected:
     }
 
 private:
-    void resolveSeekTarget(StreamTarget& st) {
-        if (st.isStop()) {
+    void resolveSeekTarget(StreamTarget& st) override {
+        if (st.isStop() || st.isBytes()) {
             return;
         }
 
@@ -128,6 +129,15 @@ private:
             }
             return;
         }
+
+        auto select_frame = [this, &st](const SeekTableEntry& entry) {
+            // Keep the decoder cutoff and byte seek on the same indexed frame.
+            // While paused, this is the only frame the reader will send.
+            st = StreamTarget::from_timestamp({entry.timestamp_ms, {1, 1000}});
+            convertStreamTarget(st, StreamTarget::ETargetType::tt_SyncTime);
+            st.bytes = entry.bytes;
+            st.type = StreamTarget::ETargetType::tt_Bytes;
+        };
 
         if (st.isLive()) {
             uint64_t t = seek_table_.crbegin()->timestamp_ms;
@@ -150,12 +160,10 @@ private:
             int64_t frame = st.frame_number;
             if (frame < 0)
                 frame = 0;
-            if (frame > seek_table_.size())
+            if (frame >= seek_table_.size())
                 frame = seek_table_.size() - 1;
 
-            st.ts = NOTS;
-            st.bytes = seek_table_[frame].bytes;
-            st.type = StreamTarget::ETargetType::tt_Bytes;
+            select_frame(seek_table_[frame]);
             return;
         }
 
@@ -215,8 +223,8 @@ private:
                     }
                     break;
                 default:
-                    // invalid request, jump to the beginning of file
-                    frame_ms = 0;
+                    // With unshifted packet timestamps, sync time is media time.
+                    frame_ms = rescaleTS(st.ts, {1, 1000}).timestamp();
                     break;
             }
         }
@@ -242,9 +250,7 @@ private:
             }
         }
 
-        st.ts = NOTS;
-        st.bytes = it->bytes;
-        st.type = StreamTarget::ETargetType::tt_Bytes;
+        select_frame(*it);
     }
 
     virtual bool convertStreamTarget(StreamTarget& st, StreamTarget::ETargetType target_type) override
@@ -284,7 +290,7 @@ private:
                     if (it == ts_offsets_.cend()) {
                         it = std::prev(it);
                     }
-                    if (it->changed_at > new_ts) {
+                    if ((it != ts_offsets_.cbegin()) && (it->changed_at > new_ts)) {
                         it = std::prev(it);
                     }
                     new_ts += it->wallclock_diff;
@@ -310,7 +316,7 @@ private:
                     if (it == ts_offsets_.cend()) {
                         it = std::prev(it);
                     }
-                    if (it->changed_at > new_ts) {
+                    if ((it != ts_offsets_.cbegin()) && (it->changed_at > new_ts)) {
                         it = std::prev(it);
                     }
 
@@ -619,9 +625,11 @@ public:
     virtual void process() {
         if (notify_eof_) {
             this->sink_->put(createEofPacket(video_stream_));
-            doStop();
+            if (stop_on_eof_) {
+                doStop();
+                eof_sent_ = false;
+            }
             notify_eof_ = false;
-            eof_sent_ = false;
             return;
         }
 
@@ -640,6 +648,7 @@ public:
         {
             auto lock = std::lock_guard<decltype(seek_mutex_)>(seek_mutex_);
             if (need_seek_) {
+                eof_sent_ = false;
                 //ictx_.flush();
                 //avformat_flush(ictx_.raw());
                 if (seek_target_.isTimestamp()) {
@@ -1105,6 +1114,9 @@ public:
         }
         if (params.count("send_eof") > 0) {
             send_eof_ = params["send_eof"];
+        }
+        if (params.count("stop_on_eof") > 0) {
+            stop_on_eof_ = params["stop_on_eof"];
         }
         if (params.count("timestamp_source") > 0) {
             std::string ts_source = params["timestamp_source"];

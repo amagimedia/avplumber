@@ -304,6 +304,9 @@ public:
     virtual void seekAndPause(StreamTarget target) = 0;
     virtual void resumeAfterSeek() = 0;
     virtual bool convertStreamTarget(StreamTarget& st, StreamTarget::ETargetType target_type) = 0;
+    // Resolve an indexed seek before configuring decoders. A resolved byte
+    // target retains the selected frame's timestamp in the decoder input clock.
+    virtual void resolveSeekTarget(StreamTarget& target) {}
     virtual void setFrameMetadataTimestamps(av::VideoFrame& frame) = 0;
     virtual void setFrameMetadataTimestamps(av::AudioSamples& frame) = 0;
     virtual void setPlaybackDirection(EPlaybackDirection dir) = 0;

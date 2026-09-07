@@ -161,6 +161,8 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/cuda_infer_scene_cut_onnx.cu,
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
+override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_overlay.o))
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/luma_diff.cpp
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/hog_diff.cpp
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/scene_cut/luma_diff.cu,avpl_luma_diff_ptx,objs/src/nodes/scene_cut/luma_diff.o))

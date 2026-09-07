@@ -10,7 +10,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Button, Footer, Header, Input, Label, Static
+from textual.scrollbar import ScrollBarRender
+from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 try:
     from .control import (
@@ -26,6 +27,11 @@ except ImportError:
         parse_mixer_status,
         parse_scene_list,
     )
+
+
+class SceneScrollBarRender(ScrollBarRender):
+    # Fractional block glyphs leave end-cap artifacts in browser terminals.
+    HORIZONTAL_BARS = [" "]
 
 
 class SceneButton(Static):
@@ -153,6 +159,8 @@ class MixerTui(App):
     #grids { margin-bottom: 1; }
     Button { margin-right: 1; }
     Input { width: 24; margin-right: 1; }
+    #wipe_file { width: 1fr; min-width: 24; }
+    #direct_transition { width: 22; margin-right: 1; }
     #transition_status { width: auto; min-width: 20; color: $text-muted; }
     #transition_status.busy { color: $warning; text-style: bold; }
     """
@@ -164,13 +172,13 @@ class MixerTui(App):
         mixer: str,
         *,
         fade_duration: float,
-        wipe_style: str,
+        wipe_file: str = "",
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
         self.mixer_name = mixer
         self.default_fade_duration = fade_duration
-        self.default_wipe_style = wipe_style
+        self.default_wipe_file = wipe_file
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
@@ -203,21 +211,30 @@ class MixerTui(App):
             yield Button("Page ▶", id="page_next")
         with Horizontal(id="settings"):
             yield Static("Mode: idle", id="transition_status")
-            yield Label("Transition seconds:")
+            yield Label("Fade seconds:")
             yield Input(str(self.default_fade_duration), id="fade_duration")
-            yield Label("Wipe style:")
-            yield Input(self.default_wipe_style, id="wipe_style")
+            yield Label("Wipe file:")
+            yield Input(self.default_wipe_file, id="wipe_file",
+                        placeholder="/path/on/mixer/host/wipe.mov")
         with Horizontal(id="takes"):
             yield Button("✂ CUT", id="cut", variant="error")
             yield Button("⟿ FADE", id="fade", variant="success")
-            yield Button("▶ CUDA WIPE", id="wipe", variant="primary")
+            yield Button("▶ MEDIA WIPE", id="wipe", variant="primary")
             yield Button("Direct: OFF", id="direct")
+            yield Select([("Cut", "cut"), ("Fade", "fade"), ("Media Wipe", "wipe")],
+                         value="cut", allow_blank=False, id="direct_transition",
+                         tooltip="Current transition, shared by take buttons and Direct mode")
             yield Button("↻ RECONNECT", id="reconnect")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#scenes").horizontal_scrollbar.renderer = SceneScrollBarRender
         self._poll_timer = self.set_interval(0.5, self._poll_status)
         self.action_reconnect()
+
+    async def on_unmount(self) -> None:
+        self._poll_timer.stop()
+        await self.connection.disconnect()
 
     def _set_connection_text(self, text: str) -> None:
         connection = self.query_one("#connection", Static)
@@ -253,6 +270,9 @@ class MixerTui(App):
         if content is None:
             raise RuntimeError("mixer.status returned no content")
         status = parse_mixer_status(content)
+        # A reply can arrive after Textual has detached the closing screen.
+        if not self.query("#program_scene"):
+            return
         self.pgm_scene = status.pgm_scene
         self.pvw_scene = status.pvw_scene
         self.transition = status.transition
@@ -268,13 +288,14 @@ class MixerTui(App):
         self._refresh_scene_buttons()
 
     async def _poll_status(self) -> None:
-        if not self.connection.connected:
+        if not self.connection.connected or not self.query("#program_scene"):
             return
         try:
             await self._read_status()
         except Exception as exc:
             await self.connection.disconnect()
-            self._set_connection_text(f"Connection lost: {exc}")
+            if self.query("#connection"):
+                self._set_connection_text(f"Connection lost: {exc}")
 
     @work(exclusive=True, group="connection")
     async def _reconnect(self) -> None:
@@ -312,13 +333,16 @@ class MixerTui(App):
         raise TimeoutError(f"preview did not become ready: {scene}")
 
     @work(exclusive=True, group="take")
-    async def _take(self, transition: str) -> None:
-        scene = self.selected_scene
+    async def _take(self, transition: str, scene: str | None = None) -> None:
+        direct = scene is not None
+        scene = scene if direct else self.selected_scene
         if not scene:
             self.notify("Select a scene first", severity="warning")
             return
         try:
-            await self._preview_and_wait(scene)
+            # Every take reaches the native mixer, including a correction back
+            # to Program while its previous transition is still in flight.
+            # Preview is optional preparation, never a prerequisite for a take.
             payload = {"scene": scene}
             if transition == "fade":
                 duration = float(self.query_one("#fade_duration", Input).value)
@@ -326,17 +350,12 @@ class MixerTui(App):
                     raise ValueError("transition duration must be positive")
                 payload["duration_sec"] = duration
             elif transition == "wipe":
-                style = self.query_one("#wipe_style", Input).value.strip()
-                supported = {"wipe_left", "wipe_right", "wipe_down", "wipe_up"}
-                if style not in supported:
-                    raise ValueError(
-                        "wipe style must be wipe_left, wipe_right, wipe_down, or wipe_up"
-                    )
-                duration = float(self.query_one("#fade_duration", Input).value)
-                if duration <= 0:
-                    raise ValueError("transition duration must be positive")
-                payload.update(style=style, duration_sec=duration)
-                transition = "cuda_wipe"
+                wipe_file = self.query_one("#wipe_file", Input).value.strip()
+                if not wipe_file:
+                    raise ValueError("Enter a transparent wipe file path on the mixer host")
+                # The backend probes the clip's duration. Its filesystem may
+                # differ from the machine running this control interface.
+                payload["wipe_file"] = wipe_file
             await self.connection.command(
                 mixer_command(transition, self.mixer_name, **payload)
             )
@@ -344,14 +363,18 @@ class MixerTui(App):
         except Exception as exc:
             self.notify(str(exc), severity="error")
 
+    def _use_transition(self, transition: str) -> None:
+        self.query_one("#direct_transition", Select).value = transition
+        self._take(transition)
+
     def action_cut(self) -> None:
-        self._take("cut")
+        self._use_transition("cut")
 
     def action_fade(self) -> None:
-        self._take("fade")
+        self._use_transition("fade")
 
     def action_wipe(self) -> None:
-        self._take("wipe")
+        self._use_transition("wipe")
 
     @work(exclusive=True, group="preview")
     async def _preview_selected(self) -> None:
@@ -370,7 +393,7 @@ class MixerTui(App):
             return
         self.selected_scene = scene
         if self.direct_mode:
-            self._direct_cut(scene)
+            self._direct_take(scene)
         else:
             self._preview_selected()
 
@@ -392,17 +415,9 @@ class MixerTui(App):
         page = min(max(page, available[0]), available[-1])
         self._select_scene(f"grid_{capacity}_page_{page}")
 
-    @work(exclusive=True, group="take")
-    async def _direct_cut(self, scene: str) -> None:
-        if self.transition != "idle" or scene == self.pgm_scene:
-            return
-        try:
-            await self.connection.command(
-                mixer_command("cut", self.mixer_name, scene=scene)
-            )
-            await self._read_status()
-        except Exception as exc:
-            self.notify(str(exc), severity="error")
+    def _direct_take(self, scene: str) -> None:
+        transition = str(self.query_one("#direct_transition", Select).value)
+        self._take(transition, scene)
 
     def action_toggle_direct(self) -> None:
         self.direct_mode = not self.direct_mode
@@ -410,7 +425,7 @@ class MixerTui(App):
         button.label = "Direct: ON" if self.direct_mode else "Direct: OFF"
         button.variant = "warning" if self.direct_mode else "default"
         button.tooltip = (
-            "Scene and layout selections cut directly to program"
+            "Scene and layout selections use the chosen transition to program"
             if self.direct_mode
             else "Scene and layout selections load preview"
         )
@@ -420,7 +435,7 @@ class MixerTui(App):
             self._select_scene(self.scenes[event.index])
 
     def on_key(self, event) -> None:
-        if isinstance(self.focused, Input):
+        if isinstance(self.focused, (Input, Select)):
             return
         key = event.key
         if key.isdigit() and key != "0":
@@ -432,7 +447,7 @@ class MixerTui(App):
         if key.startswith("f") and key[1:].isdigit():
             index = int(key[1:]) - 1
             if 0 <= index < min(9, len(self.scenes)):
-                self._direct_cut(self.scenes[index])
+                self._direct_take(self.scenes[index])
                 event.stop()
 
     @on(Button.Pressed)
@@ -473,14 +488,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=7777)
     parser.add_argument("--mixer", default="mixer")
     parser.add_argument("--fade-duration", type=float, default=0.5)
-    parser.add_argument("--wipe-style", default="wipe_left")
+    parser.add_argument("--wipe-file", default="",
+                        help="Transparent media wipe path on the mixer host")
     args = parser.parse_args(argv)
     MixerTui(
         args.host,
         args.port,
         args.mixer,
         fade_duration=args.fade_duration,
-        wipe_style=args.wipe_style,
+        wipe_file=args.wipe_file,
     ).run()
 
 
