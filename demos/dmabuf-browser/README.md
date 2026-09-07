@@ -9,9 +9,9 @@ a browser.
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png)
 
-The existing 10-second recording shows 16 independent Singular pages configured for
+The recording shows 16 independent Singular pages configured for
 1920×1080@60, grouped into two Electron processes with eight windows each and composed
-into one 1920×1080@60 output. It contains 600 NVENC-encoded frames (15.1 MB).
+into one 1920×1080@60 output. Its leading black frame is removed: 599 frames, 9.98 seconds, 8.6 MB.
 The demo page includes a live web UI graph screenshot from the Ubuntu validation
 run: about 39–40 new frames/s per source, composed at 60 fps. Media is hosted
 as public release assets, outside Git.
