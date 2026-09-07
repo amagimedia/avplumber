@@ -1,6 +1,7 @@
 # Live mixer demo
 
-**16 × native 1920×1080@60 inputs → 1080×1920@60 output.**
+**60 fps throughout: all 16 native 1920×1080 inputs → 1080×1920 portrait output at 60 fps.**
+Input files and encoded output are 60 fps; per-source frame continuity is qualified below.
 Measured on Tesla T4, 30 seconds per scene, with all sixteen sources active:
 
 | Scene | GPU compute | NVDEC | NVENC | AVPlumber CPU |
