@@ -11,32 +11,33 @@ on `127.0.0.1:9009`. The project configuration uses Electron 41 / Chromium
 
 To build the runtime-gated Electron native-handle change yourself, use the
 patch and script documented in
-[`demos/dmabuf-browser`](../../demos/dmabuf-browser/README.md#build-patched-electron-no-shim).
+[the browser demo](../../demos/dmabuf-browser/README.md#alternative-build-electron-without-the-shim).
 
 ## Quick start
 
 ```bash
 npm install
 npm run rebuild:addons   # builds fdpass native addon
-npm run rebuild:shim     # optional: builds the stock-Electron NVIDIA shim
-npm start                # launches Electron through bin/run.sh
+npm start                # on NVIDIA, use the setup below before launching
 ```
-
-Build the optional shim on the target host; its ignored `.so` is native to the
-host CPU architecture.
 
 ### NVIDIA GPUs
 
-`bin/run.sh` autodetects NVIDIA, enables the patched Electron OSR native-handle
-feature, and applies the Wayland, EGL/GBM, and DRM render-node settings. The
-same patched binary retains upstream behavior on other GPU vendors. The browser
-renderer has hardware video decoding disabled. A stock Electron binary can use
-the GBM shim documented in the demo README instead. Force-enable the NVIDIA
-runtime path with:
+The default install downloads stock Electron from its official releases.
+Build and enable the supplied GBM shim on the NVIDIA host:
 
 ```bash
+npm run rebuild:shim
+LD_PRELOAD="$PWD/native/gbm-linear-shim/libgbm_linear_shim.so" \
+GBM_LINEAR_SHIM=1 GBM_LINEAR_SHIM_ADD_SCANOUT=1 \
 DMA_BROWSER_FORCE_NVIDIA=1 npm start
 ```
+
+The shim is native to the host CPU architecture. `bin/run.sh` applies the
+Wayland, EGL/GBM, and DRM settings; hardware video decoding stays disabled.
+The [Docker demo](../../demos/dmabuf-browser/README.md#run) builds and enables
+the shim automatically. Alternatively, use the patched Electron build linked
+above without the shim.
 
 ## Process grouping
 

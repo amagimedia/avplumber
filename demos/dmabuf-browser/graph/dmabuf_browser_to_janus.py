@@ -76,6 +76,7 @@ from dmabuf_browser_common import (
     duplicate_stats,
     make_dmabuf_cuda_input_nodes,
     make_janus_h264_output_nodes,
+    wait_for_edge,
 )
 
 SOCKET = os.environ.get("SOCKET", "/tmp/dma-page/overlay.sock")
@@ -154,7 +155,7 @@ nodes, cuda_edge = make_dmabuf_cuda_input_nodes(
     drm_hwaccel="@drm",
     cuda_hwaccel="@gpu",
     source_group="in",
-    processing_group="out",
+    processing_group="capture",
 )
 
 if OUTPUT_MODE == "janus":
@@ -259,8 +260,11 @@ else:
         flush=True,
     )
 
-avp.group("out").startNodes()
+avp.group("capture").startNodes()
 avp.group("in").startNodes()
+# The encoder needs the timestamp filter's initialized output time base.
+wait_for_edge(avp, cuda_edge, float(os.environ.get("GRAPH_START_TIMEOUT_SEC", "60")))
+avp.group("out").startNodes()
 
 started = time.monotonic()
 next_report = started + MPDECIMATE_REPORT_INTERVAL_SEC
@@ -283,4 +287,5 @@ finally:
         avp.group("in").stopNodes()
         time.sleep(1)
         avp.group("out").stopNodes()
+        avp.group("capture").stopNodes()
         print_mpdecimate_stats(mpdecimate_counts, final=True)

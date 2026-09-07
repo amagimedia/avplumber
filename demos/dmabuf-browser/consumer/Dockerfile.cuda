@@ -4,8 +4,8 @@
 # every distribution.  Build FFmpeg here so the N-source scaling graph has a
 # reproducible GPU resizer for the legacy comparison and diagnostic graphs.
 # The production graph scales while sampling registered EGL images in its CUDA
-# compositor and never needs a CPU scale/download. Callers may supply explicit
-# gencode flags; the default deliberately does not fix one GPU architecture.
+# compositor and never needs a CPU scale/download. The default emits PTX for
+# compute capability 7.0 and newer, matching the bundled CUDA filter suite.
 #
 # Build context = the avplumber repository root:
 #   docker build -t avplumber-dmabuf-consumer-cuda \
@@ -18,7 +18,7 @@ FROM nvidia/cuda:${CUDA_IMAGE_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 ARG DEBIAN_FRONTEND=noninteractive
 ARG FFMPEG_TAG=n7.1.5
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
-ARG CUDA_NVCC_FLAGS="-O2"
+ARG CUDA_NVCC_FLAGS="-gencode arch=compute_70,code=compute_70 -O2"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

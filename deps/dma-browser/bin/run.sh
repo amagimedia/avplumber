@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launcher for dma-browser.
 #
-# The default NVIDIA path expects an Electron build with the demo's
-# runtime-gated native-handle patch. No GBM LD_PRELOAD shim is applied.
+# The public Docker image uses official Electron with the bundled GBM shim.
+# Native launches must configure that shim as described in README.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -46,6 +46,7 @@ services:
     image: avplumber-dmabuf-demo-wayland:${WAYLAND_IMAGE_TAG:-latest}
     restart: unless-stopped
     gpus: all
+    runtime: nvidia
     privileged: true
     security_opt:
       - seccomp:unconfined
@@ -81,6 +82,7 @@ services:
     image: avplumber-dmabuf-demo-browser:${DMA_BROWSER_IMAGE_TAG:-latest}
     restart: unless-stopped
     gpus: all
+    runtime: nvidia
     shm_size: ${DMA_BROWSER_SHM_SIZE:-1gb}
     privileged: true
     security_opt:
@@ -120,6 +122,7 @@ services:
     network_mode: host
     restart: unless-stopped
     gpus: all
+    runtime: nvidia
     privileged: true
     security_opt:
       - seccomp:unconfined
@@ -142,8 +145,8 @@ services:
       JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
     volumes:
       - dma-browser-sockets:/tmp/dma-page
-      - ./graph/dmabuf_browser_to_janus.py:/opt/avplumber/dmabuf_browser_to_janus.py:ro
-    command: ["python3", "/opt/avplumber/dmabuf_browser_to_janus.py"]
+      - ./graph:/opt/avplumber/dmabuf-browser-graph:ro,z
+    command: ["python3", "/opt/avplumber/dmabuf-browser-graph/dmabuf_browser_to_janus.py"]
 
 volumes:
   wayland-runtime:

@@ -1,6 +1,7 @@
 """Shared node builders for the DMA-BUF browser demo graphs."""
 
 import threading
+import time
 
 from pyplumber.node import (
     AssumeVideoFormat,
@@ -15,6 +16,14 @@ from pyplumber.node import (
     Output,
     PythonNode,
 )
+
+
+def wait_for_edge(avp, edge, timeout_sec, data_type=None):
+    deadline = time.monotonic() + timeout_sec
+    while avp.getEdge(edge, data_type).occupied == 0:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for the first frame on {edge}")
+        time.sleep(0.05)
 
 
 class FrameCounts:
