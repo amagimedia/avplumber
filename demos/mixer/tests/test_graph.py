@@ -64,9 +64,13 @@ class FakeMixer:
         self.parameters = parameters
         self.timeline = "mixer_timeline"
         self.routed_sources = []
+        self.sources = []
         self.scenes = {}
         self.initial_scene = None
         self.instances.append(self)
+
+    def add_source(self, name, **parameters):
+        self.sources.append((name, parameters))
 
     def add_routed_source(self, name, **parameters):
         self.routed_sources.append((name, parameters))
@@ -152,19 +156,12 @@ def test_graph_is_video_only_and_always_preheated():
     mixer = FakeMixer.instances[-1]
     node_types = [node.parameters["type"] for node in application.avp.nodes]
 
-    assert node_types.count("preheat_video_router") == 1
-    assert len(mixer.routed_sources) == 1 + 2 + 4 + 8 + 16
+    assert "preheat_video_router" not in node_types
+    assert len(mixer.sources) == 17
+    assert not mixer.routed_sources
+    assert all(params["default_graph"] == "" for _, params in mixer.sources)
     assert mixer.parameters["defer_initial_routes"] is True
-    router = next(
-        node.parameters
-        for node in application.avp.nodes
-        if node.parameters["type"] == "preheat_video_router"
-    )
-    assert len(router["routes"]) == 2 * (1 + 2 + 4 + 8 + 16)
-    assert set(router["routes"]) == set(range(17))
-    assert len(application.preheated_output_edges) == len(router["routes"])
-    assert mixer.parameters["enable_wipe"] is False
-    assert not hasattr(mixer, "add_source")
+    assert mixer.parameters["enable_wipe"] is True
     assert not any(
         forbidden in node_type_name
         for node_type_name in node_types
@@ -177,8 +174,7 @@ def test_graph_is_video_only_and_always_preheated():
         if node.parameters["type"] == "filter_video"
         and node.parameters["name"].startswith("normalize_")
     ]
-    assert normalizers
-    assert {node["dst_frame_rate"] for node in normalizers} == {"30/1"}
+    assert normalizers == []
 
     serialized_graph = repr([node.parameters for node in application.avp.nodes]).lower()
     assert "hwdownload" not in serialized_graph
@@ -196,7 +192,8 @@ def test_graph_has_stable_fullscreen_and_paged_scenes():
     assert {f"fullscreen_{index}" for index in range(3)} <= scenes.keys()
     assert "grid_2_page_0" in scenes
     assert "grid_2_page_1" in scenes
-    assert scenes["grid_2_page_1"]["routes"] == {"layout_2_slot_0": 2}
+    assert set(scenes["grid_2_page_1"]["sources"]) == {"source_2"}
+    assert scenes["grid_2_page_1"]["routes"] == {}
 
 
 def test_output_format_inference_is_explicit_when_ambiguous():
@@ -224,7 +221,7 @@ def test_cli_accepts_ordered_repeatable_input_paths():
     assert options.loop_inputs is True
 
 
-def test_configured_fps_reaches_decode_normalization_mixer_and_outputs():
+def test_configured_fps_reaches_input_mixer_and_outputs():
     FakeMixer.instances.clear()
     application = build_application(
         GraphOptions(
@@ -238,8 +235,7 @@ def test_configured_fps_reaches_decode_normalization_mixer_and_outputs():
     nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
 
     assert nodes["fps_0"]["fps"] == "60/1"
-    assert nodes["normalize_0"]["dst_frame_rate"] == "60/1"
-    assert nodes["layout_preheat_router"]["frame_rate"] == "60/1"
+    assert "normalize_0" not in nodes
     assert nodes["program_fps"]["fps"] == "60/1"
     assert nodes["program_encoder"]["options"]["g"] == 120
     assert nodes["janus_fps"]["fps"] == "60/1"
@@ -289,3 +285,16 @@ def test_cpu_encoder_is_rejected():
             GraphOptions(inputs=("input.mp4",), output="program.mp4", codec="libx264"),
             api=fake_api(),
         )
+
+
+def test_large_catalogue_keeps_paging_without_geometry_filters():
+    app = build_application(GraphOptions(inputs=tuple(f"source-{i}" for i in range(65)),
+                                          output="program.ts"), api=fake_api())
+    mixer = FakeMixer.instances[-1]
+    assert not mixer.sources
+    assert len(mixer.routed_sources) == 16
+    assert app.routed_inputs
+    assert len([n for n in app.avp.nodes if n.parameters["name"].startswith("normalize_")]) == 65
+    assert mixer.scenes["fullscreen_64"]["routes"] == {"source_0": 64}
+    assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
+    assert all(params["default_graph"] == "" for _, params in mixer.routed_sources)

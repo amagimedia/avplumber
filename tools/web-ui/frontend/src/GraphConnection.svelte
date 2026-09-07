@@ -13,6 +13,11 @@
   // svelte-ignore unused-export-let
   export let end: Position;
   export let path: string;
+  export let id: string = '';
+  export let __route: Position[][] = [];
+  $: routedPath = __route.length
+    ? __route.map(points => points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ')).join(' ')
+    : path;
 
   let hovered = false;
 
@@ -35,15 +40,15 @@
   $: label =
     queueName && q && q.capacity > 0
       ? `${queueName}: ${q.occupied}/${q.capacity} (${Math.round((q.occupied / q.capacity) * 100)}%)${
-          pps > 0 ? `, ${pps.toFixed(1)} pps` : ''
-        }${fiqLine ? `\n${fiqLine}` : ''}`
+          pps > 0 ? `, ${pps.toFixed(1)} pps${q?.aggregate ? ' total' : ''}` : ''
+        }${fiqLine ? `\n${fiqLine}` : ''}${q?.aggregate ? `\n${q.members.join('\n')}` : ''}`
       : queueName
         ? queueName
         : '';
   $: hoverText =
     pct !== null
       ? `${fiq && fiq.min != null && fiq.max != null ? `min=${fiq.min} avg=${fiqAvg} max=${fiq.max}` : ''}${
-          pps > 0 ? ` · ${pps.toFixed(1)} pps` : ''
+          pps > 0 ? ` · ${pps.toFixed(1)} pps${q?.aggregate ? ' total' : ''}` : ''
         }`
       : '';
 
@@ -107,7 +112,7 @@
   }
 
   $: stroke = pct === null ? (queueName ? '#a78bfa' : '#60a5fa') : colorFor(pct);
-  $: width = hovered ? 7 : 5;
+  $: width = hovered ? 5 : 2.5;
   $: mid = {
     x: (start.x + end.x) / 2,
     y: (start.y + end.y) / 2
@@ -115,14 +120,19 @@
 </script>
 
 <svg data-testid="connection">
+  <defs><marker id={`arrow-${id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" style={`fill: ${stroke}; pointer-events: none`} />
+  </marker></defs>
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <!-- svelte-ignore a11y-mouse-events-have-key-events -->
   <!-- svelte-ignore a11y-no-noninteractive-element-to-interactive-role -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <path
-    d={path}
+    d={routedPath}
     stroke={stroke}
     stroke-width={width}
+    stroke-linejoin="round"
+    marker-end={`url(#arrow-${id})`}
     on:mouseenter={() => (hovered = true)}
     on:mouseleave={() => (hovered = false)}
   >

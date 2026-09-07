@@ -233,11 +233,17 @@ Each GPU container needs:
 `enc_video(h264_nvenc baseline)` → `bsf dump_extra=freq=keyframe` → `mux` →
 `output(rtp)` to Janus.
 
-Set `FPS` to the dma-browser window's capture rate. The N-source graph snaps
-the windows' shared monotonic timestamps to common `1/FPS` boundaries, then
-uses `fps` and `smooth_timestamps` only on the composite program output. This
-limits Janus/NVENC to the requested rate without creating eight independent
-CPU pacing paths.
+Set `FPS` to the dma-browser window's capture rate. The default N-source EGL/CUDA
+path uses `drm_prime_to_egl_image` and `egl_image_cuda_overlay`. The compositor
+generates program timestamps on its own output clock and buffers input jitter
+with the shared native mixer timing code. The default delay is two frame periods;
+set `MIXER_LATENCY_MS` to change it. Late inputs repeat their last image and discard
+overdue frames to recover the fixed delay. Validate source frame IDs as well as
+output PTS: a steady 60 fps counter alone does not prove frame continuity.
+
+The legacy CUDA path normalizes input timestamps and applies `fps` and
+`smooth_timestamps` to the composite output. That output normalization cannot
+recover source frames already omitted during composition.
 - **Why CUDA detile:** on NVIDIA the browser's GPU render target is always tiled
   (block-linear); a plain DRM `hwdownload` reads sheared garbage. `drm_prime_to_cuda`
   EGL-imports the DMA-BUF honoring the tiling modifier into a linear CUDA frame,
@@ -283,9 +289,9 @@ should be climbing and `droppedReasons` near-empty. When using the shim, set
 
 [`compose.scaling.yaml`](compose.scaling.yaml) replaces the normal graph with a
 parameterized load test. `DMABUF_SOURCE_COUNT` is N, not a graph constant; it
-defaults to 8. The requested eight-source run opens eight independent Electron
-windows at 1920x1080@60, creates eight `ipc_dmabuf_source` →
-`drm_prime_to_egl_image` chains, fits them into a 3x3 GPU grid without
+defaults to 16. The default run opens sixteen independent Electron processes
+with one 1920x1080@60 window each, creates sixteen `ipc_dmabuf_source` →
+`drm_prime_to_egl_image` chains, fits them into a 4x4 GPU grid without
 stretching, and sends the 1920x1080 program output to the normal Janus
 mountpoint.
 
@@ -336,37 +342,27 @@ DMABUF_TEST_MODE=single \
 docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
 ```
 
-Run N sources (8 by default):
+Run the default sixteen-source grid:
 
 ```bash
-DMABUF_TEST_MODE=grid DMABUF_SOURCE_COUNT=8 \
+DMABUF_TEST_MODE=grid \
 docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
 ```
 
-The browser groups up to `DMABUF_BROWSER_WINDOWS_PER_PROCESS` windows in each
-Electron process (default 8) and derives the required process count from
-`DMABUF_SOURCE_COUNT`. For example, 20 sources use three processes. Eight is a
-measured default, not an Electron limit; raise it to test larger shared groups.
-Sharing eight windows reduced whole-GPU SM utilization in the reference
-eight-source test from about 36% with one process per window to 24–25% with one
-process for all eight.
+The scaling demo defaults to one window per Electron process and derives the
+worker count from `DMABUF_SOURCE_COUNT`. Override
+`DMABUF_BROWSER_WINDOWS_PER_PROCESS` to compare grouped windows, or
+`DMABUF_BROWSER_PROCESS_COUNT` to set the worker count explicitly.
 
-To isolate each source in its own Electron process while preserving one public
-REST endpoint, set the process count to N and one window per process. For a
-16-source 4x4 grid:
+For the measured sixteen-page animated workload on a 16-vCPU host with a Tesla
+T4, sixteen workers sustained approximately 60 fps per source and used less CPU
+than four workers with four pages each. This depends on page content; grouping
+lightweight pages can reduce resource use. Compare configurations at the same
+achieved source rate.
 
-```bash
-DMABUF_TEST_MODE=grid DMABUF_SOURCE_COUNT=16 \
-DMABUF_BROWSER_PROCESS_COUNT=16 DMABUF_BROWSER_WINDOWS_PER_PROCESS=1 \
-DMA_BROWSER_SHM_SIZE=4gb \
-docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
-```
-
-The supervisor assigns global window IDs across workers, keeps worker REST
-listeners on loopback-only ports, and reopens the assigned page if a worker
-exits. Multi-process mode costs substantially more GPU and host memory; it does
-not raise the GPU's encode or rendering capacity by itself. Leave
-`DMABUF_BROWSER_PROCESS_COUNT=1` for the lower-overhead single-process path.
+The supervisor preserves one public REST endpoint, assigns global window IDs
+across workers, keeps worker REST listeners on loopback-only ports, and reopens
+the assigned page if a worker exits.
 
 To measure duplicate frames, run a finite diagnostic phase:
 

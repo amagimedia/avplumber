@@ -76,7 +76,7 @@ builds, NVIDIA requirements, and a local WebRTC preview.
 
 | Demo | What it demonstrates | Requirements |
 | --- | --- | --- |
-| [Mixer](demos/mixer/README.md) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and CUDA wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Mixer](demos/mixer/README.md) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and transparent media wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
 | [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
 | [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
 | [Browser capture](demos/dmabuf-browser/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) | Capture HTML through DMA-BUF and compose browser sources into a GPU grid with WebRTC preview. | NVIDIA graphics driver + DRM/EGL; Docker stack includes Electron and Janus. |

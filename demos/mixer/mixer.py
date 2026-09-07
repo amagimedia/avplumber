@@ -18,10 +18,7 @@ try:
         CANONICAL_SOURCE_WIDTH,
         CANVAS_HEIGHT,
         CANVAS_WIDTH,
-        PREHEAT_CAPACITIES,
         all_scenes,
-        layout_filter_graph,
-        layout_source_name,
     )
 except ImportError:
     from layouts import (  # type: ignore[no-redef]
@@ -29,10 +26,7 @@ except ImportError:
         CANONICAL_SOURCE_WIDTH,
         CANVAS_HEIGHT,
         CANVAS_WIDTH,
-        PREHEAT_CAPACITIES,
         all_scenes,
-        layout_filter_graph,
-        layout_source_name,
     )
 
 
@@ -41,13 +35,12 @@ FPS_DEN = 1
 HWACCEL = "@gpu"
 MIXER_NAME = "mixer"
 ROUTER_GROUP = "mixer_preheat_router"
-GEOMETRY_GROUP = "mixer_preheated_geometry"
 OUTPUT_GROUP = "output"
 JANUS_DEFAULT_HOST = "127.0.0.1"
 JANUS_DEFAULT_VIDEO_PORT = 5004
 JANUS_DEFAULT_VIDEO_PT = 96
 JANUS_DEFAULT_VIDEO_SSRC = 0x41565001
-JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 3_000
+JANUS_DEFAULT_VIDEO_BITRATE_KBPS = 4_500
 RTP_PACKET_SIZE = 1_200
 PREHEAT_POLL_INTERVAL_SEC = 0.02
 
@@ -61,6 +54,7 @@ class GraphOptions:
     codec: str = "h264_nvenc"
     bitrate: str = "8M"
     fps: int = DEFAULT_FPS
+    mixer_latency_ms: float | None = None
     loop_inputs: bool = False
     janus_output: bool = False
     janus_host: str = JANUS_DEFAULT_HOST
@@ -105,15 +99,15 @@ class MixerApplication:
     avp: object
     mixer: object
     input_groups: tuple[str, ...]
-    normalized_input_edges: tuple[str, ...]
-    preheated_output_edges: tuple[str, ...]
+    input_edges: tuple[str, ...]
+    routed_inputs: bool
     preheat_timeout_sec: float
     rtcp_feedback_listener: object | None = None
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
         while True:
-            missing = [edge for edge in edges if self.avp.getEdge(edge).occupied == 0]
+            missing = [edge for edge in edges if self.avp.getEdge(edge).enqueued_total == 0]
             if not missing:
                 return
             if time.monotonic() >= deadline:
@@ -133,11 +127,10 @@ class MixerApplication:
     def start(self) -> None:
         for group in self.input_groups:
             self.avp.group(group).startNodes()
-        self._wait_for_edges(self.normalized_input_edges, "input normalization")
-        self.avp.group(ROUTER_GROUP).startNodes()
-        self._wait_for_node("layout_preheat_router")
-        self.avp.group(GEOMETRY_GROUP).startNodes()
-        self._wait_for_edges(self.preheated_output_edges, "geometry warm-up")
+        self._wait_for_edges(self.input_edges, "input readiness")
+        if self.routed_inputs:
+            self.avp.group(ROUTER_GROUP).startNodes()
+            self._wait_for_node("layout_preheat_router")
         self.mixer.initialize_routes()
         self.mixer.start_groups()
         for node in (
@@ -149,40 +142,30 @@ class MixerApplication:
         ):
             self._wait_for_node(node)
         self.mixer.begin_transition_preheat()
-        self._wait_for_edges(("mixer_trans_out",), "transition warm-up")
-        self.mixer.finish_transition_preheat()
+        try:
+            self._wait_for_edges(("mixer_trans_out",), "transition warm-up")
+        finally:
+            self.mixer.finish_transition_preheat()
+        self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
+        self._wait_for_edges(("mixer_final_out",), "program output")
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.start()
         self.avp.setReady()
         print(
-            f"Generic mixer preheat complete: "
-            f"{len(self.preheated_output_edges)} geometry paths and transition ready",
+            "Generic mixer preheat complete: compositors and transition ready",
             flush=True,
         )
 
     def stop(self) -> None:
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
-        groups = (
-            OUTPUT_GROUP,
-            f"{MIXER_NAME}_b",
-            f"{MIXER_NAME}_a",
-            MIXER_NAME,
-            GEOMETRY_GROUP,
-            ROUTER_GROUP,
-            *reversed(self.input_groups),
-        )
-        for group in groups:
-            try:
-                self.avp.group(group).stopNodes()
-            except Exception:
-                pass
+        self.avp.shutdown()
 
 
 def load_avp_api():
     from pyplumber import AVPlumber
-    from pyplumber.mixer import MixerGraphBuilder
+    from avpmixer import MixerGraphBuilder
     from pyplumber.node import (
         AssumeVideoFormat,
         Bsf,
@@ -242,7 +225,7 @@ def _input_group(index: int) -> str:
 
 
 def _build_input(
-    avp, api, index: int, url: str, *, loop: bool, fps: int
+    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool
 ) -> str:
     group = _input_group(index)
     packet_edge = f"input_{index}_packets"
@@ -292,6 +275,8 @@ def _build_input(
         "fps": f"{fps}/{FPS_DEN}",
         "group": group,
     }))
+    if not normalize:
+        return fps_edge
     avp.addNode(api.FilterVideo({
         "name": f"normalize_{index}",
         "src": fps_edge,
@@ -313,76 +298,50 @@ def _build_input(
     return normalized_edge
 
 
-def _route_edge(capacity: int, slot: int, mixer_slot: str) -> str:
-    return f"route_{capacity}_{slot}_{mixer_slot.lower()}"
-
-
-def _route_label(capacity: int, slot: int, mixer_slot: str) -> str:
-    return f"capacity_{capacity}_slot_{slot}_{mixer_slot.lower()}"
-
-
-def _build_preheated_layouts(
-    avp, api, mixer, input_edges: list[str], *, fps: int
-) -> tuple[str, ...]:
-    outputs = []
-    labels = []
-    preheated_output_edges = []
-    for capacity in PREHEAT_CAPACITIES:
-        for slot in range(capacity):
-            for mixer_slot in ("A", "B"):
-                outputs.append(_route_edge(capacity, slot, mixer_slot))
-                labels.append(_route_label(capacity, slot, mixer_slot))
-
+def _register_sources(avp, api, mixer, input_edges: list[str], *, fps: int) -> bool:
+    # Compositor masks have 32 bits. Larger catalogues retain a small router
+    # selecting the 16 visible positions, without per-layout filter branches.
+    if len(input_edges) <= 32:
+        for index, edge in enumerate(input_edges):
+            mixer.add_source(f"source_{index}", pre_otm_edge=edge,
+                             input_group=_input_group(index), default_graph="")
+        return False
+    labels = [f"slot_{i}_{slot}" for i in range(16) for slot in ("a", "b")]
+    edges = [f"route_{label}" for label in labels]
     avp.addNode(api.PreheatVideoRouter({
-        "name": "layout_preheat_router",
-        "src": input_edges,
-        "dst": outputs,
-        "routes": [index % len(input_edges) for index in range(len(outputs))],
-        "labels": labels,
-        "width": CANONICAL_SOURCE_WIDTH,
-        "height": CANONICAL_SOURCE_HEIGHT,
-        "pixel_format": "cuda",
-        "real_pixel_format": "nv12",
-        "frame_rate": f"{fps}/{FPS_DEN}",
-        "timebase": f"{FPS_DEN}/{fps}",
-        "timeline": mixer.timeline,
-        "auto_restart": "group",
-        "group": ROUTER_GROUP,
+        "name": "layout_preheat_router", "src": input_edges, "dst": edges,
+        "routes": [-1] * len(edges), "labels": labels,
+        "width": CANONICAL_SOURCE_WIDTH, "height": CANONICAL_SOURCE_HEIGHT,
+        "pixel_format": "cuda", "real_pixel_format": "nv12",
+        "frame_rate": f"{fps}/{FPS_DEN}", "timebase": f"{FPS_DEN}/{fps}",
+        "timeline": mixer.timeline, "group": ROUTER_GROUP,
     }))
-
-    for capacity in PREHEAT_CAPACITIES:
-        graph = layout_filter_graph(capacity)
-        for slot in range(capacity):
-            mixer.add_routed_source(
-                layout_source_name(capacity, slot),
-                pre_filter_edge_a=_route_edge(capacity, slot, "A"),
-                pre_filter_edge_b=_route_edge(capacity, slot, "B"),
-                input_group=GEOMETRY_GROUP,
-                route_router="layout_preheat_router",
-                route_output_label_a=_route_label(capacity, slot, "A"),
-                route_output_label_b=_route_label(capacity, slot, "B"),
-                default_graph=graph,
-            )
-            preheated_output_edges.extend((
-                f"{MIXER_NAME}_{layout_source_name(capacity, slot)}_scaled_a",
-                f"{MIXER_NAME}_{layout_source_name(capacity, slot)}_scaled_b",
-            ))
-    return tuple(preheated_output_edges)
+    for index in range(16):
+        mixer.add_routed_source(
+            f"source_{index}", pre_filter_edge_a=edges[2 * index],
+            pre_filter_edge_b=edges[2 * index + 1], input_group=ROUTER_GROUP,
+            route_router="layout_preheat_router", route_output_label_a=labels[2 * index],
+            route_output_label_b=labels[2 * index + 1], default_graph="",
+        )
+    return True
 
 
-def _define_scenes(mixer, input_count: int) -> None:
+def _define_scenes(mixer, input_count: int, routed: bool) -> None:
     for scene in all_scenes(input_count):
-        graph = layout_filter_graph(scene.capacity)
-        sources = {}
-        routes = {}
+        sources, routes = {}, {}
         for placement in scene.placements:
-            source = layout_source_name(scene.capacity, placement.slot_index)
+            index = placement.slot_index if routed else placement.source_index
+            source = f"source_{index}"
             sources[source] = {
-                "graph": graph,
-                "dst_x": placement.x,
-                "dst_y": placement.y,
+                "dst_x": placement.x, "dst_y": placement.y,
+                "dst_w": placement.width, "dst_h": placement.height, "fit": "contain",
             }
-            routes[source] = placement.source_index
+            if routed:
+                routes[source] = placement.source_index
+            else:
+                # Preserve the same 16:9 source framing without materializing
+                # an enlarged intermediate frame for every camera.
+                sources[source]["source_canvas"] = {"w": CANONICAL_SOURCE_WIDTH, "h": CANONICAL_SOURCE_HEIGHT}
         mixer.add_scene(scene.name, sources, routes=routes)
 
 
@@ -608,6 +567,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
             url,
             loop=options.loop_inputs,
             fps=options.fps,
+            normalize=len(options.inputs) > 32,
         )
         for index, url in enumerate(options.inputs)
     ]
@@ -616,14 +576,16 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         name=MIXER_NAME,
         canvas=(CANVAS_WIDTH, CANVAS_HEIGHT),
         fps=(options.fps, FPS_DEN),
+        latency_ms=options.mixer_latency_ms,
         hwaccel=HWACCEL,
-        enable_wipe=False,
+        enable_wipe=True,
         defer_initial_routes=True,
+        defer_output=True,
     )
-    preheated_output_edges = _build_preheated_layouts(
+    routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
     )
-    _define_scenes(mixer, len(input_edges))
+    _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     mixer_edge = mixer.build()
     rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge)
@@ -631,8 +593,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         avp=avp,
         mixer=mixer,
         input_groups=tuple(_input_group(index) for index in range(len(input_edges))),
-        normalized_input_edges=tuple(input_edges),
-        preheated_output_edges=preheated_output_edges,
+        input_edges=tuple(input_edges),
+        routed_inputs=routed_inputs,
         preheat_timeout_sec=options.preheat_timeout_sec,
         rtcp_feedback_listener=rtcp_feedback_listener,
     )
@@ -662,6 +624,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         default=DEFAULT_FPS,
         help=f"Mixer and output frame rate (default: {DEFAULT_FPS})",
     )
+    parser.add_argument("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
     parser.add_argument("--loop-inputs", action="store_true")
     parser.add_argument(
         "--janus-output",
@@ -697,6 +660,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         codec=args.codec,
         bitrate=args.bitrate,
         fps=args.fps,
+        mixer_latency_ms=args.mixer_latency_ms,
         loop_inputs=args.loop_inputs,
         janus_output=args.janus_output,
         janus_host=args.janus_host,

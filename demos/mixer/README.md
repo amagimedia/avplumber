@@ -1,6 +1,6 @@
 # Generic manual mixer demo
 
-<img src="docs/tui.svg" alt="The connected generic mixer TUI showing Program and Preview buses, three scenes, layout and paging controls, transition settings, Cut, Fade, CUDA Wipe, Direct mode, and Reconnect" width="100%">
+<img src="docs/tui.svg" alt="The generic mixer TUI with Program and Preview buses, scene and layout controls, and transition controls" width="100%">
 
 ## Features
 
@@ -13,19 +13,26 @@ The interface provides:
 - separate **Program** (on-air) and **Preview** (ready) buses;
 - a scrollable strip of fullscreen and grid scenes;
 - fullscreen and paged 2-box, 4-box, 8-box, and 16-box layouts;
-- immediate Cut, timed Fade, and GPU-native CUDA Wipe transitions;
-- left, right, up, and down wipe styles;
-- editable transition duration and wipe style;
+- immediate Cut, timed Fade, and transparent media-file Wipe transitions;
+- editable fade duration and media-wipe file path;
 - Direct mode for putting scene and layout selections straight on air; and
 - connection status, transition status, and manual Reconnect.
 
-With Direct mode off, selecting a scene or layout loads it into Preview. Cut,
-Fade, and CUDA Wipe wait until that preheated Preview scene is ready before
-sending the transition. With Direct mode on, scene and layout selections cut
-directly to Program.
+With Direct mode off, selecting a scene or layout loads it into Preview.
+Cut, Fade, and Media Wipe take the selected scene to Program. With Direct mode
+on, scene and layout selections use the current transition immediately. The
+take buttons and adjacent selector share this choice. Fade uses the configured
+duration; Media Wipe uses the file path and the clip's duration.
 
-Input order determines source numbers. A disconnected or incomplete input keeps
-its assigned position and displays black; remaining inputs never shift to fill
+A new take interrupts an unfinished transition. The mixer retains its current
+output picture, including a partial fade or wipe, while preparing the new scene.
+The replacement transition starts from that picture; cancelled transitions
+cannot switch the output back later. This may briefly hold motion during
+preparation. Capture happens at the mixer output, before encoding and browser
+playback, so it is ahead of the delayed picture on the viewer's screen.
+
+Input order determines source numbers. An input that stalls after startup holds
+its last frame in its assigned position; remaining inputs never shift to fill
 the gap. Empty cells on the last grid page are also black.
 
 This is deliberately a video-only manual mixer. It has no audio, speaker
@@ -36,15 +43,15 @@ detection, automatic switching, face analysis, or source-specific policy.
 | Key | Action |
 | --- | --- |
 | `1`-`9` | Select one of the first nine scenes; Preview normally, Program in Direct mode |
-| F1-F9 | Cut one of the first nine scenes directly to Program |
+| F1-F9 | Take one of the first nine scenes to Program using the Direct transition selector |
 | `c` | Cut |
 | `f` | Fade |
-| `w` | CUDA Wipe |
+| `w` | Media Wipe using the configured transparent clip |
 | `t` | Toggle Direct mode |
 | `r` | Reconnect |
 | `q` | Quit |
 
-Keyboard scene shortcuts are ignored while a transition-duration or wipe-style
+Keyboard scene shortcuts are ignored while a fade-duration or wipe-file
 field has focus, so numbers and text can be entered normally.
 
 ## Requirements
@@ -115,13 +122,23 @@ In another terminal, connect to the backend's control port:
 python3 demos/mixer/tui.py \
   --host 127.0.0.1 \
   --port 7777 \
-  --wipe-style wipe_left
+  --wipe-file /path/on/mixer/host/wipe.mov
 ```
 
-The defaults are mixer name `mixer`, Fade/Wipe duration `0.5` seconds, and wipe
-style `wipe_left`. Use `--mixer`, `--fade-duration`, and `--wipe-style` to
-change them. Supported styles are `wipe_left`, `wipe_right`, `wipe_down`, and
-`wipe_up`.
+The defaults are mixer name `mixer` and fade duration `0.5` seconds. Use
+`--mixer` and `--fade-duration` to change them.
+
+**MEDIA WIPE** plays a video with an alpha channel over the program and changes
+the underlying scene at the clip's midpoint. Enter its path in **Wipe file** or
+pass `--wipe-file`. The path must be readable by the mixer backend, including
+inside its container; it need not exist on the machine running the TUI. The
+backend uses the clip's duration, independently of **Fade seconds**. Use a clip
+that covers the picture at its midpoint to hide the scene cut.
+
+MOV is a container: the video codec must preserve alpha, for example QTRLE/ARGB
+or ProRes 4444. The wipe branch decodes and scales these assets on the CPU,
+uploads the alpha frames, and composites them on the GPU. Program inputs stay
+on the GPU. Supply media separately; clips are not stored in Git.
 
 The TUI polls Program, Preview, and transition state twice per second. If the
 connection fails or is lost, it shows the error in the connection bar; use
@@ -150,7 +167,7 @@ demo does not create or destroy it through the Janus API.
 | RTCP destination | `127.0.0.1:5005` | follows the video RTP port |
 | RTP payload type | `96` | `--janus-video-pt` |
 | SSRC | `0x41565001` | `--janus-video-ssrc` |
-| bitrate | 3000 kbit/s | `--janus-video-bitrate-kbps` |
+| bitrate | 4500 kbit/s | `--janus-video-bitrate-kbps` |
 | local RTCP listener | `0.0.0.0` on an automatic port | `--janus-rtcp-bind`, `--janus-rtcp-port` |
 
 The mixer sends RTCP sender announcements and listens for PLI/FIR feedback;
@@ -201,6 +218,10 @@ Start `demos/mixer/tui.py` separately and connect it to port 7777.
 
 ## Tests
 
+[Click-to-picture latency](docs/latency.md) explains the browser measurement,
+its initial baseline, and how to reproduce it. Protocol timings below only
+measure acknowledgment and state settlement.
+
 Pure layout, graph-construction, control, and TUI tests do not require a GPU:
 
 ```sh
@@ -211,22 +232,46 @@ With the mixer backend running, the protocol smoke test exercises the required
 scenes and reports transition-command and settle latency:
 
 ```sh
-python3 demos/mixer/smoke_test.py --port 7777
+python3 demos/mixer/smoke_test.py --port 7777 --wipe-file /path/on/mixer/host/wipe.mov
 ```
 
 The runtime acceptance check requires the configured NVIDIA environment. It
-must cover every layout, a disconnected input, Preview plus Cut/Fade/all four
-CUDA wipes, and the deterministic `overlay_many_cuda` matrix in
+must cover every layout, a disconnected input, Preview plus Cut/Fade/media
+wipes, and the deterministic
+`overlay_many_cuda` matrix in
 `demos/cuda-overlay`.
 
 ## Implementation notes
 
-The video-frame pipeline is zero-copy CUDA from hardware decode through NVENC.
-Every supported geometry is created at startup. A `preheat_video_router` feeds
-fixed `scale_cuda` and `pad_cuda` graphs for both mixer slots, preserving aspect
-ratio and adding black padding where required.
+The program pipeline stays on CUDA from hardware decode through NVENC; the
+separate alpha-media branch uploads its software-decoded wipe frames.
+Scene geometry is applied inside the two CUDA compositors. Sources feed both
+slots through fanouts; a larger catalogue uses a router to select its visible
+positions. The compositor resolves each frame's dimensions, crop and destination
+rectangle without rebuilding a filter graph. Existing callers can still supply
+explicit FFmpeg preprocessing graphs.
+
+The current compositor scaler samples four neighbours with cubic smoothstep
+weights. It does not widen its filter for downscaling, so fine patterns can alias.
+Image-quality parity with FFmpeg has not been established.
+
+For 16 inputs with Janus output and media wipes enabled, the optimized graph
+has 122 nodes / 140 defined queues, down from 185 / 248. All FPS stages remain.
+The compositors preserve source letterboxing without intermediate full-size
+normalization frames. CPU/GPU savings and full frame-level equivalence are still
+being compared; these counts alone do not establish a resource or latency
+improvement.
+
+For a demo screenshot, open the WebUI graph and choose **Expand / restore
+graph**. The grouped overview shows inputs, both compositor slots, transitions,
+media wipe and output, with bundled queues between them. Click a group to inspect
+its nodes; the input group opens a picker for all 16 source chains. Breadcrumbs
+show the current location; **← Back** moves one level up. Disable **Grouped
+overview** to inspect the complete native graph. Pan and zoom preserve the layout; hover a queue label for its full
+name. Displayed node and queue totals always describe the native graph.
 
 Both `cuda_rect_overlay` compositors and the permanent `transition_cuda` filter
-are warmed before the control server reports ready. Cut, Fade, and left/right/
-up/down Wipe therefore change runtime parameters without rebuilding an FFmpeg
-filter graph.
+are warmed before the control server reports ready. Cut and Fade therefore
+change runtime parameters without rebuilding their FFmpeg filter graphs. Media
+Wipe uses a separate, predeclared graph that the native orchestrator starts for
+the selected clip and stops after its tail has drained.

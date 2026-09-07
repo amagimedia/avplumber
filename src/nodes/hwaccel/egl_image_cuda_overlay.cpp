@@ -2,6 +2,8 @@
 #include "../../cuda.hpp"
 #include "../../hwaccel.hpp"
 #include "../../hwaccel/EglImageFrame.hpp"
+#include "../../mixer/Playout.hpp"
+#include "../../mixer/MonotonicClock.hpp"
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 
 extern "C" {
@@ -136,7 +138,6 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 	                           public IVideoFormatSource,
 	                           public IFrameRateSource,
 	                           public ITimeBaseSource {
-	using Clock = std::chrono::steady_clock;
 
 	struct InteropEntry {
 		EGLImageKHR source_image = EGL_NO_IMAGE_KHR;
@@ -188,21 +189,13 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 
 	av::Rational frame_rate_{60, 1};
 	av::Rational output_time_base_{1, 60};
-	Clock::duration frame_period_ = std::chrono::duration_cast<Clock::duration>(
-		std::chrono::duration<double>(1.0 / 60.0));
-	Clock::time_point next_tick_{};
-	bool clock_started_ = false;
-	int64_t next_output_pts_ = 0;
-
+	std::unique_ptr<avp::mixer::Playout<EglImageFrame>> playout_;
+	std::optional<int64_t> output_origin_;
 	uint64_t rendered_ticks_ = 0;
-	uint64_t missed_deadlines_ = 0;
-	std::vector<uint64_t> reuse_counts_;
-	std::vector<bool> updated_since_tick_;
-	std::vector<Clock::time_point> last_update_;
 
 	std::vector<EglImageFrame> held_;
 	std::vector<bool> held_valid_;
-	std::vector<bool> input_eof_;
+	bool sent_eof_ = false;
 	std::vector<std::shared_ptr<InteropEntry>> interop_cache_;
 	std::vector<InFlightRead> in_flight_reads_;
 	std::vector<CUevent> free_events_;
@@ -222,10 +215,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 			throw Error("egl_image_cuda_overlay: fps must be positive");
 		frame_rate_ = frame_rate;
 		output_time_base_ = av::Rational(frame_rate.getDenominator(), frame_rate.getNumerator());
-		frame_period_ = std::chrono::duration_cast<Clock::duration>(
-			std::chrono::duration<double>(1.0 / fps));
-		if (frame_period_ <= Clock::duration::zero())
-			throw Error("egl_image_cuda_overlay: fps is too high");
+
 	}
 
 	bool ensureCudaModule() {
@@ -486,42 +476,23 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 
 		this->sink_->put(std::move(output));
 		++rendered_ticks_;
-		if (debug_log_every_n_ > 0 &&
-		    rendered_ticks_ % static_cast<uint64_t>(debug_log_every_n_) == 0) {
-			std::ostringstream stats;
-			stats << "egl_image_cuda_overlay: frames=" << rendered_ticks_
-			      << " missed_deadlines=" << missed_deadlines_
-			      << " cache=" << interop_cache_.size()
-			      << " in_flight=" << in_flight_reads_.size();
-			const auto now = Clock::now();
-			for (size_t index = 0; index < reuse_counts_.size(); ++index) {
-				stats << " input" << index << "_reuse=" << reuse_counts_[index];
-				if (held_valid_[index]) {
-					const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
-						now - last_update_[index]);
-					stats << " input" << index << "_age_ms=" << age.count();
-				}
-			}
-			logstream << stats.str();
-		}
+
 		return true;
 	}
 
-	void drainLatest(size_t input) {
-		while (true) {
+	void receiveInput(size_t input) {
+		for (size_t received = 0; received < 8; ++received) {
 			EglImageFrame *frame = this->source_edges_[input]->peek();
 			if (!frame)
 				return;
 			if (isEofMarker(*frame)) {
 				this->source_edges_[input]->pop();
-				input_eof_[input] = true;
+				playout_->endInput(input);
 				return;
 			}
 			if (frameUsable(*frame)) {
-				held_[input] = *frame;
-				held_valid_[input] = true;
-				updated_since_tick_[input] = true;
-				last_update_[input] = Clock::now();
+				playout_->push(input, *frame,
+					rescaleTS(frame->pts(), {1, 1000000000}).timestamp());
 			}
 			this->source_edges_[input]->pop();
 		}
@@ -529,34 +500,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 
 	void drainAllInputs() {
 		for (size_t input = 0; input < this->source_edges_.size(); ++input)
-			drainLatest(input);
-	}
-
-	int millisecondsUntil(Clock::time_point deadline) const {
-		const auto remaining = deadline - Clock::now();
-		if (remaining <= Clock::duration::zero())
-			return 0;
-		const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count();
-		const int64_t millis = (nanos + 999999) / 1000000;
-		return static_cast<int>(std::min<int64_t>(millis, std::numeric_limits<int>::max()));
-	}
-
-	void advanceClockAfterRender(bool first_render) {
-		++next_output_pts_;
-		if (first_render) {
-			// The first render lazily registers the initial EGL/CUDA interop
-			// slots. Start the real-time schedule after that one-time work so
-			// initialization cannot create a gap between output PTS 0 and 1.
-			next_tick_ = Clock::now() + frame_period_;
-			return;
-		}
-		next_tick_ += frame_period_;
-		const auto now = Clock::now();
-		while (next_tick_ <= now) {
-			next_tick_ += frame_period_;
-			++next_output_pts_;
-			++missed_deadlines_;
-		}
+			receiveInput(input);
 	}
 
 	void destroyResources() {
@@ -612,10 +556,6 @@ public:
 
 		held_.resize(layers_.size());
 		held_valid_.resize(layers_.size());
-		input_eof_.resize(layers_.size());
-		reuse_counts_.resize(layers_.size());
-		updated_since_tick_.resize(layers_.size());
-		last_update_.resize(layers_.size());
 		this->auto_eof_ = false;
 	}
 
@@ -634,31 +574,55 @@ public:
 	}
 
 	void process() override {
-		if (source_edges_.empty())
+		if (source_edges_.empty() || sent_eof_)
 			return;
 		drainAllInputs();
-
-		const bool first_render = !clock_started_;
-		if (first_render) {
-			next_tick_ = Clock::now();
-			clock_started_ = true;
-		}
-		if (Clock::now() < next_tick_) {
-			const int ready = this->findSourceWithData(millisecondsUntil(next_tick_));
-			if (ready >= 0)
-				drainAllInputs();
-		}
-		if (Clock::now() < next_tick_)
+		if (playout_->finished()) {
+			av::VideoFrame eof;
+			eof.setPts(NOTS);
+			this->sink_->put(eof);
+			sent_eof_ = true;
 			return;
-
-		for (size_t input = 0; input < held_.size(); ++input) {
-			if (held_valid_[input] && !updated_since_tick_[input])
-				++reuse_counts_[input];
 		}
-		if (!render(next_output_pts_))
+		const auto *decision = playout_->prepare(avp::mixer::monotonicNs());
+		if (!decision) {
+			if (this->findSourceWithData(avp::mixer::waitMilliseconds(
+			        playout_->nextDeadline(), avp::mixer::monotonicNs())) >= 0)
+				drainAllInputs();
+			decision = playout_->prepare(avp::mixer::monotonicNs());
+		}
+		if (!decision)
+			return;
+		for (size_t input = 0; input < held_.size(); ++input) {
+			held_valid_[input] = decision->frames[input].has_value();
+			if (held_valid_[input])
+				held_[input] = *decision->frames[input];
+		}
+		if (!output_origin_)
+			output_origin_ = decision->index;
+		if (!render(decision->index - *output_origin_))
 			throw Error("egl_image_cuda_overlay: render failed");
-		std::fill(updated_since_tick_.begin(), updated_since_tick_.end(), false);
-		advanceClockAfterRender(first_render);
+		playout_->commit();
+		if (debug_log_every_n_ > 0 &&
+		    rendered_ticks_ % static_cast<uint64_t>(debug_log_every_n_) == 0) {
+			std::ostringstream stats;
+			stats << "egl_image_cuda_overlay: frames=" << rendered_ticks_
+			      << " missed_deadlines=" << playout_->missedDeadlines()
+			      << " cache=" << interop_cache_.size()
+			      << " in_flight=" << in_flight_reads_.size();
+			const auto now = avp::mixer::monotonicNs();
+			for (size_t index = 0; index < held_.size(); ++index) {
+				stats << " input" << index << "_reuse=" << playout_->stats(index).repeats
+				      << " input" << index << "_discarded=" << playout_->stats(index).discarded
+				      << " input" << index << "_queued=" << playout_->queued(index)
+				      << " input" << index << "_phase_corrections=" << playout_->stats(index).phase_corrections;
+				if (held_valid_[index]) {
+					const auto pts = rescaleTS(held_[index].pts(), {1, 1000000000}).timestamp();
+					stats << " input" << index << "_age_ms=" << (now - pts) / 1000000.0;
+				}
+			}
+			logstream << stats.str();
+		}
 	}
 
 	int width() override { return canvas_width_; }
@@ -701,6 +665,14 @@ public:
 		output->setProducer(node);
 
 		node->setFrameRate(parseRatio(params.value("fps", std::string("60/1"))));
+		std::optional<double> latency_ms;
+		if (params.contains("latency_ms"))
+			latency_ms = params.at("latency_ms").get<double>();
+		node->playout_ = std::make_unique<avp::mixer::Playout<EglImageFrame>>(
+			source_names.size(), avp::mixer::FrameRate(
+				node->frame_rate_.getNumerator(), node->frame_rate_.getDenominator()), latency_ms);
+		logstream << "egl_image_cuda_overlay: latency_ms=" << node->playout_->latencyNs() / 1000000.0;
+
 		const double ttl_seconds = params.value("cache_ttl", 3.0);
 		if (ttl_seconds < 0)
 			throw Error("egl_image_cuda_overlay: cache_ttl must be >= 0");

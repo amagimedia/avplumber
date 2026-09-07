@@ -218,7 +218,7 @@ mode = os.environ.get("TEST_MODE", "grid").strip().lower()
 if mode not in {"single", "grid"}:
     sys.exit("TEST_MODE must be 'single' or 'grid'")
 
-requested_count = env_int("SOURCE_COUNT", 8)
+requested_count = env_int("SOURCE_COUNT", 16)
 source_count = 1 if mode == "single" else requested_count
 compositor_backend = os.environ.get("COMPOSITOR_BACKEND", "egl_cuda").strip().lower()
 if compositor_backend not in {"egl_cuda", "cuda"}:
@@ -232,6 +232,9 @@ source_url = os.environ.get("SOURCE_URL", DEFAULT_SOURCE_URL)
 source_width = env_int("SOURCE_WIDTH", 1920, 16)
 source_height = env_int("SOURCE_HEIGHT", 1080, 16)
 fps = env_int("FPS", 60)
+mixer_timing_params = {}
+if os.environ.get("MIXER_LATENCY_MS", "").strip():
+    mixer_timing_params["latency_ms"] = float(os.environ["MIXER_LATENCY_MS"])
 canvas_width = env_int("CANVAS_WIDTH", 1920, 16)
 canvas_height = env_int("CANVAS_HEIGHT", 1080, 16)
 socket_dir = os.environ.get("SOCKET_DIR", "/tmp/dma-page")
@@ -389,6 +392,7 @@ if compositor_backend == "egl_cuda":
         EglImageCudaOverlay(
             {
                 "name": "scale_grid_mixer",
+                **mixer_timing_params,
                 "src": mix_edges,
                 "dst": mixed_program_edge,
                 "hwaccel": "@gpu",
@@ -410,6 +414,7 @@ else:
         CudaRectOverlay(
             {
                 "name": "scale_grid_mixer",
+                **mixer_timing_params,
                 "src": mix_edges,
                 "dst": mixed_program_edge,
                 "hwaccel": "@gpu",
