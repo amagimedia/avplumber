@@ -32,6 +32,19 @@ The production path stays on the GPU through DMA-BUF import, EGL/CUDA
 composition and NVENC. Pixel checks inspect the decoded WebRTC receiver output;
 they do not add downloads to the production graph.
 
+## T4 runtime usage
+
+An `nvidia-smi` snapshot with the sixteen-source grid running showed **36% GPU
+utilization and 3,381 MiB (3.3 GiB) of GPU memory in use**. This is a device-wide
+snapshot, not a measured average, peak, or minimum hardware requirement.
+
+The workload used two Electron processes with eight 1920×1080 pages each,
+DMA-BUF/EGL import, CUDA composition, and one 1920×1080 NVENC output. The measured
+source rate was 39.0–39.8 new frames/s per page; composition and encoding ran at
+59.98 frames/s. Do not extrapolate the utilization snapshot into a supported
+source count or assume it establishes sixteen independent 60 fps captures.
+Benchmark the intended page content and frame rate when sizing a host.
+
 ## Reproduced Ubuntu GBM failures
 
 The following comparisons used the same Ubuntu host, GPU, driver, and Fedora
