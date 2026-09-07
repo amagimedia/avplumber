@@ -174,6 +174,9 @@ groups without reordering sources.
 
 ## Docker
 
+Follow the [shared NVIDIA setup guide](../README.md) first. It also provides
+a local Janus preview if you want WebRTC output.
+
 The demo image builds FFmpeg 7.1 with `deps/ffmpeg-patches`, verifies the
 patched CUDA overlay and transition filters, and builds the CUDA-enabled
 AVPlumber Python module against that FFmpeg installation:
@@ -182,7 +185,7 @@ AVPlumber Python module against that FFmpeg installation:
 docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
 
 docker run --rm --gpus all --network host \
-  -v <path-to-media>:/media:ro \
+  -v <path-to-media>:/media:ro,z \
   avplumber-mixer:local \
   --input /media/camera-1.mp4 \
   --input /media/camera-2.mp4 \

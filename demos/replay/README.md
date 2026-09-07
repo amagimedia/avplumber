@@ -18,8 +18,8 @@ This directory contains two small PyPlumber applications:
 - `player.py` controls one replay slot and sends video-only H.264 RTP to an
   existing Janus Streaming mountpoint.
 
-Neither application needs OBS or Stream Studio Gateway at runtime. The controls
-model the Gateway v2 single-source playback operations.
+Both applications run directly through PyPlumber with no external control
+service.
 
 The player provides:
 
@@ -42,10 +42,13 @@ for one second, and `q` to quit. The footer displays these bindings.
 
 ## Requirements
 
-Use an NVIDIA host with an AVPlumber Python module built with the same CUDA,
-NVCC, neural, and TensorRT options as the AVPlumber binary. FFmpeg must provide
-CUDA decoding and `h264_nvenc`, and AVPlumber must load those matching FFmpeg
-libraries.
+For a build from public sources, use the [Docker instructions](#run-in-docker)
+and [shared NVIDIA setup guide](../README.md).
+
+Use an NVIDIA host with `pyplumber` built with CUDA and NVCC support. FFmpeg
+must provide CUDA decoding and `h264_nvenc`. Neural models and TensorRT are
+not required. If you also build the standalone AVPlumber binary, use the same
+feature settings and FFmpeg libraries for it and the Python module.
 
 There is no software fallback, audio output, or CPU
 `hwdownload`/`hwupload` path.
@@ -55,6 +58,32 @@ Install the TUI dependency into the same Python environment:
 ```sh
 python3 -m pip install -r demos/replay/requirements.txt
 ```
+
+## Run in Docker
+
+Build the [shared runtime and start Janus](../README.md), then put an input
+video named `source.mp4` in a local `media/` directory. Convert it:
+
+```sh
+docker run --rm --gpus all \
+  -v "$PWD/demos/replay:/demo:ro,z" \
+  -v "$PWD/media:/media:z" \
+  --entrypoint python3 avplumber-mixer:local \
+  /demo/transcode.py --input /media/source.mp4 --output /media/replay.ts --fps 30
+```
+
+Start the player and open the Janus preview at <http://127.0.0.1:8080>:
+
+```sh
+docker run --rm -it --gpus all --network host \
+  -v "$PWD/demos/replay:/demo:ro,z" \
+  -v "$PWD/media:/media:ro,z" \
+  --entrypoint python3 avplumber-mixer:local \
+  /demo/player.py --recording /media/replay.ts
+```
+
+The recording and its sidecars remain in `media/` after the containers exit.
+The following sections describe the same tools when running Python directly.
 
 ## Create a replay recording
 

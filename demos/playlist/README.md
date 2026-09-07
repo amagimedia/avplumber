@@ -78,13 +78,16 @@ The controls work against a fake backend, but no video is decoded or sent.
 The live demo requires:
 
 - an NVIDIA host;
-- a CUDA-enabled AVPlumber binary and a `pyplumber` module built with the same
-  CUDA, NVCC, neural, and TensorRT feature set;
+- `pyplumber` built with CUDA and NVCC support;
 - matching FFmpeg libraries with CUDA decoding and `h264_nvenc`; and
 - an existing, video-only Janus Streaming mountpoint that accepts H.264 RTP.
 
 There is no software-decoding fallback, audio output, or CPU
 `hwdownload`/`hwupload` path.
+
+Neural models and TensorRT are not required. If you also build the standalone
+AVPlumber binary, use the same feature settings and FFmpeg libraries for it
+and the Python module.
 
 ### Prepare the five demo clips
 
@@ -128,20 +131,19 @@ directory. Use `--no-tui` for the short headless control smoke test. Run
 AVPlumber logs and native control replies go to `--log-file` while Textual owns
 the terminal.
 
-Per-item Pause and Stop are regression-only source-lifecycle controls. The
-current gateway playlist API exposes item Play/select, cue, duration, disable,
-remove, and reorder, while playlist Pause and Stop are media controls.
+Per-item Pause and Stop exercise source lifecycle independently of the
+playlist-wide playback controls.
 
 ## Run in Docker
 
-The playlist image generates and validates the five clips during the build. Its
-base image must already contain the CUDA-enabled `pyplumber` module and matching
-AVPlumber runtime:
+First follow the [NVIDIA setup and Janus preview guide](../README.md). Build
+the shared runtime from this checkout, then build the playlist image; it
+generates and validates all five clips automatically:
 
 ```sh
-export AVP_BASE_IMAGE=<cuda-python-avplumber-image>
+docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
 docker build \
-  --build-arg AVP_BASE_IMAGE="$AVP_BASE_IMAGE" \
+  --build-arg AVP_BASE_IMAGE=avplumber-mixer:local \
   --tag avplumber-playlist:local \
   demos/playlist
 ```
@@ -158,6 +160,10 @@ docker run --rm -it \
 Recreating the container reuses the clips stored in the image. Rebuilding the
 image reruns the deterministic generator. Append normal `player.py` options
 after the image name to change the Janus configuration.
+
+To use your own compatible runtime, set
+`AVP_BASE_IMAGE=<cuda-python-avplumber-image>` and pass
+`--build-arg AVP_BASE_IMAGE="$AVP_BASE_IMAGE"` to the build command.
 
 ## Regression exercise
 
