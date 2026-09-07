@@ -25,6 +25,8 @@ protected:
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
     bool finish_after_flush_ = false;
+    bool hold_at_eof_ = false;
+    bool decoder_at_eof_ = false;
     av::Timestamp flush_timeout_ts_ = NOTS;
     av::Timestamp flush_timeout_ = {500, {1, 1000}}; // 500ms
     //AVBufferRef *out_frames_ref_ = nullptr;
@@ -295,6 +297,10 @@ public:
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() && !isEofMarker(pkt)) {
+                if (decoder_at_eof_) {
+                    avcodec_flush_buffers(dec_.raw());
+                    decoder_at_eof_ = false;
+                }
                 int iter = 0;
                 bool packet_consumed = false;
                 do {
@@ -342,7 +348,13 @@ public:
                 // Must do this AFTER flush() because flush() may have set finished_=true
                 // when all codec frames fit in the sink; resetting here ensures the EOF
                 // marker is actually sent before the decoder thread exits.
-                if (isEofMarker(pkt)) {
+                if (isEofMarker(pkt) && hold_at_eof_) {
+                    // Drain the last frames but keep an interactive recording
+                    // seekable. Reset the codec before accepting the next packet.
+                    finished_ = false;
+                    finish_after_flush_ = false;
+                    decoder_at_eof_ = true;
+                } else if (isEofMarker(pkt)) {
                     finished_ = false;
                     finish_after_flush_ = true;
                     this->flush_frames_.push_back(OutputFrame());
@@ -352,6 +364,10 @@ public:
     }
     virtual void discardUntil(av::Timestamp pts) {
         logstream << "will wait for frame and discard until " << pts;
+        std::lock_guard<std::recursive_mutex> decoder_lock(mutex_);
+        if (hold_at_eof_) {
+            flush_frames_.clear();
+        }
         auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
         waiting_for_frame_ = 1;
         discard_until_ = pts;
@@ -412,6 +428,9 @@ public:
         }
         if (params.count("waiting_for_frame")) {
             r->waiting_for_frame_ = params["waiting_for_frame"];
+        }
+        if (params.count("hold_at_eof")) {
+            r->hold_at_eof_ = params["hold_at_eof"];
         }
         return r;
     }

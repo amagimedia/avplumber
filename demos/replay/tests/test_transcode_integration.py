@@ -1,6 +1,4 @@
-import importlib.util
 import json
-import shutil
 import socket
 import subprocess
 import sys
@@ -15,38 +13,49 @@ from replay import (
     build_player_application,
     read_seek_table,
 )
+from playback_backend import backend_api
 
 
-def _gpu_prerequisites():
-    missing = [name for name in ("ffmpeg", "ffprobe", "nvidia-smi") if shutil.which(name) is None]
-    if importlib.util.find_spec("_avplumber") is None:
-        missing.append("CUDA/NVENC _avplumber Python module")
-    if missing:
-        pytest.skip("requires NVIDIA integration host with " + ", ".join(missing))
-    probe = subprocess.run(["nvidia-smi"], capture_output=True, check=False)
-    if probe.returncode:
-        pytest.skip("requires a working NVIDIA driver")
-
-
-def _transcode_test_source(tmp_path, frame_count):
+def _transcode_test_source(tmp_path, frame_count, fps=30, backend="nvidia", source_gop="interframe"):
     source = tmp_path / "source.mp4"
     output = tmp_path / "replay.ts"
+    codec_options = (["-g", "1", "-bf", "0"] if source_gop == "intra" else
+                     ["-g", "60", "-bf", "3", "-x264-params", "b-adapt=0"])
     subprocess.run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-        "-i", "testsrc2=size=640x360:rate=30", "-frames:v", str(frame_count),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+        "-i", f"testsrc2=size=640x360:rate={fps}", "-frames:v", str(frame_count),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", *codec_options, str(source),
     ], check=True)
-    subprocess.run([
-        sys.executable, str(Path(__file__).parents[1] / "transcode.py"),
-        "--input", str(source), "--output", str(output), "--fps", "30",
+    source_probe = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "frame=pict_type", "-of", "json", str(source),
+    ], capture_output=True, text=True, check=True)
+    frame_types = {frame["pict_type"] for frame in json.loads(source_probe.stdout)["frames"]}
+    if source_gop == "intra":
+        assert frame_types == {"I"}
+    else:
+        assert "B" in frame_types
+    if backend == "cpu":
+        runner = [sys.executable, "-c", (
+            "import sys; "
+            f"sys.path[:0] = {[str(Path(__file__).parent), str(Path(__file__).parents[1])]!r}; "
+            "import transcode; from playback_backend import backend_api; "
+            "build = transcode.build_transcode_application; "
+            "transcode.build_transcode_application = lambda config: build(config, api=backend_api('cpu')); "
+            "raise SystemExit(transcode.main(sys.argv[1:]))"
+        )]
+    else:
+        runner = [sys.executable, str(Path(__file__).parents[1] / "transcode.py")]
+    subprocess.run(runner + [
+        "--input", str(source), "--output", str(output), "--fps", str(fps),
     ], check=True)
     return output
 
 
 @pytest.mark.parametrize("frame_count", [30, 60, 73])
-def test_finite_transcode_publishes_every_all_intra_packet(tmp_path, frame_count):
-    _gpu_prerequisites()
-    output = _transcode_test_source(tmp_path, frame_count)
+@pytest.mark.parametrize("source_gop", ["intra", "interframe"])
+def test_finite_transcode_publishes_every_all_intra_packet(tmp_path, frame_count, source_gop, playback_backend):
+    output = _transcode_test_source(tmp_path, frame_count, backend=playback_backend, source_gop=source_gop)
 
     packet_data = subprocess.run([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -60,9 +69,8 @@ def test_finite_transcode_publishes_every_all_intra_packet(tmp_path, frame_count
     assert all("K" in packet["flags"] for packet in packets)
 
 
-def test_player_emits_configured_rtp_without_janus(tmp_path):
-    _gpu_prerequisites()
-    output = _transcode_test_source(tmp_path, 90)
+def test_player_emits_configured_rtp_without_janus(tmp_path, playback_backend):
+    output = _transcode_test_source(tmp_path, 90, backend=playback_backend)
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind(("127.0.0.1", 0))
     receiver.settimeout(5)
@@ -75,7 +83,7 @@ def test_player_emits_configured_rtp_without_janus(tmp_path):
             payload_type=97,
             ssrc=0x12345678,
         ),
-    ))
+    ), api=backend_api(playback_backend))
     try:
         application.start()
         packet, _peer = receiver.recvfrom(65535)

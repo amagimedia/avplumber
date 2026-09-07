@@ -37,14 +37,14 @@ enabled, as on Fedora. Mount only the demo's media directory.
 
 ## Build the Python video runtime
 
-The [mixer image](mixer/README.md#docker) builds avplumber, its Python module,
+The [mixer image](mixer/README.md#run) builds avplumber, its Python module,
 and patched FFmpeg together. Playlist and Replay can reuse this image:
 
 ```sh
 docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
 ```
 
-Then follow [Mixer](mixer/README.md#docker),
+Then follow [Mixer](mixer/README.md#run),
 [Playlist](playlist/README.md#run-in-docker), or
 [Replay](replay/README.md#run-in-docker) for commands and controls.
 The first build compiles FFmpeg and avplumber; subsequent builds reuse Docker's

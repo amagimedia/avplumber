@@ -26,6 +26,8 @@ def _wait(controller, predicate, timeout: float):
     before = controller.status()
     while time.monotonic() < deadline:
         status = controller.status()
+        if getattr(status, "error", ""):
+            raise RuntimeError(status.error)
         if predicate(status):
             return status
         time.sleep(0.02)
@@ -35,10 +37,16 @@ def _wait(controller, predicate, timeout: float):
 def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
     results: list[ExerciseResult] = []
 
+    def wait_observed(marker, predicate):
+        return _wait(controller, lambda status: (
+            controller.observation_marker() > marker and predicate(status)
+        ), timeout)
+
     def check(name, action, predicate=lambda _status: True):
         try:
+            marker = controller.observation_marker()
             action()
-            status = _wait(controller, predicate, timeout)
+            status = wait_observed(marker, predicate)
             results.append(ExerciseResult(name, "PASS", f"frame={status.frame_number} pos={status.position_ms}ms"))
             return status
         except Exception as exc:
@@ -47,6 +55,19 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
 
     artifact = controller.artifact
     frame_ms = 1000 / artifact.fps
+
+    def nearest_frame(position_ms):
+        return min(range(artifact.frame_count), key=lambda index: (
+            abs(artifact.seek_entries[index].timestamp_ms - artifact.start_ms - position_ms),
+            -index,
+        ))
+
+    def seek_to(position_ms):
+        marker = controller.observation_marker()
+        controller.execute(Op.SEEK_MS, position_ms)
+        expected = nearest_frame(position_ms)
+        return wait_observed(marker, lambda status: status.frame_number == expected)
+
     try:
         ready = _wait(controller, lambda status: status.ready, timeout)
     except Exception as exc:
@@ -56,16 +77,19 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
     start = ready.position_ms
     check("play advances", lambda: controller.execute(Op.PLAY), lambda s: s.position_ms > start + frame_ms)
     controller.execute(Op.PAUSE)
+    time.sleep(min(timeout, max(0.1, 3 / artifact.fps)))
     paused = controller.status().position_ms
-    time.sleep(min(timeout, max(0.1, 2 / artifact.fps)))
-    stable = abs(controller.status().position_ms - paused) <= frame_ms * 1.5
+    marker = controller.observation_marker()
+    time.sleep(min(timeout, max(0.1, 3 / artifact.fps)))
+    stable = (controller.status().position_ms == paused
+              and controller.observation_marker() == marker)
     results.append(ExerciseResult("pause stable", "PASS" if stable else "FAIL", f"{paused}->{controller.status().position_ms}ms"))
 
     middle = artifact.duration_ms // 2
     check(
         "absolute seek",
         lambda: controller.execute(Op.SEEK_MS, middle),
-        lambda s: abs(s.position_ms - middle) <= frame_ms * 2,
+        lambda s: s.frame_number == nearest_frame(middle),
     )
     for frames in (-30, -5, -1, 1, 5, 30):
         base_frame = min(max(40, artifact.frame_count // 2), artifact.frame_count - 41)
@@ -73,12 +97,11 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
             results.append(ExerciseResult(f"nudge {frames:+d}f", "SKIP", "recording too short"))
             continue
         base_ms = artifact.seek_entries[base_frame].timestamp_ms - artifact.start_ms
-        controller.execute(Op.SEEK_MS, base_ms)
-        _wait(controller, lambda s: abs((s.frame_number or 0) - base_frame) <= 1, timeout)
+        seek_to(base_ms)
         check(
             f"nudge {frames:+d}f",
             lambda frames=frames: controller.execute(Op.SEEK_FRAMES, frames),
-            lambda s, expected=base_frame + frames: abs((s.frame_number or 0) - expected) <= 1,
+            lambda s, expected=base_frame + frames: s.frame_number == expected,
         )
 
     for seconds in (-30, -5, -1, 1, 5, 30):
@@ -86,12 +109,12 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
         if not 0 <= target <= artifact.duration_ms:
             results.append(ExerciseResult(f"nudge {seconds:+d}s", "SKIP", "recording too short"))
             continue
-        controller.execute(Op.SEEK_MS, middle)
-        _wait(controller, lambda s: abs(s.position_ms - middle) <= frame_ms * 2, timeout)
+        base = seek_to(middle)
+        target = base.position_ms + seconds * 1000
         check(
             f"nudge {seconds:+d}s",
             lambda seconds=seconds: controller.execute(Op.SEEK_SECONDS, seconds),
-            lambda s, target=target: abs(s.position_ms - target) <= frame_ms * 2,
+            lambda s, expected=nearest_frame(target): s.frame_number == expected,
         )
 
     if artifact.duration_ms < 6_000:
@@ -100,8 +123,7 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
         rates = []
         for speed in (50, 100, 200):
             controller.execute(Op.PAUSE)
-            controller.execute(Op.SEEK_MS, 1_000)
-            _wait(controller, lambda s: abs(s.position_ms - 1_000) <= frame_ms * 2, timeout)
+            seek_to(1_000)
             controller.execute(Op.SPEED, speed)
             before = controller.status().position_ms
             started = time.monotonic()
@@ -113,8 +135,7 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
         results.append(ExerciseResult("speed 50/100/200%", "PASS" if distinct else "FAIL", repr([round(rate) for rate in rates])))
 
         try:
-            controller.execute(Op.SEEK_MS, 1_000)
-            _wait(controller, lambda s: abs(s.position_ms - 1_000) <= frame_ms * 2, timeout)
+            seek_to(1_000)
             controller.execute(Op.PLAY)
             _wait(controller, lambda s: s.position_ms > 1_000 + frame_ms * 2, timeout)
             controller.execute(Op.SPEED, 100)
@@ -137,8 +158,7 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
 
     controller.execute(Op.SPEED, 100)
     controller.execute(Op.PAUSE)
-    controller.execute(Op.SEEK_MS, middle)
-    _wait(controller, lambda s: abs(s.position_ms - middle) <= frame_ms * 2, timeout)
+    seek_to(middle)
     check("reverse play", lambda: controller.execute(Op.REVERSE), lambda s: s.position_ms < middle - frame_ms)
     controller.execute(Op.PAUSE)
     prior = controller.status()
@@ -148,24 +168,29 @@ def exercise_v2(controller, timeout: float) -> list[ExerciseResult]:
     restored = controller.status()
     restore_ok = restored.playing == prior.playing and restored.direction == prior.direction
     results.append(ExerciseResult("scrub restore", "PASS" if restore_ok else "FAIL", restored.direction))
-    controller.execute(Op.SEEK_MS, middle)
-    _wait(controller, lambda s: abs(s.position_ms - middle) <= frame_ms * 2, timeout)
+    seek_to(middle)
     controller.execute(Op.SCRUB, -200)
     check("scrub reverse", lambda: None, lambda s: s.position_ms < middle - frame_ms)
     controller.execute(Op.SCRUB, 0)
 
     tail = max(artifact.duration_ms - 3_000, 0)
-    check("tail -3s", lambda: controller.execute(Op.TAIL), lambda s: abs(s.position_ms - tail) <= frame_ms * 2)
+    check("tail -3s", lambda: controller.execute(Op.TAIL), lambda s: s.frame_number == nearest_frame(tail))
     utc_ms = artifact.history.media_to_wallclock_ms(artifact.start_ms + middle)
     utc = datetime.fromtimestamp(utc_ms / 1000, timezone.utc)
-    check("UTC seek", lambda: controller.execute(Op.SEEK_UTC, utc), lambda s: abs(s.position_ms - middle) <= frame_ms * 2)
+    check("UTC seek", lambda: controller.execute(Op.SEEK_UTC, utc), lambda s: s.frame_number == nearest_frame(middle))
 
     controller.execute(Op.PAUSE)
     started = time.monotonic()
-    for index in range(20):
-        controller.execute(Op.SEEK_MS, middle + (index % 2) * min(1_000, artifact.duration_ms - middle))
-    rapid_ok = time.monotonic() - started < timeout
-    results.append(ExerciseResult("rapid paused seeks", "PASS" if rapid_ok else "FAIL"))
+    try:
+        for index in range(20):
+            target = middle + (index % 2) * min(1_000, artifact.duration_ms - middle)
+            marker = controller.observation_marker()
+            controller.execute(Op.SEEK_MS, target)
+        wait_observed(marker, lambda s: s.frame_number == nearest_frame(target))
+        rapid_ok = time.monotonic() - started < timeout
+        results.append(ExerciseResult("rapid paused seeks", "PASS" if rapid_ok else "FAIL"))
+    except Exception as exc:
+        results.append(ExerciseResult("rapid paused seeks", "FAIL", str(exc)))
     return results
 
 

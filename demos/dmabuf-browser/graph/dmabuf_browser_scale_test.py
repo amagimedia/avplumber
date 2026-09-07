@@ -30,7 +30,7 @@ from dmabuf_browser_common import (
     wait_for_edge,
 )
 from dmabuf_output_config import resolve_output_config
-from dmabuf_scale_layout import MAX_COMPOSITOR_INPUTS, fit_filter_graph, fit_rect, grid_cells
+from dmabuf_scale_layout import MAX_COMPOSITOR_INPUTS, fit_rect, grid_cells
 
 
 DEFAULT_SOURCE_URL = "file:///opt/dma-browser/tests/fixtures/smoke.html"
@@ -218,7 +218,7 @@ mode = os.environ.get("TEST_MODE", "grid").strip().lower()
 if mode not in {"single", "grid"}:
     sys.exit("TEST_MODE must be 'single' or 'grid'")
 
-requested_count = env_int("SOURCE_COUNT", 8)
+requested_count = env_int("SOURCE_COUNT", 16)
 source_count = 1 if mode == "single" else requested_count
 compositor_backend = os.environ.get("COMPOSITOR_BACKEND", "egl_cuda").strip().lower()
 if compositor_backend not in {"egl_cuda", "cuda"}:
@@ -229,9 +229,12 @@ if compositor_backend == "cuda" and source_count > MAX_COMPOSITOR_INPUTS:
     )
 
 source_url = os.environ.get("SOURCE_URL", DEFAULT_SOURCE_URL)
-source_width = env_int("SOURCE_WIDTH", 1920, 16)
-source_height = env_int("SOURCE_HEIGHT", 1080, 16)
+source_width = env_int("SOURCE_WIDTH", 480, 16)
+source_height = env_int("SOURCE_HEIGHT", 270, 16)
 fps = env_int("FPS", 60)
+mixer_timing_params = {}
+if os.environ.get("MIXER_LATENCY_MS", "").strip():
+    mixer_timing_params["latency_ms"] = float(os.environ["MIXER_LATENCY_MS"])
 canvas_width = env_int("CANVAS_WIDTH", 1920, 16)
 canvas_height = env_int("CANVAS_HEIGHT", 1080, 16)
 socket_dir = os.environ.get("SOCKET_DIR", "/tmp/dma-page")
@@ -351,37 +354,11 @@ for index, (socket, cell) in enumerate(zip(sockets, cells)):
             avp.addNode(node)
 
     fitted = fit_rect(cell, source_width, source_height)
-    if compositor_backend == "egl_cuda":
-        mix_edges.append(mix_input_edge)
-        layers.append(
-            {
-                "dst_x": fitted.x,
-                "dst_y": fitted.y,
-                "dst_w": fitted.width,
-                "dst_h": fitted.height,
-            }
-        )
-    else:
-        cell_edge = f"{prefix}_cell"
-        avp.addNode(
-            FilterVideo(
-                {
-                    "name": f"{prefix}_fit_cell",
-                    "src": mix_input_edge,
-                    "dst": cell_edge,
-                    "graph": fit_filter_graph(fitted),
-                    "hwaccel": "@gpu",
-                    "dst_width": fitted.width,
-                    "dst_height": fitted.height,
-                    "dst_pixel_format": "cuda",
-                    "dst_frame_rate": f"{fps}/1",
-                    "group": group,
-                    "auto_restart": "panic",
-                }
-            )
-        )
-        mix_edges.append(cell_edge)
-        layers.append({"dst_x": fitted.x, "dst_y": fitted.y})
+    mix_edges.append(mix_input_edge)
+    layers.append({
+        "dst_x": fitted.x, "dst_y": fitted.y,
+        "dst_w": fitted.width, "dst_h": fitted.height,
+    })
 
 if compositor_backend == "egl_cuda":
     mixed_program_edge = "scale_grid_program"
@@ -389,6 +366,7 @@ if compositor_backend == "egl_cuda":
         EglImageCudaOverlay(
             {
                 "name": "scale_grid_mixer",
+                **mixer_timing_params,
                 "src": mix_edges,
                 "dst": mixed_program_edge,
                 "hwaccel": "@gpu",
@@ -402,20 +380,21 @@ if compositor_backend == "egl_cuda":
             }
         )
     )
-elif source_count == 1:
-    mixed_program_edge = mix_edges[0]
 else:
     mixed_program_edge = "scale_grid_program"
     avp.addNode(
         CudaRectOverlay(
             {
                 "name": "scale_grid_mixer",
+                **mixer_timing_params,
                 "src": mix_edges,
                 "dst": mixed_program_edge,
                 "hwaccel": "@gpu",
                 "width": canvas_width,
                 "height": canvas_height,
                 "sw_format": "rgb0",
+                "fps": f"{fps}/1",
+                "scale": True,
                 "layers": layers,
                 "active_inputs": (1 << source_count) - 1,
                 "warmup_timeout_ms": 5000,
@@ -519,8 +498,7 @@ for group in input_groups:
 if compositor_backend != "egl_cuda":
     for ready_edge in mix_edges:
         wait_for_edge(avp, ready_edge, graph_start_timeout_sec)
-if compositor_backend == "egl_cuda" or source_count > 1:
-    avp.group("mixer").startNodes()
+avp.group("mixer").startNodes()
 wait_for_edge(avp, ready_program_edge, graph_start_timeout_sec)
 if mpdecimate_warmup_sec:
     print(

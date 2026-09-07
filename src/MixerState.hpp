@@ -69,6 +69,7 @@ struct MixerState : public InstanceShared<MixerState> {
     enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
     std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
     std::atomic<uint64_t> transition_generation{0};
+    std::string transition_scene_name;
 
     struct SlotNodes {
         std::string compositor_name;   // "comp_a" / "comp_b"
