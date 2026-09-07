@@ -31,7 +31,7 @@
 <main>
   <header>
     <h1>AVPlumber <span>Live mixer</span></h1>
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/mixer">Code &amp; setup guide</a>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Code &amp; setup guide</a>
   </header>
   <p>Direct editing with the real terminal controls on the right and program output on the left. Fullscreen, 16, 8, 4 and 2 boxes, with Cut, Fade and a transparent media-file Wipe.</p>
   <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg">
@@ -50,15 +50,15 @@
   <p><a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4" download>Download the MP4</a> · 15 seconds · 60 fps · 1600×900 · 0.95 MB · silent H.264.</p>
   <h2 id="graph">The complete processing graph</h2>
   <p>122 nodes and 140 queues, shown as six groups. Open the overview to inspect every node in the full ungrouped graph, in a separate tab.</p>
-  <p>With sixteen generated 640×360 H.264 inputs and 1080×1920@60 output, a Tesla T4 run averaged <strong>4% GPU and 0.58 AVPlumber CPU cores</strong> over 30 seconds (689 MiB whole-device GPU memory). Eleven separate warm Cut trials measured <strong>188.8 ms median click-to-browser-picture</strong>, with 182.3 ms minimum, 237.7 ms mean and 503.9 ms maximum. The viewer ran on the same host. <a href="https://github.com/amagimedia/avplumber/blob/fix/shared-mixer-timing/demos/mixer/docs/latency.md">Conditions and raw samples</a>.</p>
+  <p>With sixteen generated 640×360 H.264 inputs and 1080×1920@60 output, a Tesla T4 run averaged <strong>4% GPU and 0.58 AVPlumber CPU cores</strong> over 30 seconds (689 MiB whole-device GPU memory). Eleven separate warm Cut trials measured <strong>188.8 ms median click-to-browser-picture</strong>, with 182.3 ms minimum, 237.7 ms mean and 503.9 ms maximum. The viewer ran on the same host. <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md">Conditions and raw samples</a>.</p>
   <figure>
     <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/mixer-graph-grouped.png" alt="Grouped live mixer graph: inputs, compositor slots, transitions, media wipe and output. Open the full ungrouped graph in a new tab." loading="lazy"></a>
     <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer">Open full ungrouped graph ↗</a> · In the live WebUI, enter a group and use ← Back to return. Edge colours and fill markers show sampled flow without continuous animation.</figcaption>
   </figure>
   <footer>
     <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/tools/web-ui">Web UI</a> ·
-    <a href="https://github.com/amagimedia/avplumber/blob/fix/shared-mixer-timing/demos/mixer/docs/guide.md">Controls &amp; recording notes</a>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/tools/web-ui">Web UI</a> ·
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/guide.md">Controls &amp; recording notes</a>
   </footer>
 </main>
 <script>

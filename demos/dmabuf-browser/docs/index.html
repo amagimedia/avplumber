@@ -31,7 +31,7 @@
 <main>
   <header>
     <h1>AVPlumber <span>DMA-BUF browser</span></h1>
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/dmabuf-browser">Code &amp; setup guide</a>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">Code &amp; setup guide</a>
   </header>
   <p>The current default captures sixteen 480×270@60 browser pages in four Electron workers and composes 1920×1080@60 output with the shared native mixer timing. Configure the page URL and dimensions at startup; this demo has no TUI.</p>
   <p>The recording below is the earlier 1080p-input run. Its sources delivered about 39–40 new frames/s into a 60 fps output. It predates the current configuration, which delivered about 60 frames/s per source during validation.</p>
@@ -49,6 +49,7 @@
   <h2 id="graph">The complete processing graph</h2>
   <p>The current sixteen-source graph: DMA-BUF inputs, cached EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible with orthogonal routes and directional arrows. This static capture shows the current 480×270, four-worker configuration; the video above is the earlier recording.</p>
   <p>The current 480×270 four-worker Singular run delivered 59.91–59.99 fps per source, with zero browser capture drops over 12 seconds. Whole-device averages were 38.92% GPU and 576 MiB GPU memory; browser processes used 8.15 CPU cores and AVPlumber 0.30. These are workload-specific observations, not capacity guarantees. The setup guide documents the stage comparison.</p>
+  <p>With the cadence fix and the default two-frame buffer, 1/4/8-source checks each had 0 repeats and 0 discards per input over 1,800 output ticks (30 seconds): 0%. Three cold sixteen-source trials had worst-source repeats of 10/3,600 (0.278%, 60 seconds), 1/1,800 (0.056%, 30 seconds), and 4/1,800 (0.222%, 30 seconds). Every input had 0 discards (0%) and every trial had 0 missed output deadlines. Slightly late browser paints can still require repeats. The first 600 warmup ticks are excluded; the live mixer remained active. <a href="continuity.json" target="_blank" rel="noopener noreferrer">Per-input results and conditions</a>.</p>
   <figure>
     <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/dmabuf-graph.png" alt="Live AVPlumber web UI showing the sixteen DMA-BUF source branches, GPU compositor, encoder, RTP output, and routed queue connections." loading="lazy"></a>
     <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the HTML viewer to zoom and read every node. Edge colours and fill markers reflect queue state at capture time.</figcaption>
