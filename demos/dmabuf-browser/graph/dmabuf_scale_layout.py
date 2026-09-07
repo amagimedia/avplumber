@@ -54,7 +54,3 @@ def fit_rect(cell, source_width, source_height):
         width=width,
         height=height,
     )
-
-
-def fit_filter_graph(rect):
-    return f"scale_cuda=w={rect.width}:h={rect.height}"

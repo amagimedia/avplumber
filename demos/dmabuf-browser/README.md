@@ -9,12 +9,13 @@ a browser.
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png)
 
-The recording shows 16 independent Singular pages configured for
+The older recording shows 16 independent Singular pages configured for
 1920×1080@60, grouped into two Electron processes with eight windows each and composed
 into one 1920×1080@60 output. Its leading black frame is removed: 599 frames, 9.98 seconds, 8.6 MB.
 The demo page includes a live web UI graph screenshot from the Ubuntu validation
 run: about 39–40 new frames/s per source, composed at 60 fps. Media is hosted
-as public release assets, outside Git.
+as public release assets, outside Git. The current scaling configuration and
+60-FPS measurements are documented below; this recording predates them.
 
 With all sixteen pages running, an `nvidia-smi` snapshot on the Tesla T4 showed
 **36% GPU utilization and 3,381 MiB (3.3 GiB) of GPU memory in use**. These are
@@ -289,8 +290,8 @@ should be climbing and `droppedReasons` near-empty. When using the shim, set
 
 [`compose.scaling.yaml`](compose.scaling.yaml) replaces the normal graph with a
 parameterized load test. `DMABUF_SOURCE_COUNT` is N, not a graph constant; it
-defaults to 16. The default run opens sixteen independent Electron processes
-with one 1920x1080@60 window each, creates sixteen `ipc_dmabuf_source` →
+defaults to 16. The default run opens four Electron processes with four
+480x270@60 windows each, creates sixteen `ipc_dmabuf_source` →
 `drm_prime_to_egl_image` chains, fits them into a 4x4 GPU grid without
 stretching, and sends the 1920x1080 program output to the normal Janus
 mountpoint.
@@ -311,6 +312,13 @@ tick samples the cached texture objects with bilinear scaling and writes the
 grid directly into the final CUDA RGB0 frame. The frame loop does not
 register/unregister resources, call `glFinish` or `cuCtxSynchronize`, run
 per-input `scale_cuda`, or copy a per-input frame.
+
+Direct tile scaling saves compositor work, but every browser still renders its
+full source page. Sixteen 1920x1080 sources at 60 FPS represent 1.99 billion
+source pixels per second, compared with 124 million pixels in the final
+1920x1080 output. JavaScript, layout, painting and browser capture remain
+separate costs. Rendering pages at tile resolution can reduce those costs, but
+does not preserve full-resolution sources for later enlargement.
 
 The compositor runs on its own `FPS` clock and retains the latest frame for
 each input independently. One late input therefore repeats its previous image;
@@ -338,7 +346,7 @@ available. Override `DMA_BROWSER_SHM_SIZE` for larger multi-process runs.
 Run the single full-screen baseline separately:
 
 ```bash
-DMABUF_TEST_MODE=single \
+DMABUF_TEST_MODE=single DMABUF_SOURCE_WIDTH=1920 DMABUF_SOURCE_HEIGHT=1080 \
 docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
 ```
 
@@ -349,13 +357,47 @@ DMABUF_TEST_MODE=grid \
 docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
 ```
 
-The scaling demo defaults to one window per Electron process and derives the
-worker count from `DMABUF_SOURCE_COUNT`. Override
+The scaling demo defaults to four windows per Electron process and derives the
+worker count from `DMABUF_SOURCE_COUNT` (four workers for sixteen pages). Override
 `DMABUF_BROWSER_WINDOWS_PER_PROCESS` to compare grouped windows, or
 `DMABUF_BROWSER_PROCESS_COUNT` to set the worker count explicitly.
 
+Browser resolution is a startup parameter, independent of output resolution.
+The default 480x270 source matches each tile in a 4x4 grid; the output remains
+1920x1080 at 60 FPS. The selected size is included in the capture allowlist
+automatically. For full-resolution sources that can later fill the output,
+use the tested 1080p one-page-per-worker configuration:
+
+```bash
+DMABUF_SOURCE_WIDTH=1920 DMABUF_SOURCE_HEIGHT=1080 \
+DMABUF_BROWSER_WINDOWS_PER_PROCESS=1 \
+docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml up --build
+```
+
+This setting does not resize running pages during transitions.
+
+An isolated Tesla T4 / 16-vCPU comparison used the same sixteen animated
+Singular pages, bilinear composition and 1920x1080@60 output. Each row is one
+25-second sample after startup; other GPU demos and profilers were stopped.
+
+| Browser resolution | Workers × pages | Average GPU | GPU memory | Browser CPU cores |
+| --- | --- | ---: | ---: | ---: |
+| 1920x1080 | 16 × 1 | 44.1% | 3,503 MiB | 10.53 |
+| 480x270 | 16 × 1 | 38.3% | 813 MiB | 9.78 |
+| 480x270 | 4 × 4 | 38.3% | 578 MiB | 8.59 |
+
+AVPlumber used 0.30–0.32 CPU cores across these runs. The 270p 4×4 run delivered
+59.97–60.01 FPS per browser, zero browser capture drops, and 59.97 FPS at the
+compositor output. These counters measure delivery rate, not frame uniqueness.
+Lower source resolution saved memory substantially; neither it nor grouping
+removed most browser runtime cost. In a separate 12-second isolation check,
+the four browser workers alone still used 38.25% GPU while painting at 60 FPS,
+versus 38.33% with the complete AVPlumber pipeline. The dominant device load
+therefore precedes AVPlumber's DMA-BUF import; these whole-device counters do
+not distinguish browser rendering from offscreen capture blits.
+
 For the measured sixteen-page animated workload on a 16-vCPU host with a Tesla
-T4, sixteen workers sustained approximately 60 fps per source and used less CPU
+T4 at 1080p, sixteen workers sustained approximately 60 fps per source and used less CPU
 than four workers with four pages each. This depends on page content; grouping
 lightweight pages can reduce resource use. Compare configurations at the same
 achieved source rate.
