@@ -43,7 +43,7 @@
     <button data-seek="3">3 seconds</button>
     <button data-seek="6">6 seconds</button>
   </nav>
-  <p><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4" download>Download the MP4</a> · 10 seconds · 15.1 MB · silent H.264 video · 1920×1080 at 60 fps. The existing 600-frame NVENC recording is shown unchanged.</p>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4" download>Download the MP4</a> · 9.98 seconds · 8.6 MB · silent H.264 video · 1920×1080 at 60 fps. The original GPU-output recording is trimmed to 599 frames, with its leading black frame removed.</p>
 
   <h2>The complete processing graph</h2>
   <p>The live sixteen-source graph from the Ubuntu validation run: DMA-BUF inputs, modifier-aware EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible. In this run, sources delivered about 39–40 new frames/s each and the compositor produced 60 fps.</p>

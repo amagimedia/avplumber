@@ -20,10 +20,13 @@ but the NVIDIA runtime must expose the matching host graphics libraries.
   measured 39.0–39.8 new frames/s per source and 59.98 frames/s through the
   compositor and encoder. The output repeats the latest source image as needed;
   this run does not establish sixteen independent 60 fps captures.
-- The existing MP4 decoded without errors: H.264, 1920×1080, 60 fps, 600 frames,
-  10 seconds. It is retained as the demo recording; the web UI screenshot comes
-  from the new Ubuntu validation run and shows all 54 nodes and 53 queues.
-  The poster uses the frame at one second because the recording starts black.
+- The original MP4 decoded without errors. Its one leading black frame was
+  removed and the remaining 599 frames were re-encoded with libx264 (CRF 18)
+  for publication: H.264, 1920×1080, 60 fps, 9.98 seconds, 8.6 MB. Full decoding
+  and black-frame detection passed; the poster now matches its visible first
+  frame. This packaging step does not change the running NVENC pipeline.
+- The web UI screenshot comes from the new Ubuntu validation run and shows
+  all 54 nodes and 53 queues.
 
 The production path stays on the GPU through DMA-BUF import, EGL/CUDA
 composition and NVENC. Pixel checks inspect the decoded WebRTC receiver output;
