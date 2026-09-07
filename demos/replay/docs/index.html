@@ -52,10 +52,10 @@
   <p><a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4" download>Download the MP4</a> · 49 seconds · 1.7 MB · silent H.264 video. Recorded on an NVIDIA T4 using generated media.</p>
 
   <h2>The complete processing graph</h2>
-  <p>The same running player, inspected through AVPlumber’s web UI: all 14 nodes and 13 queues. Flow runs left to right, from the recording through decoding and transport controls to encoding and RTP output.</p>
+  <p>A fresh capture of the current player graph: all 14 nodes and 13 queues with orthogonal routes and directional arrows. Flow runs left to right, from the recording through decoding and transport controls to encoding and RTP output.</p>
   <figure>
-    <a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png"><img src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png" alt="Live AVPlumber web UI showing all Replay nodes, their connections, and the queue statistics table." loading="lazy"></a>
-    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png">Open the full-resolution screenshot</a> to read every node and queue. The table shows queue fill, capacity, throughput, timestamps, and counters at capture time.</figcaption>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/replay-graph.png" alt="Live AVPlumber web UI showing all Replay nodes, their connections, with routed arrows and queue-state markers." loading="lazy"></a>
+    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the HTML viewer to zoom and inspect every node. Edge colours and fill markers reflect queue state at capture time.</figcaption>
   </figure>
   <footer>
     <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·

@@ -46,12 +46,12 @@
   </nav>
   <p><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4" download>Download the MP4</a> · 9.98 seconds · 8.6 MB · silent H.264 video · 1920×1080 at 60 fps. The original GPU-output recording is trimmed to 599 frames, with its leading black frame removed.</p>
 
-  <h2 id="graph">Earlier processing graph</h2>
-  <p>The earlier sixteen-source graph from the Ubuntu validation run: DMA-BUF inputs, modifier-aware EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible. In this run, sources delivered about 39–40 new frames/s each and the compositor produced 60 fps.</p>
+  <h2 id="graph">The complete processing graph</h2>
+  <p>The current sixteen-source graph: DMA-BUF inputs, cached EGL import, CUDA grid composition, NVENC encoding, and RTP delivery to Janus. All 54 nodes and 53 queues are visible with orthogonal routes and directional arrows. This static capture shows the current 480×270, four-worker configuration; the video above is the earlier recording.</p>
   <p>The current 480×270 four-worker Singular run delivered 59.91–59.99 fps per source, with zero browser capture drops over 12 seconds. Whole-device averages were 38.92% GPU and 576 MiB GPU memory; browser processes used 8.15 CPU cores and AVPlumber 0.30. These are workload-specific observations, not capacity guarantees. The setup guide documents the stage comparison.</p>
   <figure>
-    <a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png" alt="Live AVPlumber web UI showing the sixteen DMA-BUF source branches, GPU compositor, encoder, RTP output, and queue statistics." loading="lazy"></a>
-    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-graph.png" target="_blank" rel="noopener noreferrer">Open the full-resolution screenshot</a> to read every node and queue. The table shows queue fill, capacity, throughput, timestamps, and counters at capture time.</figcaption>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/dmabuf-graph.png" alt="Live AVPlumber web UI showing the sixteen DMA-BUF source branches, GPU compositor, encoder, RTP output, and routed queue connections." loading="lazy"></a>
+    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the HTML viewer to zoom and read every node. Edge colours and fill markers reflect queue state at capture time.</figcaption>
   </figure>
   <footer>
     <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
