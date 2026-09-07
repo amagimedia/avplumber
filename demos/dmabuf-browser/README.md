@@ -21,12 +21,9 @@ With all sixteen pages running, an `nvidia-smi` snapshot on the Tesla T4 showed
 observed runtime values, not peak measurements or a minimum GPU requirement;
 page complexity and source frame rate affect the workload.
 
-Purely linear scaling gives **about 44 sources at 100% GPU utilization**
-(`16 / 0.36 ≈ 44`), assuming the same 39–40 new frames/s per source and GPU work
-proportional to source count. This is an arithmetic estimate, not tested
-capacity or a 44-source 60 fps claim. Sixteen sources already fell below their
-60 fps target with GPU utilization at 36%, so other pipeline limits may prevent
-that scaling; 100% utilization also leaves no margin for workload spikes.
+GPU utilization alone does not establish source capacity. Sixteen sources
+delivered 39–40 new frames/s each despite a 60 fps target. A source-count sweep
+with sustained frame-rate measurements is needed to determine supported load.
 
 The [validation notes](docs/validation.md) cover real rendered pixels,
 three single-source cold starts, all sixteen animated grid tiles, and the
