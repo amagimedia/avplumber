@@ -1,0 +1,321 @@
+{
+  "conditions": "Separate short captures of 16 native 1920x1080@60 sources in a 1080x1920@60 grid, two-frame jitter budget.",
+  "method": "Passively capture H.264 RTP; start at SPS, retain complete access units, decode every output frame on CPU, read each source/frame barcode, compare successive source IDs modulo 1800. Repeated and skipped source frames are distinct from RTP packet loss.",
+  "limitation": "These captures expose per-source continuity problems despite regular 60 fps output timestamps. The cause has not been established; they are not a frame-perfect acceptance result.",
+  "captures": [
+    {
+      "complete_rtp_frames": 672,
+      "decoded_frames": 672,
+      "sequence_gaps": [],
+      "unexpected_timestamp_steps": 0,
+      "unreadable": [],
+      "inputs": [
+        {
+          "source": 0,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 9,
+          "skipped": 10,
+          "repeat_percent": 1.3412816691505216,
+          "skip_percent": 1.4903129657228018
+        },
+        {
+          "source": 1,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 2,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 3,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 4,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 5,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 6,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 7,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 8,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 9,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 10,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 11,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 12,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 13,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 14,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        },
+        {
+          "source": 15,
+          "frames": 672,
+          "intervals": 671,
+          "repeated": 0,
+          "skipped": 1,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.14903129657228018
+        }
+      ],
+      "decoder_exit": 0,
+      "decoder_stderr": "",
+      "description": "First complete capture after returning to grid16",
+      "output_span_seconds": 11.183333333333334
+    },
+    {
+      "complete_rtp_frames": 686,
+      "decoded_frames": 686,
+      "sequence_gaps": [],
+      "unexpected_timestamp_steps": 0,
+      "unreadable": [],
+      "inputs": [
+        {
+          "source": 0,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 1,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 2,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 3,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 4,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 5,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 6,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 7,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 8,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 9,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 10,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 11,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 12,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 13,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        },
+        {
+          "source": 14,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 229,
+          "skipped": 228,
+          "repeat_percent": 33.43065693430657,
+          "skip_percent": 33.284671532846716
+        },
+        {
+          "source": 15,
+          "frames": 686,
+          "intervals": 685,
+          "repeated": 0,
+          "skipped": 0,
+          "repeat_percent": 0.0,
+          "skip_percent": 0.0
+        }
+      ],
+      "decoder_exit": 0,
+      "decoder_stderr": "",
+      "description": "Later steady grid16 capture without an intervening scene change",
+      "output_span_seconds": 11.416666666666666
+    }
+  ]
+}
