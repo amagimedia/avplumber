@@ -40,8 +40,9 @@ Repeat `--input` for each source; the recording uses sixteen generated clips.
 Open the output at <http://127.0.0.1:8080>. In another terminal:
 
 ```sh
-python3 -m pip install -r demos/mixer/requirements.txt
-python3 demos/mixer/tui.py --host 127.0.0.1 --port 7777 \
+python3 -m venv .venv-tui
+.venv-tui/bin/python -m pip install -r demos/mixer/requirements.txt
+.venv-tui/bin/python demos/mixer/tui.py --host 127.0.0.1 --port 7777 \
   --fade-duration 0.8 --wipe-file /media/wipe.mov
 ```
 
@@ -83,15 +84,22 @@ budget; the default is two output frame periods (about 33 ms at 60 fps).
 Late sources repeat their previous image and discard overdue frames to recover.
 This budget is not the full click-to-display latency.
 
-A 20-sample, steady 16-box run on a Tesla T4 / 16-vCPU host used **4% GPU,
-0.50 CPU cores and 509 MiB GPU memory**, with sixteen generated 640×360 H.264
-sources and 1080×1920@60 output. This was an exploratory automatic-clock sample,
-not a capacity guarantee or matched before/after benchmark. Page/file content,
-resolution and transitions change load.
+On a Tesla T4 / 16-vCPU host, sixteen generated 640×360 H.264 sources feeding
+1080×1920@60 NVENC output at 8 Mbit/s measured:
 
-[Click-to-picture measurements](docs/latency.md) distinguish displayed-frame
-latency from command acknowledgment; the published initial baseline predates
-the current graph optimization. The demonstration video is not a latency test.
+| Measurement | Result |
+| --- | ---: |
+| GPU, 30-second steady 16-box average | **4%** |
+| AVPlumber CPU, same phase | **0.58 cores** |
+| Whole-device GPU memory | **689 MiB** |
+| Cut click → browser picture, median of 11 warm cuts | **188.8 ms** |
+| Cut latency, min / mean / max | **182.3 / 237.7 / 503.9 ms** |
+
+The viewer ran on the same host. Load and Cut timings were measured in separate
+phases; latency includes browser presentation and probe overhead. The two slow
+Cut trials are retained. See [raw samples, conditions and measurement method](docs/latency.md).
+Content, source resolution, transitions and viewer/network conditions change
+these results. The demonstration video is not a latency test.
 
 For output files, Janus settings, keyboard details, layouts and tests, see the
 [full reference](docs/guide.md). GPU program frames remain on the GPU; the

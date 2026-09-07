@@ -6,6 +6,32 @@ viewer sees the picture. The browser test timestamps the TUI's actual
 It measures to `requestVideoFrameCallback().expectedDisplayTime` for the first
 verified destination frame. Both timestamps use the browser performance clock.
 
+## Current optimized graph
+
+Warm CUT clicks, fullscreen ↔ 4-box, with the target already prewarmed:
+
+| Measurement | Result |
+| --- | ---: |
+| Samples | 11 |
+| Minimum | 182.3 ms |
+| Mean (average) | 237.7 ms |
+| Median | 188.8 ms |
+| 95th percentile / maximum | 503.9 ms |
+
+The run used sixteen generated 640×360 H.264 inputs, 1080×1920@60 output,
+NVENC at 8 Mbit/s, a Tesla T4 with 16 vCPUs, and Chromium 148 on the same host.
+The viewer decoded in software. [Raw samples and conditions](latency-current.json)
+retain the two slow trials (403.2 and 503.9 ms); their cause is not established.
+Pixel readback took 6.0–15.3 ms per sampled frame. These measurements do not
+support a 39 ms click-to-display claim for this configuration.
+
+A separate 30-second steady 16-box phase averaged **4% whole-device GPU,
+0.58 AVPlumber CPU cores and 689 MiB whole-device GPU memory**. The DMA-BUF
+browser workload was stopped; automatic clocks and the same-host viewer stayed
+in use. [Raw load samples](runtime-load.json) document scope and conditions.
+These are observations for generated 640×360 sources, not a capacity estimate
+for sixteen arbitrary 1080p sources.
+
 ## Initial baseline
 
 | Measurement | Result |

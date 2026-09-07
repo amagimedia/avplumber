@@ -1,0 +1,101 @@
+{
+  "method": "browser mousedown to expectedDisplayTime of first verified destination frame",
+  "mode": "preloaded cut",
+  "samples": [
+    {
+      "trial": 1,
+      "target": 4,
+      "latencyMs": 185.60009765625,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 6
+    },
+    {
+      "trial": 2,
+      "target": 1,
+      "latencyMs": 209.7998046875,
+      "callbackLateMs": -33.2998046875,
+      "readMs": 6.600000001490116
+    },
+    {
+      "trial": 3,
+      "target": 4,
+      "latencyMs": 188.199951171875,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 6.800000000745058
+    },
+    {
+      "trial": 4,
+      "target": 1,
+      "latencyMs": 184.199951171875,
+      "callbackLateMs": -16.599853515625,
+      "readMs": 15.300000000745058
+    },
+    {
+      "trial": 5,
+      "target": 4,
+      "latencyMs": 192.5,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 13.400000002235174
+    },
+    {
+      "trial": 6,
+      "target": 1,
+      "latencyMs": 183.89990234375,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 6.199999999254942
+    },
+    {
+      "trial": 7,
+      "target": 4,
+      "latencyMs": 403.199951171875,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 12
+    },
+    {
+      "trial": 8,
+      "target": 1,
+      "latencyMs": 503.89990234375,
+      "callbackLateMs": -16.699951171875,
+      "readMs": 12.800000000745058
+    },
+    {
+      "trial": 9,
+      "target": 4,
+      "latencyMs": 182.300048828125,
+      "callbackLateMs": -16.60009765625,
+      "readMs": 14.900000002235174
+    },
+    {
+      "trial": 10,
+      "target": 1,
+      "latencyMs": 192.10009765625,
+      "callbackLateMs": -16.60009765625,
+      "readMs": 6.600000001490116
+    },
+    {
+      "trial": 11,
+      "target": 4,
+      "latencyMs": 188.800048828125,
+      "callbackLateMs": -16.60009765625,
+      "readMs": 13.100000001490116
+    }
+  ],
+  "summary": {
+    "count": 11,
+    "minMs": 182.300048828125,
+    "meanMs": 237.6817959872159,
+    "medianMs": 188.800048828125,
+    "p95Ms": 503.89990234375,
+    "maxMs": 503.89990234375
+  },
+  "conditions": {
+    "date": "2026-09-07",
+    "graph": "122 nodes / 140 queues",
+    "inputs": "16 generated 640x360 H.264 sources at 60 fps",
+    "output": "1080x1920 at 60 fps, H.264 NVENC, 8 Mbit/s",
+    "host": "Tesla T4, 16 vCPUs",
+    "viewer": "Chromium 148 on the same host, software video decode",
+    "cut": "Fullscreen <-> 4-box; destination prewarmed before timed Cut",
+    "note": "All samples retained. Browser presentation estimate; includes probe overhead, excludes network transport to a remote viewer."
+  }
+}

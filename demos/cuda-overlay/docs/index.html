@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="AVPlumber CUDA overlay demo: one base and fifteen transparent layers, with pixel-exact validation and the complete WebUI graph.">
+  <title>CUDA overlay demo · AVPlumber</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1280px; margin: auto; padding: 36px 24px 64px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -1px; margin: 0; }
+    h1 span, a { color: #57dbc2; }
+    a { text-underline-offset: 4px; }
+    p { color: #b5c4d8; line-height: 1.6; max-width: 75ch; }
+    video, figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
+    video { aspect-ratio: 16 / 9; margin-top: 24px; }
+    .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    button { font: inherit; color: #edf4ff; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:hover, button:focus-visible { background: #25423f; border-color: #57dbc2; }
+    h2 { margin-top: 44px; font-size: 26px; }
+    figure { margin: 20px 0 0; }
+    figcaption { color: #a4b4ca; line-height: 1.6; margin-top: 12px; }
+    footer { margin-top: 36px; border-top: 1px solid #26354a; padding-top: 20px; color: #a4b4ca; }
+    @media (max-width: 600px) { main { padding: 24px 14px; } header { align-items: start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AVPlumber <span>CUDA overlay</span></h1>
+    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/cuda-overlay">Code &amp; setup guide</a>
+  </header>
+  <p>One base plus fifteen transparent overlays, composed by overlay_many_cuda. Generated labels, alpha ramps and overlapping shapes show layer order and transparency. An independent CPU reference checks every output plane.</p>
+  <figure>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" alt="Sixteen labelled inputs composed into one 1920×1080 CUDA output."></a>
+  </figure>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" download>Download the result image</a> · 1920×1080 · sixteen inputs · static validation example.</p>
+  <h2 id="graph">The complete processing graph</h2>
+  <p>All 50 nodes and 49 queues from the completed 641×360 validation case. Sixteen source branches feed one CUDA composition filter, then raw output for the pixel comparison. CPU/GPU transfers are explicit test boundaries.</p>
+  <figure>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" alt="Live WebUI capture of sixteen input-reader, demux and decode branches feeding overlay_many_cuda and raw output." loading="lazy"></a>
+    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" target="_blank" rel="noopener noreferrer">Open the full-resolution screenshot</a> in a new tab to read every node and connection.</figcaption>
+  </figure>
+  <footer>
+    <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
+    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/tools/web-ui">Web UI</a> ·
+    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/cuda-overlay/docs/guide.md">Validation reference</a>
+  </footer>
+</main>
+</body>
+</html>

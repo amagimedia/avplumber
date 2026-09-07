@@ -51,7 +51,13 @@ def continuity(rows, loop_frames):
 
 
 def visibility_errors(rows, schedule):
-    """Validate a complete scene schedule; frame ranges are [start, end)."""
+    """Check layout and source-to-slot mapping over [start, end) intervals.
+
+    ``sources`` remains shorthand for sequential slots in a full grid. Partial
+    grids use explicit ``capacity`` and ``slots``. Fade/media_wipe intervals
+    permit unreadable codes; their interruption pixels require the separate
+    check_rendered_interruptions.py check. A cut has no exempt intermediate frames.
+    """
     cursor = 0
     errors = []
     for interval in schedule:
@@ -59,15 +65,26 @@ def visibility_errors(rows, schedule):
         if start != cursor or end <= start or end > len(rows):
             raise ValueError("scene schedule must cover every frame once, in order")
         cursor = end
-        if interval.get("transition", False):
+        if "transition" in interval:
+            if interval["transition"] not in ("fade", "media_wipe"):
+                raise ValueError("transition exemption must be fade or media_wipe")
             continue
-        expected = set(interval["sources"])
-        if not expected:
-            raise ValueError("scene interval must specify expected sources")
+        slots = interval.get("slots")
+        expected = ({int(slot): source for slot, source in slots.items()} if slots is not None
+                    else dict(enumerate(interval.get("sources", []))))
+        capacity = interval.get("capacity", len(expected))
+        if (capacity not in (1, 2, 4, 8, 16) or not expected or
+                any(slot < 0 or slot >= capacity for slot in expected) or
+                any(type(source) is not int or not 0 <= source < 16 for source in expected.values())):
+            raise ValueError("scene interval must specify valid capacity and source slots")
+        expected_tiles = {(capacity, slot, source) for slot, source in expected.items()}
         for row in rows[start:end]:
-            seen = {code["source"] for code in row["codes"]}
-            if missing := sorted(expected - seen):
-                errors.append({"frame": row["frame"], "missing_sources": missing})
+            seen = {(code["capacity"], code["slot"], code["source"]) for code in row["codes"]}
+            missing = {slot: source for _, slot, source in sorted(expected_tiles - seen)}
+            unexpected = sorted(seen - expected_tiles)
+            if missing or unexpected:
+                errors.append({"frame": row["frame"], "missing_slots": missing,
+                               "unexpected_tiles": unexpected})
     if cursor != len(rows):
         raise ValueError("scene schedule must cover every frame once, in order")
     return errors

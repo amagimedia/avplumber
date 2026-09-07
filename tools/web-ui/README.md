@@ -22,6 +22,10 @@ npm start
 
 and when starting avplumber, specify `--webui-api` and `--instance-name`. Also, make sure that `--port` is specified, otherwise web UI won't be able to execute necessary commands.
 
+Selecting an instance updates the URL with `?instance=<id>`; share that URL to
+open the same graph. An unavailable instance displays a waiting state instead
+of another graph. Use the WebUI server's reachable address when sharing.
+
 ## DiSCLAiMER
 
 I'm not a frontend developer.

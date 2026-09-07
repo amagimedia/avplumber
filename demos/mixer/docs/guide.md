@@ -72,7 +72,8 @@ The control TUI requires Textual but may run in a separate terminal or on
 another host that can reach the backend's TCP control port:
 
 ```sh
-python3 -m pip install -r demos/mixer/requirements.txt
+python3 -m venv .venv-tui
+.venv-tui/bin/python -m pip install -r demos/mixer/requirements.txt
 ```
 
 ## Start the mixer backend
@@ -119,7 +120,7 @@ Run `python3 demos/mixer/mixer.py --help` for the complete backend option list.
 In another terminal, connect to the backend's control port:
 
 ```sh
-python3 demos/mixer/tui.py \
+.venv-tui/bin/python demos/mixer/tui.py \
   --host 127.0.0.1 \
   --port 7777 \
   --wipe-file /path/on/mixer/host/wipe.mov
@@ -241,6 +242,24 @@ wipes, and the deterministic
 `overlay_many_cuda` matrix in
 `demos/cuda-overlay`.
 
+Two standalone NVIDIA regressions use the numbered 640×360/60 fixtures from
+`demos/mixer/tests/frame_codes.py` and a freshly built Python module:
+
+```sh
+python3 demos/mixer/tests/check_transition_recovery.py \
+  /tmp/fixtures/source-0.mp4 /tmp/fixtures/source-1.mp4
+python3 demos/mixer/tests/check_rendered_interruptions.py \
+  /tmp/fixtures/source-0.mp4 /tmp/fixtures/source-1.mp4 \
+  --wipe-file /path/to/wipe.mov --wipe-seconds 2 --output /tmp/interruptions.json
+```
+
+Set `--wipe-seconds` to the clip's duration. Recovery checks target timeout,
+invalid scenes, missing wipe media and cancelled callbacks. The interruption
+suite covers all Cut/Fade/media-wipe pairs and both sides of the wipe midpoint,
+comparing retained luma pixels against the last observed pre-command picture.
+Chroma is not compared. These tests own their graphs; they do not control a
+running demo. A test-only download makes pixel assertions possible.
+
 ## Implementation notes
 
 The program pipeline stays on CUDA from hardware decode through NVENC; the
@@ -251,8 +270,7 @@ positions. The compositor resolves each frame's dimensions, crop and destination
 rectangle without rebuilding a filter graph. Existing callers can still supply
 explicit FFmpeg preprocessing graphs.
 
-The current compositor scaler samples four neighbours with cubic smoothstep
-weights. It does not widen its filter for downscaling, so fine patterns can alias.
+The compositor scaler uses bilinear interpolation over four neighbours. It does not widen its filter for downscaling, so fine patterns can alias.
 Image-quality parity with FFmpeg has not been established.
 
 For 16 inputs with Janus output and media wipes enabled, the optimized graph

@@ -70,6 +70,9 @@ class MixerOrchestrator {
     void ensureIdle() const;
     void interruptTransition();
     void finishSnapshot();
+    // Caller holds state_->mutex; restores live program after failed preparation.
+    void restoreProgramRouting();
+    void abortTransition(uint64_t generation) noexcept;
     void startFadeWhenReady(std::string scene_name, double duration_sec, int64_t requested_pts,
                            uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms);
     void startFade(const std::string& scene_name, double duration_sec, int64_t T_start,

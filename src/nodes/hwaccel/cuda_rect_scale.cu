@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 
-// Four-neighbour interpolation with cubic smoothstep weights. This lightweight
+// Bilinear interpolation. This lightweight
 // sampler does not widen its support when downscaling. Each lane is sampled
 // separately, including interleaved UV.
 extern "C" __global__ void scale_plane(
@@ -14,9 +14,7 @@ extern "C" __global__ void scale_plane(
     const float fx = (ox + 0.5f) * sw / dw - 0.5f;
     const float fy = (oy + 0.5f) * sh / dh - 0.5f;
     const int ix = int(floorf(fx)), iy = int(floorf(fy));
-    float tx = fx - ix, ty = fy - iy;
-    tx = tx * tx * (3.0f - 2.0f * tx);
-    ty = ty * ty * (3.0f - 2.0f * ty);
+    const float tx = fx - ix, ty = fy - iy;
     const int x0 = sx + max(0, min(ix, sw - 1));
     const int x1 = sx + max(0, min(ix + 1, sw - 1));
     const int y0 = sy + max(0, min(iy, sh - 1));

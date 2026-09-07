@@ -86,6 +86,9 @@ sixteen animated Singular pages delivered **59.91–59.99 fps per source and
 59.91 fps encoded output**, with zero browser capture drops over 12 seconds.
 It averaged **38.92% GPU, 576 MiB GPU memory, 8.15 browser CPU cores and
 0.30 AVPlumber CPU cores**. These delivery counters do not prove frame uniqueness.
+The final smoke check also held 60 Hz output with zero browser capture drops,
+but two input streams accumulated compositor repeats and discards. Input jitter
+can therefore reduce motion continuity even when the output rate stays at 60 fps.
 The bundled page can have a different cost.
 
 Stage comparisons used fixed 1200 MHz GPU graphics / 5000 MHz memory clocks,
