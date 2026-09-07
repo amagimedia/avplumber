@@ -246,6 +246,8 @@ Two standalone NVIDIA regressions use the numbered 640×360/60 fixtures from
 `demos/mixer/tests/frame_codes.py` and a freshly built Python module:
 
 ```sh
+python3 demos/mixer/tests/frame_codes.py /tmp/fixtures \
+  --sources 2 --width 640 --height 360 --fps 60 --seconds 60
 python3 demos/mixer/tests/check_transition_recovery.py \
   /tmp/fixtures/source-0.mp4 /tmp/fixtures/source-1.mp4
 python3 demos/mixer/tests/check_rendered_interruptions.py \

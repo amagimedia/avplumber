@@ -1,5 +1,15 @@
 # Live mixer demo
 
+**16 × native 1920×1080@60 inputs → 1080×1920@60 output.**
+Measured on Tesla T4, 30 seconds per scene, with all sixteen sources active:
+
+| Scene | GPU compute | NVDEC | NVENC | AVPlumber CPU |
+| --- | ---: | ---: | ---: | ---: |
+| **16-box** | **8.0%** | **76.7%** | **23.0%** | **0.58 cores** |
+| Fullscreen | 7.0% | 76.5% | 22.2% | 0.53 cores |
+
+[Samples and conditions](docs/runtime-load-1080p.json).
+
 [![Watch the mixer: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
@@ -8,7 +18,8 @@ The 15-second, 0.95 MB recording shows Direct editing with Cut, Fade and
 transparent media wipes, switching between fullscreen, 16-box, 8-box, 4-box
 and 2-box. Program output is on the left and real terminal controls on the
 right, in a 1600×900, 60 fps MP4. Click the first-frame preview to play it with
-chapter buttons and inspect the web UI graph. The page is hosted on GitHub
+chapter buttons and inspect the web UI graph. This earlier recording uses 360p
+sources; the current 1080p benchmark below was measured separately. The page is hosted on GitHub
 Pages; media comes from public release assets, outside Git history.
 
 ## Run
@@ -50,6 +61,34 @@ The wipe path is resolved by the mixer backend, including inside its container.
 Use a clip with alpha, such as QTRLE/ARGB or ProRes 4444. The clip plays over the
 program and the scene changes at its midpoint. The demo has no audio.
 
+## Generated input size and FPS
+
+Generate sixteen native-resolution test clips (requires NumPy and FFmpeg with
+`libx264`; generation does not require a GPU):
+
+```sh
+python3 demos/mixer/tests/frame_codes.py media \
+  --sources 16 --width 1920 --height 1080 --fps 60 --seconds 30
+```
+
+`--width`, `--height` and `--fps` control the generated source files. Defaults
+are **1920×1080 at 60 fps**; `--ffmpeg` selects the FFmpeg executable. Existing
+files are not overwritten. For example, use `--width 1280 --height 720 --fps 30`
+for a 720p30 input test. Supplied video files retain their encoded dimensions.
+The mixer's separate `--fps` option sets the processing/output rate; keep it at
+60 when comparing different source sizes.
+
+To run all sixteen generated inputs from Bash:
+
+```sh
+demo_inputs=()
+for i in {0..15}; do demo_inputs+=(--input "/media/source-$i.mp4"); done
+docker run --rm --gpus all --network host \
+  -v "$PWD/media:/media:ro,z" avplumber-mixer:local \
+  "${demo_inputs[@]}" --loop-inputs --fps 60 --janus-output \
+  --janus-video-bitrate-kbps 8000 --remote-control-port 7777
+```
+
 ## Controls
 
 | Control | Result |
@@ -85,22 +124,42 @@ budget; the default is two output frame periods (about 33 ms at 60 fps).
 Late sources repeat their previous image and discard overdue frames to recover.
 This budget is not the full click-to-display latency.
 
-On a Tesla T4 / 16-vCPU host, sixteen generated 640×360 H.264 sources feeding
-1080×1920@60 NVENC output at 8 Mbit/s measured:
+With **sixteen native 1920×1080@60 H.264 inputs**, a Tesla T4 / 16-vCPU
+host measured the following over 30 seconds in the steady 16-box scene.
+Output was **1080×1920@60**, H.264 NVENC at 8 Mbit/s; the two-frame jitter
+budget and automatic GPU clocks were retained.
 
-| Measurement | Result |
+| Measurement | Average |
 | --- | ---: |
-| GPU, 30-second steady 16-box average | **4%** |
-| AVPlumber CPU, same phase | **0.58 cores** |
-| Whole-device GPU memory | **689 MiB** |
-| Cut click → browser picture, median of 11 warm cuts | **188.8 ms** |
-| Cut latency, min / mean / max | **182.3 / 237.7 / 503.9 ms** |
+| GPU compute utilization | **8.0%** (min/max: 8%/8%) |
+| NVDEC decoder utilization | **76.7%** (min/max: 76%/79%) |
+| NVENC encoder utilization | **23.0%** |
+| GPU memory activity | **16.0%** |
+| AVPlumber CPU | **0.58 cores** |
+| Whole-device GPU memory | **1,958 MiB** |
 
-The viewer ran on the same host. Load and Cut timings were measured in separate
-phases; latency includes browser presentation and probe overhead. The two slow
-Cut trials are retained. See [raw samples, conditions and measurement method](docs/latency.md).
-Content, source resolution, transitions and viewer/network conditions change
-these results. The demonstration video is not a latency test.
+These are separate engine/activity measurements; **8% does not mean the entire
+GPU is only 8% occupied**. Decoder capacity matters for scaling source count.
+The input clips contain native-resolution animated test patterns and visible
+frame IDs. No fixture generation or DMA-BUF browser workload ran during the
+measurement. See [samples and exact conditions](docs/runtime-load-1080p.json).
+A separate 11.4-second decoded-output check had regular 60 fps RTP timestamps
+and no packet loss, but source 14 repeated **33.43%** and skipped **33.28%**
+of source frames (229 repeats / 228 skipped frames across 685 intervals).
+The other fifteen sources had **0%** repeats and skips. An earlier short
+capture also showed smaller continuity errors on other sources. This is an
+unresolved per-source timing issue: the load figures do **not** establish
+frame-perfect delivery. See [both pixel-level checks](docs/continuity-1080p.json).
+
+The earlier **4%** measurement used **640×360 inputs** and is retained only as
+historical data in [the earlier report](docs/runtime-load.json).
+
+Click latency was measured separately with the earlier 360p inputs: eleven
+warm Cut trials had **182.3 ms minimum, 237.7 ms mean, 188.8 ms median and
+503.9 ms maximum**. The viewer ran on the same host; these measurements include
+browser presentation and probe overhead. They are not a new 1080p latency
+measurement. See [raw samples and method](docs/latency.md).
+Content, resolution, transitions and viewer/network conditions affect results.
 
 For output files, Janus settings, keyboard details, layouts and tests, see the
 [full reference](docs/guide.md). GPU program frames remain on the GPU; the
