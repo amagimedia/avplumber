@@ -2,7 +2,7 @@
 
 [![One base plus fifteen transparent overlays composed on the GPU](https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png)](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/)
 
-[View the demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png) · [Reference](docs/guide.md)
+[View the demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay) · [Reference](docs/guide.md)
 
 Compose one base image and up to fifteen transparent overlays with
 `overlay_many_cuda`. The generated labels, alpha ramps and overlapping shapes
@@ -34,7 +34,7 @@ supported formats, a smaller sweep and build-only instructions.
 
 ## Processing graph
 
-[![CUDA overlay WebUI: source readers and decoders feed one GPU filter and raw output](https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png)](https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png)
+[![CUDA overlay WebUI: source readers and decoders feed one GPU filter and raw output](https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/cuda-overlay-graph.png)](https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay)
 
 **50 nodes / 49 queues** for sixteen inputs. The capture shows the completed
 641×360 validation graph; click it to inspect every node. Software fixtures

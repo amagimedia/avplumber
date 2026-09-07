@@ -2,7 +2,7 @@
 
 [![Watch Replay: video beside terminal controls](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg)](https://amagimedia.github.io/avplumber/demos/replay/docs/)
 
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png)
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay)
 
 The 49-second, 1.7 MB recording shows frame/time/UTC seeks, pause, 0.25×–2× speed,
 scrubbing, reverse, and seeking after EOF. Click the first-frame preview to play
@@ -185,9 +185,9 @@ python3 demos/replay/player.py \
   --exercise-v2
 ```
 
-The exercise observes frames after Play, Pause, absolute and relative seeks,
-speed changes, Reverse, scrubbing, Tail, UTC seek, and rapid paused seeks. It
-prints `PASS`, `FAIL`, or an explicit `SKIP` when the recording is too short for
+The exercise requires fresh, exact frames after seeks and nudges and a stable
+paused frame. It also checks Play, speed changes, Reverse, scrubbing, Tail,
+UTC seek, and the final target after rapid paused seeks. It prints `PASS`, `FAIL`, or an explicit `SKIP` when the recording is too short for
 a nudge, and exits nonzero on failure. The TUI's **RUN V2** button runs the same
 checks.
 
@@ -202,13 +202,67 @@ checks.
 - If video does not recover after a seek, check RTCP reachability and confirm
   that PLI/FIR requests reach the configured RTCP bind address.
 
+## Processing graph
+
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/replay-graph.png" alt="Current replay graph from recording input through transport controls to NVENC and RTP, with routed arrows." width="640"></a>
+
+**14 nodes / 13 queues**. Click the current WebUI capture to open the full graph
+in an HTML viewer with Fit and zoom controls. It is a static capture of graph
+structure and queue state.
+
 ## Tests
 
 ```sh
 python3 -m pytest demos/replay/tests -q
 ```
 
+The same native integration suite supports two codec backends. It runs the real
+reader, decoder, pause gates, speed control, and encoder, generates its own clips,
+and does not need Janus:
+
+```sh
+# CUDA build: NVDEC decoding and NVENC encoding
+python3 -m pytest demos/replay/tests/test_playback_integration.py demos/replay/tests/test_transcode_integration.py --replay-backend=nvidia -q
+
+# CPU build: software H.264 decoding and libx264 encoding; no GPU needed
+python3 -m pytest demos/replay/tests/test_playback_integration.py demos/replay/tests/test_transcode_integration.py --replay-backend=cpu -q
+```
+
+Playback coverage includes 24/25/30/60 fps; forward and reverse at 25/50/100/200%;
+absolute, relative, and UTC seeks around frame boundaries; exact frame steps;
+repeated and seeded random seeks; both recording boundaries; looping and EOF
+recovery; and pause/resume around repeated active speed changes. Assertions
+require a freshly observed exact source frame and a stable paused position.
+Timestamp seeks use raw AVPlumber commands to exercise the native seek path
+independently of the controller.
+
+Finite transcode tests also exercise the regular `input` node and default decoder
+EOF behavior, with both all-intra and B-frame H.264 sources. They verify that every
+frame reaches the output and seek table. An RTP test checks the configured stream
+headers on both backends.
+
+The demux lifecycle suite uses the real native node with video and audio packet
+streams. It checks blocked reads, stop/EOF overlap, full output queues, repeated
+stops, ordinary EOF completion, and resumed packets after retained EOF. Each
+case runs in a child process with a shutdown deadline so a hang fails the test:
+
+```sh
+python3 -m pytest demos/replay/tests/test_demux_shutdown_integration.py -q
+```
+
+Tests skip if the native module or selected backend's prerequisites are missing.
+Both backends need `pytest`, `ffprobe`, and an `ffmpeg` with `libx264` for fixture
+generation. The native module must load its matching FFmpeg libraries: CUDA-enabled
+libraries for NVIDIA, or libraries with `libx264` for CPU. CPU selection changes
+only test graph codec settings; the shipped demo remains NVIDIA-based.
+
 ## Format and implementation notes
+
+Indexed seeks resolve the target frame before setting the decoder's discard
+cutoff, so a paused seek cannot discard the only frame selected by the seek table.
+Replay keeps its reader and demultiplexer available at EOF (`stop_on_eof=false`)
+and drains its decoder without ending playback (`hold_at_eof=true`). These are
+opt-in settings; regular `input` and default finite-stream EOF behavior are unchanged.
 
 The binary seek table contains native-endian `(int64 timestamp_ms, uint64
 byte_offset)` records. The history contains native-endian `(int64 changed_at,

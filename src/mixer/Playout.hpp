@@ -103,6 +103,16 @@ public:
                 ++state.stats.phase_corrections;
             }
         }
+        // Missing paints can leave the inferred cadence behind the output.
+        // Recover only a fresh frame assigned to an already committed slot;
+        // ordinary jitter inside the buffer and stale catch-up bursts retain
+        // their original timing. Queued older frames must not be relabelled.
+        if (state.cadence && started_ && slot < *index_ &&
+            timestamp_ns >= rate_.time(*index_)) {
+            state.cadence->advance(*index_ - slot);
+            slot = *index_;
+            ++state.stats.phase_corrections;
+        }
         if (state.queue.size() == queue_capacity) {
             state.queue.pop_front();
             ++state.stats.overflow;

@@ -23,6 +23,10 @@ def playout_binary(tmp_path_factory):
 
 
 @pytest.mark.parametrize("case", [
+    "complete_jitter_plateau_is_not_rate_drift",
+    "stale_burst_is_not_retimestamped_as_fresh",
+    "rational_source_drift_does_not_amplify",
+    "sparse_missing_paints_do_not_amplify_into_persistent_losses",
     "latency_cannot_exceed_retained_frames",
     "resumed_source_is_live_after_an_eof_marker",
     "presentation_phase_on_half_tick_keeps_every_frame",

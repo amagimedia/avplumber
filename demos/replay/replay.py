@@ -311,7 +311,7 @@ class PlaybackController:
                 serial = self._observation_serial
                 quiet_since = time.monotonic()
 
-    def _decrease_speed_cleanly(self, speed: float, sign: int) -> None:
+    def _change_speed_cleanly(self, speed: float, sign: int) -> None:
         transition_error = None
         gate_closed = False
         try:
@@ -349,8 +349,8 @@ class PlaybackController:
         else:
             sign = -1 if self._status.direction == "reverse" else 1
             if (self._status.ready and self._status.playing
-                    and self._status.speed_percent > 100 and speed <= 100):
-                self._decrease_speed_cleanly(speed, sign)
+                    and self._status.speed_percent != speed and speed <= 100):
+                self._change_speed_cleanly(speed, sign)
             else:
                 self._send(f"speed.set {self.SPEED_TEAM} {_format_number(sign * speed / 100)}")
         self._status = replace(self._status, speed_percent=speed)
@@ -724,17 +724,20 @@ def build_player_application(config: PlayerConfig, api=None) -> PlayerApplicatio
     )
     fps = artifact.fps
 
+    # Drain the final decoded frames at EOF while keeping the slot seekable.
     _add_node(avp, api.InputRec, "replay_input", "player",
               url=str(artifact.path), dst="player_packets", timeout=-1, preseek=0,
               seek_table="", ts_offsets="", team="replay_input_seek",
               timestamp_source="wallclock", pause_team=PlaybackController.PAUSE_TEAM,
-              stop_delay=3000, loop=config.slot.loop)
+              stop_delay=3000, loop=config.slot.loop, stop_on_eof=False)
     _add_node(avp, api.Demux, "replay_demux", "player",
-              src="player_packets", routing={"v:0": "player_video_packets"})
+              src="player_packets", routing={"v:0": "player_video_packets"},
+              stop_on_eof=False)
     _add_node(avp, api.DecVideo, "replay_decode", "player",
               src="player_video_packets", dst="player_decoded", pixel_format="cuda",
               hwaccel=GPU_DEVICE, codec_map={"h264": "h264_cuvid"},
-              hwaccel_only_for_codecs=["h264"], flush_magic=True)
+              hwaccel_only_for_codecs=["h264"], flush_magic=True, hold_at_eof=True,
+              options={"flags": "low_delay"})
     _add_node(avp, api.SpeedVideo, "replay_speed", "player",
               src="player_decoded", dst="player_speed_raw", team=PlaybackController.SPEED_TEAM,
               sync_team=PlaybackController.SYNC_TEAM, sync_node="replay_realtime", speed=1)

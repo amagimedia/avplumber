@@ -56,6 +56,130 @@ void sixteen_independent_phases() {
     }
 }
 
+void sparse_missing_paints_do_not_amplify_into_persistent_losses() {
+    using namespace avp::mixer;
+    const FrameRate rate(60, 1);
+    for (size_t count : {1u, 4u, 8u, 16u}) {
+        for (double latency_ms : {100.0 / 3, 50.0}) {
+            Playout<int> mix(count, rate, latency_ms);
+            std::vector<int> next(count), previous(count, -1);
+            std::vector<Playout<int>::Stats> baseline(count);
+            for (int tick = 0; tick < 3600; ++tick) {
+                const auto now = rate.time(tick) + mix.latencyNs() + 100000;
+                for (size_t source = 0; source < count; ++source) {
+                    while (true) {
+                        // Three real missing paints must not cause repeated
+                        // selection losses once healthy 60 Hz delivery resumes.
+                        if (next[source] == 200 || next[source] == 400 || next[source] == 600)
+                            ++next[source];
+                        const auto arrival = rate.time(next[source]) + static_cast<int64_t>(source) * 400000 - 3000000 +
+                            (next[source] % 7) * 1000000;
+                        if (arrival > now) break;
+                        mix.push(source, next[source]++, arrival);
+                    }
+                }
+                const auto *decision = mix.prepare(now);
+                CHECK(decision);
+                for (size_t source = 0; source < count; ++source) {
+                    if (tick > 150 && decision->frames[source]) {
+                        const int frame = *decision->frames[source];
+                        CHECK(frame >= previous[source]);
+                        if (previous[source] >= 0 && frame > previous[source] + 1)
+                            CHECK(frame == 201 || frame == 401 || frame == 601);
+                        previous[source] = frame;
+                    }
+                }
+                mix.commit();
+                if (tick == 150)
+                    for (size_t source = 0; source < count; ++source)
+                        baseline[source] = mix.stats(source);
+            }
+            for (size_t source = 0; source < count; ++source) {
+                CHECK(mix.stats(source).discarded == baseline[source].discarded);
+                CHECK(mix.stats(source).repeats - baseline[source].repeats <= 3);
+                CHECK(mix.stats(source).discontinuities == baseline[source].discontinuities);
+            }
+        }
+    }
+}
+
+void complete_jitter_plateau_is_not_rate_drift() {
+    using namespace avp::mixer;
+    const FrameRate rate(60, 1);
+    Playout<int> mix(1, rate, 50.0);
+    int next = 0;
+    auto offset = [](int frame) -> int64_t {
+        if (frame >= 500 && frame < 516) return 38000000;
+        if (frame == 516) return 26000000;
+        if (frame == 517) return 14000000;
+        return 2000000;
+    };
+    for (int tick = 0; tick < 1200; ++tick) {
+        const auto now = rate.time(tick) + mix.latencyNs() + 1000;
+        while (rate.time(next) + offset(next) <= now) {
+            mix.push(0, next, rate.time(next) + offset(next));
+            ++next;
+        }
+        const auto *decision = mix.prepare(now);
+        CHECK(decision && *decision->frames[0] == tick);
+        mix.commit();
+    }
+    CHECK(mix.stats(0).repeats == 0 && mix.stats(0).discarded == 0);
+    CHECK(mix.stats(0).phase_corrections == 0);
+}
+
+void stale_burst_is_not_retimestamped_as_fresh() {
+    using namespace avp::mixer;
+    const FrameRate rate(60, 1);
+    Playout<int> mix(2, rate, 50.0);
+    int next = 0, healthy = 0, previous = -1;
+    for (int tick = 0; tick < 1200; ++tick) {
+        const auto now = rate.time(tick) + mix.latencyNs() + 1000;
+        while (rate.time(healthy) + 2000000 <= now) {
+            mix.push(1, healthy, rate.time(healthy) + 2000000);
+            ++healthy;
+        }
+        while (true) {
+            if (next == 100 || next == 200) ++next;
+            const auto pts = rate.time(next) + 2000000;
+            const auto arrival = next >= 500 && next < 506 ? rate.time(506) + 2000000 : pts;
+            if (arrival > now) break;
+            mix.push(0, next++, pts);
+        }
+        const auto *decision = mix.prepare(now);
+        CHECK(decision && *decision->frames[1] == tick);
+        if (tick > 540) CHECK(*decision->frames[0] == previous + 1);
+        previous = *decision->frames[0];
+        mix.commit();
+    }
+    CHECK(mix.stats(0).repeats <= 6 && mix.stats(0).discarded <= 4);
+    CHECK(mix.stats(1).repeats == 0 && mix.stats(1).discarded == 0);
+}
+
+void rational_source_drift_does_not_amplify() {
+    using namespace avp::mixer;
+    const FrameRate input(60000, 1001), output(60, 1);
+    Playout<int> mix(1, output, 50.0);
+    int next = 0, previous = -1;
+    for (int tick = 0; tick < 36000; ++tick) {
+        const auto now = output.time(tick) + mix.latencyNs() + 1000;
+        while (input.time(next) + 2000000 <= now) {
+            mix.push(0, next, input.time(next) + 2000000);
+            ++next;
+        }
+        const auto *decision = mix.prepare(now);
+        CHECK(decision);
+        const int frame = *decision->frames[0];
+        CHECK(previous < 0 || frame == previous || frame == previous + 1);
+        previous = frame;
+        mix.commit();
+    }
+    // Ten minutes of 59.94 Hz input naturally needs about 36 held frames at
+    // 60 Hz output; clock drift must not discard any supplied source frames.
+    CHECK(mix.stats(0).repeats <= 37 && mix.stats(0).discarded == 0);
+    CHECK(mix.stats(0).discontinuities == 0);
+}
+
 void bounded_queue_counts_overflow() {
     avp::mixer::Playout<int> mix(1, {60, 1});
     for (int id = 0; id < 100; ++id) mix.push(0, id, id * 1000000000LL / 60);
@@ -381,6 +505,10 @@ void resumed_source_is_live_after_an_eof_marker() {
 
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
+        {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
+        {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},
+        {"sparse_missing_paints_do_not_amplify_into_persistent_losses", sparse_missing_paints_do_not_amplify_into_persistent_losses},
         {"latency_cannot_exceed_retained_frames", latency_cannot_exceed_retained_frames},
         {"resumed_source_is_live_after_an_eof_marker", resumed_source_is_live_after_an_eof_marker},
         {"presentation_phase_on_half_tick_keeps_every_frame", presentation_phase_on_half_tick_keeps_every_frame},

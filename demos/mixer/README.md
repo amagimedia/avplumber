@@ -2,7 +2,7 @@
 
 [![Watch the mixer: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-graph-ungrouped.png)
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
 
 The 15-second, 0.95 MB recording shows Direct editing with Cut, Fade and
 transparent media wipes, switching between fullscreen, 16-box, 8-box, 4-box
@@ -68,10 +68,11 @@ inputs keep their aspect ratio. More sources than cells create additional pages.
 
 ## Processing graph
 
-<a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-graph-ungrouped.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
 
 **122 nodes / 140 queues**, grouped into six blocks. Click the overview for the
-full-resolution ungrouped graph. On the [demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/#graph)
+full-resolution ungrouped graph in an HTML viewer with Fit and zoom controls.
+On the [demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/#graph)
 it opens in a new tab. In the live WebUI, click a group to enter it and use
 **← Back** to return. Static edge colours and fill markers show sampled flow
 without animated edges.

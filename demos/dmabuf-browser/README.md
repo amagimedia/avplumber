@@ -2,7 +2,7 @@
 
 [![Watch sixteen browser sources composed on the GPU](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.jpg)](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/)
 
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [Download MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Technical reference](docs/guide.md)
+[Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [Download MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser) · [Technical reference](docs/guide.md)
 
 Capture HTML pages in Electron, export GPU DMA-BUF frames, compose a grid in
 AVPlumber and stream it through Janus/WebRTC. The default grid is **16 pages,
@@ -67,8 +67,10 @@ For the tested full-resolution sixteen-source configuration, also set
 
 ## Processing graph
 
-[View the processing graph](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/#graph).
-The older graph screenshot is labelled with the configuration it represents.
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/dmabuf-graph.png" alt="Current sixteen-input DMA-BUF graph with orthogonal routes and directional arrows." width="640"></a>
+
+**54 nodes / 53 queues**. Click the current WebUI capture to open the full graph
+in an HTML viewer with Fit and zoom controls.
 In the current path, each source feeds cached EGL/CUDA import and the shared
 native compositor, followed by NVENC and RTP output. Bilinear tile scaling
 happens directly in the compositor; intermediate per-source scaling graphs
@@ -86,10 +88,24 @@ sixteen animated Singular pages delivered **59.91–59.99 fps per source and
 59.91 fps encoded output**, with zero browser capture drops over 12 seconds.
 It averaged **38.92% GPU, 576 MiB GPU memory, 8.15 browser CPU cores and
 0.30 AVPlumber CPU cores**. These delivery counters do not prove frame uniqueness.
-The final smoke check also held 60 Hz output with zero browser capture drops,
-but two input streams accumulated compositor repeats and discards. Input jitter
-can therefore reduce motion continuity even when the output rate stays at 60 fps.
 The bundled page can have a different cost.
+
+After the cadence selection fix, checks with the default two-frame buffer had
+**zero discarded input frames and zero missed output deadlines**:
+
+| Sources / trial | Measurement | Worst-source repeated frames |
+| --- | --- | ---: |
+| 1, 4 and 8 sources, each | 30 s / 1,800 output ticks | 0 / 1,800 (0%) |
+| 16 sources, cold start 1 | 60 s / 3,600 ticks | 10 / 3,600 (0.278%) |
+| 16 sources, cold start 2 | 30 s / 1,800 ticks | 1 / 1,800 (0.056%) |
+| 16 sources, cold start 3 | 30 s / 1,800 ticks | 4 / 1,800 (0.222%) |
+
+Discard counts were **0 (0%) for every input**, using each row's output ticks
+as the denominator. Measurements exclude the first 600 warmup ticks. Residual
+repeats coincide with browser paint rates slightly below 60 Hz; zero capture
+overflows does not prove 60 unique frames/s. These continuity checks ran with
+the live mixer also active and are separate from the load measurement above.
+See [per-input results and conditions](docs/continuity.json).
 
 Stage comparisons used fixed 1200 MHz GPU graphics / 5000 MHz memory clocks,
 twenty one-second samples, and the same page workload:

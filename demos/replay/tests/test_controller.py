@@ -92,7 +92,8 @@ def test_speed_and_reverse_retain_direction(controller):
     assert commands.values[-1] == "resume replay_pause"
 
 
-def test_active_speed_decrease_gates_transition_and_requests_idr(controller):
+@pytest.mark.parametrize("initial,target", [(200, 100), (200, 50), (50, 100), (100, 50)])
+def test_active_speed_change_gates_transition_and_requests_idr(controller, initial, target):
     original, _, _ = controller
     commands = Commands()
     artifact = ReplayArtifact(
@@ -103,19 +104,19 @@ def test_active_speed_decrease_gates_transition_and_requests_idr(controller):
     )
     control = PlaybackController(commands, artifact)
     control.observe(frame_number=50, media_timestamp_ms=3_260)
-    control.execute(PlaybackOperation.SPEED, 200)
+    control.execute(PlaybackOperation.SPEED, initial)
     commands.values.clear()
 
-    status = control.execute(PlaybackOperation.SPEED, 100)
+    status = control.execute(PlaybackOperation.SPEED, target)
 
     assert commands.values == [
         "pause replay_transition now",
-        "speed.set replay_speed 1",
+        f"speed.set replay_speed {target / 100:g}",
         "node.object.set janus_force_keyframe trigger true",
         "resume replay_transition",
     ]
     assert status.playing is True
-    assert status.speed_percent == 100
+    assert status.speed_percent == target
     assert status.frame_number == 50
 
 

@@ -121,6 +121,7 @@ public:
 
         if (input) {
             input->convertStreamTarget(target, StreamTarget::ETargetType::tt_SyncTime);
+            input->resolveSeekTarget(target);
             direction = input->getPlaybackDirection();
         }
         // set-up discard until & execute seek

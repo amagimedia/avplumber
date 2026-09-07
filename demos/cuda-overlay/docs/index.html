@@ -31,7 +31,7 @@
 <main>
   <header>
     <h1>AVPlumber <span>CUDA overlay</span></h1>
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/cuda-overlay">Code &amp; setup guide</a>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/cuda-overlay">Code &amp; setup guide</a>
   </header>
   <p>One base plus fifteen transparent overlays, composed by overlay_many_cuda. Generated labels, alpha ramps and overlapping shapes show layer order and transparency. An independent CPU reference checks every output plane.</p>
   <figure>
@@ -41,13 +41,13 @@
   <h2 id="graph">The complete processing graph</h2>
   <p>All 50 nodes and 49 queues from the completed 641×360 validation case. Sixteen source branches feed one CUDA composition filter, then raw output for the pixel comparison. CPU/GPU transfers are explicit test boundaries.</p>
   <figure>
-    <a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" alt="Live WebUI capture of sixteen input-reader, demux and decode branches feeding overlay_many_cuda and raw output." loading="lazy"></a>
-    <figcaption><a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-graph.png" target="_blank" rel="noopener noreferrer">Open the full-resolution screenshot</a> in a new tab to read every node and connection.</figcaption>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/cuda-overlay-graph.png" alt="Live WebUI capture of sixteen input-reader, demux and decode branches feeding overlay_many_cuda and raw output." loading="lazy"></a>
+    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in a new tab to read every node and connection.</figcaption>
   </figure>
   <footer>
     <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/tools/web-ui">Web UI</a> ·
-    <a href="https://github.com/amagimedia/avplumber/tree/fix/shared-mixer-timing/demos/cuda-overlay/docs/guide.md">Validation reference</a>
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/tools/web-ui">Web UI</a> ·
+    <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/cuda-overlay/docs/guide.md">Validation reference</a>
   </footer>
 </main>
 </body>

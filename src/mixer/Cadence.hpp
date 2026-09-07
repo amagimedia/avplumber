@@ -30,6 +30,11 @@ public:
     Cadence(FrameRate rate, int64_t latency_ns)
         : rate_(rate), tolerance_(std::max<int64_t>(2, rate.nearestIndex(latency_ns) + 1)) {}
 
+    void advance(int64_t slots) {
+        if (next_) *next_ += slots;
+        for (auto &error : phase_errors_) error -= rate_.time(slots);
+    }
+
     Position observe(int64_t timestamp_ns) {
         const auto stamped = rate_.nearestIndex(timestamp_ns);
         Position result{stamped};
