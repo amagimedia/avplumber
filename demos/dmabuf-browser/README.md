@@ -16,6 +16,11 @@ The demo page includes a live web UI graph screenshot from the Ubuntu validation
 run: about 39–40 new frames/s per source, composed at 60 fps. Media is hosted
 as public release assets, outside Git.
 
+With all sixteen pages running, an `nvidia-smi` snapshot on the Tesla T4 showed
+**36% GPU utilization and 3,381 MiB (3.3 GiB) of GPU memory in use**. These are
+observed runtime values, not peak measurements or a minimum GPU requirement;
+page complexity and source frame rate affect the workload.
+
 The [validation notes](docs/validation.md) cover real rendered pixels,
 three single-source cold starts, all sixteen animated grid tiles, and the
 NVIDIA GBM settings needed on the tested Ubuntu host. Benchmark the intended
