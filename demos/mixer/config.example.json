@@ -6,9 +6,44 @@
   },
   "sources": [
     {
-      "id": "page",
+      "id": "sg_static_rect",
       "kind": "browser",
-      "url": "https://example.org/graphics",
+      "url": "https://app.singular.live/output/5ZzzJADkEiSGsfZxxbltbJ/Output?aspect=16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "sg_moving_rect",
+      "kind": "browser",
+      "url": "https://app.singular.live/output/7oTbGvhQYlmEHWIWE4NWCg/Output?aspect=16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "sg_text20",
+      "kind": "browser",
+      "url": "https://app.singular.live/output/4BxIZCOM2J5PPgojAnZfRj/Output?aspect=16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "sg_graphics",
+      "kind": "browser",
+      "url": "https://app.singular.live/output/6MAXCzTulkAyZlGPHfYJoM/Output?aspect=16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "sg_fillrate",
+      "kind": "browser",
+      "url": "https://app.singular.live/output/3KM3hemkGlLdPfBrHVCXuK/Output?aspect=16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "sg_combined",
+      "kind": "browser",
+      "url": "https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=16:9",
       "width": 1920,
       "height": 1080
     },
@@ -109,7 +144,7 @@
           "fit": "cover"
         },
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 60,
             "y": 120,
@@ -154,7 +189,7 @@
           "fit": "contain"
         },
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 60,
             "y": 120,
@@ -185,7 +220,7 @@
           }
         },
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 0,
             "y": 960,
@@ -206,7 +241,7 @@
       "id": "twins",
       "items": [
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 0,
             "y": 0,
@@ -216,7 +251,7 @@
           "fit": "contain"
         },
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 540,
             "y": 0,
@@ -277,7 +312,7 @@
           }
         },
         {
-          "source": "page",
+          "source": "sg_combined",
           "dst": {
             "x": 40,
             "y": 100,
