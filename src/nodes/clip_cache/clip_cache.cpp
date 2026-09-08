@@ -92,11 +92,15 @@ public:
         if (!in) return;
         if (caching_) {
             if (!in.isComplete() || !in.pts().isValid()) {
-                // The end-of-clip marker: the cache holds a whole clip now, which
-                // is what a preload waits for.
-                cache_->finish(key_);
-                caching_ = false;
-                logstream << "clip_cache: cached " << cached_frames_ << " frame(s) of " << key_;
+                // A marker frame. Before the first picture it is the chain
+                // starting up, not the clip ending; only the second kind means
+                // the cache now holds a whole clip, which is what a preload
+                // waits for.
+                if (cached_frames_ > 0) {
+                    cache_->finish(key_);
+                    caching_ = false;
+                    logstream << "clip_cache: cached " << cached_frames_ << " frame(s) of " << key_;
+                }
             } else if (!cache_->append(key_, in, frameBytes(in))) {
                 caching_ = false;   // over budget: stay a passthrough for this clip
                 logstream << "clip_cache: " << key_ << " does not fit the budget; not cached";
