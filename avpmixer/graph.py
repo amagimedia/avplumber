@@ -619,11 +619,10 @@ class MixerGraphBuilder:
             "name": self._n("wipe_fmt"),
             "src": self._e("wipe_dec_out"),
             "dst": self._e("wipe_fmt_out"),
-            # Bilinear, not lanczos: this frame is blended over the program and
-            # re-encoded, so the sharper kernel buys nothing visible and costs
-            # two thirds of the chain's CPU, which showed up as the compositor
-            # missing 60 Hz ticks while a wipe ran.
-            "graph": f"format=yuva420p,scale={W}:{H}:flags=bilinear,hwupload",
+            # Upload the clip at its own size and let the compositor scale it on
+            # the GPU. Resizing to the canvas on a CPU thread cost two thirds of
+            # this chain and made the compositor miss 60 Hz ticks during a wipe.
+            "graph": "format=rgba,hwupload",
             "hwaccel": self.hwaccel,
             "group": wipe_group,
         }))
@@ -641,19 +640,19 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_rt_fps_out"),
             "group": wipe_group,
         }))
-        # overlay_many_cuda: convert NV12 main to YUV420P, blend YUVA wipe,
-        # convert back to NV12 (matches assume_video_format downstream).
-        self.avp.addNode(FilterVideo({
+        # The wipe is one alpha-blended layer over the program, drawn by the same
+        # compositor kernel the scenes use: no format round trip through
+        # yuv420p, no second blend pass and no CPU resize.
+        self.avp.addNode(CudaRectOverlay({
             "name": self._n("wipe_overlay"),
             "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
             "dst": self._e("wipe_overlay_out"),
-            "graph": (
-                "[in0]scale_cuda=format=yuv420p[main];"
-                " [main][in1]overlay_many_cuda=inputs=2[blended];"
-                " [blended]scale_cuda=format=nv12"
-            ),
             "hwaccel": self.hwaccel,
-            "defer_preliminary_init": True,
+            "width": W, "height": H, "sw_format": "nv12", "fps": fps_str, "scale": True,
+            "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
+                       {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
+            "active_inputs": 3,
+            **({} if self.latency_ms is None else {"latency_ms": self.latency_ms}),
             "group": wipe_group,
         }))
 
