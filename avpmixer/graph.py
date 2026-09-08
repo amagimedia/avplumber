@@ -619,7 +619,11 @@ class MixerGraphBuilder:
             "name": self._n("wipe_fmt"),
             "src": self._e("wipe_dec_out"),
             "dst": self._e("wipe_fmt_out"),
-            "graph": f"format=yuva420p,scale={W}:{H}:flags=lanczos,hwupload",
+            # Bilinear, not lanczos: this frame is blended over the program and
+            # re-encoded, so the sharper kernel buys nothing visible and costs
+            # two thirds of the chain's CPU, which showed up as the compositor
+            # missing 60 Hz ticks while a wipe ran.
+            "graph": f"format=yuva420p,scale={W}:{H}:flags=bilinear,hwupload",
             "hwaccel": self.hwaccel,
             "group": wipe_group,
         }))
