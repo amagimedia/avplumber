@@ -166,29 +166,26 @@ element goes on air the controller computes its end time from cue points and
 speed, arms the next element, and re-arms whenever the playlist, mode or
 transition changes.
 
-`engine.py` binds elements to sixteen fixed mixer sources: group
-`pl_item_<slot>`, scene `item_<slot>` (fullscreen), decode chain from
-`avpmixer.inputs.build_input` with the replay demo's additions: a pause team
-on the input, a `pause` node and a realtime sync team, `h264_cuvid` with
-`flush_magic` and low-delay decoding so a seek lands on the exact frame. Every
-chain loops between its cue points and never reaches EOF; the schedule alone
-ends an element.
+`engine.py` binds elements to sixteen fixed mixer sources (group
+`pl_item_<slot>`, fullscreen scene `item_<slot>`). The decode chain is
+`avpmixer.inputs.build_input` with the replay demo's playback controls: a
+pause team and pause node, a realtime sync team, and `h264_cuvid` with
+`flush_magic` so a seek lands on the exact frame. A parked element sits on its
+cue-in frame with the decoder resident; every chain loops between its cue
+points and never reaches EOF.
 
-A scheduled cut is armed 600 ms before its start (`arm_lead_ms`): `mixer.cut`
-with `start_pts_ms`, plus the switcher's `active` key written into the mixer
-timeline at the same time, so the switch is decided by frame timestamp rather
-than by the polling order of the mixer's ready-cut task. The incoming chain is
-resumed natively (`resume <team> at`) a few milliseconds after the cut time,
-so its cue-in frame is the first frame stamped past the cut; the mixer's playout
-buffer absorbs the lag. The switch is confirmed from `mixer.status` over the
-local control port before the outgoing element is parked. Fades and wipes are
+A scheduled cut is armed 600 ms ahead with `mixer.cut` at a wallclock
+`start_pts_ms`, and the incoming chain is resumed natively (`resume <team>
+at`) 50 ms before the cut. A parked element sits one frame before its cue-in:
+the mixer's ready cut consumes the first fresh frame of the incoming element,
+so cue-in itself is the first frame on air. The switch is confirmed from
+`mixer.status` before the outgoing element is parked. Fades and wipes are
 armed the same way and end at the scheduled time.
 
-Two native additions were made for this demo: `resume <team> at <ms>` on the
-pause team (an explicit pause cancels a scheduled resume) and a public
-`mixer.interrupt` command that drops an armed or running transition. A decoder
-fix, needed for exact seeks, makes stale frames from the NVDEC queue unable to
-clear the post-seek discard target.
+Native additions made for this demo: `resume <team> at <ms>`, `mixer.interrupt`,
+the pause node's `pass_on_seek` option, and two decoder fixes for exact seeks
+(a stale frame no longer clears the post-seek discard target; the re-fed
+flush-magic frame is not output twice).
 
 `control.py` is the JSON protocol shared by `server.py` (which registers
 `playlist.status` and `playlist.<verb>` on the control server) and

@@ -17,6 +17,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 speed_team: Optional[str] = None, speed: float = 1.0,
                 pause_team: Optional[str] = None, sync_team: Optional[str] = None,
                 realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
+                pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group") -> str:
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
 
@@ -54,7 +55,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     if pause_team is not None:
         avp.addNode(api.Pause({
             "name": f"pause_{tag}", "src": realtime_src, "dst": edge("paused"),
-            "team": pause_team, "group": group, **sync,
+            "team": pause_team, "group": group, **sync, **(pause_params or {}),
         }))
         realtime_src = edge("paused")
     avp.addNode(api.Realtime({

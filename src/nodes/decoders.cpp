@@ -24,6 +24,7 @@ protected:
     std::list<OutputFrame> flush_frames_;
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
+    av::Timestamp flush_magic_frame_ = NOTS;   // target frame; its re-fed decode must not surface twice
     bool finish_after_flush_ = false;
     bool hold_at_eof_ = false;
     bool decoder_at_eof_ = false;
@@ -62,9 +63,14 @@ protected:
         }
         last_pts_ = frm.pts();
         bool put = true;
+        bool completed_flush_magic = false;
         if (flush_magic_ && waiting_for_frame_ > 0) {
             if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
                 logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
+                // The packet was fed once per iteration; the extra decodes of the
+                // target frame surface later and must not be output again.
+                flush_magic_frame_ = waiting_for_frame_ > 1 ? frm.pts() : NOTS;
+                completed_flush_magic = true;
                 waiting_for_frame_ = 0;
             } else {
                 waiting_for_frame_++;
@@ -74,6 +80,14 @@ protected:
                 logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
                 waiting_for_frame_ = 0;
                 put = true;
+            }
+        }
+        if (put && !completed_flush_magic && flush_magic_frame_.isValid()) {
+            if (frm.pts() == flush_magic_frame_) {
+                logstream << "dropping re-fed duplicate of flush magic frame " << frm.pts();
+                put = false;
+            } else if (frm.pts() > flush_magic_frame_) {
+                flush_magic_frame_ = NOTS;
             }
         }
         // Only frames that survived flush magic may consume the discard target: a
