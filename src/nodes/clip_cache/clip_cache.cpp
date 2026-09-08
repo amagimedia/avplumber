@@ -16,6 +16,8 @@ extern "C" {
 ///
 /// The clip is identified by the "url" parameter, which is what the mixer sets
 /// when it arms a media wipe, so nothing upstream needs to know about caching.
+static constexpr int IDLE_END_MS = 200;
+
 class ClipCacheNode : public NodeSISO<av::VideoFrame, av::VideoFrame>,
                       public ReportsFinishByFlag, public IReturnsObjects,
                       public IFrameRateSource, public ITimeBaseSource {
@@ -28,6 +30,7 @@ protected:
     std::vector<av::VideoFrame> playback_;
     size_t index_ = 0;
     size_t cached_frames_ = 0;
+    int logged_first_ = 0;
     int64_t first_frame_ns_ = 0;
     int64_t frame_ns_ = 16666667;
 
@@ -59,6 +62,7 @@ public:
             playback_ = key_.empty() ? std::vector<av::VideoFrame>() : cache_->take(key_);
             caching_ = playback_.empty() && !key_.empty();
             cached_frames_ = 0;
+            logged_first_ = 0;
             if (caching_) {
                 cache_->begin(key_);
                 logstream << "clip_cache: loading " << key_;
@@ -88,10 +92,30 @@ public:
             return;
         }
 
-        av::VideoFrame in = this->source_->get();
-        if (!in) return;
+        // A bounded wait doubles as the end-of-clip signal: the decode chain
+        // stops delivering when the clip runs out, and no marker frame reaches
+        // this far. Frames are paced at the clip's own rate, tens of
+        // milliseconds apart, so a quiet fifth of a second means the end.
+        av::VideoFrame in = this->source_->get(IDLE_END_MS);
+        if (!in) {
+            if (caching_ && cached_frames_ > 0) {
+                cache_->finish(key_);
+                caching_ = false;
+                logstream << "clip_cache: cached " << cached_frames_ << " frame(s) of " << key_;
+            }
+            return;
+        }
         if (caching_) {
-            if (!in.isComplete() || !in.pts().isValid()) {
+            // A picture is anything with real dimensions and a timestamp; the
+            // completeness flag is not reliable across every producer.
+            const bool picture = in.raw() && in.width() > 0 && in.height() > 0 && in.pts().isValid();
+            if (cached_frames_ == 0 && logged_first_ < 3) {
+                ++logged_first_;
+                logstream << "clip_cache: input frame " << in.width() << "x" << in.height()
+                          << " pts_valid=" << in.pts().isValid() << " complete=" << in.isComplete()
+                          << " -> " << (picture ? "picture" : "marker");
+            }
+            if (!picture) {
                 // A marker frame. Before the first picture it is the chain
                 // starting up, not the clip ending; only the second kind means
                 // the cache now holds a whole clip, which is what a preload
@@ -106,6 +130,8 @@ public:
                 logstream << "clip_cache: " << key_ << " does not fit the budget; not cached";
             } else {
                 ++cached_frames_;
+                if (cached_frames_ % 16 == 0)
+                    logstream << "clip_cache: " << cached_frames_ << " frame(s) so far of " << key_;
             }
         }
         if (caching_) {
@@ -122,7 +148,11 @@ public:
     /// The loading pass ends when the group is torn down, which is also when the
     /// decode chain has reached the end of the clip.
     ~ClipCacheNode() override {
-        if (caching_ && cache_) cache_->finish(key_);
+        if (caching_ && cache_) {
+            logstream << "clip_cache: torn down while loading " << key_ << " after "
+                      << cached_frames_ << " frame(s); completing what was read";
+            cache_->finish(key_);
+        }
     }
 
     Parameters getObject(const std::string key) override {
