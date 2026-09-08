@@ -153,18 +153,25 @@ class MixerApplication:
             self.avp.group(player).startNodes()
             self.avp.group(loader).startNodes()
             deadline = started + self.preheat_timeout_sec
+            held = None
             while time.monotonic() < deadline:
-                cached = self.avp.node(cache_node).getObject("status")
-                if any(c["path"] == clip and c["complete"] for c in cached.get("clips", [])):
+                try:
+                    status = self.avp.node(cache_node).getObject("status")
+                except Exception:
+                    time.sleep(PREHEAT_POLL_INTERVAL_SEC)   # the group is still starting
+                    continue
+                held = next((c for c in status.get("clips", [])
+                             if c["path"] == clip and c["complete"]), None)
+                if held:
                     break
                 time.sleep(PREHEAT_POLL_INTERVAL_SEC)
             self.avp.group(loader).stopNodes()
             self.avp.group(player).stopNodes()
-            status = self.avp.node(cache_node).getObject("status")
-            held = next((c for c in status.get("clips", []) if c["path"] == clip), None)
             print(f"wipe cached: {clip} {held['frames'] if held else 0} frames, "
                   f"{(held['bytes'] if held else 0) / 1048576:.1f} MiB, "
                   f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
+            if not held:
+                raise RuntimeError(f"wipe clip did not cache within the preheat timeout: {clip}")
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
