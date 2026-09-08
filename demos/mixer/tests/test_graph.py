@@ -75,7 +75,7 @@ class FakeMixer:
     def add_routed_source(self, name, **parameters):
         self.routed_sources.append((name, parameters))
 
-    def add_scene(self, name, sources, *, routes):
+    def add_scene(self, name, sources, *, routes=None):
         self.scenes[name] = {"sources": sources, "routes": routes}
 
     def set_initial_scene(self, name, slot):
@@ -129,6 +129,7 @@ def fake_api():
         "input_rec",
         "ipc_dmabuf_source",
         "mux",
+        "one_to_many",
         "output",
         "preheat_video_router",
         "realtime",
@@ -153,6 +154,7 @@ def fake_api():
             "input_rec": "InputRec",
             "ipc_dmabuf_source": "IpcDmabufSource",
             "mux": "Mux",
+            "one_to_many": "OneToMany",
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
             "realtime": "Realtime",
@@ -402,3 +404,89 @@ def test_wipe_file_warms_the_wipe_chain_up_at_start(monkeypatch):
     monkeypatch.setattr(plain, "_wait_for_node", lambda *a, **k: None)
     plain.start()
     assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
+
+
+CONFIG = {
+    "canvas": {"width": 1920, "height": 1080, "fps": 60},
+    "sources": [
+        {"id": "cam", "kind": "video", "path": "/media/cam.mp4", "width": 1920, "height": 1080},
+        {"id": "page", "kind": "browser", "url": "https://example.org/", "width": 1280, "height": 720},
+    ],
+    "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
+    "scenes": [
+        {"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "cover"}]},
+        {"id": "pip", "items": [
+            {"source": "page", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}},
+            {"source": "cam", "dst": {"x": 1440, "y": 60, "w": 420, "h": 236}},
+            {"source": "cam", "dst": {"x": 60, "y": 60, "w": 420, "h": 236},
+             "crop": {"x": 480, "y": 270, "w": 960, "h": 540}}]},
+    ],
+    "initial_scene": "pip",
+}
+
+
+def test_config_scene_layers_carry_z_cover_and_aliases():
+    from avpmixer import config as mc
+    cfg = mc.parse(CONFIG)
+    assert cfg.alias_counts == {"cam": 2, "page": 1}
+    full = mc.scene_layers(cfg, cfg.scenes[0])
+    assert full["cam"] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "z": 0, "fit": "stretch",
+                           "crop": {"x": 0, "y": 0, "w": 1920, "h": 1080}}
+    pip = mc.scene_layers(cfg, cfg.scenes[1])
+    assert list(pip) == ["page", "cam", "cam#2"]
+    assert [layer["z"] for layer in pip.values()] == [0, 1, 2]
+    assert pip["cam#2"]["crop"] == {"x": 480, "y": 270, "w": 960, "h": 540} and pip["cam#2"]["fit"] == "contain"
+    # cover of a 16:9 source into a 9:16 box keeps the full height and a centred slice
+    tall = mc.cover_crop(1920, 1080, mc.Rect(0, 0, 1080, 1920), None)
+    assert (tall.w, tall.h, tall.x) == (606, 1080, 657)
+
+
+def test_config_rejects_duplicate_locations_and_bad_references():
+    from avpmixer import config as mc
+    import copy
+    dup = copy.deepcopy(CONFIG)
+    dup["sources"].append({"id": "cam2", "kind": "video", "path": "/media/cam.mp4"})
+    with pytest.raises(mc.ConfigError, match="already declared"):
+        mc.parse(dup)
+    bad = copy.deepcopy(CONFIG)
+    bad["scenes"][0]["items"][0]["source"] = "nope"
+    with pytest.raises(mc.ConfigError, match="unknown source"):
+        mc.parse(bad)
+    nocover = copy.deepcopy(CONFIG)
+    del nocover["sources"][0]["width"]
+    with pytest.raises(mc.ConfigError, match="cover needs"):
+        mc.parse(nocover)
+
+
+def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch):
+    import json as _json
+    from avpmixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    path = tmp_path / "mixer.json"
+    path.write_text(_json.dumps(CONFIG))
+    opened = []
+    monkeypatch.setattr(dmabuf_inputs, "rest_request",
+                        lambda base, method, p, body=None: opened.append((method, p, body)) or {"windows": []})
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    mixer = FakeMixer.instances[-1]
+
+    assert [name for name in nodes if name and name.startswith("decode_")] == ["decode_0"]
+    assert nodes["alias_0"]["dst"] == ["input_0_fps_alias1", "input_0_fps_alias2"]
+    assert nodes["alias_0"]["outputs"] == 3
+    assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
+    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_cuda"
+    assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
+                             "fps": 60, "audio": False}
+    assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
+    assert mixer.parameters["canvas"] == (1920, 1080)
+    assert application.wipe_files == ("/media/swoosh.mov",)
+    assert nodes["program_format"]["width"] == 1920
+
+
+def test_cli_requires_inputs_or_config():
+    with pytest.raises(SystemExit):
+        parse_args(["--output", "p.mp4"])
+    assert parse_args(["--config", "m.json", "--janus-output"]).config == "m.json"

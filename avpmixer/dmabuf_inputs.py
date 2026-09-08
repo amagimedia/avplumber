@@ -69,14 +69,19 @@ def rest_request(base_url: str, method: str, path: str, body=None):
 
 def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: int, height: int,
                          fps: int) -> None:
-    """Open (or reopen) the named windows; other windows are left alone."""
+    """Open (or reopen) the named windows on one page; other windows are left alone."""
+    open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps}
+                            for name in ids])
+
+
+def open_windows(base_url: str, windows: List[dict]) -> None:
+    """Open (or reopen) windows given as {id, url, width, height, fps} dicts."""
     status = rest_request(base_url, "GET", "/status") or {}
     existing = {w.get("id") for w in status.get("windows", [])}
-    for name in ids:
-        if name in existing:
-            rest_request(base_url, "POST", "/window/close", {"id": name})
-        rest_request(base_url, "POST", "/window/open", {
-            "id": name, "url": page_url, "width": width, "height": height, "fps": fps, "audio": False})
+    for spec in windows:
+        if spec["id"] in existing:
+            rest_request(base_url, "POST", "/window/close", {"id": spec["id"]})
+        rest_request(base_url, "POST", "/window/open", {**spec, "audio": False})
 
 
 def wait_for_sockets(paths: List[str], timeout_sec: float) -> None:

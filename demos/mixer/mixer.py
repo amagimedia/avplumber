@@ -12,8 +12,9 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
-                                    wait_for_sockets, window_id)
+                                    open_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
 from avpmixer.janus import JanusVideoConfig, build_janus_output
 
@@ -51,7 +52,7 @@ PREHEAT_POLL_INTERVAL_SEC = 0.02
 
 @dataclass(frozen=True)
 class GraphOptions:
-    inputs: tuple[str, ...]
+    inputs: tuple[str, ...] = ()
     output: str | None = None
     output_format: str | None = None
     remote_control_port: int = 7777
@@ -70,6 +71,7 @@ class GraphOptions:
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
+    config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -81,7 +83,9 @@ class GraphOptions:
         return [window_id(url) for url in self.inputs if is_dmabuf_url(url)]
 
     def validate(self) -> None:
-        if not self.inputs:
+        if self.config and self.inputs:
+            raise ValueError("--config replaces --input; pass one or the other")
+        if not self.inputs and not self.config:
             raise ValueError("at least one input is required")
         if not self.output and not self.janus_output:
             raise ValueError("--output or --janus-output is required")
@@ -123,6 +127,7 @@ class MixerApplication:
     preheat_timeout_sec: float
     rtcp_feedback_listener: object | None = None
     wipe_file: str | None = None
+    wipe_files: tuple[str, ...] = ()
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
@@ -169,8 +174,9 @@ class MixerApplication:
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
         self._wait_for_edges(("mixer_final_out",), "program output")
-        if self.wipe_file:
-            self.mixer.warmup_wipe(self.wipe_file)
+        for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
+            if wipe_file:
+                self.mixer.warmup_wipe(wipe_file)
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.start()
         self.avp.setReady()
@@ -201,6 +207,7 @@ def load_avp_api():
         InputRec,
         IpcDmabufSource,
         Mux,
+        OneToMany,
         Output,
         PreheatVideoRouter,
         Realtime,
@@ -223,6 +230,7 @@ def load_avp_api():
         InputRec=InputRec,
         IpcDmabufSource=IpcDmabufSource,
         Mux=Mux,
+        OneToMany=OneToMany,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
         Realtime=Realtime,
@@ -340,7 +348,8 @@ def _define_scenes(mixer, input_count: int, routed: bool) -> None:
         mixer.add_scene(scene.name, sources, routes=routes)
 
 
-def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> None:
+def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
+                         width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT) -> None:
     if options.output is None:
         raise ValueError("record output needs an output URL or path")
     fps_edge = "program_fps"
@@ -358,8 +367,8 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
         "name": "program_format",
         "src": fps_edge,
         "dst": assumed_edge,
-        "width": CANVAS_WIDTH,
-        "height": CANVAS_HEIGHT,
+        "width": width,
+        "height": height,
         "pixel_format": "cuda",
         "real_pixel_format": "nv12",
         "group": OUTPUT_GROUP,
@@ -399,7 +408,8 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
     }))
 
 
-def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
+def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str, *,
+                   width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT):
     record_edge = mixer_edge
     janus_edge = mixer_edge
     if options.output and options.janus_output:
@@ -414,7 +424,7 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
         }))
 
     if options.output:
-        _build_record_output(avp, api, options, record_edge)
+        _build_record_output(avp, api, options, record_edge, width=width, height=height)
     if not options.janus_output:
         return None
 
@@ -426,7 +436,7 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
             bitrate_kbps=options.janus_video_bitrate_kbps,
             rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
         ),
-        fps=options.fps, fps_den=FPS_DEN, width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
+        fps=options.fps, fps_den=FPS_DEN, width=width, height=height,
         hwaccel=HWACCEL, group=OUTPUT_GROUP,
     )
 
@@ -434,6 +444,8 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
 def build_application(options: GraphOptions, api=None) -> MixerApplication:
     options.validate()
     api = api or load_avp_api()
+    if options.config:
+        return _build_from_config(options, mixer_config.load(options.config), api)
     avp = api.AVPlumber()
     if options.remote_control_port:
         avp.enableControlServer(options.remote_control_port)
@@ -493,16 +505,81 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     )
 
 
+def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
+    """Sources, wipes and scenes from a JSON document; one chain per source."""
+    avp = api.AVPlumber()
+    if options.remote_control_port:
+        avp.enableControlServer(options.remote_control_port)
+    avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    browsers = [s for s in cfg.sources if s.kind == "browser"]
+    if browsers:
+        open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
+                                            "height": s.height, "fps": s.fps or cfg.fps} for s in browsers])
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
+                         options.preheat_timeout_sec)
+    avp.edges.planCapacity("*", 4)
+
+    mixer = api.MixerGraphBuilder(
+        avp, name=MIXER_NAME, canvas=(cfg.canvas_w, cfg.canvas_h), fps=(cfg.fps, FPS_DEN),
+        latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
+        defer_initial_routes=True, defer_output=True,
+    )
+    aliases = cfg.alias_counts
+    input_edges: list[str] = []
+    for index, source in enumerate(cfg.sources):
+        group = _input_group(index)
+        if source.kind == "browser":
+            nodes, edge = dmabuf_cuda_input_nodes(
+                api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
+                width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
+                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group)
+            for node in nodes:
+                avp.addNode(node)
+        else:
+            edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
+        input_edges.append(edge)
+        count = aliases[source.id]
+        edges = [edge]
+        if count > 1:
+            # The same frames under several names: one fan-out, no second decoder.
+            edges = [f"{edge}_alias{k}" for k in range(1, count + 1)]
+            avp.addNode(api.OneToMany({
+                "type": "one_to_many", "name": f"alias_{index}", "src": edge, "dst": edges,
+                "outputs": (1 << count) - 1, "group": group,
+            }))
+        for k, alias_edge in enumerate(edges, start=1):
+            mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=alias_edge,
+                             input_group=group, default_graph="")
+    for scene in cfg.scenes:
+        mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
+    mixer.set_initial_scene(cfg.initial_scene, slot="A")
+    mixer_edge = mixer.build()
+    rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
+                                            width=cfg.canvas_w, height=cfg.canvas_h)
+    return MixerApplication(
+        avp=avp, mixer=mixer,
+        input_groups=tuple(_input_group(index) for index in range(len(cfg.sources))),
+        input_edges=tuple(input_edges), routed_inputs=False,
+        preheat_timeout_sec=options.preheat_timeout_sec,
+        rtcp_feedback_listener=rtcp_feedback_listener,
+        wipe_file=options.wipe_file, wipe_files=tuple(w.path for w in cfg.wipes),
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
         dest="inputs",
         action="append",
-        required=True,
+        default=[],
         metavar="PATH",
         help="Input media file or URL; repeat for each mixer input",
     )
+    parser.add_argument("--config", metavar="FILE",
+                        help="JSON document with sources, wipes and scenes (replaces --input and the "
+                             "built-in layouts; see doc/research/2026-09-08-mixer-config-schema.md)")
     parser.add_argument("--output", help="Optional video-only output URL or path")
     parser.add_argument("--dmabuf-socket-dir", default="/tmp/dma-page",
                         help="dma-browser socket directory for dmabuf://<window-id> inputs")
@@ -554,6 +631,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                         "(the TUI still selects the clip for each wipe)")
     args = parser.parse_args(argv)
+    if not args.inputs and not args.config:
+        parser.error("pass --input (repeatable) or --config FILE")
     return GraphOptions(
         inputs=tuple(args.inputs),
         output=args.output,
@@ -578,6 +657,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         dmabuf_size=parse_size(args.dmabuf_size),
         dmabuf_open=args.dmabuf_open,
         dmabuf_rest=args.dmabuf_rest,
+        config=args.config,
     )
 
 

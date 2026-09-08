@@ -55,9 +55,10 @@ struct LayerSpec {
     int source_canvas_h = 0;
     int crop_w= 0;
     int crop_h = 0;
+    int z = 0;   // draw order: lower first, ties by source index
 
     bool operator==(const LayerSpec &other) const {
-        return dst_x == other.dst_x && dst_y == other.dst_y &&
+        return dst_x == other.dst_x && dst_y == other.dst_y && z == other.z &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
@@ -88,6 +89,7 @@ static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_y = obj.value("dst_y", 0);
     out.dst_w = obj.value("dst_w", 0);
     out.dst_h = obj.value("dst_h", 0);
+    out.z = obj.value("z", 0);
     const std::string fit = obj.value("fit", std::string("stretch"));
     if (fit != "stretch" && fit != "contain")
         throw Error("cuda_rect_overlay: fit must be stretch or contain");
@@ -635,6 +637,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             }
             ops.push_back({srcp, srcp->width(), srcp->height(), L});
         }
+        // z decides who draws on top; equal z keeps source order (stable).
+        std::stable_sort(ops.begin(), ops.end(),
+                         [](const DrawOp &a, const DrawOp &b) { return a.layer.z < b.layer.z; });
         return ops;
     }
 
