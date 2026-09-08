@@ -46,6 +46,16 @@ protected:
         return size > 0 ? (size_t)size : 0;
     }
 
+    /// Nanoseconds from the clip's first frame to frame *index*, from the
+    /// timestamps the frames were decoded with.
+    int64_t elapsedNs(size_t index) {
+        if (index == 0 || index >= playback_.size()) return 0;
+        const av::Timestamp first = playback_.front().pts(), current = playback_[index].pts();
+        if (!first.isValid() || !current.isValid())
+            return (int64_t)index * frame_ns_;   // no timestamps: fall back to the output grid
+        return rescaleTS(addTS(current, negateTS(first)), {1, 1000000000}).timestamp();
+    }
+
     av::Timestamp ptsFor(size_t index) {
         return av::Timestamp((int64_t)index, timeBase());
     }
@@ -78,7 +88,10 @@ public:
             }
             const int64_t now = avp::mixer::monotonicNs();
             if (first_frame_ns_ == 0) first_frame_ns_ = now;
-            const int64_t due = first_frame_ns_ + (int64_t)index_ * frame_ns_;
+            // Replay at the clip's own rate, which its frames carry: a 30 fps
+            // clip on a 60 fps output must still take its full running time, or
+            // the wipe plays at double speed and its midpoint lands early.
+            const int64_t due = first_frame_ns_ + elapsedNs(index_);
             if (now < due) {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(due - now, frame_ns_)));
                 return;

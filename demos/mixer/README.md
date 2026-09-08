@@ -114,7 +114,9 @@ extra passes.
 ## Configuration file
 
 `--config mixer.json` replaces `--input` and the built-in layouts with a
-document of sources, wipes and scenes; see the
+document of sources, wipes, scenes, control defaults and encoded outputs.
+**Every field is documented in [docs/config.md](docs/config.md)**; the design
+rationale is in the
 [schema note](../../doc/research/2026-09-08-mixer-config-schema.md). Sources
 are unique clips or pages, each decoded or captured once; scenes are ordered
 item lists (`dst` rect, `fit` stretch/contain/cover, optional `crop`), item
@@ -123,7 +125,7 @@ declared wipes are warmed up at start. `make_config.py` writes the demo's own
 layouts out in this form:
 
 ```sh
-python3 demos/mixer/make_config.py --fps 60 --wipe /media/wipe.mov   cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
+python3 demos/mixer/make_config.py --fps 30 --wipe /media/wipe.mov   cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
 ```
 
 ## Generated input size and FPS

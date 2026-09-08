@@ -103,7 +103,8 @@ let selected = "";        // scene the take buttons act on
 let direct = false;       // a pick goes straight to program
 let pgm = "", pvw = "", transition = "idle";
 let touched = { fade: false, wipe: false };   // stop polling from overwriting typing
-let currentTransition = "cut";   // what a pick uses in direct mode
+let currentTransition = "fade";  // what a pick uses in direct mode; the config may change it
+let tookTransition = false;      // once the operator picks one, stop following the config
 let wipes = [];                  // the library published by the mixer
 let currentWipe = null;          // the clip a direct-mode wipe uses
 
@@ -126,7 +127,7 @@ async function take(command, scene, wipe) {
     if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
     if (wipe && wipe.duration_seconds) payload.duration_sec = wipe.duration_seconds;
   }
-  currentTransition = command === "preview" ? currentTransition : command;
+  if (command !== "preview") { currentTransition = command; tookTransition = true; }
   if (command === "wipe") currentWipe = wipe || currentWipe;
   try {
     showError("");
@@ -191,6 +192,7 @@ function applySettings(settings) {
   renderWipes(Array.isArray(settings.wipes) ? settings.wipes : []);
   if (typeof settings.direct === "boolean" && !$("direct").dataset.user) setDirect(settings.direct);
   if (settings.fade_seconds && !touched.fade) $("fade_seconds").value = settings.fade_seconds;
+  if (settings.transition && !tookTransition) currentTransition = settings.transition;
   if (settings.wipe_file && !touched.wipe && !wipes.length) $("wipe_file").value = settings.wipe_file;
 }
 

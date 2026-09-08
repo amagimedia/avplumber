@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 FITS = ("stretch", "contain", "cover")
+TRANSITIONS = ("cut", "fade", "wipe")
+DEFAULT_FPS = 30          # canvas.fps when the document does not say
+DEFAULT_FADE_SECONDS = 0.5
+DEFAULT_TRANSITION = "fade"
 
 
 @dataclass(frozen=True)
@@ -98,8 +102,9 @@ class MixerConfig:
     wipes: Tuple[Wipe, ...] = ()
     renditions: Tuple[Rendition, ...] = ()
     initial_scene: str = ""
-    direct: bool = True            # TUI: scene picks go straight to program
-    fade_seconds: float = 0.5
+    direct: bool = True            # control surfaces: scene picks go straight to program
+    fade_seconds: float = DEFAULT_FADE_SECONDS
+    transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
 
     def source(self, id: str) -> Source:
@@ -111,6 +116,7 @@ class MixerConfig:
                   "duration_seconds": w.duration_seconds} for w in self.wipes]
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
         return {"direct": self.direct, "fade_seconds": self.fade_seconds,
+                "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes}
 
@@ -150,7 +156,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError(f"missing '{key}'")
     canvas = doc["canvas"]
     try:
-        canvas_w, canvas_h, fps = int(canvas["width"]), int(canvas["height"]), int(canvas["fps"])
+        # fps is how often the compositor renders; renditions re-time from it.
+        canvas_w, canvas_h = int(canvas["width"]), int(canvas["height"])
+        fps = int(canvas.get("fps", DEFAULT_FPS))
     except (KeyError, TypeError, ValueError):
         raise ConfigError("canvas needs integer width, height and fps") from None
     if canvas_w <= 0 or canvas_h <= 0 or fps <= 0:
@@ -258,9 +266,17 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     default_wipe = str(control.get("default_wipe", wipes[0].id if wipes else ""))
     if default_wipe and not any(w.id == default_wipe for w in wipes):
         raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
+    transition = str(control.get("transition", DEFAULT_TRANSITION))
+    if transition not in TRANSITIONS:
+        raise ConfigError(f"control.transition must be one of {TRANSITIONS}")
+    if transition == "wipe" and not wipes:
+        raise ConfigError("control.transition 'wipe' needs a wipe library")
+    fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
+    if fade_seconds <= 0:
+        raise ConfigError("control.fade_seconds must be positive")
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes),
                        tuple(renditions), initial,
-                       bool(control.get("direct", True)), float(control.get("fade_seconds", 0.5)), default_wipe)
+                       bool(control.get("direct", True)), fade_seconds, transition, default_wipe)
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

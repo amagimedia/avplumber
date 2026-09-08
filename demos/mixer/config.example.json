@@ -2,8 +2,21 @@
   "canvas": {
     "width": 1080,
     "height": 1920,
-    "fps": 60
+    "fps": 30
   },
+  "renditions": [
+    {
+      "id": "program",
+      "target": "janus",
+      "width": 1080,
+      "height": 1920,
+      "aspect": "9:16",
+      "fps": 30,
+      "bitrate_kbps": 2700,
+      "profile": "baseline",
+      "preset": "p7"
+    }
+  ],
   "sources": [
     {
       "id": "sg_static_rect",
@@ -86,7 +99,8 @@
   ],
   "control": {
     "direct": true,
-    "fade_seconds": 0.8,
+    "transition": "fade",
+    "fade_seconds": 0.5,
     "default_wipe": "wipe"
   },
   "scenes": [

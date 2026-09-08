@@ -176,12 +176,15 @@ class MixerTui(App):
         fade_duration: float,
         wipe_file: str = "",
         direct: bool = True,
+        transition: str = "fade",
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
         self.mixer_name = mixer
         self.default_fade_duration = fade_duration
         self.default_wipe_file = wipe_file
+        self.default_transition = transition
+        self._transition_chosen = False   # an operator pick outranks the config
         self._wipes: dict[str, dict] = {}
         self.scenes: list[str] = []
         self.selected_scene = ""
@@ -230,7 +233,7 @@ class MixerTui(App):
             yield Button("Direct: ON" if self.direct_mode else "Direct: OFF", id="direct",
                          variant="warning" if self.direct_mode else "default")
             yield Select([("Cut", "cut"), ("Fade", "fade"), ("Media Wipe", "wipe")],
-                         value="cut", allow_blank=False, id="direct_transition",
+                         value=self.default_transition, allow_blank=False, id="direct_transition",
                          tooltip="Current transition, shared by take buttons and Direct mode")
             yield Button("↻ RECONNECT", id="reconnect")
         yield Footer()
@@ -377,6 +380,7 @@ class MixerTui(App):
             self.notify(str(exc), severity="error")
 
     def _use_transition(self, transition: str) -> None:
+        self._transition_chosen = True
         self.query_one("#direct_transition", Select).value = transition
         self._take(transition)
 
@@ -446,6 +450,8 @@ class MixerTui(App):
             self._set_direct(bool(settings["direct"]))
         if "fade_seconds" in settings:
             self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
+        if settings.get("transition") and not self._transition_chosen:
+            self.query_one("#direct_transition", Select).value = str(settings["transition"])
         library = settings.get("wipes") or []
         if isinstance(library, list) and library != list(self._wipes.values()):
             self._wipes = {str(w["id"]): w for w in library}
@@ -528,6 +534,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--fade-duration", type=float, default=0.5)
     parser.add_argument("--wipe-file", default="",
                         help="Transparent media wipe path on the mixer host")
+    parser.add_argument("--transition", default="fade", choices=("cut", "fade", "wipe"),
+                        help="Transition a direct-mode pick takes with until the mixer says otherwise")
     parser.add_argument("--no-direct", action="store_true",
                         help="Start with scene picks loading preview instead of taking to program")
     args = parser.parse_args(argv)
@@ -538,6 +546,7 @@ def main(argv: list[str] | None = None) -> None:
         fade_duration=args.fade_duration,
         wipe_file=args.wipe_file,
         direct=not args.no_direct,
+        transition=args.transition,
     ).run()
 
 

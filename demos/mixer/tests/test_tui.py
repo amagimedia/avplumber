@@ -57,6 +57,7 @@ def test_direct_mode_scene_tile_cuts_to_program():
             fade_duration=0.5,
             wipe_file="",
             direct=False,
+            transition="cut",
         )
         connection = FakeConnection()
         app.connection = connection
@@ -205,7 +206,7 @@ def test_rapid_tui_cuts_keep_tcp_replies_aligned():
 
         server = await asyncio.start_server(serve, "127.0.0.1", 0)
         app = MixerTui("127.0.0.1", server.sockets[0].getsockname()[1], "mixer",
-                       fade_duration=0.5, wipe_file="", direct=False)
+                       fade_duration=0.5, wipe_file="", direct=False, transition="cut")
         try:
             async with app.run_test(size=(160, 45)) as pilot:
                 await pilot.pause()
@@ -295,7 +296,8 @@ def test_return_to_current_program_reaches_backend_during_pending_cut():
                     'pvw_scene': 'grid_2_page_0', 'transition': 'cut'})
             return await super().command(command)
     async def exercise():
-        app = MixerTui('127.0.0.1', 7777, 'mixer', fade_duration=.5, wipe_file='', direct=False)
+        app = MixerTui('127.0.0.1', 7777, 'mixer', fade_duration=.5, wipe_file='', direct=False,
+                       transition='cut')
         app.connection = connection = PendingConnection()
         async with app.run_test(size=(160,45)) as pilot:
             await pilot.pause()
@@ -311,15 +313,17 @@ async def test_direct_is_on_by_default_and_mixer_settings_apply():
         async def command(self, command):
             if command.startswith("mixer.settings"):
                 self.commands.append(command)
-                return json.dumps({"direct": False, "fade_seconds": 1.5, "wipe_file": "/media/w.mov"})
+                return json.dumps({"direct": False, "fade_seconds": 1.5, "transition": "wipe",
+                                   "wipe_file": "/media/w.mov"})
             return await super().command(command)
 
     app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.5, wipe_file="")
-    assert app.direct_mode is True
+    assert app.direct_mode is True and app.default_transition == "fade"
     app.connection = SettingsConnection()
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.direct_mode is False
         assert app.query_one("#fade_duration").value == "1.5"
+        assert app.query_one("#direct_transition").value == "wipe"
         assert app.query_one("#wipe_file").value == "/media/w.mov"
         assert str(app.query_one("#direct").label) == "Direct: OFF"

@@ -528,7 +528,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
-        "direct": False, "fade_seconds": 0.8, "wipe_file": "/media/swoosh.mov",
+        "direct": False, "fade_seconds": 0.8, "transition": "fade",
+        "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
                    "duration_seconds": 0.0}]}
@@ -645,3 +646,39 @@ def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
                   "renditions": [{**RENDITION_CONFIG["renditions"][0], "aspect": "16:9"}]})
     cfg = mc.parse(RENDITION_CONFIG)
     assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
+
+
+def test_control_section_carries_the_defaults_the_surfaces_start_from():
+    from avpmixer import config as mc
+    import copy
+    doc = copy.deepcopy(CONFIG)
+    del doc["control"]
+    del doc["canvas"]["fps"]
+    cfg = mc.parse(doc)
+    # An undeclared canvas rate is 30, and a pick takes with a half-second fade.
+    assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "fade")
+    assert cfg.settings()["transition"] == "fade"
+    chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False}})
+    assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
+    with pytest.raises(mc.ConfigError, match="control.transition must be"):
+        mc.parse({**doc, "control": {"transition": "dissolve"}})
+    with pytest.raises(mc.ConfigError, match="needs a wipe library"):
+        mc.parse({**{k: v for k, v in doc.items() if k != "wipes"}, "control": {"transition": "wipe"}})
+    with pytest.raises(mc.ConfigError, match="fade_seconds must be positive"):
+        mc.parse({**doc, "control": {"fade_seconds": 0}})
+
+
+def test_generated_grids_show_every_distinct_source_before_any_repeat():
+    import make_config
+    import io
+    import contextlib
+    args = [f"clip{i}=/media/clip{i}.mp4" for i in range(4)] + ["dup=/media/clip0.mp4"]
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        make_config.main(args)
+    doc = json.loads(out.getvalue())
+    assert [s["id"] for s in doc["sources"]] == ["clip0", "clip1", "clip2", "clip3"]
+    four_box = next(s for s in doc["scenes"] if s["id"] == "grid_4_page_0")
+    assert [i["source"] for i in four_box["items"]] == ["clip0", "clip1", "clip2", "clip3"]
+    assert doc["canvas"]["fps"] == 30 and doc["control"]["transition"] == "fade"
+    assert doc["renditions"][0]["bitrate_kbps"] == 2700 and doc["renditions"][0]["aspect"] == "9:16"
