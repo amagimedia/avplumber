@@ -100,8 +100,8 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
--   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`, `cuda_infer_scene_cut_onnx`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
--   NEURAL_NET=1: enable retained neural drawing, tracking, inference, learned scene-cut, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
+-   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
+-   NEURAL_NET=1: enable retained neural drawing, tracking, inference, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
 -   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff`, `hog_diff`, and TensorRT inference. Requires `nvcc`.
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
