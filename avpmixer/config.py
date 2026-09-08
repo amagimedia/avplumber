@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 FITS = ("stretch", "contain", "cover")
@@ -42,6 +43,11 @@ class Wipe:
     id: str
     path: str
     duration_seconds: float = 0.0  # 0 = probed by the mixer
+    name: str = ""                 # label for the control surfaces
+
+    @property
+    def label(self) -> str:
+        return self.name or self.id
 
 
 @dataclass(frozen=True)
@@ -75,10 +81,13 @@ class MixerConfig:
         return next(s for s in self.sources if s.id == id)
 
     def settings(self) -> Dict[str, Any]:
-        """What a control surface needs: direct mode, fade length, wipe paths."""
-        wipes = {w.id: w.path for w in self.wipes}
+        """What a control surface needs: direct mode, fade length, wipe library."""
+        wipes = [{"id": w.id, "name": w.label, "path": w.path,
+                  "duration_seconds": w.duration_seconds} for w in self.wipes]
+        default = next((w for w in self.wipes if w.id == self.default_wipe), None)
         return {"direct": self.direct, "fade_seconds": self.fade_seconds,
-                "wipe_file": wipes.get(self.default_wipe, ""), "wipes": wipes}
+                "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
+                "wipes": wipes}
 
     @property
     def alias_counts(self) -> Dict[str, int]:
@@ -158,7 +167,13 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             raise ConfigError(f"wipes[{i}]: id and path required")
         if any(x.id == w["id"] for x in wipes):
             raise ConfigError(f"wipes[{i}]: duplicate id '{w['id']}'")
-        wipes.append(Wipe(str(w["id"]), str(w["path"]), float(w.get("duration_seconds", 0))))
+        wipes.append(Wipe(str(w["id"]), str(w["path"]), float(w.get("duration_seconds", 0)),
+                          str(w.get("name", ""))))
+    if "wipe_dir" in doc:
+        # Every clip in the directory joins the library under its file name.
+        # Entries declared above keep their id, name and duration.
+        wipes.extend(scan_wipe_dir(str(doc["wipe_dir"]), taken={w.path for w in wipes},
+                                   ids={w.id for w in wipes}))
 
     ids = {s.id: s for s in sources}
     scenes: List[Scene] = []
@@ -193,6 +208,24 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), initial,
                        bool(control.get("direct", True)), float(control.get("fade_seconds", 0.5)), default_wipe)
+
+
+WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")
+
+
+def scan_wipe_dir(directory: str, taken=frozenset(), ids=frozenset()) -> List[Wipe]:
+    """Every clip in *directory*, sorted, as a wipe named after its file."""
+    root = Path(directory)
+    if not root.is_dir():
+        raise ConfigError(f"wipe_dir '{directory}' is not a directory")
+    found: List[Wipe] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() not in WIPE_SUFFIXES:
+            continue
+        if str(entry) in taken or entry.stem in ids:
+            continue   # already declared explicitly, with its own id and duration
+        found.append(Wipe(entry.stem, str(entry)))
+    return found
 
 
 def load(path: str) -> MixerConfig:

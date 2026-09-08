@@ -161,6 +161,7 @@ class MixerTui(App):
     Button { margin-right: 1; }
     Input { width: 24; margin-right: 1; }
     #wipe_file { width: 1fr; min-width: 24; }
+    #wipe_choice { width: 26; margin-right: 1; }
     #direct_transition { width: 22; margin-right: 1; }
     #transition_status { width: auto; min-width: 20; color: $text-muted; }
     #transition_status.busy { color: $warning; text-style: bold; }
@@ -181,6 +182,7 @@ class MixerTui(App):
         self.mixer_name = mixer
         self.default_fade_duration = fade_duration
         self.default_wipe_file = wipe_file
+        self._wipes: dict[str, dict] = {}
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
@@ -215,7 +217,10 @@ class MixerTui(App):
             yield Static("Mode: idle", id="transition_status")
             yield Label("Fade seconds:")
             yield Input(str(self.default_fade_duration), id="fade_duration")
-            yield Label("Wipe file:")
+            yield Label("Wipe:")
+            # A library published by the mixer fills the picker; without one the
+            # path field stays the way to name a clip.
+            yield Select([], id="wipe_choice", allow_blank=True, prompt="(path below)")
             yield Input(self.default_wipe_file, id="wipe_file",
                         placeholder="/path/on/mixer/host/wipe.mov")
         with Horizontal(id="takes"):
@@ -354,7 +359,11 @@ class MixerTui(App):
                     raise ValueError("transition duration must be positive")
                 payload["duration_sec"] = duration
             elif transition == "wipe":
-                wipe_file = self.query_one("#wipe_file", Input).value.strip()
+                chosen = self.query_one("#wipe_choice", Select).value
+                wipe = self._wipes.get(chosen) if chosen is not Select.BLANK else None
+                wipe_file = wipe["path"] if wipe else self.query_one("#wipe_file", Input).value.strip()
+                if wipe and wipe.get("duration_seconds"):
+                    payload["duration_sec"] = wipe["duration_seconds"]
                 if not wipe_file:
                     raise ValueError("Enter a transparent wipe file path on the mixer host")
                 # The backend probes the clip's duration. Its filesystem may
@@ -437,7 +446,15 @@ class MixerTui(App):
             self._set_direct(bool(settings["direct"]))
         if "fade_seconds" in settings:
             self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
-        if settings.get("wipe_file"):
+        library = settings.get("wipes") or []
+        if isinstance(library, list) and library != list(self._wipes.values()):
+            self._wipes = {str(w["id"]): w for w in library}
+            picker = self.query_one("#wipe_choice", Select)
+            picker.set_options([(str(w.get("name") or w["id"]), str(w["id"])) for w in library])
+            default = settings.get("default_wipe")
+            if default in self._wipes:
+                picker.value = default
+        if settings.get("wipe_file") and not self._wipes:
             self.query_one("#wipe_file", Input).value = str(settings["wipe_file"])
 
     def _set_direct(self, enabled: bool) -> None:

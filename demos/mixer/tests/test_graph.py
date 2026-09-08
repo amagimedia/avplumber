@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -506,8 +507,11 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     del opened[:]
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
-    assert application.avp.commands_registered["mixer.settings"]("") == (
-        '{"direct":false,"fade_seconds":0.8,"wipe_file":"/media/swoosh.mov","wipes":{"swoosh":"/media/swoosh.mov"}}\n')
+    assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
+        "direct": False, "fade_seconds": 0.8, "wipe_file": "/media/swoosh.mov",
+        "default_wipe": "swoosh",
+        "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
+                   "duration_seconds": 0.0}]}
     assert nodes["program_format"]["width"] == 1920
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
@@ -532,3 +536,20 @@ def test_transitions_trigger_a_keyframe_only_when_streaming():
     FakeMixer.instances.clear()
     build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
     assert FakeMixer.instances[-1].parameters["keyframe_node"] is None
+
+
+def test_wipe_dir_scans_a_library_and_explicit_entries_win(tmp_path):
+    from avpmixer import config as mc
+    for name in ("b_swoosh.mov", "a_dip.webm", "notes.txt", "c_star.mp4"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {**CONFIG, "wipe_dir": str(tmp_path),
+           "wipes": [{"id": "a_dip", "path": str(tmp_path / "a_dip.webm"),
+                      "duration_seconds": 1.2, "name": "Dip"}]}
+    cfg = mc.parse(doc)
+
+    assert [(w.id, w.label, w.duration_seconds) for w in cfg.wipes] == [
+        ("a_dip", "Dip", 1.2), ("b_swoosh", "b_swoosh", 0.0), ("c_star", "c_star", 0.0)]
+    assert cfg.settings()["default_wipe"] == "a_dip"
+    assert [w["id"] for w in cfg.settings()["wipes"]] == ["a_dip", "b_swoosh", "c_star"]
+    with pytest.raises(mc.ConfigError, match="not a directory"):
+        mc.parse({**CONFIG, "wipe_dir": str(tmp_path / "nope")})

@@ -34,6 +34,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
                      "fps": {"type": "integer"}}},
     "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
     "wipes": {"type": "array", "items": {"$ref": "#/$defs/wipe"}},
+    "wipe_dir": {"type": "string", "description": "directory scanned for further wipe clips, named after their files"},
     "control": {"type": "object", "description": "defaults for the control surface",
       "properties": {"direct": {"type": "boolean", "default": true},
                      "fade_seconds": {"type": "number"}, "default_wipe": {"type": "string"}}},
@@ -62,7 +63,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
         {"if": {"properties": {"kind": {"const": "video"}}}, "then": {"required": ["path"]}}
       ]},
     "wipe": {"type": "object", "required": ["id", "path"],
-      "properties": {"id": {"type": "string"}, "path": {"type": "string"},
+      "properties": {"id": {"type": "string"}, "path": {"type": "string"}, "name": {"type": "string"},
                      "duration_seconds": {"type": "number", "description": "default: probed"}}},
     "item": {"type": "object", "required": ["source", "dst"],
       "properties": {
@@ -125,7 +126,7 @@ of the engine.
 | `fit: cover` | loader computes the crop from the aspect; clip sizes probed with ffprobe | none |
 | item order = z-order | draw order is source registration order | order ops by item index instead; small compositor change |
 | same source twice in one scene | one layer per source | alias source (above) |
-| `wipes[]` | `mixer.wipe` takes any path; `mixer.wipe.warmup` | loader warms every declared wipe at start |
+| `wipes[]` + `wipe_dir` | `mixer.wipe` takes any path; `mixer.wipe.warmup` | the library is warmed at start and published in `mixer.settings`; the web UI shows one button per clip, the TUI a picker |
 | `control.*` | TUI arguments | the mixer publishes them as `mixer.settings`; the TUI applies them on connect |
 | `initial_scene` | `set_initial_scene` | none |
 
