@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+from avpmixer import clipcache
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
@@ -74,6 +75,7 @@ class GraphOptions:
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
     webui_url: str = ""                  # AVPlumber web UI to register the graph with
+    wipe_cache_mb: float | None = None   # hold decoded wipe clips in GPU memory
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -132,6 +134,35 @@ class MixerApplication:
     wipe_files: tuple[str, ...] = ()
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
+    wipe_cache_mb: float | None = None      # hold decoded wipes in GPU memory
+
+    def _preload_wipes(self) -> None:
+        """Decode every wipe once into GPU memory (see avpmixer.clipcache).
+
+        The loader group is started only here; a take starts the player group
+        alone and replays what this left behind.
+        """
+        loader = clipcache.loader_group(MIXER_NAME)
+        player = f"{MIXER_NAME}_wipe"
+        cache_node = f"{MIXER_NAME}_wipe_cache"
+        for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
+            started = time.monotonic()
+            self.avp.executeCommandsFromString(f"node.param.set {MIXER_NAME}_wipe_input url {clip}")
+            self.avp.group(player).startNodes()
+            self.avp.group(loader).startNodes()
+            deadline = started + self.preheat_timeout_sec
+            while time.monotonic() < deadline:
+                cached = self.avp.node(cache_node).getObject("status")
+                if any(c["path"] == clip and c["complete"] for c in cached.get("clips", [])):
+                    break
+                time.sleep(PREHEAT_POLL_INTERVAL_SEC)
+            self.avp.group(loader).stopNodes()
+            self.avp.group(player).stopNodes()
+            status = self.avp.node(cache_node).getObject("status")
+            held = next((c for c in status.get("clips", []) if c["path"] == clip), None)
+            print(f"wipe cached: {clip} {held['frames'] if held else 0} frames, "
+                  f"{(held['bytes'] if held else 0) / 1048576:.1f} MiB, "
+                  f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
@@ -180,9 +211,12 @@ class MixerApplication:
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
         self._wait_for_edges(("mixer_final_out",), "program output")
-        for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
-            if wipe_file:
-                self.mixer.warmup_wipe(wipe_file)
+        if self.wipe_cache_mb is not None:
+            self._preload_wipes()
+        else:
+            for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
+                if wipe_file:
+                    self.mixer.warmup_wipe(wipe_file)
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.start()
         self.avp.setReady()
@@ -494,6 +528,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         defer_initial_routes=True,
         defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        cache_wipes_mb=options.wipe_cache_mb,
     )
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
@@ -512,6 +547,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         rtcp_feedback_listener=rtcp_feedback_listener,
         wipe_file=options.wipe_file,
         browser_windows=tuple(options.dmabuf_inputs), dmabuf_rest=options.dmabuf_rest,
+        wipe_cache_mb=options.wipe_cache_mb,
     )
 
 
@@ -535,6 +571,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        cache_wipes_mb=options.wipe_cache_mb,
     )
     aliases = cfg.alias_counts
     input_edges: list[str] = []
@@ -579,6 +616,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         rtcp_feedback_listener=rtcp_feedback_listener,
         wipe_file=options.wipe_file, wipe_files=tuple(w.path for w in cfg.wipes),
         browser_windows=tuple(s.id for s in browsers), dmabuf_rest=options.dmabuf_rest,
+        wipe_cache_mb=options.wipe_cache_mb,
     )
 
 
@@ -645,6 +683,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
     parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                         "(the TUI still selects the clip for each wipe)")
+    parser.add_argument("--wipe-cache-mb", type=float, default=None,
+                        help="Hold decoded wipe clips in GPU memory, up to this many MiB "
+                             "(default: decode each wipe on every take)")
     parser.add_argument("--webui-url", default="",
                         help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     args = parser.parse_args(argv)
@@ -676,6 +717,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         dmabuf_rest=args.dmabuf_rest,
         config=args.config,
         webui_url=args.webui_url,
+        wipe_cache_mb=args.wipe_cache_mb,
     )
 
 

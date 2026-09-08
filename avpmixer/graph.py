@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pyplumber.node import (
     InternalNode,
+    ClipCache,
     CudaRectOverlay,
     FilterVideo,
     ForceFPS,
@@ -65,6 +66,7 @@ from pyplumber.node import (
 )
 
 
+from . import clipcache
 from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
 
@@ -97,6 +99,7 @@ class MixerGraphBuilder:
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
+        cache_wipes_mb: Optional[float] = None,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -111,6 +114,9 @@ class MixerGraphBuilder:
         # Triggered when a transition reaches the output, so receivers do not wait
         # for the next periodic keyframe to see the new scene.
         self.keyframe_node = keyframe_node
+        # When set, wipe clips are held decoded in GPU memory (avpmixer.clipcache)
+        # and a take replays them instead of opening and decoding the file again.
+        self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
         self._output_started = not defer_output
@@ -590,19 +596,22 @@ class MixerGraphBuilder:
         W, H = self.canvas_w, self.canvas_h
         fps_str = self._fps_str()
         wipe_group = f"{self.name}_wipe"
+        # With the cache on, everything up to and including the decode lives in a
+        # group a take never starts; the take only replays cached frames.
+        load_group = clipcache.loader_group(self.name) if self.cache_wipes_mb is not None else wipe_group
 
         self.avp.addNode(InputRec({
             "name": self._n("wipe_input"),
             "url": "",
             "loop": False,
             "dst": self._e("wipe_raw_pkt"),
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(Demux({
             "name": self._n("wipe_demux"),
             "src": self._e("wipe_raw_pkt"),
             "routing": {"v:0": self._e("wipe_v_pkt")},
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(DecVideo({
             "name": self._n("wipe_dec"),
@@ -610,7 +619,7 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_dec_out"),
             "pixel_format": "?cuda",
             "hwaccel": self.hwaccel,
-            "group": wipe_group,
+            "group": load_group,
         }))
         # Alpha media codecs decode on the CPU. Upload the converted wipe to
         # the configured mixer device; hwupload_cuda creates a separate CUDA
@@ -624,19 +633,24 @@ class MixerGraphBuilder:
             # this chain and made the compositor miss 60 Hz ticks during a wipe.
             "graph": "format=rgba,hwupload",
             "hwaccel": self.hwaccel,
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(Realtime({
             "name": self._n("wipe_rt"),
             "src": self._e("wipe_fmt_out"),
             "dst": self._e("wipe_rt_out"),
             "set_pts": True,
-            "group": wipe_group,
+            "group": load_group,
         }))
+        if self.cache_wipes_mb is not None:
+            self.avp.addNode(ClipCache(clipcache.cache_node(
+                name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
+                dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
+                budget_mb=self.cache_wipes_mb)))
         self.avp.addNode(ForceFPS({
             "name": self._n("wipe_rt_fps"),
             "fps": fps_str,
-            "src": self._e("wipe_rt_out"),
+            "src": self._e("wipe_cached") if self.cache_wipes_mb is not None else self._e("wipe_rt_out"),
             "dst": self._e("wipe_rt_fps_out"),
             "group": wipe_group,
         }))
@@ -697,7 +711,8 @@ class MixerGraphBuilder:
         if self.enable_wipe:
             init_cfg.update({
                 "wipe_group": wipe_group,
-                "wipe_input_node": self._n("wipe_input"),
+                "wipe_input_node": self._n("wipe_cache" if self.cache_wipes_mb is not None
+                                            else "wipe_input"),
                 "wipe_tail_edge": self._e("wipe_rt_fps_out"),
                 "wipe_flush_edges": wipe_flush_edges,
             })

@@ -160,6 +160,10 @@ class Realtime(InternalNode):
     TYPE = "realtime"
 
 
+class ClipCache(InternalNode):
+    TYPE = "clip_cache"
+
+
 class RepeatLastFrame(InternalNode):
     TYPE = "repeat_last_frame"
 

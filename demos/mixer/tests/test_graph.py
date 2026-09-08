@@ -124,6 +124,7 @@ def fake_api():
     names = (
         "assume_video_format",
         "bsf",
+        "clip_cache",
         "dec_video",
         "demux",
         "drm_prime_to_cuda",
@@ -150,6 +151,7 @@ def fake_api():
         {
             "assume_video_format": "AssumeVideoFormat",
             "bsf": "Bsf",
+            "clip_cache": "ClipCache",
             "dec_video": "DecVideo",
             "demux": "Demux",
             "drm_prime_to_cuda": "DrmPrimeToCuda",
@@ -553,3 +555,29 @@ def test_wipe_dir_scans_a_library_and_explicit_entries_win(tmp_path):
     assert [w["id"] for w in cfg.settings()["wipes"]] == ["a_dip", "b_swoosh", "c_star"]
     with pytest.raises(mc.ConfigError, match="not a directory"):
         mc.parse({**CONFIG, "wipe_dir": str(tmp_path / "nope")})
+
+
+def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
+    from avpmixer import clipcache
+
+    FakeMixer.instances.clear()
+    plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    assert plain.wipe_cache_mb is None
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
+
+    FakeMixer.instances.clear()
+    cached = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=512), api=fake_api())
+    assert cached.wipe_cache_mb == 512
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 512
+    assert clipcache.loader_group("mixer") == "mixer_wipe_load"
+
+
+def test_clip_cache_node_parameters_name_the_clip_by_url():
+    from avpmixer import clipcache
+
+    node = clipcache.cache_node(name="mixer_wipe_cache", src="in", dst="out", group="g",
+                                fps="60/1", budget_mb=256, url="/media/w.mov")
+    assert node == {"name": "mixer_wipe_cache", "src": "in", "dst": "out", "group": "g",
+                    "fps": "60/1", "cache": "clips", "url": "/media/w.mov", "budget_mb": 256}
+    assert "budget_mb" not in clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
