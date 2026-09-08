@@ -31,12 +31,3 @@ def cache_node(*, name: str, src: str, dst: str, group: str, fps: str,
     if budget_mb is not None:
         node["budget_mb"] = budget_mb
     return node
-
-
-def preload_commands(mixer_name: str, input_node: str, clips: List[str]) -> List[Tuple[str, str]]:
-    """(clip, url-set command) pairs; the caller starts and stops the loader group.
-
-    Kept as data so the demo decides how long to wait for each clip and can
-    report progress, rather than this module blocking on a graph it does not own.
-    """
-    return [(clip, f'node.param.set {input_node} url {clip}') for clip in clips]

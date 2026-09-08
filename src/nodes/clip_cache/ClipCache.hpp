@@ -101,14 +101,6 @@ public:
         if (it != clips_.end()) it->second.complete = !it->second.frames.empty();
     }
 
-    void drop(const std::string& key) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = clips_.find(key);
-        if (it == clips_.end()) return;
-        bytes_ -= it->second.bytes;
-        clips_.erase(it);
-    }
-
     Parameters status() {
         std::lock_guard<std::mutex> lock(mutex_);
         Parameters clips = Parameters::array();
