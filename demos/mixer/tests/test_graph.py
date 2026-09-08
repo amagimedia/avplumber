@@ -496,6 +496,12 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
+    assert application.browser_windows == ("page",)
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
+    del opened[:]
+    application.start()
+    assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert application.avp.commands_registered["mixer.settings"]("") == (
         '{"direct":false,"fade_seconds":0.8,"wipe_file":"/media/swoosh.mov","wipes":{"swoosh":"/media/swoosh.mov"}}\n')
     assert nodes["program_format"]["width"] == 1920

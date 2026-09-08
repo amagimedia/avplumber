@@ -84,6 +84,12 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
         rest_request(base_url, "POST", "/window/open", {**spec, "audio": False})
 
 
+def refresh_windows(base_url: str, ids: List[str]) -> None:
+    """Reload pages so ones that only paint on load paint again into a connected chain."""
+    for name in ids:
+        rest_request(base_url, "POST", "/window/refresh", {"id": name})
+
+
 def wait_for_sockets(paths: List[str], timeout_sec: float) -> None:
     deadline = time.monotonic() + timeout_sec
     missing = set(paths)

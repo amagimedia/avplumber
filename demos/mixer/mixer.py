@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
-                                    open_windows, wait_for_sockets, window_id)
+                                    open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
 from avpmixer.janus import JanusVideoConfig, build_janus_output
 
@@ -129,6 +129,8 @@ class MixerApplication:
     rtcp_feedback_listener: object | None = None
     wipe_file: str | None = None
     wipe_files: tuple[str, ...] = ()
+    browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
+    dmabuf_rest: str = ""
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
@@ -153,6 +155,8 @@ class MixerApplication:
     def start(self) -> None:
         for group in self.input_groups:
             self.avp.group(group).startNodes()
+        if self.browser_windows:
+            refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness")
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
@@ -503,6 +507,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         preheat_timeout_sec=options.preheat_timeout_sec,
         rtcp_feedback_listener=rtcp_feedback_listener,
         wipe_file=options.wipe_file,
+        browser_windows=tuple(options.dmabuf_inputs), dmabuf_rest=options.dmabuf_rest,
     )
 
 
@@ -568,6 +573,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         preheat_timeout_sec=options.preheat_timeout_sec,
         rtcp_feedback_listener=rtcp_feedback_listener,
         wipe_file=options.wipe_file, wipe_files=tuple(w.path for w in cfg.wipes),
+        browser_windows=tuple(s.id for s in browsers), dmabuf_rest=options.dmabuf_rest,
     )
 
 
