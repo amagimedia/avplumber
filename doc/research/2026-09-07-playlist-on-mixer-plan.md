@@ -252,3 +252,27 @@ decoder's warm-up on air.
 Published: `playlist-demo-media-2026-09` (movie, poster) and the graph PNGs in
 `webui-graphs-2026-09`; `demos/graph.html` has the playlist entry; the TUI is
 ASCII-only so browser terminals without symbol fonts render it.
+
+## Determinism experiments after the merge (2026-09-08)
+
+Goal: make elements cued at frame 0 land on frame 0 every time. Three
+mechanisms were built and measured on the T4, each with a clean 50 s pass:
+
+1. `source_switcher` **hold input** (`mixer.cut hold_incoming`): the pending
+   input's newest frame is kept instead of drained, so the frame that makes
+   the ready cut fire is the first one on air. Result: element 3 parked on
+   frame 60 went on air on 61, i.e. the frame is lost *upstream* of the
+   selector, not in it.
+2. **Seek then `pause at`** (content-based park): the seek on a running chain
+   never returned (control path hung inside flushAndSeek); not safe.
+3. `pause` node **`pass_on_seek` off** so the seeked frame stays behind the
+   pause until the resume, park exactly on cue-in, hold on: still +1, and
+   parking at the file start reproduces the decoder tear after the resume.
+
+Conclusion: the first fresh frame of a resumed element is consumed between
+the chain and the output selector, most likely by the compositor's cadence
+logic for the first frame after a long idle. A frame-exact cut for a cue at 0
+needs either a compositor change (do not drop the first frame of a
+re-activated input) or a content-addressed switch. All three experiments were
+reverted; develop keeps the measured behaviour: exact for cue points inside a
+file, ±1 frame for elements cued at 0.
