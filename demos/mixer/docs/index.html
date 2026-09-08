@@ -25,15 +25,20 @@
     h1 span, a { color: var(--accent); }
     a { text-underline-offset: 4px; }
     p { color: var(--body); line-height: 1.6; max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 18px 0 0; }
-    figure { margin: 22px 0 0; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 0; }
+    figure { margin: 0; }
     figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
-    figcaption { color: var(--muted); line-height: 1.6; margin-top: 10px; max-width: 90ch; font-size: 14px; }
-    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 26px 0 0; padding: 0; list-style: none; }
+    figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
+    /* Control surface beside the picture it is cutting: the operator's two screens. */
+    .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 0.32fr); gap: 22px; align-items: start; margin-top: 24px; }
+    .stage .desk { display: grid; gap: 18px; }
+    @media (max-width: 860px) { .stage { grid-template-columns: 1fr; } .stage .program { max-width: 320px; } }
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
     .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
     .figures b { display: block; font-size: 25px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
     .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
     code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
+    .closing { margin-top: 26px; }
     footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--muted); line-height: 2; }
     @media (max-width: 600px) { main { padding: 24px 14px; } header { align-items: start; flex-direction: column; } }
   </style>
@@ -45,21 +50,27 @@
     <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Code &amp; setup guide</a>
   </header>
 
-  <figure>
-    <img src="webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length.">
-    <figcaption>The control surface during a live run: a tile per published scene, a button per cached wipe clip, Direct on and a half-second fade. A terminal UI speaks the same protocol and can run beside it.</figcaption>
-  </figure>
+  <div class="stage">
+    <div class="desk">
+    <figure>
+      <img src="webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length.">
+      <figcaption>A tile per published scene, a button per cached wipe clip, Direct on and a half-second fade. A terminal UI speaks the same protocol and can run beside it.</figcaption>
+    </figure>
+    <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from this page, with the whole show described by one JSON document.</p>
+    <ul class="figures">
+      <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
+      <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
+      <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
+      <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
+    </ul>
+    </div>
+    <figure class="program">
+      <img src="program-16box.png" alt="The 1080×1920 program: a sixteen-box grid, two columns of eight, each cell a different source — live browser pages down the left, video clips down the right.">
+      <figcaption>The program at that moment: <code>grid_16_page_0</code>, sixteen distinct sources in one 9:16 raster — live pages on the left, clips on the right.</figcaption>
+    </figure>
+  </div>
 
-  <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from this page, with the whole show described by one JSON document.</p>
-
-  <ul class="figures">
-    <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
-    <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
-    <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
-    <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
-  </ul>
-
-  <p>Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips are decoded once at start and replayed from GPU memory, drawn as one alpha-blended layer by the compositor kernel the scenes use — no CPU scaling anywhere. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
+  <p class="closing">Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips are decoded once at start and replayed from GPU memory, drawn as one alpha-blended layer by the compositor kernel the scenes use — no CPU scaling anywhere. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
 
   <footer>
     <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Configuration reference</a> — sources, scenes, wipes, renditions, control defaults<br>
