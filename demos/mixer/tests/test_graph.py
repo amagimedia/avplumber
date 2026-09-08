@@ -137,6 +137,7 @@ def fake_api():
         "output",
         "preheat_video_router",
         "realtime",
+        "repeat_last_frame",
         "split",
     )
     api = {
@@ -162,6 +163,7 @@ def fake_api():
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
             "realtime": "Realtime",
+            "repeat_last_frame": "RepeatLastFrame",
             "split": "Split",
         }[name]: node_type(name)
         for name in names
@@ -344,9 +346,11 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     stamp = nodes["input_1_timestamp"]
     assert (stamp["dst_width"], stamp["dst_height"], stamp["dst_frame_rate"]) == (480, 270, "60/1")
     assert stamp["dst"] == "input_1_cuda"
+    hold = nodes["input_1_hold"]
+    assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
     assert "decode_1" not in nodes and "decode_0" in nodes
     sources = dict(FakeMixer.instances[-1].sources)
-    assert sources["source_1"]["pre_otm_edge"] == "input_1_cuda"
+    assert sources["source_1"]["pre_otm_edge"] == "input_1_held"
     assert sources["source_0"]["pre_otm_edge"] == "input_0_fps"
 
 
@@ -490,7 +494,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert nodes["alias_0"]["dst"] == ["input_0_fps_alias1", "input_0_fps_alias2"]
     assert nodes["alias_0"]["outputs"] == 3
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
-    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_cuda"
+    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
                              "fps": 60, "audio": False}
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}

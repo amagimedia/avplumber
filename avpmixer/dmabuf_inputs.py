@@ -32,8 +32,11 @@ def window_id(url: str) -> str:
 
 def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height: int, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
-                            processing_group: str) -> Tuple[list, str]:
-    """Return the node list and the final CUDA edge for one browser socket."""
+                            processing_group: str, hold: bool = False) -> Tuple[list, str]:
+    """Return the node list and the final CUDA edge for one browser socket.
+
+    With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
+    while the page is not painting, so static pages keep feeding the mixer."""
     drm_edge, assumed_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
@@ -55,6 +58,12 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
             "dst_height": height, "dst_pixel_format": "cuda", "dst_frame_rate": f"{fps}/1",
             "group": processing_group, "name": f"{prefix}_timestamp", "auto_restart": "panic"}),
     ]
+    if hold:
+        held_edge = f"{prefix}_held"
+        nodes.append(api.RepeatLastFrame({"src": cuda_edge, "dst": held_edge, "fps": f"{fps}/1",
+                                          "group": processing_group, "name": f"{prefix}_hold",
+                                          "auto_restart": "group"}))
+        return nodes, held_edge
     return nodes, cuda_edge
 
 

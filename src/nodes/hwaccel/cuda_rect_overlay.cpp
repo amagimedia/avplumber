@@ -612,9 +612,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                     ops.push_back(rejected);
                     continue;
                 }
-                    ops.push_back({});
-                    continue;
-                }
                 const auto &p = *placement;
                 L.crop_x = p.source.x; L.crop_y = p.source.y;
                 L.crop_w = p.source.w; L.crop_h = p.source.h;

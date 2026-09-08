@@ -216,6 +216,7 @@ def load_avp_api():
         Output,
         PreheatVideoRouter,
         Realtime,
+        RepeatLastFrame,
         Split,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
@@ -239,6 +240,7 @@ def load_avp_api():
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
         Realtime=Realtime,
+        RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
         Split=Split,
     )
@@ -276,7 +278,7 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group)
+            source_group=group, processing_group=group, hold=True)
         for node in nodes:
             avp.addNode(node)
     else:
@@ -539,7 +541,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             nodes, edge = dmabuf_cuda_input_nodes(
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
-                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group)
+                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
             for node in nodes:
                 avp.addNode(node)
         else:
