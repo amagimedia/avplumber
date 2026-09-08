@@ -675,6 +675,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         dmabuf_open=args.dmabuf_open,
         dmabuf_rest=args.dmabuf_rest,
         config=args.config,
+        webui_url=args.webui_url,
     )
 
 

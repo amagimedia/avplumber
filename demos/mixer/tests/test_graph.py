@@ -512,6 +512,12 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
 
+def test_cli_passes_the_web_ui_url_through_to_the_options():
+    assert parse_args(["--config", "m.json", "--janus-output",
+                       "--webui-url", "http://ui:22222"]).webui_url == "http://ui:22222"
+    assert parse_args(["--config", "m.json", "--janus-output"]).webui_url == ""
+
+
 def test_cli_requires_inputs_or_config():
     with pytest.raises(SystemExit):
         parse_args(["--output", "p.mp4"])
