@@ -32,8 +32,8 @@
   <text x="745" y="128" class="txt small">highpass, lowpass, 16 kHz mono</text>
 
   <rect x="920" y="90" width="250" height="56" class="box ai"/>
-  <text x="1045" y="110" class="txt">whisper</text>
-  <text x="1045" y="128" class="txt small">ASR, format=json</text>
+  <text x="1045" y="110" class="txt">whisper node</text>
+  <text x="1045" y="128" class="txt small">AVPlumber ASR, JSON</text>
 
   <rect x="1220" y="90" width="150" height="56" class="box sink"/>
   <text x="1295" y="110" class="txt">null_sink</text>

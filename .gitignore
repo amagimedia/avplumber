@@ -22,8 +22,20 @@ __pycache__/
 /shaky-samples/
 /tools/web-ui/frontend/dist/
 /tools/web-ui/node_modules/
+/artifacts/
+/.uncommitted-from-old-ai-studio.patch
 /neural-demo/.generated-models*/
 /neural-demo/.docker-build-inputs*/
 /neural-demo/.model-build-cache*/
 /neural-demo/.models_onnx.tgz
 /neural-demo/.tensorrt*.tgz
+
+# Replay media is published as release assets, never committed.
+/demos/replay/docs/*.mp4
+/demos/replay/docs/*.jpg
+/demos/replay/docs/*.png
+
+# DMA-BUF demo media is published as release assets.
+/demos/dmabuf-browser/docs/dmabuf-demo.mp4
+/demos/dmabuf-browser/docs/dmabuf-demo.jpg
+/demos/dmabuf-browser/docs/dmabuf-graph.png

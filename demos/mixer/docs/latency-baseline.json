@@ -1,0 +1,88 @@
+{
+  "method": "browser mousedown to expectedDisplayTime of first verified destination frame",
+  "samples": [
+    {
+      "trial": 1,
+      "target": 4,
+      "latencyMs": 189.7,
+      "callbackLateMs": -16.6,
+      "readMs": 19.6
+    },
+    {
+      "trial": 2,
+      "target": 1,
+      "latencyMs": 190.6,
+      "callbackLateMs": -16.6,
+      "readMs": 0.5
+    },
+    {
+      "trial": 3,
+      "target": 4,
+      "latencyMs": 190.0,
+      "callbackLateMs": -16.8,
+      "readMs": 8.6
+    },
+    {
+      "trial": 4,
+      "target": 1,
+      "latencyMs": 186.5,
+      "callbackLateMs": -16.7,
+      "readMs": 8.7
+    },
+    {
+      "trial": 5,
+      "target": 4,
+      "latencyMs": 199.3,
+      "callbackLateMs": -16.6,
+      "readMs": 8.8
+    },
+    {
+      "trial": 6,
+      "target": 1,
+      "latencyMs": 190.0,
+      "callbackLateMs": -16.7,
+      "readMs": 9.1
+    },
+    {
+      "trial": 7,
+      "target": 4,
+      "latencyMs": 175.5,
+      "callbackLateMs": -16.7,
+      "readMs": 18.2
+    },
+    {
+      "trial": 8,
+      "target": 1,
+      "latencyMs": 206.4,
+      "callbackLateMs": -33.3,
+      "readMs": 9.5
+    },
+    {
+      "trial": 9,
+      "target": 4,
+      "latencyMs": 140.1,
+      "callbackLateMs": -16.6,
+      "readMs": 8.7
+    },
+    {
+      "trial": 10,
+      "target": 1,
+      "latencyMs": 207.3,
+      "callbackLateMs": -16.6,
+      "readMs": 8.8
+    },
+    {
+      "trial": 11,
+      "target": 4,
+      "latencyMs": 189.5,
+      "callbackLateMs": -16.6,
+      "readMs": 17.9
+    }
+  ],
+  "summary": {
+    "count": 11,
+    "medianMs": 190.0,
+    "p95Ms": 207.3,
+    "maxMs": 207.3
+  }
+}

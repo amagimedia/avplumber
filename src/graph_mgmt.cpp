@@ -599,10 +599,10 @@ bool NodeManager::nodeExists(const std::string& name) {
 }
 
 
-const std::list<NodeGroup::Item>& NodeGroup::sortedNodes() {
+std::list<NodeGroup::Item> NodeGroup::sortedNodes() {
     auto lock = getLock();
     if (!is_sorted_) sort();
-    return sorted_nodes_;
+    return sorted_nodes_; // copied into the return value before lock is released
 }
 
 
@@ -809,6 +809,7 @@ void NodeGroup::sort() {
     {
         auto lock = getLock();
         NodeGroupUtils::sort(sorted_nodes_, nodes_);
+        is_sorted_ = true;
     }
 }
 

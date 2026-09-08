@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Processing graph · AVPlumber</title>
+  <style>
+    :root { color-scheme: dark; font: 16px system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 16px 24px; border-bottom: 1px solid #334157; }
+    h1 { font-size: 20px; margin: 0 auto 0 0; }
+    a { color: #57dbc2; }
+    button { font: inherit; color: inherit; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:hover, button:focus-visible { border-color: #57dbc2; }
+    select { font: inherit; color: inherit; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; }
+    label { display: flex; align-items: center; gap: 8px; }
+    main { overflow: auto; height: calc(100dvh - 100px); padding: 16px; }
+    img { display: block; max-width: none; height: auto; }
+    p { margin: 8px 24px; color: #b5c4d8; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Processing graph</h1>
+    <label>Demo <select id="pick"></select></label>
+    <a id="demo">Back to demo</a>
+    <button id="fit">Fit</button><button id="actual">100%</button>
+    <label>Zoom <input id="zoom" type="range" min="10" max="200" value="100"><output id="percent">100%</output></label>
+  </header>
+  <p>Static WebUI capture. Scroll to inspect the full graph; arrows show frame direction. Queue colours reflect capture time.</p>
+  <main><img id="graph" alt="Complete AVPlumber processing graph with routed connections and arrowheads."></main>
+  <script>
+    const demos = { replay: ['Replay', 'replay-graph.png'], mixer: ['Mixer', 'mixer-graph-ungrouped.png'],
+      playlist: ['Playlist', 'playlist-graph.png'],
+      'dmabuf-browser': ['DMA-BUF browser', 'dmabuf-graph.png'], 'cuda-overlay': ['CUDA overlay', 'cuda-overlay-graph.png'] };
+    const requested = new URLSearchParams(location.search).get('demo');
+    const key = Object.hasOwn(demos, requested) ? requested : 'mixer';
+    const [name, asset] = demos[key];
+    const graph = document.querySelector('#graph'), zoom = document.querySelector('#zoom');
+    const pick = document.querySelector('#pick');
+    for (const [id, [label]] of Object.entries(demos)) pick.add(new Option(label, id, false, id === key));
+    pick.addEventListener('change', () => { location.search = `?demo=${pick.value}`; });
+    document.querySelector('h1').textContent = `AVPlumber ${name} · processing graph`;
+    document.title = `${name} processing graph · AVPlumber`;
+    document.querySelector('#demo').href = `${key}/docs/`;
+    function scale(value) {
+      zoom.value = value;
+      graph.style.width = `${graph.naturalWidth * value / 100}px`;
+      document.querySelector('#percent').textContent = `${Math.round(value)}%`;
+    }
+    function fit() { scale(Math.max(10, Math.min(100, (graph.parentElement.clientWidth - 32) / graph.naturalWidth * 100))); }
+    graph.addEventListener('load', fit);
+    graph.src = `https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/${asset}`;
+    zoom.addEventListener('input', () => scale(Number(zoom.value)));
+    document.querySelector('#fit').addEventListener('click', fit);
+    document.querySelector('#actual').addEventListener('click', () => scale(100));
+  </script>
+</body>
+</html>

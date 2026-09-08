@@ -1,7 +1,10 @@
 #include "stats.hpp"
 
 #include <cstdint>
+#include <map>
+#include <string>
 #include <utility>
+#include <vector>
 #include <avcpp/audioresampler.h>
 extern "C" {
 #include "libavutil/dict.h"
@@ -155,6 +158,16 @@ protected:
     bool clear_on_send_ = false;
     bool processes_decoded_frames_;
 
+    // Per-category latched frame metadata. Keyed by configured prefix (category);
+    // each value is the stripped-key -> value snapshot of the most recent frame
+    // that carried any key in that category. Latched (left unchanged) on frames
+    // that carry no key for a category, so a category snapshot equals the full
+    // metadata of the last frame that reported anything in that category.
+    std::map<std::string, std::map<std::string, std::string>> latched_metadata_;
+    // Configured prefixes (categories) read from the per-stream stats spec under
+    // the "metadata_prefixes" key. Each prefix is one category.
+    std::vector<std::string> metadata_prefixes_;
+
     template<typename U> std::shared_ptr<U> decoderAs() {
         try {
             std::shared_ptr<NodeWrapper> nw = decoder_.lock();
@@ -185,11 +198,54 @@ protected:
             return "???";
         }
     }
+    // Scan the frame's metadata for every configured category (prefix). For each
+    // category that has at least one matching key on this frame, replace the whole
+    // category snapshot with the matching keys (prefix stripped). Categories with
+    // no matching key on this frame are left unchanged (latched), so a category
+    // snapshot equals the full metadata of the last frame that reported anything
+    // in that category. The full-replace-on-event rule avoids stale sub-keys
+    // (e.g. a new freeze_start clears a previous freeze's freeze_end/freeze_duration).
+    void latchFrameMetadata(const AVFrame *raw) {
+        if (raw == nullptr || raw->metadata == nullptr) return;
+        for (const auto &prefix : metadata_prefixes_) {
+            std::map<std::string, std::string> matched;
+            const AVDictionaryEntry *entry = nullptr;
+            while ((entry = av_dict_get(raw->metadata, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+                std::string key = entry->key ? entry->key : "";
+                if (key.rfind(prefix, 0) != 0) continue;
+                std::string stripped = key.substr(prefix.size());
+                matched[stripped] = entry->value ? entry->value : "";
+            }
+            if (!matched.empty()) {
+                latched_metadata_[prefix] = std::move(matched);
+            }
+        }
+    }
+    // Emit latched_metadata_ as a JSON object "metadata" with one key per
+    // configured prefix, each mapping to the latched stripped-key -> value dict
+    // (empty object if nothing latched yet). Emitted every send so the consumer
+    // sees a stable shape (snapshot/self-healing); never reset on send.
+    void fillLatchedMetadataStats(json &jstats) {
+        if (metadata_prefixes_.empty()) return;
+        json jmd;
+        for (const auto &prefix : metadata_prefixes_) {
+            json jcat = json::object();
+            auto it = latched_metadata_.find(prefix);
+            if (it != latched_metadata_.end()) {
+                for (const auto &kv : it->second) {
+                    jcat[kv.first] = kv.second;
+                }
+            }
+            jmd[prefix] = jcat;
+        }
+        jstats["metadata"] = jmd;
+    }
 public:
     virtual void resetHistory() {
         logstream << "Discontinuity in stream " << stream_index_ << ", purging statistics.";
         ts_by_rtc_.clearAll();
         bytes_.clearAll();
+        latched_metadata_.clear();
     }
     void resetHistoryWrapper() {
         std::lock(pre_dec_mutex_, post_dec_mutex_);
@@ -277,6 +333,7 @@ public:
             }
         }
         last_pts_ = frm.pts();
+        latchFrameMetadata(frm.raw());
     }
     virtual void fillMediaSpecificStatsPreDec(json &jstats) override {
         std::shared_ptr<IFrameRateSource> vframerate = decoderAs<IFrameRateSource>();
@@ -309,6 +366,7 @@ public:
             jstats["pix_fmt"] = pix_fmt_.name();
         }
         jstats["dropped_frames"] = missing_frames_;
+        fillLatchedMetadataStats(jstats);
         if (clear_on_send_) {
             missing_frames_ = 0;
         }
@@ -614,6 +672,7 @@ public:
         total_samples_ += frm.samplesCount();
         samples_.push(frm.pts(), total_samples_);
         extractR128Stats(frm);
+        latchFrameMetadata(frm.raw());
         analyzer_.processSamples(frm);
     }
     virtual void fillMediaSpecificStatsPostDec(json &jstats) override {
@@ -649,6 +708,7 @@ public:
             }
             channels_count_ = 0;
         }
+        fillLatchedMetadataStats(jstats);
         analyzer_.getStats(jstats, sr_by_ts);
         if (clear_on_send_) {
             samples_.clearAll();
@@ -825,6 +885,12 @@ template<typename T> StreamStats<T>::StreamStats(std::shared_ptr<NodeManager> ma
     clear_on_send_(max_age<=0) {
     ts_by_rtc_.setMaxAge(max_age_);
     bytes_.setMaxAge(max_age_);
+
+    if (jobj.count("metadata_prefixes")) {
+        for (auto &p : jobj["metadata_prefixes"]) {
+            metadata_prefixes_.push_back(p.get<std::string>());
+        }
+    }
 
     std::shared_ptr<Edge<av::Packet>> pre_dec_edge = manager_->edges()->template find<av::Packet>(jobj.at("q_pre_dec"));
 

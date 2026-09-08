@@ -8,6 +8,7 @@
 class PauseControlTeam: public InstanceShared<PauseControlTeam>, public ILinkableTeam<PauseControlTeam> {
 protected:
     std::atomic_bool paused_ {false};
+    std::atomic<AVTS> resume_at_ {AV_NOPTS_VALUE}; // wallclock ms, see resumeAt()
     std::optional<StreamTarget> pause_at_;
     std::vector<std::weak_ptr<IInputReset>> nodes_to_resume_;
     std::mutex mutex_;
@@ -17,6 +18,7 @@ protected:
 
     void pauseNonRecursive(bool synchonize_nodes = true) {
         paused_ = true;
+        resume_at_ = AV_NOPTS_VALUE; // an explicit pause cancels a scheduled resume
         if (synchonize_nodes) {
             for (auto& p: sync_objs_) {
                 auto obj = p.lock();
@@ -37,6 +39,7 @@ protected:
     }
     void resumeNonRecursive() {
         paused_ = false;
+        resume_at_ = AV_NOPTS_VALUE;
         {
             std::lock_guard<decltype(mutex_)> lock(mutex_);
             for (auto &wptr: nodes_to_resume_) {
@@ -72,7 +75,21 @@ protected:
 
 public:
     bool isPaused() {
+        // Scheduled resume: readers poll isPaused() a few times per frame, so
+        // checking the deadline here resumes within their poll period.
+        AVTS at = resume_at_.load();
+        if (paused_ && at != AV_NOPTS_VALUE && wallclock.pts() >= at
+                && resume_at_.compare_exchange_strong(at, AV_NOPTS_VALUE)) {
+            resume(); // the CAS loses against a concurrent explicit pause()
+        }
         return paused_;
+    }
+    /// Resume when the wallclock (ms, same domain as mixer start_pts_ms) reaches `at`.
+    void resumeAt(AVTS at) {
+        resume_at_ = at;
+        for (auto team: getLinkedTeams()) {
+            team->resume_at_ = at;
+        }
     }
     
     void pause(bool synchonize_nodes = true) {

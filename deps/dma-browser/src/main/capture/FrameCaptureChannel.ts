@@ -34,18 +34,20 @@ interface SizeReport {
 }
 
 interface RetainedFrame {
+  readonly frameNumber: bigint;
   readonly texture: PaintTextureLike;
   released: boolean;
 }
 
 const SOCKET_MONITOR_INTERVAL_MS = 1000;
-const DEFAULT_RETAINED_FRAME_POOL_SIZE = 10;
+export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 11;
 
 export interface FrameCaptureChannelOptions {
   readonly socketPath: string;
   readonly allowedDims: AllowedDims;
   readonly log: LogSink;
   readonly paintDiag?: boolean;
+  /** Maximum frames sent but not yet released by consumer acknowledgement. */
   readonly retainedFramePoolSize?: number;
 }
 
@@ -63,32 +65,32 @@ export class FrameCaptureChannel implements ICaptureChannel {
     droppedFrames: 0,
     droppedReasons: {},
     txFrameCount: 0,
+    releasedFrameCount: 0,
     lastPaintTsMs: null,
   };
 
   private socketMonitor: NodeJS.Timeout | null = null;
   private boundContents: WebContents | null = null;
+  private readonly retainedFrames = new Map<bigint, RetainedFrame>();
   private readonly retainedFramePoolSize: number;
-  private readonly retainedFrames: RetainedFrame[] = [];
   private nextFrameNumber = 0n;
   private readonly boundHandler = (event: unknown, _dirty: unknown, img: unknown) =>
     this.handlePaint(event as PaintEventLike, img as PaintImageLike);
 
   constructor(opts: FrameCaptureChannelOptions) {
     this.opts = opts;
-    this.retainedFramePoolSize = Math.max(
-      1,
-      Math.floor(opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE),
-    );
+    this.retainedFramePoolSize =
+      opts.retainedFramePoolSize ?? DEFAULT_RETAINED_FRAME_POOL_SIZE;
   }
 
   public start(): Promise<void> {
     fdpass.setServerLogger(this.opts.socketPath, (line) => this.opts.log.write(line));
+    fdpass.setReleaseCallback(this.opts.socketPath, (frameNumber) => {
+      this.releaseRetainedFrameNumber(frameNumber);
+    });
     const ok = fdpass.createServer(this.opts.socketPath);
     this.opts.log.write(
-      `fdpass.createServer(${this.opts.socketPath}) => ${String(
-        ok,
-      )}; retainedFramePoolSize=${String(this.retainedFramePoolSize)}`,
+      `fdpass.createServer(${this.opts.socketPath}) => ${String(ok)}; releaseMode=ack`,
     );
     this.socketMonitor = setInterval(() => {
       try {
@@ -137,6 +139,8 @@ export class FrameCaptureChannel implements ICaptureChannel {
       droppedFrames: this.stats.droppedFrames,
       droppedReasons: { ...this.stats.droppedReasons },
       txFrameCount: this.stats.txFrameCount,
+      releasedFrameCount: this.stats.releasedFrameCount,
+      retainedFrameCount: this.retainedFrames.size,
       lastPaintTsMs: this.stats.lastPaintTsMs,
     };
   }
@@ -150,6 +154,11 @@ export class FrameCaptureChannel implements ICaptureChannel {
       tex = event.texture;
       if (!tex) {
         this.dropFrame('no_texture');
+        return;
+      }
+      if (this.retainedFrames.size >= this.retainedFramePoolSize) {
+        this.dropFrame('retained_pool_full');
+        this.releaseTexture(tex);
         return;
       }
       try {
@@ -216,6 +225,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
         const stride = meta.stride && meta.stride >= minStride ? meta.stride : minStride;
         const pixelFormat = this.pixelFormatOf(info);
 
+        const frameNumber = this.nextFrameNumber++;
         const header = this.encoder.encode({
           codedWidth: codedW,
           codedHeight: codedH,
@@ -224,10 +234,10 @@ export class FrameCaptureChannel implements ICaptureChannel {
           modifier: meta.modifierBig,
           offset: meta.offsetBig,
           timestampNs: fdpass.monotonicTimeNs(),
-          frameNumber: this.nextFrameNumber++,
+          frameNumber,
         });
 
-        retained = this.retainTexture(tex);
+        retained = this.retainTexture(tex, frameNumber);
         fdpass.broadcastFd(this.opts.socketPath, meta.fd, header).then(
           () => {
             this.stats.txFrameCount++;
@@ -274,13 +284,10 @@ export class FrameCaptureChannel implements ICaptureChannel {
     const fdRaw = firstPlane.fd;
     const strideRaw = firstPlane.stride;
     const offsetRaw = firstPlane.offset;
-    const rawModifier = legacyPlanes
-      ? info.modifier
-      : (nativePixmap.modifier ?? info.modifier);
+    const rawModifier = legacyPlanes ? info.modifier : (nativePixmap.modifier ?? info.modifier);
 
     const fd = typeof fdRaw === 'number' && Number.isFinite(fdRaw) ? fdRaw : null;
-    const stride =
-      typeof strideRaw === 'number' && Number.isFinite(strideRaw) ? strideRaw : null;
+    const stride = typeof strideRaw === 'number' && Number.isFinite(strideRaw) ? strideRaw : null;
     return {
       fd,
       stride,
@@ -350,33 +357,31 @@ export class FrameCaptureChannel implements ICaptureChannel {
     }
   }
 
-  private retainTexture(tex: PaintTextureLike): RetainedFrame {
+  private retainTexture(tex: PaintTextureLike, frameNumber: bigint): RetainedFrame {
     const retained: RetainedFrame = {
+      frameNumber,
       texture: tex,
       released: false,
     };
-    this.retainedFrames.push(retained);
-    while (this.retainedFrames.length > this.retainedFramePoolSize) {
-      const old = this.retainedFrames.shift();
-      if (old) {
-        this.releaseRetainedFrame(old);
-      }
-    }
+    this.retainedFrames.set(frameNumber, retained);
     return retained;
+  }
+
+  private releaseRetainedFrameNumber(frameNumber: bigint): void {
+    const retained = this.retainedFrames.get(frameNumber);
+    if (retained) this.releaseRetainedFrame(retained);
   }
 
   private releaseRetainedFrame(retained: RetainedFrame): void {
     if (retained.released) return;
     retained.released = true;
-    const idx = this.retainedFrames.indexOf(retained);
-    if (idx >= 0) {
-      this.retainedFrames.splice(idx, 1);
-    }
+    this.retainedFrames.delete(retained.frameNumber);
+    this.stats.releasedFrameCount++;
     this.releaseTexture(retained.texture);
   }
 
   private releaseAllRetainedFrames(): void {
-    for (const retained of [...this.retainedFrames]) {
+    for (const retained of [...this.retainedFrames.values()]) {
       this.releaseRetainedFrame(retained);
     }
   }
@@ -387,5 +392,6 @@ interface MutableStats {
   droppedFrames: number;
   droppedReasons: Record<string, number>;
   txFrameCount: number;
+  releasedFrameCount: number;
   lastPaintTsMs: number | null;
 }

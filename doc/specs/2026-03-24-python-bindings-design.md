@@ -50,7 +50,7 @@ The recommended architecture is a hybrid design:
 `avplumber` already provides:
 
 - a graph runtime with typed edges carrying `av::Packet`, `av::VideoFrame`, and `av::AudioSamples`
-- metadata-heavy intelligence nodes such as `cuda_infer_yolo`, `basketball_analysis`, `draw_bbox`, and `draw_text`
+- metadata-heavy intelligence nodes such as `cuda_infer_yolo`, `draw_bbox`, and `draw_text`
 - a natural sidecar metadata merge pattern via `join_metadata`
 - internal edge callbacks through `addWiretapCallback`
 - an embeddable `AVPlumber` library API
@@ -180,14 +180,14 @@ Cons:
 ```python
 import avplumber as avp
 
-rt = avp.Runtime(name="basketball-app", mode="embedded")
-pipe = avp.Pipeline(name="game-1")
+rt = avp.Runtime(name="object-analysis-app", mode="embedded")
+pipe = avp.Pipeline(name="analysis-1")
 
-pipe.add(avp.nodes.Input(name="input", url="nba.mp4", dst="in_v", group="in"))
+pipe.add(avp.nodes.Input(name="input", url="sample.mp4", dst="in_v", group="in"))
 pipe.add(avp.nodes.Demux(src="in_v", routing={"?v:0": "v_pkt"}, group="in"))
 pipe.add(avp.nodes.DecVideo(name="Video_Dec", src="v_pkt", dst="v_dec_cuda", pixel_format="?cuda", hwaccel="@gpu"))
 pipe.add(avp.nodes.CudaInferYolo(name="Yolo_Infer", src="v_pre_yolo", dst="v_post_yolo", hwaccel="@gpu", models=[...]))
-pipe.add(avp.nodes.PyMetadataTransform(name="PyBasketball", src="v_post_yolo", dst="v_py_analysis", module="myapp.basketball", callable="analyze"))
+pipe.add(avp.nodes.PyMetadataTransform(name="PyAnalysis", src="v_post_yolo", dst="v_py_analysis", module="myapp.analysis", callable="analyze"))
 pipe.add(avp.nodes.JoinMetadata(src=["v_dec_1080p", "v_py_analysis"], dst="v_1080p_with_md"))
 
 rt.load(pipe)
@@ -202,7 +202,7 @@ rt.shutdown()
 Equivalent worker-backed form:
 
 ```python
-rt = avp.Runtime(name="basketball-app", mode="worker")
+rt = avp.Runtime(name="object-analysis-app", mode="worker")
 ```
 
 ### Runtime API requirements
@@ -301,8 +301,8 @@ yolo = avp.nodes.CudaInferYolo(
     metadata_key_out="yolo_detections_v1",
     models=[
         avp.nodes.CudaInferYolo.Model(
-            engine="/models/ball.plan",
-            class_names=["basketball"],
+            engine="/models/objects.plan",
+            class_names=["object"],
             output_box_format="end2end_xyxy",
         ),
     ],
@@ -485,7 +485,7 @@ f = avp.SyntheticVideoFrame(
     width=frame.width,
     height=frame.height,
     pixel_format=frame.pixel_format,
-    metadata={"basketball_analysis_py_v1": analysis},
+    metadata={"object_analysis_py_v1": analysis},
 )
 ```
 
@@ -495,7 +495,7 @@ or:
 f = avp.VideoFrameBuilder() \
     .pts(frame.pts, timebase=frame.timebase) \
     .format(width=frame.width, height=frame.height, pixel_format=frame.pixel_format) \
-    .metadata({"basketball_analysis_py_v1": analysis}) \
+    .metadata({"object_analysis_py_v1": analysis}) \
     .build()
 ```
 
@@ -513,7 +513,7 @@ Examples:
 - `PySidecarVideoSource`
 - `PyPacketObserver` later
 
-This is the right model for graph-resident basketball analysis.
+This is the right model for graph-resident domain analysis.
 
 ### 2. Subscription callback
 
@@ -762,12 +762,12 @@ At minimum:
 - C++ `enc_video`
 - C++ `output`
 
-### Basketball use case
+### Object-analysis use case
 
 - YOLO emits `yolo_detections_v1`
 - Python transform reads detection metadata and optional read-only CPU image data
-- Python computes shot, pass, and possession aggregates
-- Python emits synthetic sidecar frames with `basketball_analysis_py_v1`
+- Python computes object counts and trajectory aggregates
+- Python emits synthetic sidecar frames with `object_analysis_py_v1`
 - `join_metadata` merges Python-generated metadata onto the main video branch
 - downstream overlays use merged metadata for debug-only visualization
 
@@ -870,7 +870,7 @@ README prose and examples remain supplementary, not canonical.
 - add Python-backed transform node
 - add synthetic metadata-bearing video frame emission
 - support `join_metadata` sidecar workflows
-- provide basketball-analysis example graph in Python
+- provide an object-analysis example graph in Python
 - generate docs from schemas
 
 ### Phase 4: Expanded media support

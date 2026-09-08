@@ -1,0 +1,1030 @@
+{
+  "schema_version": 1,
+  "conditions": {
+    "gpu": "NVIDIA Tesla T4",
+    "host_vcpus": 16,
+    "browser_workers": 4,
+    "pages_per_worker_limit": 4,
+    "browser_resolution": [
+      480,
+      270
+    ],
+    "output_resolution": [
+      1920,
+      1080
+    ],
+    "target_fps": 60,
+    "buffer_frames": 2,
+    "latency_ms": 33.333333333333336,
+    "compositor": "egl_image_cuda_overlay",
+    "warmup_output_ticks": 600,
+    "cold_trials": "Browser workers were restarted before each cold16 trial. Source-count cases closed prior pages and opened only the requested count.",
+    "compilation_during_measurement": false,
+    "concurrent_workloads": [
+      "The live mixer remained running throughout all cases.",
+      "An auxiliary 640x360 replay visualization ran during early cold trials and was stopped before the third steady measurement.",
+      "The 1/4/8-source cases overlapped CPU/NVDEC replay regression testing; they are continuity checks, not isolated resource benchmarks."
+    ]
+  },
+  "interpretation": {
+    "repeat_and_discard_denominator": "Every per-input percentage uses that case output_ticks, after excluding the first 600 output ticks.",
+    "capture_counter_denominator": "Capture overflow percentage uses painted_frames in its independently sampled browser interval; this counter does not detect missing browser paints.",
+    "limitations": "These are finite sampled continuity runs, not a guarantee of future frame-perfect playback. Browser paint cadence was slightly below 60 Hz in some 16-source runs. Zero discarded accepted frames does not mean every output contains a new source frame.",
+    "excluded_trial": "An earlier fixed-module trial overlapped two builds and had browser capture rates near 54\u201357 fps. It is excluded from acceptance results."
+  },
+  "cases": [
+    {
+      "case": "cold16-1",
+      "input_count": 16,
+      "measurement_seconds": 59.999626,
+      "output_ticks": 3600,
+      "output_fps": 60.000374002331284,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.027777777777777776,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 1,
+          "repeated": 4,
+          "discarded": 0,
+          "phase_corrections": 4,
+          "repeat_percent_per_output_tick": 0.1111111111111111,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 2,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.027777777777777776,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 3,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.027777777777777776,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 4,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 5,
+          "repeated": 4,
+          "discarded": 0,
+          "phase_corrections": 4,
+          "repeat_percent_per_output_tick": 0.1111111111111111,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 6,
+          "repeated": 3,
+          "discarded": 0,
+          "phase_corrections": 2,
+          "repeat_percent_per_output_tick": 0.08333333333333333,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 7,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 8,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.027777777777777776,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 9,
+          "repeated": 3,
+          "discarded": 0,
+          "phase_corrections": 3,
+          "repeat_percent_per_output_tick": 0.08333333333333333,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 10,
+          "repeated": 2,
+          "discarded": 0,
+          "phase_corrections": 2,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 11,
+          "repeated": 2,
+          "discarded": 0,
+          "phase_corrections": 2,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 12,
+          "repeated": 3,
+          "discarded": 0,
+          "phase_corrections": 3,
+          "repeat_percent_per_output_tick": 0.08333333333333333,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 13,
+          "repeated": 10,
+          "discarded": 0,
+          "phase_corrections": 10,
+          "repeat_percent_per_output_tick": 0.2777777777777778,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 14,
+          "repeated": 5,
+          "discarded": 0,
+          "phase_corrections": 5,
+          "repeat_percent_per_output_tick": 0.1388888888888889,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 15,
+          "repeated": 2,
+          "discarded": 0,
+          "phase_corrections": 2,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 61.488120078000065,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.946539190402405,
+          "painted_frames": 3686,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 4,
+          "transmitted_fps": 59.99532910292851,
+          "painted_frames": 3689,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 8,
+          "transmitted_fps": 59.97906579875314,
+          "painted_frames": 3688,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 12,
+          "transmitted_fps": 59.96280249457777,
+          "painted_frames": 3687,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 1,
+          "transmitted_fps": 59.89774927787631,
+          "painted_frames": 3683,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 5,
+          "transmitted_fps": 59.914012582051676,
+          "painted_frames": 3684,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 9,
+          "transmitted_fps": 59.914012582051676,
+          "painted_frames": 3684,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 13,
+          "transmitted_fps": 59.832696061174836,
+          "painted_frames": 3679,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 2,
+          "transmitted_fps": 59.946539190402405,
+          "painted_frames": 3686,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 6,
+          "transmitted_fps": 59.914012582051676,
+          "painted_frames": 3684,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 10,
+          "transmitted_fps": 59.914012582051676,
+          "painted_frames": 3684,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 14,
+          "transmitted_fps": 59.88148597370094,
+          "painted_frames": 3682,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 3,
+          "transmitted_fps": 59.914012582051676,
+          "painted_frames": 3684,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 7,
+          "transmitted_fps": 59.97906579875314,
+          "painted_frames": 3688,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 11,
+          "transmitted_fps": 59.93027588622704,
+          "painted_frames": 3685,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 15,
+          "transmitted_fps": 59.97906579875314,
+          "painted_frames": 3688,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    },
+    {
+      "case": "cold16-2",
+      "input_count": 16,
+      "measurement_seconds": 29.999955,
+      "output_ticks": 1800,
+      "output_fps": 60.000090000135,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 1,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 2,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 3,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 4,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 5,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 6,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 7,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 8,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 9,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 10,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 11,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 12,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 13,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 14,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 15,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 30.694840889998886,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 4,
+          "transmitted_fps": 59.91234835164727,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 8,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 12,
+          "transmitted_fps": 59.91234835164727,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 1,
+          "transmitted_fps": 59.944927116384434,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 5,
+          "transmitted_fps": 59.944927116384434,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 9,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 13,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 2,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 6,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 10,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 14,
+          "transmitted_fps": 59.91234835164727,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 3,
+          "transmitted_fps": 59.944927116384434,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 7,
+          "transmitted_fps": 59.944927116384434,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 11,
+          "transmitted_fps": 59.9775058811216,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 15,
+          "transmitted_fps": 59.91234835164727,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    },
+    {
+      "case": "cold16-3",
+      "input_count": 16,
+      "measurement_seconds": 29.999501,
+      "output_ticks": 1800,
+      "output_fps": 60.00099801660035,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 1,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 2,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 3,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 4,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 5,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 6,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 7,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 8,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 9,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 10,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 11,
+          "repeated": 4,
+          "discarded": 0,
+          "phase_corrections": 4,
+          "repeat_percent_per_output_tick": 0.2222222222222222,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 12,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 13,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 14,
+          "repeated": 1,
+          "discarded": 0,
+          "phase_corrections": 1,
+          "repeat_percent_per_output_tick": 0.05555555555555555,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 15,
+          "repeated": 2,
+          "discarded": 0,
+          "phase_corrections": 2,
+          "repeat_percent_per_output_tick": 0.1111111111111111,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 30.699279677999584,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 4,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 8,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 12,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 1,
+          "transmitted_fps": 59.9362597200814,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 5,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 9,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 13,
+          "transmitted_fps": 59.9036856658857,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 2,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 6,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 10,
+          "transmitted_fps": 59.9362597200814,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 14,
+          "transmitted_fps": 59.9036856658857,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 3,
+          "transmitted_fps": 59.968833774277094,
+          "painted_frames": 1841,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 7,
+          "transmitted_fps": 59.9362597200814,
+          "painted_frames": 1840,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 11,
+          "transmitted_fps": 59.87111161169001,
+          "painted_frames": 1838,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 15,
+          "transmitted_fps": 59.9036856658857,
+          "painted_frames": 1839,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    },
+    {
+      "case": "count1",
+      "input_count": 1,
+      "measurement_seconds": 30.003192,
+      "output_ticks": 1800,
+      "output_fps": 59.99361667918534,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 30.46975139300048,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.96110622746003,
+          "painted_frames": 1827,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    },
+    {
+      "case": "count4",
+      "input_count": 4,
+      "measurement_seconds": 30.000202,
+      "output_ticks": 1800,
+      "output_fps": 59.999596002720246,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 1,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 2,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 3,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 30.536800965997827,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.96043927583591,
+          "painted_frames": 1831,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 1,
+          "transmitted_fps": 59.96043927583591,
+          "painted_frames": 1831,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 2,
+          "transmitted_fps": 59.96043927583591,
+          "painted_frames": 1831,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 3,
+          "transmitted_fps": 59.96043927583591,
+          "painted_frames": 1831,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    },
+    {
+      "case": "count8",
+      "input_count": 8,
+      "measurement_seconds": 29.999265,
+      "output_ticks": 1800,
+      "output_fps": 60.00147003601588,
+      "missed_output_deadlines": 0,
+      "inputs": [
+        {
+          "source": 0,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 1,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 2,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 3,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 4,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 5,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 6,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        },
+        {
+          "source": 7,
+          "repeated": 0,
+          "discarded": 0,
+          "phase_corrections": 0,
+          "repeat_percent_per_output_tick": 0.0,
+          "discard_percent_per_output_tick": 0.0
+        }
+      ],
+      "capture_measurement_seconds": 30.56082894100109,
+      "browser_capture": [
+        {
+          "source": 0,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 4,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 1,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 5,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 2,
+          "transmitted_fps": 59.946017941357205,
+          "painted_frames": 1832,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 6,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 3,
+          "transmitted_fps": 59.946017941357205,
+          "painted_frames": 1832,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        },
+        {
+          "source": 7,
+          "transmitted_fps": 59.97873956687105,
+          "painted_frames": 1833,
+          "capture_overflow_drops": 0,
+          "capture_overflow_percent_per_paint": 0.0
+        }
+      ]
+    }
+  ]
+}

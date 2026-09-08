@@ -6,7 +6,7 @@ extern "C" {
 #include "../util.hpp"
 #include "../video_parameters.hpp"
 
-class DynamicVideoScaler: public NodeSISO<av::VideoFrame, av::VideoFrame>, public IVideoFormatSource {
+class DynamicVideoScaler: public NodeSISO<av::VideoFrame, av::VideoFrame>, public IVideoFormatSource, public ReportsFinishByFlag {
 protected:
     VideoParameters src_params_, dst_params_;
     std::unique_ptr<av::VideoRescaler> rescaler_;
@@ -29,6 +29,7 @@ public:
 
         if (isEofMarker(in_frame)) {
             this->sink_->put(in_frame);
+            this->markFinished();
             return;
         }
 

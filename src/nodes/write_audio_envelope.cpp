@@ -62,7 +62,7 @@ struct LevelState {
 
 } // namespace
 
-class WriteAudioEnvelope: public NodeSingleInput<av::AudioSamples> {
+class WriteAudioEnvelope: public NodeSingleInput<av::AudioSamples>, public IFlushable {
     std::string path_;
     std::vector<LevelState> levels_;
     std::unique_ptr<av::AudioResampler> resampler_;
@@ -196,8 +196,22 @@ class WriteAudioEnvelope: public NodeSingleInput<av::AudioSamples> {
 public:
     using NodeSingleInput<av::AudioSamples>::NodeSingleInput;
 
+    virtual void flush() override {
+        for (auto& level : levels_) {
+            if (level.file_.is_open()) level.file_.close();
+        }
+    }
+
     virtual void process() override {
-        av::AudioSamples frame = this->source_->get();
+        av::AudioSamples* ptr = this->source_->peek();
+        if (ptr == nullptr) return;
+        if (isEofMarker(*ptr)) {
+            // Leave the EOF marker in the queue so consumeEofIfPresent() picks it up,
+            // closes the level files via flush() and terminates the node loop.
+            return;
+        }
+        av::AudioSamples frame = *ptr;
+        this->source_->pop();
         if (!frame.isComplete() || frame.samplesCount() == 0) return;
         if (!frame.pts().isValid()) return;
 

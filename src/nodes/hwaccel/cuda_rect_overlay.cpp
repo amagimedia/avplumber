@@ -1,6 +1,13 @@
 #include "../node_common.hpp"
 #include "../../hwaccel.hpp"
+#include "../../hwaccel/CompositorGeometry.hpp"
+#ifdef HAVE_CUDA_RECT_SCALE
+#include "../../../objs/src/nodes/hwaccel/cuda_rect_scale.ptx.h"
+#endif
 #include "../../SharedTimeline.hpp"
+#include "../../mixer/Playout.hpp"
+#include "../../mixer/MonotonicClock.hpp"
+#include <sstream>
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -41,13 +48,20 @@ struct LayerSpec {
     int dst_y = 0;
     int crop_x = 0;
     int crop_y = 0;
+    int dst_w = 0;
+    int dst_h = 0;
+    bool fit = false;
+    int source_canvas_w = 0;
+    int source_canvas_h = 0;
     int crop_w= 0;
     int crop_h = 0;
 
     bool operator==(const LayerSpec &other) const {
         return dst_x == other.dst_x && dst_y == other.dst_y &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
-               crop_w == other.crop_w && crop_h == other.crop_h;
+               crop_w == other.crop_w && crop_h == other.crop_h &&
+               dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
+               source_canvas_w == other.source_canvas_w && source_canvas_h == other.source_canvas_h;
     }
 };
 
@@ -72,6 +86,26 @@ static bool frameUsable(const av::VideoFrame &f) {
 static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_x = obj.value("dst_x", 0);
     out.dst_y = obj.value("dst_y", 0);
+    out.dst_w = obj.value("dst_w", 0);
+    out.dst_h = obj.value("dst_h", 0);
+    const std::string fit = obj.value("fit", std::string("stretch"));
+    if (fit != "stretch" && fit != "contain")
+        throw Error("cuda_rect_overlay: fit must be stretch or contain");
+    out.fit = fit == "contain";
+    out.source_canvas_w = out.source_canvas_h = 0;
+    if (obj.contains("source_canvas")) {
+        const auto &canvas = obj.at("source_canvas");
+        out.source_canvas_w = canvas.at("w").get<int>();
+        out.source_canvas_h = canvas.at("h").get<int>();
+        if (!out.fit || out.dst_w <= 0 || out.dst_h <= 0 || out.source_canvas_w <= 0 || out.source_canvas_h <= 0)
+            throw Error("cuda_rect_overlay: source_canvas requires positive dimensions and fit=contain");
+    }
+    if (out.dst_w < 0 || out.dst_h < 0 || (out.dst_w == 0) != (out.dst_h == 0))
+        throw Error("cuda_rect_overlay: dst_w and dst_h must both be positive or both omitted");
+#ifndef HAVE_CUDA_RECT_SCALE
+    if (out.dst_w || out.dst_h)
+        throw Error("cuda_rect_overlay: destination sizing requires HAVE_NVCC=1");
+#endif
     if (obj.contains("crop") && obj["crop"].is_object()) {
         const auto &c = obj["crop"];
         out.crop_x = c.value("x", 0);
@@ -344,6 +378,8 @@ static bool fillFrameBlack(AVPixelFormat fmt, AVFrame *f, const AVFrame *color_s
 class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         public NodeSingleOutput<av::VideoFrame>,
                         public IVideoFormatSource,
+                        public IFrameRateSource,
+                        public IInputReset,
                         public TimelineReader,
                         public IInputsObjects {
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -360,12 +396,24 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     uint64_t frame_counter_ = 0;
 
     AVCUDADeviceContext *cuda_dev_ = nullptr;
+    CUmodule scale_module_ = nullptr;
+    CUfunction scale_kernel_ = nullptr;
     bool sent_eof_ = false;
 
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
     std::vector<bool> held_valid_;
     std::atomic<uint32_t> active_inputs_{~0u};
+
+    // An explicit fps opts live, monotonic-PTS inputs into shared playout.
+    // Unclocked callers retain the established timestamp-driven behavior.
+    std::unique_ptr<avp::mixer::Playout<av::VideoFrame>> playout_;
+    av::Rational frame_rate_{0, 1};
+    std::atomic<uint64_t> input_generation_{0};
+    std::atomic<int64_t> input_valid_from_ns_{0};
+    uint64_t applied_generation_ = 0;
+    uint32_t applied_active_mask_ = 0;
+
 
     // Bound how long we will wait for every active layer to produce a fresh
     // post-activation frame before emitting with whatever we have. <=0 disables
@@ -376,12 +424,15 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     int64_t warmup_started_pts_ = -1;
 
     void freeHwContexts() {
+        if (scale_module_) {
+            cuCtxSetCurrent(cuda_dev_->cuda_ctx);
+            CHECK_CU(cuModuleUnload(scale_module_));
+            scale_module_ = nullptr;
+        }
         av_buffer_unref(&out_frames_ref_);
     }
 
     void ensureCudaDevice() {
-        if (cuda_dev_)
-            return;
         if (!hwaccel_ || !hwaccel_->deviceContext() || !hwaccel_->deviceContext()->data)
             throw Error("cuda_rect_overlay: invalid hwaccel device");
         AVHWDeviceContext *devctx = (AVHWDeviceContext *)hwaccel_->deviceContext()->data;
@@ -390,6 +441,46 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             throw Error("cuda_rect_overlay: CUDA hwctx missing");
         if (CHECK_CU(cuCtxSetCurrent(cuda_dev_->cuda_ctx)))
             throw Error("cuda_rect_overlay: cuCtxSetCurrent failed");
+    }
+
+    void ensureScaleKernel() {
+#ifdef HAVE_CUDA_RECT_SCALE
+        if (scale_kernel_) return;
+        ensureCudaDevice();
+        const std::string image(avpl_rect_scale_ptx, avpl_rect_scale_ptx + avpl_rect_scale_ptx_len);
+        if (CHECK_CU(cuModuleLoadDataEx(&scale_module_, image.c_str(), 0, nullptr, nullptr)) ||
+            CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")))
+            throw Error("cuda_rect_overlay: cannot load scaling kernel");
+#endif
+    }
+
+    void scaleLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer) {
+        const auto *desc = av_pix_fmt_desc_get(sw_fmt_);
+        for (int c = 0; c < desc->nb_components; ++c)
+            if (desc->comp[c].depth != 8)
+                throw Error("cuda_rect_overlay: scaling currently requires 8-bit components");
+        ensureScaleKernel();
+        if (!scale_kernel_) throw Error("cuda_rect_overlay: scaling kernel unavailable");
+        for (int p = 0; p < numPlanes(sw_fmt_); ++p) {
+            if (!src->data[p]) continue; // Opaque input on an alpha canvas.
+            int lanes = 1;
+            for (int c = 0; c < desc->nb_components; ++c)
+                if (desc->comp[c].plane == p) lanes = std::max(lanes, desc->comp[c].step);
+            int sx, sy, sw, sh, dx, dy, dw, dh, cx, cy, cw, ch;
+            lumaRectToPlaneRegion(sw_fmt_, layer.crop_x, layer.crop_y, layer.crop_w, layer.crop_h,
+                                  p, sx, sy, sw, sh);
+            lumaRectToPlaneRegion(sw_fmt_, layer.dst_x, layer.dst_y, layer.dst_w, layer.dst_h,
+                                  p, dx, dy, dw, dh);
+            lumaRectToPlaneRegion(sw_fmt_, 0, 0, canvas_w_, canvas_h_, p, cx, cy, cw, ch);
+            sx /= lanes; sw /= lanes; dx /= lanes; dw /= lanes; cw /= lanes;
+            CUdeviceptr source = (CUdeviceptr)src->data[p], destination = (CUdeviceptr)dst->data[p];
+            int source_pitch = src->linesize[p], destination_pitch = dst->linesize[p];
+            void *args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh,
+                            &destination, &destination_pitch, &dx, &dy, &dw, &dh, &cw, &ch, &lanes};
+            if (CHECK_CU(cuLaunchKernel(scale_kernel_, (dw + 31) / 32, (dh + 7) / 8, 1,
+                                        32, 8, 1, 0, stream, args, nullptr)))
+                throw Error("cuda_rect_overlay: scaling launch failed");
+        }
     }
 
     std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source) {
@@ -456,6 +547,29 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 continue;
             }
             LayerSpec L = layers[i];
+            if (L.dst_w > 0) {
+                const avp::compositor::Rect crop{L.crop_x, L.crop_y, L.crop_w, L.crop_h};
+                const avp::compositor::Rect box{L.dst_x, L.dst_y, L.dst_w, L.dst_h};
+                const int ax = chromaXAlign(sw_fmt_), ay = chromaYAlign(sw_fmt_);
+                auto placement = L.source_canvas_w > 0
+                    ? avp::compositor::placeInCanvas(srcp->width(), srcp->height(), crop, box,
+                                                     L.source_canvas_w, L.source_canvas_h, ax, ay)
+                    : avp::compositor::place(srcp->width(), srcp->height(), crop, box, L.fit, ax, ay);
+                if (!placement || placement->destination.x >= canvas_w_ ||
+                    placement->destination.y >= canvas_h_ ||
+                    int64_t(placement->destination.x) + placement->destination.w <= 0 ||
+                    int64_t(placement->destination.y) + placement->destination.h <= 0) {
+                    ops.push_back({});
+                    continue;
+                }
+                const auto &p = *placement;
+                L.crop_x = p.source.x; L.crop_y = p.source.y;
+                L.crop_w = p.source.w; L.crop_h = p.source.h;
+                L.dst_x = p.destination.x; L.dst_y = p.destination.y;
+                L.dst_w = p.destination.w; L.dst_h = p.destination.h;
+                ops.push_back({srcp, srcp->width(), srcp->height(), L});
+                continue;
+            }
             // 0 means "remaining source extent from the crop origin".
             if (L.crop_w <= 0) L.crop_w = srcp->width()  - L.crop_x;
             if (L.crop_h <= 0) L.crop_h = srcp->height() - L.crop_y;
@@ -506,7 +620,12 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 continue;
             const LayerSpec &L = op.layer;
 
-            if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,
+            const bool sized = L.dst_w > 0;
+            const bool full_copy = !sized || (L.dst_w == L.crop_w && L.dst_h == L.crop_h &&
+                L.dst_x >= 0 && L.dst_y >= 0 && L.dst_x + L.dst_w <= canvas_w_ && L.dst_y + L.dst_h <= canvas_h_);
+            if (!full_copy) {
+                scaleLayer(stream, srcp->raw(), outf.raw(), L);
+            } else if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,
                                  L.crop_h, L.dst_x, L.dst_y))
                 throw Error("cuda_rect_overlay: GPU blit failed");
 
@@ -515,9 +634,10 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
             if (src_sw_fmt != AV_PIX_FMT_NONE && src_sw_fmt != sw_fmt_) {
                 const int alpha_p = alphaPlaneIndex(sw_fmt_);
-                if (alpha_p >= 0)
-                    fillPlaneRect(sw_fmt_, outf.raw(), alpha_p,
-                                  L.dst_x, L.dst_y, L.crop_w, L.crop_h, 255);
+                int x = L.dst_x, y = L.dst_y;
+                int w = sized ? L.dst_w : L.crop_w, h = sized ? L.dst_h : L.crop_h;
+                if (alpha_p >= 0 && clipRect(x, y, w, h, canvas_w_, canvas_h_))
+                    fillPlaneRect(sw_fmt_, outf.raw(), alpha_p, x, y, w, h, 255);
             }
         }
 
@@ -573,6 +693,7 @@ public:
     ~CudaRectOverlay() override { freeHwContexts(); }
 
     void init(EdgeManager &edges, const Parameters &params) override {
+        if (params.value("scale", false)) ensureScaleKernel();
         (void)edges;
         (void)params;
         NodeSingleOutput<av::VideoFrame>::init(edges, params);
@@ -590,7 +711,99 @@ public:
         return source_edges_[0];
     }
 
+    void processClocked() {
+        const int64_t now = avp::mixer::monotonicNs();
+        uint32_t active = active_inputs_.load(std::memory_order_acquire);
+        if (hasTimeline()) {
+            const auto deadline = playout_->nextDeadline();
+            const int64_t content_time = std::max(now - playout_->latencyNs(),
+                deadline ? *deadline - playout_->latencyNs() : now);
+            const auto value = tlGetRaw("active_inputs", av::Timestamp(content_time, {1, 1000000000}));
+            if (value) active = parseBitmask(*value);
+        }
+        const auto generation = input_generation_.load(std::memory_order_acquire);
+        if (generation != applied_generation_ || active != applied_active_mask_) {
+            for (size_t i = 0; i < source_edges_.size(); ++i) {
+                playout_->setActive(i, (active & (1u << i)) != 0);
+                if (generation != applied_generation_) {
+                    const auto from = input_valid_from_ns_.load(std::memory_order_acquire);
+                    playout_->resetInput(i, from ? std::optional<int64_t>(from) : std::nullopt);
+                }
+            }
+            applied_generation_ = generation;
+            applied_active_mask_ = active;
+            warmup_started_pts_ = wallclock.pts();
+            sent_eof_ = false;
+        }
+        if (sent_eof_) return;
+        if (!active) {
+            this->waitForInput();
+            return;
+        }
+        for (size_t i = 0; i < source_edges_.size(); ++i) {
+            if (!(active & (1u << i))) continue;
+            // Bound ingestion as well as storage; an unpaced producer must not
+            // monopolize the output thread before it reaches its deadline.
+            for (size_t received = 0; received < 8; ++received) {
+                auto *frame = source_edges_[i]->peek();
+                if (!frame) break;
+                if (isEofMarker(*frame)) {
+                    playout_->endInput(i);
+                    source_edges_[i]->pop();
+                    break;
+                }
+                if (frameUsable(*frame)) {
+                    if (frame->raw()->format != AV_PIX_FMT_CUDA)
+                        throw Error("cuda_rect_overlay: input must be AV_PIX_FMT_CUDA");
+                    if (!hwSwFormatMatch(*frame))
+                        throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
+                    playout_->push(i, *frame, rescaleTS(frame->pts(), {1, 1000000000}).timestamp());
+                }
+                source_edges_[i]->pop();
+            }
+        }
+        if (playout_->finished()) {
+            av::VideoFrame eof;
+            eof.setPts(NOTS);
+            this->sink_->put(eof);
+            sent_eof_ = true;
+            return;
+        }
+        const bool require_all = warmup_timeout_ms_ <= 0 ||
+            wallclock.pts() - warmup_started_pts_ < warmup_timeout_ms_;
+        const auto *decision = playout_->prepare(avp::mixer::monotonicNs(), require_all);
+        if (!decision) {
+            this->findSourceWithData(avp::mixer::waitMilliseconds(
+                playout_->nextDeadline(), avp::mixer::monotonicNs()));
+            return;
+        }
+        std::vector<const av::VideoFrame *> sources;
+        const av::VideoFrame *metadata = nullptr;
+        for (const auto &frame : decision->frames) {
+            sources.push_back(frame ? &*frame : nullptr);
+            if (frame) metadata = &*frame;
+        }
+        processComposite(av::Timestamp(decision->index,
+            {frame_rate_.getDenominator(), frame_rate_.getNumerator()}), sources, metadata);
+        playout_->commit();
+        if (debug_log_every_n_ > 0 && frame_counter_ % debug_log_every_n_ == 0) {
+            std::ostringstream stats;
+            stats << "cuda_rect_overlay: frames=" << frame_counter_
+                  << " missed_deadlines=" << playout_->missedDeadlines();
+            for (size_t i = 0; i < sources.size(); ++i) {
+                if (!(active & (1u << i))) continue;
+                stats << " input" << i << "_reuse=" << playout_->stats(i).repeats
+                      << " input" << i << "_discarded=" << playout_->stats(i).discarded;
+            }
+            logstream << stats.str();
+        }
+    }
+
     void process() override {
+        if (playout_) {
+            processClocked();
+            return;
+        }
         if (sent_eof_)
             return;
 
@@ -828,14 +1041,23 @@ public:
         processComposite(min_ts, src_for_layer, meta_src);
     }
 
+    void resetInput() override {
+        if (!playout_) return;
+        input_valid_from_ns_.store(avp::mixer::monotonicNs(), std::memory_order_release);
+        input_generation_.fetch_add(1, std::memory_order_release);
+        for (auto &edge : source_edges_) edge->producedEvent().signal();
+    }
+
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "active_inputs") {
             const uint32_t new_mask = parseBitmask(value);
             active_inputs_.store(new_mask, std::memory_order_relaxed);
-            sent_eof_ = false;
-            std::fill(input_eof_.begin(), input_eof_.end(), false);
-            std::fill(held_valid_.begin(), held_valid_.end(), false);
-            warmup_started_pts_ = -1;
+            if (!playout_) {
+                sent_eof_ = false;
+                std::fill(input_eof_.begin(), input_eof_.end(), false);
+                std::fill(held_valid_.begin(), held_valid_.end(), false);
+                warmup_started_pts_ = -1;
+            }
             for (auto& edge : this->source_edges_) {
                 edge->producedEvent().signal();
             }
@@ -844,6 +1066,15 @@ public:
             std::lock_guard<std::mutex> lock(layers_mutex_);
             default_layers_ = std::move(new_layers);
         }
+    }
+
+    av::Rational frameRate() override {
+        if (playout_) return frame_rate_;
+        if (!source_edges_.empty()) {
+            auto source = source_edges_.front()->findNodeUp<IFrameRateSource>();
+            if (source) return source->frameRate();
+        }
+        return {0, 1};
     }
 
     int width() override { return canvas_w_; }
@@ -858,8 +1089,8 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     EdgeManager &edges = nci.edges;
     const Parameters &params = nci.params;
     auto src_names = jsonToStringList(params["src"]);
-    if (src_names.size() < 2)
-        throw Error("cuda_rect_overlay: at least 2 inputs required in src");
+    if (src_names.empty())
+        throw Error("cuda_rect_overlay: at least one input required in src");
     std::vector<LayerSpec> layers = parseLayersParam(params);
     if (layers.size() != src_names.size())
         throw Error("cuda_rect_overlay: layers array length must match src count");
@@ -893,6 +1124,17 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     if (params.count("active_inputs"))
         node->active_inputs_.store(parseBitmask(params["active_inputs"]), std::memory_order_relaxed);
     node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
+    if (params.contains("fps")) {
+        node->frame_rate_ = parseRatio(params.at("fps"));
+        std::optional<double> latency_ms;
+        if (params.contains("latency_ms")) latency_ms = params.at("latency_ms").get<double>();
+        node->playout_ = std::make_unique<avp::mixer::Playout<av::VideoFrame>>(
+            src_names.size(), avp::mixer::FrameRate(node->frame_rate_.getNumerator(),
+                node->frame_rate_.getDenominator()), latency_ms, avp::mixer::TimestampMode::Presentation);
+        node->input_generation_.store(1);
+        logstream << "cuda_rect_overlay: latency_ms=" << node->playout_->latencyNs() / 1000000.0;
+    }
+
     return node;
 }
 

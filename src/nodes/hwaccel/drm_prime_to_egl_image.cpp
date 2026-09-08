@@ -11,285 +11,309 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
-#include <unistd.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
-#include <unordered_map>
 #include <memory>
 #include <string>
+#include <vector>
+
+namespace {
+
+enum class CacheMode {
+	Reuse,
+	Off,
+};
+
+struct CacheKey {
+	dev_t st_dev{};
+	ino_t st_ino{};
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t stride = 0;
+	uint32_t fourcc = 0;
+	uint64_t modifier = 0;
+	uint64_t offset = 0;
+
+	bool operator==(const CacheKey &other) const {
+		return st_dev == other.st_dev && st_ino == other.st_ino &&
+		       width == other.width && height == other.height &&
+		       stride == other.stride && fourcc == other.fourcc &&
+		       modifier == other.modifier && offset == other.offset;
+	}
+};
+
+} // namespace
 
 class DRMPrimeToEglImage : public NodeSISO<av::VideoFrame, EglImageFrame> {
 protected:
 	struct EglState {
 		EGLDisplay dpy = EGL_NO_DISPLAY;
-		PFNEGLDESTROYIMAGEKHRPROC destroy_fn = nullptr;
+		PFNEGLDESTROYIMAGEKHRPROC destroy_image = nullptr;
+
 		~EglState() {
-			// Must outlive any EGLImage created from it.
-			if (dpy != EGL_NO_DISPLAY) {
-				//eglTerminate(dpy);
-				dpy = EGL_NO_DISPLAY;
-			}
+			// EGLDisplay is process-global on the supported drivers. Other nodes may
+			// still own images or contexts for it, so do not call eglTerminate here.
+			dpy = EGL_NO_DISPLAY;
 		}
 	};
 
 	struct Entry {
 		std::shared_ptr<EglState> egl;
-
 		EGLImageKHR image = EGL_NO_IMAGE_KHR;
 		int dup_fd = -1;
-		dev_t st_dev{};
-		ino_t st_ino{};
-
-		// Attributes used for validation / cache correctness
-		uint32_t fourcc = 0;
-		int width = 0;
-		int height = 0;
-		uint32_t pitch = 0;
-		uint32_t offset = 0;
-		uint64_t modifier = 0;
-
+		CacheKey key;
 		int64_t last_seen_ms = 0;
 
 		~Entry() {
-			if (image != EGL_NO_IMAGE_KHR && egl && egl->dpy != EGL_NO_DISPLAY && egl->destroy_fn) {
-				egl->destroy_fn(egl->dpy, image);
-				image = EGL_NO_IMAGE_KHR;
-			}
-			if (dup_fd >= 0) {
+			if (image != EGL_NO_IMAGE_KHR && egl && egl->dpy != EGL_NO_DISPLAY && egl->destroy_image)
+			egl->destroy_image(egl->dpy, image);
+			if (dup_fd >= 0)
 				close(dup_fd);
-				dup_fd = -1;
-			}
 		}
 	};
 
-	// Cache keyed by *incoming* FD number (per requirement); entries hold a dup() of FD.
-	std::unordered_map<int, std::shared_ptr<Entry>> cache_;
-
-	// Eviction + format tracking
-	int64_t ttl_ms_ = 5000;
+	std::vector<std::shared_ptr<Entry>> cache_;
+	CacheMode cache_mode_ = CacheMode::Reuse;
+	int64_t ttl_ms_ = 3000;
+	size_t max_cache_entries_ = 64;
+	int64_t last_purge_scan_ms_ = 0;
+	int64_t purge_scan_interval_ms_ = 1000;
 	int last_w_ = 0;
 	int last_h_ = 0;
-	int64_t last_purge_scan_ms_ = 0;
-	int64_t purge_scan_interval_ms_ = 250;
 
-	// EGL state
 	std::shared_ptr<EglState> egl_;
-	bool have_dma_buf_import_ = false;
-	bool have_mods_ = false;
-	PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR_ = nullptr;
-	PFNEGLDESTROYIMAGEKHRPROC p_eglDestroyImageKHR_ = nullptr;
+	bool have_modifiers_ = false;
+	PFNEGLCREATEIMAGEKHRPROC create_image_ = nullptr;
+	PFNEGLDESTROYIMAGEKHRPROC destroy_image_ = nullptr;
 
-	static inline const char* safe_str(const char* s) { return s ? s : ""; }
+	uint64_t frames_ = 0;
+	uint64_t cache_hits_ = 0;
+	uint64_t fresh_imports_ = 0;
+	uint64_t evictions_ = 0;
+	int debug_log_every_n_ = 0;
+
+	static const char *safeString(const char *value) { return value ? value : ""; }
+
+	static bool extensionSupported(EGLDisplay display, const char *extension) {
+		const char *extensions = eglQueryString(display, EGL_EXTENSIONS);
+		if (!extensions || !extension || !extension[0])
+			return false;
+		const size_t len = std::strlen(extension);
+		const char *current = extensions;
+		while ((current = std::strstr(current, extension)) != nullptr) {
+			const bool starts = current == extensions || current[-1] == ' ';
+			const bool ends = current[len] == '\0' || current[len] == ' ';
+			if (starts && ends)
+				return true;
+			current += len;
+		}
+		return false;
+	}
 
 	bool ensureEGL() {
-		if (egl_ && egl_->dpy != EGL_NO_DISPLAY) return true;
-		auto st = std::make_shared<EglState>();
-		st->dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-		if (st->dpy == EGL_NO_DISPLAY) {
+		if (egl_ && egl_->dpy != EGL_NO_DISPLAY)
+			return true;
+
+		auto state = std::make_shared<EglState>();
+		state->dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+		if (state->dpy == EGL_NO_DISPLAY) {
 			logstream << "drm2egl: eglGetDisplay failed";
 			return false;
 		}
-		EGLint major = 0, minor = 0;
-		if (!eglInitialize(st->dpy, &major, &minor)) {
+
+		EGLint major = 0;
+		EGLint minor = 0;
+		if (!eglInitialize(state->dpy, &major, &minor)) {
 			logstream << "drm2egl: eglInitialize failed";
 			return false;
 		}
-		const char* exts = eglQueryString(st->dpy, EGL_EXTENSIONS);
-		have_dma_buf_import_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import");
-		have_mods_ = exts && strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers");
-		if (!have_dma_buf_import_) {
-			logstream << "drm2egl: EGL_EXT_image_dma_buf_import missing, exts=" << safe_str(exts);
+
+		if (!extensionSupported(state->dpy, "EGL_EXT_image_dma_buf_import")) {
+			logstream << "drm2egl: EGL_EXT_image_dma_buf_import missing, exts="
+			          << safeString(eglQueryString(state->dpy, EGL_EXTENSIONS));
 			return false;
 		}
-		if (!p_eglCreateImageKHR_) {
-			p_eglCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-			if (!p_eglCreateImageKHR_) {
-				// Some stacks expose eglCreateImage (EGL 1.5) but we still prefer KHR; keep null if not present.
-				p_eglCreateImageKHR_ = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImage");
-			}
-		}
-		if (!p_eglDestroyImageKHR_) {
-			p_eglDestroyImageKHR_ = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-			if (!p_eglDestroyImageKHR_) {
-				p_eglDestroyImageKHR_ = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImage");
-			}
-		}
-		if (!p_eglCreateImageKHR_ || !p_eglDestroyImageKHR_) {
-			logstream << "drm2egl: failed to load eglCreateImageKHR/eglDestroyImageKHR";
+		have_modifiers_ = extensionSupported(state->dpy, "EGL_EXT_image_dma_buf_import_modifiers");
+
+		create_image_ = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
+		if (!create_image_)
+			create_image_ = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImage"));
+		destroy_image_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+		if (!destroy_image_)
+			destroy_image_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImage"));
+		if (!create_image_ || !destroy_image_) {
+			logstream << "drm2egl: failed to load eglCreateImage/eglDestroyImage";
 			return false;
 		}
-		st->destroy_fn = p_eglDestroyImageKHR_;
-		egl_ = std::move(st);
+
+		state->destroy_image = destroy_image_;
+		egl_ = std::move(state);
 		return true;
 	}
 
-	void maybeScanAndEvict(int64_t now_ms) {
-		if (last_purge_scan_ms_ != 0 && now_ms - last_purge_scan_ms_ < purge_scan_interval_ms_) return;
+	void maybeEvict(int64_t now_ms) {
+		if (last_purge_scan_ms_ && now_ms - last_purge_scan_ms_ < purge_scan_interval_ms_)
+			return;
 		last_purge_scan_ms_ = now_ms;
-		if (ttl_ms_ <= 0) return;
-
-		for (auto it = cache_.begin(); it != cache_.end();) {
-			const auto &sp = it->second;
-			if (!sp) {
-				it = cache_.erase(it);
-				continue;
-			}
-			if (now_ms - sp->last_seen_ms > ttl_ms_) {
-				it = cache_.erase(it);
-				continue;
-			}
-			++it;
-		}
+		if (ttl_ms_ <= 0)
+			return;
+		const auto before = cache_.size();
+		cache_.erase(std::remove_if(cache_.begin(), cache_.end(), [=](const auto &entry) {
+			return !entry || now_ms - entry->last_seen_ms >= ttl_ms_;
+		}), cache_.end());
+		evictions_ += before - cache_.size();
 	}
 
-	static bool fstat_identity(int fd, dev_t &out_dev, ino_t &out_ino) {
-		struct stat st;
-		if (fstat(fd, &st) != 0) return false;
-		out_dev = st.st_dev;
-		out_ino = st.st_ino;
-		return true;
-	}
-
-	std::shared_ptr<Entry> getOrCreateEntry(const AVDRMFrameDescriptor *desc, int in_fd_key, int width, int height, int64_t now_ms) {
-		if (!ensureEGL()) return nullptr;
-		if (!egl_) return nullptr;
-		if (!desc || desc->nb_layers < 1 || desc->layers[0].nb_planes < 1) return nullptr;
-
-		const AVDRMLayerDescriptor &layer = desc->layers[0];
-		const AVDRMPlaneDescriptor &pl = layer.planes[0];
-		const AVDRMObjectDescriptor &obj = desc->objects[pl.object_index];
-
-		// Support only single-plane ABGR/ARGB
-		if (!(layer.format == DRM_FORMAT_ABGR8888 || layer.format == DRM_FORMAT_ARGB8888)) {
-			logstream << "drm2egl: unsupported DRM fourcc=" << layer.format << " (need ABGR8888/ARGB8888)";
-			return nullptr;
-		}
-
-		// Resolution change purges the cache (per requirement)
-		if (last_w_ > 0 && last_h_ > 0 && (width != last_w_ || height != last_h_)) {
-			cache_.clear();
-		}
-		last_w_ = width;
-		last_h_ = height;
-
-		// Periodic eviction
-		maybeScanAndEvict(now_ms);
-
-		dev_t cur_dev{};
-		ino_t cur_ino{};
-		bool have_id = fstat_identity(obj.fd, cur_dev, cur_ino);
-
-		auto it = cache_.find(in_fd_key);
-		if (it != cache_.end() && it->second) {
-			auto &e = it->second;
-			bool ok = true;
-			if (have_id) ok &= (e->st_dev == cur_dev && e->st_ino == cur_ino);
-			ok &= (e->fourcc == layer.format);
-			ok &= (e->width == width && e->height == height);
-			ok &= (e->pitch == pl.pitch && e->offset == pl.offset);
-			const uint64_t mod = obj.format_modifier;
-			ok &= (e->modifier == mod);
-			if (ok && e->image != EGL_NO_IMAGE_KHR) {
-				e->last_seen_ms = now_ms;
-				return e;
-			}
-			// Stale / FD number reused / attributes changed
-			cache_.erase(it);
-		}
-
-		int dup_fd = dup(obj.fd);
+	std::shared_ptr<Entry> createAndInsert(const CacheKey &key, int fd, int64_t now_ms) {
+		const int dup_fd = dup(fd);
 		if (dup_fd < 0) {
-			logstream << "drm2egl: dup(fd) failed";
+			logstream << "drm2egl: dup(fd) failed: " << std::strerror(errno);
 			return nullptr;
 		}
 
-		// Create EGLImage from DMA-BUF
-		EGLint attrs[64];
-		int a = 0;
-		attrs[a++] = EGL_WIDTH;  attrs[a++] = (EGLint)width;
-		attrs[a++] = EGL_HEIGHT; attrs[a++] = (EGLint)height;
-		attrs[a++] = EGL_LINUX_DRM_FOURCC_EXT; attrs[a++] = (EGLint)layer.format;
-		attrs[a++] = EGL_DMA_BUF_PLANE0_FD_EXT; attrs[a++] = (EGLint)dup_fd;
-		attrs[a++] = EGL_DMA_BUF_PLANE0_PITCH_EXT; attrs[a++] = (EGLint)pl.pitch;
-		attrs[a++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attrs[a++] = (EGLint)pl.offset;
-		if (have_mods_ && obj.format_modifier) {
-			EGLint mod_lo = (EGLint)(obj.format_modifier & 0xFFFFFFFFu);
-			EGLint mod_hi = (EGLint)(obj.format_modifier >> 32);
-			attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attrs[a++] = mod_lo;
-			attrs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attrs[a++] = mod_hi;
+		EGLint attrs[32];
+		int index = 0;
+		attrs[index++] = EGL_WIDTH;
+		attrs[index++] = static_cast<EGLint>(key.width);
+		attrs[index++] = EGL_HEIGHT;
+		attrs[index++] = static_cast<EGLint>(key.height);
+		attrs[index++] = EGL_LINUX_DRM_FOURCC_EXT;
+		attrs[index++] = static_cast<EGLint>(key.fourcc);
+		attrs[index++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+		attrs[index++] = dup_fd;
+		attrs[index++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+		attrs[index++] = static_cast<EGLint>(key.offset);
+		attrs[index++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+		attrs[index++] = static_cast<EGLint>(key.stride);
+		if (have_modifiers_ && key.modifier) {
+			attrs[index++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+			attrs[index++] = static_cast<EGLint>(key.modifier & 0xffffffffu);
+			attrs[index++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+			attrs[index++] = static_cast<EGLint>(key.modifier >> 32);
 		}
-		attrs[a++] = EGL_NONE;
+		attrs[index++] = EGL_NONE;
 
-		EGLImageKHR img = p_eglCreateImageKHR_(egl_->dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)nullptr, attrs);
-		if (img == EGL_NO_IMAGE_KHR) {
-			logstream << "drm2egl: eglCreateImageKHR failed for w=" << width << " h=" << height;
+		EGLImageKHR image = create_image_(egl_->dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+		                                  static_cast<EGLClientBuffer>(nullptr), attrs);
+		if (image == EGL_NO_IMAGE_KHR) {
+			logstream << "drm2egl: eglCreateImage failed for " << key.width << "x" << key.height
+			          << ", EGL error=" << eglGetError();
 			close(dup_fd);
 			return nullptr;
 		}
 
-		auto e = std::make_shared<Entry>();
-		e->egl = egl_;
-		e->image = img;
-		e->dup_fd = dup_fd;
-		e->fourcc = layer.format;
-		e->width = width;
-		e->height = height;
-		e->pitch = pl.pitch;
-		e->offset = pl.offset;
-		e->modifier = obj.format_modifier;
-		if (have_id) {
-			e->st_dev = cur_dev;
-			e->st_ino = cur_ino;
+		auto entry = std::make_shared<Entry>();
+		entry->egl = egl_;
+		entry->image = image;
+		entry->dup_fd = dup_fd;
+		entry->key = key;
+		entry->last_seen_ms = now_ms;
+
+		if (max_cache_entries_ > 0 && cache_.size() >= max_cache_entries_) {
+			auto oldest = std::min_element(cache_.begin(), cache_.end(), [](const auto &a, const auto &b) {
+				return a->last_seen_ms < b->last_seen_ms;
+			});
+			cache_.erase(oldest);
+			++evictions_;
 		}
-		e->last_seen_ms = now_ms;
-		cache_[in_fd_key] = e;
-		return e;
+		cache_.push_back(entry);
+		++fresh_imports_;
+		return entry;
+	}
+
+	std::shared_ptr<Entry> getOrCreateEntry(const AVDRMFrameDescriptor *desc, int width, int height,
+	                                        int64_t now_ms) {
+		if (!ensureEGL() || !desc || desc->nb_layers != 1 || desc->layers[0].nb_planes != 1)
+			return nullptr;
+
+		const AVDRMLayerDescriptor &layer = desc->layers[0];
+		const AVDRMPlaneDescriptor &plane = layer.planes[0];
+		if (plane.object_index < 0 || plane.object_index >= desc->nb_objects)
+			return nullptr;
+		const AVDRMObjectDescriptor &object = desc->objects[plane.object_index];
+		if (layer.format != DRM_FORMAT_ABGR8888 && layer.format != DRM_FORMAT_ARGB8888) {
+			logstream << "drm2egl: unsupported DRM fourcc=" << layer.format
+			          << " (need ABGR8888/ARGB8888)";
+			return nullptr;
+		}
+
+		struct stat statbuf{};
+		if (fstat(object.fd, &statbuf) != 0) {
+			logstream << "drm2egl: fstat(fd) failed: " << std::strerror(errno);
+			return nullptr;
+		}
+		CacheKey key{
+			statbuf.st_dev,
+			statbuf.st_ino,
+			static_cast<uint32_t>(width),
+			static_cast<uint32_t>(height),
+			static_cast<uint32_t>(plane.pitch),
+			layer.format,
+			object.format_modifier,
+			static_cast<uint64_t>(plane.offset),
+		};
+
+		if (last_w_ && (last_w_ != width || last_h_ != height)) {
+			evictions_ += cache_.size();
+			cache_.clear();
+		}
+		last_w_ = width;
+		last_h_ = height;
+		maybeEvict(now_ms);
+
+		if (cache_mode_ != CacheMode::Off) {
+			for (const auto &entry : cache_) {
+				if (!entry || !(entry->key == key))
+					continue;
+				entry->last_seen_ms = now_ms;
+				++cache_hits_;
+				return entry;
+			}
+		}
+
+		return createAndInsert(key, object.fd, now_ms);
 	}
 
 public:
-	using NodeSISO::NodeSISO;
+	using NodeSISO<av::VideoFrame, EglImageFrame>::NodeSISO;
 
 	void process() override {
-		av::VideoFrame in = this->source_->get();
-		if (!in) return;
-
-		if (in.raw()->format != AV_PIX_FMT_DRM_PRIME) {
-			// Can't pass through (output type differs); just drop.
+		av::VideoFrame input = this->source_->get();
+		if (!input)
 			return;
-		}
+		if (input.raw()->format != AV_PIX_FMT_DRM_PRIME)
+			return;
 
-		const AVDRMFrameDescriptor *desc = (const AVDRMFrameDescriptor*)in.raw()->data[0];
+		const auto *desc = reinterpret_cast<const AVDRMFrameDescriptor *>(input.raw()->data[0]);
 		if (!desc) {
 			logstream << "drm2egl: missing DRM descriptor";
 			return;
 		}
 
-		// Keyed by the dma-buf object fd (per requirement).
-		if (desc->nb_layers < 1 || desc->layers[0].nb_planes < 1) {
-			logstream << "drm2egl: unsupported layer/plane count";
+		auto entry = getOrCreateEntry(desc, input.width(), input.height(), wallclock.pts());
+		if (!entry)
 			return;
-		}
-		const AVDRMPlaneDescriptor &pl = desc->layers[0].planes[0];
-		const AVDRMObjectDescriptor &obj = desc->objects[pl.object_index];
-		const int in_fd_key = obj.fd;
 
-		const int W = in.width();
-		const int H = in.height();
-		const int64_t now_ms = wallclock.pts();
-
-		auto entry = getOrCreateEntry(desc, in_fd_key, W, H, now_ms);
-		if (!entry) return;
-
-		// Create holder token that keeps Entry alive until consumer releases.
-		auto token_sp = std::shared_ptr<EglImagePoolToken>(new EglImagePoolToken{
-			.release = [keep = entry]() mutable {
-				keep.reset();
-			}
+		auto token = std::shared_ptr<EglImagePoolToken>(new EglImagePoolToken{
+			.release = [keep = entry]() mutable { keep.reset(); },
 		});
-		std::shared_ptr<void> holder = token_sp;
-		EglImageFrame out(entry->image, W, H, in.pts(), in.timeBase(), holder);
-		this->sink_->put(out);
+		auto frame_lifetime = std::make_shared<av::VideoFrame>(input);
+		EglImageFrame output(entry->image, input.width(), input.height(), input.pts(),
+		                     input.timeBase(), token, frame_lifetime);
+		output.copyMetadata(input);
+		this->sink_->put(output);
+
+		++frames_;
+		if (debug_log_every_n_ > 0 && frames_ % static_cast<uint64_t>(debug_log_every_n_) == 0) {
+			logstream << "drm2egl: frames=" << frames_ << " hits=" << cache_hits_
+			          << " imports=" << fresh_imports_ << " evictions=" << evictions_
+			          << " cache=" << cache_.size();
+		}
 	}
 
 	~DRMPrimeToEglImage() override {
@@ -300,21 +324,33 @@ public:
 	static std::shared_ptr<DRMPrimeToEglImage> create(NodeCreationInfo &nci) {
 		EdgeManager &edges = nci.edges;
 		const Parameters &params = nci.params;
-		std::shared_ptr<Edge<av::VideoFrame>> src = edges.find<av::VideoFrame>(params["src"]);
-		std::shared_ptr<Edge<EglImageFrame>> dst = edges.find<EglImageFrame>(params["dst"]);
-		auto r = std::make_shared<DRMPrimeToEglImage>(
+		auto src = edges.find<av::VideoFrame>(params["src"]);
+		auto dst = edges.find<EglImageFrame>(params["dst"]);
+		auto node = std::make_shared<DRMPrimeToEglImage>(
 			make_unique<EdgeSource<av::VideoFrame>>(src),
-			make_unique<EdgeSink<EglImageFrame>>(dst)
-		);
-		if (params.count("ttl")) {
-			const float ttl_s = params["ttl"].get<float>();
-			if (ttl_s < 0) throw Error("drm_prime_to_egl_image: ttl must be >= 0");
-			r->ttl_ms_ = (int64_t)(ttl_s * 1000.0f + 0.5f);
-		}
-		return r;
+			make_unique<EdgeSink<EglImageFrame>>(dst));
+
+		const std::string mode = params.value("cache_mode", std::string("reuse"));
+		if (mode == "reuse")
+			node->cache_mode_ = CacheMode::Reuse;
+		else if (mode == "off")
+			node->cache_mode_ = CacheMode::Off;
+		else
+			throw Error("drm_prime_to_egl_image: cache_mode must be reuse or off");
+
+		const double ttl_seconds = params.value("ttl", 3.0);
+		if (ttl_seconds < 0)
+			throw Error("drm_prime_to_egl_image: ttl must be >= 0");
+		node->ttl_ms_ = static_cast<int64_t>(ttl_seconds * 1000.0 + 0.5);
+		const int max_entries = params.value("max_cache_entries", 64);
+		if (max_entries < 1)
+			throw Error("drm_prime_to_egl_image: max_cache_entries must be >= 1");
+		node->max_cache_entries_ = static_cast<size_t>(max_entries);
+		node->debug_log_every_n_ = params.value("debug_log_every_n", 0);
+		if (node->debug_log_every_n_ < 0)
+			throw Error("drm_prime_to_egl_image: debug_log_every_n must be >= 0");
+		return node;
 	}
 };
 
 DECLNODE(drm_prime_to_egl_image, DRMPrimeToEglImage);
-
-

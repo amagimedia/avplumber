@@ -1,6 +1,7 @@
 #include "mixer_orchestrator.hpp"
 #include "avutils.hpp"
 #include "graph_interfaces.hpp"
+#include "mixer/OutputSnapshot.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <utility>
+#include <tuple>
 
 struct MixerTransitionScheduler::Impl {
     struct Task {
@@ -115,7 +117,6 @@ void MixerTransitionScheduler::shutdown() {
 namespace {
 
 constexpr int64_t kWipeSwitchGraceMs = 500;
-constexpr int64_t kFadeColdPrepMs = 700;
 constexpr int64_t kWipeReadyPollMs = 5;
 constexpr int64_t kWipeReadyTimeoutMs = 5000;
 constexpr int kOverlayDirectInput = 0;
@@ -252,9 +253,11 @@ struct OverlayReadyResult {
 WipeReadyResult waitForWipeOverlayReady(std::shared_ptr<NodeManager> nodes,
                                         const std::string& edge_name,
                                         av::Timestamp initial_ts,
-                                        int64_t earliest_visible_pts_ms) {
+                                        int64_t earliest_visible_pts_ms,
+                                        const std::shared_ptr<MixerState>& state, uint64_t generation) {
     WipeReadyResult result;
     while (result.waited_ms < kWipeReadyTimeoutMs) {
+        if (state->transition_generation.load() != generation) return result;
         const bool time_ready = wallclock.pts() >= earliest_visible_pts_ms;
         av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
         const bool frame_ready = ts.isValid() && (!initial_ts.isValid() || ts > initial_ts);
@@ -460,16 +463,15 @@ Parameters compositorLayersFromScene(const MixerState& st, const SceneDefinition
 }
 
 class TransitionPrepGuard {
-    std::shared_ptr<MixerState> state_;
+    std::function<void()> abort_;
     bool active_ = true;
 
 public:
-    explicit TransitionPrepGuard(std::shared_ptr<MixerState> state)
-        : state_(std::move(state)) {}
+    explicit TransitionPrepGuard(std::function<void()> abort)
+        : abort_(std::move(abort)) {}
 
     ~TransitionPrepGuard() {
-        if (active_)
-            state_->transition_mode = MixerState::TransitionMode::Idle;
+        if (active_) abort_();
     }
 
     void release() {
@@ -644,6 +646,82 @@ void MixerOrchestrator::ensureIdle() const {
     auto mode = state_->transition_mode.load();
     if (mode != MixerState::TransitionMode::Idle)
         throw Error("mixer: transition already in progress");
+}
+
+void MixerOrchestrator::interruptTransition() {
+    if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
+    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
+        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+    {
+        std::lock_guard<std::mutex> lock(snapshot->mutex);
+        if (!snapshot->output_connected)
+            throw Error("mixer: interruption requires mixer_snapshot output and slot nodes");
+        snapshot->frames.capture(state_->pgmSourceSwitcherIndex());
+    }
+    const auto previous_mode = state_->transition_mode.load();
+    const auto generation = ++state_->transition_generation;
+    TransitionPrepGuard guard([&] { abortTransition(generation); });
+    restoreProgramRouting();
+    if (previous_mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty()) {
+        // Group management retires the old decoder independently. Waiting here
+        // would add teardown time to every correction, including a hard cut.
+        stopGroup(state_->wipe_group_name);
+    }
+    state_->pvw_scene_name.clear();
+    state_->transition_mode = MixerState::TransitionMode::Idle;
+    {
+        std::lock_guard<std::mutex> lock(snapshot->mutex);
+        snapshot->frames.arm(wallclock.pts() * 1000000);
+    }
+    guard.release();
+    logstream << "mixer: interrupted transition; retained current output picture";
+}
+
+void MixerOrchestrator::restoreProgramRouting() {
+    // Remove scheduled controls as well as routes; cancelling a worker alone
+    // cannot cancel a future selector flip.
+    if (auto scene = state_->scenes.find(state_->transition_scene_name); scene != state_->scenes.end()) {
+        for (const auto& control : scene->second.controls)
+            timeline_->clearKey(control.node_name, control.key);
+    }
+    applyPostTransitionRouting(state_->pgm_is_slot_a, state_->pgm_scene_name);
+    scheduleSceneControls(state_->scenes.at(state_->pgm_scene_name), wallclock.pts());
+    for (const auto& [name, key, value] : std::vector<std::tuple<std::string, std::string, int>>{
+            {state_->wipe_selector_name, "active", 0}, {state_->wipe_otm_name, "outputs", 1}}) {
+        if (name.empty()) continue;
+        timeline_->clearKey(name, key);
+        setNodeObject(name, key, Parameters(value));
+    }
+}
+
+void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
+    // All callers hold the control mutex. A cancelled worker must never undo
+    // the routing of its replacement transition.
+    if (state_->transition_generation != generation) return;
+    ++state_->transition_generation;
+    const auto mode = state_->transition_mode.load();
+    auto cleanup = [](auto action) {
+        try { action(); }
+        catch (const std::exception& e) {
+            logstream << "mixer: transition abort cleanup failed: " << e.what();
+        }
+    };
+    cleanup([&] { restoreProgramRouting(); });
+    if (mode == MixerState::TransitionMode::Wipe && !state_->wipe_group_name.empty())
+        cleanup([&] { stopGroup(state_->wipe_group_name); });
+    // Remove slot substitution even when the target never produced a frame.
+    // The output gate still waits for a fresh program frame before releasing.
+    cleanup([&] { finishSnapshot(); });
+    state_->pvw_scene_name.clear();
+    state_->transition_mode = MixerState::TransitionMode::Idle;
+}
+
+void MixerOrchestrator::finishSnapshot() {
+    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
+        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+    std::lock_guard<std::mutex> lock(snapshot->mutex);
+    snapshot->frames.finish();
+    snapshot->frames.arm(wallclock.pts() * 1000000, false);
 }
 
 int64_t MixerOrchestrator::resolveTransitionStartPts(int64_t requested_start_pts_ms) const {
@@ -833,12 +911,21 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
     // its input edges. If left there, the next activation starts by rendering
     // stale frames and appears to lag behind the scene switch.
     flushSlotEdges(is_slot_a);
+    // Reset on the compositor's worker thread and reject frames from before
+    // this load, including those still travelling through live upstream edges.
+    resetInputIf(nodes_, slot.compositor_name);
 
     for (const auto& [src_name, layout] : scene.sources) {
         auto src_it = state_->sources.find(src_name);
         if (src_it == state_->sources.end()) continue;
         const auto& info = src_it->second;
         const std::string& cs_node = is_slot_a ? info.cs_node_a : info.cs_node_b;
+
+        if (cs_node.empty()) {
+            if (!layout.crop_scale_graph.empty())
+                throw Error("mixer: source " + src_name + " has no filter node for its scene graph");
+            continue;
+        }
 
         // Only restart the crop/scale node when the graph string actually changed.
         // Restarting a filter_video node tears down and rebuilds its FFmpeg filter
@@ -963,24 +1050,33 @@ void MixerOrchestrator::deferredCleanup(
         uint64_t transition_generation,
         bool new_pgm_is_slot_a,
         std::string new_pgm_scene,
-        std::vector<std::string> nodes_to_delete) {
+        int64_t end_pts_ms) {
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
 
-    for (const auto& name : nodes_to_delete) {
-        try {
-            auto node = nodes->node_if_exists(name);
-            if (node) nodes->deleteNode(name);
-        } catch (const std::exception& e) {
-            logstream << "mixer: deferred cleanup error deleting " << name << ": " << e.what();
-        }
+    // Media time can lag wall time by the configured playout budget. Finish
+    // only after the selector has produced the first frame at/after the end,
+    // then release the controls immediately. Do not park the scheduler worker
+    // while waiting: other commands and shutdown must remain responsive.
+    const auto presented = edgeLastTsIfExists(nodes,
+        firstDstEdgeName(nodes, state->source_switcher_name));
+    if (!presented.isValid() || presented < av::Timestamp(end_pts_ms, {1, 1000})) {
+        scheduler->postAfter("mixer.fade.presented", 2,
+            [nodes, state, timeline, scheduler, transition_generation,
+             new_pgm_is_slot_a, new_pgm_scene, end_pts_ms] {
+                deferredCleanup(nodes, state, timeline, scheduler, transition_generation,
+                                new_pgm_is_slot_a, new_pgm_scene, end_pts_ms);
+            });
+        return;
     }
+
     std::lock_guard<std::mutex> lock(state->mutex);
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Crossfade))
         return;
     try {
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
         orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
+        orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: deferred cleanup error restoring routing: " << e.what();
     }
@@ -1015,8 +1111,7 @@ void MixerOrchestrator::readyCutTask(
                 logstream << "mixer ready cut: missing ready edge " << ready_edge_name
                           << " for scene=" << new_pgm_scene;
                 std::lock_guard<std::mutex> lock(state->mutex);
-                if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Cut))
-                    state->transition_mode = MixerState::TransitionMode::Idle;
+                MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
                 return;
             }
             av::Timestamp ts = edge->lastTS();
@@ -1039,6 +1134,7 @@ void MixerOrchestrator::readyCutTask(
     try {
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
         orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
+        orch.finishSnapshot();
     } catch (const std::exception& e) {
         logstream << "mixer: ready cut error restoring routing: " << e.what();
     }
@@ -1054,12 +1150,14 @@ void MixerOrchestrator::readyCutTask(
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    ensureIdle();
-
+    if (!state_->scenes.count(scene_name))
+        throw Error("mixer: unknown scene: " + scene_name);
     int64_t T_cut = resolveTransitionStartPts(start_pts_ms);
+    interruptTransition();
     state_->transition_mode = MixerState::TransitionMode::Cut;
     uint64_t transition_generation = ++state_->transition_generation;
-    TransitionPrepGuard prep_guard(state_);
+    state_->transition_scene_name = scene_name;
+    TransitionPrepGuard prep_guard([&] { abortTransition(transition_generation); });
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     bool was_preloaded = state_->pvw_scene_name == scene_name;
 
@@ -1082,71 +1180,89 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
 }
 
 // ---------------------------------------------------------------------------
-// fade: crossfade transition.  All timeline values are computed from the
-// pre-flip state.  The state flip + transition node deletion are deferred.
+// fade: crossfade transition through the permanent preheated CUDA filter.
+// All timeline values are computed from the pre-flip state.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms) {
+void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
+                             int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    ensureIdle();
-
-    int64_t T_start = resolveTransitionStartPts(start_pts_ms);
+    if (!state_->scenes.count(scene_name)) throw Error("mixer: unknown scene: " + scene_name);
+    if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid fade duration");
+    const auto start = resolveTransitionStartPts(start_pts_ms);
+    interruptTransition();
     state_->transition_mode = MixerState::TransitionMode::Crossfade;
-    uint64_t transition_generation = ++state_->transition_generation;
-    TransitionPrepGuard prep_guard(state_);
+    const auto generation = ++state_->transition_generation;
+    state_->transition_scene_name = scene_name;
+    TransitionPrepGuard guard([&] { abortTransition(generation); });
+    cutInternal(scene_name, start);
+    const auto initial = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));
+    postTransitionTask("mixer.fade.ready", 0,
+        [orch = *this, scene_name, duration_sec, start, generation, initial]() mutable {
+            orch.startFadeWhenReady(scene_name, duration_sec, start, generation, initial, wallclock.pts() + 2000);
+        });
+    guard.release();
+}
 
+void MixerOrchestrator::startFadeWhenReady(std::string scene_name, double duration_sec,
+        int64_t requested_pts, uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!transitionIsCurrent(state_, generation, MixerState::TransitionMode::Crossfade)) return;
+    TransitionPrepGuard guard([&] { abortTransition(generation); });
+    const auto ready = edgeLastTsIfExists(nodes_, firstDstEdgeName(nodes_, state_->pvwSlot().post_otm_name));
+    auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
+        nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
+    bool output_held;
+    {
+        std::lock_guard<std::mutex> snapshot_lock(snapshot->mutex);
+        output_held = snapshot->frames.holding();
+    }
+    if (output_held || !ready.isValid() || (initial_ts.isValid() && ready <= initial_ts)) {
+        if (wallclock.pts() >= deadline_ms) {
+            throw Error("mixer.fade: target scene did not produce a fresh frame within 2 seconds");
+        }
+        postTransitionTask("mixer.fade.ready", 2,
+            [orch = *this, scene_name, duration_sec, requested_pts, generation, initial_ts, deadline_ms]() mutable {
+                orch.startFadeWhenReady(scene_name, duration_sec, requested_pts, generation, initial_ts, deadline_ms);
+            });
+        guard.release();
+        return;
+    }
+    startFade(scene_name, duration_sec, std::max(requested_pts, wallclock.pts()), generation);
+    guard.release();
+}
+
+void MixerOrchestrator::startFade(const std::string& scene_name, double duration_sec,
+                                 int64_t T_start, uint64_t transition_generation) {
     // Capture all needed values from pre-flip state
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
-    bool was_preloaded = state_->pvw_scene_name == scene_name;
     uint32_t pvw_bit = state_->pvwOutputBit();
     const auto& target_slot = pvw_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot    = pvw_is_slot_a ? state_->slot_b : state_->slot_a;
     int pvw_sw_idx = state_->pvwSourceSwitcherIndex();
 
-    if (!was_preloaded) {
-        T_start = std::max(T_start, wallclock.pts() + kFadeColdPrepMs);
-    }
-
-    // 1. Ensure target scene is loaded into PVW slot.
-    if (was_preloaded) {
-        logstream << "mixer fade: reusing preloaded PVW scene=" << scene_name;
-    } else {
-        loadSceneIntoSlot(pvw_is_slot_a, scene_name);
-    }
-
     auto& target_scene = state_->scenes.at(scene_name);
     scheduleSceneControls(target_scene, T_start);
 
-    // 2. Create transition_cuda with direction-dependent alpha expression
+    // 2. Update the preheated transition_cuda expression while its input
+    // branches are idle. The filter graph itself remains running.
     std::string progress_expr = "clip((t-" + std::to_string(T_start / 1000.0) +
-        ")/" + std::to_string(duration_sec) + "\\,0\\,1)";
+        ")/" + std::to_string(duration_sec) + ",0,1)";
     std::string alpha_expr = pvw_is_slot_a ? "1-" + progress_expr : progress_expr;
-
-    std::string slot_a_trans_edge = edgeNameAt(nodes_, state_->slot_a.post_otm_name, "dst", 1);
-    std::string slot_b_trans_edge = edgeNameAt(nodes_, state_->slot_b.post_otm_name, "dst", 1);
-    std::string transition_out_edge = edgeNameAt(
-        nodes_, state_->source_switcher_name, "src", MixerState::transSourceSwitcherIndex());
-    if (slot_a_trans_edge.empty() || slot_b_trans_edge.empty() || transition_out_edge.empty())
-        throw Error("mixer.fade: graph is missing transition edges");
 
     std::string transition_node_name = state_->source_switcher_name.empty()
         ? transition_node_name_
         : state_->source_switcher_name + "_transition";
-
-    Parameters trans_params;
-    trans_params["type"] = "filter_video";
-    trans_params["name"] = transition_node_name;
-    trans_params["src"] = Parameters::array({slot_a_trans_edge, slot_b_trans_edge});
-    trans_params["dst"] = transition_out_edge;
-    trans_params["graph"] = "transition_cuda=alpha='" + alpha_expr + "':eval=frame";
-    trans_params["hwaccel"] = state_->hwaccel_name;
-    trans_params["defer_preliminary_init"] = true;
-    trans_params["group"] = "mixer_trans";
-    createAndStartNode(trans_params);
+    Parameters alpha_command = {
+        {"target", "transition_cuda"},
+        {"command", "alpha"},
+        {"argument", alpha_expr},
+    };
+    setNodeObject(transition_node_name, "filter_command", alpha_command);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
     // 4–5. Timeline: priming post-scene otms (direct+trans) then visible-path switches
-    int64_t T_prep = T_start - (was_preloaded ? state_->switch_margin_ms : kFadeColdPrepMs);
+    int64_t T_prep = wallclock.pts();
     timeline_->set(state_->slot_a.post_otm_name, "outputs", T_prep, Parameters(3u)); // 0b11 warmup
     timeline_->set(state_->slot_b.post_otm_name, "outputs", T_prep, Parameters(3u));
 
@@ -1175,16 +1291,14 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
     publishRoutedRoutesForProgramOnly(pvw_is_slot_a, target_scene, T_cleanup, false);
     timeline_->set(old_slot.compositor_name, "active_inputs", T_cleanup, Parameters(0u));
 
-    // 6. Deferred cleanup: delete transition node + flip state
-    int64_t flip_delay = (T_cleanup - wallclock.pts()) + 300;
+    // 6. Deferred state/routing cleanup. The transition node stays hot.
+    int64_t flip_delay = T_end - wallclock.pts();
     postTransitionTask("mixer.fade.cleanup", flip_delay,
         [nodes = nodes_, state = state_, timeline = timeline_, scheduler = scheduler_,
-         transition_generation, pvw_is_slot_a, scene_name, transition_node_name] {
+         transition_generation, pvw_is_slot_a, scene_name, T_end] {
             deferredCleanup(nodes, state, timeline, scheduler, transition_generation,
-                            pvw_is_slot_a, scene_name,
-                            std::vector<std::string>{transition_node_name});
+                            pvw_is_slot_a, scene_name, T_end);
         });
-    prep_guard.release();
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,16 +1306,7 @@ void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
 // Phase 1 (midpoint): PVW slot prep + timeline source_switcher (hidden under opaque wipe).
 // Phase 2 (end): routing cleanup, tear down wipe chain, flip state.
 //
-// The transition_mode stays at Wipe through Phase 2 — including the
-// EOF-drain wait, the kWipeOverlayTailMs grace, and the kWipeSwitchGraceMs
-// pause before group teardown. That window is typically ~500-1500ms after
-// the wipe pixels have visually finished, during which any new mixer.cut /
-// mixer.fade / mixer.wipe will reject with "transition already in progress".
-// This is intentional: tearing down the wipe subgraph concurrently with a
-// new transition's setup would race on shared nodes (wipe_sel, post_otm).
-// Controllers that want to react at the visual end of the wipe must retry
-// after this window — the public mixer.cut/fade/wipe entry points reject
-// (no auto-queueing) for the entire Phase 2 duration.
+// Generation checks prevent an interrupted wipe from changing new routing.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::runWipeMidpointAndCleanup(
         std::shared_ptr<NodeManager> nodes,
@@ -1223,8 +1328,9 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
             return;
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
 
-        // Reconfigure PVW slot for the target scene
-        orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
+        // Keep a prewarmed scene intact at the wipe midpoint.
+        if (state->pvw_scene_name != scene_name)
+            orch.loadSceneIntoSlot(new_pgm_is_slot_a, scene_name);
 
         // Same post-scene OTM flip as cutInternal: out_sel will read PVW `sc*_direct`, so that slot's
         // `one_to_many` must have outputs=1. If it stays 0 (idle default), frames are popped from
@@ -1296,7 +1402,10 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
             std::this_thread::sleep_for(std::chrono::milliseconds(kWipeDrainPollMs));
             waited += kWipeDrainPollMs;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kWipeOverlayTailMs));
+        for (int64_t tail = 0; tail < kWipeOverlayTailMs; tail += 5) {
+            if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         logstream << "mixer wipe: drained " << state->wipe_tail_edge << " in " << waited
                   << "ms + " << kWipeOverlayTailMs << "ms overlay tail";
     }
@@ -1340,7 +1449,10 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         return;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(kWipeSwitchGraceMs));
+    for (int64_t waited = 0; waited < kWipeSwitchGraceMs; waited += 5) {
+        if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
         return;
 
@@ -1361,6 +1473,7 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
             orch.flushWipeEdges();
         }
 
+        orch.finishSnapshot();
         state->pgm_is_slot_a = new_pgm_is_slot_a;
         state->pgm_scene_name = scene_name;
         state->pvw_scene_name = "";
@@ -1393,7 +1506,11 @@ int64_t MixerOrchestrator::prepareWipe(
     av::Timestamp overlay_initial_ts = NOTS;
     int64_t T_prep = wallclock.pts();
 
+    // Only the serialized transition worker reuses wipe nodes. Finish retiring
+    // the previous clip outside the control mutex, then recheck cancellation.
+    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
     try {
+        nodes->group(state->wipe_group_name)->stopNodesAndWait();
         std::lock_guard<std::mutex> lock(state->mutex);
         if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
             return -1;
@@ -1424,36 +1541,18 @@ int64_t MixerOrchestrator::prepareWipe(
     } catch (const std::exception& e) {
         logstream << "mixer: wipe prep error: " << e.what();
         std::lock_guard<std::mutex> lock(state->mutex);
-        if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            state->transition_mode = MixerState::TransitionMode::Idle;
+        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
         return -1;
     }
 
     WipeReadyResult ready = waitForWipeOverlayReady(
-        nodes, overlay_edge_name, overlay_initial_ts, earliest_visible_pts_ms);
+        nodes, overlay_edge_name, overlay_initial_ts, earliest_visible_pts_ms, state, transition_generation);
+    if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) return -1;
     if (!ready.ready) {
         logstream << "mixer: wipe overlay did not become ready within " << kWipeReadyTimeoutMs
                   << "ms: edge=" << overlay_edge_name << " last_ts=" << ready.ready_ts;
-        try {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe)) {
-                MixerOrchestrator orch(nodes, state, timeline, scheduler);
-                int64_t Tw = wallclock.pts();
-                timeline->clearKey(state->wipe_otm_name, "outputs");
-                orch.setNodeObject(state->wipe_otm_name, "outputs", Parameters(1u));
-                timeline->set(state->wipe_otm_name, "outputs", Tw, Parameters(1u));
-                timeline->clearKey(state->wipe_selector_name, "active");
-                orch.setNodeObject(state->wipe_selector_name, "active", Parameters(0));
-                timeline->set(state->wipe_selector_name, "active", Tw, Parameters(0));
-                orch.stopGroup(state->wipe_group_name);
-                orch.flushWipeEdges();
-                state->transition_mode = MixerState::TransitionMode::Idle;
-            }
-        } catch (const std::exception& e) {
-            logstream << "mixer: wipe prep cleanup error: " << e.what();
-            if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-                state->transition_mode = MixerState::TransitionMode::Idle;
-        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
         return -1;
     }
 
@@ -1474,8 +1573,7 @@ int64_t MixerOrchestrator::prepareWipe(
     } catch (const std::exception& e) {
         logstream << "mixer: wipe visible switch error: " << e.what();
         std::lock_guard<std::mutex> lock(state->mutex);
-        if (transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
-            state->transition_mode = MixerState::TransitionMode::Idle;
+        MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
         return -1;
     }
 }
@@ -1483,18 +1581,23 @@ int64_t MixerOrchestrator::prepareWipe(
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
                              int64_t start_pts_ms) {
     std::lock_guard<std::mutex> lock(state_->mutex);
-    ensureIdle();
+    if (!state_->scenes.count(scene_name))
+        throw Error("mixer: unknown scene: " + scene_name);
 
     if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty())
         throw Error("mixer: wipe requires wipe_otm and wipe_selector nodes (see mixer.init)");
     if (state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
         throw Error("mixer: wipe requires wipe_group and wipe_input_node (see mixer.init)");
 
+    if (!std::isfinite(duration_sec) || duration_sec <= 0) throw Error("mixer: invalid wipe duration");
     int64_t T_start = resolveTransitionStartPts(start_pts_ms);
+    interruptTransition();
     state_->transition_mode = MixerState::TransitionMode::Wipe;
     uint64_t transition_generation = ++state_->transition_generation;
-    TransitionPrepGuard prep_guard(state_);
+    state_->transition_scene_name = scene_name;
+    TransitionPrepGuard prep_guard([&] { abortTransition(transition_generation); });
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
+    cutInternal(scene_name, T_start);
     scheduleSceneControls(state_->scenes.at(scene_name), T_start);
 
     int64_t total_ms = (int64_t)(duration_sec * 1000);

@@ -1,0 +1,20 @@
+general: {
+	json = "compact"
+	base_path = "/janus"
+	http = true
+	port = __JANUS_HTTP_PORT__
+	ip = "0.0.0.0"
+	https = false
+}
+
+admin: {
+	admin_http = false
+	admin_https = false
+}
+
+cors: {
+	allow_origin = "*"
+}
+
+certificates: {
+}

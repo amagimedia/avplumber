@@ -1,8 +1,18 @@
-from pyplumber.auto_mixer.rtcp_feedback import (
-    build_rtcp_fir,
-    build_rtcp_pli,
-    rtcp_keyframe_requests,
-)
+import importlib.util
+from pathlib import Path
+import sys
+
+
+_MODULE_PATH = Path(__file__).resolve().parents[1] / "pyplumber" / "rtcp_feedback.py"
+_SPEC = importlib.util.spec_from_file_location("rtcp_feedback", _MODULE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
+_SPEC.loader.exec_module(_MODULE)
+
+build_rtcp_fir = _MODULE.build_rtcp_fir
+build_rtcp_pli = _MODULE.build_rtcp_pli
+rtcp_keyframe_requests = _MODULE.rtcp_keyframe_requests
 
 
 def test_detects_psfb_pli():

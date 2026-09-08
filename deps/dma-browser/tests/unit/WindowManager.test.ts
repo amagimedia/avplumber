@@ -2,11 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { WindowManager } from '../../src/main/WindowManager';
 import type { IManagedWindow, IManagedWindowFactory } from '../../src/main/ManagedWindow';
 import type { WindowConfig, WindowSnapshot } from '../../src/main/config/WindowConfig';
-import {
-  CapacityError,
-  ConflictError,
-  NotFoundError,
-} from '../../src/main/rest/errors';
+import { CapacityError, ConflictError, NotFoundError } from '../../src/main/rest/errors';
 
 function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {}): IManagedWindow {
   const snapshot: WindowSnapshot = {
@@ -22,6 +18,8 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
       droppedFrames: 0,
       droppedReasons: {},
       txFrameCount: 0,
+      releasedFrameCount: 0,
+      retainedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };

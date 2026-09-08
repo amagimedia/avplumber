@@ -50,7 +50,7 @@ Development on Windows can be done using Docker and VSCode Dev Containers.
 
 Development container comes with all required dependencies and clangd installed.
 
-### Demo
+### Test stream demo
 
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
 
@@ -69,6 +69,23 @@ This demo uses [MediaMTX](https://github.com/bluenviron/mediamtx) as streaming s
     brew install docker docker-compose colima
     colima start
 
+## Demos
+
+Start with the [demo setup guide](demos/README.md) for public-source Docker
+builds, NVIDIA requirements, and a local WebRTC preview.
+
+| Demo | What it demonstrates | Requirements |
+| --- | --- | --- |
+| [Mixer](demos/mixer/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) | Mix video inputs into portrait fullscreen or grid layouts; Preview/Program, Cut, Fade, and transparent media wipes. | NVIDIA decode/encode; patched FFmpeg included in Docker build. |
+| [Playlist](demos/playlist/README.md) | Play, loop, reorder, and edit clips with a terminal UI and generated test media. | NVIDIA + Janus for video; UI-only preview works without a GPU. |
+| [Replay](demos/replay/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [graph](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-graph.png) | Convert a file to seekable replay; seek by frame or time, scrub, change speed, and play in reverse. | NVIDIA + Janus; convert the input first. |
+| [Browser capture](demos/dmabuf-browser/README.md) · [watch demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) | Capture HTML through DMA-BUF and compose browser sources into a GPU grid with WebRTC preview. | NVIDIA graphics driver + DRM/EGL; Docker stack includes Electron and Janus. |
+| [CUDA overlay validation](demos/cuda-overlay/README.md) · [view demo](https://amagimedia.github.io/avplumber/demos/cuda-overlay/docs/) | Compare up to 16 composited inputs against a CPU reference; inspect images and a pass/fail report. | NVIDIA GPU; Docker generates the fixtures. |
+
+These demos produce video only. For smaller building blocks, see the
+[fixed graph examples](examples/README.md) and
+[Python examples](pyplumber/examples/README.md).
+
 ## Build process details
 
 The build is driven by Makefile variables. Set them on the `make` command line, e.g.:
@@ -79,21 +96,24 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
     -   Debug enables debug-only nodes (`jittergen`, `delaygen`).
     -   Release sets compiler flags to more optimization.
 -   HAVE_CUDA=1: enable CUDA support and CUDA-based nodes. Uses dynlink loader, so does not require anything during compilation and lack of CUDA libraries in runtime is non-fatal (nodes not using CUDA will work normally)
+-   HAVE_NVJPEG=1: enable `nvjpeg_enc`. Requires `HAVE_CUDA=1` plus nvJPEG and CUDA runtime development libraries. Disabled by default.
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
--   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
+-   HAVE_TENSORRT=1: enable TensorRT inference nodes (`cuda_infer_yolo`, `cuda_infer_rtdetr`, `cuda_infer_scene_cut_onnx`). Links `-lnvinfer -lnvinfer_plugin`. Optionally set `TENSORRT_ROOT=/path/to/TensorRT`.
+-   NEURAL_NET=1: enable retained neural drawing, tracking, inference, learned scene-cut, and reframing nodes. `NEURAL_NET_COMMON=1` and `NEURAL_NET_SPECIFIC=1` are supported as compatibility aliases when `NEURAL_NET` is not set explicitly.
 -   HAVE_JACK=1: enable `jack_sink`. Links `-ljack`. Requires `libjack-dev`.
--   HAVE_NVCC=1: build CUDA PTX used by CUDA processing nodes (`cuda_to_egl_image`, `cuda_infer_yolo`, `cuda_infer_rtdetr`). Requires `nvcc`.
--   HAVE_SCTE35=1: build SCTE35 libraries and `scte35_parse` node (used for inserting [ads](https://ublockorigin.com/) and switching to regional programs in TV distribution systems)
+-   HAVE_NVCC=1: build CUDA module images used by CUDA processing nodes, including `luma_diff`, `hog_diff`, and TensorRT inference. Requires `nvcc`.
 -   EMBED_IN=obs: [builds nodes and adds fields specific to OBS source plugin](library_examples/obs-avplumber-source/README.md)
 
 Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
--   `cuda_infer_yolo` builds only when `HAVE_CUDA=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
+-   `nvjpeg_enc` builds only when `HAVE_CUDA=1 HAVE_NVJPEG=1`.
+-   `luma_diff` and `hog_diff` build only when `HAVE_CUDA=1 HAVE_NVCC=1`.
+-   TensorRT inference nodes build only when `HAVE_CUDA=1 NEURAL_NET=1 HAVE_TENSORRT=1 HAVE_NVCC=1`.
+-   `cuda_camera_motion` builds only when `HAVE_CUDA=1 HAVE_NVOF=1` and the dense NVOF headers are available; `HAVE_NVCC=1` additionally enables its GPU IRLS backend.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`
--   `scte35_parse` builds only when `HAVE_SCTE35=1`
 
 
 ### Using as a library

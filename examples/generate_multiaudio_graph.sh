@@ -9,7 +9,7 @@ for i in `seq 0 1 $[AUDIO_STREAMS-1]`; do
 done
 
 echo 'queue.plan_capacity in_v_dec 240
-node.add {"url":"https://dqktq9708cqse.cloudfront.net/cards/broken_stream_board_v03.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
+node.add {"url":"/path/to/slate.jpg","type":"input","auto_restart":"off","name":"slate_input","group":"slate_loader","dst":"slate_input"}
 node.add {"routing":{"v:0":"slate_vpkt"},"type":"demux","auto_restart":"off","name":"slate_demux","group":"slate_loader","src":"slate_input"}
 node.add {"type":"dec_video","auto_restart":"off","name":"slate_decoder","group":"slate_loader","src":"slate_vpkt","dst":"slate_vfrm"}
 node.add {"dst_width":1920,"dst_height":1080,"dst_pixel_format":"yuv420p","flags":["SWS_LANCZOS"],"type":"rescale_video","auto_restart":"off","name":"slate_scaler","group":"slate_loader","src":"slate_vfrm","dst":"slate_final"}

@@ -1,0 +1,866 @@
+{
+  "conditions": {
+    "inputs": "16 native1920x1080@60 H264 testsrc2 sources, source/frame barcode, 2 B-frames",
+    "output": "1080x1920@60 NVENC 8Mbit/s",
+    "clocks": "automatic",
+    "host": "Tesla T4 /16vCPU",
+    "other_gpu_work": "Sway and Janus browser viewer; browser DMA-BUF workload stopped",
+    "generation_during_measurement": false,
+    "date": "2026-09-07",
+    "graph": "122 nodes / 140 queues",
+    "source_generation": "Native 1920x1080 testsrc2 with source hue and frame-ID barcode; 1800 frames per file. Only the barcode band is enlarged."
+  },
+  "cases": [
+    {
+      "scene": "grid16",
+      "seconds": 30.043764000998635,
+      "start_wall": 1788810707.058291,
+      "end_wall": 1788810737.1020548,
+      "samples": [
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.54,
+          "cpu_cores": 0.589940759920392,
+          "wall_time": 1788810708.100605
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.66,
+          "cpu_cores": 0.5900008431100727,
+          "wall_time": 1788810709.1011329
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 55.12,
+          "cpu_cores": 0.5799952254791544,
+          "wall_time": 1788810710.1019387
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.0,
+          "cpu_cores": 0.5799893937345549,
+          "wall_time": 1788810711.1011746
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.22,
+          "cpu_cores": 0.6000159706245406,
+          "wall_time": 1788810712.1010802
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.84,
+          "cpu_cores": 0.5799986335239536,
+          "wall_time": 1788810713.0996234
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.56,
+          "cpu_cores": 0.5700081454158036,
+          "wall_time": 1788810714.1007771
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.07,
+          "cpu_cores": 0.5899937649452958,
+          "wall_time": 1788810715.1009867
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.69,
+          "cpu_cores": 0.5699985402343946,
+          "wall_time": 1788810716.102937
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.27,
+          "cpu_cores": 0.5799988156417542,
+          "wall_time": 1788810717.104343
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.54,
+          "cpu_cores": 0.5799994466816302,
+          "wall_time": 1788810718.1046646
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.68,
+          "cpu_cores": 0.5799962282845866,
+          "wall_time": 1788810719.1009839
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.42,
+          "cpu_cores": 0.5600040600297933,
+          "wall_time": 1788810720.1025634
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.2,
+          "cpu_cores": 0.5800046005953131,
+          "wall_time": 1788810721.1046023
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.24,
+          "cpu_cores": 0.5799967972572664,
+          "wall_time": 1788810722.1029515
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.45,
+          "cpu_cores": 0.5800000719203159,
+          "wall_time": 1788810723.1017303
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.09,
+          "cpu_cores": 0.5900010956314374,
+          "wall_time": 1788810724.100614
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.32,
+          "cpu_cores": 0.5700034086206325,
+          "wall_time": 1788810725.1019275
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.51,
+          "cpu_cores": 0.5799921579264103,
+          "wall_time": 1788810726.103284
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 79.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.84,
+          "cpu_cores": 0.5799935522110274,
+          "wall_time": 1788810727.1007507
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.22,
+          "cpu_cores": 0.5899998489616394,
+          "wall_time": 1788810728.0998273
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.51,
+          "cpu_cores": 0.5900032408870697,
+          "wall_time": 1788810729.1027746
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.35,
+          "cpu_cores": 0.5800084014227858,
+          "wall_time": 1788810730.1036928
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 55.38,
+          "cpu_cores": 0.5800036192222883,
+          "wall_time": 1788810731.1018193
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 56.03,
+          "cpu_cores": 0.5899970506040109,
+          "wall_time": 1788810732.101954
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.5,
+          "cpu_cores": 0.5699977866984063,
+          "wall_time": 1788810733.1007874
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 51.74,
+          "cpu_cores": 0.5800023147898135,
+          "wall_time": 1788810734.101568
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.33,
+          "cpu_cores": 0.5900006035704088,
+          "wall_time": 1788810735.101245
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.81,
+          "cpu_cores": 0.5799833086609575,
+          "wall_time": 1788810736.101668
+        },
+        {
+          "gpu_percent": 8.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 16.0,
+          "vram_mib": 1958.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.43,
+          "cpu_cores": 0.610014102915311,
+          "wall_time": 1788810737.1016324
+        }
+      ],
+      "summary": {
+        "gpu_percent": {
+          "min": 8.0,
+          "mean": 8.0,
+          "max": 8.0
+        },
+        "decoder_percent": {
+          "min": 76.0,
+          "mean": 76.7,
+          "max": 79.0
+        },
+        "encoder_percent": {
+          "min": 23.0,
+          "mean": 23.0,
+          "max": 23.0
+        },
+        "memory_busy_percent": {
+          "min": 16.0,
+          "mean": 16.0,
+          "max": 16.0
+        },
+        "vram_mib": {
+          "min": 1958.0,
+          "mean": 1958.0,
+          "max": 1958.0
+        },
+        "sm_mhz": {
+          "min": 1590.0,
+          "mean": 1590.0,
+          "max": 1590.0
+        },
+        "memory_mhz": {
+          "min": 5000.0,
+          "mean": 5000.0,
+          "max": 5000.0
+        },
+        "watts": {
+          "min": 51.74,
+          "mean": 53.68533333333333,
+          "max": 56.03
+        },
+        "cpu_cores": {
+          "min": 0.5600040600297933,
+          "mean": 0.582331392984034,
+          "max": 0.610014102915311
+        }
+      },
+      "rss": "VmRSS:\t  875988 kB",
+      "conditions": {
+        "inputs": "16 native1920x1080@60 H264 testsrc2 sources, source/frame barcode, 2 B-frames",
+        "output": "1080x1920@60 NVENC 8Mbit/s",
+        "clocks": "automatic",
+        "host": "Tesla T4 /16vCPU",
+        "other_gpu_work": "Sway and Janus browser viewer; browser DMA-BUF workload stopped",
+        "generation_during_measurement": false,
+        "date": "2026-09-07",
+        "graph": "122 nodes / 140 queues",
+        "source_generation": "Native 1920x1080 testsrc2 with source hue and frame-ID barcode; 1800 frames per file. Only the barcode band is enlarged."
+      }
+    },
+    {
+      "scene": "fullscreen",
+      "seconds": 30.04247019700051,
+      "start_wall": 1788810873.3148155,
+      "end_wall": 1788810903.357286,
+      "samples": [
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 75.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.04,
+          "cpu_cores": 0.5299393865933049,
+          "wall_time": 1788810874.357654
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.24,
+          "cpu_cores": 0.5300036061439997,
+          "wall_time": 1788810875.3578405
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.4,
+          "cpu_cores": 0.5400078171520403,
+          "wall_time": 1788810876.3582265
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.89,
+          "cpu_cores": 0.5499972549649511,
+          "wall_time": 1788810877.3567486
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.56,
+          "cpu_cores": 0.5199990151214136,
+          "wall_time": 1788810878.357688
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.46,
+          "cpu_cores": 0.5200003723210403,
+          "wall_time": 1788810879.3584523
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 51.84,
+          "cpu_cores": 0.5300025742225156,
+          "wall_time": 1788810880.3599672
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.07,
+          "cpu_cores": 0.5200001393595197,
+          "wall_time": 1788810881.3596053
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 51.58,
+          "cpu_cores": 0.5199974057327218,
+          "wall_time": 1788810882.3600466
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.04,
+          "cpu_cores": 0.5299999136102058,
+          "wall_time": 1788810883.357581
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.38,
+          "cpu_cores": 0.5399989858813253,
+          "wall_time": 1788810884.3572626
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.54,
+          "cpu_cores": 0.5200029931367991,
+          "wall_time": 1788810885.357971
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.56,
+          "cpu_cores": 0.5399997067815332,
+          "wall_time": 1788810886.358329
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.18,
+          "cpu_cores": 0.5400003547806478,
+          "wall_time": 1788810887.3578038
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 75.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.43,
+          "cpu_cores": 0.5299960520585009,
+          "wall_time": 1788810888.3590739
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.05,
+          "cpu_cores": 0.5299996994897342,
+          "wall_time": 1788810889.3583548
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 54.4,
+          "cpu_cores": 0.5300033289506528,
+          "wall_time": 1788810890.3566113
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.37,
+          "cpu_cores": 0.5200026052143605,
+          "wall_time": 1788810891.358473
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.53,
+          "cpu_cores": 0.5499981921552853,
+          "wall_time": 1788810892.3582983
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.86,
+          "cpu_cores": 0.5399957529329091,
+          "wall_time": 1788810893.35657
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.18,
+          "cpu_cores": 0.520001958847218,
+          "wall_time": 1788810894.3583786
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.22,
+          "cpu_cores": 0.5300015041452342,
+          "wall_time": 1788810895.3569329
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.83,
+          "cpu_cores": 0.5399962994059343,
+          "wall_time": 1788810896.3583279
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.27,
+          "cpu_cores": 0.5200018896862837,
+          "wall_time": 1788810897.3591049
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 51.68,
+          "cpu_cores": 0.550001126952658,
+          "wall_time": 1788810898.3588908
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.49,
+          "cpu_cores": 0.5299993019913127,
+          "wall_time": 1788810899.358201
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 76.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.83,
+          "cpu_cores": 0.5200021314876961,
+          "wall_time": 1788810900.3572178
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.04,
+          "cpu_cores": 0.5199984462450046,
+          "wall_time": 1788810901.3573887
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 22.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 53.02,
+          "cpu_cores": 0.5099976907307491,
+          "wall_time": 1788810902.3560352
+        },
+        {
+          "gpu_percent": 7.0,
+          "decoder_percent": 77.0,
+          "encoder_percent": 23.0,
+          "memory_busy_percent": 15.0,
+          "vram_mib": 1962.0,
+          "sm_mhz": 1590.0,
+          "memory_mhz": 5000.0,
+          "watts": 52.59,
+          "cpu_cores": 0.5500038318759524,
+          "wall_time": 1788810903.3567421
+        }
+      ],
+      "summary": {
+        "gpu_percent": {
+          "min": 7.0,
+          "mean": 7.0,
+          "max": 7.0
+        },
+        "decoder_percent": {
+          "min": 75.0,
+          "mean": 76.5,
+          "max": 77.0
+        },
+        "encoder_percent": {
+          "min": 22.0,
+          "mean": 22.2,
+          "max": 23.0
+        },
+        "memory_busy_percent": {
+          "min": 15.0,
+          "mean": 15.0,
+          "max": 15.0
+        },
+        "vram_mib": {
+          "min": 1962.0,
+          "mean": 1962.0,
+          "max": 1962.0
+        },
+        "sm_mhz": {
+          "min": 1590.0,
+          "mean": 1590.0,
+          "max": 1590.0
+        },
+        "memory_mhz": {
+          "min": 5000.0,
+          "mean": 5000.0,
+          "max": 5000.0
+        },
+        "watts": {
+          "min": 51.58,
+          "mean": 52.619,
+          "max": 54.4
+        },
+        "cpu_cores": {
+          "min": 0.5099976907307491,
+          "mean": 0.5306649779323834,
+          "max": 0.5500038318759524
+        }
+      },
+      "rss": "VmRSS:\t  877404 kB",
+      "conditions": {
+        "inputs": "16 native1920x1080@60 H264 testsrc2 sources, source/frame barcode, 2 B-frames",
+        "output": "1080x1920@60 NVENC 8Mbit/s",
+        "clocks": "automatic",
+        "host": "Tesla T4 /16vCPU",
+        "other_gpu_work": "Sway and Janus browser viewer; browser DMA-BUF workload stopped",
+        "generation_during_measurement": false
+      }
+    }
+  ]
+}

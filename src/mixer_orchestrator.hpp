@@ -68,6 +68,15 @@ class MixerOrchestrator {
     void applyPostTransitionRouting(bool new_pgm_is_slot_a, const std::string& new_pgm_scene);
 
     void ensureIdle() const;
+    void interruptTransition();
+    void finishSnapshot();
+    // Caller holds state_->mutex; restores live program after failed preparation.
+    void restoreProgramRouting();
+    void abortTransition(uint64_t generation) noexcept;
+    void startFadeWhenReady(std::string scene_name, double duration_sec, int64_t requested_pts,
+                           uint64_t generation, av::Timestamp initial_ts, int64_t deadline_ms);
+    void startFade(const std::string& scene_name, double duration_sec, int64_t T_start,
+                   uint64_t transition_generation);
     int64_t resolveTransitionStartPts(int64_t requested_start_pts_ms) const;
 
     // Core hard-cut logic: ensure PVW is configured, enable cameras, write timeline entries.
@@ -75,8 +84,7 @@ class MixerOrchestrator {
     // Caller must hold state_->mutex. Returns T_cleanup timestamp.
     int64_t cutInternal(const std::string& scene_name, int64_t start_pts_ms);
 
-    // Generic deferred cleanup: flip state + optionally delete nodes. The caller
-    // schedules this for non-PTS-expressible work (node deletion and bookkeeping).
+    // Complete crossfade routing and state once the final frame is presented.
     // `scheduler` is forwarded into the locally-constructed MixerOrchestrator so
     // any future scheduler-using helper called from this path won't blow up with
     // "transition scheduler is not configured".
@@ -87,7 +95,7 @@ class MixerOrchestrator {
                                  uint64_t transition_generation,
                                  bool new_pgm_is_slot_a,
                                  std::string new_pgm_scene,
-                                 std::vector<std::string> nodes_to_delete);
+                                 int64_t end_pts_ms);
     static void readyCutTask(std::shared_ptr<NodeManager> nodes,
                              std::shared_ptr<MixerState> state,
                              std::shared_ptr<SharedTimeline> timeline,
@@ -125,6 +133,8 @@ class MixerOrchestrator {
     std::string transition_edge_name_ = "trans_out";
 
 public:
+    /// Drop an armed or running transition and keep the current program picture (`mixer.interrupt`).
+    void interrupt() { interruptTransition(); }
     MixerOrchestrator(std::shared_ptr<NodeManager> nodes,
                       std::shared_ptr<MixerState> state,
                       std::shared_ptr<SharedTimeline> timeline,

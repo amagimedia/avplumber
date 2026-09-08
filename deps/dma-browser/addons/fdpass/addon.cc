@@ -1,4 +1,6 @@
 #include <napi.h>
+#include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -10,6 +12,7 @@
 #include <condition_variable>
 #include <deque>
 #include <atomic>
+#include <array>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
@@ -20,13 +23,17 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <unordered_set>
 
+#include "dmabuf_ack.h"
 #include "texinfo.h"
 
 namespace {
 static std::unordered_map<std::string, int> g_socks;
 static std::unordered_map<std::string, Napi::ThreadSafeFunction> g_loggers;
+static std::unordered_map<std::string, Napi::ThreadSafeFunction> g_release_callbacks;
 static std::mutex g_logger_mu;
+static std::mutex g_release_callback_mu;
 
 static int fdpass_log_frames_enabled() {
   // Optional per-frame logging (VERY chatty). Enable with:
@@ -48,6 +55,19 @@ static void emit_log(const std::string &path, const std::string &line) {
     cb.Call({ Napi::String::New(env, *msg) });
     delete msg;
   });
+}
+
+static void emit_release(const std::string &path, uint64_t frame_count) {
+  std::lock_guard<std::mutex> lk(g_release_callback_mu);
+  auto it = g_release_callbacks.find(path);
+  if (it == g_release_callbacks.end()) return;
+  uint64_t *heap = new uint64_t(frame_count);
+  const napi_status status = it->second.NonBlockingCall(
+      heap, [](Napi::Env env, Napi::Function cb, uint64_t *value) {
+    cb.Call({Napi::BigInt::New(env, *value)});
+    delete value;
+  });
+  if (status != napi_ok) delete heap;
 }
 
 static void logf(const std::string &path, const char *fmt, ...) {
@@ -115,23 +135,45 @@ class Server {
     if (!running_.compare_exchange_strong(expected, false)) return;
     if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); }
     if (accept_thread_.joinable()) accept_thread_.join();
+    std::vector<int> clients;
     {
       std::lock_guard<std::mutex> lk(clients_mu_);
-      for (int fd : clients_) { if (fd >= 0) ::close(fd); }
-      clients_.clear();
+      clients.swap(clients_);
+      ack_states_.clear();
+    }
+    for (int fd : clients) {
+      if (fd >= 0) ::close(fd);
+      releaseClientFrames(fd);
+    }
+    std::vector<uint64_t> abandoned;
+    {
+      std::lock_guard<std::mutex> lk(pending_mu_);
+      for (const auto &item : pending_frames_) abandoned.push_back(item.first);
+      pending_frames_.clear();
+    }
+    for (uint64_t frame_count : abandoned) {
+      emit_release(path_, frame_count);
     }
     if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
     if (unlink_on_stop_ && !path_.empty()) { ::unlink(path_.c_str()); }
   }
 
   void sendToAll(int send_fd, const std::vector<uint8_t> &meta) {
-    if (!running_.load()) return;
+    const bool track_release = meta.size() >= sizeof(TexInfo);
+    const uint64_t frame_count = track_release ? dmabufLoadLe64(meta.data() + 40) : 0;
+    if (!running_.load()) {
+      if (track_release) emit_release(path_, frame_count);
+      return;
+    }
     const int s_log_frames = fdpass_log_frames_enabled();
     // Duplicate once with CLOEXEC so we can reuse across clients safely
     int dup_fd = -1;
 
     dup_fd = ::fcntl(send_fd, F_DUPFD_CLOEXEC, 3);
-    if (dup_fd < 0) return;
+    if (dup_fd < 0) {
+      if (track_release) emit_release(path_, frame_count);
+      return;
+    }
 
     char control[CMSG_SPACE(sizeof(int))];
     std::memset(control, 0, sizeof(control));
@@ -151,6 +193,8 @@ class Server {
       std::lock_guard<std::mutex> lk(clients_mu_);
       clients = clients_;
     }
+
+    if (track_release) beginFrameBroadcast(frame_count);
 
     // Log once per broadcast, not per client.
     if (s_log_frames) {
@@ -174,15 +218,22 @@ class Server {
     size_t drop_error = 0;
     for (int cfd : clients) {
       if (cfd < 0) continue;
+      if (track_release) addFrameRecipient(frame_count, cfd);
       for (;;) {
         ssize_t n = ::sendmsg(cfd, &msgh, MSG_DONTWAIT);
-        if (n >= 0) { ok_count++; break; }
+        if (n == static_cast<ssize_t>(iov.iov_len)) { ok_count++; break; }
+        if (n >= 0) {
+          drop_error++;
+          removeClient(cfd);
+          break;
+        }
         int e = errno;
         if (e == EINTR) continue;
         if (e == EAGAIN || e == EWOULDBLOCK) {
           // skip this client for this frame to maintain pacing
           emit_log(path_, std::string("[fdpass] sendmsg backpressure drop path=") + path_);
           drop_backpressure++;
+          if (track_release) releaseFrameRecipient(frame_count, cfd);
           break;
         }
         std::fprintf(stderr, "[fdpass] sendmsg to client fd=%d failed errno=%d (%s); dropping client\n", cfd, e, strerror(e)); std::fflush(stderr);
@@ -192,6 +243,7 @@ class Server {
         break;
       }
     }
+    if (track_release) finishFrameBroadcast(frame_count);
     if (s_log_frames) {
       logf(path_, "[fdpass] frame tx summary path=%s ok=%zu backpressure=%zu dropped=%zu clients=%zu",
            path_.c_str(), ok_count, drop_backpressure, drop_error, clients.size());
@@ -202,6 +254,121 @@ class Server {
   ~Server() { stop(); }
 
  private:
+  struct PendingFrame {
+    std::unordered_set<int> recipients;
+    bool broadcast_complete = false;
+  };
+
+  struct AckState {
+    std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES> bytes{};
+    size_t used = 0;
+  };
+
+  void beginFrameBroadcast(uint64_t frame_count) {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    pending_frames_.try_emplace(frame_count);
+  }
+
+  void addFrameRecipient(uint64_t frame_count, int fd) {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    pending_frames_[frame_count].recipients.insert(fd);
+  }
+
+  void finishFrameBroadcast(uint64_t frame_count) {
+    bool complete = false;
+    {
+      std::lock_guard<std::mutex> lk(pending_mu_);
+      auto it = pending_frames_.find(frame_count);
+      if (it == pending_frames_.end()) return;
+      it->second.broadcast_complete = true;
+      if (it->second.recipients.empty()) {
+        pending_frames_.erase(it);
+        complete = true;
+      }
+    }
+    if (complete) emit_release(path_, frame_count);
+  }
+
+  void releaseFrameRecipient(uint64_t frame_count, int fd) {
+    bool complete = false;
+    {
+      std::lock_guard<std::mutex> lk(pending_mu_);
+      auto it = pending_frames_.find(frame_count);
+      if (it == pending_frames_.end()) return;
+      it->second.recipients.erase(fd);
+      if (it->second.broadcast_complete && it->second.recipients.empty()) {
+        pending_frames_.erase(it);
+        complete = true;
+      }
+    }
+    if (complete) emit_release(path_, frame_count);
+  }
+
+  void releaseClientFrames(int fd) {
+    std::vector<uint64_t> complete;
+    {
+      std::lock_guard<std::mutex> lk(pending_mu_);
+      for (auto it = pending_frames_.begin(); it != pending_frames_.end();) {
+        it->second.recipients.erase(fd);
+        if (it->second.broadcast_complete && it->second.recipients.empty()) {
+          complete.push_back(it->first);
+          it = pending_frames_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (uint64_t frame_count : complete) emit_release(path_, frame_count);
+  }
+
+  void readClientAcks(int fd) {
+    bool disconnected = false;
+    for (;;) {
+      uint64_t acknowledged = 0;
+      bool have_ack = false;
+      bool malformed = false;
+      {
+        std::lock_guard<std::mutex> lk(clients_mu_);
+        auto client = std::find(clients_.begin(), clients_.end(), fd);
+        if (client == clients_.end()) return;
+        AckState &state = ack_states_[fd];
+        const ssize_t received = ::recv(
+            fd, state.bytes.data() + state.used, state.bytes.size() - state.used, MSG_DONTWAIT);
+        if (received > 0) {
+          state.used += static_cast<size_t>(received);
+          if (state.used == state.bytes.size()) {
+            have_ack = dmabufDecodeReleaseAck(state.bytes.data(), acknowledged);
+            malformed = !have_ack;
+            state.used = 0;
+          }
+        } else if (received == 0) {
+          disconnected = true;
+        } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+          disconnected = true;
+        }
+      }
+      if (have_ack) releaseFrameRecipient(acknowledged, fd);
+      if (malformed) {
+        emit_log(path_, std::string("[fdpass] malformed release acknowledgement path=") + path_);
+        disconnected = true;
+      }
+      if (disconnected) {
+        removeClient(fd);
+        return;
+      }
+      if (!have_ack) return;
+    }
+  }
+
+  void pollClientAcks() {
+    std::vector<int> clients;
+    {
+      std::lock_guard<std::mutex> lk(clients_mu_);
+      clients = clients_;
+    }
+    for (int fd : clients) readClientAcks(fd);
+  }
+
   void acceptLoop() {
     for (;;) {
       if (!running_.load()) break;
@@ -209,6 +376,7 @@ class Server {
       if (cfd < 0) {
         if (errno == EINTR) continue;
         if (errno != EAGAIN && errno != EWOULDBLOCK) { std::fprintf(stderr, "[fdpass] accept error errno=%d (%s)\n", errno, strerror(errno)); std::fflush(stderr); emit_log(path_, std::string("[fdpass] accept error errno=") + std::to_string(errno)); }
+        pollClientAcks();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
@@ -220,6 +388,7 @@ class Server {
       {
         std::lock_guard<std::mutex> lk(clients_mu_);
         clients_.push_back(cfd);
+        ack_states_.try_emplace(cfd);
       }
       std::fprintf(stderr, "[fdpass] client accepted fd=%d (path=%s)\n", cfd, path_.c_str()); std::fflush(stderr);
       emit_log(path_, std::string("[fdpass] client accepted path=") + path_);
@@ -227,14 +396,21 @@ class Server {
   }
 
   void removeClient(int fd) {
-    std::lock_guard<std::mutex> lk(clients_mu_);
-    for (auto it = clients_.begin(); it != clients_.end(); ++it) {
-      if (*it == fd) {
-        if (fd >= 0) ::close(fd);
-        clients_.erase(it);
-        break;
+    bool removed = false;
+    {
+      std::lock_guard<std::mutex> lk(clients_mu_);
+      for (auto it = clients_.begin(); it != clients_.end(); ++it) {
+        if (*it == fd) {
+          clients_.erase(it);
+          ack_states_.erase(fd);
+          removed = true;
+          break;
+        }
       }
     }
+    if (!removed) return;
+    if (fd >= 0) ::close(fd);
+    releaseClientFrames(fd);
   }
 
   std::string path_;
@@ -243,6 +419,9 @@ class Server {
   std::thread accept_thread_;
   std::mutex clients_mu_;
   std::vector<int> clients_;
+  std::unordered_map<int, AckState> ack_states_;
+  std::mutex pending_mu_;
+  std::unordered_map<uint64_t, PendingFrame> pending_frames_;
   public: bool unlink_on_stop_;
 };
 
@@ -281,6 +460,7 @@ Napi::Value BroadcastFd(const Napi::CallbackInfo &info) {
     if (fdpass_log_frames_enabled()) {
       logf(path, "[fdpass] WARN: broadcastFd called but no server exists for path=%s fd=%d meta=%zu", path.c_str(), fd, meta.size());
     }
+    if (meta.size() >= sizeof(TexInfo)) emit_release(path, dmabufLoadLe64(meta.data() + 40));
     return env.Undefined();
   }
 
@@ -307,6 +487,14 @@ Napi::Value CloseServer(const Napi::CallbackInfo &info) {
     auto lit = g_loggers.find(path);
     if (lit != g_loggers.end()) { lit->second.Release(); g_loggers.erase(lit); }
   }
+  {
+    std::lock_guard<std::mutex> lk(g_release_callback_mu);
+    auto callback = g_release_callbacks.find(path);
+    if (callback != g_release_callbacks.end()) {
+      callback->second.Release();
+      g_release_callbacks.erase(callback);
+    }
+  }
   return env.Undefined();
 }
 
@@ -321,6 +509,22 @@ Napi::Value SetServerLogger(const Napi::CallbackInfo &info) {
     auto it = g_loggers.find(path);
     if (it != g_loggers.end()) { it->second.Release(); it->second = tsf; }
     else { g_loggers.emplace(path, tsf); }
+  }
+  return env.Undefined();
+}
+
+Napi::Value SetReleaseCallback(const Napi::CallbackInfo &info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsFunction()) return env.Undefined();
+  std::string path = info[0].As<Napi::String>().Utf8Value();
+  Napi::Function cb = info[1].As<Napi::Function>();
+  Napi::ThreadSafeFunction tsf = Napi::ThreadSafeFunction::New(
+      env, cb, "fdpass-release", 0, 1);
+  {
+    std::lock_guard<std::mutex> lk(g_release_callback_mu);
+    auto it = g_release_callbacks.find(path);
+    if (it != g_release_callbacks.end()) { it->second.Release(); it->second = tsf; }
+    else { g_release_callbacks.emplace(path, tsf); }
   }
   return env.Undefined();
 }
@@ -343,6 +547,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("broadcastFdWithInfo", Napi::Function::New(env, BroadcastFd));
   exports.Set("closeServer", Napi::Function::New(env, CloseServer));
   exports.Set("setServerLogger", Napi::Function::New(env, SetServerLogger));
+  exports.Set("setReleaseCallback", Napi::Function::New(env, SetReleaseCallback));
   exports.Set("monotonicTimeNs", Napi::Function::New(env, MonotonicTimeNs));
   exports.Set("close", Napi::Function::New(env, Close));
   return exports;

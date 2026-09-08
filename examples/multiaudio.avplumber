@@ -1,4 +1,4 @@
-node.add {"url":"srt://test-streamer-s3dev.aws-dev.intranet:10007","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"type":"input","auto_restart":"group","name":"input","group":"in","dst":"in_mux0"}
+node.add {"url":"srt://localhost:9000?streamid=read:input","initial_timeout":20,"timeout":10.0,"options":{"probesize":5000000,"analyzeduration":5000000,"fflags":"discardcorrupt"},"type":"input","auto_restart":"group","name":"input","group":"in","dst":"in_mux0"}
 
 queue.plan_capacity a0 600
 queue.plan_capacity a1 600

@@ -441,6 +441,7 @@ namespace {
             .def_property_readonly("capacity", [](Edge<T> &e) { return e.capacity(); })
             .def("clear", &Edge<T>::clear)
             .def_property_readonly("occupied", [](Edge<T> &e) { return e.occupied(); })
+            .def_property_readonly("enqueued_total", [](Edge<T> &e) { return e.enqueuedTotal(); })
             .def_property_readonly("free", [](Edge<T> &e) { return e.free(); })
             .def("enqueue", [](Edge<T> &e, const T &elem) {
                 py::gil_scoped_release release;
@@ -547,8 +548,16 @@ PYBIND11_MODULE(_avplumber, m) {
         .def(py::init<>())
         .def("enableControlServer", &AVPlumber::enableControlServer)
         .def("registerWithWebUI", &AVPlumber::registerWithWebUI)
-        .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString)
-        .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile)
+        // Release the GIL while executing control commands: a command such as
+        // node.add / group.start makes the NodeManager create nodes, and a
+        // PythonNode's createNode() runs on a graph-management thread that must
+        // reacquire the GIL.  Holding the GIL here while that thread blocks on
+        // it deadlocks the whole instance (surfaced by the playlist demo's
+        // mid-stream worker rebuild).  These calls do their own C++-side locking.
+        .def("executeCommandsFromString", &AVPlumber::executeCommandsFromString,
+             py::call_guard<py::gil_scoped_release>())
+        .def("executeCommandsFromFile", &AVPlumber::executeCommandsFromFile,
+             py::call_guard<py::gil_scoped_release>())
         .def("registerControlCommand", [](AVPlumber &avp, const std::string &command, py::function callback, bool no_lock) {
             avp.registerControlCommand(command, [callback](const std::string &arg) -> std::string {
                 py::gil_scoped_acquire acquire;
@@ -600,15 +609,27 @@ PYBIND11_MODULE(_avplumber, m) {
         .def(py::init<>())
         .def("addNode", [](NodeManager &nm, py::dict &parameters, bool early_create=false, bool start=false, py::object node_obj=py::none()) {
             Parameters json_parameters = pyjson::to_json(parameters);
+            // Same GIL-release rationale as the NodeGroup bindings below:
+            // createNode takes the manager's and the target group's busy_
+            // locks, and createNode()/start() reacquire the GIL for python
+            // nodes, so holding the GIL across them deadlocks against GM
+            // threads. setPythonNodeObject must keep the GIL (py::object).
             if (node_obj.is_none()) {
+                py::gil_scoped_release release;
                 return nm.createNode(json_parameters, early_create, start);
             }
-            auto result = nm.createNode(json_parameters, false, false);
+            std::shared_ptr<NodeWrapper> result;
+            {
+                py::gil_scoped_release release;
+                result = nm.createNode(json_parameters, false, false);
+            }
             result->setPythonNodeObject(node_obj);
             if (early_create) {
+                py::gil_scoped_release release;
                 result->createNode();
             }
             if (start) {
+                py::gil_scoped_release release;
                 result->start();
             }
             return result;
@@ -630,12 +651,31 @@ PYBIND11_MODULE(_avplumber, m) {
 
     py::class_<NodeGroup, std::shared_ptr<NodeGroup>>(m, "NodeGroup")
         .def(py::init<NodeManager*, const std::string>())
-        .def("startNodes", &NodeGroup::startNodes)
-        .def("stopNodes", &NodeGroup::stopNodes)
-        .def("restartNodes", &NodeGroup::restartNodes)
+        // Same GIL-release rationale as executeCommandsFromString above: group
+        // (re)starts create nodes on GM threads that reacquire the GIL, so the
+        // caller must not hold it across these calls.
+        .def("startNodes", &NodeGroup::startNodes,
+             py::call_guard<py::gil_scoped_release>())
+        .def("stopNodes", &NodeGroup::stopNodes,
+             py::call_guard<py::gil_scoped_release>())
+        .def("restartNodes", &NodeGroup::restartNodes,
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("sortedNodes", [](NodeGroup &ng) -> py::list {
+            // Same GIL-release rationale as startNodes/stopNodes/restartNodes
+            // above: sortedNodes() takes the group's busy_ lock, which is held
+            // across node creation on GM threads while they reacquire the GIL
+            // (NodeGroup::doWithNodes -> NodeWrapper::createNode). Holding the
+            // GIL here while waiting for that lock is a lock-order inversion
+            // that deadlocks against those threads. sortedNodes() returns a
+            // copy made under busy_, so iterating it below without the lock
+            // is safe against concurrent graph mutation.
+            std::list<std::weak_ptr<NodeWrapper>> nodes_copy;
+            {
+                py::gil_scoped_release release;
+                nodes_copy = ng.sortedNodes();
+            }
             py::list sorted_nodes;
-            for (auto &weak_node: ng.sortedNodes()) {
+            for (auto &weak_node: nodes_copy) {
                 auto node = weak_node.lock();
                 if (node) {
                     sorted_nodes.append(node);

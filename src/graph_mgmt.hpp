@@ -197,7 +197,9 @@ public:
     void restartNodes() {
         goToState(State::RESTART);
     }
-    const std::list<Item>& sortedNodes();
+    // Returns a copy taken under busy_ so callers may iterate without the
+    // lock; the live list is rebuilt by sort() and cleared by add().
+    std::list<Item> sortedNodes();
 };
 
 class NodeManager: public std::enable_shared_from_this<NodeManager> {

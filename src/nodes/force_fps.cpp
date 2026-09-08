@@ -84,7 +84,7 @@ public:
             }
             if (last_ts_.isValid()) {
                 av::Timestamp delta_from_last = in_ts - last_ts_;
-                bool discontinuity = (delta_from_last.seconds() > 0.5) || (delta_from_last.timestamp() < 0);
+                bool discontinuity = (delta_from_last.seconds() > frame_delta_.seconds() + 0.5) || (delta_from_last.timestamp() < 0);
                 if (discontinuity) {
                     logstream << "force_fps[" << label_ << "]: Discontinuity " << last_ts_ << " -> " << in_ts;
                 }

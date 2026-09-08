@@ -24,7 +24,10 @@ protected:
     std::list<OutputFrame> flush_frames_;
     bool flush_magic_ = false;
     int waiting_for_frame_ = 0;
+    av::Timestamp flush_magic_frame_ = NOTS;   // target frame; its re-fed decode must not surface twice
     bool finish_after_flush_ = false;
+    bool hold_at_eof_ = false;
+    bool decoder_at_eof_ = false;
     av::Timestamp flush_timeout_ts_ = NOTS;
     av::Timestamp flush_timeout_ = {500, {1, 1000}}; // 500ms
     //AVBufferRef *out_frames_ref_ = nullptr;
@@ -60,7 +63,36 @@ protected:
         }
         last_pts_ = frm.pts();
         bool put = true;
-        {
+        bool completed_flush_magic = false;
+        if (flush_magic_ && waiting_for_frame_ > 0) {
+            if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
+                logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
+                // The packet was fed once per iteration; the extra decodes of the
+                // target frame surface later and must not be output again.
+                flush_magic_frame_ = waiting_for_frame_ > 1 ? frm.pts() : NOTS;
+                completed_flush_magic = true;
+                waiting_for_frame_ = 0;
+            } else {
+                waiting_for_frame_++;
+                put = false;
+            }
+            if (waiting_for_frame_ > 5) {
+                logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
+                waiting_for_frame_ = 0;
+                put = true;
+            }
+        }
+        if (put && !completed_flush_magic && flush_magic_frame_.isValid()) {
+            if (frm.pts() == flush_magic_frame_) {
+                logstream << "dropping re-fed duplicate of flush magic frame " << frm.pts();
+                put = false;
+            } else if (frm.pts() > flush_magic_frame_) {
+                flush_magic_frame_ = NOTS;
+            }
+        }
+        // Only frames that survived flush magic may consume the discard target: a
+        // stale frame left in the decoder queue after a seek must not clear it.
+        if (put) {
             auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
             if (discard_until_.isValid()) {
                 if (frm.pts() >= discard_until_) {
@@ -69,21 +101,6 @@ protected:
                 } else {
                     put = false;
                 }
-            }
-        }
-        if (flush_magic_ && waiting_for_frame_ > 0) {
-            if (abs(addTS(pkt.pts(), negateTS(frm.pts())).seconds()) < 0.008) {
-                logstream << "flush magic done, got the frame that we need, " << waiting_for_frame_ << " iterations";
-                waiting_for_frame_ = 0;
-                put &= true;
-            } else {
-                waiting_for_frame_++;
-                put = false;
-            }
-            if (waiting_for_frame_ > 5) {
-                logstream << "decoder did not give us correct frame within " << waiting_for_frame_ << " frames, breaking the loop";
-                waiting_for_frame_ = 0;
-                put &= true;
             }
         }
         if (put) {
@@ -279,7 +296,15 @@ public:
         // Copy from the edge queue, but keep the packet queued until the
         // decoder accepts it. FFmpeg send_packet(EAGAIN) means retry same input.
         av::Packet pkt;
-        if (!this->source_->tryPeek(pkt, 0)) {
+        // Blocking poll: park the decoder thread until a packet arrives instead of
+        // busy-spinning. Measured ~41% CPU vs ~100% (full core) with non-blocking
+        // ,0 on a starved live source. wait_peek() is event-woken by the producer's
+        // enqueue and by finishConsumer() (stop / flushAndSeek), so shutdown, flush
+        // and seek all wake it cleanly. Safe for the OBS switcher/playlist path: each
+        // clip is a fresh graph (new edges reset finish_consumer_), so the post-seek
+        // busy-poll degradation only affects in-place seeks (ssgw replay), where it
+        // is merely no worse than the non-blocking form.
+        if (!this->source_->tryPeek(pkt)) {
             //flush();
             return;
         }
@@ -287,6 +312,10 @@ public:
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if ( (!pkt.isNull()) && pkt.isComplete() && !isEofMarker(pkt)) {
+                if (decoder_at_eof_) {
+                    avcodec_flush_buffers(dec_.raw());
+                    decoder_at_eof_ = false;
+                }
                 int iter = 0;
                 bool packet_consumed = false;
                 do {
@@ -334,7 +363,13 @@ public:
                 // Must do this AFTER flush() because flush() may have set finished_=true
                 // when all codec frames fit in the sink; resetting here ensures the EOF
                 // marker is actually sent before the decoder thread exits.
-                if (isEofMarker(pkt)) {
+                if (isEofMarker(pkt) && hold_at_eof_) {
+                    // Drain the last frames but keep an interactive recording
+                    // seekable. Reset the codec before accepting the next packet.
+                    finished_ = false;
+                    finish_after_flush_ = false;
+                    decoder_at_eof_ = true;
+                } else if (isEofMarker(pkt)) {
                     finished_ = false;
                     finish_after_flush_ = true;
                     this->flush_frames_.push_back(OutputFrame());
@@ -344,6 +379,10 @@ public:
     }
     virtual void discardUntil(av::Timestamp pts) {
         logstream << "will wait for frame and discard until " << pts;
+        std::lock_guard<std::recursive_mutex> decoder_lock(mutex_);
+        if (hold_at_eof_) {
+            flush_frames_.clear();
+        }
         auto lock = std::lock_guard<decltype(discard_until_mutex_)>(discard_until_mutex_);
         waiting_for_frame_ = 1;
         discard_until_ = pts;
@@ -404,6 +443,9 @@ public:
         }
         if (params.count("waiting_for_frame")) {
             r->waiting_for_frame_ = params["waiting_for_frame"];
+        }
+        if (params.count("hold_at_eof")) {
+            r->hold_at_eof_ = params["hold_at_eof"];
         }
         return r;
     }

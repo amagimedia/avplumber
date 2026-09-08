@@ -8,5 +8,7 @@ export interface CaptureStats {
   readonly droppedFrames: number;
   readonly droppedReasons: Readonly<Record<string, number>>;
   readonly txFrameCount: number;
+  readonly releasedFrameCount: number;
+  readonly retainedFrameCount: number;
   readonly lastPaintTsMs: number | null;
 }

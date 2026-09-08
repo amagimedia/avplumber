@@ -39,6 +39,15 @@ export class CapacityError extends DomainError {
   }
 }
 
+export class WorkerUnavailableError extends DomainError {
+  public readonly httpStatus = 503;
+  public readonly code = 'WorkerUnavailableError';
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkerUnavailableError';
+  }
+}
+
 export function isDomainError(err: unknown): err is DomainError {
   return err instanceof DomainError;
 }
