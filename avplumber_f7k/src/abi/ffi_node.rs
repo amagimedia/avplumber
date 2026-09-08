@@ -2,11 +2,14 @@
 
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::graph::capability::AvpInterfaceId;
-use crate::graph::node::{Blocked, Node, NodeKind, Tick};
+use crate::graph::error::{NodeError, NodePhase};
+use crate::graph::node::{Blocked, Node, NodeBody, NodeKind, Tick};
 use crate::graph::poll_ctx::NodePollContext;
+use crate::scaffold::body::{BlockingStep, PollStep, blocking_body, poll_body};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -17,6 +20,7 @@ pub struct AvpNodeVtable {
     pub process: Option<extern "C" fn(*mut c_void) -> i32>,
     pub poll: Option<extern "C" fn(*mut c_void) -> i32>,
     pub query_interface: Option<extern "C" fn(*mut c_void, u32) -> *const c_void>,
+    pub direct_consumer_is_infallible: i32,
 }
 
 pub struct FfiNode {
@@ -55,17 +59,59 @@ impl FfiNode {
         )
     }
 
-    fn flow_blocked(code: i32) -> Blocked {
+    fn flow_blocked(&self, code: i32) -> Result<Blocked, NodeError> {
         match code {
-            3 | 4 => Blocked::Done,
-            _ => Blocked::Again,
+            0..=2 => Ok(Blocked::Again),
+            3 => Ok(Blocked::Done),
+            4 => Err(NodeError::new(
+                &self.name,
+                NodePhase::Process,
+                "C node returned AVP_FLOW_ERROR",
+            )),
+            _ => Err(NodeError::new(
+                &self.name,
+                NodePhase::Process,
+                format!("C node returned invalid AvpFlow code {code}"),
+            )),
         }
     }
-    fn flow_tick(code: i32) -> Tick {
+    fn flow_tick(&self, code: i32) -> Result<Tick, NodeError> {
         match code {
-            2 => Tick::Idle,
-            3 | 4 => Tick::Done,
-            _ => Tick::Again,
+            0 | 1 => Ok(Tick::Again),
+            2 => Ok(Tick::Idle),
+            3 => Ok(Tick::Done),
+            4 => Err(NodeError::new(
+                &self.name,
+                NodePhase::Poll,
+                "C node returned AVP_FLOW_ERROR",
+            )),
+            _ => Err(NodeError::new(
+                &self.name,
+                NodePhase::Poll,
+                format!("C node returned invalid AvpFlow code {code}"),
+            )),
+        }
+    }
+}
+
+/// A C vtable is one of the two kinds at a time (`kind` picks by which entry
+/// point it defines), so `FfiNode` implements both steps and `take_body`
+/// selects. `AVP_FLOW_ERROR` becomes a `NodeError` here, so a C node fails its
+/// group the way a native `Err` does.
+impl BlockingStep for FfiNode {
+    fn step(&self) -> Result<Blocked, NodeError> {
+        match self.vtable.process {
+            Some(f) => self.flow_blocked(self.call(|| f(self.handle))),
+            None => Ok(Blocked::Done),
+        }
+    }
+}
+
+impl PollStep for FfiNode {
+    fn step(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        match self.vtable.poll {
+            Some(f) => self.flow_tick(self.call(|| f(self.handle))),
+            None => Ok(Tick::Done),
         }
     }
 }
@@ -149,6 +195,9 @@ impl Node for FfiNode {
             NodeKind::Poll
         }
     }
+    fn direct_consumer_is_infallible(&self) -> bool {
+        self.vtable.direct_consumer_is_infallible != 0
+    }
     fn start(&self) {
         if let Some(f) = self.vtable.start {
             self.call(|| f(self.handle));
@@ -163,15 +212,16 @@ impl Node for FfiNode {
         }
     }
     fn process(&self) -> Blocked {
-        match self.vtable.process {
-            Some(f) => Self::flow_blocked(self.call(|| f(self.handle))),
-            None => Blocked::Done,
-        }
+        BlockingStep::step(self).unwrap_or(Blocked::Done)
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
-        match self.vtable.poll {
-            Some(f) => Self::flow_tick(self.call(|| f(self.handle))),
-            None => Tick::Done,
+    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+        PollStep::step(self, ctx).unwrap_or(Tick::Done)
+    }
+    fn take_body(self: Arc<Self>) -> NodeBody {
+        match self.kind() {
+            NodeKind::Blocking => blocking_body(self),
+            NodeKind::Poll => poll_body(self),
+            NodeKind::Async => unreachable!("C vtables do not define async nodes"),
         }
     }
     fn query_interface(&self, iface: AvpInterfaceId) -> Option<*const c_void> {

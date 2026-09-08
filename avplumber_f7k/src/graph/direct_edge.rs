@@ -301,7 +301,15 @@ impl Edge for DirectEdge {
         self.state.lock().unwrap().events.current_spec()
     }
     fn rearm_spec(&self) {
-        self.state.lock().unwrap().events.rearm_spec();
+        let callback = {
+            let mut state = self.state.lock().unwrap();
+            if !state.events.rearm_spec() {
+                return;
+            }
+            state.events.take_readable_cb()
+        };
+        self.readable.notify();
+        Self::fire(callback);
     }
     fn notify_readable(&self, node: Box<dyn EdgeWaker>) {
         self.state.lock().unwrap().events.set_readable_cb(node);

@@ -166,7 +166,7 @@ wiring a new path.
 | `NodeEnvelope` | factory | Framework keys stripped from JSON (`type`, `name`, `group`, `src`, `dst`, `event_loop`, …) before remaining keys become `NodeSpec`. | Parsing only | No. |
 | `AvpNode` | C ABI | Stable opaque handle around the native `Arc`. Same pointer across restart; impl pointer inside is swapped. | `Instance.node_handles` | No. C `process`/`poll` go through `FfiNode` which **is** a `Node`. |
 
-`SisoNode` is a one-in/one-out **transform helper**, not a graph vertex. Adapters (`SisoAdapter` / `SisoPollAdapter` / `SisoAsyncAdapter`) implement `Node`.
+`SisoNode` is a one-in/one-out **transform helper**, not a graph vertex. Adapters (`SisoAdapter` / `SisoPollAdapter` / `SisoAsyncAdapter`) implement `Node`. Each hands the executor a fallible body, so an `Err` from `on_spec` or `process` reaches the supervisor; `SisoAdapter` parks on a `Park` through `push_blocking` when its output is full and honours `Node::interrupt`, `SisoPollAdapter` stashes the produced buffer and waits writable. Only a `SisoNode` that returns `true` from `direct_consumer_is_infallible` may sit behind a Direct edge.
 
 ### `NodeSpec` vs `NodeBlueprint`
 
@@ -220,8 +220,9 @@ Callers use a `NodeInstance` as a snapshot of the current generation:
   walking the `Vertex`.
 - `exec_ctx`, `restart`, `on_error`, `service_hint` — copied **into**
   `Group` at `add_group_member`. After that, the running group’s own maps
-  are what start/stop/policy consult. `NodeInstance` remains the source
-  used to reject a policy-bearing node in a second group.
+  are what start/stop/policy consult. `Instance.groups` is what rejects a
+  node that already belongs to another group: every node belongs to exactly
+  one, whatever its policy.
 - `blueprint` — the only handle reconstruct has to build generation N+1.
 
 `Group::start` does **not** read `NodeInstance`. It walks member names,
@@ -399,10 +400,15 @@ The native data path owns values:
 - `Spec` describes the format in force on an edge.
 - `Ts` carries value and timebase together; rescaling is explicit.
 
-Raw pointers belong in `abi/convert.rs` and `abi/edge_ops.rs`. Moving a frame
-through the C boundary transfers ownership; it is not a borrowed view.
-`AvpBuffer`, `AvpSpec`, `AvpRational`, and media vtables are ABI projections,
-not an alternative internal model.
+Raw pointers belong in `abi/convert.rs` and `abi/edge_ops.rs`. `avp_edge_take`
+and `avp_edge_peek_consume` hand the caller an owned reference; `avp_edge_peek`
+alone lends a view that lives until the peek is consumed or released.
+`avp_edge_push` takes the caller's reference only when it reports `PUSHED`: the
+edge is offered a retained clone, and on backpressure, drop, a closed edge or a
+stale lease the caller still owns its buffer and may retry it. A C `process` or
+`poll` returning `AVP_FLOW_ERROR` reaches the supervisor as a `NodeError`, the
+same as a native node's `Err`. `AvpBuffer`, `AvpSpec`, `AvpRational`, and media
+vtables are ABI projections, not an alternative internal model.
 
 `AvpSpec` is intentionally lossy. The native audio representation can retain a
 custom channel map, whereas the flat C struct cannot. With the `ffmpeg` feature
@@ -438,7 +444,12 @@ is congestion at that far end, so the original producer stays Idle until
 tail). Never fuse across a blocking or async node (`connect_edge` rejects
 those — the producer’s OS thread would stall, and async bodies are not
 `poll`). Selection is still explicit `connect_edge(..., EdgeKind::Direct)`
-(not inferred from co-location).
+(not inferred from co-location). A Direct consumer must also opt in through
+`Node::direct_consumer_is_infallible` (C: the vtable field of the same name):
+its fused `poll` runs inside the producer's `offer`, which has no `NodeError`
+channel back to the supervisor, so `connect_edge` and `Group::start` both reject
+a consumer that has not promised that path cannot fail. Put a Buffered edge in
+front of a fallible consumer.
 
 Control events (Spec, Flush, Eof) never take a buffer slot, so EOF/flush
 cannot stall behind a full media queue. Direct keeps them on a side queue;
@@ -446,15 +457,23 @@ Buffered uses `EdgeQueue` for both events and media. `FlushStart` discards
 queued buffers, keeps events, then appends itself. EOF closes later buffer
 `offer`s but remains an item for the consumer.
 
-`Spec` is queued and latched, and delivered **exactly once**: the queue counts
-its own queued `Spec` entries and synthesises from the latch only when that
-count is zero, so a pushed `Spec` is not seen twice and does not multiply along
-a chain of forwarding nodes. `rearm_spec` deliberately adds one more delivery,
-which is how a newly attached or restarted consumer learns the format. Nodes
-still treat an identical re-delivered `Spec` as a no-op (see the media node
-layer below) rather than trusting the count. `pop` is `take` with the item
-dropped in both edge kinds; a separate precedence rule there is what used to let
-`peek` return an event while `pop` ate a buffer.
+`Spec` is queued and latched, and a pushed `Spec` is delivered **exactly
+once**: from its queue entry, in order with the buffers around it, and never
+synthesised from the latch as well, so it does not multiply along a chain of
+forwarding nodes. `rearm_spec` deliberately arms one more delivery, served ahead
+of the queue, which is how a newly attached or restarted consumer learns the
+format. It replays whatever governs the head of the queue: nothing when a
+queued `Spec` is already first, the last *delivered* `Spec` when buffers are
+queued (they were produced under it, and a newer `Spec` is still queued behind
+them), the latch when the queue is empty. It also wakes a consumer parked on
+readable, and the replay counts as `occupied`. Restart keeps queued `Spec`
+entries together with the preserved buffers, so a format transition between two
+buffers survives; `Ingress` and `Internal` re-arm because the consumer is the
+endpoint being rebuilt, `Egress` does not. Nodes still treat an identical
+re-delivered `Spec` as a no-op (see the media node layer below) rather than
+trusting the count. `pop` is `take` with the item dropped in both edge kinds; a
+separate precedence rule there is what used to let `peek` return an event while
+`pop` ate a buffer.
 
 Hints travel the other way: a consumer calls `post_hint` and the producer
 `take_hints`. They are *state*, not events — latched per variant, replaced
@@ -770,8 +789,8 @@ output. Do not edit that header, and do not generate Rust from the C headers.
 This core is suitable for architecture review, not yet as a trusted runtime.
 The following are implementation facts, not roadmap speculation:
 
-- RestartGroup is group-scoped; a policy-bearing node must belong to exactly
-  one supervisor group before start/restart. Isolated `restart_node` remains
+- RestartGroup is group-scoped; every node must belong to exactly one
+  supervisor group before start/restart, whatever its policy. Isolated `restart_node` remains
   intentionally unsupported: `on`, boolean `true`, and `restart_node` are
   rejected instead of being reinterpreted. `group`/`restart_group`,
   `panic`, `exit`, and `off` are explicit actions. Automatic and manual

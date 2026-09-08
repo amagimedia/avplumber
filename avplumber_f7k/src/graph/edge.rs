@@ -51,8 +51,10 @@ pub enum Push {
 /// - [`Direct`](EdgeKind::Direct) — capacity 0. `offer` runs the consumer
 ///   (and the rest of a Direct-only chain) on the same executor;
 ///   `Push::Full` is congestion at the first Buffered edge or sink after the
-///   chain. Never fuse across a blocking or async node. Explicit
-///   `connect_edge` only.
+///   chain. Direct consumers must be lightweight and opt in through
+///   `Node::direct_consumer_is_infallible` because the fused `Node::poll` contract
+///   cannot return `NodeError`. Never fuse across a blocking or async node.
+///   Explicit `connect_edge` only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeKind {
     Buffered { capacity: usize },
@@ -263,12 +265,16 @@ pub(crate) struct EdgeQueue {
     queue: VecDeque<QueueEntry>,
     buffer_capacity: usize,
     latched_spec: Option<Spec>,
-    /// The latched `Spec` still owes the consumer a delivery. Suppressed while
-    /// `spec_queued > 0`: the queued entry is that delivery, and synthesising
-    /// from the latch as well would hand the same `Spec` over twice.
-    spec_delivered: bool,
-    /// `Spec` entries currently sitting in `queue`.
-    spec_queued: usize,
+    /// The `Spec` most recently handed to the consumer. While buffers are still
+    /// queued, `rearm_spec` replays this one rather than the latch: those
+    /// buffers were produced under it, and any newer `Spec` is still queued
+    /// behind them and will be delivered in order.
+    delivered_spec: Option<Spec>,
+    /// The one extra delivery `rearm_spec` owes, served ahead of the queue. A
+    /// pushed `Spec` is only ever delivered from its queue entry, never
+    /// synthesised from the latch as well, so this slot is the sole source of a
+    /// second delivery.
+    pending_replay: Option<Spec>,
     closed: bool,
     interrupted: bool,
     readable_waker: Option<Box<dyn EdgeWaker>>,
@@ -286,8 +292,8 @@ impl EdgeQueue {
             queue: VecDeque::with_capacity(buffer_capacity),
             buffer_capacity,
             latched_spec: None,
-            spec_delivered: true,
-            spec_queued: 0,
+            delivered_spec: None,
+            pending_replay: None,
             closed: false,
             interrupted: false,
             readable_waker: None,
@@ -345,8 +351,6 @@ impl EdgeQueue {
             }
             EdgeEvent::Spec(spec) => {
                 self.latched_spec = Some(spec.clone());
-                self.spec_delivered = false;
-                self.spec_queued += 1;
             }
             EdgeEvent::Eof => self.closed = true,
             _ => {}
@@ -357,30 +361,22 @@ impl EdgeQueue {
         });
     }
 
-    /// The latch owes the consumer a delivery that no queued entry will make.
-    fn undelivered_latched_spec(&self) -> Option<&Spec> {
-        if self.spec_delivered || self.spec_queued > 0 {
-            return None;
-        }
-        self.latched_spec.as_ref()
-    }
-
     pub fn try_peek(&self) -> Option<EdgeItem> {
-        if let Some(spec) = self.undelivered_latched_spec() {
-            return Some(EdgeItem::Event(EdgeEvent::Spec(spec.clone())));
+        if let Some(spec) = self.pending_replay.clone() {
+            return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
         }
         self.queue.front().map(|entry| entry.item.clone())
     }
 
     pub fn try_take(&mut self) -> Option<EdgeItem> {
-        if let Some(spec) = self.undelivered_latched_spec().cloned() {
-            self.spec_delivered = true;
+        if let Some(spec) = self.pending_replay.take() {
+            self.delivered_spec = Some(spec.clone());
             return Some(EdgeItem::Event(EdgeEvent::Spec(spec)));
         }
-        let item = self.queue.pop_front()?.item;
-        if matches!(item, EdgeItem::Event(EdgeEvent::Spec(_))) {
-            self.spec_delivered = true;
-            self.spec_queued = self.spec_queued.saturating_sub(1);
+        let entry = self.queue.pop_front()?;
+        let item = entry.item;
+        if let EdgeItem::Event(EdgeEvent::Spec(spec)) = &item {
+            self.delivered_spec = Some(spec.clone());
         }
         Some(item)
     }
@@ -392,7 +388,7 @@ impl EdgeQueue {
     }
 
     pub fn occupied(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + usize::from(self.pending_replay.is_some())
     }
     pub fn is_closed(&self) -> bool {
         self.closed
@@ -403,12 +399,25 @@ impl EdgeQueue {
     pub fn current_spec(&self) -> Option<Spec> {
         self.latched_spec.clone()
     }
-    pub fn rearm_spec(&mut self) {
-        if self.latched_spec.is_some() {
-            self.spec_delivered = false;
-        }
+    /// Arms one extra `Spec` delivery for a newly attached or restarted
+    /// consumer and reports whether there is anything to deliver. The replay is
+    /// whatever format governs the head of the queue: nothing when a queued
+    /// `Spec` is already first, the last delivered `Spec` when buffers are
+    /// queued, the latch when the queue is empty.
+    pub fn rearm_spec(&mut self) -> bool {
+        self.pending_replay = match self.queue.front().map(|entry| &entry.item) {
+            Some(EdgeItem::Event(EdgeEvent::Spec(_))) => None,
+            Some(_) => self.delivered_spec.clone(),
+            None => self.latched_spec.clone(),
+        };
+        self.pending_replay.is_some()
     }
 
+    /// `Egress` and `Ingress` keep queued `Spec` entries along with the
+    /// buffers, so a format transition sitting between two preserved buffers
+    /// survives the restart. `Ingress` and `Internal` also re-arm the replay,
+    /// because the endpoint being rebuilt is the consumer; an `Egress` restart
+    /// keeps its consumer, which already holds the format.
     pub fn reset_for_restart(&mut self, kind: EdgeRestart) {
         match kind {
             EdgeRestart::Internal => {
@@ -417,18 +426,28 @@ impl EdgeQueue {
                         discarded.store(true, Ordering::Release);
                     }
                 }
+                self.rearm_spec();
             }
-            EdgeRestart::Egress | EdgeRestart::Ingress => {
-                self.queue
-                    .retain(|entry| matches!(entry.item, EdgeItem::Buffer(_)));
+            EdgeRestart::Egress => {
+                self.queue.retain(|entry| {
+                    matches!(
+                        entry.item,
+                        EdgeItem::Buffer(_) | EdgeItem::Event(EdgeEvent::Spec(_))
+                    )
+                });
+            }
+            EdgeRestart::Ingress => {
+                self.queue.retain(|entry| {
+                    matches!(
+                        entry.item,
+                        EdgeItem::Buffer(_) | EdgeItem::Event(EdgeEvent::Spec(_))
+                    )
+                });
+                self.rearm_spec();
             }
         }
-        // Both arms removed every event entry, `Spec` included; the latch is
-        // what re-delivers it, via the `rearm_spec` below.
-        self.spec_queued = 0;
         self.closed = false;
         self.interrupted = false;
-        self.rearm_spec();
     }
 
     pub fn interrupt(&mut self) {

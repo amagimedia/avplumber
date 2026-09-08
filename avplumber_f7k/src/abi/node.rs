@@ -162,6 +162,7 @@ fn bind_endpoint(
         let mut lease = Box::new(AvpEdge {
             name,
             edge: lease_edge,
+            media_vtables: core.media_vtables.clone(),
         });
         let pointer = lease.as_mut() as *mut AvpEdge;
         match (direction, node.building) {
@@ -177,6 +178,7 @@ fn bind_endpoint(
         Box::new(AvpEdge {
             name,
             edge: edge.clone(),
+            media_vtables: core.media_vtables.clone(),
         })
     });
     handle.as_ref() as *const AvpEdge as *mut AvpEdge

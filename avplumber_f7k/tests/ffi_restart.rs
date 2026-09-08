@@ -1,25 +1,29 @@
 use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use avplumber_f7k::abi::edge_ops::{
+    AvpItem, avp_edge_peek, avp_edge_peek_consume, avp_edge_peek_release, avp_edge_take,
+};
 use avplumber_f7k::abi::{
     AvpCore, AvpEdge, AvpNode, avp_core_create, avp_core_destroy, avp_create_edge,
     avp_create_group, avp_create_node, avp_destroy_group, avp_destroy_node, avp_edge_push,
     avp_group_add, avp_group_add_checked, avp_group_status, avp_lookup_node, avp_node_bind_sink,
     avp_node_bind_source, avp_node_impl, avp_node_query_interface, avp_node_set_impl,
-    avp_register_node_factory, avp_restart_group, avp_start_group, avp_stop_group, avp_string_free,
+    avp_register_media_type, avp_register_node_factory, avp_restart_group, avp_start_group,
+    avp_stop_group, avp_string_free,
 };
 use avplumber_f7k::{
-    AvpBuffer, AvpInterfaceId, AvpMediaType, AvpNodeVtable, Blocked, EdgeRestart, GroupState, Node,
-    NodeError, NodeOutcome, NodePhase, NodeRequest, RestartPolicy, register_factory,
+    AvpBuffer, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpNodeVtable, AvpRational, Blocked,
+    Edge, EdgeCoupling, EdgeRestart, GroupState, Node, NodeError, NodeKind, NodeOutcome, NodePhase,
+    NodePollContext, NodeRequest, RestartPolicy, Tick, register_factory,
 };
 
-/// One ABI buffer, freshly owned. [`avp_edge_push`] adopts the pointer whether
-/// the edge accepts it or not, so every push needs its own — and with libav
-/// compiled in the pointer really is an `AVFrame` that the push will free, which
-/// is why this is cfg-paired rather than a dangling address in both builds.
+/// One ABI buffer, freshly owned. With libav compiled in the pointer really is
+/// an `AVFrame`, which is why this is cfg-paired rather than a dangling address
+/// in both builds.
 fn abi_buffer() -> AvpBuffer {
     #[cfg(feature = "ffmpeg")]
     {
@@ -41,6 +45,27 @@ fn abi_buffer() -> AvpBuffer {
             ptr: std::ptr::dangling_mut(),
         }
     }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn release_abi_buffer(buffer: AvpBuffer) {
+    let mut frame = buffer.ptr as *mut rusty_ffmpeg::ffi::AVFrame;
+    unsafe { rusty_ffmpeg::ffi::av_frame_free(&mut frame) };
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn release_abi_buffer(_buffer: AvpBuffer) {}
+
+/// Pushes a fresh buffer and returns the raw `AvpFlow` code. [`avp_edge_push`]
+/// takes the caller's reference only on `PUSHED`; every other outcome leaves the
+/// buffer with the caller, which is this helper, so it frees it.
+fn push_abi_buffer(edge: *mut AvpEdge) -> usize {
+    let buffer = abi_buffer();
+    let flow = avp_edge_push(edge, &buffer) as usize;
+    if flow != 0 {
+        release_abi_buffer(buffer);
+    }
+    flow
 }
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -78,7 +103,7 @@ fn group_status_and_restart_errors_are_available_through_c_abi() {
 }
 
 #[test]
-fn checked_c_group_add_reports_duplicate_policy_membership() {
+fn checked_c_group_add_reports_duplicate_membership() {
     let _guard = TEST_LOCK.lock().unwrap();
     FACTORY_CALLS.store(0, Ordering::SeqCst);
     FIRST_HANDLE.store(0, Ordering::SeqCst);
@@ -149,12 +174,12 @@ static VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(process),
     poll: None,
     query_interface: None,
+    direct_consumer_is_infallible: 0,
 };
 
 extern "C" fn push_process(_handle: *mut c_void) -> i32 {
     let edge = PUSH_EDGE.load(Ordering::SeqCst) as *mut AvpEdge;
-    let buffer = abi_buffer();
-    PUSH_FLOW.store(avp_edge_push(edge, &buffer) as usize, Ordering::SeqCst);
+    PUSH_FLOW.store(push_abi_buffer(edge), Ordering::SeqCst);
     0
 }
 
@@ -165,6 +190,7 @@ static PUSH_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(push_process),
     poll: None,
     query_interface: None,
+    direct_consumer_is_infallible: 0,
 };
 
 extern "C" fn helper_process(_handle: *mut c_void) -> i32 {
@@ -179,6 +205,21 @@ static HELPER_VTABLE: AvpNodeVtable = AvpNodeVtable {
     process: Some(helper_process),
     poll: None,
     query_interface: None,
+    direct_consumer_is_infallible: 0,
+};
+
+extern "C" fn error_process(_handle: *mut c_void) -> i32 {
+    4
+}
+
+static ERROR_VTABLE: AvpNodeVtable = AvpNodeVtable {
+    start: None,
+    stop: None,
+    destroy: None,
+    process: Some(error_process),
+    poll: None,
+    query_interface: None,
+    direct_consumer_is_infallible: 0,
 };
 
 extern "C" fn push_factory(
@@ -202,6 +243,15 @@ extern "C" fn helper_factory(
     }
     let state = Box::into_raw(Box::new(CState { generation: 1 }));
     avp_node_set_impl(node, state.cast(), &HELPER_VTABLE);
+    node
+}
+
+extern "C" fn error_factory(
+    _core: *mut AvpCore,
+    node: *mut AvpNode,
+    _params: *const c_char,
+) -> *mut AvpNode {
+    avp_node_set_impl(node, std::ptr::null_mut(), &ERROR_VTABLE);
     node
 }
 
@@ -287,6 +337,45 @@ fn trigger_restart(core: *mut AvpCore, generation: u64) {
         err: NodeError::new("worker", NodePhase::Process, "planned restart"),
     });
     wait_for_generation(core, generation + 1);
+}
+
+#[test]
+fn c_flow_error_reaches_the_group_supervisor() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let core = avp_core_create();
+    avp_register_node_factory(core, c"always_errors".as_ptr(), error_factory);
+    let node = avp_create_node(
+        core,
+        c"always_errors".as_ptr(),
+        c"failing_c_node".as_ptr(),
+        c"{}".as_ptr(),
+        std::ptr::null_mut(),
+    );
+    assert!(!node.is_null());
+    let group = avp_create_group(core, c"error_group".as_ptr());
+    avp_group_add(group, node);
+    assert_eq!(avp_start_group(group, std::ptr::null_mut()), 0);
+
+    let native_group = unsafe { &*core }.group("error_group").unwrap();
+    wait_for("the C error to reach the supervisor", || {
+        native_group.state() == GroupState::Failed
+    });
+    let status = native_group.status();
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("C node returned AVP_FLOW_ERROR")
+    );
+    assert!(
+        status
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("failed:failing_c_node:generation=1:"))
+    );
+
+    avp_stop_group(group, std::ptr::null_mut());
+    avp_destroy_node(core, node);
+    avp_destroy_group(core, group);
+    avp_core_destroy(core);
 }
 
 #[test]
@@ -415,15 +504,12 @@ fn create_edge_handle_rejects_writes_after_producer_generation_changes() {
         std::ptr::null(),
     );
     let logical = unsafe { &*core }.edge_link("created").unwrap().edge;
-    let accepted = abi_buffer();
-    assert_eq!(avp_edge_push(edge, &accepted) as usize, 0);
+    assert_eq!(push_abi_buffer(edge), 0);
 
     logical.restart(1, 2, EdgeRestart::Egress);
 
-    // A second buffer, not the same one again: the push above adopted the first.
-    let fenced = abi_buffer();
     assert_eq!(
-        avp_edge_push(edge, &fenced) as usize,
+        push_abi_buffer(edge),
         3,
         "the returned create-edge writer lease must be generation-fenced"
     );
@@ -467,18 +553,12 @@ fn stale_c_helper_thread_is_fenced_by_generation_lease() {
     let new_lease =
         avp_node_bind_sink(producer, c"helper-edge".as_ptr(), AvpMediaType::VIDEO, 4) as usize;
     assert_ne!(old_lease, new_lease);
-    let stale_flow = std::thread::spawn(move || {
-        let buffer = abi_buffer();
-        avp_edge_push(old_lease as *mut AvpEdge, &buffer) as usize
-    })
-    .join()
-    .unwrap();
-    let fresh_flow = std::thread::spawn(move || {
-        let buffer = abi_buffer();
-        avp_edge_push(new_lease as *mut AvpEdge, &buffer) as usize
-    })
-    .join()
-    .unwrap();
+    let stale_flow = std::thread::spawn(move || push_abi_buffer(old_lease as *mut AvpEdge))
+        .join()
+        .unwrap();
+    let fresh_flow = std::thread::spawn(move || push_abi_buffer(new_lease as *mut AvpEdge))
+        .join()
+        .unwrap();
 
     assert_eq!(
         stale_flow, 3,
@@ -635,6 +715,267 @@ struct NativeFactoryNode {
 impl Node for NativeFactoryNode {
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+struct TrackedOpaque {
+    refs: AtomicUsize,
+    retains: AtomicUsize,
+    releases: AtomicUsize,
+}
+
+impl TrackedOpaque {
+    fn allocate() -> (*mut Self, AvpBuffer) {
+        let ptr = Box::into_raw(Box::new(Self {
+            refs: AtomicUsize::new(1),
+            retains: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        }));
+        (
+            ptr,
+            AvpBuffer {
+                media: AvpMediaType::METADATA,
+                ptr: ptr.cast(),
+            },
+        )
+    }
+}
+
+extern "C" fn tracked_retain(ptr: *mut c_void) {
+    let tracked = unsafe { &*(ptr.cast::<TrackedOpaque>()) };
+    tracked.retains.fetch_add(1, Ordering::SeqCst);
+    tracked.refs.fetch_add(1, Ordering::SeqCst);
+}
+
+extern "C" fn tracked_release(ptr: *mut c_void) {
+    let tracked = unsafe { &*(ptr.cast::<TrackedOpaque>()) };
+    tracked.releases.fetch_add(1, Ordering::SeqCst);
+    assert!(tracked.refs.fetch_sub(1, Ordering::SeqCst) > 0);
+}
+
+extern "C" fn tracked_pts(_ptr: *mut c_void) -> i64 {
+    42
+}
+
+extern "C" fn tracked_time_base(_ptr: *mut c_void, out: *mut AvpRational) {
+    unsafe {
+        *out = AvpRational { num: 1, den: 1000 };
+    }
+}
+
+static TRACKED_MEDIA_VTABLE: AvpMediaVtable = AvpMediaVtable {
+    retain: tracked_retain,
+    release: tracked_release,
+    get_pts: tracked_pts,
+    get_time_base: tracked_time_base,
+};
+
+struct DirectEndpoint {
+    name: String,
+    input: OnceLock<Arc<dyn Edge>>,
+    drain: Arc<AtomicBool>,
+}
+
+impl Node for DirectEndpoint {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> NodeKind {
+        NodeKind::Poll
+    }
+
+    fn direct_consumer_is_infallible(&self) -> bool {
+        true
+    }
+
+    fn bind_source(&self, _name: &str, edge: Arc<dyn Edge>) {
+        let _ = self.input.set(edge);
+    }
+
+    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
+        if self.drain.load(Ordering::SeqCst)
+            && self
+                .input
+                .get()
+                .is_some_and(|input| input.try_take().is_some())
+        {
+            Tick::Again
+        } else {
+            Tick::Idle
+        }
+    }
+}
+
+fn opaque_test_edge() -> (*mut AvpCore, *mut AvpNode, *mut AvpNode, *mut AvpEdge) {
+    let core = avp_core_create();
+    avp_register_media_type(core, AvpMediaType::METADATA, &TRACKED_MEDIA_VTABLE);
+    avp_register_node_factory(core, c"opaque_source".as_ptr(), push_factory);
+    register_factory(unsafe { &*core }, "opaque_sink", |name, _| {
+        Ok(Arc::new(NativeFactoryNode { name: name.into() }))
+    });
+    let producer = avp_create_node(
+        core,
+        c"opaque_source".as_ptr(),
+        c"producer".as_ptr(),
+        c"{}".as_ptr(),
+        std::ptr::null_mut(),
+    );
+    let consumer = avp_create_node(
+        core,
+        c"opaque_sink".as_ptr(),
+        c"consumer".as_ptr(),
+        c"{}".as_ptr(),
+        std::ptr::null_mut(),
+    );
+    let coupling = EdgeCoupling {
+        is_direct: 0,
+        capacity: 1,
+    };
+    let edge = avp_create_edge(
+        core,
+        c"opaque".as_ptr(),
+        producer,
+        c"out".as_ptr(),
+        consumer,
+        c"in".as_ptr(),
+        &coupling,
+    );
+    assert!(!edge.is_null());
+    (core, producer, consumer, edge)
+}
+
+fn destroy_opaque_test_edge(core: *mut AvpCore, producer: *mut AvpNode, consumer: *mut AvpNode) {
+    avp_destroy_node(core, producer);
+    avp_destroy_node(core, consumer);
+    avp_core_destroy(core);
+}
+
+#[test]
+fn c_push_keeps_caller_reference_on_backpressure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (core, producer, consumer, edge) = opaque_test_edge();
+    let (first_ptr, first) = TrackedOpaque::allocate();
+    let (second_ptr, second) = TrackedOpaque::allocate();
+
+    assert_eq!(avp_edge_push(edge, &first) as usize, 0);
+    assert_eq!(unsafe { (*first_ptr).refs.load(Ordering::SeqCst) }, 1);
+
+    assert_eq!(avp_edge_push(edge, &second) as usize, 2);
+    assert_eq!(unsafe { (*second_ptr).refs.load(Ordering::SeqCst) }, 1);
+    let second_retains = unsafe { (*second_ptr).retains.load(Ordering::SeqCst) };
+    assert!(second_retains > 0);
+    assert_eq!(
+        unsafe { (*second_ptr).releases.load(Ordering::SeqCst) },
+        second_retains,
+        "a rejected push must balance every temporary reference"
+    );
+
+    let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
+    assert_eq!(avp_edge_take(edge, 0, item.as_mut_ptr()), 1);
+    let item = unsafe { item.assume_init() };
+    assert_eq!(item.buffer.ptr, first.ptr);
+    tracked_release(item.buffer.ptr);
+    assert_eq!(unsafe { (*first_ptr).refs.load(Ordering::SeqCst) }, 0);
+
+    assert_eq!(avp_edge_push(edge, &second) as usize, 0);
+    let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
+    assert_eq!(avp_edge_take(edge, 0, item.as_mut_ptr()), 1);
+    tracked_release(unsafe { item.assume_init() }.buffer.ptr);
+    assert_eq!(unsafe { (*second_ptr).refs.load(Ordering::SeqCst) }, 0);
+
+    destroy_opaque_test_edge(core, producer, consumer);
+    unsafe {
+        drop(Box::from_raw(first_ptr));
+        drop(Box::from_raw(second_ptr));
+    }
+}
+
+#[test]
+fn c_peek_borrows_without_leaking_an_extra_reference() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (core, producer, consumer, edge) = opaque_test_edge();
+    let (tracked_ptr, buffer) = TrackedOpaque::allocate();
+    assert_eq!(avp_edge_push(edge, &buffer) as usize, 0);
+
+    let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
+    let peek = avp_edge_peek(edge, 0, item.as_mut_ptr());
+    assert!(!peek.is_null());
+    assert_eq!(unsafe { item.assume_init() }.buffer.ptr, buffer.ptr);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 2);
+    avp_edge_peek_release(peek);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
+
+    let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
+    let peek = avp_edge_peek(edge, 0, item.as_mut_ptr());
+    let mut consumed = AvpBuffer::null(AvpMediaType::METADATA);
+    assert_eq!(avp_edge_peek_consume(peek, &mut consumed), 1);
+    assert_eq!(consumed.ptr, buffer.ptr);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
+    tracked_release(consumed.ptr);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 0);
+
+    destroy_opaque_test_edge(core, producer, consumer);
+    unsafe {
+        drop(Box::from_raw(tracked_ptr));
+    }
+}
+
+#[test]
+fn direct_push_commits_ownership_only_after_the_consumer_accepts() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let core = avp_core_create();
+    avp_register_media_type(core, AvpMediaType::METADATA, &TRACKED_MEDIA_VTABLE);
+    let drain = Arc::new(AtomicBool::new(false));
+    register_factory(unsafe { &*core }, "direct_endpoint", {
+        let drain = drain.clone();
+        move |name, _| {
+            Ok(Arc::new(DirectEndpoint {
+                name: name.into(),
+                input: OnceLock::new(),
+                drain: drain.clone(),
+            }))
+        }
+    });
+    let producer = avp_create_node(
+        core,
+        c"direct_endpoint".as_ptr(),
+        c"producer".as_ptr(),
+        c"{}".as_ptr(),
+        std::ptr::null_mut(),
+    );
+    let consumer = avp_create_node(
+        core,
+        c"direct_endpoint".as_ptr(),
+        c"consumer".as_ptr(),
+        c"{}".as_ptr(),
+        std::ptr::null_mut(),
+    );
+    let coupling = EdgeCoupling {
+        is_direct: 1,
+        capacity: 0,
+    };
+    let edge = avp_create_edge(
+        core,
+        c"direct".as_ptr(),
+        producer,
+        c"out".as_ptr(),
+        consumer,
+        c"in".as_ptr(),
+        &coupling,
+    );
+    assert!(!edge.is_null());
+    let (tracked_ptr, buffer) = TrackedOpaque::allocate();
+
+    assert_eq!(avp_edge_push(edge, &buffer) as usize, 2);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
+    drain.store(true, Ordering::SeqCst);
+    assert_eq!(avp_edge_push(edge, &buffer) as usize, 0);
+    assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 0);
+
+    destroy_opaque_test_edge(core, producer, consumer);
+    unsafe {
+        drop(Box::from_raw(tracked_ptr));
     }
 }
 
