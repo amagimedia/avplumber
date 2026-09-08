@@ -236,10 +236,6 @@ class LumaSceneCut(InternalNode):
     TYPE = "luma_scene_cut"
 
 
-class CudaInferSceneCutOnnx(InternalNode):
-    TYPE = "cuda_infer_scene_cut_onnx"
-
-
 class DrawTrail(InternalNode):
     TYPE = "draw_trail"
 
