@@ -16,24 +16,12 @@ Pages; media comes from public release assets, outside Git history.
 
 ## Frame continuity, measured
 
-Every generated clip carries a machine-readable frame code. A recorded program
-is decoded frame by frame and each element boundary is checked against the
-configured cue-in and cue-out frames (`tests/verify_recording.py`). The
-measurements published on the [demo page](https://amagimedia.github.io/avplumber/demos/playlist/docs/)
-come from a 50 s LoopAll pass on a Tesla T4 with the five fixtures:
-
-- Cue points inside a file land exactly: element 3 (cued 2.000 s to 8.000 s)
-  goes on air on frame 60 and leaves on frame 239.
-- Elements cued at 0 land on frame 0 or frame 1. The mixer's ready cut fires
-  on the first fresh incoming frame and switches on the next one; the frame it
-  consumes has to come from the loop wrap for a cue at 0, and the realtime
-  resync at the wrap decides the race. This ±1 frame is the remaining known
-  offset.
-- No black or unreadable frames at any boundary in 1,509 recorded frames. One
-  repeated and one skipped frame occur about 0.8 s after each transition.
-
-Every anomaly and its position is listed in the published report; nothing is
-claimed beyond what the verifier prints.
+Every generated clip carries a machine-readable frame code, and a recorded
+program is checked boundary by boundary against the configured cue-in and
+cue-out frames (`tests/verify_recording.py`). The results for a 50 s LoopAll
+pass on a Tesla T4 are on the [demo page](https://amagimedia.github.io/avplumber/demos/playlist/docs/):
+which frame each element left on, which frame the next one arrived on, and
+every repeated or skipped frame with its position.
 
 ## Run
 
