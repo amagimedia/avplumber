@@ -203,8 +203,10 @@ The legacy CUDA path normalizes input timestamps and applies `fps` and
 recover source frames already omitted during composition.
 - **Why CUDA detile:** on NVIDIA the browser's GPU render target is always tiled
   (block-linear); a plain DRM `hwdownload` reads sheared garbage. `drm_prime_to_cuda`
-  EGL-imports the DMA-BUF honoring the tiling modifier into a linear CUDA frame,
-  which NVENC encodes directly (`drop_alpha` labels it RGB0 so NVENC accepts it).
+  EGL-imports each DMA-BUF allocation once (the same allocation-identity cache as
+  `drm_prime_to_egl_image`) and copies it per frame through the CUDA array,
+  honoring the tiling modifier, into a linear CUDA frame that NVENC encodes
+  directly (`drop_alpha` labels it RGB0/BGR0 by DRM byte order so NVENC accepts it).
   Consumer image: `consumer/Dockerfile.cuda` (`HAVE_CUDA+GL+DRM`, no TensorRT/neural).
   It builds FFmpeg with `scale_cuda` for the N-source grid and `mpdecimate` for
   the explicitly downloaded diagnostic path.
