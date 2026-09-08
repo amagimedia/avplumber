@@ -9,7 +9,7 @@ source with its decoder kept resident; each transition is a `mixer.cut`,
 `fade` or `wipe` armed ahead of time at a wallclock start, so the switch between
 two clips is decided inside the engine, not by Python after the fact. Program
 output is on the left and the real terminal controls on the right, in a
-26-second, 2.3 MB, 1600×900, 30 fps MP4: a manual take, two scheduled cuts landing on the
+26-second, 2.2 MB, 1600×900, 30 fps MP4: a manual take, two scheduled cuts landing on the
 configured cue frames, and a fade. Click the first-frame preview to play it
 with chapter buttons and inspect the web UI graph. The page is hosted on GitHub
 Pages; media comes from public release assets, outside Git history.

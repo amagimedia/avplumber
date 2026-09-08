@@ -34,7 +34,7 @@
     <a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg" alt="Playlist program video beside terminal controls; click to download the MP4."></a>
   </video>
   <nav class="chapters" aria-label="Jump to a demonstration" id="chapters"></nav>
-  <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · <span id="media-line">26 seconds · 2.3 MB · 1600×900 · 30 fps · silent H.264 video</span>. The program track is the engine's own recording of the program (never resampled in time); the terminal is a separate browser capture of the TUI served by ttyd.</p>
+  <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · <span id="media-line">26 seconds · 2.2 MB · 1600×900 · 30 fps · silent H.264 video</span>. The program track is the engine's own recording of the program (never resampled in time); the terminal is a separate browser capture of the TUI served by ttyd.</p>
 
   <h2>Frame continuity, measured</h2>
   <p>Every generated clip carries a 32-bit frame code. A 50-second LoopAll pass was recorded by the engine on a Tesla T4 and checked frame by frame with <code>tests/verify_recording.py</code>: 1,509 program frames, none unreadable, no black frames. Element 3, cued 2.000 s to 8.000 s, goes on air on frame 60 and leaves on frame 239. The full report with every boundary and anomaly position: <a href="verify-clean.json">verify-clean.json</a>.</p>

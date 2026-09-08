@@ -176,9 +176,8 @@ points and never reaches EOF.
 
 A scheduled cut is armed 600 ms ahead with `mixer.cut` at a wallclock
 `start_pts_ms`, and the incoming chain is resumed natively (`resume <team>
-at`) 50 ms before the cut. A parked element sits one frame before its cue-in:
-the mixer's ready cut consumes the first fresh frame of the incoming element,
-so cue-in itself is the first frame on air. The switch is confirmed from
+at`) 50 ms before the cut, parked so that cue-in is the first frame on air.
+The switch is confirmed from
 `mixer.status` before the outgoing element is parked. Fades and wipes are
 armed the same way and end at the scheduled time.
 
