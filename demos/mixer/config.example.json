@@ -1,0 +1,314 @@
+{
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 60
+  },
+  "sources": [
+    {
+      "id": "page",
+      "kind": "browser",
+      "url": "https://example.org/graphics",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam0",
+      "kind": "video",
+      "path": "/media/camera-0.mp4",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam1",
+      "kind": "video",
+      "path": "/media/camera-1.mp4",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam2",
+      "kind": "video",
+      "path": "/media/camera-2.mp4",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam3",
+      "kind": "video",
+      "path": "/media/camera-3.mp4",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam4",
+      "kind": "video",
+      "path": "/media/camera-4.mp4",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": "cam5",
+      "kind": "video",
+      "path": "/media/camera-5.mp4",
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "wipes": [
+    {
+      "id": "wipe",
+      "path": "/media/wipe.mov"
+    }
+  ],
+  "transitions": {
+    "fade_seconds": 0.8,
+    "default_wipe": "wipe"
+  },
+  "scenes": [
+    {
+      "id": "cam0_full",
+      "items": [
+        {
+          "source": "cam0",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 1920
+          },
+          "fit": "cover"
+        }
+      ]
+    },
+    {
+      "id": "two_up",
+      "items": [
+        {
+          "source": "cam0",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 960
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "cam1",
+          "dst": {
+            "x": 0,
+            "y": 960,
+            "w": 1080,
+            "h": 960
+          },
+          "fit": "contain"
+        }
+      ]
+    },
+    {
+      "id": "pip_over",
+      "items": [
+        {
+          "source": "cam0",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 1920
+          },
+          "fit": "cover"
+        },
+        {
+          "source": "page",
+          "dst": {
+            "x": 60,
+            "y": 120,
+            "w": 960,
+            "h": 540
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "cam1",
+          "dst": {
+            "x": 600,
+            "y": 420,
+            "w": 420,
+            "h": 236
+          },
+          "fit": "contain"
+        }
+      ]
+    },
+    {
+      "id": "pip_under",
+      "items": [
+        {
+          "source": "cam0",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 1920
+          },
+          "fit": "cover"
+        },
+        {
+          "source": "cam1",
+          "dst": {
+            "x": 600,
+            "y": 420,
+            "w": 420,
+            "h": 236
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "page",
+          "dst": {
+            "x": 60,
+            "y": 120,
+            "w": 960,
+            "h": 540
+          },
+          "fit": "contain"
+        }
+      ]
+    },
+    {
+      "id": "crop_stretch",
+      "items": [
+        {
+          "source": "cam2",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 1920
+          },
+          "fit": "stretch",
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "w": 960,
+            "h": 540
+          }
+        },
+        {
+          "source": "page",
+          "dst": {
+            "x": 0,
+            "y": 960,
+            "w": 1080,
+            "h": 960
+          },
+          "fit": "stretch",
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "w": 960,
+            "h": 540
+          }
+        }
+      ]
+    },
+    {
+      "id": "twins",
+      "items": [
+        {
+          "source": "page",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 540,
+            "h": 304
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "page",
+          "dst": {
+            "x": 540,
+            "y": 0,
+            "w": 540,
+            "h": 304
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "cam3",
+          "dst": {
+            "x": 0,
+            "y": 320,
+            "w": 1080,
+            "h": 780
+          },
+          "fit": "cover"
+        },
+        {
+          "source": "cam3",
+          "dst": {
+            "x": 0,
+            "y": 1120,
+            "w": 1080,
+            "h": 780
+          },
+          "fit": "contain"
+        }
+      ]
+    },
+    {
+      "id": "showcase",
+      "items": [
+        {
+          "source": "cam4",
+          "dst": {
+            "x": 0,
+            "y": 0,
+            "w": 1080,
+            "h": 1920
+          },
+          "fit": "cover"
+        },
+        {
+          "source": "cam5",
+          "dst": {
+            "x": 0,
+            "y": 1500,
+            "w": 1080,
+            "h": 300
+          },
+          "fit": "stretch",
+          "crop": {
+            "x": 0,
+            "y": 400,
+            "w": 1920,
+            "h": 280
+          }
+        },
+        {
+          "source": "page",
+          "dst": {
+            "x": 40,
+            "y": 100,
+            "w": 1000,
+            "h": 562
+          },
+          "fit": "contain"
+        },
+        {
+          "source": "cam4",
+          "dst": {
+            "x": 760,
+            "y": 560,
+            "w": 280,
+            "h": 158
+          },
+          "fit": "cover"
+        }
+      ]
+    }
+  ],
+  "initial_scene": "cam0_full"
+}
