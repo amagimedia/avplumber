@@ -50,7 +50,8 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
         "kind": {"enum": ["browser", "video"]},
         "url": {"type": "string", "description": "browser: page URL"},
         "path": {"type": "string", "description": "video: file path or stream URL"},
-        "width": {"type": "integer"}, "height": {"type": "integer"},
+        "width": {"type": "integer"}, "height": {"type": "integer",
+                  "description": "browser: window size (required); video: optional, probed with ffprobe"},
         "fps": {"type": "integer", "description": "browser paint rate, default canvas fps"},
         "loop": {"type": "boolean", "default": true},
         "audio": {"type": "boolean", "default": false}
@@ -121,7 +122,7 @@ of the engine.
 | `sources[]` browser | `avpmixer.dmabuf_inputs` (window open, DMA-BUF import) | none |
 | duplicate `url`/`path` | — | loader rejects; alias support (one chain, two ids) is a second `one_to_many` output, ~10 lines |
 | `item.dst`, `crop`, `fit: stretch\|contain` | `cuda_rect_overlay` layer: `dst_*`, `crop`, `fit` | none |
-| `fit: cover` | — | compute the crop from the aspect in the loader; no compositor change |
+| `fit: cover` | loader computes the crop from the aspect; clip sizes probed with ffprobe | none |
 | item order = z-order | draw order is source registration order | order ops by item index instead; small compositor change |
 | same source twice in one scene | one layer per source | alias source (above) |
 | `wipes[]` | `mixer.wipe` takes any path; `mixer.wipe.warmup` | loader warms every declared wipe at start |
