@@ -7,6 +7,9 @@
 
 #![allow(dead_code)]
 
+#[cfg(all(feature = "ffmpeg", feature = "async"))]
+pub mod player;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -280,4 +283,219 @@ pub fn wait_until(timeout: std::time::Duration, mut pred: impl FnMut() -> bool, 
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// A `testsrc2` clip: every frame is distinct and deterministic, which is what
+/// a frame-exact playback assertion needs. libx264 with a GOP, like a VOD
+/// source would be; the replay transcode makes it all-intra.
+pub fn testsrc_mp4(path: &Path, fps: u32, seconds: u32) {
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("testsrc2=size=160x120:rate={fps}:duration={seconds}"),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-g",
+        "15",
+        "-pix_fmt",
+        "yuv420p",
+        path.to_str().expect("utf-8 path"),
+    ]);
+}
+
+/// The replay demo's transcode graph on the CPU backend: one video stream,
+/// conformed to `fps`, every frame a keyframe, MPEG-TS with both seek tables
+/// beside it (`<target>+seek`, `<target>+txt`).
+pub fn replay_recording_script(source: &Path, target: &Path, fps: u32) -> Vec<String> {
+    let source = source.to_str().expect("utf-8 path");
+    let target = target.to_str().expect("utf-8 path");
+    vec![
+        "queue.plan_capacity * 4".into(),
+        format!(
+            r#"node.add {{"type":"input","name":"in","group":"g","dst":"pkt","url":"{source}","eof_mode":"drain"}}"#
+        ),
+        r#"node.add {"type":"demux","name":"dx","group":"g","src":"pkt","routing":{"?v:0":"vpkt"},"wait_for_keyframe":false}"#.into(),
+        r#"node.add {"type":"dec_video","name":"dv","group":"g","src":"vpkt","dst":"raw"}"#.into(),
+        format!(
+            r#"node.add {{"type":"force_fps","name":"fps","group":"g","src":"raw","dst":"fixed","fps":"{fps}/1"}}"#
+        ),
+        format!(
+            r#"node.add {{"type":"force_keyframe","name":"kf","group":"g","src":"fixed","dst":"keyed","interval_sec":"1/{fps}"}}"#
+        ),
+        r#"node.add {"type":"enc_video","name":"ev","group":"g","src":"keyed","dst":"enc","codec":"libx264","options":{"preset":"ultrafast","g":"1","bf":"0","profile":"baseline","tune":"zerolatency","x264-params":"keyint=1:scenecut=0"}}"#.into(),
+        r#"node.add {"type":"mux","name":"mx","group":"g","src":["enc"],"dst":"muxed","ts_sort_wait":0}"#.into(),
+        format!(
+            r#"node.add {{"type":"output","name":"out","group":"g","src":"muxed","url":"{target}","format":"mpegts","seek_table":"{target}+seek","seek_table_text":"{target}+txt"}}"#
+        ),
+        "group.start g".into(),
+    ]
+}
+
+/// Blocks until `node` of `group` reports a clean completion, failing on any
+/// failed or panicked member. Reads the whole `outcomes` list, not the single
+/// `last_outcome` slot, for the reason `transcode_file.rs` explains.
+pub fn wait_for_completion(inst: &avplumber_f7k::Instance, group: &str, node: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut outcomes: Vec<String> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let status = avplumber_f7k::control::exec_line(inst, &format!("group.status {group}"))
+            .expect("group.status");
+        let status: serde_json::Value = serde_json::from_str(&status).expect("group.status json");
+        outcomes = status["outcomes"]
+            .as_array()
+            .expect("group.status outcomes")
+            .iter()
+            .map(|outcome| outcome.as_str().expect("an outcome string").to_owned())
+            .collect();
+        for outcome in &outcomes {
+            assert!(
+                !outcome.starts_with("failed:") && !outcome.starts_with("panicked:"),
+                "a node of group {group} did not finish cleanly: {outcome}"
+            );
+        }
+        if outcomes
+            .iter()
+            .any(|outcome| outcome.starts_with(&format!("completed:{node}:")))
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("{node} never finished; group {group} reported {outcomes:?}");
+}
+
+/// `ffprobe` packet flags of one stream, in file order: `K_` for a keyframe.
+pub fn packet_flags(path: &Path, stream: i32) -> Vec<String> {
+    let raw = ffprobe(&[
+        "-select_streams",
+        &stream.to_string(),
+        "-show_entries",
+        "packet=flags",
+        "-of",
+        "csv=p=0",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
+}
+
+pub fn video_dimensions(path: &Path) -> (usize, usize) {
+    let raw = ffprobe(&[
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .expect("width,height");
+    let (w, h) = line.split_once(',').expect("width,height");
+    (
+        w.parse().expect("width"),
+        h.trim_end_matches(',').parse().expect("height"),
+    )
+}
+
+/// FNV-1a over a frame's bytes: enough to tell any two `testsrc2` frames apart.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Ground truth for frame-exact playback: the hash of every decoded frame of
+/// the video stream, in presentation order, as the `ffmpeg` CLI decodes it to
+/// planar yuv420p. The same libavcodec decodes in-process, so a frame the graph
+/// releases must hash to one of these, and its index says which frame it is.
+pub fn decoded_frame_hashes(path: &Path) -> Vec<u64> {
+    let (width, height) = video_dimensions(path);
+    let frame_size = width * height + 2 * (width.div_ceil(2) * height.div_ceil(2));
+    let output = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .output()
+        .expect("running ffmpeg");
+    assert!(
+        output.status.success(),
+        "ffmpeg rawvideo decode of {path:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout.len() % frame_size,
+        0,
+        "rawvideo output is whole frames"
+    );
+    output.stdout.chunks(frame_size).map(fnv1a).collect()
+}
+
+/// The planes of a decoded yuv420p frame, laid out like `rawvideo` writes them,
+/// so [`fnv1a`] of it compares against [`decoded_frame_hashes`].
+#[cfg(feature = "ffmpeg")]
+pub fn yuv420p_bytes(frame: &rsmpeg::avutil::AVFrame) -> Vec<u8> {
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    assert_eq!(
+        frame.format,
+        rusty_ffmpeg::ffi::AV_PIX_FMT_YUV420P,
+        "the graph decodes to yuv420p"
+    );
+    let mut out = Vec::with_capacity(width * height * 3 / 2);
+    let planes = [
+        (0usize, width, height),
+        (1, width.div_ceil(2), height.div_ceil(2)),
+        (2, width.div_ceil(2), height.div_ceil(2)),
+    ];
+    for (plane, plane_width, plane_height) in planes {
+        let stride = frame.linesize[plane] as usize;
+        let data = frame.data[plane];
+        for row in 0..plane_height {
+            let line = unsafe { std::slice::from_raw_parts(data.add(row * stride), plane_width) };
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+
+/// Installs a stderr logger at the level `AVP_TEST_LOG` names (`debug`,
+/// `trace`, …), once per process; without the variable, nothing. Run a test
+/// with `--nocapture` to see the graph explain itself.
+pub fn init_logging() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(level) = std::env::var("AVP_TEST_LOG") else {
+            return;
+        };
+        let Ok(level) = level.parse::<log::LevelFilter>() else {
+            return;
+        };
+        struct Stderr(log::LevelFilter);
+        impl log::Log for Stderr {
+            fn enabled(&self, metadata: &log::Metadata) -> bool {
+                metadata.level() <= self.0
+            }
+            fn log(&self, record: &log::Record) {
+                if self.enabled(record.metadata()) {
+                    eprintln!("[{:5}] {}", record.level(), record.args());
+                }
+            }
+            fn flush(&self) {}
+        }
+        let _ = log::set_boxed_logger(Box::new(Stderr(level)));
+        log::set_max_level(level);
+    });
 }

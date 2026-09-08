@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod correction;
+pub mod playback;
 pub mod timeline;
 
 use std::any::{Any, TypeId};
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use crate::graph::AvpServiceId;
 use crate::services::clock::ClockService;
 use crate::services::correction::CorrectionService;
+use crate::services::playback::PlaybackService;
 use crate::services::timeline::TimelineService;
 
 pub struct ServiceRegistry {
@@ -20,6 +22,7 @@ pub struct ServiceRegistry {
     pub clocks: ClockService,
     pub corrections: CorrectionService,
     pub timelines: TimelineService,
+    pub playbacks: PlaybackService,
 }
 
 impl ServiceRegistry {
@@ -30,7 +33,13 @@ impl ServiceRegistry {
             clocks: ClockService::new(),
             corrections: CorrectionService::new(),
             timelines: TimelineService::new(),
+            playbacks: PlaybackService::new(),
         }
+    }
+
+    /// The playback group `name`, over the clock of the same name.
+    pub fn playback(&self, name: &str) -> std::sync::Arc<crate::services::playback::Playback> {
+        self.playbacks.get_or_create(name, &self.clocks)
     }
 
     pub fn register_vtable(&self, id: AvpServiceId, vtable: *const c_void) {

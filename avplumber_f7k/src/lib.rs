@@ -181,6 +181,21 @@ impl Default for Instance {
     }
 }
 
+impl Instance {
+    /// Another handle onto the same instance: the graph, groups and services
+    /// are shared, not copied. What a server thread or an embedder keeps.
+    pub fn share(&self) -> Instance {
+        Instance {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// The clocks, corrections, timelines and playback groups, by name.
+    pub fn services(&self) -> &ServiceRegistry {
+        &self.services
+    }
+}
+
 impl Drop for InstanceInner {
     fn drop(&mut self) {
         let groups = self

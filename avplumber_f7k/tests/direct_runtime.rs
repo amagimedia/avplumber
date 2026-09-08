@@ -442,7 +442,7 @@ fn direct_chain_parks_on_executor_until_tail_drains() {
     );
 
     hold.store(false, Ordering::Release);
-    release.push_event(EdgeEvent::FlushStop);
+    release.push_event(EdgeEvent::FlushStop { resume_at: None });
 
     wait_until(
         Duration::from_secs(2),

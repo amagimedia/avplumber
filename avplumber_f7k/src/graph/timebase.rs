@@ -103,3 +103,106 @@ pub fn finer(a: AvpRational, b: AvpRational) -> AvpRational {
     }
     if tb_cmp(a, b).is_le() { a } else { b }
 }
+
+/// Reduces `num/den` by their gcd, keeping the sign on the numerator.
+pub fn reduce(r: AvpRational) -> AvpRational {
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a.abs() } else { gcd(b, a % b) }
+    }
+    let g = gcd(r.num as i64, r.den as i64);
+    if g <= 1 {
+        return r;
+    }
+    AvpRational {
+        num: (r.num as i64 / g) as i32,
+        den: (r.den as i64 / g) as i32,
+    }
+}
+
+/// C++ `parseRatio`: `"30"`, `"30/1"`, `"1/25"`, `"29.97"`. A decimal is
+/// scaled by a power of ten and reduced, so `"29.97"` is `2997/100`.
+pub fn parse_rational(text: &str) -> Result<AvpRational, String> {
+    let text = text.trim();
+    let invalid = || format!("`{text}` is not a rational (want N, N/D or a decimal)");
+    let parse_int = |part: &str| part.trim().parse::<i64>().map_err(|_| invalid());
+    let (num, den) = match text.split_once('/') {
+        Some((n, d)) => (parse_int(n)?, parse_int(d)?),
+        None => match text.split_once('.') {
+            Some((whole, frac)) if !frac.is_empty() && frac.len() <= 9 => {
+                let scale = 10i64.pow(frac.len() as u32);
+                let whole_value = if whole.is_empty() || whole == "-" {
+                    0
+                } else {
+                    parse_int(whole)?
+                };
+                let frac_value = parse_int(frac)?;
+                let sign = if text.starts_with('-') { -1 } else { 1 };
+                (sign * (whole_value.abs() * scale + frac_value), scale)
+            }
+            _ => (parse_int(text)?, 1),
+        },
+    };
+    if den == 0 {
+        return Err(format!("`{text}`: the denominator is zero"));
+    }
+    if num.abs() > i32::MAX as i64 || den > i32::MAX as i64 {
+        return Err(format!("`{text}` does not fit a rational"));
+    }
+    Ok(reduce(AvpRational {
+        num: num as i32,
+        den: den as i32,
+    }))
+}
+
+/// A rational node parameter as scripts write it: a string for
+/// [`parse_rational`], or a JSON number (an integer as `N/1`, a float through
+/// its shortest decimal form).
+pub fn rational_from_json(value: &serde_json::Value) -> Result<AvpRational, String> {
+    match value {
+        serde_json::Value::String(text) => parse_rational(text),
+        serde_json::Value::Number(number) => parse_rational(&number.to_string()),
+        other => Err(format!("`{other}` is not a rational")),
+    }
+}
+
+#[cfg(test)]
+mod rational_tests {
+    use super::*;
+
+    fn r(num: i32, den: i32) -> AvpRational {
+        AvpRational { num, den }
+    }
+
+    #[test]
+    fn parses_the_forms_scripts_use() {
+        assert_eq!(parse_rational("30").unwrap(), r(30, 1));
+        assert_eq!(parse_rational("30/1").unwrap(), r(30, 1));
+        assert_eq!(parse_rational("1/25").unwrap(), r(1, 25));
+        assert_eq!(parse_rational(" 50 / 2 ").unwrap(), r(25, 1));
+        assert_eq!(parse_rational("29.97").unwrap(), r(2997, 100));
+        assert_eq!(parse_rational("0.04").unwrap(), r(1, 25));
+        assert_eq!(parse_rational("-1").unwrap(), r(-1, 1));
+        assert_eq!(parse_rational("-0.5").unwrap(), r(-1, 2));
+        assert_eq!(
+            rational_from_json(&serde_json::json!(25)).unwrap(),
+            r(25, 1)
+        );
+        assert_eq!(
+            rational_from_json(&serde_json::json!(0.5)).unwrap(),
+            r(1, 2)
+        );
+        assert_eq!(
+            rational_from_json(&serde_json::json!("1/30")).unwrap(),
+            r(1, 30)
+        );
+    }
+
+    #[test]
+    fn rejects_garbage_and_zero_denominators() {
+        assert!(parse_rational("").is_err());
+        assert!(parse_rational("abc").is_err());
+        assert!(parse_rational("1/0").is_err());
+        assert!(parse_rational("1/2/3").is_err());
+        assert!(rational_from_json(&serde_json::json!(true)).is_err());
+    }
+}

@@ -21,7 +21,7 @@ use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::routing::{self, MEDIA_TYPE_VIDEO, RouteKey};
 use avplumber_f7k::graph::spec::{CatalogStream, Spec, StreamSelection};
-use avplumber_f7k::scaffold::{Io, PollNode, Polling};
+use avplumber_f7k::scaffold::{Io, PollNode, Polling, flush_at_head};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct DemuxSpec {
@@ -167,11 +167,18 @@ impl PollNode for StreamDemuxer {
         let mut state = self.state.lock().unwrap();
 
         // A held-back packet goes out before anything new is taken, so ordering
-        // within a stream survives a full output.
+        // within a stream survives a full output — unless a flush has reached
+        // the input meanwhile, which makes it stale.
+        if state.pending.is_some() && flush_at_head(&input) {
+            state.pending = None;
+        }
         if let Some((edge, buffer)) = state.pending.take() {
             match self.emit(&mut state, ctx, edge, buffer) {
                 Emitted::Ok => {}
-                Emitted::Parked => return Ok(Tick::Idle),
+                Emitted::Parked => {
+                    ctx.wait_flush(input.clone());
+                    return Ok(Tick::Idle);
+                }
                 Emitted::Closed => return Ok(Tick::Done),
             }
         }
@@ -196,7 +203,7 @@ impl PollNode for StreamDemuxer {
                 self.log_drops(&state);
                 Ok(Tick::Done)
             }
-            EdgeItem::Event(event @ (EdgeEvent::FlushStart | EdgeEvent::FlushStop)) => {
+            EdgeItem::Event(event @ (EdgeEvent::FlushStart | EdgeEvent::FlushStop { .. })) => {
                 for (_, edge) in &state.map {
                     edge.push_event(event.clone());
                 }
@@ -272,7 +279,13 @@ impl StreamDemuxer {
 
         match self.emit(state, ctx, edge, buffer) {
             Emitted::Ok => Ok(Tick::Again),
-            Emitted::Parked => Ok(Tick::Idle),
+            Emitted::Parked => {
+                // A flush behind this packet must be able to wake the node.
+                if let Some(input) = self.io.input_slot.get() {
+                    ctx.wait_flush(input);
+                }
+                Ok(Tick::Idle)
+            }
             Emitted::Closed => Ok(Tick::Done),
         }
     }

@@ -1,8 +1,14 @@
-//! Line-based control language (script-compatible). TCP is deferred.
+//! Line-based control language (script-compatible); [`tcp`] serves it on a
+//! socket in the C++ wire format.
+
+pub mod tcp;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::Value;
+
+use crate::services::playback::{Playback, Target};
 
 use crate::factory::NodeEnvelope;
 use crate::{CoreError, EdgeKind, Instance, NodePads, NodeRequest, PadDirection};
@@ -64,6 +70,14 @@ pub fn exec_line(core: &Instance, line: &str) -> Result<String, String> {
         "group.stop" => group_cmd(core, rest, false),
         "group.restart" => group_restart(core, rest),
         "group.status" => group_status(core, rest),
+        "node.object.set" => node_object_set(core, rest),
+        "node.object.get" => node_object_get(core, rest),
+        "seek" => seek(core, rest),
+        "pause" => pause(core, rest),
+        "resume" => resume(core, rest),
+        "speed.set" => speed_set(core, rest),
+        "speed.get" => speed_get(core, rest),
+        "playback.status" => playback_status(core, rest),
         "hello" | "version" => Ok("ok".into()),
         "bye" => Ok("bye".into()),
         _ => Err(format!("unknown command {cmd}")),
@@ -210,6 +224,139 @@ fn group_cmd(core: &Instance, rest: &str, start: bool) -> Result<String, String>
 fn group_restart(core: &Instance, rest: &str) -> Result<String, String> {
     core.restart_group(rest.trim()).map_err(|e| e.to_string())?;
     Ok("ok".into())
+}
+
+/// `node.object.set <node> <key> <json>`.
+fn node_object_set(core: &Instance, rest: &str) -> Result<String, String> {
+    let mut parts = rest.trim().splitn(3, char::is_whitespace);
+    let node = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("node.object.set <node> <key> <json>")?;
+    let key = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("missing object key")?;
+    let value: Value = match parts.next().map(str::trim) {
+        Some(text) if !text.is_empty() => serde_json::from_str(text).map_err(|e| e.to_string())?,
+        _ => Value::Null,
+    };
+    let instance = core
+        .node(node)
+        .ok_or_else(|| format!("unknown node {node}"))?;
+    instance.node.set_object(key, &value)?;
+    Ok("ok".into())
+}
+
+/// `node.object.get <node> <key>`: the value as JSON.
+fn node_object_get(core: &Instance, rest: &str) -> Result<String, String> {
+    let mut parts = rest.split_whitespace();
+    let node = parts.next().ok_or("node.object.get <node> <key>")?;
+    let key = parts.next().ok_or("missing object key")?;
+    let instance = core
+        .node(node)
+        .ok_or_else(|| format!("unknown node {node}"))?;
+    let value = instance.node.get_object(key)?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
+/// The playback group a verb addresses; created on demand, so a group that
+/// only has a pacing node still answers `pause` and `speed.set`.
+fn playback(core: &Instance, name: &str) -> Result<Arc<Playback>, String> {
+    if name.is_empty() {
+        return Err("missing playback group name".into());
+    }
+    Ok(core.services.playback(name))
+}
+
+/// `seek <group> now <target>` | `frame <N|+N|-N>` | `at <when> <target>` |
+/// `clear` | `live` | `end`. Targets: `12000`, `+500`, `01:02:03.250`,
+/// `2026-08-10T12:00:00.000`. Replies with the media time seeked to.
+fn seek(core: &Instance, rest: &str) -> Result<String, String> {
+    let mut parts = rest.split_whitespace();
+    let group = parts
+        .next()
+        .ok_or("seek <group> now|frame|at|clear|live|end ...")?;
+    let verb = parts.next().ok_or("seek: missing subcommand")?;
+    let playback = playback(core, group)?;
+    match verb {
+        "now" => {
+            let target = Target::parse(parts.next().ok_or("seek now: missing target")?)?;
+            playback.seek(target).map(|ms| ms.to_string())
+        }
+        "frame" => {
+            let text = parts.next().ok_or("seek frame: missing frame number")?;
+            let number: i64 = text
+                .parse()
+                .map_err(|_| format!("`{text}` is not a frame number"))?;
+            let target = if text.starts_with(['+', '-']) {
+                Target::RelativeFrames(number)
+            } else {
+                Target::Frame(number)
+            };
+            playback.seek(target).map(|ms| ms.to_string())
+        }
+        "at" => {
+            let when = Target::parse(parts.next().ok_or("seek at: missing when")?)?;
+            let target = Target::parse(parts.next().ok_or("seek at: missing target")?)?;
+            playback.seek_at(when, target).map(|()| "ok".into())
+        }
+        "clear" => {
+            playback.clear_scheduled();
+            Ok("ok".into())
+        }
+        "live" => playback.seek(Target::Live).map(|ms| ms.to_string()),
+        "end" => playback.seek(Target::End).map(|ms| ms.to_string()),
+        other => Err(format!("seek: unknown subcommand `{other}`")),
+    }
+}
+
+/// `pause <group> now` | `pause <group> at <target>`.
+fn pause(core: &Instance, rest: &str) -> Result<String, String> {
+    let mut parts = rest.split_whitespace();
+    let group = parts.next().ok_or("pause <group> now|at <target>")?;
+    let playback = playback(core, group)?;
+    match parts.next().unwrap_or("now") {
+        "now" => {
+            playback.pause();
+            Ok("ok".into())
+        }
+        "at" => {
+            let target = Target::parse(parts.next().ok_or("pause at: missing target")?)?;
+            playback.pause_at(target).map(|()| "ok".into())
+        }
+        other => Err(format!("pause: unknown subcommand `{other}`")),
+    }
+}
+
+fn resume(core: &Instance, rest: &str) -> Result<String, String> {
+    let group = rest.split_whitespace().next().ok_or("resume <group>")?;
+    playback(core, group)?.resume();
+    Ok("ok".into())
+}
+
+/// `speed.set <group> <rate>`: negative plays backwards, zero pauses.
+fn speed_set(core: &Instance, rest: &str) -> Result<String, String> {
+    let mut parts = rest.split_whitespace();
+    let group = parts.next().ok_or("speed.set <group> <rate>")?;
+    let text = parts.next().ok_or("speed.set: missing rate")?;
+    let rate: f64 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a rate"))?;
+    playback(core, group)?.set_rate(rate).map(|()| "ok".into())
+}
+
+fn speed_get(core: &Instance, rest: &str) -> Result<String, String> {
+    let group = rest.split_whitespace().next().ok_or("speed.get <group>")?;
+    Ok(playback(core, group)?.rate().to_string())
+}
+
+fn playback_status(core: &Instance, rest: &str) -> Result<String, String> {
+    let group = rest
+        .split_whitespace()
+        .next()
+        .ok_or("playback.status <group>")?;
+    serde_json::to_string(&playback(core, group)?.status()).map_err(|e| e.to_string())
 }
 
 fn group_status(core: &Instance, rest: &str) -> Result<String, String> {

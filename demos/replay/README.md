@@ -11,19 +11,25 @@ outside Git history.
 
 ## Features
 
-This directory contains two small PyPlumber applications:
+This directory contains two small Python applications that drive the **Rust
+avplumber** over its control protocol (`doc/control_protocol.md`):
 
 - `transcode.py` converts one video-on-demand file into AVPlumber's seekable
-  replay format.
+  replay format, running the Rust executable as a batch job.
 - `player.py` controls one replay slot and sends video-only H.264 RTP to an
-  existing Janus Streaming mountpoint.
+  existing Janus Streaming mountpoint, over a Rust avplumber it spawns (or one
+  already serving a port).
 
-Both applications run directly through PyPlumber with no external control
-service.
+Nothing runs inside the media process: the graph is sent as `node.add` lines,
+playback is driven with `seek`, `pause`, `resume` and `speed.set` on one
+playback group, and the position comes back from `playback.status`. The design
+is in `doc/specs/rust-refactor/rust_refactor_playback.md`.
 
 The player provides:
 
-- Play, Pause, Play/Pause Toggle, and Reverse controls;
+- Play, Pause, Play/Pause Toggle, and Reverse controls: **PLAY** and
+  **REVERSE** are the two directions, each turns playback around when it was
+  going the other way, and the toggle (Space) resumes in the current direction;
 - forward and backward scrubbing;
 - relative seeks of 1, 5, or 30 frames and 1, 5, or 30 seconds;
 - `0x`, `0.25x`, `0.5x`, `1x`, and `2x` playback speeds;
@@ -34,56 +40,33 @@ The player provides:
 
 The status panel shows the recording, Janus destination, RTP payload type and
 SSRC, Play/Pause state, direction, configured and scrub speeds, current frame,
-position and duration, mapped UTC time, loop state, last command, and errors.
-Controls remain disabled until the first source frame is ready.
+position and duration, mapped UTC time, loop state, an `END` marker when the
+recording has run out, last command, and errors. Controls remain disabled until
+the first source frame is ready.
 
 Keyboard controls are Space for Play/Pause, Left/Right for one frame, Down/Up
 for one second, and `q` to quit. The footer displays these bindings.
 
 ## Requirements
 
-For a build from public sources, use the [Docker instructions](#run-in-docker)
-and [shared NVIDIA setup guide](../README.md).
+Build the Rust executable and point the scripts at it:
 
-Use an NVIDIA host with `pyplumber` built with CUDA and NVCC support. FFmpeg
-must provide CUDA decoding and `h264_nvenc`. Neural models and TensorRT are
-not required. If you also build the standalone AVPlumber binary, use the same
-feature settings and FFmpeg libraries for it and the Python module.
+```sh
+cargo build -p avplumber_nodes --features ffmpeg7_1,async --bin avplumber
+export AVPLUMBER_BIN=$PWD/target/debug/avplumber
+```
 
-There is no software fallback, audio output, or CPU
-`hwdownload`/`hwupload` path.
+(Pick the `ffmpeg*` feature matching the FFmpeg the crate links against, see
+`avplumber_nodes/Cargo.toml`.) The FFmpeg libraries must provide software H.264
+decoding and `libx264`; hardware acceleration is not used. Both scripts also
+take `--avplumber PATH`; nothing is taken from `PATH`, because the C++ binary
+of the same name does not run these graphs.
 
 Install the TUI dependency into the same Python environment:
 
 ```sh
 python3 -m pip install -r demos/replay/requirements.txt
 ```
-
-## Run in Docker
-
-Build the [shared runtime and start Janus](../README.md), then put an input
-video named `source.mp4` in a local `media/` directory. Convert it:
-
-```sh
-docker run --rm --gpus all \
-  -v "$PWD/demos/replay:/demo:ro,z" \
-  -v "$PWD/media:/media:z" \
-  --entrypoint python3 avplumber-mixer:local \
-  /demo/transcode.py --input /media/source.mp4 --output /media/replay.ts --fps 30
-```
-
-Start the player and open the Janus preview at <http://127.0.0.1:8080>:
-
-```sh
-docker run --rm -it --gpus all --network host \
-  -v "$PWD/demos/replay:/demo:ro,z" \
-  -v "$PWD/media:/media:ro,z" \
-  --entrypoint python3 avplumber-mixer:local \
-  /demo/player.py --recording /media/replay.ts
-```
-
-The recording and its sidecars remain in `media/` after the containers exit.
-The following sections describe the same tools when running Python directly.
 
 ## Create a replay recording
 
@@ -97,8 +80,8 @@ python3 demos/replay/transcode.py \
 ```
 
 The frame rate must be an integer from 1 to 240. The output is all-intra H.264
-baseline video encoded by NVENC in VBR constant-quality mode (`cq=17`). It
-preserves the source dimensions and creates four files that must stay together:
+baseline video encoded by libx264 at constant quality (`crf=17`). It preserves
+the source dimensions and creates four files that must stay together:
 
 ```text
 replay.ts
@@ -151,15 +134,18 @@ python3 demos/replay/player.py \
 ```
 
 The player validates the recording and its sidecars, infers the integer frame
-rate from the seek table, waits for the first decoded frame, starts the Janus
-output, and opens the TUI. It rejects inconsistent frame cadence.
+rate from the seek table, spawns the Rust avplumber on a free local port, sends
+it the graph, waits for the first decoded frame, starts the RTCP listener, and
+opens the TUI. It rejects inconsistent frame cadence.
 
 Useful options are:
 
 - `--no-loop` to stop at the end instead of looping;
 - `--no-tui` to keep the player running without the terminal interface;
 - `--control-timeout <seconds>` to change the five-second operation timeout;
-  and
+- `--connect HOST:PORT` to drive an avplumber already serving its control
+  protocol instead of spawning one;
+- `--avplumber-log PATH` to keep the spawned avplumber's log; and
 - the Janus options in the table above when the mountpoint differs.
 
 Run `python3 demos/replay/player.py --help` for the complete option list.
@@ -195,8 +181,9 @@ checks.
 
 - If startup rejects the recording, confirm that its `+seek` and `+history`
   files exist and belong to the same conversion.
-- If decoding or NVENC fails, confirm that the process loads the same custom
-  FFmpeg libraries as the working `ffmpeg` command. Do not add a CPU round trip.
+- If the Rust avplumber fails to start or decode, run it by hand with
+  `--log debug` (or pass `--avplumber-log` to the player) and check that its
+  FFmpeg libraries provide software H.264 decoding and `libx264`.
 - If Janus has no picture, compare its H.264 codec, payload type, SSRC, RTP port,
   and RTCP port with the values in the TUI header.
 - If video does not recover after a seek, check RTCP reachability and confirm
@@ -216,53 +203,42 @@ structure and queue state.
 python3 -m pytest demos/replay/tests -q
 ```
 
-The same native integration suite supports two codec backends. It runs the real
-reader, decoder, pause gates, speed control, and encoder, generates its own clips,
-and does not need Janus:
+The unit tests cover the controller's command translation, the graphs the
+scripts send, the player's lifecycle over a fake connection, the TUI (when
+`textual` is installed), the recording sidecars, and the paused-picture
+oracle. The end-to-end tests run the Rust executable: they transcode
+generated `testsrc2` clips (all-intra and with B-frames, odd frame counts
+included) and check every packet and seek entry, play a recording through
+the same **RUN V2** exercise the TUI offers, check that RTP keeps arriving
+after seeks, reversal, scrubbing and nudges, and that the player stops
+promptly whatever it was doing. They need `AVPLUMBER_BIN` and an `ffmpeg`
+CLI with libx264, and skip otherwise:
 
 ```sh
-# CUDA build: NVDEC decoding and NVENC encoding
-python3 -m pytest demos/replay/tests/test_playback_integration.py demos/replay/tests/test_transcode_integration.py --replay-backend=nvidia -q
-
-# CPU build: software H.264 decoding and libx264 encoding; no GPU needed
-python3 -m pytest demos/replay/tests/test_playback_integration.py demos/replay/tests/test_transcode_integration.py --replay-backend=cpu -q
+AVPLUMBER_BIN=$PWD/target/debug/avplumber python3 -m pytest demos/replay/tests/test_rust_integration.py -q
 ```
 
-Playback coverage includes 24/25/30/60 fps; forward and reverse at 25/50/100/200%;
-absolute, relative, and UTC seeks around frame boundaries; exact frame steps;
-repeated and seeded random seeks; both recording boundaries; looping and EOF
-recovery; and pause/resume around repeated active speed changes. Assertions
-require a freshly observed exact source frame and a stable paused position.
-Timestamp seeks use raw AVPlumber commands to exercise the native seek path
-independently of the controller.
-
-Finite transcode tests also exercise the regular `input` node and default decoder
-EOF behavior, with both all-intra and B-frame H.264 sources. They verify that every
-frame reaches the output and seek table. An RTP test checks the configured stream
-headers on both backends.
-
-The demux lifecycle suite uses the real native node with video and audio packet
-streams. It checks blocked reads, stop/EOF overlap, full output queues, repeated
-stops, ordinary EOF completion, and resumed packets after retained EOF. Each
-case runs in a child process with a shutdown deadline so a hang fails the test:
+Frame-exact playback itself is verified in Rust, against the frames the
+`ffmpeg` CLI decodes from the same recording: `avplumber_nodes/tests/playback.rs`
+(point checks), `playback_scenarios.rs` (the seek/pause/speed sweeps of the
+demo's old native suite at 24, 25, 30 and 60 fps) and `encode_after_seek.rs`
+(the live encoder across discontinuities). They pace at real time:
 
 ```sh
-python3 -m pytest demos/replay/tests/test_demux_shutdown_integration.py -q
+cargo test -p avplumber_nodes --features ffmpeg7_1,async -- --test-threads=1
 ```
-
-Tests skip if the native module or selected backend's prerequisites are missing.
-Both backends need `pytest`, `ffprobe`, and an `ffmpeg` with `libx264` for fixture
-generation. The native module must load its matching FFmpeg libraries: CUDA-enabled
-libraries for NVIDIA, or libraries with `libx264` for CPU. CPU selection changes
-only test graph codec settings; the shipped demo remains NVIDIA-based.
 
 ## Format and implementation notes
 
-Indexed seeks resolve the target frame before setting the decoder's discard
-cutoff, so a paused seek cannot discard the only frame selected by the seek table.
-Replay keeps its reader and demultiplexer available at EOF (`stop_on_eof=false`)
-and drains its decoder without ending playback (`hold_at_eof=true`). These are
-opt-in settings; regular `input` and default finite-stream EOF behavior are unchanged.
+Seeks resolve to the nearest indexed frame (ties select the later one) and the
+source repositions with a byte seek to that frame, so a paused seek shows
+exactly that frame. The source never announces an end: at the tail it holds the
+last frame, or loops, and stays seekable. Everything the C++ demo did with
+`input_rec`, `speed`, `pause`, the realtime team and the position probe is the
+Rust core's playback service plus its `realtime` node. The Janus encoder runs
+with `flush: keep`: a seek must not touch a live encoder (libavcodec's flush
+stops libx264 for good), and the paced frames keep monotonic timestamps
+across it anyway.
 
 The binary seek table contains native-endian `(int64 timestamp_ms, uint64
 byte_offset)` records. The history contains native-endian `(int64 changed_at,
@@ -270,6 +246,6 @@ int64 input_offset, int64 wallclock_offset, int64 output_offset)` records.
 
 The player always has one input, one replay slot, and one output. It
 intentionally omits live recording, audio, clips, bins, playlists, transitions,
-and A/B switching. `build_player_application` returns one slot's controller and
-video output path so a future multi-input application can compose several slots
+and A/B switching. `build_player_application` returns one slot's controller
+and client so a future multi-input application can compose several slots
 without changing their control semantics.

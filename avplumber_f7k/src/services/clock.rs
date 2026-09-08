@@ -21,6 +21,13 @@ pub struct ClockSnapshot {
 }
 
 pub trait SyncGroup: Send + Sync {
+    /// The wall side of the mapping, in the microseconds `map_to_wall`
+    /// returns: process-monotonic for real clocks, whatever the test set for a
+    /// synthetic one. A node compares `map_to_wall` against this, never against
+    /// its own idea of the time.
+    fn now_us(&self) -> i64 {
+        now_us()
+    }
     fn set_rate(&self, rate: f64);
     fn set_paused(&self, paused: bool);
     fn reset(&self, new_pos: i64, tb: AvpRational);
@@ -36,9 +43,19 @@ pub trait SyncGroup: Send + Sync {
     fn snapshot(&self) -> ClockSnapshot;
 }
 
-fn now_us() -> i64 {
+fn origin() -> Instant {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    ORIGIN.get_or_init(Instant::now).elapsed().as_micros() as i64
+    *ORIGIN.get_or_init(Instant::now)
+}
+
+/// Process-monotonic microseconds, the wall side of every real clock here.
+pub fn now_us() -> i64 {
+    origin().elapsed().as_micros() as i64
+}
+
+/// The `Instant` a wall value of [`now_us`]'s scale denotes, for a deadline.
+pub fn instant_at(wall_us: i64) -> Instant {
+    origin() + std::time::Duration::from_micros(wall_us.max(0) as u64)
 }
 
 fn src_us(pts: i64, tb: AvpRational) -> i64 {
@@ -104,16 +121,22 @@ impl SyncGroup for SnapshotClock {
         self.publish(s);
     }
 
+    /// Pausing folds the elapsed time into the source origin, so the position
+    /// freezes where it was; resuming re-anchors that position at now. Without
+    /// the fold a resume would jump back to the last reset.
     fn set_paused(&self, paused: bool) {
         let _g = self.write.lock().unwrap();
         let mut s = self.load();
         if s.paused == paused {
             return;
         }
+        let now = now_us();
         if paused {
+            s.origin_src_us += ((now - s.origin_wall_us) as f64 * rate_or_one(s.rate)) as i64;
+            s.origin_wall_us = now;
             s.paused = true;
         } else {
-            s.origin_wall_us = now_us();
+            s.origin_wall_us = now;
             s.paused = false;
         }
         self.publish(s);
@@ -256,6 +279,8 @@ impl SyncGroup for SourceTimeClock {
 pub struct SyntheticClock {
     inner: SnapshotClock,
     position: AtomicI64,
+    /// What [`SyncGroup::now_us`] answers, set by the test.
+    now: AtomicI64,
 }
 
 impl SyntheticClock {
@@ -263,11 +288,18 @@ impl SyntheticClock {
         Self {
             inner: SnapshotClock::new(),
             position: AtomicI64::new(0),
+            now: AtomicI64::new(0),
         }
     }
 
     pub fn set_position(&self, position: i64) {
         self.position.store(position, Ordering::Release);
+    }
+
+    /// Moves the synthetic wall clock; a pacing node compares its mappings
+    /// against this.
+    pub fn set_now(&self, now: i64) {
+        self.now.store(now, Ordering::Release);
     }
 }
 impl Default for SyntheticClock {
@@ -276,6 +308,9 @@ impl Default for SyntheticClock {
     }
 }
 impl SyncGroup for SyntheticClock {
+    fn now_us(&self) -> i64 {
+        self.now.load(Ordering::Acquire)
+    }
     fn set_rate(&self, r: f64) {
         self.inner.set_rate(r);
     }

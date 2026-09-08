@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::graph::edge::{Edge, EdgeEvent, EdgeItem};
 use crate::graph::error::NodeError;
-use crate::graph::media::Media;
+use crate::graph::media::{Media, Ts};
 use crate::graph::node::Blocked;
 use crate::graph::pad::NodePads;
 use crate::graph::spec::Spec;
@@ -43,9 +43,16 @@ pub trait InputHandler: Send + Sync + 'static {
     fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError>;
 
     /// The input is being flushed: discard whatever is buffered here. The
-    /// `FlushStart` is forwarded once this returns, and the `FlushStop` when it
-    /// arrives. A node that buffers nothing needs nothing here.
+    /// `FlushStart` is forwarded once this returns. A node that buffers nothing
+    /// needs nothing here.
     fn on_flush(&self) {}
+
+    /// The flush is over; what follows is at the new position. `resume_at` is
+    /// the position the source aimed for when its reposition could only land on
+    /// a keyframe before it, so a node that turns buffered input into
+    /// timestamped output — a decoder — drops what lies below it. The
+    /// `FlushStop` is forwarded, payload intact, once this returns.
+    fn on_flush_stop(&self, _resume_at: Option<Ts>) {}
 
     /// The input ended. `Done` finishes the node, after `Eof` is forwarded. A
     /// node that has to drain first — a codec — returns `Again`, keeps stepping
@@ -98,8 +105,9 @@ pub fn react<H: InputHandler + ?Sized>(
             forward(EdgeEvent::FlushStart);
             Ok(Reaction::Again)
         }
-        EdgeItem::Event(EdgeEvent::FlushStop) => {
-            forward(EdgeEvent::FlushStop);
+        EdgeItem::Event(EdgeEvent::FlushStop { resume_at }) => {
+            handler.on_flush_stop(resume_at);
+            forward(EdgeEvent::FlushStop { resume_at });
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::Eof) => match handler.on_eof()? {
@@ -171,7 +179,7 @@ impl<N: SingleInput> BlockingNode for N {
         match react(self, io.output_slot.get().as_ref(), item)? {
             Reaction::Again => Ok(Blocked::Again),
             Reaction::Done => Ok(Blocked::Done),
-            Reaction::Produced(buffer) => io.push(&io.output()?, buffer),
+            Reaction::Produced(buffer) => io.push_from(&input, &io.output()?, buffer),
         }
     }
 
@@ -191,7 +199,7 @@ impl<N: SingleInput> BlockingNode for N {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use super::*;
     use crate::graph::BufferedEdge;
@@ -208,6 +216,8 @@ mod tests {
         io: BlockingIo,
         seen: Mutex<Vec<&'static str>>,
         drain_steps: AtomicUsize,
+        /// The `resume_at` the last `FlushStop` carried, `i64::MIN` for none.
+        resume_seen: AtomicI64,
     }
 
     impl Echo {
@@ -243,6 +253,12 @@ mod tests {
 
         fn on_flush(&self) {
             self.saw("flush");
+        }
+
+        fn on_flush_stop(&self, resume_at: Option<Ts>) {
+            self.saw("flush-stop");
+            self.resume_seen
+                .store(resume_at.map_or(i64::MIN, |ts| ts.val), Ordering::SeqCst);
         }
 
         fn on_eof(&self) -> Result<Blocked, NodeError> {
@@ -284,6 +300,7 @@ mod tests {
             io: BlockingIo::new("echo"),
             seen: Mutex::new(Vec::new()),
             drain_steps: AtomicUsize::new(0),
+            resume_seen: AtomicI64::new(i64::MIN),
         });
         let input: Arc<dyn Edge> = Arc::new(BufferedEdge::new(8));
         let output: Arc<dyn Edge> = Arc::new(BufferedEdge::new(8));
@@ -299,7 +316,8 @@ mod tests {
                 EdgeItem::Buffer(_) => "buffer",
                 EdgeItem::Event(EdgeEvent::Spec(_)) => "spec",
                 EdgeItem::Event(EdgeEvent::FlushStart) => "flush-start",
-                EdgeItem::Event(EdgeEvent::FlushStop) => "flush-stop",
+                EdgeItem::Event(EdgeEvent::FlushStop { resume_at: None }) => "flush-stop",
+                EdgeItem::Event(EdgeEvent::FlushStop { resume_at: Some(_) }) => "flush-stop+resume",
                 EdgeItem::Event(EdgeEvent::Eof) => "eof",
             });
         }
@@ -324,7 +342,12 @@ mod tests {
         );
 
         input.push_event(EdgeEvent::FlushStart);
-        input.push_event(EdgeEvent::FlushStop);
+        input.push_event(EdgeEvent::FlushStop {
+            resume_at: Some(Ts {
+                val: 42,
+                tb: AvpRational { num: 1, den: 1000 },
+            }),
+        });
         input.push_event(EdgeEvent::Eof);
         assert_eq!(node.process().unwrap(), Blocked::Again, "flush start");
         assert_eq!(node.process().unwrap(), Blocked::Again, "flush stop");
@@ -338,12 +361,26 @@ mod tests {
 
         assert_eq!(
             *node.seen.lock().unwrap(),
-            vec!["start", "spec", "buffer", "flush", "eof", "drained", "stop"]
+            vec![
+                "start",
+                "spec",
+                "buffer",
+                "flush",
+                "flush-stop",
+                "eof",
+                "drained",
+                "stop"
+            ]
+        );
+        assert_eq!(
+            node.resume_seen.load(Ordering::SeqCst),
+            42,
+            "the hook sees the resume position"
         );
         assert_eq!(
             events(&*output),
-            vec!["flush-start", "flush-stop", "eof"],
-            "both flush markers forwarded, then the drain's own Eof"
+            vec!["flush-start", "flush-stop+resume", "eof"],
+            "both flush markers forwarded, the payload intact, then the drain's own Eof"
         );
     }
 

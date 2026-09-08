@@ -32,3 +32,6 @@ neural-demo/*.onnx
 neural-demo/*.plan
 neural-demo/.generated-models*/
 neural-demo/.model-build-cache*/
+target/
+**/__pycache__/
+demos/replay-rust/media/

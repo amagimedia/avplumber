@@ -21,9 +21,17 @@
 //!   only, and leaves an unfinalized — unplayable — MP4 behind when a group is
 //!   stopped mid-stream.
 //!
-//! Deferred: `seek_table` / `seek_table_text`, which belong with seek.
+//! With `seek_table` and/or `seek_table_text` set, every packet of stream 0
+//! is indexed by the byte offset it starts at: a binary file of native-endian
+//! `(i64 timestamp_ms, u64 byte_offset)` records and a text file with one
+//! `timestamp_ms byte_offset` line per packet. Both are what an indexed seek
+//! reads (see `services/playback.rs`), and both are flushed per entry so a
+//! reader can follow a recording still being written. C++ rotated four backing
+//! files behind a symlink for the same purpose; one growing file is enough.
 
 use std::ffi::CString;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 
 use rsmpeg::avformat::AVFormatContextOutput;
@@ -37,7 +45,7 @@ use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
 use avplumber_f7k::graph::node::Blocked;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{MuxStream, Spec};
-use avplumber_f7k::graph::timebase::rescale;
+use avplumber_f7k::graph::timebase::{MILLISECONDS, rescale};
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
@@ -47,8 +55,7 @@ use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
 const MAX_CONSECUTIVE_ERRORS: u32 = 20;
 
 /// The node keeps this whole struct rather than copying fields out of it, so each
-/// parameter is declared exactly once. The `seek_table*` fields are the only ones
-/// that mean nothing after a successful build.
+/// parameter is declared exactly once.
 #[derive(Debug, serde::Deserialize)]
 pub struct OutputSpec {
     url: String,
@@ -59,13 +66,31 @@ pub struct OutputSpec {
     /// entries are logged.
     #[serde(default)]
     options: Option<Value>,
-    /// Build-time only: rejected outright, see the module docs. Always `None` on a
-    /// node that was built successfully.
+    /// Path of the binary seek table, see the module docs; an empty string means
+    /// `<url>+seek`, which is where an indexed input looks by default.
     #[serde(default)]
     seek_table: Option<String>,
-    /// Build-time only, like `seek_table`.
+    /// Path of the text seek table; an empty string means `<url>+txt`.
     #[serde(default)]
     seek_table_text: Option<String>,
+}
+
+impl OutputSpec {
+    fn seek_table_paths(&self) -> (Option<String>, Option<String>) {
+        let default_or = |value: &Option<String>, suffix: &str| {
+            value.as_ref().map(|path| {
+                if path.is_empty() {
+                    format!("{}{suffix}", self.url)
+                } else {
+                    path.clone()
+                }
+            })
+        };
+        (
+            default_or(&self.seek_table, "+seek"),
+            default_or(&self.seek_table_text, "+txt"),
+        )
+    }
 }
 
 impl NodeSpec for OutputSpec {
@@ -73,9 +98,6 @@ impl NodeSpec for OutputSpec {
     type Node = Blocking<StreamOutput>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        if self.seek_table.is_some() || self.seek_table_text.is_some() {
-            return Err("seek_table is not implemented in the Rust core yet".into());
-        }
         // Unlike `input`, nothing is opened here: the container cannot be created
         // before its stream list arrives, and that is a runtime message.
         Ok(Blocking(StreamOutput {
@@ -99,12 +121,52 @@ struct Stream {
     forced_dts: u64,
 }
 
+/// The two seek-table files, open for as long as the container is.
+struct SeekTable {
+    binary: Option<BufWriter<File>>,
+    text: Option<BufWriter<File>>,
+    entries: u64,
+}
+
+impl SeekTable {
+    fn open(binary: Option<&str>, text: Option<&str>) -> Result<Self, String> {
+        let create = |path: &str| {
+            File::create(path)
+                .map(BufWriter::new)
+                .map_err(|error| format!("cannot create seek table {path}: {error}"))
+        };
+        Ok(Self {
+            binary: binary.map(create).transpose()?,
+            text: text.map(create).transpose()?,
+            entries: 0,
+        })
+    }
+
+    /// One record in each file, flushed at once: a reader following a live
+    /// recording sees whole records only.
+    fn record(&mut self, timestamp_ms: i64, byte_offset: u64) -> std::io::Result<()> {
+        if let Some(binary) = self.binary.as_mut() {
+            binary.write_all(&timestamp_ms.to_ne_bytes())?;
+            binary.write_all(&byte_offset.to_ne_bytes())?;
+            binary.flush()?;
+        }
+        if let Some(text) = self.text.as_mut() {
+            writeln!(text, "{timestamp_ms} {byte_offset}")?;
+            text.flush()?;
+        }
+        self.entries += 1;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// `None` until the container description arrives; also the "header written"
     /// flag, since [`StreamOutput::open`] writes it before handing the context
     /// over, and [`StreamOutput::finalize`] takes the context back out.
     ctx: Option<AVFormatContextOutput>,
+    /// Open while `ctx` is, when the script asked for a seek table.
+    seek_table: Option<SeekTable>,
     /// The [`Spec::Mux`] `ctx` was built for, so a re-delivered identical
     /// description is a no-op instead of a second file.
     mux_spec: Option<Spec>,
@@ -161,6 +223,21 @@ impl InputHandler for StreamOutput {
         let (ctx, streams) = self
             .open(streams)
             .map_err(|message| self.io.error(NodePhase::Spec, message))?;
+        let (binary, text) = self.params.seek_table_paths();
+        if binary.is_some() || text.is_some() {
+            state.seek_table = Some(
+                SeekTable::open(binary.as_deref(), text.as_deref())
+                    .map_err(|message| self.io.error(NodePhase::Spec, message))?,
+            );
+            log::info!(
+                "{}: indexing stream 0 into {}{}",
+                self.io.name,
+                binary.as_deref().unwrap_or("-"),
+                text.as_deref()
+                    .map(|path| format!(" and {path}"))
+                    .unwrap_or_default()
+            );
+        }
         state.ctx = Some(ctx);
         state.streams = streams;
         state.errors = 0;
@@ -387,6 +464,28 @@ impl StreamOutput {
             self.io
                 .error(NodePhase::Process, "the container is not open")
         })?;
+        if index == 0
+            && let Some(table) = state.seek_table.as_mut()
+        {
+            // Where this packet's bytes begin: the logical position of the
+            // output, pending buffer included, before the muxer sees it. With
+            // one stream libavformat writes it straight through, which is the
+            // case the index exists for.
+            let pb = unsafe { (*ctx.as_mut_ptr()).pb };
+            if !pb.is_null() {
+                let offset = unsafe { ffi::avio_seek(pb, 0, SEEK_CUR) };
+                let stamp = if dts.is_valid() { dts } else { pts };
+                if offset >= 0 && stamp.is_valid() {
+                    if let Err(error) = table.record(stamp.rescale(MILLISECONDS).val, offset as u64)
+                    {
+                        return Err(self.io.error(
+                            NodePhase::Process,
+                            format!("writing the seek table failed: {error}"),
+                        ));
+                    }
+                }
+            }
+        }
         // Interleaved, like C++ `octx_.writePacket`: the muxer reorders across
         // streams, which is what mp4 and mpegts need. It also takes the packet.
         match ctx.interleaved_write_frame(&mut packet) {
@@ -429,6 +528,10 @@ impl StreamOutput {
         // Drop closes the protocol; `mux_spec` goes with it so a restart opens the
         // file again instead of taking the re-delivered description for a no-op.
         drop(ctx);
+        if let Some(table) = state.seek_table.take() {
+            // Every record was flushed as it was written; dropping closes.
+            log::info!("{}: seek table has {} entries", self.io.name, table.entries);
+        }
         state.mux_spec = None;
         self.log_drops(state);
         for (index, stream) in state.streams.iter().enumerate() {
@@ -463,3 +566,6 @@ impl StreamOutput {
 
 /// `FF_COMPLIANCE_NORMAL`, which the bindings generate as unsigned.
 const COMPLIANCE_NORMAL: i32 = ffi::FF_COMPLIANCE_NORMAL as i32;
+
+/// `avio_tell` is a static inline over `avio_seek(pb, 0, SEEK_CUR)`.
+const SEEK_CUR: i32 = 1;

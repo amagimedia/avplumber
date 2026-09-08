@@ -302,13 +302,24 @@ async fn run_poll(
                 }
             }
             Ok(Tick::Idle) => {
-                again = 0;
-                IdlePark {
+                // A park that is ready at once is a step in disguise: it gets
+                // the same fairness budget, or one node could starve the loop.
+                let parked = IdlePark {
                     ctx: &mut ctx,
                     timer: None,
+                    parked: false,
                 }
                 .await;
                 ctx.clear_park();
+                if parked {
+                    again = 0;
+                } else {
+                    again += 1;
+                    if again >= AGAIN_BUDGET {
+                        again = 0;
+                        tokio::task::yield_now().await;
+                    }
+                }
             }
         }
     }
@@ -398,25 +409,27 @@ impl Future for WaitOnce {
 struct IdlePark<'a> {
     ctx: &'a mut NodePollContext,
     timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// Whether the park ever returned `Pending`; `false` is "ready at once".
+    parked: bool,
 }
 
 #[cfg(feature = "async")]
 impl Future for IdlePark<'_> {
-    type Output = ();
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> TaskPoll<()> {
+    type Output = bool;
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> TaskPoll<bool> {
         let this = self.get_mut();
         if this.ctx.ready_now() {
-            return TaskPoll::Ready(());
+            return TaskPoll::Ready(this.parked);
         }
         this.ctx.register_idle_waker(cx.waker().clone());
         if this.ctx.ready_now() {
-            return TaskPoll::Ready(());
+            return TaskPoll::Ready(this.parked);
         }
         if this.timer.is_none()
             && let Some(deadline) = this.ctx.take_deadline()
         {
             if Instant::now() >= deadline {
-                return TaskPoll::Ready(());
+                return TaskPoll::Ready(this.parked);
             }
             this.timer = Some(Box::pin(tokio::time::sleep_until(
                 tokio::time::Instant::from_std(deadline),
@@ -425,8 +438,9 @@ impl Future for IdlePark<'_> {
         if let Some(timer) = &mut this.timer
             && timer.as_mut().poll(cx).is_ready()
         {
-            return TaskPoll::Ready(());
+            return TaskPoll::Ready(this.parked);
         }
+        this.parked = true;
         TaskPoll::Pending
     }
 }

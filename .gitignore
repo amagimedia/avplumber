@@ -39,3 +39,6 @@ __pycache__/
 /demos/dmabuf-browser/docs/dmabuf-demo.mp4
 /demos/dmabuf-browser/docs/dmabuf-demo.jpg
 /demos/dmabuf-browser/docs/dmabuf-graph.png
+
+# Replay on the Rust core: generated sample clip and recordings.
+/demos/replay-rust/media/

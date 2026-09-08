@@ -15,11 +15,19 @@ ffmpeg7_1 = ["ffmpeg", "avplumber_f7k/ffmpeg7_1", "rsmpeg/ffmpeg7_1", "rusty_ffm
 ffmpeg8 = ["ffmpeg", "avplumber_f7k/ffmpeg8", "rsmpeg/ffmpeg8", "rusty_ffmpeg/ffmpeg8"]
 async = ["avplumber_f7k/async"]
 
+# The executable: runs scripts and serves the control protocol. Needs the
+# media nodes, hence the features.
+[[bin]]
+name = "avplumber"
+path = "src/bin/avplumber.rs"
+required-features = ["ffmpeg", "async"]
+
 [dependencies]
 avplumber_f7k = { path = "../avplumber_f7k" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
+# `std` for the executable's boxed logger.
+log = { version = "0.4", features = ["std"] }
 rusty_ffmpeg = { version = "0.16.7", optional = true, default-features = false, features = ["link_system_ffmpeg"] }
 rsmpeg = { version = "0.18.0", optional = true, default-features = false }
 

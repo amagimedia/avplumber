@@ -109,6 +109,20 @@ pub trait Node: Send + Sync + 'static {
     fn query_interface(&self, _iface: AvpInterfaceId) -> Option<*const c_void> {
         None
     }
+
+    /// A named knob the control layer can turn (`node.object.set`), C++
+    /// `IInputsObjects::setObject`. Called from the control thread while the
+    /// body runs, so an implementation must not take a lock the body holds
+    /// across a blocking call. The default node has none.
+    fn set_object(&self, key: &str, _value: &serde_json::Value) -> Result<(), String> {
+        Err(format!("{} has no object `{key}` to set", self.name()))
+    }
+
+    /// A named value the control layer can read (`node.object.get`), C++
+    /// `IReturnsObjects::getObject`. Same threading rule as [`Self::set_object`].
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        Err(format!("{} has no object `{key}` to get", self.name()))
+    }
     fn bind_source(&self, _name: &str, _edge: Arc<dyn Edge>) {}
     fn bind_sink(&self, _name: &str, _edge: Arc<dyn Edge>) {}
 

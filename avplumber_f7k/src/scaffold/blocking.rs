@@ -54,6 +54,16 @@ pub trait BlockingNode: Send + Sync + 'static {
     /// itself: a node blocked *inside* libav has to be told through its own
     /// callback. Any thread, any time, must not block.
     fn interrupt(&self) {}
+
+    /// [`Node::set_object`], from the control thread.
+    fn set_object(&self, key: &str, _value: &serde_json::Value) -> Result<(), String> {
+        Err(format!("{} has no object `{key}` to set", self.io().name))
+    }
+
+    /// [`Node::get_object`], from the control thread.
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        Err(format!("{} has no object `{key}` to get", self.io().name))
+    }
 }
 
 /// The [`Node`] a [`BlockingNode`] runs as.
@@ -99,6 +109,14 @@ impl<N: BlockingNode> Node for Blocking<N> {
 
     fn process(&self) -> Result<Blocked, NodeError> {
         self.0.step()
+    }
+
+    fn set_object(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+        self.0.set_object(key, value)
+    }
+
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        self.0.get_object(key)
     }
 }
 

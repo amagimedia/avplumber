@@ -122,6 +122,18 @@ pub enum Pushed {
     Interrupted,
     /// The edge is closed — downstream is gone, so the node is done.
     Closed,
+    /// `while_parked` asked to give the buffer up: something newer supersedes
+    /// it, such as a seek that makes the packet stale.
+    Abandoned,
+}
+
+/// What `while_parked` answers on each wake of a [`push_blocking`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Parked {
+    /// Try the push again.
+    Retry,
+    /// Drop the buffer and return [`Pushed::Abandoned`].
+    Abandon,
 }
 
 /// Push from a blocking body, parking for room instead of dropping.
@@ -129,12 +141,14 @@ pub enum Pushed {
 /// `while_parked` runs on every wake, before retrying: that is where a producer
 /// answers [hints](crate::graph::EdgeHint) posted by its consumer. Without it, a
 /// full edge plus a consumer waiting for an answer only the producer can give
-/// would deadlock.
+/// would deadlock. It is also where a producer notices that what it holds has
+/// gone stale — a seek arrived while it waited — and answers
+/// [`Parked::Abandon`].
 pub fn push_blocking(
     park: &Arc<Park>,
     edge: &Arc<dyn Edge>,
     buffer: Media,
-    mut while_parked: impl FnMut() -> Result<(), NodeError>,
+    mut while_parked: impl FnMut() -> Result<Parked, NodeError>,
 ) -> Result<Pushed, NodeError> {
     let mut buffer = buffer;
     loop {
@@ -151,7 +165,10 @@ pub fn push_blocking(
             // as an error.
             Err((Push::Dropped | Push::Accepted, _)) => return Ok(Pushed::Ok),
         }
-        while_parked()?;
+        if while_parked()? == Parked::Abandon {
+            log::debug!("push abandoned: a flush superseded the buffer");
+            return Ok(Pushed::Abandoned);
+        }
         park.wait(PARK_TIMEOUT_MS);
     }
 }

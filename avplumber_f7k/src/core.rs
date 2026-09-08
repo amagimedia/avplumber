@@ -390,7 +390,12 @@ impl Instance {
                 CoreError::Operation(format!("unknown node type: {}", request.type_name))
             })?;
         let mut built = crate::factory::with_build_generation(1, || {
-            factory.build(self, &request.name, &params_json)
+            factory.build(
+                self,
+                &request.name,
+                &params_json,
+                request.sync_group.as_deref(),
+            )
         })
         .map_err(CoreError::Operation)?;
         let self_bindings = std::mem::take(&mut built.bindings);
@@ -479,6 +484,11 @@ impl Instance {
 
     pub fn node(&self, name: &str) -> Option<NodeInstance> {
         self.nodes.lock().unwrap().get(name).cloned()
+    }
+
+    /// Every group name, in no particular order.
+    pub fn group_names(&self) -> Vec<String> {
+        self.groups.lock().unwrap().keys().cloned().collect()
     }
 
     pub fn group(&self, name: &str) -> Option<Arc<Group>> {
@@ -764,14 +774,7 @@ impl Instance {
         let edge = edges
             .entry(name.to_string())
             .or_insert_with(|| {
-                let capacity = self
-                    .planned_capacity
-                    .lock()
-                    .unwrap()
-                    .get(name)
-                    .copied()
-                    .unwrap_or(0);
-                EdgeRecord::new(Arc::new(BufferedEdge::new(capacity)))
+                EdgeRecord::new(Arc::new(BufferedEdge::new(self.planned_capacity_of(name))))
             })
             .edge
             .clone();
@@ -779,6 +782,18 @@ impl Instance {
             name: name.to_string(),
             edge,
         }
+    }
+
+    /// The capacity `queue.plan_capacity` set for `name`, else for `*` — the
+    /// default for every edge not planned by name, as in C++ — else 0, which
+    /// `BufferedEdge::new` turns into its own default.
+    fn planned_capacity_of(&self, name: &str) -> usize {
+        let planned = self.planned_capacity.lock().unwrap();
+        planned
+            .get(name)
+            .or_else(|| planned.get("*"))
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn edge_link(&self, name: &str) -> Option<EdgeLink> {
@@ -815,14 +830,9 @@ impl Instance {
 
         let mut edges = self.edges.lock().unwrap();
         let record = edges.entry(edge_name.to_string()).or_insert_with(|| {
-            let capacity = self
-                .planned_capacity
-                .lock()
-                .unwrap()
-                .get(edge_name)
-                .copied()
-                .unwrap_or(0);
-            EdgeRecord::new(Arc::new(BufferedEdge::new(capacity)))
+            EdgeRecord::new(Arc::new(BufferedEdge::new(
+                self.planned_capacity_of(edge_name),
+            )))
         });
         let endpoint = (node_name.to_string(), pad.to_string());
         let existing = match direction {

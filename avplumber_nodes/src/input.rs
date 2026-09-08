@@ -7,10 +7,20 @@
 //! node evaluates (only the `AVFormatContext`'s owner can) and the stream
 //! selection it turns into `AVDISCARD_ALL` on everything unwanted.
 //!
-//! Deferred: `getObject("streams"/"programs")` (the Rust control layer has no
-//! `object.get` yet), and seek.
+//! With a `sync_group`, the node is a **seekable source**: it binds to that
+//! playback group (`services/playback.rs`), asks it before every read whether
+//! to reposition — a user seek, a reverse step, a skip stride, a loop — and
+//! wraps a discontinuity in `FlushStart`/`FlushStop`. It never announces an
+//! end in this mode: at the tail it asks the group whether to loop or idle. The
+//! recording's seek table (`<url>+seek`) and history (`<url>+history`) are
+//! loaded for the group; without them only timestamp seeks work. This is what
+//! is left of C++ `input_rec`: the container half. Design:
+//! `doc/specs/rust-refactor/rust_refactor_playback.md` §6.
+//!
+//! Deferred: `getObject("streams"/"programs")`.
 
 use std::ffi::{CString, c_int, c_void};
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,10 +37,14 @@ use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
 use avplumber_f7k::graph::node::Blocked;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{CatalogStream, PacketSpec, Spec, StreamSelection};
+use avplumber_f7k::graph::timebase::{MILLISECONDS, rescale};
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::error::{av_error, code_of, is_eagain};
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, BlockingNode};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, BlockingNode, Parked};
+use avplumber_f7k::services::playback::{
+    Playback, ReadPlan, Reposition, SeekIndex, SeekTo, SourceId,
+};
 
 /// C++ `int timeout = 5`.
 const DEFAULT_TIMEOUT_S: f64 = 5.0;
@@ -58,18 +72,50 @@ pub struct InputSpec {
     #[serde(default)]
     initial_timeout: Option<f64>,
     /// `drain` (default) sends [`EdgeEvent::Eof`] downstream, `none` stays quiet.
+    /// Not with `sync_group`: a seekable source never ends.
     #[serde(default)]
     eof_mode: Option<String>,
-    /// Milliseconds to keep the node alive after EOF.
+    /// Milliseconds to keep the node alive after EOF. Not with `sync_group`.
     #[serde(default)]
     stop_delay: Option<i64>,
+    /// Seekable mode only: the binary seek table. Absent means `<url>+seek` if
+    /// that file exists; an empty string means none, so only timestamp seeks.
+    #[serde(default)]
+    seek_table: Option<String>,
+    /// Seekable mode only: the timestamp history for UTC seeks. Absent means
+    /// `<url>+history` if it exists; an empty string means none.
+    #[serde(default)]
+    history: Option<String>,
+    /// Seekable mode only: start over at the tail instead of idling there.
+    #[serde(default, rename = "loop")]
+    loop_: Option<bool>,
+    /// Seekable mode only: how far behind the newest indexed frame `seek live`
+    /// lands, in seconds. Default 1.
+    #[serde(default)]
+    live_delay: Option<f64>,
+}
+
+/// What binds a seekable `input` to its playback group.
+struct Seekable {
+    playback: Arc<Playback>,
+    id: SourceId,
+    /// The stream the index describes and time seeks address: the first video
+    /// stream.
+    video_stream: i32,
 }
 
 impl NodeSpec for InputSpec {
     const TYPE_NAME: &'static str = "input";
     type Node = Blocking<StreamInput>;
 
-    fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+    fn build(self, name: &str, build_ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+        if build_ctx.sync_group.is_some() && (self.eof_mode.is_some() || self.stop_delay.is_some())
+        {
+            return Err(
+                "eof_mode and stop_delay do not apply with sync_group: a seekable source never                  announces an end"
+                    .into(),
+            );
+        }
         let eof_drain = match self.eof_mode.as_deref() {
             None | Some("drain") => true,
             Some("none") => false,
@@ -97,20 +143,92 @@ impl NodeSpec for InputSpec {
         let ctx = ctx?;
         log_streams(name, &self.url, &ctx);
 
+        let io = BlockingIo::new(name);
+        let seekable = match build_ctx.sync_group {
+            Some(group) => Some(self.bind_seekable(name, group, build_ctx, &io, &ctx)?),
+            None => None,
+        };
+
         Ok(Blocking(StreamInput {
-            io: BlockingIo::new(name),
+            io,
             params: self,
             timeout_s,
             eof_drain,
             interrupt,
+            seekable,
             state: Mutex::new(Some(State {
                 ctx,
                 filter: None,
                 catalog_published: false,
                 eof_sent: false,
                 finish_at_us: None,
+                last_pos: None,
             })),
         }))
+    }
+}
+
+impl InputSpec {
+    /// Loads the recording's index and registers the node with its playback
+    /// group, whose commands reach the reader through the node's own park.
+    fn bind_seekable(
+        &self,
+        name: &str,
+        group: &str,
+        build_ctx: &BuildCtx<'_>,
+        io: &BlockingIo,
+        ctx: &AVFormatContextInput,
+    ) -> Result<Seekable, String> {
+        let video_stream = ctx
+            .streams()
+            .iter()
+            .find(|s| s.codecpar().codec_type == ffi::AVMEDIA_TYPE_VIDEO)
+            .map(|s| s.index)
+            .ok_or_else(|| format!("{} has no video stream to seek in", self.url))?;
+        let path_or_default = |value: &Option<String>, suffix: &str| -> Option<PathBuf> {
+            match value.as_deref() {
+                Some("") => None,
+                Some(path) => Some(PathBuf::from(path)),
+                None => {
+                    let default = PathBuf::from(format!("{}{suffix}", self.url));
+                    default.exists().then_some(default)
+                }
+            }
+        };
+        let index = match path_or_default(&self.seek_table, "+seek") {
+            Some(table) => {
+                let history = path_or_default(&self.history, "+history");
+                let index = SeekIndex::load(&table, history.as_deref())?;
+                log::info!(
+                    "{name}: {} indexed frames from {}{}",
+                    index.len(),
+                    table.display(),
+                    if index.has_history() {
+                        ", with a timestamp history"
+                    } else {
+                        ""
+                    }
+                );
+                Some(Arc::new(index))
+            }
+            None => {
+                log::info!("{name}: no seek table, timestamp seeks only");
+                None
+            }
+        };
+        let playback = build_ctx.playback(group);
+        let park = io.park().clone();
+        let id = playback.bind_source(
+            Arc::new(move || park.wake()),
+            index,
+            self.loop_.unwrap_or(false),
+            (self.live_delay.unwrap_or(1.0) * 1000.0) as i64,
+        );
+        Ok(Seekable {
+            playback,
+            id,
+            video_stream,
+        })
     }
 }
 
@@ -188,6 +306,9 @@ struct State {
     eof_sent: bool,
     /// `stop_delay` is running: monotonic microseconds to finish at.
     finish_at_us: Option<i64>,
+    /// Seekable mode: byte offset of the last video packet delivered, which is
+    /// what the playback group plans the next read from.
+    last_pos: Option<u64>,
 }
 
 pub struct StreamInput {
@@ -202,6 +323,8 @@ pub struct StreamInput {
     /// Aborts a blocking call *inside* libav, through the context's
     /// `AVIOInterruptCB`.
     interrupt: Arc<InterruptState>,
+    /// Present in seekable mode.
+    seekable: Option<Seekable>,
     state: Mutex<Option<State>>,
 }
 
@@ -266,13 +389,29 @@ impl BlockingNode for StreamInput {
 
         self.serve_hints(state, &out)?;
 
+        if let Some(seekable) = &self.seekable {
+            let plan = seekable.playback.plan_read(seekable.id, state.last_pos);
+            if let Some(blocked) = self.follow_plan(seekable, state, &out, plan)? {
+                return Ok(blocked);
+            }
+        }
+
         self.interrupt.arm(self.timeout_s);
         let read = state.ctx.read_packet();
         self.interrupt.disarm();
 
         let mut packet = match read {
             Ok(Some(packet)) => packet,
-            Ok(None) => return self.on_eof(state, &out),
+            Ok(None) => {
+                let Some(seekable) = &self.seekable else {
+                    return self.on_eof(state, &out);
+                };
+                log::debug!("{}: tail reached after {:?}", self.io.name, state.last_pos);
+                let plan = seekable.playback.plan_tail(seekable.id, state.last_pos);
+                return Ok(self
+                    .follow_plan(seekable, state, &out, plan)?
+                    .unwrap_or(Blocked::Again));
+            }
             Err(error) => {
                 if self.interrupt.should_end() {
                     log::info!("{}: read interrupted by stop", self.io.name);
@@ -329,11 +468,96 @@ impl BlockingNode for StreamInput {
             },
         );
 
+        if let Some(seekable) = &self.seekable
+            && index == seekable.video_stream
+            && packet.pos >= 0
+        {
+            state.last_pos = Some(packet.pos as u64);
+        }
+
         self.io.push_with(&out, Media::Packet(packet), || {
             // The anti-deadlock rule: a producer with no room still answers the
             // question its consumer is parked on.
-            self.serve_hints(state, &out)
+            self.serve_hints(state, &out)?;
+            // And a seek that arrived meanwhile makes what it holds stale.
+            let stale = self
+                .seekable
+                .as_ref()
+                .is_some_and(|s| s.playback.has_request(s.id));
+            Ok(if stale {
+                Parked::Abandon
+            } else {
+                Parked::Retry
+            })
         })
+    }
+}
+
+impl StreamInput {
+    /// Acts on what the playback group planned. `Some` ends the step.
+    fn follow_plan(
+        &self,
+        seekable: &Seekable,
+        state: &mut State,
+        out: &Arc<dyn Edge>,
+        plan: ReadPlan,
+    ) -> Result<Option<Blocked>, NodeError> {
+        match plan {
+            ReadPlan::Continue => Ok(None),
+            ReadPlan::Idle => {
+                // The tail without loop, or the start when reversing: wait for a
+                // command, which wakes the park.
+                self.io.wait(50);
+                Ok(Some(Blocked::Again))
+            }
+            ReadPlan::Reposition(Reposition { to, discontinuity }) => {
+                if discontinuity {
+                    out.push_event(EdgeEvent::FlushStart);
+                }
+                let resume_at = match to {
+                    SeekTo::Bytes(offset) => {
+                        state
+                            .ctx
+                            .seek(-1, offset as i64, ffi::AVSEEK_FLAG_BYTE as i32)
+                            .map_err(|error| {
+                                self.io.error(
+                                    NodePhase::Process,
+                                    format!("byte seek to {offset} failed: {error}"),
+                                )
+                            })?;
+                        None
+                    }
+                    SeekTo::Time {
+                        media_ms,
+                        resume_at,
+                    } => {
+                        let tb = stream_time_base(&state.ctx, seekable.video_stream)
+                            .unwrap_or(MILLISECONDS);
+                        let ts = rescale(media_ms, MILLISECONDS, tb);
+                        state
+                            .ctx
+                            .seek(seekable.video_stream, ts, ffi::AVSEEK_FLAG_BACKWARD as i32)
+                            .map_err(|error| {
+                                self.io.error(
+                                    NodePhase::Process,
+                                    format!("seek to {media_ms} ms failed: {error}"),
+                                )
+                            })?;
+                        resume_at
+                    }
+                };
+                state.last_pos = None;
+                log::debug!(
+                    "{}: repositioned to {to:?}{}",
+                    self.io.name,
+                    if discontinuity { " (flushed)" } else { "" }
+                );
+                if discontinuity {
+                    out.push_event(EdgeEvent::FlushStop { resume_at });
+                }
+                Ok(None)
+            }
+        }
     }
 }
 

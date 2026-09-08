@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Waker;
 use std::time::Instant;
 
-use crate::graph::edge::{Edge, Wakeup};
+use crate::graph::edge::{Edge, EdgeEvent, EdgeItem, Wakeup};
 
 pub struct NodePollContext {
     cancel: Arc<AtomicBool>,
@@ -13,6 +13,8 @@ pub struct NodePollContext {
     self_wake: Arc<Wakeup>,
     deadline: Option<Instant>,
     readable: Vec<Arc<dyn Edge>>,
+    /// Edges waited on for a `FlushStart` at their head, see [`Self::wait_flush`].
+    flushes: Vec<Arc<dyn Edge>>,
     writable: Vec<Arc<dyn Edge>>,
     waiting: bool,
 }
@@ -25,6 +27,7 @@ impl NodePollContext {
             self_wake: Arc::new(Wakeup::new()),
             deadline: None,
             readable: Vec::new(),
+            flushes: Vec::new(),
             writable: Vec::new(),
             waiting: false,
         }
@@ -37,6 +40,21 @@ impl NodePollContext {
     pub fn wait_readable(&mut self, edge: Arc<dyn Edge>) {
         edge.arm_readable();
         self.readable.push(edge);
+        self.waiting = true;
+    }
+
+    /// Wake when a `FlushStart` reaches the head of `edge`, or it closes.
+    ///
+    /// For a node holding a buffer it cannot deliver yet (its output is full,
+    /// or the buffer's time has not come): it must not take more from its
+    /// input, so [`Self::wait_readable`] would make it ready at once and spin,
+    /// yet a flush arriving behind that buffer must still reach it, because it
+    /// makes the buffer stale — and a flush lands at the head, since pushing
+    /// it drops the buffers before it. Any other event behind the buffer waits
+    /// its turn.
+    pub fn wait_flush(&mut self, edge: Arc<dyn Edge>) {
+        edge.arm_readable();
+        self.flushes.push(edge);
         self.waiting = true;
     }
 
@@ -78,6 +96,13 @@ impl NodePollContext {
                 .readable
                 .iter()
                 .any(|e| e.occupied() > 0 || e.is_closed())
+            || self.flushes.iter().any(|e| {
+                e.is_closed()
+                    || matches!(
+                        e.peek_clone(0),
+                        Some(EdgeItem::Event(EdgeEvent::FlushStart))
+                    )
+            })
             || self
                 .writable
                 .iter()
@@ -89,6 +114,9 @@ impl NodePollContext {
         self.tick.register_waker(waker.clone());
         self.self_wake.register_waker(waker.clone());
         for e in &self.readable {
+            e.register_readable_waker(waker.clone());
+        }
+        for e in &self.flushes {
             e.register_readable_waker(waker.clone());
         }
         for e in &self.writable {
@@ -103,6 +131,7 @@ impl NodePollContext {
         self.waiting = false;
         self.deadline = None;
         self.readable.clear();
+        self.flushes.clear();
         self.writable.clear();
     }
 

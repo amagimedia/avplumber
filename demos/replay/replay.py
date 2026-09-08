@@ -1,19 +1,29 @@
-"""Shared recording, graph, and control logic for the replay demos."""
+"""Shared recording, graph, and control logic for the replay demos.
+
+The graphs run on the Rust avplumber, reached over its control protocol
+(`control_client.py`); nothing here runs inside the media process. Seek, rate
+and pause address one playback group, `GROUP`, which is the `sync_group` of the
+seekable `input` and of the `realtime` pacing node
+(`doc/specs/rust-refactor/rust_refactor_playback.md`).
+"""
 
 from __future__ import annotations
 
+import json
 import struct
 import math
+import tempfile
 import threading
 import time
 from bisect import bisect_right
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from types import SimpleNamespace
-from typing import NamedTuple
+from typing import Callable, NamedTuple
+
+from control_client import AvplumberProcess, ControlClient, find_avplumber
 
 
 SEEK_STRUCT = struct.Struct("=qQ")
@@ -21,11 +31,14 @@ HISTORY_STRUCT = struct.Struct("=qqqq")
 SEEK_TABLE_SUFFIX = "+seek"
 TEXT_SEEK_TABLE_SUFFIX = "+txt"
 HISTORY_SUFFIX = "+history"
+GROUP = "replay"
+PLAYER_NODE_GROUP = "player"
+TRANSCODE_NODE_GROUP = "transcode"
 JANUS_FORCE_KEYFRAME_NODE = "janus_force_keyframe"
 JANUS_FORCE_KEYFRAME_COMMAND = (
     f"node.object.set {JANUS_FORCE_KEYFRAME_NODE} trigger true"
 )
-GPU_DEVICE = "replay_gpu"
+STATUS_POLL_INTERVAL = 0.01
 
 
 class SeekTableEntry(NamedTuple):
@@ -175,6 +188,7 @@ class PlaybackStatus:
     duration_ms: int
     ready: bool
     loop: bool
+    at_end: bool = False
     message: str = ""
     error: str = ""
     last_command: str = ""
@@ -193,12 +207,12 @@ def _format_number(value: float | int) -> str:
 
 
 class PlaybackController:
-    """Translate SSGW v2 single-source operations into AVPlumber commands."""
+    """Translate SSGW v2 single-source operations into avplumber commands.
 
-    PAUSE_TEAM = "replay_pause"
-    SPEED_TEAM = "replay_speed"
-    SYNC_TEAM = "replay_sync"
-    TRANSITION_TEAM = "replay_transition"
+    Rate and direction are one signed rate on the playback group; the
+    transition gate the C++ core needed for a clean speed change is gone,
+    because a rate change on the Rust core touches nothing in flight.
+    """
 
     def __init__(self, command, artifact: ReplayArtifact, *, loop=True,
                  clock=time.monotonic, control_timeout=5.0):
@@ -210,6 +224,7 @@ class PlaybackController:
         self._observed = threading.Condition(self._lock)
         self._observation_serial = 0
         self._observations = deque(maxlen=256)
+        self._last_server_serial = 0
         self._status = PlaybackStatus(
             playing=True,
             direction="forward",
@@ -260,16 +275,23 @@ class PlaybackController:
         with self._lock:
             return tuple(frame for serial, frame in self._observations if serial > marker)
 
-    def observe_metadata(self, metadata) -> PlaybackStatus:
+    def observe_status(self, status: dict) -> PlaybackStatus:
+        """Folds one `playback.status` document in: a new `serial` is a newly
+        released frame, `frame`/`media_ms` say which."""
         try:
-            if "frame_no" not in metadata or "frame_ts" not in metadata:
-                return self.status()
-            return self.observe(
-                frame_number=int(metadata["frame_no"]),
-                media_timestamp_ms=int(metadata["frame_ts"]),
-            )
-        except (TypeError, ValueError):
+            serial = int(status.get("serial", 0))
+            frame = status.get("frame")
+            media_ms = status.get("media_ms")
+            at_end = bool(status.get("at_end", False))
+        except (TypeError, ValueError, AttributeError):
             return self.status()
+        with self._lock:
+            if at_end != self._status.at_end:
+                self._status = replace(self._status, at_end=at_end)
+            if serial <= self._last_server_serial or frame is None or media_ms is None:
+                return self._status
+            self._last_server_serial = serial
+            return self.observe(frame_number=int(frame), media_timestamp_ms=int(media_ms))
 
     def _send(self, command: str) -> None:
         try:
@@ -279,9 +301,13 @@ class PlaybackController:
             raise
         self._status = replace(self._status, error="", last_command=command)
 
+    def _signed_rate(self, speed_percent: float, direction: str | None = None) -> float:
+        direction = direction or self._status.direction
+        return speed_percent / 100 * (-1 if direction == "reverse" else 1)
+
     def _pause(self) -> None:
         if self._status.playing:
-            self._send(f"pause {self.PAUSE_TEAM} now")
+            self._send(f"pause {GROUP} now")
         self._status = replace(self._status, playing=False, message="")
 
     def _play(self) -> None:
@@ -293,52 +319,21 @@ class PlaybackController:
             )
             return
         if not self._status.playing:
-            self._send(f"resume {self.PAUSE_TEAM}")
+            self._send(f"resume {GROUP}")
         self._status = replace(self._status, playing=True, message="")
 
-    def _wait_for_quiet_output(self, deadline: float) -> None:
-        quiet_period = 2 / self.artifact.fps
-        serial = self._observation_serial
-        quiet_since = time.monotonic()
-        while True:
-            now = time.monotonic()
-            if now >= deadline:
-                raise TimeoutError("timed out draining the speed transition")
-            if now - quiet_since >= quiet_period:
-                return
-            self._observed.wait(min(quiet_period - (now - quiet_since), deadline - now))
-            if self._observation_serial != serial:
-                serial = self._observation_serial
-                quiet_since = time.monotonic()
-
-    def _change_speed_cleanly(self, speed: float, sign: int) -> None:
-        transition_error = None
-        gate_closed = False
-        try:
-            self._send(f"pause {self.TRANSITION_TEAM} now")
-            gate_closed = True
-            self._wait_for_quiet_output(time.monotonic() + self._control_timeout)
+    def _play_towards(self, direction: str) -> None:
+        """PLAY and REVERSE are the two directions of one control: each plays,
+        and turns playback around when it was going the other way. The toggle
+        (Space) is the one that resumes in whatever direction was current."""
+        turned = self._status.direction != direction
+        self._status = replace(self._status, direction=direction)
+        self._play()
+        if turned and self._status.playing:
             self._send(
-                f"speed.set {self.SPEED_TEAM} "
-                f"{_format_number(sign * speed / 100)}"
+                f"speed.set {GROUP} "
+                f"{_format_number(self._signed_rate(self._status.speed_percent))}"
             )
-            self._status = replace(self._status, speed_percent=speed)
-            self._send(JANUS_FORCE_KEYFRAME_COMMAND)
-        except Exception as exc:
-            transition_error = exc
-        if gate_closed:
-            try:
-                self._send(f"resume {self.TRANSITION_TEAM}")
-            except Exception as exc:
-                if transition_error is None:
-                    transition_error = exc
-        if transition_error is not None:
-            self._status = replace(
-                self._status,
-                message="",
-                error=f"speed transition failed: {transition_error}",
-            )
-            raise transition_error
 
     def _set_speed(self, value) -> None:
         speed = _number(value, "speed")
@@ -347,12 +342,7 @@ class PlaybackController:
         if speed == 0:
             self._pause()
         else:
-            sign = -1 if self._status.direction == "reverse" else 1
-            if (self._status.ready and self._status.playing
-                    and self._status.speed_percent != speed and speed <= 100):
-                self._change_speed_cleanly(speed, sign)
-            else:
-                self._send(f"speed.set {self.SPEED_TEAM} {_format_number(sign * speed / 100)}")
+            self._send(f"speed.set {GROUP} {_format_number(self._signed_rate(speed))}")
         self._status = replace(self._status, speed_percent=speed)
 
     def _scrub(self, value) -> None:
@@ -362,13 +352,13 @@ class PlaybackController:
         if speed == 0:
             if self._scrub_restore is not None:
                 was_playing, direction = self._scrub_restore
-                signed_speed = self._status.speed_percent / 100 * (-1 if direction == "reverse" else 1)
+                signed_speed = self._signed_rate(self._status.speed_percent, direction)
                 if signed_speed:
-                    self._send(f"speed.set {self.SPEED_TEAM} {_format_number(signed_speed)}")
+                    self._send(f"speed.set {GROUP} {_format_number(signed_speed)}")
                 if not was_playing or not signed_speed:
-                    self._send(f"pause {self.PAUSE_TEAM} now")
+                    self._send(f"pause {GROUP} now")
                 elif not self._status.playing:
-                    self._send(f"resume {self.PAUSE_TEAM}")
+                    self._send(f"resume {GROUP}")
                 self._status = replace(
                     self._status,
                     playing=was_playing and bool(signed_speed),
@@ -383,9 +373,9 @@ class PlaybackController:
         self._status = replace(self._status, scrubbing_percent=speed)
         if abs(speed) <= 20 or self._clock() - self._last_scrub_command < 0.1:
             return
-        self._send(f"speed.set {self.SPEED_TEAM} {_format_number(speed / 100)}")
+        self._send(f"speed.set {GROUP} {_format_number(speed / 100)}")
         if not self._status.playing:
-            self._send(f"resume {self.PAUSE_TEAM}")
+            self._send(f"resume {GROUP}")
         self._status = replace(
             self._status,
             playing=True,
@@ -399,17 +389,11 @@ class PlaybackController:
             if operation is PlaybackOperation.PAUSE:
                 self._pause()
             elif operation is PlaybackOperation.PLAY:
-                self._play()
+                self._play_towards("forward")
             elif operation is PlaybackOperation.TOGGLE:
                 self._pause() if self._status.playing else self._play()
             elif operation is PlaybackOperation.REVERSE:
-                self._status = replace(self._status, direction="reverse")
-                self._play()
-                if self._status.playing:
-                    self._send(
-                        f"speed.set {self.SPEED_TEAM} "
-                        f"{_format_number(-self._status.speed_percent / 100)}"
-                    )
+                self._play_towards("reverse")
             elif operation is PlaybackOperation.SPEED:
                 self._set_speed(value)
             elif operation is PlaybackOperation.SCRUB:
@@ -419,34 +403,31 @@ class PlaybackController:
                 if not 0 <= target <= self.artifact.duration_ms:
                     raise ValueError("seek timestamp is outside the recording")
                 self._send(
-                    f"seek {self.SYNC_TEAM} now "
+                    f"seek {GROUP} now "
                     f"{_format_number(self.artifact.start_ms + target)}"
                 )
             elif operation is PlaybackOperation.SEEK_FRAMES:
                 frames = _number(value, "frames")
                 if not frames.is_integer() or abs(frames) > 2**53 - 1:
                     raise ValueError("frames must be a safe integer")
-                self._send(
-                    f"seek {self.SYNC_TEAM} frame "
-                    f"{int(frames):+d}"
-                )
+                self._send(f"seek {GROUP} frame {int(frames):+d}")
             elif operation is PlaybackOperation.SEEK_SECONDS:
                 seconds = _number(value, "seconds")
                 milliseconds = seconds * 1000
                 if abs(milliseconds) > 2**53 - 1:
                     raise ValueError("seconds are outside the supported range")
                 self._send(
-                    f"seek {self.SYNC_TEAM} now "
+                    f"seek {GROUP} now "
                     f"{_format_number(milliseconds) if milliseconds < 0 else '+' + _format_number(milliseconds)}"
                 )
             elif operation is PlaybackOperation.SEEK_UTC:
                 if not isinstance(value, datetime) or value.tzinfo is None:
                     raise ValueError("UTC seek requires a timezone-qualified datetime")
                 target = value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-                self._send(f"seek {self.SYNC_TEAM} now {target}")
+                self._send(f"seek {GROUP} now {target}")
             elif operation is PlaybackOperation.TAIL:
                 target = self.artifact.start_ms + max(self.artifact.duration_ms - 3_000, 0)
-                self._send(f"seek {self.SYNC_TEAM} now {target}")
+                self._send(f"seek {GROUP} now {target}")
             return self._status
 
 
@@ -508,147 +489,183 @@ class PlayerConfig:
     janus: JanusVideoConfig
 
 
+def node_add(node_type: str, name: str, group: str, **parameters) -> str:
+    """One `node.add` line. Option values go out as strings: that is what the
+    libav dictionaries take, whatever the script author typed."""
+    params = {"type": node_type, "name": name, "group": group}
+    for key, value in parameters.items():
+        if key == "options" and isinstance(value, dict):
+            value = {k: str(v) for k, v in value.items()}
+        params[key] = value
+    return "node.add " + json.dumps(params, separators=(",", ":"))
+
+
+def _stringify(options: dict) -> dict:
+    return {key: str(value) for key, value in options.items()}
+
+
+def transcode_script(config: TranscodeConfig) -> list[str]:
+    """The transcode graph, video only, all-intra H.264 with a seek table.
+    CPU codecs: software decode and libx264."""
+    group = TRANSCODE_NODE_GROUP
+    fps = config.fps
+    output = str(config.output)
+    return [
+        "queue.plan_capacity * 4",
+        node_add("input", "replay_input", group,
+                 url=str(config.source), dst="transcode_packets", eof_mode="drain"),
+        node_add("demux", "replay_demux", group,
+                 src="transcode_packets", routing={"?v:0": "transcode_video_packets"},
+                 wait_for_keyframe=False),
+        node_add("dec_video", "replay_decode", group,
+                 src="transcode_video_packets", dst="transcode_decoded",
+                 codec_map={"h264": "h264", "hevc": "hevc"}),
+        node_add("force_fps", "replay_fps", group,
+                 src="transcode_decoded", dst="transcode_fps", fps=f"{fps}/1"),
+        node_add("force_keyframe", "replay_keyframes", group,
+                 src="transcode_fps", dst="transcode_keyframes", interval_sec=f"1/{fps}"),
+        node_add("enc_video", "replay_encoder", group,
+                 src="transcode_keyframes", dst="transcode_encoded", codec="libx264",
+                 options={"g": 1, "bf": 0, "profile": "baseline", "preset": "ultrafast",
+                          "tune": "zerolatency", "crf": 17,
+                          "x264-params": "keyint=1:scenecut=0"}),
+        node_add("mux", "replay_mux", group,
+                 src=["transcode_encoded"], dst="transcode_muxed", ts_sort_wait=0),
+        node_add("output", "replay_output", group,
+                 src="transcode_muxed", url=output, format="mpegts",
+                 seek_table=f"{output}{SEEK_TABLE_SUFFIX}",
+                 seek_table_text=f"{output}{TEXT_SEEK_TABLE_SUFFIX}"),
+        f"group.start {group}",
+    ]
+
+
+def _rtp_url(config: JanusVideoConfig) -> str:
+    return (
+        f"rtp://{config.host}:{config.video_port}?pkt_size=1200"
+        f"&rtcp_port={config.video_port + 1}"
+    )
+
+
+def player_script(config: PlayerConfig, artifact: ReplayArtifact) -> list[str]:
+    """The player graph: a seekable input paced by the `replay` group, then the
+    Janus leg with a forced keyframe every second, libx264, SPS/PPS repeated
+    in band, RTP out."""
+    group = PLAYER_NODE_GROUP
+    fps = artifact.fps
+    bitrate = "4000k"
+    return [
+        "queue.plan_capacity * 1",
+        node_add("input", "replay_input", group, sync_group=GROUP,
+                 url=str(artifact.path), dst="player_packets", loop=config.slot.loop),
+        node_add("demux", "replay_demux", group,
+                 src="player_packets", routing={"v:0": "player_video_packets"}),
+        node_add("dec_video", "replay_decode", group,
+                 src="player_video_packets", dst="player_decoded",
+                 codec_map={"h264": "h264"},
+                 options={"threads": 1, "flags": "low_delay"}),
+        node_add("realtime", "replay_realtime", group, sync_group=GROUP,
+                 src="player_decoded", dst="player_realtime", tick_period=f"1/{fps}"),
+        node_add("force_keyframe", JANUS_FORCE_KEYFRAME_NODE, group,
+                 src="player_realtime", dst="janus_keyframes", interval_sec="1/1"),
+        # A live output: a seek must not touch the encoder (`flush: keep`), the
+        # paced frames keep monotonic timestamps across it anyway.
+        node_add("enc_video", "janus_encoder", group,
+                 src="janus_keyframes", dst="janus_encoded", codec="libx264", flush="keep",
+                 options={"b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
+                          "bf": 0, "preset": "ultrafast", "profile": "baseline",
+                          "tune": "zerolatency", "x264-params": "aud=1:scenecut=0"}),
+        node_add("bsf", "janus_headers", group,
+                 src="janus_encoded", dst="janus_headers", bsf="dump_extra=freq=keyframe"),
+        node_add("mux", "janus_mux", group,
+                 src=["janus_headers"], dst="janus_muxed", ts_sort_wait=0),
+        node_add("output", "janus_rtp_output", group,
+                 src="janus_muxed", url=_rtp_url(config.janus), format="rtp",
+                 options={"payload_type": config.janus.payload_type,
+                          "rtpflags": "skip_rtcp", "ssrc": config.janus.ssrc}),
+    ]
+
+
 @dataclass
 class TranscodeApplication:
-    avp: object
     config: TranscodeConfig
-    group: str = "transcode"
+    binary: Path
+    group: str = TRANSCODE_NODE_GROUP
+    log_level: str = "info"
 
     def run(self) -> None:
-        self.avp.executeCommandsFromString(
-            "event.on.node.finished transcode_finished replay_output"
-        )
+        """Runs the transcode to completion in a batch avplumber process."""
+        with tempfile.NamedTemporaryFile("w", suffix=".avplumber", prefix="replay-transcode-",
+                                         delete=False) as script:
+            script.write("\n".join(transcode_script(self.config)) + "\n")
+            script_path = Path(script.name)
         try:
-            self.avp.group(self.group).startNodes()
-            self.avp.executeCommandsFromString("event.wait transcode_finished")
+            result = AvplumberProcess(self.binary, log_level=self.log_level).run_batch(script_path)
         finally:
-            self.avp.setExceptionCallback(None)
-            self.avp.shutdown()
+            script_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            tail = "\n".join(result.stderr.strip().splitlines()[-8:])
+            raise RuntimeError(f"avplumber exited with status {result.returncode}:\n{tail}")
 
 
-def load_avp_api():
-    from pyplumber import AVPlumber
-    from pyplumber.node import (
-        DecVideo,
-        Bsf,
-        Demux,
-        EncVideo,
-        ForceFPS,
-        ForceKeyFrame,
-        Input,
-        InputRec,
-        Mux,
-        Output,
-        Pause,
-        PythonNode,
-        RealtimeVideoFrame,
-        SpeedVideo,
-    )
-    from pyplumber.rtcp_feedback import RtcpFeedbackListener
-
-    class PositionProbe(PythonNode):
-        def __init__(self, parameters, controller):
-            super().__init__(parameters)
-            self.controller = controller
-
-        def process(self):
-            frame = self._src.get()
-            if frame:
-                self.controller.observe_metadata(frame.metadata)
-                self._dst.enqueue(frame)
-
-        @property
-        def worker_running(self):
-            return self._wrapper is not None and self._wrapper.isWorking
-
-        def request_stop(self):
-            self._wrapper.stop(False)
-
-        def detach(self):
-            if self.worker_running:
-                raise RuntimeError("position probe is still running")
-            self._src = None
-            self._dst = None
-            self._wrapper = None
-            self._avplumber = None
-
-    return SimpleNamespace(
-        AVPlumber=AVPlumber,
-        Bsf=Bsf,
-        Input=Input,
-        InputRec=InputRec,
-        Demux=Demux,
-        DecVideo=DecVideo,
-        ForceFPS=ForceFPS,
-        ForceKeyFrame=ForceKeyFrame,
-        EncVideo=EncVideo,
-        Mux=Mux,
-        Output=Output,
-        Pause=Pause,
-        PositionProbe=PositionProbe,
-        RealtimeVideoFrame=RealtimeVideoFrame,
-        RtcpFeedbackListener=RtcpFeedbackListener,
-        SpeedVideo=SpeedVideo,
-    )
+def build_transcode_application(config: TranscodeConfig, binary: str | Path | None = None) -> TranscodeApplication:
+    return TranscodeApplication(config, find_avplumber(binary))
 
 
-def _add_node(avp, node_type, name: str, group: str, **parameters):
-    node = node_type({"name": name, "group": group, **parameters})
-    avp.addNode(node)
-    return node
+class StatusPoller:
+    """Feeds `playback.status` into the controller a few times per frame, so
+    every released frame is observed and a fresh one can be told from a
+    repeated read."""
 
+    def __init__(self, client: ControlClient, controller: PlaybackController,
+                 *, interval: float = STATUS_POLL_INTERVAL, node_group: str = PLAYER_NODE_GROUP):
+        self.client = client
+        self.controller = controller
+        self.interval = interval
+        self.node_group = node_group
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
-def _init_cuda(avp) -> None:
-    avp.executeCommandsFromString(
-        f'hwaccel.init {{ "name": "{GPU_DEVICE}", "type": "cuda" }}'
-    )
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="replay-status", daemon=True)
+        self._thread.start()
 
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
 
-def build_transcode_application(config: TranscodeConfig, api=None) -> TranscodeApplication:
-    api = api or load_avp_api()
-    avp = api.AVPlumber()
-    _init_cuda(avp)
-    avp.edges.planCapacity("*", 4)
-    group = "transcode"
-    _add_node(avp, api.Input, "replay_input", group,
-              url=str(config.source), dst="transcode_packets", eof_mode="drain")
-    _add_node(avp, api.Demux, "replay_demux", group,
-              src="transcode_packets", routing={"?v:0": "transcode_video_packets"},
-              wait_for_keyframe=False)
-    _add_node(avp, api.DecVideo, "replay_decode", group,
-              src="transcode_video_packets", dst="transcode_decoded",
-              pixel_format="cuda", hwaccel=GPU_DEVICE,
-              codec_map={"h264": "h264_cuvid", "hevc": "hevc_cuvid"},
-              hwaccel_only_for_codecs=["h264", "hevc"])
-    _add_node(avp, api.ForceFPS, "replay_fps", group,
-              src="transcode_decoded", dst="transcode_fps", fps=f"{config.fps}/1")
-    _add_node(avp, api.ForceKeyFrame, "replay_keyframes", group,
-              src="transcode_fps", dst="transcode_keyframes",
-              interval_sec=f"1/{config.fps}")
-    _add_node(avp, api.EncVideo, "replay_encoder", group,
-              src="transcode_keyframes", dst="transcode_encoded",
-              codec="h264_nvenc", hwaccel=GPU_DEVICE,
-              options={"g": 1, "bf": 0, "profile": "baseline", "rc": "vbr",
-                       "cq": 17, "b": 0, "tune": "ull", "rc-lookahead": 0,
-                       "zerolatency": 1, "delay": 0})
-    _add_node(avp, api.Mux, "replay_mux", group,
-              src=["transcode_encoded"], dst="transcode_muxed", ts_sort_wait=0)
-    _add_node(avp, api.Output, "replay_output", group,
-              src="transcode_muxed", url=str(config.output), format="mpegts",
-              seek_table=f"{config.output}{SEEK_TABLE_SUFFIX}",
-              seek_table_text=f"{config.output}{TEXT_SEEK_TABLE_SUFFIX}")
-    return TranscodeApplication(avp, config, group)
+    def _run(self) -> None:
+        polls = 0
+        while not self._stop.is_set():
+            try:
+                self.controller.observe_status(self.client.status(GROUP))
+                polls += 1
+                if polls % 50 == 0:
+                    for outcome in self.client.group_status(self.node_group).get("outcomes", []):
+                        if outcome.startswith(("failed:", "panicked:")):
+                            self.controller.set_error(outcome)
+            except Exception as exc:  # the connection or the server went away
+                if self._stop.is_set():
+                    return
+                self.controller.set_error(str(exc))
+                time.sleep(0.5)
+                continue
+            self._stop.wait(self.interval)
 
 
 @dataclass
 class PlayerApplication:
-    avp: object
     config: PlayerConfig
     artifact: ReplayArtifact
     controller: PlaybackController
-    position_probe: object
+    client: ControlClient
     rtcp_feedback_listener: object
-    video_edge: str = "player_observed"
+    process: AvplumberProcess | None = None
+    poller: StatusPoller | None = None
+    node_group: str = PLAYER_NODE_GROUP
     _stopped: bool = False
 
     def _wait_for(self, predicate, description: str) -> None:
@@ -663,15 +680,18 @@ class PlayerApplication:
 
     def start(self) -> None:
         try:
-            self.avp.group("player").startNodes()
+            if self.process is not None:
+                self.process.start()
+                self.client = self.process.connect(self.config.slot.control_timeout)
+            elif not self.client.connected:
+                self.client.connect()
+            for line in player_script(self.config, self.artifact):
+                self.client.command(line)
+            self.client.command(f"group.start {self.node_group}")
+            self.poller = StatusPoller(self.client, self.controller, node_group=self.node_group)
+            self.poller.start()
             self._wait_for(lambda: self.controller.status().ready, "the first source frame")
-            self.avp.group("output").startNodes()
-            self._wait_for(
-                lambda: self.avp.node("janus_rtp_output").isWorking,
-                "the Janus RTP output",
-            )
             self.rtcp_feedback_listener.start()
-            self.avp.setReady()
         except Exception:
             self.stop()
             raise
@@ -679,39 +699,45 @@ class PlayerApplication:
     def stop(self) -> None:
         if self._stopped:
             return
-        self.avp.setExceptionCallback(None)
-        self.rtcp_feedback_listener.stop()
-        if self.position_probe.worker_running:
-            self.position_probe.request_stop()
-            deadline = time.monotonic() + self.config.slot.control_timeout
-            while self.position_probe.worker_running:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("timed out stopping the position probe")
-                time.sleep(0.01)
-        self.position_probe.detach()
-        self.avp.group("output").stopNodes()
-        self.avp.group("player").stopNodes()
-        self.avp.shutdown()
         self._stopped = True
+        self.rtcp_feedback_listener.stop()
+        if self.poller is not None:
+            self.poller.stop()
+        if self.client.connected:
+            try:
+                self.client.command(f"group.stop {self.node_group}")
+            except Exception:
+                pass
+            self.client.close()
+        if self.process is not None:
+            self.process.stop(self.config.slot.control_timeout)
 
 
-def _rtp_url(config: JanusVideoConfig) -> str:
-    return (
-        f"rtp://{config.host}:{config.video_port}?pkt_size=1200"
-        f"&rtcp_port={config.video_port + 1}"
-    )
+def load_rtcp_listener():
+    from rtcp_feedback import RtcpFeedbackListener
+    return RtcpFeedbackListener
 
 
-def build_player_application(config: PlayerConfig, api=None) -> PlayerApplication:
+def build_player_application(config: PlayerConfig, *, binary: str | Path | None = None,
+                             connect: tuple[str, int] | None = None,
+                             listener_factory: Callable | None = None,
+                             avplumber_log: Path | None = None) -> PlayerApplication:
+    """One replay slot and one Janus output on a Rust avplumber: spawned from
+    `binary` (or `$AVPLUMBER_BIN`), or an already running one at `connect`."""
     artifact = validate_recording(config.slot.recording)
-    api = api or load_avp_api()
-    avp = api.AVPlumber()
-    _init_cuda(avp)
-    avp.edges.planCapacity("*", 1)
+    if connect is not None:
+        process = None
+        client = ControlClient(*connect, timeout=config.slot.control_timeout)
+    else:
+        process = AvplumberProcess(find_avplumber(binary), log_path=avplumber_log)
+        client = ControlClient(process.host, process.port, timeout=config.slot.control_timeout)
+
+    # Both closures go through the application, whose client a spawned process
+    # replaces on start (and a test replaces with a fake).
     def command(value: str) -> None:
-        avp.executeCommandsFromString(value)
+        application.client.command(value)
         if value.startswith("seek "):
-            avp.executeCommandsFromString(JANUS_FORCE_KEYFRAME_COMMAND)
+            application.client.command(JANUS_FORCE_KEYFRAME_COMMAND)
 
     controller = PlaybackController(
         command,
@@ -719,78 +745,14 @@ def build_player_application(config: PlayerConfig, api=None) -> PlayerApplicatio
         loop=config.slot.loop,
         control_timeout=config.slot.control_timeout,
     )
-    avp.on_exception = lambda name, node_type, message: controller.set_error(
-        f"{name} ({node_type}): {message}"
-    )
-    fps = artifact.fps
-
-    # Drain the final decoded frames at EOF while keeping the slot seekable.
-    _add_node(avp, api.InputRec, "replay_input", "player",
-              url=str(artifact.path), dst="player_packets", timeout=-1, preseek=0,
-              seek_table="", ts_offsets="", team="replay_input_seek",
-              timestamp_source="wallclock", pause_team=PlaybackController.PAUSE_TEAM,
-              stop_delay=3000, loop=config.slot.loop, stop_on_eof=False)
-    _add_node(avp, api.Demux, "replay_demux", "player",
-              src="player_packets", routing={"v:0": "player_video_packets"},
-              stop_on_eof=False)
-    _add_node(avp, api.DecVideo, "replay_decode", "player",
-              src="player_video_packets", dst="player_decoded", pixel_format="cuda",
-              hwaccel=GPU_DEVICE, codec_map={"h264": "h264_cuvid"},
-              hwaccel_only_for_codecs=["h264"], flush_magic=True, hold_at_eof=True,
-              options={"flags": "low_delay"})
-    _add_node(avp, api.SpeedVideo, "replay_speed", "player",
-              src="player_decoded", dst="player_speed_raw", team=PlaybackController.SPEED_TEAM,
-              sync_team=PlaybackController.SYNC_TEAM, sync_node="replay_realtime", speed=1)
-    _add_node(avp, api.Pause, "replay_transition_gate", "player",
-              src="player_speed_raw", dst="player_speed",
-              team=PlaybackController.TRANSITION_TEAM)
-    _add_node(avp, api.ForceFPS, "replay_fps", "player",
-              src="player_speed", dst="player_fps", fps=f"{fps}/1")
-    _add_node(avp, api.Pause, "replay_pause", "player",
-              src="player_fps", dst="player_paused", team=PlaybackController.PAUSE_TEAM,
-              sync_team=PlaybackController.SYNC_TEAM)
-    _add_node(avp, api.RealtimeVideoFrame, "replay_realtime", "player",
-              src="player_paused", dst="player_realtime", team=PlaybackController.SYNC_TEAM,
-              set_pts=True, tick_period=f"1/{fps}", negative_time_tolerance=1 / fps,
-              negative_time_discard=1 / fps, discontinuity_threshold=3)
-    probe = api.PositionProbe({
-        "name": "replay_position",
-        "src": "player_realtime",
-        "dst": "player_observed",
-        "data_type": "VideoFrame",
-        "group": "player",
-    }, controller)
-    avp.addNode(probe)
-
-    bitrate = "4000k"
-    _add_node(avp, api.ForceKeyFrame, JANUS_FORCE_KEYFRAME_NODE, "output",
-              src="player_observed", dst="janus_keyframes", interval_sec="1/1")
-    _add_node(avp, api.EncVideo, "janus_encoder", "output",
-              src="janus_keyframes", dst="janus_encoded", codec="h264_nvenc",
-              hwaccel=GPU_DEVICE, options={
-                  "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
-                  "bf": 0, "preset": "p6", "profile": "baseline", "tune": "ull",
-                  "rc": "cbr", "rc-lookahead": 0, "zerolatency": 1, "delay": 0,
-                  "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1, "aud": 1,
-                  "spatial-aq": 1, "temporal-aq": 0,
-              })
-    _add_node(avp, api.Bsf, "janus_headers", "output",
-              src="janus_encoded", dst="janus_headers", bsf="dump_extra=freq=keyframe")
-    _add_node(avp, api.Mux, "janus_mux", "output",
-              src=["janus_headers"], dst="janus_muxed", ts_sort_wait=0)
-    _add_node(avp, api.Output, "janus_rtp_output", "output",
-              src="janus_muxed", url=_rtp_url(config.janus), format="rtp",
-              options={"payload_type": config.janus.payload_type,
-                       "rtpflags": "skip_rtcp", "ssrc": config.janus.ssrc})
-
-    listener = api.RtcpFeedbackListener(
+    listener_factory = listener_factory or load_rtcp_listener()
+    listener = listener_factory(
         bind_host=config.janus.rtcp_bind,
         bind_port=config.janus.rtcp_port,
         janus_host=config.janus.host,
         janus_rtcp_port=config.janus.video_port + 1,
         media_ssrc=config.janus.ssrc,
-        on_keyframe_request=lambda _request: avp.executeCommandsFromString(
-            JANUS_FORCE_KEYFRAME_COMMAND
-        ),
+        on_keyframe_request=lambda _request: application.client.command(JANUS_FORCE_KEYFRAME_COMMAND),
     )
-    return PlayerApplication(avp, config, artifact, controller, probe, listener)
+    application = PlayerApplication(config, artifact, controller, client, listener, process=process)
+    return application

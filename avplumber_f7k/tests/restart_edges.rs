@@ -107,7 +107,7 @@ fn internal_restart_clears_data_and_control_but_rearms_latched_spec() {
         Some(EdgeItem::Event(EdgeEvent::Spec(_)))
     ));
     assert_eq!(old.push(media(1)), Push::Accepted);
-    old.push_event(EdgeEvent::FlushStop);
+    old.push_event(EdgeEvent::FlushStop { resume_at: None });
     old.push_event(EdgeEvent::Eof);
 
     logical.restart(1, 2, EdgeRestart::Internal);
@@ -244,7 +244,7 @@ fn interrupt_releases_blocking_peek_and_both_waiter_directions() {
         edge.interrupt();
         let interrupted = rx.recv_timeout(Duration::from_millis(100));
         if interrupted.is_err() {
-            edge.push_event(EdgeEvent::FlushStop);
+            edge.push_event(EdgeEvent::FlushStop { resume_at: None });
         }
         waiter.join().unwrap();
 
@@ -422,11 +422,11 @@ fn concurrent_direct_fence_does_not_wait_inside_consumer_poll() {
     );
     assert_eq!(fresh_result, Push::Accepted);
     assert_eq!(fresh_received.load(Ordering::SeqCst), 1);
-    fresh_events.push_event(EdgeEvent::FlushStop);
+    fresh_events.push_event(EdgeEvent::FlushStop { resume_at: None });
     assert!(consumer.input.get().unwrap().try_take().is_none());
     assert!(matches!(
         replacement.input.get().unwrap().try_take(),
-        Some(EdgeItem::Event(EdgeEvent::FlushStop))
+        Some(EdgeItem::Event(EdgeEvent::FlushStop { .. }))
     ));
 
     assert!(
@@ -451,7 +451,7 @@ fn direct_internal_restart_clears_events_and_inflight_but_rearms_spec() {
         logical.try_take(),
         Some(EdgeItem::Event(EdgeEvent::Spec(_)))
     ));
-    old.push_event(EdgeEvent::FlushStop);
+    old.push_event(EdgeEvent::FlushStop { resume_at: None });
 
     let (entered_tx, entered_rx) = mpsc::channel();
     let release = Arc::new(Barrier::new(2));
@@ -1001,7 +1001,7 @@ fn live_direct_restart_clears_old_state_and_fuses_into_replacement() {
     inst.start_group("g").unwrap();
     let group = inst.group("g").unwrap();
     let stale = writers.lock().unwrap()[0].clone();
-    stale.push_event(EdgeEvent::FlushStop);
+    stale.push_event(EdgeEvent::FlushStop { resume_at: None });
     assert_eq!(logical.occupied(), 1);
 
     group.report_outcome(NodeOutcome::Failed {
@@ -1171,7 +1171,7 @@ fn live_direct_only_chain_restart_stores_nothing_and_rewires_both_hops() {
     assert_eq!(hop2.occupied(), 0);
     assert_eq!(received.load(Ordering::SeqCst), 1);
 
-    stale.push_event(EdgeEvent::FlushStop);
+    stale.push_event(EdgeEvent::FlushStop { resume_at: None });
     assert!(hop1.occupied() >= 1);
 
     let group = inst.group("g").unwrap();
@@ -1302,7 +1302,7 @@ fn live_direct_chain_restart_rebinds_tails_to_buffered() {
     assert_eq!(hop2.occupied(), 0);
 
     hold.store(false, Ordering::Release);
-    release.push_event(EdgeEvent::FlushStop);
+    release.push_event(EdgeEvent::FlushStop { resume_at: None });
     wait_until(
         Duration::from_secs(2),
         || received.load(Ordering::SeqCst) >= 1,

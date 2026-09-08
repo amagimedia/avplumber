@@ -4,7 +4,9 @@ use crate::abi::convert::{clone_avp_buffer, media_as_avp, media_to_avp, release_
 use crate::abi::{AvpBuffer, AvpSpec};
 use crate::abi::{AvpEdge, AvpNode};
 use crate::graph::edge::{EdgeEvent, EdgeItem, Push};
+use crate::graph::media::Ts;
 use crate::graph::spec::Spec;
+use crate::graph::{AVP_NOPTS, AvpRational};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -20,6 +22,22 @@ pub enum AvpEventType {
 pub struct AvpEdgeEvent {
     pub r#type: AvpEventType,
     pub spec: AvpSpec,
+    /// `FlushStop`: the media time the source aimed for, `AVP_NOPTS` when the
+    /// reposition was exact. Its time base is `resume_at_tb`.
+    pub resume_at: i64,
+    pub resume_at_tb: AvpRational,
+}
+
+impl AvpEdgeEvent {
+    /// An event with no payload of either kind.
+    fn plain(r#type: AvpEventType) -> Self {
+        Self {
+            r#type,
+            spec: AvpSpec::zeroed(),
+            resume_at: AVP_NOPTS,
+            resume_at_tb: AvpRational::default(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -51,21 +69,19 @@ fn push_to_c(p: Push) -> AvpFlow {
 
 fn event_to_c(ev: &EdgeEvent) -> AvpEdgeEvent {
     match ev {
-        EdgeEvent::Eof => AvpEdgeEvent {
-            r#type: AvpEventType::Eof,
-            spec: AvpSpec::zeroed(),
-        },
-        EdgeEvent::FlushStart => AvpEdgeEvent {
-            r#type: AvpEventType::FlushStart,
-            spec: AvpSpec::zeroed(),
-        },
-        EdgeEvent::FlushStop => AvpEdgeEvent {
-            r#type: AvpEventType::FlushStop,
-            spec: AvpSpec::zeroed(),
-        },
+        EdgeEvent::Eof => AvpEdgeEvent::plain(AvpEventType::Eof),
+        EdgeEvent::FlushStart => AvpEdgeEvent::plain(AvpEventType::FlushStart),
+        EdgeEvent::FlushStop { resume_at } => {
+            let mut event = AvpEdgeEvent::plain(AvpEventType::FlushStop);
+            if let Some(ts) = resume_at {
+                event.resume_at = ts.val;
+                event.resume_at_tb = ts.tb;
+            }
+            event
+        }
         EdgeEvent::Spec(s) => AvpEdgeEvent {
-            r#type: AvpEventType::Spec,
             spec: AvpSpec::from(s),
+            ..AvpEdgeEvent::plain(AvpEventType::Spec)
         },
     }
 }
@@ -75,10 +91,7 @@ fn owned_item_to_c(item: EdgeItem) -> AvpItem {
         EdgeItem::Buffer(m) => AvpItem {
             is_event: 0,
             buffer: media_to_avp(m),
-            event: AvpEdgeEvent {
-                r#type: AvpEventType::Eof,
-                spec: AvpSpec::zeroed(),
-            },
+            event: AvpEdgeEvent::plain(AvpEventType::Eof),
         },
         EdgeItem::Event(e) => AvpItem {
             is_event: 1,
@@ -93,10 +106,7 @@ fn borrowed_item_to_c(item: &EdgeItem) -> AvpItem {
         EdgeItem::Buffer(media) => AvpItem {
             is_event: 0,
             buffer: media_as_avp(media),
-            event: AvpEdgeEvent {
-                r#type: AvpEventType::Eof,
-                spec: AvpSpec::zeroed(),
-            },
+            event: AvpEdgeEvent::plain(AvpEventType::Eof),
         },
         EdgeItem::Event(event) => AvpItem {
             is_event: 1,
@@ -144,7 +154,12 @@ pub extern "C" fn avp_edge_push_event(edge: *mut AvpEdge, ev: *const AvpEdgeEven
     let ev = match ev_c.r#type {
         AvpEventType::Eof => EdgeEvent::Eof,
         AvpEventType::FlushStart => EdgeEvent::FlushStart,
-        AvpEventType::FlushStop => EdgeEvent::FlushStop,
+        AvpEventType::FlushStop => EdgeEvent::FlushStop {
+            resume_at: (ev_c.resume_at != AVP_NOPTS).then(|| Ts {
+                val: ev_c.resume_at,
+                tb: ev_c.resume_at_tb,
+            }),
+        },
         AvpEventType::Spec => EdgeEvent::Spec(ev_c.spec.to_native()),
     };
     if let Some(generation) = crate::abi::ffi_node::callback_generation() {

@@ -97,6 +97,9 @@ pub struct BuildCtx<'a> {
     pub instance: &'a Instance,
     pub name: &'a str,
     pub params: &'a Value,
+    /// The envelope's `sync_group`, which names the node's clock and, for the
+    /// seekable input and the pacing node, its [`Self::playback`] group.
+    pub sync_group: Option<&'a str>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -108,6 +111,11 @@ impl<'a> BuildCtx<'a> {
     }
     pub fn timeline(&self, name: &str) -> Arc<crate::services::timeline::InMemoryTimeline> {
         self.instance.services.timelines.get_or_create(name)
+    }
+    /// The playback group `name`: its clock plus seek, rate and position
+    /// control. Same clock as [`Self::clock`] of that name.
+    pub fn playback(&self, name: &str) -> Arc<crate::services::playback::Playback> {
+        self.instance.services.playback(name)
     }
 }
 
@@ -202,9 +210,12 @@ pub(crate) struct ConstructionRecipe {
 
 impl NodeBlueprint {
     pub(crate) fn build(&self, inst: &Instance) -> Result<BuiltNode, String> {
-        self.recipe
-            .factory
-            .build(inst, &self.name, &self.canonical_params)
+        self.recipe.factory.build(
+            inst,
+            &self.name,
+            &self.canonical_params,
+            self.sync_group.as_deref(),
+        )
     }
 }
 
@@ -214,6 +225,7 @@ impl ResolvedFactory {
         inst: &Instance,
         instance_name: &str,
         params: &str,
+        sync_group: Option<&str>,
     ) -> Result<BuiltNode, String> {
         match self {
             ResolvedFactory::Legacy(factory) => {
@@ -225,6 +237,7 @@ impl ResolvedFactory {
                     instance: inst,
                     name: instance_name,
                     params: &parsed,
+                    sync_group,
                 };
                 factory(instance_name, params, &ctx)
             }
@@ -427,7 +440,7 @@ impl FactoryRegistry {
     ) -> Result<BuiltNode, String> {
         self.resolve(type_name)
             .ok_or_else(|| format!("unknown node type: {type_name}"))?
-            .build(inst, instance_name, params)
+            .build(inst, instance_name, params, None)
     }
 
     pub(crate) fn resolve(&self, type_name: &str) -> Option<ResolvedFactory> {

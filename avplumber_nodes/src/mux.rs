@@ -567,7 +567,7 @@ impl StreamMuxer {
                     input.shift = 0;
                     input.shifted_for = 0;
                 }
-                Some(EdgeItem::Event(EdgeEvent::FlushStop)) => {}
+                Some(EdgeItem::Event(EdgeEvent::FlushStop { .. })) => {}
                 None => {
                     if edge.is_closed() {
                         log::debug!(
@@ -952,6 +952,7 @@ mod tests {
                         instance: &instance,
                         name: "m",
                         params: &params,
+                        sync_group: None,
                     },
                 )
                 .expect("mux node");
@@ -1220,6 +1221,7 @@ mod tests {
                 instance: &instance,
                 name: "m",
                 params: &params,
+                sync_group: None,
             },
         );
         // `StreamMuxer` is not `Debug`, so the `Ok` side cannot be unwrapped into

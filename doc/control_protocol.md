@@ -220,6 +220,18 @@ Set speed of the `speed` nodes belonging to the team `team_name` to `speed` (flo
 
 Get current playback speed of the team `team_name`.
 
+```playback.status group_name```
+
+Rust core only. Replies with a JSON document: `position_ms`, `media_ms`, `frame`,
+`wallclock_ms`, `start_ms`, `duration_ms`, `frame_count`, `fps`, `rate`, `paused`,
+`direction`, `at_end`, `serial` (incremented per released frame), `pending`
+(a seek not yet observed), `loop`.
+
+In the Rust core `pause`, `resume`, `seek` and `speed.set` all address one name:
+the `sync_group` of the seekable `input` and the `realtime` node
+(`doc/specs/rust-refactor/rust_refactor_playback.md`). Teams and
+`team.link` do not exist there.
+
 ### Teams synchronization
 
 ```team.link<Pause> pause-team-A pause-team-B```

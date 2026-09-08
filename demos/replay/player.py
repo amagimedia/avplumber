@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Play one AVPlumber replay recording directly to a Janus RTP mountpoint."""
+"""Play one AVPlumber replay recording to a Janus RTP mountpoint, driving a Rust
+avplumber over its control protocol."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from control_client import parse_endpoint
 from replay import (JanusVideoConfig, PlaybackOperation as Op, PlayerConfig,
                     ReplaySlotConfig, build_player_application)
 
@@ -19,6 +21,14 @@ class ExerciseResult:
     name: str
     outcome: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class Backend:
+    """Which Rust avplumber runs the graph: one to spawn, or one to connect to."""
+    binary: str | None = None
+    connect: tuple[str, int] | None = None
+    log: Path | None = None
 
 
 def _wait(controller, predicate, timeout: float):
@@ -316,7 +326,8 @@ else:
                 f"speed={status.speed_percent:g}% scrub={status.scrubbing_percent:g}%  "
                 f"frame={status.frame_number if status.frame_number is not None else '—'}  "
                 f"{status.position_ms / 1000:.3f}/{status.duration_ms / 1000:.3f}s  "
-                f"UTC={wallclock}  LOOP={'ON' if status.loop else 'OFF'}\n"
+                f"UTC={wallclock}  LOOP={'ON' if status.loop else 'OFF'}"
+                f"{'  END' if status.at_end else ''}\n"
                 f"{status.error or status.message or status.last_command}"
             )
             state.set_class(bool(status.error), "error")
@@ -388,23 +399,37 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--control-timeout", type=float, default=5.0)
     parser.add_argument("--no-tui", action="store_true")
     parser.add_argument("--exercise-v2", action="store_true")
+    parser.add_argument("--avplumber", metavar="PATH",
+                        help="the Rust avplumber executable to spawn (default: $AVPLUMBER_BIN)")
+    parser.add_argument("--connect", metavar="HOST:PORT",
+                        help="use an avplumber already serving its control protocol instead")
+    parser.add_argument("--avplumber-log", type=Path, metavar="PATH",
+                        help="where the spawned avplumber writes its log (default: discarded)")
     args = parser.parse_args(argv)
     try:
-        return PlayerConfig(
+        config = PlayerConfig(
             ReplaySlotConfig(args.recording.resolve(), not args.no_loop, args.control_timeout),
             JanusVideoConfig(
                 args.janus_host, args.janus_video_port, args.janus_video_pt,
                 args.janus_video_ssrc, args.janus_rtcp_bind, args.janus_rtcp_port,
             ),
-        ), args.no_tui, args.exercise_v2
+        )
     except ValueError as exc:
         parser.error(str(exc))
+    backend = Backend(
+        binary=args.avplumber,
+        connect=parse_endpoint(args.connect) if args.connect else None,
+        log=args.avplumber_log,
+    )
+    return config, args.no_tui, args.exercise_v2, backend
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        config, no_tui, run_exercise = parse_args(argv)
-        application = build_player_application(config)
+        config, no_tui, run_exercise, backend = parse_args(argv)
+        application = build_player_application(
+            config, binary=backend.binary, connect=backend.connect, avplumber_log=backend.log,
+        )
         application.start()
         try:
             if run_exercise:
@@ -422,9 +447,10 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             return 0
         finally:
-            if not stop_bounded(application, config.slot.control_timeout):
-                print("FAIL shutdown exceeded control timeout")
-                return 1
+            stopped = stop_bounded(application, config.slot.control_timeout)
+        if not stopped:
+            print("FAIL shutdown exceeded control timeout")
+            return 1
     except Exception as exc:
         print(f"player failed: {exc}")
         return 1

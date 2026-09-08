@@ -36,10 +36,29 @@ pub extern "C" fn avp_core_exec_command(
     }
 }
 
+/// Serves the control protocol on `0.0.0.0:port` for the rest of the process.
+/// Returns the bound port, or -1. The `AvpCore` must outlive the process, which
+/// is the only way a C embedder holds one.
 #[unsafe(no_mangle)]
-pub extern "C" fn avp_core_serve_tcp(_core: *mut AvpCore, _port: u16) -> i32 {
-    // TCP listener is a thin loop over exec_command; embedders can call that.
-    -1
+pub extern "C" fn avp_core_serve_tcp(core: *mut AvpCore, port: u16) -> i32 {
+    if core.is_null() {
+        return -1;
+    }
+    // The handle is an `Arc<Instance>` sharing the embedder's inner state:
+    // `Instance` is `Arc<InstanceInner>` underneath, so this is a clone of the
+    // pointer, not of the graph.
+    let instance = std::sync::Arc::new(unsafe { &*core }.share());
+    match crate::control::tcp::serve(instance, ("0.0.0.0", port)) {
+        Ok(server) => {
+            let bound = server.local_addr().port();
+            std::mem::forget(server);
+            i32::from(bound)
+        }
+        Err(error) => {
+            log::error!("cannot serve the control protocol on port {port}: {error}");
+            -1
+        }
+    }
 }
 
 pub fn exec_line(core: &AvpCore, line: &str) -> Result<String, String> {

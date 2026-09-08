@@ -4,12 +4,12 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::graph::edge::Edge;
+use crate::graph::edge::{Edge, EdgeEvent, EdgeItem};
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::media::Media;
 use crate::graph::node::Blocked;
 use crate::scaffold::edge_slot::EdgeSlot;
-use crate::scaffold::park::{Park, Pushed, push_blocking};
+use crate::scaffold::park::{Park, Parked, Pushed, push_blocking};
 
 /// What a node keeps besides its own state: its name, and one rebindable slot
 /// per direction.
@@ -75,21 +75,22 @@ impl BlockingIo {
     /// means the node was interrupted while parked, or the edge is closed;
     /// either way it is finished.
     pub fn push(&self, edge: &Arc<dyn Edge>, buffer: Media) -> Result<Blocked, NodeError> {
-        self.push_with(edge, buffer, || Ok(()))
+        self.push_with(edge, buffer, || Ok(Parked::Retry))
     }
 
     /// [`Self::push`] with the anti-deadlock hook of [`push_blocking`]:
     /// `while_parked` runs on every wake, which is where a producer answers the
-    /// hints its parked consumer posted.
+    /// hints its parked consumer posted, or abandons a buffer a seek made stale
+    /// (the step then simply goes `Again`).
     pub fn push_with(
         &self,
         edge: &Arc<dyn Edge>,
         buffer: Media,
-        while_parked: impl FnMut() -> Result<(), NodeError>,
+        while_parked: impl FnMut() -> Result<Parked, NodeError>,
     ) -> Result<Blocked, NodeError> {
         Ok(
             match push_blocking(&self.park, edge, buffer, while_parked)? {
-                Pushed::Ok => Blocked::Again,
+                Pushed::Ok | Pushed::Abandoned => Blocked::Again,
                 Pushed::Interrupted => Blocked::Done,
                 Pushed::Closed => {
                     log::info!("{}: output edge closed, finishing", self.name);
@@ -97,6 +98,32 @@ impl BlockingIo {
                 }
             },
         )
+    }
+
+    /// [`Self::push`] for a buffer derived from `input`: parks for room, but
+    /// gives the buffer up as soon as a `FlushStart` reaches the head of
+    /// `input`, since everything produced before a flush is stale. Without
+    /// this, a pipeline backed up behind a paused output could never pass the
+    /// flush that is meant to clear it.
+    pub fn push_from(
+        &self,
+        input: &Arc<dyn Edge>,
+        edge: &Arc<dyn Edge>,
+        buffer: Media,
+    ) -> Result<Blocked, NodeError> {
+        self.push_with(edge, buffer, || {
+            Ok(if flush_at_head(input) {
+                Parked::Abandon
+            } else {
+                Parked::Retry
+            })
+        })
+    }
+
+    /// The park itself, for a node that must be woken from elsewhere — a
+    /// service delivering a command to a producer parked on a full output.
+    pub fn park(&self) -> &Arc<Park> {
+        &self.park
     }
 
     /// Set by [`Node::interrupt`](crate::graph::node::Node::interrupt); a body
@@ -110,6 +137,15 @@ impl BlockingIo {
     pub fn wait(&self, timeout_ms: u64) {
         self.park.wait(timeout_ms)
     }
+}
+
+/// Whether the next item on `input` is a `FlushStart`: what a node holding a
+/// buffer it produced from that input checks before waiting any longer.
+pub fn flush_at_head(input: &Arc<dyn Edge>) -> bool {
+    matches!(
+        input.peek_clone(0),
+        Some(EdgeItem::Event(EdgeEvent::FlushStart))
+    )
 }
 
 impl Deref for BlockingIo {

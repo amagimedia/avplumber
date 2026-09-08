@@ -63,6 +63,16 @@ pub trait PollNode: Send + Sync + 'static {
     /// is never parked anywhere the executor cannot reach, so most nodes need
     /// nothing here.
     fn interrupt(&self) {}
+
+    /// [`Node::set_object`], from the control thread.
+    fn set_object(&self, key: &str, _value: &serde_json::Value) -> Result<(), String> {
+        Err(format!("{} has no object `{key}` to set", self.io().name))
+    }
+
+    /// [`Node::get_object`], from the control thread.
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        Err(format!("{} has no object `{key}` to get", self.io().name))
+    }
 }
 
 /// The [`Node`] a [`PollNode`] runs as. See [`Blocking`](crate::scaffold::Blocking)
@@ -108,6 +118,14 @@ impl<N: PollNode> Node for Polling<N> {
 
     fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         self.0.step(ctx)
+    }
+
+    fn set_object(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+        self.0.set_object(key, value)
+    }
+
+    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
+        self.0.get_object(key)
     }
 }
 

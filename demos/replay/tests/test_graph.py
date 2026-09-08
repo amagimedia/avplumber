@@ -1,166 +1,38 @@
+"""The graphs the demos send to avplumber, and the player's lifecycle over a
+fake control connection."""
+
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+import json
 import struct
-import threading
 
 import pytest
 
 from replay import (
+    GROUP,
+    JANUS_FORCE_KEYFRAME_COMMAND,
     JanusVideoConfig,
+    PlayerApplication,
     PlayerConfig,
     ReplaySlotConfig,
     TranscodeConfig,
     build_player_application,
-    build_transcode_application,
+    player_script,
+    transcode_script,
+    validate_recording,
 )
 
 
-class FakeNode:
-    node_type = "unknown"
-
-    def __init__(self, parameters):
-        self.parameters = {"type": self.node_type, **parameters}
-        self.isWorking = False
-
-    def stopAndWait(self):
-        if not self.isWorking:
-            raise RuntimeError("node no longer has a stopping interface")
-        self.avp.group_calls.append(f"stop:{self.parameters['name']}")
-        self.isWorking = False
-
-
-def node_type(name):
-    return type(name, (FakeNode,), {"node_type": name})
-
-
-class FakeGroup:
-    def __init__(self, avp, name):
-        self.avp = avp
-        self.name = name
-
-    def startNodes(self):
-        self.avp.group_calls.append("start")
-        if self.avp.on_group_start:
-            self.avp.on_group_start(self.name)
-        for node in self.avp.nodes:
-            if node.parameters["group"] == self.name:
-                node.isWorking = True
-
-    def stopNodes(self):
-        self.avp.group_calls.append(f"stop-group:{self.name}")
-        if not self.avp.on_group_stop or not self.avp.on_group_stop(self.name):
-            for node in self.sortedNodes:
-                node.isWorking = False
-
-    @property
-    def sortedNodes(self):
-        return [node for node in self.avp.nodes if node.parameters["group"] == self.name]
-
-
-class FakeEdges:
-    def __init__(self):
-        self.plans = []
-
-    def planCapacity(self, pattern, capacity):
-        self.plans.append((pattern, capacity))
-
-
-class FakeAvp:
-    def __init__(self):
-        self.nodes = []
-        self.commands = []
-        self.group_calls = []
-        self.edges = FakeEdges()
-        self.ready = False
-        self.on_group_start = None
-        self.on_group_stop = None
-        self.shutdown_while_working = False
-        self.exception_callback_active = True
-
-    def addNode(self, node):
-        node.avp = self
-        self.nodes.append(node)
-
-    def executeCommandsFromString(self, command):
-        self.commands.append(command)
-
-    def group(self, name):
-        return FakeGroup(self, name)
-
-    def node(self, name):
-        return next(node for node in self.nodes if node.parameters["name"] == name)
-
-    def setReady(self):
-        self.ready = True
-
-    def setExceptionCallback(self, callback):
-        self.exception_callback_active = callback is not None
-
-    def shutdown(self):
-        self.shutdown_while_working = any(node.isWorking for node in self.nodes)
-        self.group_calls.append("shutdown")
-
-
-class FakePositionProbe(FakeNode):
-    node_type = "python_node_siso"
-
-    def __init__(self, parameters, controller):
-        super().__init__(parameters)
-        self.controller = controller
-        self.attached = True
-
-    def request_stop(self):
-        self.avp.group_calls.append("probe-stop")
-        self.isWorking = False
-
-    @property
-    def worker_running(self):
-        return self.isWorking
-
-    def detach(self):
-        assert not self.worker_running
-        self.avp.group_calls.append("probe-detach")
-        self.attached = False
-
-
-class FakeRtcpFeedbackListener:
-    def __init__(self, **parameters):
-        self.parameters = parameters
-        self.started = False
-
-    def start(self):
-        self.started = True
-
-    def stop(self):
-        self.started = False
-
-
-def fake_api():
-    classes = {
-        name: node_type(node)
-        for name, node in {
-            "Input": "input",
-            "Demux": "demux",
-            "DecVideo": "dec_video",
-            "ForceFPS": "force_fps",
-            "ForceKeyFrame": "force_keyframe",
-            "EncVideo": "enc_video",
-            "Mux": "mux",
-            "Output": "output",
-            "InputRec": "input_rec",
-            "SpeedVideo": "speed_video",
-            "Pause": "pause",
-            "RealtimeVideoFrame": "realtime<av::VideoFrame>",
-            "Bsf": "bsf",
-        }.items()
-    }
-    return SimpleNamespace(
-        AVPlumber=FakeAvp,
-        PositionProbe=FakePositionProbe,
-        RtcpFeedbackListener=FakeRtcpFeedbackListener,
-        **classes,
-    )
+def nodes_of(script):
+    """`name -> parameters` of every `node.add` line, plus the other lines."""
+    nodes, others = {}, []
+    for line in script:
+        if line.startswith("node.add "):
+            params = json.loads(line[len("node.add "):])
+            nodes[params["name"]] = params
+        else:
+            others.append(line)
+    return nodes, others
 
 
 def replay_file(tmp_path, fps=25):
@@ -176,7 +48,7 @@ def replay_file(tmp_path, fps=25):
     return recording
 
 
-def test_transcode_graph_is_video_only_cuda_all_intra(tmp_path):
+def test_transcode_graph_is_video_only_all_intra_with_seek_tables(tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"vod")
     config = TranscodeConfig(
@@ -186,289 +58,178 @@ def test_transcode_graph_is_video_only_cuda_all_intra(tmp_path):
         wallclock_start=datetime(2026, 8, 10, tzinfo=timezone.utc),
     )
 
-    application = build_transcode_application(config, api=fake_api())
-    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
-    serialized = repr(nodes).lower()
+    nodes, others = nodes_of(transcode_script(config))
 
+    assert others == ["queue.plan_capacity * 4", "group.start transcode"]
     assert nodes["replay_input"]["eof_mode"] == "drain"
+    assert nodes["replay_input"]["url"] == str(source)
     assert nodes["replay_demux"]["routing"] == {"?v:0": "transcode_video_packets"}
     assert nodes["replay_decode"]["src"] == "transcode_video_packets"
-    assert nodes["replay_decode"]["pixel_format"] == "cuda"
-    assert nodes["replay_decode"]["hwaccel"] == "replay_gpu"
-    assert nodes["replay_decode"]["codec_map"] == {
-        "h264": "h264_cuvid",
-        "hevc": "hevc_cuvid",
-    }
-    assert nodes["replay_fps"]["src"] == "transcode_decoded"
+    assert "hwaccel" not in nodes["replay_decode"]
     assert nodes["replay_fps"]["fps"] == "30/1"
     assert nodes["replay_keyframes"]["interval_sec"] == "1/30"
-    assert nodes["replay_encoder"]["codec"] == "h264_nvenc"
-    assert nodes["replay_encoder"]["options"] == {
-        "g": 1,
-        "bf": 0,
-        "profile": "baseline",
-        "rc": "vbr",
-        "cq": 17,
-        "b": 0,
-        "tune": "ull",
-        "rc-lookahead": 0,
-        "zerolatency": 1,
-        "delay": 0,
-    }
+    encoder = nodes["replay_encoder"]
+    assert encoder["codec"] == "libx264"
+    assert encoder["options"]["g"] == "1" and encoder["options"]["bf"] == "0"
+    assert "keyint=1" in encoder["options"]["x264-params"]
+    assert all(isinstance(value, str) for value in encoder["options"].values())
     assert nodes["replay_mux"]["src"] == ["transcode_encoded"]
-    assert nodes["replay_mux"]["ts_sort_wait"] == 0
-    assert nodes["replay_output"]["format"] == "mpegts"
-    assert nodes["replay_output"]["seek_table"] == f"{config.output}+seek"
-    assert nodes["replay_output"]["seek_table_text"] == f"{config.output}+txt"
-    assert "audio" not in serialized
-    assert "realtime" not in serialized
-    assert "hwdownload" not in serialized
-    assert "hwupload" not in serialized
-    assert application.avp.commands == [
-        'hwaccel.init { "name": "replay_gpu", "type": "cuda" }'
-    ]
+    output = nodes["replay_output"]
+    assert output["format"] == "mpegts"
+    assert output["seek_table"] == str(tmp_path / "replay.ts+seek")
+    assert output["seek_table_text"] == str(tmp_path / "replay.ts+txt")
+    assert {params["group"] for params in nodes.values()} == {"transcode"}
 
 
-def test_transcode_config_rejects_missing_input_and_invalid_fps(tmp_path):
-    common = {
-        "source": tmp_path / "missing.mp4",
-        "output": tmp_path / "replay.ts",
-        "wallclock_start": datetime.now(timezone.utc),
-    }
-    try:
-        TranscodeConfig(fps=30, **common)
-    except FileNotFoundError:
-        pass
-    else:
-        raise AssertionError("missing input accepted")
-
-    source = tmp_path / "source.mp4"
-    source.write_bytes(b"vod")
-    try:
-        TranscodeConfig(source, tmp_path / "replay.ts", 0, common["wallclock_start"])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("invalid fps accepted")
-
-
-def test_transcode_run_shuts_down_graph_before_returning(tmp_path):
-    source = tmp_path / "source.mp4"
-    source.write_bytes(b"vod")
-    application = build_transcode_application(
-        TranscodeConfig(
-            source=source,
-            output=tmp_path / "replay.ts",
-            fps=30,
-            wallclock_start=datetime(2026, 8, 10, tzinfo=timezone.utc),
-        ),
-        api=fake_api(),
-    )
-
-    application.run()
-
-    assert application.avp.commands[-2:] == [
-        "event.on.node.finished transcode_finished replay_output",
-        "event.wait transcode_finished",
-    ]
-    assert application.avp.group_calls == ["start", "shutdown"]
-    assert application.avp.exception_callback_active is False
-
-
-def test_player_graph_is_single_source_cuda_and_janus_video_only(tmp_path):
+def test_player_graph_is_one_seekable_slot_paced_into_a_janus_rtp_leg(tmp_path):
     recording = replay_file(tmp_path)
     config = PlayerConfig(
-        ReplaySlotConfig(recording, loop=True),
-        JanusVideoConfig(host="127.0.0.1", video_port=5004, payload_type=96, ssrc=0x41565001),
+        ReplaySlotConfig(recording, loop=False),
+        JanusVideoConfig("10.0.0.5", 6000, 97, 0x1234),
     )
 
-    application = build_player_application(config, api=fake_api())
-    nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
-    serialized = repr(nodes).lower()
+    nodes, others = nodes_of(player_script(config, validate_recording(recording)))
 
-    assert application.artifact.fps == 25
-    assert application.video_edge == "player_observed"
-    assert application.avp.edges.plans == [("*", 1)]
-    assert nodes["replay_input"]["seek_table"] == ""
-    assert nodes["replay_input"]["ts_offsets"] == ""
-    assert nodes["replay_input"]["timestamp_source"] == "wallclock"
-    assert nodes["replay_input"]["preseek"] == 0
-    assert nodes["replay_input"]["loop"] is True
-    assert nodes["replay_input"]["stop_on_eof"] is False
-    assert nodes["replay_input"]["pause_team"] == "replay_pause"
-    assert "speed_team" not in nodes["replay_input"]
+    assert others == ["queue.plan_capacity * 1"], "the client starts the group itself"
+    source = nodes["replay_input"]
+    assert source["sync_group"] == GROUP and source["loop"] is False
+    assert source["url"] == str(recording)
+    assert "eof_mode" not in source and "stop_delay" not in source
     assert nodes["replay_demux"]["routing"] == {"v:0": "player_video_packets"}
-    assert nodes["replay_demux"]["stop_on_eof"] is False
-    assert nodes["replay_decode"]["pixel_format"] == "cuda"
-    assert nodes["replay_decode"]["hwaccel"] == "replay_gpu"
-    assert nodes["replay_decode"]["flush_magic"] is True
-    assert nodes["replay_decode"]["hold_at_eof"] is True
-    assert nodes["replay_decode"]["options"] == {"flags": "low_delay"}
-    assert nodes["replay_speed"]["team"] == "replay_speed"
-    assert nodes["replay_transition_gate"]["type"] == "pause"
-    assert nodes["replay_transition_gate"]["src"] == "player_speed_raw"
-    assert nodes["replay_transition_gate"]["dst"] == "player_speed"
-    assert nodes["replay_transition_gate"]["team"] == "replay_transition"
-    assert nodes["replay_pause"]["team"] == "replay_pause"
-    assert nodes["replay_realtime"]["team"] == "replay_sync"
-    assert nodes["replay_fps"]["fps"] == "25/1"
-    assert nodes["replay_position"]["dst"] == "player_observed"
-
+    assert nodes["replay_decode"]["options"] == {"threads": "1", "flags": "low_delay"}
+    pacing = nodes["replay_realtime"]
+    assert pacing["type"] == "realtime" and pacing["sync_group"] == GROUP
+    assert pacing["tick_period"] == "1/25"
+    assert nodes["janus_force_keyframe"]["interval_sec"] == "1/1"
+    assert nodes["janus_force_keyframe"]["src"] == "player_realtime"
     encoder = nodes["janus_encoder"]
-    assert encoder["codec"] == "h264_nvenc"
-    assert encoder["hwaccel"] == "replay_gpu"
-    assert encoder["options"] == {
-        "b": "4000k",
-        "maxrate": "4000k",
-        "bufsize": "4000k",
-        "g": 25,
-        "bf": 0,
-        "preset": "p6",
-        "profile": "baseline",
-        "tune": "ull",
-        "rc": "cbr",
-        "rc-lookahead": 0,
-        "zerolatency": 1,
-        "delay": 0,
-        "forced-idr": 1,
-        "no-scenecut": 1,
-        "strict_gop": 1,
-        "aud": 1,
-        "spatial-aq": 1,
-        "temporal-aq": 0,
-    }
-    assert nodes["janus_mux"]["src"] == ["janus_headers"]
-    assert nodes["janus_rtp_output"]["url"] == (
-        "rtp://127.0.0.1:5004?pkt_size=1200&rtcp_port=5005"
-    )
-    assert nodes["janus_rtp_output"]["options"] == {
-        "payload_type": 96,
-        "rtpflags": "skip_rtcp",
-        "ssrc": 0x41565001,
-    }
-    assert application.rtcp_feedback_listener.parameters["janus_rtcp_port"] == 5005
-    assert "audio" not in serialized
-    assert not any(node["type"].startswith("obs_") for node in nodes.values())
-    assert "hwdownload" not in serialized
-    assert "hwupload" not in serialized
-    assert application.avp.commands == [
-        'hwaccel.init { "name": "replay_gpu", "type": "cuda" }'
-    ]
+    assert encoder["codec"] == "libx264" and encoder["options"]["g"] == "25"
+    assert encoder["flush"] == "keep", "a live encoder is never flushed by a seek"
+    assert nodes["janus_headers"]["bsf"] == "dump_extra=freq=keyframe"
+    output = nodes["janus_rtp_output"]
+    assert output["format"] == "rtp"
+    assert output["url"] == "rtp://10.0.0.5:6000?pkt_size=1200&rtcp_port=6001"
+    assert output["options"] == {"payload_type": "97", "rtpflags": "skip_rtcp", "ssrc": "4660"}
+    assert {params["group"] for params in nodes.values()} == {"player"}
+    # One chain, every edge produced once and consumed once.
+    produced = [params["dst"] for params in nodes.values() if "dst" in params]
+    produced += [edge for params in nodes.values() for edge in params.get("routing", {}).values()]
+    consumed = [edge for params in nodes.values() if "src" in params
+                for edge in (params["src"] if isinstance(params["src"], list) else [params["src"]])]
+    assert sorted(produced) == sorted(consumed)
 
 
-def test_janus_config_validates_port_pair_payload_and_ssrc():
-    for kwargs in (
-        {"video_port": 65535},
-        {"payload_type": 128},
-        {"ssrc": -1},
-    ):
-        try:
-            JanusVideoConfig(**kwargs)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"invalid Janus config accepted: {kwargs}")
+class FakeClient:
+    """Answers commands the way avplumber does, and remembers them."""
+
+    def __init__(self, *, frames=(), fail=None):
+        self.commands = []
+        self.connected = False
+        self.closed = False
+        self.frames = list(frames)
+        self.serial = 0
+        self.fail = fail
+
+    def connect(self):
+        self.connected = True
+
+    def command(self, line):
+        self.commands.append(line)
+        if self.fail and line.startswith(self.fail):
+            raise RuntimeError(f"refused: {line}")
+        if line.startswith("playback.status"):
+            if self.frames:
+                self.serial += 1
+                frame = self.frames.pop(0)
+                return json.dumps({"serial": self.serial, "frame": frame,
+                                   "media_ms": 1_260 + frame * 40, "at_end": False})
+            return json.dumps({"serial": self.serial, "frame": None, "media_ms": None})
+        if line.startswith("group.status"):
+            return json.dumps({"state": "running", "outcomes": []})
+        return ""
+
+    def status(self, group):
+        return json.loads(self.command(f"playback.status {group}"))
+
+    def group_status(self, group):
+        return json.loads(self.command(f"group.status {group}"))
+
+    def close(self):
+        self.closed = True
+        self.connected = False
 
 
-def test_player_lifecycle_starts_listener_and_stops_once(tmp_path):
+class FakeListener:
+    def __init__(self, **parameters):
+        self.parameters = parameters
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+
+def build(tmp_path, client, **slot):
+    recording = replay_file(tmp_path)
+    config = PlayerConfig(ReplaySlotConfig(recording, **slot), JanusVideoConfig(video_port=6000))
     application = build_player_application(
-        PlayerConfig(ReplaySlotConfig(replay_file(tmp_path)), JanusVideoConfig()),
-        api=fake_api(),
+        config, connect=("127.0.0.1", 1), listener_factory=FakeListener,
     )
-    application.controller.observe(frame_number=0, media_timestamp_ms=application.artifact.start_ms)
+    application.client = client
+    return application
+
+
+def test_player_start_sends_the_graph_waits_for_a_frame_then_listens(tmp_path):
+    client = FakeClient(frames=[0, 1, 2])
+    application = build(tmp_path, client)
+
     application.start()
-
-    assert application.avp.group_calls == ["start", "start"]
-    assert application.rtcp_feedback_listener.started is True
-    assert application.avp.ready is True
-
-    application.stop()
-    application.stop()
-    assert application.avp.group_calls == [
-        "start", "start",
-        "probe-stop", "probe-detach",
-        "stop-group:output", "stop-group:player", "shutdown",
-    ]
-    assert application.position_probe.attached is False
-    assert application.rtcp_feedback_listener.started is False
-    assert application.avp.exception_callback_active is False
-
-
-def test_player_probe_timeout_does_not_start_native_teardown_and_can_retry(tmp_path):
-    application = build_player_application(
-        PlayerConfig(
-            ReplaySlotConfig(replay_file(tmp_path), control_timeout=0.001),
-            JanusVideoConfig(),
-        ),
-        api=fake_api(),
-    )
-    application.controller.observe(
-        frame_number=0,
-        media_timestamp_ms=application.artifact.start_ms,
-    )
-    application.start()
-
-    def request_stop_without_finishing():
-        application.avp.group_calls.append("probe-stop")
-
-    application.position_probe.request_stop = request_stop_without_finishing
-    with pytest.raises(TimeoutError, match="position probe"):
-        application.stop()
-
-    assert application.avp.group_calls == ["start", "start", "probe-stop"]
-    assert application.position_probe.attached is True
-    assert application._stopped is False
-
-    application.position_probe.isWorking = False
-    application.stop()
-    assert application.avp.group_calls[-1] == "shutdown"
-    assert application.position_probe.attached is False
-    assert application._stopped is True
-
-
-def test_player_stops_all_nodes_before_shutdown(tmp_path):
-    application = build_player_application(
-        PlayerConfig(
-            ReplaySlotConfig(replay_file(tmp_path), control_timeout=0.5),
-            JanusVideoConfig(),
-        ),
-        api=fake_api(),
-    )
-    application.controller.observe(frame_number=0, media_timestamp_ms=application.artifact.start_ms)
-    application.start()
-    application.stop()
-
-    assert application.avp.shutdown_while_working is False
-
-
-def test_player_waits_for_source_metadata_before_starting_output(tmp_path):
-    application = build_player_application(
-        PlayerConfig(
-            ReplaySlotConfig(replay_file(tmp_path), control_timeout=0.5),
-            JanusVideoConfig(),
-        ),
-        api=fake_api(),
-    )
-    timer = None
-
-    def on_group_start(name):
-        nonlocal timer
-        if name == "player":
-            timer = threading.Timer(
-                0.02,
-                lambda: application.controller.observe(
-                    frame_number=0,
-                    media_timestamp_ms=application.artifact.start_ms,
-                ),
-            )
-            timer.start()
-        elif name == "output":
-            assert application.controller.status().ready
-
-    application.avp.on_group_start = on_group_start
     try:
-        application.start()
+        node_adds = [c for c in client.commands if c.startswith("node.add ")]
+        assert len(node_adds) == 9
+        assert client.commands.index("group.start player") > client.commands.index(node_adds[-1])
+        assert application.controller.status().ready is True
+        assert application.controller.status().frame_number == 0
+        assert application.rtcp_feedback_listener.started is True
+        listener = application.rtcp_feedback_listener.parameters
+        assert listener["janus_rtcp_port"] == 6001 and listener["media_ssrc"] == 0x41565001
+
+        # Seeks are followed by a keyframe request for Janus; other commands not.
+        application.controller.execute("seek_frames", 5)
+        assert client.commands[-2:] == ["seek replay frame +5", JANUS_FORCE_KEYFRAME_COMMAND]
+        application.controller.execute("pause")
+        assert client.commands[-1] == "pause replay now"
     finally:
-        if timer:
-            timer.join()
         application.stop()
+
+    assert application.rtcp_feedback_listener.started is False
+    assert "group.stop player" in client.commands
+    assert client.closed is True
+    application.stop()  # idempotent
+
+
+def test_player_start_failure_stops_everything(tmp_path):
+    client = FakeClient(fail="group.start")
+    application = build(tmp_path, client)
+    with pytest.raises(RuntimeError, match="refused: group.start"):
+        application.start()
+    assert application.rtcp_feedback_listener.started is False
+    assert client.closed is True
+
+
+def test_player_start_times_out_without_a_first_frame(tmp_path):
+    client = FakeClient(frames=[])
+    application = build(tmp_path, client, control_timeout=0.2)
+    with pytest.raises(TimeoutError, match="first source frame"):
+        application.start()
+    assert client.closed is True
+
+
+def test_player_needs_a_binary_or_an_endpoint(tmp_path, monkeypatch):
+    monkeypatch.delenv("AVPLUMBER_BIN", raising=False)
+    recording = replay_file(tmp_path)
+    config = PlayerConfig(ReplaySlotConfig(recording), JanusVideoConfig())
+    with pytest.raises(FileNotFoundError, match="AVPLUMBER_BIN"):
+        build_player_application(config, listener_factory=FakeListener)

@@ -1,0 +1,72 @@
+# The replay demo on the Rust core: Janus and its browser preview from the
+# shared images, plus the player image (Rust avplumber + Python TUI).
+#
+#   docker compose -f demos/replay-rust/compose.yaml up -d janus janus-preview
+#   docker compose -f demos/replay-rust/compose.yaml run --rm replay sample
+#   docker compose -f demos/replay-rust/compose.yaml run --rm replay
+#
+# `demos/replay-rust/run.sh` wraps these. Everything shares the host network:
+# Janus needs its RTP and ICE ports, and the player sends RTP to 127.0.0.1.
+# The images build on the host network too, so package downloads work on
+# hosts whose firewall does not forward the Docker bridge.
+name: ${COMPOSE_PROJECT_NAME:-avplumber-replay-rust}
+
+services:
+  janus:
+    build:
+      context: ../../docker-compose/images/janus
+      dockerfile: Dockerfile
+      network: host
+      args:
+        JANUS_REF: ${JANUS_REF:-v1.4.1}
+    image: avplumber-demo-janus:${JANUS_IMAGE_TAG:-v1.4.1}
+    network_mode: host
+    restart: unless-stopped
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      JANUS_HOST_IP: ${JANUS_HOST_IP:-127.0.0.1}
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_AUDIO_ENABLED: "false"
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      JANUS_VIDEO_RTCP_PORT: ${JANUS_VIDEO_RTCP_PORT:-5005}
+      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-20000-20100}
+      JANUS_DEBUG_LEVEL: ${JANUS_DEBUG_LEVEL:-4}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  janus-preview:
+    build:
+      context: ../../docker-compose/images/preview
+      dockerfile: Dockerfile
+      network: host
+    image: avplumber-demo-janus-preview:${JANUS_PREVIEW_IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - janus
+    environment:
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+
+  # Not started by `up`: it is run per session (`docker compose run --rm replay ...`).
+  replay:
+    build:
+      context: ../..
+      dockerfile: demos/replay-rust/Dockerfile
+      network: host
+    image: avplumber-replay-rust:${REPLAY_IMAGE_TAG:-latest}
+    profiles:
+      - player
+    network_mode: host
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${REPLAY_MEDIA:-./media}:/media:z
+    environment:
+      JANUS_HOST: 127.0.0.1
+      JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
+      JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}

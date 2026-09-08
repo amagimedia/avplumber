@@ -17,10 +17,6 @@ from replay import (HISTORY_STRUCT, HISTORY_SUFFIX, SEEK_TABLE_SUFFIX,
                     validate_recording)
 
 
-SEEK_TABLE_SUFFIXES = (SEEK_TABLE_SUFFIX, TEXT_SEEK_TABLE_SUFFIX)
-SEEK_TABLE_BACKING_FILES = 4
-
-
 def parse_wallclock_start(value: str, *, now=lambda: datetime.now(timezone.utc)) -> datetime:
     if value == "now":
         return now().astimezone(timezone.utc)
@@ -31,18 +27,13 @@ def parse_wallclock_start(value: str, *, now=lambda: datetime.now(timezone.utc))
 
 
 def output_family(output: Path) -> tuple[Path, ...]:
-    canonical = [
+    """The four files a recording is: the stream, both seek tables, the history."""
+    return (
         output,
         Path(f"{output}{SEEK_TABLE_SUFFIX}"),
         Path(f"{output}{TEXT_SEEK_TABLE_SUFFIX}"),
         Path(f"{output}{HISTORY_SUFFIX}"),
-    ]
-    backing = [
-        Path(f"{output}{suffix}.{index}")
-        for suffix in SEEK_TABLE_SUFFIXES
-        for index in range(SEEK_TABLE_BACKING_FILES)
-    ]
-    return tuple(canonical + backing)
+    )
 
 
 def output_collisions(output: Path) -> tuple[Path, ...]:
@@ -59,13 +50,15 @@ def write_history(
     path.write_bytes(HISTORY_STRUCT.pack(0, 0, first_timestamp_ms - wallclock_ms, 0))
 
 
-def parse_args(argv: list[str] | None = None) -> TranscodeConfig:
+def parse_args(argv: list[str] | None = None) -> tuple[TranscodeConfig, str | None]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, metavar="PATH")
     parser.add_argument("--output", required=True, type=Path, metavar="PATH")
     parser.add_argument("--fps", required=True, type=int)
     parser.add_argument("--wallclock-start", default="now", metavar="ISO8601|now")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--avplumber", metavar="PATH",
+                        help="the Rust avplumber executable (default: $AVPLUMBER_BIN)")
     args = parser.parse_args(argv)
     try:
         wallclock_start = parse_wallclock_start(args.wallclock_start)
@@ -75,7 +68,7 @@ def parse_args(argv: list[str] | None = None) -> TranscodeConfig:
             args.fps,
             wallclock_start,
             args.force,
-        )
+        ), args.avplumber
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -92,29 +85,14 @@ def _validate_text_seek(path: Path, expected_count: int) -> None:
 
 
 def _publish(staged: Path, output: Path) -> None:
-    stage_dir = staged.parent
-    materialized = {}
-    for suffix in SEEK_TABLE_SUFFIXES:
-        source = Path(f"{staged}{suffix}")
-        regular = stage_dir / f"publish{suffix}"
-        shutil.copyfile(source.resolve(strict=True), regular)
-        materialized[suffix] = regular
-
-    for suffix in SEEK_TABLE_SUFFIXES:
-        for index in range(SEEK_TABLE_BACKING_FILES):
-            source = Path(f"{staged}{suffix}.{index}")
-            if source.exists():
-                os.replace(source, Path(f"{output}{suffix}.{index}"))
-    os.replace(materialized[SEEK_TABLE_SUFFIX], Path(f"{output}{SEEK_TABLE_SUFFIX}"))
-    os.replace(
-        materialized[TEXT_SEEK_TABLE_SUFFIX],
-        Path(f"{output}{TEXT_SEEK_TABLE_SUFFIX}"),
-    )
-    os.replace(Path(f"{staged}{HISTORY_SUFFIX}"), Path(f"{output}{HISTORY_SUFFIX}"))
+    """Moves the family into place, the stream last, so an incomplete
+    conversion never looks ready to the player."""
+    for suffix in (SEEK_TABLE_SUFFIX, TEXT_SEEK_TABLE_SUFFIX, HISTORY_SUFFIX):
+        os.replace(Path(f"{staged}{suffix}"), Path(f"{output}{suffix}"))
     os.replace(staged, output)
 
 
-def run(config: TranscodeConfig) -> None:
+def run(config: TranscodeConfig, binary: str | None = None) -> None:
     if not config.output.parent.is_dir():
         raise FileNotFoundError(f"output directory does not exist: {config.output.parent}")
     collisions = output_collisions(config.output)
@@ -126,14 +104,7 @@ def run(config: TranscodeConfig) -> None:
     staged = stage_dir / config.output.name
     staged_config = replace(config, output=staged)
     try:
-        application = build_transcode_application(staged_config)
-        errors = []
-        application.avp.on_exception = (
-            lambda name, node_type, message: errors.append(f"{name} ({node_type}): {message}")
-        )
-        application.run()
-        if errors:
-            raise RuntimeError(errors[-1])
+        build_transcode_application(staged_config, binary).run()
 
         seek_entries = read_seek_table(Path(f"{staged}{SEEK_TABLE_SUFFIX}"))
         write_history(
@@ -153,8 +124,8 @@ def run(config: TranscodeConfig) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        config = parse_args(argv)
-        run(config)
+        config, binary = parse_args(argv)
+        run(config, binary)
     except Exception as exc:
         print(f"transcode failed: {exc}")
         return 1

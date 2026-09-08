@@ -25,7 +25,7 @@ def test_utc_parser_requires_timezone_and_normalizes_offset():
 
 
 def test_player_cli_is_one_recording_one_janus_output(tmp_path):
-    config, no_tui, exercise = parse_args([
+    config, no_tui, exercise, backend = parse_args([
         "--recording", str(tmp_path / "clip.ts"),
         "--janus-host", "127.0.0.1",
         "--janus-video-port", "6000",
@@ -40,6 +40,16 @@ def test_player_cli_is_one_recording_one_janus_output(tmp_path):
     assert config.janus.ssrc == 0x1234
     assert no_tui is True
     assert exercise is True
+    assert backend.binary is None and backend.connect is None
+
+
+def test_player_cli_names_the_backend(tmp_path):
+    args = ["--recording", str(tmp_path / "clip.ts")]
+    assert parse_args(args + ["--avplumber", "/opt/avp"])[3].binary == "/opt/avp"
+    connected = parse_args(args + ["--connect", "10.0.0.2:20300", "--avplumber-log", "avp.log"])[3]
+    assert connected.connect == ("10.0.0.2", 20300)
+    assert str(connected.log) == "avp.log"
+    assert parse_args(args + ["--connect", ":20300"])[3].connect == ("127.0.0.1", 20300)
 
 
 def test_shutdown_is_bounded():

@@ -47,8 +47,8 @@ pub mod siso;
 
 pub use blocking::{Blocking, BlockingNode};
 pub use edge_slot::EdgeSlot;
-pub use io::{BlockingIo, Io};
-pub use park::{PARK_TIMEOUT_MS, Park, Pushed, push_blocking};
+pub use io::{BlockingIo, Io, flush_at_head};
+pub use park::{PARK_TIMEOUT_MS, Park, Parked, Pushed, push_blocking};
 pub use poll::{PollNode, Polling};
 pub use single_input::{InputHandler, Reaction, SingleInput, react};
 pub use siso::{SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter};

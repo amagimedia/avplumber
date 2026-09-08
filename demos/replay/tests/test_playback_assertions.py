@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_playback_integration import _assert_stable
+from test_rust_integration import _assert_stable
 
 
 @pytest.mark.parametrize("observations,valid", [
@@ -26,7 +26,7 @@ def test_paused_picture_oracle(monkeypatch, observations, valid):
         observation_marker=lambda: len(frames),
         observed_frames_since=lambda marker: frames[marker:],
     )
-    monkeypatch.setattr("test_playback_integration.time.sleep", advance)
+    monkeypatch.setattr("test_rust_integration.time.sleep", advance)
     if valid:
         _assert_stable(control)
     else:

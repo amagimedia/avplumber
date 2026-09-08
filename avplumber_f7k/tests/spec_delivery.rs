@@ -183,7 +183,7 @@ impl Node for PeekPopConsumer {
         };
         self.seen.lock().unwrap().push(match item {
             EdgeItem::Buffer(_) => "buffer",
-            EdgeItem::Event(EdgeEvent::FlushStop) => "flush-stop",
+            EdgeItem::Event(EdgeEvent::FlushStop { .. }) => "flush-stop",
             EdgeItem::Event(_) => "event",
         });
         input.pop();
@@ -203,7 +203,7 @@ fn direct_peek_then_pop_keeps_the_inflight_buffer_behind_a_queued_event() {
     direct.set_consumer(consumer.clone());
 
     // The ordinary first offer after an event: event queued, buffer inflight.
-    logical.push_event(EdgeEvent::FlushStop);
+    logical.push_event(EdgeEvent::FlushStop { resume_at: None });
     assert_eq!(logical.push(stub(7)), Push::Accepted);
 
     assert_eq!(

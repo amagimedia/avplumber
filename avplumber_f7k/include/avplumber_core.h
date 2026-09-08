@@ -99,7 +99,11 @@ typedef struct {
 
 typedef struct {
     AvpEventType type;
-    AvpSpec      spec;       /* SPEC */
+    AvpSpec      spec;         /* SPEC */
+    int64_t      resume_at;    /* FLUSH_STOP: media time the source aimed for when it
+                                  could only land on a keyframe before it; decoders drop
+                                  frames below it. AVP_NOPTS when the reposition was exact. */
+    AvpRational  resume_at_tb;
 } AvpEdgeEvent;
 
 /* A dequeued item is either a buffer or an event (single ordered stream). */

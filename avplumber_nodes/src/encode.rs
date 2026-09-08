@@ -59,10 +59,35 @@ pub struct EncoderParams {
     /// encoder's own. A hack for the 1:1 `pcm_*` "encoders", see [`Encoder`].
     #[serde(default)]
     timestamps_passthrough: bool,
+    /// What a `FlushStart` (a seek or another discontinuity upstream) does to
+    /// the codec, see [`FlushMode`].
+    #[serde(default)]
+    flush: FlushMode,
     /// Build-time only: rejected outright, see the module docs. Always `None` on a
     /// node that was built successfully.
     #[serde(default)]
     hwaccel: Option<Value>,
+}
+
+/// How the codec takes an in-band discontinuity. An `Eof` is different: it
+/// always drains the codec, that is how a recording gets its last packets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FlushMode {
+    /// The codec is left alone; only what this node holds itself is dropped
+    /// and the backwards-PTS reference forgotten. What the codec buffers
+    /// internally is a few frames of delay at most, harmless in a live
+    /// output whose timestamps stay monotonic across the seek (the `realtime`
+    /// node's), and `avcodec_flush_buffers` is not a safe way to get rid of
+    /// them: libx264 implements it by draining, which stops its lookahead
+    /// thread for good, so every frame after the first seek failed with
+    /// "Generic error in an external library".
+    #[default]
+    Keep,
+    /// The codec is closed and reopened: nothing from before the discontinuity
+    /// comes out after it, and the next packet is a fresh keyframe. For a
+    /// recorder that wants a clean cut; costs a codec open per seek.
+    Reopen,
 }
 
 impl EncoderParams {
@@ -130,6 +155,12 @@ struct State {
     /// `Eof` seen: drain the codec, forward it, finish.
     eof: bool,
     dropped_early: u64,
+    /// A reopen at a `FlushStart` produced different codec parameters: publish
+    /// them before the next packet.
+    pending_spec: Option<Spec>,
+    /// A reopen at a `FlushStart` failed. `on_flush` cannot fail itself, so the
+    /// next step reports it.
+    pending_error: Option<String>,
 }
 
 impl State {
@@ -145,6 +176,8 @@ impl State {
             passthrough_warned: false,
             eof: false,
             dropped_early: 0,
+            pending_spec: None,
+            pending_error: None,
         }
     }
 }
@@ -216,14 +249,47 @@ impl InputHandler for Encoder {
         Ok(None)
     }
 
+    /// A discontinuity drops what this node holds — the frame loaded into the
+    /// pump and packets not yet pushed — and forgets the backwards-PTS
+    /// reference. What happens to the codec is the `flush` parameter's call,
+    /// see [`FlushMode`].
     fn on_flush(&self) {
         let state = &mut *self.state.lock().unwrap();
-        if let Some(ctx) = state.ctx.as_mut() {
-            ctx.flush_buffers();
-        }
         state.pump.reset();
         state.prev_pts = Ts::invalid();
         state.input_pts.clear();
+        if self.params.flush == FlushMode::Reopen
+            && let Some(spec) = state.input_spec.clone()
+            && state.ctx.is_some()
+        {
+            match self.open(&spec) {
+                Ok(ctx) => {
+                    let packet_spec = Spec::Packet(codec::packet_spec_of(&ctx));
+                    let unchanged = state
+                        .ctx
+                        .as_ref()
+                        .map(|old| {
+                            codec::same_spec(
+                                &Spec::Packet(codec::packet_spec_of(old)),
+                                &packet_spec,
+                            )
+                        })
+                        .unwrap_or(false);
+                    if !unchanged {
+                        state.pending_spec = Some(packet_spec);
+                    }
+                    state.time_base = ctx.time_base.into();
+                    state.ctx = Some(ctx);
+                    log::debug!("{}: reopened the encoder at a discontinuity", self.io.name);
+                }
+                Err(message) => {
+                    state.ctx = None;
+                    state.pending_error = Some(format!(
+                        "reopening the encoder at a discontinuity failed: {message}"
+                    ));
+                }
+            }
+        }
     }
 
     /// The codec keeps producing after its last input, so this only starts the
@@ -255,19 +321,26 @@ impl SingleInput for Encoder {
     fn start(&self) {
         let state = &mut *self.state.lock().unwrap();
         state.pump.reset();
-        if let Some(ctx) = state.ctx.as_mut() {
-            ctx.flush_buffers();
+        if state.eof {
+            // The codec was drained: libavcodec only takes new input after
+            // `avcodec_flush_buffers`, which encoders do not reliably support
+            // (see `on_flush`). Forgetting both makes the spec the edge re-arms
+            // on restart open a fresh one.
+            state.ctx = None;
+            state.input_spec = None;
         }
         state.prev_pts = Ts::invalid();
         state.input_pts.clear();
         state.passthrough_warned = false;
         state.eof = false;
         state.dropped_early = 0;
-        // `input_spec` deliberately survives: the codec is still open for it, and
-        // the edge re-arms its latched spec on a restart, so the re-delivery is
-        // recognised as "unchanged" instead of reopening. The output spec is
-        // latched on the output edge for the same reason, so the muxer keeps the
-        // codec parameters of the encoder that is still running.
+        state.pending_spec = None;
+        state.pending_error = None;
+        // Otherwise `input_spec` deliberately survives: the codec is still open
+        // for it, and the edge re-arms its latched spec on a restart, so the
+        // re-delivery is recognised as "unchanged" instead of reopening. The
+        // output spec is latched on the output edge for the same reason, so the
+        // muxer keeps the codec parameters of the encoder that is still running.
     }
 
     /// Encoded packets go downstream before anything new is taken in, and a
@@ -275,6 +348,12 @@ impl SingleInput for Encoder {
     fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         let out = self.io.output()?;
+        if let Some(message) = state.pending_error.take() {
+            return Err(self.io.error(NodePhase::Process, message));
+        }
+        if let Some(spec) = state.pending_spec.take() {
+            out.push_event(EdgeEvent::Spec(spec));
+        }
         if let Some(buffer) = state.pump.take_output() {
             return self.emit(state, &out, buffer).map(Some);
         }

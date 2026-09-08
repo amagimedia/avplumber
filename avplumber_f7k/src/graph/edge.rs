@@ -8,14 +8,24 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll as TaskPoll, Waker};
 use std::time::Duration;
 
-use crate::graph::media::Media;
+use crate::graph::media::{Media, Ts};
 use crate::graph::spec::{Spec, StreamSelection};
 
 #[derive(Clone, Debug)]
 pub enum EdgeEvent {
     Eof,
+    /// Preempts: the edge drops its queued buffers when this is pushed, and
+    /// every node discards what it holds when it arrives.
     FlushStart,
-    FlushStop,
+    /// The discontinuity is over; the buffers that follow are at the new
+    /// position. `resume_at` is the position the source aimed for when it
+    /// could only reposition to a keyframe before it: a decoder drops the
+    /// frames below it, so a plain time seek is still frame exact. `None` when
+    /// the reposition itself was exact (an indexed byte seek) or when there is
+    /// no position to speak of (a restart).
+    FlushStop {
+        resume_at: Option<Ts>,
+    },
     Spec(Spec),
 }
 

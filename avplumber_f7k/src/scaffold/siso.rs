@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::graph::edge::{Edge, Push};
 use crate::graph::error::{NodeError, NodePhase};
-use crate::graph::media::Media;
+use crate::graph::media::{Media, Ts};
 use crate::graph::node::{Node, NodeFuture, NodeKind, Tick};
 use crate::graph::poll_ctx::NodePollContext;
 use crate::graph::spec::Spec;
@@ -64,6 +64,8 @@ pub trait SisoNode: Send + Sync + 'static {
     fn on_spec(&self, spec: &Spec) -> Result<(Self::Inner, Spec), String>;
     fn process(&self, inner: &mut Self::Inner, buf: Media) -> Result<Option<Media>, String>;
     fn on_flush(&self, _inner: &mut Self::Inner) {}
+    /// See [`InputHandler::on_flush_stop`].
+    fn on_flush_stop(&self, _inner: &mut Self::Inner, _resume_at: Option<Ts>) {}
 }
 
 /// The [`InputHandler`] every adapter drives: the `Inner` and the
@@ -111,6 +113,12 @@ impl<F: SisoNode> InputHandler for SisoCore<F> {
             self.f.on_flush(inner);
         }
     }
+
+    fn on_flush_stop(&self, resume_at: Option<Ts>) {
+        if let Some(inner) = self.inner.lock().unwrap().as_mut() {
+            self.f.on_flush_stop(inner, resume_at);
+        }
+    }
 }
 
 /// The blocking body: a [`SingleInput`] over [`SisoCore`], so the loop is the
@@ -143,6 +151,10 @@ impl<F: SisoNode> InputHandler for SisoBlocking<F> {
 
     fn on_flush(&self) {
         self.core.on_flush()
+    }
+
+    fn on_flush_stop(&self, resume_at: Option<Ts>) {
+        self.core.on_flush_stop(resume_at)
     }
 }
 

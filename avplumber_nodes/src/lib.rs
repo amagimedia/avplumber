@@ -30,17 +30,23 @@ compile_error!(
 use avplumber_f7k::Instance;
 
 #[cfg(feature = "ffmpeg")]
+pub mod bsf;
+#[cfg(feature = "ffmpeg")]
 pub mod decode;
 #[cfg(feature = "ffmpeg")]
 pub mod demux;
 #[cfg(feature = "ffmpeg")]
 pub mod encode;
+pub mod force_fps;
+#[cfg(feature = "ffmpeg")]
+pub mod force_keyframe;
 #[cfg(feature = "ffmpeg")]
 pub mod input;
 pub mod mux;
 pub mod null_sink;
 #[cfg(feature = "ffmpeg")]
 pub mod output;
+pub mod realtime;
 
 /// Registers every media node type. Separate from `Instance::new` so an
 /// embedder that only wants the substrate does not pay for libav.
@@ -49,8 +55,13 @@ pub fn register_media_nodes(inst: &Instance) {
     // `mux` only orders timestamps and describes the container, so it needs no
     // libav and stays available in the default build.
     avplumber_f7k::register_spec::<mux::MuxSpec>(inst);
+    // `force_fps` only restamps and clones media, so it needs no libav either.
+    avplumber_f7k::register_spec::<force_fps::ForceFpsSpec>(inst);
+    // Likewise `realtime`: it paces by a clock and restamps, nothing more.
+    avplumber_f7k::register_spec::<realtime::RealtimeSpec>(inst);
     #[cfg(feature = "ffmpeg")]
     {
+        avplumber_f7k::register_spec::<force_keyframe::ForceKeyframeSpec>(inst);
         avplumber_f7k::register_spec::<input::InputSpec>(inst);
         avplumber_f7k::register_spec::<demux::DemuxSpec>(inst);
         avplumber_f7k::register_spec::<decode::VideoDecoderSpec>(inst);
@@ -58,5 +69,6 @@ pub fn register_media_nodes(inst: &Instance) {
         avplumber_f7k::register_spec::<encode::VideoEncoderSpec>(inst);
         avplumber_f7k::register_spec::<encode::AudioEncoderSpec>(inst);
         avplumber_f7k::register_spec::<output::OutputSpec>(inst);
+        avplumber_f7k::register_spec::<bsf::BsfSpec>(inst);
     }
 }

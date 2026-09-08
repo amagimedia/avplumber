@@ -191,6 +191,32 @@ impl Media {
             },
         }
     }
+
+    /// Restamps the buffer, time base included, for the nodes that own the
+    /// timeline (a frame-rate conformer, the pacing stage). A packet keeps its
+    /// DTS at the same distance from its PTS; an opaque frame cannot be
+    /// restamped and is left alone.
+    pub fn set_ts(&mut self, ts: Ts) {
+        match self {
+            #[cfg(feature = "ffmpeg")]
+            Media::Packet(p) => {
+                let dts = if p.dts != AVP_NOPTS && p.pts != AVP_NOPTS {
+                    Ts {
+                        val: ts.val - (p.pts - p.dts),
+                        tb: ts.tb,
+                    }
+                } else {
+                    Ts::invalid()
+                };
+                p.set_ts_dts(ts, dts);
+            }
+            #[cfg(feature = "ffmpeg")]
+            Media::Video(f) | Media::Audio(f) => f.set_ts(ts),
+            Media::Opaque(_) => {}
+            #[cfg(not(feature = "ffmpeg"))]
+            Media::Stub { pts, .. } => *pts = ts.rescale(AvpRational { num: 1, den: 1000 }).val,
+        }
+    }
 }
 
 /// A buffer carrying nothing but a timestamp, for unit tests.

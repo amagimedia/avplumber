@@ -56,15 +56,20 @@ avplumber_f7k/
 │   │   ├── topo.rs             group-local topological ordering
 │   │   └── mod.rs              membership, placement, start/stop ownership
 │   ├── factory/mod.rs          JSON envelope, BuildCtx, factory erasure
-│   ├── nodes/
-│   │   ├── input.rs            container open + demux into one packet stream
+│   ├── nodes/                  (the avplumber_nodes crate)
+│   │   ├── input.rs            container open + packets; seekable with `sync_group`
 │   │   ├── demux.rs            catalog → per-stream edges (Poll)
-│   │   ├── decode.rs           dec_video / dec_audio
+│   │   ├── decode.rs           dec_video / dec_audio, with the in-band seek cutoff
 │   │   ├── encode.rs           enc_video / enc_audio
+│   │   ├── bsf.rs              a bitstream filter chain over packets
+│   │   ├── force_fps.rs        frame-rate conformer (Poll, libav-free)
+│   │   ├── force_keyframe.rs   periodic + triggered keyframes (Poll)
+│   │   ├── realtime.rs         the pacing stage over the playback clock (Poll, libav-free)
 │   │   ├── mux.rs              least-DTS interleave of N packet inputs (Poll)
-│   │   ├── output.rs           container create/write/finalize
+│   │   ├── output.rs           container create/write/finalize, seek table
 │   │   ├── null_sink.rs        counting sink, for tests
-│   │   └── mod.rs              register_media_nodes, nothing else
+│   │   ├── bin/avplumber.rs    the executable: scripts + the TCP control protocol
+│   │   └── lib.rs              register_media_nodes, nothing else
 │   ├── libav/
 │   │   ├── codec.rs            codec lookup, Spec ⇄ AVCodecContext/codecpar
 │   │   ├── dict.rs             JSON ⇄ AVDictionary, leftover-option logging
@@ -74,9 +79,12 @@ avplumber_f7k/
 │   ├── services/
 │   │   ├── clock.rs            source-time to monotonic-time snapshots
 │   │   ├── correction.rs       shared reference plus per-member cursors
+│   │   ├── playback.rs         seek index, targets, read planning, position (§ playback)
 │   │   ├── timeline.rs         named PTS-indexed JSON histories
 │   │   └── mod.rs              typed and C-vtable registries
-│   ├── control/mod.rs          script parser and graph-construction commands
+│   ├── control/
+│   │   ├── mod.rs              script parser: graph, group, object and playback commands
+│   │   └── tcp.rs              the C++ wire format over TCP, one thread per connection
 │   ├── scaffold/
 │   │   ├── siso.rs             SisoNode + blocking/poll/async one-in/one-out adapters
 │   │   ├── park.rs             a blocking body's wait-for-room condvar + push_blocking
@@ -98,7 +106,13 @@ avplumber_f7k/
 │   ├── smoke_2node.rs          legacy substrate smoke coverage
 │   ├── demux_packets.rs        input → demux → null_sink against ffprobe
 │   ├── transcode_file.rs       the full transcode, driven through control lines
-│   └── common/mod.rs           ffmpeg/ffprobe fixtures and ground truth
+│   ├── replay_recording.rs     the replay transcode graph: all-intra, seek tables
+│   ├── playback.rs             seek/play/speed/reverse/tail, frames identified by pixels
+│   ├── playback_scenarios.rs   the demo's old scenario sweeps (fps, speeds, edges, EOF)
+│   ├── encode_after_seek.rs    the live encoder survives seeks and reversal
+│   ├── rtp_output.rs           the Janus leg into a UDP socket
+│   ├── common/mod.rs           ffmpeg/ffprobe fixtures and ground truth
+│   └── common/player.rs        the player graph + capture sink the playback tests drive
 └── parked/                     deliberately excluded nodes/shims/seek work
 ```
 
@@ -452,8 +466,13 @@ a consumer that has not promised that path cannot fail. Put a Buffered edge in
 front of a fallible consumer.
 
 Control events (Spec, Flush, Eof) never take a buffer slot, so EOF/flush
-cannot stall behind a full media queue. Direct keeps them on a side queue;
-Buffered uses `EdgeQueue` for both events and media. `FlushStart` discards
+cannot stall behind a full media queue, and a source can push `FlushStart`
+into a full edge, which is what makes room. `FlushStop` carries an optional
+`resume_at`: the position the source aimed for when it could only reposition
+to a keyframe before it, so a decoder drops the frames below it and a plain
+time seek is still frame exact (`InputHandler::on_flush_stop`). Direct keeps
+events on a side queue; Buffered uses `EdgeQueue` for both events and media.
+`FlushStart` discards
 queued buffers, keeps events, then appends itself. EOF closes later buffer
 `offer`s but remains an item for the consumer.
 
@@ -606,8 +625,20 @@ edge both nodes already hold — not a revived graph walk.
 ### Placement and bodies
 
 `input`, `dec_*`, `enc_*` and `output` are Blocking: they call libav, which can
-block. `demux` and `mux` are Poll, because each services several edges, so a
-graph containing them needs `--features async` for the `AsyncExecutor`.
+block. `demux` and `mux` are Poll, because each services several edges, and so
+are `force_fps`, `force_keyframe` and `realtime`, which only move buffers; a
+graph containing any of them needs `--features async` for the `AsyncExecutor`.
+
+A node that holds a buffer it cannot deliver yet — its output is full, or the
+buffer's time has not come — must not wait on its input as *readable*: the
+input may well be non-empty, and the executor would find the node ready at
+once and let it spin. It waits on `NodePollContext::wait_flush` instead, which
+fires when a `FlushStart` reaches the head of that input, because a flush makes
+the held buffer stale and is the one thing behind it that cannot wait. A
+blocking node gets the same rule from `BlockingIo::push_from`, which abandons
+the push when a flush shows up at the head of the input it produced from. Both
+exist so a flush can pass through a pipeline that is backed up behind a paused
+output, which is exactly what a seek while paused looks like.
 
 Nodes implement the crate-private `BlockingStep` / `PollStep`
 (`scaffold/body.rs`) and hand the executor a fallible body through
@@ -685,15 +716,31 @@ required for the state to mean anything. `input` holds a non-optional
 `Decoder` always has a `State` whose `ctx` is the `Option`, because the codec
 cannot open before the spec arrives.
 
+### Playback
+
+Seek, rate and pause are one service per `sync_group` name
+(`services/playback.rs`; design in `doc/specs/rust-refactor/rust_refactor_playback.md`).
+`input` with a `sync_group` binds to it as a seekable source and asks it before
+every read what to do; `realtime` paces by its clock, stamps release time on
+what it lets through, and reports each release back. A seek is one in-band
+`FlushStart` / `FlushStop { resume_at }` pair issued by the source; the decoder
+drops frames below `resume_at`, which is the in-band form of C++ `discardUntil`.
+The `seek`, `pause`, `resume`, `speed.set` and `playback.status` commands
+address the group by name. `output` writes the seek table an indexed seek needs.
+Downstream of `realtime` the timeline is monotonic across a seek, so a live
+encoder needs no flush at the discontinuity: `enc_video`'s `flush` parameter
+defaults to `keep` (the codec is left alone; `avcodec_flush_buffers` on libx264
+stops it for good), with `reopen` for a recorder that wants a clean cut. An
+`Eof` still drains the codec.
+
 ### Deferrals
 
-`hwaccel` and `seek_table` are declared and **rejected** with "not implemented
-in the Rust core yet", so a script asking for them fails at `node.add` instead of
-quietly transcoding on the CPU or losing a seek table. The seek-only decoder
-params (`flush_magic`, `waiting_for_frame`) are not declared at all and are
-ignored like any other unknown key — they mean nothing without the `discardUntil`
-machinery. Sentinel, realtime pacing, filters/rescale/resample and the C++ shim
-are not in this layer yet at all.
+`hwaccel` is declared and **rejected** with "not implemented in the Rust core
+yet", so a script asking for it fails at `node.add` instead of quietly
+transcoding on the CPU. The seek-only C++ decoder params (`flush_magic`,
+`waiting_for_frame`) are not declared and are ignored like any other unknown
+key: their job is done by `resume_at`. Sentinel, filters/rescale/resample and
+the C++ shim are not in this layer.
 
 ## Shared services
 

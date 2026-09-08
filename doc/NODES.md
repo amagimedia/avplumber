@@ -460,6 +460,15 @@ Encodes video or audio frames.
     that don't buffer data (otherwise bad things like repeated
     timestamps may happen), replace PTS & DTS in outgoing packet with
     incoming PTS
+-   `flush` (string, Rust core) - what an in-band discontinuity (a seek
+    upstream, `FlushStart`) does to the codec. `keep` (default) leaves it
+    alone and only drops what the node itself holds: right for a live
+    output whose timestamps stay monotonic across the seek, such as the
+    replay player's, and the only mode that works with libx264, whose
+    libavcodec flush stops it for good. `reopen` closes and reopens the
+    codec so nothing from before the discontinuity comes out after it and
+    the next packet is a keyframe: for a recorder that wants a clean cut.
+    An `Eof` always drains the codec, whatever this says.
 
 ### `packet_relay`
 

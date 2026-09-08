@@ -696,7 +696,7 @@ fn output_continues_across_failed_retries_recovery_and_manual_restart() {
     let input_group = inst.group("input").unwrap();
     wait_for_output(&state, 5);
     let before_delay = state.output_pts.lock().unwrap().len();
-    delay_trigger.push_event(EdgeEvent::FlushStop);
+    delay_trigger.push_event(EdgeEvent::FlushStop { resume_at: None });
     wait_for(Duration::from_secs(1), "delayed poll to enter", || {
         state.delay_entered.load(Ordering::Acquire)
     });

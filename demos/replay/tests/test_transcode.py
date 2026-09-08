@@ -34,12 +34,21 @@ def test_cli_requires_explicit_fps(tmp_path):
         parse_args(["--input", str(source), "--output", str(tmp_path / "out.ts")])
 
 
-def test_output_collisions_include_canonical_and_rotated_files(tmp_path):
+def test_output_collisions_cover_the_whole_family(tmp_path):
     output = tmp_path / "out.ts"
-    paths = (tmp_path / "out.ts+history", tmp_path / "out.ts+seek.2")
+    paths = (tmp_path / "out.ts+history", tmp_path / "out.ts+txt")
     for path in paths:
         path.write_bytes(b"old")
+    (tmp_path / "out.ts+seek.2").write_bytes(b"not part of the family any more")
     assert output_collisions(output) == paths
+
+
+def test_cli_takes_the_binary_from_an_option_or_the_environment(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"vod")
+    args = ["--input", str(source), "--output", str(tmp_path / "out.ts"), "--fps", "25"]
+    assert parse_args(args)[1] is None
+    assert parse_args(args + ["--avplumber", "/opt/avp"])[1] == "/opt/avp"
 
 
 def test_history_record_maps_first_packet_to_selected_wallclock(tmp_path):
