@@ -55,6 +55,9 @@ PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp'
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
+# Optional module: decoded clips held in GPU memory (media wipe playback).
+NODES_SRC += $(SRCDIR)/nodes/clip_cache/clip_cache.cpp
+
 ifeq ($(NEURAL_NET),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/object_tracker.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
@@ -78,7 +81,7 @@ override CXXFLAGS += -DSYNCMETER=1
 endif
 
 nodes_list_file = graph_factory.generated.cpp
-CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer_orchestrator.cpp
+CPPSRC = avplumber.cpp util.cpp avutils.cpp graph_core.cpp graph_mgmt.cpp stats.cpp output_control.cpp instance_shared.cpp hwaccel_mgmt.cpp EventLoop.cpp TickSource.cpp rest_client.cpp mixer/mixer_orchestrator.cpp
 DEPS_LIBS = deps/cpr/build/lib/libcpr.a deps/avcpp/build/src/libavcpp.a
 # Python extension links via PYTHON_MODULE_EXTRA_LFLAGS (python3-config; -lpython3 is not a valid soname on many distros).
 LIBS_FLAGS = -lpthread -lcurl -lssl -lcrypto -lboost_thread -lboost_system -lavcodec -lavfilter -lavutil -lavformat -lavdevice -lswscale -lswresample -ldl -lz

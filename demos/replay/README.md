@@ -1,6 +1,6 @@
 # Replay VOD player demo
 
-[![Watch Replay: video beside terminal controls](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg)](https://amagimedia.github.io/avplumber/demos/replay/docs/)
+[![Watch Replay: video beside terminal controls](https://amagimedia.github.io/avplumber/demos/replay/docs/replay-demo.jpg)](https://amagimedia.github.io/avplumber/demos/replay/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/replay/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay)
 
@@ -204,7 +204,7 @@ checks.
 
 ## Processing graph
 
-<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/replay-graph.png" alt="Current replay graph from recording input through transport controls to NVENC and RTP, with routed arrows." width="640"></a>
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/replay/docs/replay-graph.png" alt="Current replay graph from recording input through transport controls to NVENC and RTP, with routed arrows." width="640"></a>
 
 **14 nodes / 13 queues**. Click the current WebUI capture to open the full graph
 in an HTML viewer with Fit and zoom controls. It is a static capture of graph

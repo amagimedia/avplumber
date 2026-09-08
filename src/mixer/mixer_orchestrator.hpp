@@ -1,8 +1,8 @@
 #pragma once
 #include "MixerState.hpp"
-#include "SharedTimeline.hpp"
-#include "graph_mgmt.hpp"
-#include "instance_shared.hpp"
+#include "../SharedTimeline.hpp"
+#include "../graph_mgmt.hpp"
+#include "../instance_shared.hpp"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -155,6 +155,11 @@ public:
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
               int64_t start_pts_ms = -1);
+    /// Run the wipe subgraph once on *wipe_file* with the output kept on the
+    /// direct branch, so file open, decoder and GPU filter initialisation (PTX
+    /// compilation included) happen before the first real wipe. Blocks until
+    /// the overlay produced a frame or *timeout_ms* passed.
+    void warmupWipe(const std::string& wipe_file, int64_t timeout_ms);
     void setOverlayEnabled(bool enabled, int64_t ready_timeout_ms = -1);
 
     /// Returns the names of all registered scenes, sorted alphabetically.

@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from avpmixer.control import AvpConnection
-from control import mixer_command, parse_mixer_status, parse_scene_list
+from avpmixer.control import (AvpConnection, mixer_command, parse_mixer_status,
+                              parse_scene_list)
 
 
 def test_cancelled_tui_request_cannot_leave_a_reply_for_the_next_command():

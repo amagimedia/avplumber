@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 
 from textual import on, work
@@ -15,18 +16,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from avpmixer.control import AvpConnection
 
-try:
-    from .control import (
-        mixer_command,
-        parse_mixer_status,
-        parse_scene_list,
-    )
-except ImportError:
-    from control import (
-        mixer_command,
-        parse_mixer_status,
-        parse_scene_list,
-    )
+from avpmixer.control import mixer_command, parse_mixer_status, parse_scene_list
 
 
 class SceneScrollBarRender(ScrollBarRender):
@@ -160,6 +150,7 @@ class MixerTui(App):
     Button { margin-right: 1; }
     Input { width: 24; margin-right: 1; }
     #wipe_file { width: 1fr; min-width: 24; }
+    #wipe_choice { width: 26; margin-right: 1; }
     #direct_transition { width: 22; margin-right: 1; }
     #transition_status { width: auto; min-width: 20; color: $text-muted; }
     #transition_status.busy { color: $warning; text-style: bold; }
@@ -173,18 +164,23 @@ class MixerTui(App):
         *,
         fade_duration: float,
         wipe_file: str = "",
+        direct: bool = True,
+        transition: str = "fade",
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
         self.mixer_name = mixer
         self.default_fade_duration = fade_duration
         self.default_wipe_file = wipe_file
+        self.default_transition = transition
+        self._transition_chosen = False   # an operator pick outranks the config
+        self._wipes: dict[str, dict] = {}
         self.scenes: list[str] = []
         self.selected_scene = ""
         self.pgm_scene = ""
         self.pvw_scene = ""
         self.transition = "idle"
-        self.direct_mode = False
+        self.direct_mode = direct
         self._poll_timer = None
 
     def compose(self) -> ComposeResult:
@@ -213,16 +209,20 @@ class MixerTui(App):
             yield Static("Mode: idle", id="transition_status")
             yield Label("Fade seconds:")
             yield Input(str(self.default_fade_duration), id="fade_duration")
-            yield Label("Wipe file:")
+            yield Label("Wipe:")
+            # A library published by the mixer fills the picker; without one the
+            # path field stays the way to name a clip.
+            yield Select([], id="wipe_choice", allow_blank=True, prompt="(path below)")
             yield Input(self.default_wipe_file, id="wipe_file",
                         placeholder="/path/on/mixer/host/wipe.mov")
         with Horizontal(id="takes"):
             yield Button("✂ CUT", id="cut", variant="error")
             yield Button("⟿ FADE", id="fade", variant="success")
             yield Button("▶ MEDIA WIPE", id="wipe", variant="primary")
-            yield Button("Direct: OFF", id="direct")
+            yield Button("Direct: ON" if self.direct_mode else "Direct: OFF", id="direct",
+                         variant="warning" if self.direct_mode else "default")
             yield Select([("Cut", "cut"), ("Fade", "fade"), ("Media Wipe", "wipe")],
-                         value="cut", allow_blank=False, id="direct_transition",
+                         value=self.default_transition, allow_blank=False, id="direct_transition",
                          tooltip="Current transition, shared by take buttons and Direct mode")
             yield Button("↻ RECONNECT", id="reconnect")
         yield Footer()
@@ -305,6 +305,7 @@ class MixerTui(App):
         try:
             await self.connection.connect()
             await self._fetch_scenes()
+            await self._apply_settings()
             await self._read_status()
         except Exception as exc:
             await self.connection.disconnect()
@@ -350,7 +351,11 @@ class MixerTui(App):
                     raise ValueError("transition duration must be positive")
                 payload["duration_sec"] = duration
             elif transition == "wipe":
-                wipe_file = self.query_one("#wipe_file", Input).value.strip()
+                chosen = self.query_one("#wipe_choice", Select).value
+                wipe = self._wipes.get(chosen) if chosen is not Select.BLANK else None
+                wipe_file = wipe["path"] if wipe else self.query_one("#wipe_file", Input).value.strip()
+                if wipe and wipe.get("duration_seconds"):
+                    payload["duration_sec"] = wipe["duration_seconds"]
                 if not wipe_file:
                     raise ValueError("Enter a transparent wipe file path on the mixer host")
                 # The backend probes the clip's duration. Its filesystem may
@@ -364,6 +369,7 @@ class MixerTui(App):
             self.notify(str(exc), severity="error")
 
     def _use_transition(self, transition: str) -> None:
+        self._transition_chosen = True
         self.query_one("#direct_transition", Select).value = transition
         self._take(transition)
 
@@ -420,7 +426,34 @@ class MixerTui(App):
         self._take(transition, scene)
 
     def action_toggle_direct(self) -> None:
-        self.direct_mode = not self.direct_mode
+        self._set_direct(not self.direct_mode)
+
+    async def _apply_settings(self) -> None:
+        """Defaults published by a config-driven mixer; older mixers have none."""
+        try:
+            content = await self.connection.command(f"mixer.settings {self.mixer_name}")
+            settings = json.loads(content or "{}")
+        except Exception:
+            return
+        if "direct" in settings:
+            self._set_direct(bool(settings["direct"]))
+        if "fade_seconds" in settings:
+            self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
+        if settings.get("transition") and not self._transition_chosen:
+            self.query_one("#direct_transition", Select).value = str(settings["transition"])
+        library = settings.get("wipes") or []
+        if isinstance(library, list) and library != list(self._wipes.values()):
+            self._wipes = {str(w["id"]): w for w in library}
+            picker = self.query_one("#wipe_choice", Select)
+            picker.set_options([(str(w.get("name") or w["id"]), str(w["id"])) for w in library])
+            default = settings.get("default_wipe")
+            if default in self._wipes:
+                picker.value = default
+        if settings.get("wipe_file") and not self._wipes:
+            self.query_one("#wipe_file", Input).value = str(settings["wipe_file"])
+
+    def _set_direct(self, enabled: bool) -> None:
+        self.direct_mode = enabled
         button = self.query_one("#direct", Button)
         button.label = "Direct: ON" if self.direct_mode else "Direct: OFF"
         button.variant = "warning" if self.direct_mode else "default"
@@ -490,6 +523,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--fade-duration", type=float, default=0.5)
     parser.add_argument("--wipe-file", default="",
                         help="Transparent media wipe path on the mixer host")
+    parser.add_argument("--transition", default="fade", choices=("cut", "fade", "wipe"),
+                        help="Transition a direct-mode pick takes with until the mixer says otherwise")
+    parser.add_argument("--no-direct", action="store_true",
+                        help="Start with scene picks loading preview instead of taking to program")
     args = parser.parse_args(argv)
     MixerTui(
         args.host,
@@ -497,6 +534,8 @@ def main(argv: list[str] | None = None) -> None:
         args.mixer,
         fade_duration=args.fade_duration,
         wipe_file=args.wipe_file,
+        direct=not args.no_direct,
+        transition=args.transition,
     ).run()
 
 

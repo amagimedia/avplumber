@@ -2,7 +2,7 @@
 
 AVPlumber's mixer is a two-slot program/preview video switcher. The reusable
 graph builder is `avpmixer/graph.py`; the native control implementation is in
-`src/mixer_orchestrator.cpp`; the maintained example is `demos/mixer/`.
+`src/mixer/mixer_orchestrator.cpp`; the maintained example is `demos/mixer/`.
 
 The mixer carries video frames only. It has no audio routing, VAD, speaker
 selection, face tracking, or camera policy.

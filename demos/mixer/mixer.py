@@ -8,12 +8,17 @@ path; use ``tui.py`` to preview and take scenes manually.
 from __future__ import annotations
 
 import argparse
+import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+from avpmixer import clipcache
+from avpmixer import config as mixer_config
+from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
+                                    open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
-from avpmixer.janus import JanusVideoConfig, build_janus_output
+from avpmixer.janus import JANUS_KEYFRAME_NODE, JanusVideoConfig, build_janus_output
 
 try:
     from .layouts import (
@@ -49,7 +54,7 @@ PREHEAT_POLL_INTERVAL_SEC = 0.02
 
 @dataclass(frozen=True)
 class GraphOptions:
-    inputs: tuple[str, ...]
+    inputs: tuple[str, ...] = ()
     output: str | None = None
     output_format: str | None = None
     remote_control_port: int = 7777
@@ -67,9 +72,26 @@ class GraphOptions:
     janus_rtcp_bind: str = "0.0.0.0"
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
+    wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
+    config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
+    webui_url: str = ""                  # AVPlumber web UI to register the graph with
+    # Wipe clips are held decoded in GPU memory by default: a take then costs no
+    # file open, no decoder and no thread startup. 0 turns it off.
+    wipe_cache_mb: float = 768.0
+    # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
+    dmabuf_socket_dir: str = "/tmp/dma-page"
+    dmabuf_size: tuple[int, int] = (1280, 720)
+    dmabuf_open: str | None = None       # page URL: open the named windows before building
+    dmabuf_rest: str = "http://127.0.0.1:9009"
+
+    @property
+    def dmabuf_inputs(self) -> list[str]:
+        return [window_id(url) for url in self.inputs if is_dmabuf_url(url)]
 
     def validate(self) -> None:
-        if not self.inputs:
+        if self.config and self.inputs:
+            raise ValueError("--config replaces --input; pass one or the other")
+        if not self.inputs and not self.config:
             raise ValueError("at least one input is required")
         if not self.output and not self.janus_output:
             raise ValueError("--output or --janus-output is required")
@@ -83,6 +105,11 @@ class GraphOptions:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
             raise ValueError("preheat_timeout_sec must be positive")
+        if any(v <= 0 for v in self.dmabuf_size):
+            raise ValueError("--dmabuf-size must be WxH with positive numbers")
+        ids = self.dmabuf_inputs
+        if len(ids) != len(set(ids)):
+            raise ValueError("dmabuf window ids must be unique")
         if self.janus_output:
             if not self.janus_host:
                 raise ValueError("janus_host is required for Janus output")
@@ -105,6 +132,51 @@ class MixerApplication:
     routed_inputs: bool
     preheat_timeout_sec: float
     rtcp_feedback_listener: object | None = None
+    wipe_file: str | None = None
+    wipe_files: tuple[str, ...] = ()
+    browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
+    dmabuf_rest: str = ""
+    wipe_cache_mb: float = 0.0              # hold decoded wipes in GPU memory
+
+    def _preload_wipes(self) -> None:
+        """Decode every wipe once into GPU memory (see avpmixer.clipcache).
+
+        The loader group is started only here; a take starts the player group
+        alone and replays what this left behind.
+        """
+        loader = clipcache.loader_group(MIXER_NAME)
+        player = f"{MIXER_NAME}_wipe"
+        cache_node = f"{MIXER_NAME}_wipe_cache"
+        for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
+            started = time.monotonic()
+            # Both nodes need the clip before their group starts: the reader to
+            # open the file, the cache to know which clip it is filling.
+            value = json.dumps(clip)   # node.param.set parses the value as JSON
+            self.avp.executeCommandsFromString(
+                f"node.param.set {MIXER_NAME}_wipe_input url {value}\n"
+                f"node.param.set {cache_node} url {value}")
+            self.avp.group(player).startNodes()
+            self.avp.group(loader).startNodes()
+            deadline = started + self.preheat_timeout_sec
+            held = None
+            while time.monotonic() < deadline:
+                try:
+                    status = self.avp.node(cache_node).getObject("status")
+                except Exception:
+                    time.sleep(PREHEAT_POLL_INTERVAL_SEC)   # the group is still starting
+                    continue
+                held = next((c for c in status.get("clips", [])
+                             if c["path"] == clip and c["complete"]), None)
+                if held:
+                    break
+                time.sleep(PREHEAT_POLL_INTERVAL_SEC)
+            self.avp.group(loader).stopNodes()
+            self.avp.group(player).stopNodes()
+            print(f"wipe cached: {clip} {held['frames'] if held else 0} frames, "
+                  f"{(held['bytes'] if held else 0) / 1048576:.1f} MiB, "
+                  f"{(time.monotonic() - started) * 1000:.0f} ms", flush=True)
+            if not held:
+                raise RuntimeError(f"wipe clip did not cache within the preheat timeout: {clip}")
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
@@ -129,6 +201,8 @@ class MixerApplication:
     def start(self) -> None:
         for group in self.input_groups:
             self.avp.group(group).startNodes()
+        if self.browser_windows:
+            refresh_windows(self.dmabuf_rest, list(self.browser_windows))
         self._wait_for_edges(self.input_edges, "input readiness")
         if self.routed_inputs:
             self.avp.group(ROUTER_GROUP).startNodes()
@@ -151,6 +225,12 @@ class MixerApplication:
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
         self._wait_for_edges(("mixer_final_out",), "program output")
+        if self.wipe_cache_mb:
+            self._preload_wipes()
+        else:
+            for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
+                if wipe_file:
+                    self.mixer.warmup_wipe(wipe_file)
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.start()
         self.avp.setReady()
@@ -173,15 +253,19 @@ def load_avp_api():
         Bsf,
         DecVideo,
         Demux,
+        DrmPrimeToCuda,
         EncVideo,
         FilterVideo,
         ForceFPS,
         ForceKeyFrame,
         InputRec,
+        IpcDmabufSource,
         Mux,
+        OneToMany,
         Output,
         PreheatVideoRouter,
         Realtime,
+        RepeatLastFrame,
         Split,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
@@ -193,15 +277,19 @@ def load_avp_api():
         Bsf=Bsf,
         DecVideo=DecVideo,
         Demux=Demux,
+        DrmPrimeToCuda=DrmPrimeToCuda,
         EncVideo=EncVideo,
         FilterVideo=FilterVideo,
         ForceFPS=ForceFPS,
         ForceKeyFrame=ForceKeyFrame,
         InputRec=InputRec,
+        IpcDmabufSource=IpcDmabufSource,
         Mux=Mux,
+        OneToMany=OneToMany,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
         Realtime=Realtime,
+        RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
         Split=Split,
     )
@@ -227,11 +315,24 @@ def _input_group(index: int) -> str:
 
 
 def _build_input(
-    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool
+    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
+    options: "GraphOptions | None" = None,
 ) -> str:
     group = _input_group(index)
-    fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
-                           fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
+    if is_dmabuf_url(url):
+        # A dma-browser window: DRM PRIME frames over its socket, already on the
+        # shared monotonic clock; the same chain the DMA-BUF demo composes from.
+        width, height = options.dmabuf_size
+        nodes, fps_edge = dmabuf_cuda_input_nodes(
+            api, prefix=f"input_{index}",
+            socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
+            width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
+            source_group=group, processing_group=group, hold=True)
+        for node in nodes:
+            avp.addNode(node)
+    else:
+        fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
     if not normalize:
         return fps_edge
     normalized_edge = f"input_{index}_normalized"
@@ -303,7 +404,8 @@ def _define_scenes(mixer, input_count: int, routed: bool) -> None:
         mixer.add_scene(scene.name, sources, routes=routes)
 
 
-def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> None:
+def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
+                         width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT) -> None:
     if options.output is None:
         raise ValueError("record output needs an output URL or path")
     fps_edge = "program_fps"
@@ -321,8 +423,8 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
         "name": "program_format",
         "src": fps_edge,
         "dst": assumed_edge,
-        "width": CANVAS_WIDTH,
-        "height": CANVAS_HEIGHT,
+        "width": width,
+        "height": height,
         "pixel_format": "cuda",
         "real_pixel_format": "nv12",
         "group": OUTPUT_GROUP,
@@ -362,7 +464,8 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str) -> No
     }))
 
 
-def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
+def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str, *,
+                   width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT):
     record_edge = mixer_edge
     janus_edge = mixer_edge
     if options.output and options.janus_output:
@@ -377,7 +480,7 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
         }))
 
     if options.output:
-        _build_record_output(avp, api, options, record_edge)
+        _build_record_output(avp, api, options, record_edge, width=width, height=height)
     if not options.janus_output:
         return None
 
@@ -389,7 +492,7 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
             bitrate_kbps=options.janus_video_bitrate_kbps,
             rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
         ),
-        fps=options.fps, fps_den=FPS_DEN, width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
+        fps=options.fps, fps_den=FPS_DEN, width=width, height=height,
         hwaccel=HWACCEL, group=OUTPUT_GROUP,
     )
 
@@ -397,12 +500,22 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str):
 def build_application(options: GraphOptions, api=None) -> MixerApplication:
     options.validate()
     api = api or load_avp_api()
+    if options.config:
+        return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(options.config)), api)
     avp = api.AVPlumber()
     if options.remote_control_port:
         avp.enableControlServer(options.remote_control_port)
     avp.executeCommandsFromString(
         f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}'
     )
+    dmabuf_ids = options.dmabuf_inputs
+    if dmabuf_ids:
+        if options.dmabuf_open:
+            width, height = options.dmabuf_size
+            open_browser_windows(options.dmabuf_rest, dmabuf_ids, options.dmabuf_open,
+                                 width, height, options.fps)
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
+                         options.preheat_timeout_sec)
     avp.edges.planCapacity("*", 4)
 
     input_edges = [
@@ -414,6 +527,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
             loop=options.loop_inputs,
             fps=options.fps,
             normalize=len(options.inputs) > 32,
+            options=options,
         )
         for index, url in enumerate(options.inputs)
     ]
@@ -427,6 +541,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         enable_wipe=True,
         defer_initial_routes=True,
         defer_output=True,
+        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        cache_wipes_mb=options.wipe_cache_mb or None,
     )
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
@@ -443,6 +559,124 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         routed_inputs=routed_inputs,
         preheat_timeout_sec=options.preheat_timeout_sec,
         rtcp_feedback_listener=rtcp_feedback_listener,
+        wipe_file=options.wipe_file,
+        browser_windows=tuple(options.dmabuf_inputs), dmabuf_rest=options.dmabuf_rest,
+        wipe_cache_mb=options.wipe_cache_mb,
+    )
+
+
+def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
+    """One encoder per rendition, all fed from the single composited program.
+
+    The compositor renders once at the canvas rate; a rendition re-times and
+    rescales that picture for its own target, so extra renditions cost an
+    encode, not another composite.
+    """
+    edges = [mixer_edge]
+    if len(cfg.renditions) > 1:
+        edges = [f"program_rendition_{r.id}" for r in cfg.renditions]
+        avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
+                               "group": OUTPUT_GROUP, "on_error": "panic"}))
+    listener = None
+    for rendition, edge in zip(cfg.renditions, edges):
+        scaled = edge
+        if (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h):
+            scaled = f"program_scaled_{rendition.id}"
+            avp.addNode(api.FilterVideo({
+                "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
+                "graph": f"scale_cuda=w={rendition.width}:h={rendition.height}",
+                "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            }))
+        if rendition.target == "janus":
+            listener = build_janus_output(
+                avp, api, scaled,
+                JanusVideoConfig(
+                    host=options.janus_host,
+                    video_port=rendition.port or options.janus_video_port,
+                    payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
+                    bitrate_kbps=rendition.bitrate_kbps,
+                    rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
+                ),
+                fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
+                hwaccel=HWACCEL, group=OUTPUT_GROUP,
+                profile=rendition.profile, preset=rendition.preset,
+            )
+        else:
+            _build_record_output(avp, api, replace(options, output=rendition.target,
+                                                   codec=rendition.codec, fps=rendition.fps),
+                                 scaled, width=rendition.width, height=rendition.height)
+    return listener
+
+
+def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
+    """Sources, wipes and scenes from a JSON document; one chain per source."""
+    options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
+    avp = api.AVPlumber()
+    if options.remote_control_port:
+        avp.enableControlServer(options.remote_control_port)
+    avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    browsers = [s for s in cfg.sources if s.kind == "browser"]
+    if browsers:
+        open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
+                                            "height": s.height, "fps": s.fps or cfg.fps} for s in browsers])
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
+                         options.preheat_timeout_sec)
+    avp.edges.planCapacity("*", 4)
+
+    mixer = api.MixerGraphBuilder(
+        avp, name=MIXER_NAME, canvas=(cfg.canvas_w, cfg.canvas_h), fps=(cfg.fps, FPS_DEN),
+        latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
+        defer_initial_routes=True, defer_output=True,
+        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        cache_wipes_mb=options.wipe_cache_mb or None,
+    )
+    aliases = cfg.alias_counts
+    input_edges: list[str] = []
+    for index, source in enumerate(cfg.sources):
+        group = _input_group(index)
+        if source.kind == "browser":
+            nodes, edge = dmabuf_cuda_input_nodes(
+                api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
+                width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
+                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
+            for node in nodes:
+                avp.addNode(node)
+        else:
+            edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
+        input_edges.append(edge)
+        count = aliases[source.id]
+        edges = [edge]
+        if count > 1:
+            # The same frames under several names: one fan-out, no second decoder.
+            edges = [f"{edge}_alias{k}" for k in range(1, count + 1)]
+            avp.addNode(api.OneToMany({
+                "type": "one_to_many", "name": f"alias_{index}", "src": edge, "dst": edges,
+                "outputs": (1 << count) - 1, "group": group,
+            }))
+        for k, alias_edge in enumerate(edges, start=1):
+            mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=alias_edge,
+                             input_group=group, default_graph="")
+    for scene in cfg.scenes:
+        mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
+    mixer.set_initial_scene(cfg.initial_scene, slot="A")
+    settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
+    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
+    mixer_edge = mixer.build()
+    if cfg.renditions:
+        rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, mixer_edge)
+    else:
+        rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
+                                                width=cfg.canvas_w, height=cfg.canvas_h)
+    return MixerApplication(
+        avp=avp, mixer=mixer,
+        input_groups=tuple(_input_group(index) for index in range(len(cfg.sources))),
+        input_edges=tuple(input_edges), routed_inputs=False,
+        preheat_timeout_sec=options.preheat_timeout_sec,
+        rtcp_feedback_listener=rtcp_feedback_listener,
+        wipe_file=options.wipe_file, wipe_files=tuple(w.path for w in cfg.wipes),
+        browser_windows=tuple(s.id for s in browsers), dmabuf_rest=options.dmabuf_rest,
+        wipe_cache_mb=options.wipe_cache_mb,
     )
 
 
@@ -452,11 +686,21 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         "--input",
         dest="inputs",
         action="append",
-        required=True,
+        default=[],
         metavar="PATH",
         help="Input media file or URL; repeat for each mixer input",
     )
+    parser.add_argument("--config", metavar="FILE",
+                        help="JSON document with sources, wipes and scenes (replaces --input and the "
+                             "built-in layouts; see doc/research/2026-09-08-mixer-config-schema.md)")
     parser.add_argument("--output", help="Optional video-only output URL or path")
+    parser.add_argument("--dmabuf-socket-dir", default="/tmp/dma-page",
+                        help="dma-browser socket directory for dmabuf://<window-id> inputs")
+    parser.add_argument("--dmabuf-size", default="1280x720", metavar="WxH",
+                        help="browser window size for dmabuf:// inputs")
+    parser.add_argument("--dmabuf-open", metavar="URL",
+                        help="open the dmabuf:// windows with this page through the dma-browser REST API")
+    parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
     parser.add_argument(
         "--output-format",
         help="Muxer format when it cannot be inferred from the output",
@@ -497,7 +741,16 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
     parser.add_argument("--janus-rtcp-port", type=int, default=0)
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
+    parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
+                        "(the TUI still selects the clip for each wipe)")
+    parser.add_argument("--wipe-cache-mb", type=float, default=768.0,
+                        help="Hold decoded wipe clips in GPU memory, up to this many MiB "
+                             "(0 decodes each wipe on every take)")
+    parser.add_argument("--webui-url", default="",
+                        help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     args = parser.parse_args(argv)
+    if not args.inputs and not args.config:
+        parser.error("pass --input (repeatable) or --config FILE")
     return GraphOptions(
         inputs=tuple(args.inputs),
         output=args.output,
@@ -517,12 +770,30 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         janus_rtcp_bind=args.janus_rtcp_bind,
         janus_rtcp_port=args.janus_rtcp_port,
         preheat_timeout_sec=args.preheat_timeout,
+        wipe_file=args.wipe_file,
+        dmabuf_socket_dir=args.dmabuf_socket_dir,
+        dmabuf_size=parse_size(args.dmabuf_size),
+        dmabuf_open=args.dmabuf_open,
+        dmabuf_rest=args.dmabuf_rest,
+        config=args.config,
+        webui_url=args.webui_url,
+        wipe_cache_mb=args.wipe_cache_mb,
     )
+
+
+def parse_size(text: str) -> tuple[int, int]:
+    try:
+        width, height = (int(v) for v in text.lower().split("x"))
+    except ValueError:
+        raise ValueError(f"expected WxH, got {text!r}") from None
+    return width, height
 
 
 def main(argv: list[str] | None = None) -> None:
     options = parse_args(argv)
     application = build_application(options)
+    if options.webui_url:
+        application.avp.registerWithWebUI(options.webui_url, "mixer", "")
     application.start()
     targets = []
     if options.output:
@@ -539,6 +810,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         while True:
             time.sleep(1)
+            if options.webui_url:
+                application.avp.heartbeat()
     except KeyboardInterrupt:
         pass
     finally:

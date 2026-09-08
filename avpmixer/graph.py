@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pyplumber.node import (
     InternalNode,
+    ClipCache,
     CudaRectOverlay,
     FilterVideo,
     ForceFPS,
@@ -65,6 +66,7 @@ from pyplumber.node import (
 )
 
 
+from . import clipcache
 from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
 
@@ -96,6 +98,8 @@ class MixerGraphBuilder:
         defer_initial_routes: bool = False,
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
+        keyframe_node: Optional[str] = None,
+        cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -107,6 +111,12 @@ class MixerGraphBuilder:
         self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
         self.switch_margin_ms = switch_margin_ms
+        # Triggered when a transition reaches the output, so receivers do not wait
+        # for the next periodic keyframe to see the new scene.
+        self.keyframe_node = keyframe_node
+        # When set, wipe clips are held decoded in GPU memory (avpmixer.clipcache)
+        # and a take replays them instead of opening and decoding the file again.
+        self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
         self._output_started = not defer_output
@@ -345,6 +355,15 @@ class MixerGraphBuilder:
         """Last scene requested (local tracking; not polled from the mixer)."""
         return self._current_pgm
 
+    def warmup_wipe(self, wipe_file: str, timeout_ms: int = 30000) -> None:
+        """Initialise the wipe chain on *wipe_file* once, invisibly, so the
+        first real wipe does not pay for file open, decoder and GPU filter
+        setup (PTX compilation included)."""
+        if not self.enable_wipe:
+            raise RuntimeError("Wipe subgraph not enabled (pass enable_wipe=True)")
+        cmd = {"mixer": self.name, "wipe_file": wipe_file, "timeout_ms": timeout_ms}
+        self.avp.executeCommandsFromString(f"mixer.wipe.warmup {json.dumps(cmd)}")
+
     def start_groups(self) -> None:
         """Start the mixer's internal compositor and output groups.
 
@@ -577,19 +596,22 @@ class MixerGraphBuilder:
         W, H = self.canvas_w, self.canvas_h
         fps_str = self._fps_str()
         wipe_group = f"{self.name}_wipe"
+        # With the cache on, everything up to and including the decode lives in a
+        # group a take never starts; the take only replays cached frames.
+        load_group = clipcache.loader_group(self.name) if self.cache_wipes_mb is not None else wipe_group
 
         self.avp.addNode(InputRec({
             "name": self._n("wipe_input"),
             "url": "",
             "loop": False,
             "dst": self._e("wipe_raw_pkt"),
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(Demux({
             "name": self._n("wipe_demux"),
             "src": self._e("wipe_raw_pkt"),
             "routing": {"v:0": self._e("wipe_v_pkt")},
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(DecVideo({
             "name": self._n("wipe_dec"),
@@ -597,7 +619,7 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_dec_out"),
             "pixel_format": "?cuda",
             "hwaccel": self.hwaccel,
-            "group": wipe_group,
+            "group": load_group,
         }))
         # Alpha media codecs decode on the CPU. Upload the converted wipe to
         # the configured mixer device; hwupload_cuda creates a separate CUDA
@@ -606,37 +628,45 @@ class MixerGraphBuilder:
             "name": self._n("wipe_fmt"),
             "src": self._e("wipe_dec_out"),
             "dst": self._e("wipe_fmt_out"),
-            "graph": f"format=yuva420p,scale={W}:{H}:flags=lanczos,hwupload",
+            # Upload the clip at its own size and let the compositor scale it on
+            # the GPU. Resizing to the canvas on a CPU thread cost two thirds of
+            # this chain and made the compositor miss 60 Hz ticks during a wipe.
+            "graph": "format=rgba,hwupload",
             "hwaccel": self.hwaccel,
-            "group": wipe_group,
+            "group": load_group,
         }))
         self.avp.addNode(Realtime({
             "name": self._n("wipe_rt"),
             "src": self._e("wipe_fmt_out"),
             "dst": self._e("wipe_rt_out"),
             "set_pts": True,
-            "group": wipe_group,
+            "group": load_group,
         }))
+        if self.cache_wipes_mb is not None:
+            self.avp.addNode(ClipCache(clipcache.cache_node(
+                name=self._n("wipe_cache"), src=self._e("wipe_rt_out"),
+                dst=self._e("wipe_cached"), group=wipe_group, fps=fps_str,
+                budget_mb=self.cache_wipes_mb)))
         self.avp.addNode(ForceFPS({
             "name": self._n("wipe_rt_fps"),
             "fps": fps_str,
-            "src": self._e("wipe_rt_out"),
+            "src": self._e("wipe_cached") if self.cache_wipes_mb is not None else self._e("wipe_rt_out"),
             "dst": self._e("wipe_rt_fps_out"),
             "group": wipe_group,
         }))
-        # overlay_many_cuda: convert NV12 main to YUV420P, blend YUVA wipe,
-        # convert back to NV12 (matches assume_video_format downstream).
-        self.avp.addNode(FilterVideo({
+        # The wipe is one alpha-blended layer over the program, drawn by the same
+        # compositor kernel the scenes use: no format round trip through
+        # yuv420p, no second blend pass and no CPU resize.
+        self.avp.addNode(CudaRectOverlay({
             "name": self._n("wipe_overlay"),
             "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
             "dst": self._e("wipe_overlay_out"),
-            "graph": (
-                "[in0]scale_cuda=format=yuv420p[main];"
-                " [main][in1]overlay_many_cuda=inputs=2[blended];"
-                " [blended]scale_cuda=format=nv12"
-            ),
             "hwaccel": self.hwaccel,
-            "defer_preliminary_init": True,
+            "width": W, "height": H, "sw_format": "nv12", "fps": fps_str, "scale": True,
+            "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
+                       {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
+            "active_inputs": 3,
+            **({} if self.latency_ms is None else {"latency_ms": self.latency_ms}),
             "group": wipe_group,
         }))
 
@@ -662,6 +692,7 @@ class MixerGraphBuilder:
             "fps_den": self.fps_den,
             "switch_margin_ms": self.switch_margin_ms,
             "source_switcher": self._n("out_sel"),
+            **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,
             "initial_pgm_scene": self._initial_pgm_scene,
             "wipe_otm": self._n("otm_final"),
@@ -680,7 +711,8 @@ class MixerGraphBuilder:
         if self.enable_wipe:
             init_cfg.update({
                 "wipe_group": wipe_group,
-                "wipe_input_node": self._n("wipe_input"),
+                "wipe_input_node": self._n("wipe_cache" if self.cache_wipes_mb is not None
+                                            else "wipe_input"),
                 "wipe_tail_edge": self._e("wipe_rt_fps_out"),
                 "wipe_flush_edges": wipe_flush_edges,
             })
