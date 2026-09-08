@@ -152,7 +152,7 @@ def test_build_registers_sixteen_fullscreen_scenes_and_the_replay_style_chain(bu
     assert by_name["decode_pl0"]["flush_magic"] is True and by_name["decode_pl0"]["codec_map"] == {"h264": "h264_cuvid"}
     assert by_name["pause_pl0"] == {"type": "pause", "name": "pause_pl0", "src": "input_pl0_speeded",
                                     "dst": "input_pl0_paused", "team": "pl_item_0_pause",
-                                    "sync_team": "pl_item_0_sync", "group": "pl_item_0"}
+                                    "sync_team": "pl_item_0_sync", "group": "pl_item_0", "pass_on_seek": False}
     assert by_name["realtime_pl0"]["team"] == "pl_item_0_sync" and by_name["realtime_pl0"]["set_pts"] is True
     assert by_name["realtime_pl0"]["tick_period"] == "1/30" and by_name["speed_pl0"]["sync_node"] == "realtime_pl0"
     assert by_name["janus_encoder"]["codec"] == "h264_nvenc" and by_name["janus_rtp_output"]["format"] == "rtp"

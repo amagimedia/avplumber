@@ -283,6 +283,7 @@ class PlaylistEngine:
                     hwaccel=HWACCEL, loop=True, input_params=params, auto_restart=None,
                     speed_team=f"pl_item_{slot}_speed", speed=clip.speed,
                     pause_team=slot_pause_team(slot), sync_team=slot_sync_team(slot),
+                    pause_params={"pass_on_seek": False},   # the parked frame leaves only on resume
                     realtime_params={"tick_period": f"1/{fps}", "negative_time_tolerance": 1 / fps,
                                      "negative_time_discard": 1 / fps, "discontinuity_threshold": 3},
                     # Frame-exact seeks need the replay demo's decoder setup: flush the
@@ -463,12 +464,10 @@ class PlaylistEngine:
     def _park_target_ms(self, slot: int) -> int:
         """One frame before cue-in, in loop order.
 
-        The mixer's ready cut fires on the first fresh frame of the incoming
-        element and switches on the next one, so the parked frame is only ever
-        shown in the preview slot.  An element cued at 0 parks on its last frame;
-        the realtime resync at the loop wrap then costs its frame 0 (measured).
-        Seeking to the very start of the file instead stalls the decoder after
-        the resume, which is worse."""
+        The parked frame leaves the chain only on the resume (``pass_on_seek``
+        off) and the mixer's ready cut consumes that first fresh frame, so the
+        next one, cue-in, is the first frame on air.  An element cued at 0
+        parks on its last frame."""
         url, cue_in, cue_out, _speed = self._bound[slot]
         frame_ms = 1000 // self.config.fps
         if cue_in >= frame_ms:

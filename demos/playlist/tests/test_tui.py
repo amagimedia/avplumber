@@ -27,8 +27,8 @@ def run(coro):
 
 def test_formatting_helpers():
     assert clock(61_005) == "1:01.005" and clock(None, "end") == "end"
-    assert bar(5000, 0, 10_000, width=11) == "=====|-----"
-    assert bar(None, 0, 10_000, width=4) == "----"
+    assert bar(5000, 0, 10_000, width=11) == "━━━━━●─────"
+    assert bar(None, 0, 10_000, width=4) == "────"
 
 
 def test_two_action_bars_group_playlist_and_element_controls():
@@ -56,7 +56,7 @@ def test_play_take_and_navigation_drive_the_controller():
             await pilot.click("#pl-play")
             await pilot.pause(0.1)
             assert ctl.status().active_index == 0
-            assert "ON AIR  a" in str(app.query_one("#oa-name", Static).render())
+            assert "▶ a" in str(app.query_one("#oa-name", Static).render())
             assert "next   b" in str(app.query_one("#oa-next", Static).render())
             await pilot.press("down", "down")
             await pilot.pause(0.1)
@@ -71,7 +71,7 @@ def test_play_take_and_navigation_drive_the_controller():
             await pilot.press("space")
             await pilot.pause(0.1)
             assert ctl.status().transport.value == "Paused"
-            assert str(app.query_one("#pl-play", Button).label) == "Resume"
+            assert str(app.query_one("#pl-play", Button).label) == "▶ Resume"
             await pilot.press("s")
             await pilot.pause(0.1)
             assert ctl.status().transport.value == "Stopped"
@@ -142,7 +142,7 @@ def test_scheduled_advance_shows_countdown_and_switches_rows():
             await pilot.pause(0.1)
             assert ctl.status().active_index == 1
             table = app.query_one("#clips", DataTable)
-            assert str(table.get_row_at(1)[0]) == ">"
+            assert str(table.get_row_at(1)[0]) == "▶"
     run(scenario())
 
 

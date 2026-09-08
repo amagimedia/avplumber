@@ -8,6 +8,7 @@ protected:
     std::shared_ptr<PauseControlTeam> team_;
     Event wake_paused_;
     std::atomic_bool pass_single_ {false};
+    bool pass_on_seek_ = true;   // let the seeked frame through while paused (replay shows the held frame)
 public:
     using NodeSISO<T, T>::NodeSISO;
     virtual void processNonBlocking(EventLoop& evl, bool ticks) override {
@@ -60,7 +61,8 @@ public:
         } while (process_next);
     }
     virtual void resetInput() override {
-        pass_single_ = true;
+        if (pass_on_seek_)
+            pass_single_ = true;
         wake_paused_.signal();
     }
     static std::shared_ptr<Pause> create(NodeCreationInfo &nci) {
@@ -78,6 +80,9 @@ public:
                 r->team_->pause(false);
                 r->pass_single_ = true;
             }
+        }
+        if (params.count("pass_on_seek")) {
+            r->pass_on_seek_ = params["pass_on_seek"].get<bool>();
         }
 
         if (edges.exists<av::VideoFrame>(params["src"])) {
