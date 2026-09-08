@@ -73,6 +73,7 @@ class GraphOptions:
     preheat_timeout_sec: float = 60.0
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
+    webui_url: str = ""                  # AVPlumber web UI to register the graph with
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -644,6 +645,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
     parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                         "(the TUI still selects the clip for each wipe)")
+    parser.add_argument("--webui-url", default="",
+                        help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     args = parser.parse_args(argv)
     if not args.inputs and not args.config:
         parser.error("pass --input (repeatable) or --config FILE")
@@ -686,6 +689,8 @@ def parse_size(text: str) -> tuple[int, int]:
 def main(argv: list[str] | None = None) -> None:
     options = parse_args(argv)
     application = build_application(options)
+    if options.webui_url:
+        application.avp.registerWithWebUI(options.webui_url, "mixer", "")
     application.start()
     targets = []
     if options.output:
@@ -702,6 +707,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         while True:
             time.sleep(1)
+            if options.webui_url:
+                application.avp.heartbeat()
     except KeyboardInterrupt:
         pass
     finally:

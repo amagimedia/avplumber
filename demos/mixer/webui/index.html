@@ -1,0 +1,214 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVPlumber mixer</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --edge: #232b34; --edge-soft: #1b222a;
+    --text: #e8edf2; --muted: #8b98a5;
+    --pgm: #e5484d; --pgm-dim: #3a1416; --pvw: #30a46c; --pvw-dim: #0f2a1d;
+    --accent: #f5a524; --wipe: #6e8bf5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); min-height: 100vh;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; gap: 14px; padding: 14px;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+  #link { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--edge); }
+  #link:hover { color: var(--text); }
+  #conn { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #conn.bad { color: var(--pgm); }
+
+  #buses { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .bus { border: 1px solid var(--edge); border-radius: 10px; padding: 14px 16px; background: var(--panel); }
+  .bus h2 { margin: 0 0 6px; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+  .bus .scene { font-size: clamp(18px, 3.4vw, 30px); font-weight: 600; word-break: break-word; }
+  .bus.pgm { border-color: var(--pgm); background: linear-gradient(var(--pgm-dim), var(--panel) 70%); }
+  .bus.pgm h2 { color: var(--pgm); }
+  .bus.pvw { border-color: var(--pvw); background: linear-gradient(var(--pvw-dim), var(--panel) 70%); }
+  .bus.pvw h2 { color: var(--pvw); }
+  .state { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  #scenes { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+  .tile {
+    display: flex; align-items: baseline; gap: 8px; text-align: left; cursor: pointer;
+    background: var(--panel); color: var(--text); border: 1px solid var(--edge);
+    border-radius: 8px; padding: 10px 12px; font: inherit; min-height: 46px;
+  }
+  .tile:hover { border-color: var(--muted); }
+  .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tile .n { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; min-width: 1.2em; }
+  .tile .label { overflow-wrap: anywhere; }
+  .tile.pgm { border-color: var(--pgm); background: var(--pgm-dim); }
+  .tile.pvw { border-color: var(--pvw); background: var(--pvw-dim); }
+
+  footer { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+           border: 1px solid var(--edge); border-radius: 10px; padding: 12px; background: var(--panel); }
+  button.take { border: 1px solid var(--edge); border-radius: 8px; padding: 10px 18px; cursor: pointer;
+                font: inherit; font-weight: 600; color: var(--text); background: #1b2129; }
+  button.take:hover { border-color: var(--muted); }
+  #cut { border-color: var(--pgm); } #fade { border-color: var(--pvw); } #wipe { border-color: var(--wipe); }
+  #direct { border-color: var(--edge); }
+  #direct[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input { background: #0e1216; color: var(--text); border: 1px solid var(--edge); border-radius: 6px;
+          padding: 7px 9px; font: inherit; }
+  input#fade_seconds { width: 5em; }
+  input#wipe_file { min-width: 16em; flex: 1; }
+  .sep { flex: 1 1 auto; }
+  #hint { color: var(--muted); font-size: 12px; }
+  #error { color: var(--pgm); min-height: 1.2em; font-size: 13px; }
+  @media (max-width: 620px) { #buses { grid-template-columns: 1fr; } }
+</style>
+
+<header>
+  <h1>AVPlumber mixer</h1>
+  <a id="link" href="/" target="_blank" rel="noreferrer">program output</a>
+  <span id="conn">connecting…</span>
+</header>
+
+<div id="buses">
+  <section class="bus pgm"><h2>Program</h2><div class="scene" id="pgm">—</div>
+    <div class="state" id="pgm_state">on air</div></section>
+  <section class="bus pvw"><h2>Preview</h2><div class="scene" id="pvw">—</div>
+    <div class="state" id="pvw_state">ready</div></section>
+</div>
+
+<div id="scenes"></div>
+
+<footer>
+  <button class="take" id="cut" type="button">Cut</button>
+  <button class="take" id="fade" type="button">Fade</button>
+  <button class="take" id="wipe" type="button">Media wipe</button>
+  <button class="take" id="direct" type="button" aria-pressed="false">Direct: off</button>
+  <label>Fade <input id="fade_seconds" type="number" min="0.1" step="0.1" value="0.5"> s</label>
+  <label>Wipe <input id="wipe_file" type="text" placeholder="clip with alpha, path on the mixer host"></label>
+  <span class="sep"></span>
+  <span id="hint">1–9 pick a scene · C cut · F fade · W wipe · D direct</span>
+</footer>
+<div id="error"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let scenes = [];          // [{id, name}]
+let selected = "";        // scene the take buttons act on
+let direct = false;       // a pick goes straight to program
+let pgm = "", pvw = "", transition = "idle";
+let touched = { fade: false, wipe: false };   // stop polling from overwriting typing
+let currentTransition = "cut";   // what a pick uses in direct mode
+
+function showError(message) {
+  $("error").textContent = message || "";
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
+  return body;
+}
+
+async function take(command, scene) {
+  const payload = { command, scene: scene ?? selected };
+  if (command === "fade") payload.duration_sec = Number($("fade_seconds").value) || 0.5;
+  if (command === "wipe") {
+    payload.wipe_file = $("wipe_file").value.trim();
+    if (!payload.wipe_file) return showError("Enter a wipe clip path on the mixer host");
+  }
+  currentTransition = command === "preview" ? currentTransition : command;
+  try {
+    showError("");
+    await api("/api/command", { method: "POST", headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(payload) });
+    await refresh();
+  } catch (exc) { showError(String(exc.message || exc)); }
+}
+
+function pick(scene) {
+  selected = scene;
+  return take(direct ? currentTransition : "preview", scene);
+}
+
+function renderScenes() {
+  const list = $("scenes");
+  if (list.childElementCount !== scenes.length) {
+    list.replaceChildren(...scenes.map((scene, index) => {
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = "tile";
+      tile.dataset.scene = scene.id;
+      tile.innerHTML = `<span class="n">${index < 9 ? index + 1 : ""}</span>`;
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = scene.name || scene.id;
+      tile.append(label);
+      tile.onclick = () => pick(scene.id);
+      return tile;
+    }));
+  }
+  for (const tile of list.children) {
+    tile.classList.toggle("pgm", tile.dataset.scene === pgm);
+    tile.classList.toggle("pvw", tile.dataset.scene === pvw && pvw !== pgm);
+  }
+}
+
+function applySettings(settings) {
+  if (typeof settings.direct === "boolean" && !$("direct").dataset.user) setDirect(settings.direct);
+  if (settings.fade_seconds && !touched.fade) $("fade_seconds").value = settings.fade_seconds;
+  if (settings.wipe_file && !touched.wipe) $("wipe_file").value = settings.wipe_file;
+}
+
+function setDirect(value) {
+  direct = value;
+  const button = $("direct");
+  button.setAttribute("aria-pressed", String(value));
+  button.textContent = `Direct: ${value ? "on" : "off"}`;
+  $("pvw_state").textContent = value ? `picks take to program with ${currentTransition}` : "ready";
+}
+
+async function refresh() {
+  try {
+    const state = await api("/api/state");
+    const status = state.status || {};
+    pgm = status.pgm_scene || ""; pvw = status.pvw_scene || ""; transition = status.transition || "idle";
+    const named = (state.settings && state.settings.scenes) || null;
+    scenes = named ? named.map((s) => ({ id: s.id, name: s.name })) : (state.scenes || []).map((id) => ({ id }));
+    if (!selected) selected = pvw || pgm;
+    applySettings(state.settings || {});
+    $("pgm").textContent = pgm || "—";
+    $("pvw").textContent = pvw || "—";
+    $("pgm_state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
+    $("conn").textContent = `connected · ${state.mixer}`;
+    $("conn").classList.remove("bad");
+    renderScenes();
+  } catch (exc) {
+    $("conn").textContent = `no mixer: ${exc.message || exc}`;
+    $("conn").classList.add("bad");
+  }
+}
+
+$("cut").onclick = () => take("cut");
+$("fade").onclick = () => take("fade");
+$("wipe").onclick = () => take("wipe");
+$("direct").onclick = () => { $("direct").dataset.user = "1"; setDirect(!direct); };
+$("fade_seconds").oninput = () => { touched.fade = true; };
+$("wipe_file").oninput = () => { touched.wipe = true; };
+
+addEventListener("keydown", (event) => {
+  if (event.target.tagName === "INPUT" || event.metaKey || event.ctrlKey || event.altKey) return;
+  const digit = Number(event.key);
+  if (digit >= 1 && digit <= 9 && scenes[digit - 1]) { event.preventDefault(); pick(scenes[digit - 1].id); return; }
+  const keys = { c: "cut", f: "fade", w: "wipe" };
+  const command = keys[event.key.toLowerCase()];
+  if (command) { event.preventDefault(); take(command); }
+  else if (event.key.toLowerCase() === "d") { event.preventDefault(); $("direct").click(); }
+});
+
+// The program output usually sits on :8080 of the same host as this page.
+$("link").href = `${location.protocol}//${location.hostname}:8080/`;
+refresh();
+setInterval(refresh, 500);
+</script>
