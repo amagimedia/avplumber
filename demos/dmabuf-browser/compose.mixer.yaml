@@ -39,6 +39,6 @@ services:
         done
         exec python3 /opt/avplumber/demos/mixer/mixer.py "$$@" \
           --fps "$$MIXER_FPS" --janus-output --janus-host "$$JANUS_HOST" \
-          --janus-video-port "$$JANUS_VIDEO_PORT" --janus-rtcp-port "$$JANUS_VIDEO_RTCP_PORT" \
+          --janus-video-port "$$JANUS_VIDEO_PORT" \
           --janus-video-bitrate-kbps "$$MIXER_BITRATE_KBPS" --remote-control-port 7777 \
           --dmabuf-open "$$MIXER_SOURCE_URL" --dmabuf-size "$$MIXER_SOURCE_SIZE"

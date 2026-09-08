@@ -348,3 +348,24 @@ def test_cli_parses_dmabuf_options():
         parse_args(["--input", "dmabuf://x", "--janus-output", "--dmabuf-size", "wide"])
     with pytest.raises(ValueError):
         GraphOptions(inputs=("dmabuf://", ), output="p.mp4").validate()
+
+
+def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
+    from avpmixer import dmabuf_inputs
+
+    calls = []
+
+    def fake_rest(base_url, method, path, body=None):
+        calls.append((method, path, body))
+        if path == "/status":
+            return {"windows": [{"id": "page_00"}]}
+        return {"ok": True}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01"], "http://p", 480, 270, 60)
+
+    assert [c[:2] for c in calls] == [
+        ("GET", "/status"), ("POST", "/window/close"), ("POST", "/window/open"), ("POST", "/window/open")]
+    assert calls[1][2] == {"id": "page_00"}
+    assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
+                           "audio": False}
