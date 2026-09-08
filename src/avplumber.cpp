@@ -29,8 +29,8 @@
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
 #include "SharedTimeline.hpp"
-#include "MixerState.hpp"
-#include "mixer_orchestrator.hpp"
+#include "mixer/MixerState.hpp"
+#include "mixer/mixer_orchestrator.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"

@@ -7,7 +7,7 @@ import sys
 import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from avpmixer.control import AvpConnection
-from control import mixer_command
+from avpmixer.control import mixer_command
 
 async def run(args):
     c = AvpConnection(args.host, args.port)

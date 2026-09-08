@@ -1,8 +1,8 @@
 #pragma once
 #include "MixerState.hpp"
-#include "SharedTimeline.hpp"
-#include "graph_mgmt.hpp"
-#include "instance_shared.hpp"
+#include "../SharedTimeline.hpp"
+#include "../graph_mgmt.hpp"
+#include "../instance_shared.hpp"
 #include <cstdint>
 #include <functional>
 #include <memory>

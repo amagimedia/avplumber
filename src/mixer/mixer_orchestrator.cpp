@@ -1,7 +1,7 @@
 #include "mixer_orchestrator.hpp"
-#include "avutils.hpp"
-#include "graph_interfaces.hpp"
-#include "mixer/OutputSnapshot.hpp"
+#include "../avutils.hpp"
+#include "../graph_interfaces.hpp"
+#include "OutputSnapshot.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>

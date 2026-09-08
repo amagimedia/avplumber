@@ -22,12 +22,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-try:  # Package-relative when imported, path-relative when run as a script.
-    from .control import mixer_command
-except ImportError:  # pragma: no cover - exercised by the __main__ path
-    from control import mixer_command  # type: ignore[no-redef]
-
-from avpmixer.control import AvpConnection
+from avpmixer.control import AvpConnection, mixer_command
 
 PAGE = Path(__file__).with_name("webui") / "index.html"
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")

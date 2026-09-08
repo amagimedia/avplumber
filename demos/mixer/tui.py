@@ -16,18 +16,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from avpmixer.control import AvpConnection
 
-try:
-    from .control import (
-        mixer_command,
-        parse_mixer_status,
-        parse_scene_list,
-    )
-except ImportError:
-    from control import (
-        mixer_command,
-        parse_mixer_status,
-        parse_scene_list,
-    )
+from avpmixer.control import mixer_command, parse_mixer_status, parse_scene_list
 
 
 class SceneScrollBarRender(ScrollBarRender):
