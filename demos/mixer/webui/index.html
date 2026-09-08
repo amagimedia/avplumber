@@ -57,6 +57,7 @@
   #direct { border-color: var(--edge); }
   #direct[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  [hidden] { display: none !important; }   /* the rule above would otherwise win */
   input { background: #0e1216; color: var(--text); border: 1px solid var(--edge); border-radius: 6px;
           padding: 7px 9px; font: inherit; }
   input#fade_seconds { width: 5em; }
