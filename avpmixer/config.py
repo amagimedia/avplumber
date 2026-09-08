@@ -9,6 +9,7 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -200,18 +201,24 @@ def load(path: str) -> MixerConfig:
 
 
 def probe_video_size(path: str) -> Tuple[int, int]:
-    """Width and height of the first video stream, via ffprobe."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        raise ConfigError(f"ffprobe not found; declare width and height for '{path}'")
-    out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height", "-of", "csv=p=0", path],
-                         capture_output=True, text=True, timeout=30)
-    try:
-        width, height = (int(v) for v in out.stdout.strip().split(",")[:2])
-    except ValueError:
-        raise ConfigError(f"cannot probe the size of '{path}': {out.stderr.strip() or out.stdout.strip()}") from None
-    return width, height
+    """Width and height of the first video stream, via ffprobe or, failing that, ffmpeg -i."""
+    ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
+    text = ""
+    if ffprobe:
+        out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=width,height", "-of", "csv=p=0", path],
+                             capture_output=True, text=True, timeout=30)
+        text = out.stdout.strip().replace(",", "x")
+    elif ffmpeg:
+        out = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=30)
+        match = re.search(r"Video:.*?\b(\d{2,5})x(\d{2,5})\b", out.stderr)
+        text = f"{match.group(1)}x{match.group(2)}" if match else ""
+    else:
+        raise ConfigError(f"neither ffprobe nor ffmpeg found; declare width and height for '{path}'")
+    match = re.match(r"^(\d+)x(\d+)", text)
+    if not match:
+        raise ConfigError(f"cannot probe the size of '{path}'")
+    return int(match.group(1)), int(match.group(2))
 
 
 def with_probed_sizes(cfg: MixerConfig, probe=probe_video_size) -> MixerConfig:
