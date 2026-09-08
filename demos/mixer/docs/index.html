@@ -3,27 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="AVPlumber live mixer: 15 seconds of Direct-mode Cut, Fade and transparent media wipes, with program output beside real terminal controls.">
+  <meta name="description" content="AVPlumber live mixer: sixteen sources — live browser pages and clips — on one GPU canvas, cut, faded and wiped from a browser control surface, described by one JSON document.">
   <title>Live mixer demo · AVPlumber</title>
   <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #edf4ff; background: #080d17; }
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      color: #edf4ff;
+      background: #080d17;
+      --panel: #101827;
+      --line: #26354a;
+      --muted: #a4b4ca;
+      --body: #b5c4d8;
+      --accent: #57dbc2;
+    }
     * { box-sizing: border-box; }
     body { margin: 0; }
-    main { max-width: 1280px; margin: auto; padding: 36px 24px 64px; }
+    main { max-width: 1180px; margin: auto; padding: 36px 24px 56px; }
     header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-    h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -1px; margin: 0; }
-    h1 span, a { color: #57dbc2; }
+    h1 { font-size: clamp(26px, 4vw, 38px); letter-spacing: -1px; margin: 0; }
+    h1 span, a { color: var(--accent); }
     a { text-underline-offset: 4px; }
-    p { color: #b5c4d8; line-height: 1.6; max-width: 75ch; }
-    video, figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
-    video { aspect-ratio: 16 / 9; margin-top: 24px; }
-    .chapters { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
-    button { font: inherit; color: #edf4ff; background: #182236; border: 1px solid #334157; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
-    button:hover, button:focus-visible { background: #25423f; border-color: #57dbc2; }
-    h2 { margin-top: 44px; font-size: 26px; }
-    figure { margin: 20px 0 0; }
-    figcaption { color: #a4b4ca; line-height: 1.6; margin-top: 12px; }
-    footer { margin-top: 36px; border-top: 1px solid #26354a; padding-top: 20px; color: #a4b4ca; }
+    p { color: var(--body); line-height: 1.6; max-width: 78ch; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 18px 0 0; }
+    figure { margin: 22px 0 0; }
+    figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
+    figcaption { color: var(--muted); line-height: 1.6; margin-top: 10px; max-width: 90ch; font-size: 14px; }
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 26px 0 0; padding: 0; list-style: none; }
+    .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+    .figures b { display: block; font-size: 25px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+    .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
+    code { background: #182236; border: 1px solid #2b3a52; border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
+    footer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--muted); line-height: 2; }
     @media (max-width: 600px) { main { padding: 24px 14px; } header { align-items: start; flex-direction: column; } }
   </style>
 </head>
@@ -33,47 +44,29 @@
     <h1>AVPlumber <span>Live mixer</span></h1>
     <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Code &amp; setup guide</a>
   </header>
-  <p><strong>60 fps throughout: all 16 native 1920×1080 inputs → 1080×1920 portrait output at 60 fps.</strong> Input files and encoded output are 60 fps; per-source frame continuity is qualified below.</p>
-  <p><strong>Current 1080p input benchmark:</strong> sixteen native 1920×1080@60 H.264 inputs, steady 16-box composition, and 1080×1920@60 NVENC output at 8 Mbit/s. Over 30 seconds on a Tesla T4: <strong>8.0% GPU compute, 76.7% NVDEC decoder, 23.0% NVENC encoder, and 0.58 AVPlumber CPU cores</strong>; GPU memory was 1,958 MiB. These are separate activity measurements: 8% is not total GPU capacity usage. <a href="runtime-load-1080p.json">Samples and conditions</a>.</p>
-  <p><strong>Fullscreen, with all sixteen sources still active:</strong> 7.0% GPU compute · 76.5% NVDEC · 22.2% NVENC · 0.53 CPU cores, measured separately over 30 seconds.</p>
-  <p><strong>Continuity limitation:</strong> a separate 11.4-second pixel check had regular 60 fps output timestamps and no RTP loss, but one source repeated 33.43% and skipped 33.28% of frames; the other fifteen had 0% repeats/skips. Per-source timing remains unresolved. <a href="continuity-1080p.json">Both short capture results and method</a>.</p>
-  <p>Direct editing with the real terminal controls on the right and program output on the left. Fullscreen, 16, 8, 4 and 2 boxes, with Cut, Fade and a transparent media-file Wipe.</p>
-  <video id="demo" controls playsinline preload="metadata" poster="mixer-demo.jpg">
-    <source src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4" type="video/mp4">
-    <a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4"><img src="mixer-demo.jpg" alt="Mixer program beside terminal controls; click to download the MP4."></a>
-  </video>
-  <nav class="chapters" aria-label="Jump to a transition">
-    <button data-seek="0">Fullscreen</button>
-    <button data-seek="0.9">Media wipe → 16</button>
-    <button data-seek="3.7">Cut → 8</button>
-    <button data-seek="5.8">Fade → 4</button>
-    <button data-seek="8.3">Media wipe → 2</button>
-    <button data-seek="11.3">Cut → fullscreen</button>
-    <button data-seek="13.4">Fade → 16</button>
-  </nav>
-  <p><a href="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4" download>Download the MP4</a> · 15 seconds · 60 fps · 1600×900 · 0.95 MB · silent H.264.</p>
-  <h2 id="graph">The complete processing graph</h2>
-  <p>122 nodes and 140 queues, shown as six groups. Open the overview to inspect every node in the full ungrouped graph, in a separate tab.</p>
 
-  <p>The video above and earlier 4% result used 640×360 inputs. The current benchmark uses native 1080p sources; source width, height and FPS are configurable in the <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md#generated-input-size-and-fps">source generator</a>. Cut latency was measured separately with the earlier 360p inputs: 182.3 ms minimum, 237.7 ms mean, 188.8 ms median and 503.9 ms maximum over eleven trials. <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/latency.md">Latency conditions and raw samples</a>.</p>
   <figure>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="mixer-graph-grouped.png" alt="Grouped live mixer graph: inputs, compositor slots, transitions, media wipe and output. Open the full ungrouped graph in a new tab." loading="lazy"></a>
-    <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer">Open full ungrouped graph ↗</a> · In the live WebUI, enter a group and use ← Back to return. Edge colours and fill markers show sampled flow without continuous animation.</figcaption>
+    <img src="webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length.">
+    <figcaption>The control surface during a live run: a tile per published scene, a button per cached wipe clip, Direct on and a half-second fade. A terminal UI speaks the same protocol and can run beside it.</figcaption>
   </figure>
+
+  <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from this page, with the whole show described by one JSON document.</p>
+
+  <ul class="figures">
+    <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
+    <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
+    <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
+    <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
+  </ul>
+
+  <p>Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips are decoded once at start and replayed from GPU memory, drawn as one alpha-blended layer by the compositor kernel the scenes use — no CPU scaling anywhere. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
+
   <footer>
-    <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a> ·
-    <a href="https://github.com/amagimedia/avplumber/tree/develop/tools/web-ui">Web UI</a> ·
-    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/guide.md">Controls &amp; recording notes</a>
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Configuration reference</a> — sources, scenes, wipes, renditions, control defaults<br>
+    <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/README.md">Demo README</a> — run it, controls, measured load<br>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer">Processing graph ↗</a> — 122 nodes, 140 queues<br>
+    <a href="https://github.com/amagimedia/avplumber">AVPlumber on GitHub</a>
   </footer>
 </main>
-<script>
-  const video = document.querySelector('#demo');
-  for (const button of document.querySelectorAll('[data-seek]')) {
-    button.addEventListener('click', () => {
-      video.currentTime = Number(button.dataset.seek);
-      video.play().catch(() => {});
-    });
-  }
-</script>
 </body>
 </html>
