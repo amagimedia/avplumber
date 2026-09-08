@@ -94,6 +94,14 @@ public:
                 logstream << "clip_cache: " << key_ << " does not fit the budget; not cached";
             }
         }
+        if (caching_) {
+            // A preload runs with nothing downstream consuming, so waiting for
+            // room would stall the clip half-decoded. The frames that matter are
+            // already in the cache; forwarding is best effort here. A live pass
+            // has a consumer, so this put succeeds and nothing is dropped.
+            this->sink_->put(in, true);
+            return;
+        }
         this->sink_->put(in);
     }
 
