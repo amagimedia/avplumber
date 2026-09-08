@@ -117,7 +117,4 @@ impl crate::graph::Node for PlaceholderNode {
     fn name(&self) -> &str {
         "<placeholder>"
     }
-    fn process(&self) -> crate::graph::Blocked {
-        crate::graph::Blocked::Done
-    }
 }

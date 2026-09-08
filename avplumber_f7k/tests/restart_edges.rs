@@ -263,12 +263,12 @@ impl Node for BlockingPeekNode {
     fn name(&self) -> &str {
         "blocking-peek"
     }
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         if let Some(entered) = self.entered.lock().unwrap().take() {
             entered.send(()).unwrap();
         }
         let _ = self.input.peek_clone(-1);
-        Blocked::Done
+        Ok(Blocked::Done)
     }
 }
 
@@ -306,8 +306,8 @@ impl Node for NaturallyDone {
     fn name(&self) -> &str {
         "naturally-done"
     }
-    fn process(&self) -> Blocked {
-        Blocked::Done
+    fn process(&self) -> Result<Blocked, NodeError> {
+        Ok(Blocked::Done)
     }
 }
 
@@ -348,7 +348,7 @@ impl Node for GatedDirectConsumer {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if let Some(entered) = self.entered.lock().unwrap().take() {
             entered.send(()).unwrap();
             self.release.wait();
@@ -356,7 +356,7 @@ impl Node for GatedDirectConsumer {
         if self.input.get().and_then(|edge| edge.try_take()).is_some() {
             self.received.fetch_add(1, Ordering::SeqCst);
         }
-        Tick::Idle
+        Ok(Tick::Idle)
     }
 }
 
@@ -590,14 +590,14 @@ impl Node for PollNode {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.input.get().and_then(|edge| edge.try_take()).is_some() {
             self.received
                 .as_ref()
                 .unwrap()
                 .fetch_add(1, Ordering::SeqCst);
         }
-        Tick::Idle
+        Ok(Tick::Idle)
     }
 }
 
@@ -777,9 +777,9 @@ impl Node for RestartDirectSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         self.writers.lock().unwrap().push(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         ctx.wait_tick();
-        Tick::Idle
+        Ok(Tick::Idle)
     }
 }
 
@@ -806,21 +806,21 @@ impl Node for RestartDirectConsumer {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let input = self.input.get().unwrap();
         if !self.consume {
             ctx.wait_readable(input.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         match input.try_take() {
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::SeqCst);
-                Tick::Again
+                Ok(Tick::Again)
             }
-            Some(_) => Tick::Again,
+            Some(_) => Ok(Tick::Again),
             None => {
                 ctx.wait_readable(input.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
         }
     }
@@ -862,34 +862,34 @@ impl Node for RestartDirectForward {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.output.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let Some(src) = self.input.get() else {
-            return Tick::Done;
+            return Ok(Tick::Done);
         };
         let Some(sink) = self.output.get() else {
-            return Tick::Done;
+            return Ok(Tick::Done);
         };
         if sink.is_full() {
             ctx.wait_writable(sink.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         match src.peek_clone(0) {
             Some(EdgeItem::Event(_)) => {
                 ctx.wait_tick();
-                Tick::Idle
+                Ok(Tick::Idle)
             }
             None => {
                 ctx.wait_readable(src.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
             Some(EdgeItem::Buffer(_)) => match src.try_take() {
                 Some(EdgeItem::Buffer(buf)) => match sink.offer(buf) {
-                    Ok(()) => Tick::Again,
-                    Err((Push::Full, _)) => Tick::Idle,
-                    Err((Push::Closed | Push::Dropped, _)) => Tick::Done,
-                    Err((Push::Accepted, _)) => Tick::Again,
+                    Ok(()) => Ok(Tick::Again),
+                    Err((Push::Full, _)) => Ok(Tick::Idle),
+                    Err((Push::Closed | Push::Dropped, _)) => Ok(Tick::Done),
+                    Err((Push::Accepted, _)) => Ok(Tick::Again),
                 },
-                _ => Tick::Again,
+                _ => Ok(Tick::Again),
             },
         }
     }
@@ -924,23 +924,23 @@ impl Node for RestartHoldSink {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.hold.load(Ordering::Acquire) {
             ctx.wait_readable(self.release.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         let Some(input) = self.input.get() else {
-            return Tick::Done;
+            return Ok(Tick::Done);
         };
         match input.try_take() {
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::SeqCst);
-                Tick::Again
+                Ok(Tick::Again)
             }
-            Some(_) => Tick::Again,
+            Some(_) => Ok(Tick::Again),
             None => {
                 ctx.wait_readable(input.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
         }
     }
@@ -1332,9 +1332,9 @@ impl Node for EgressSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         self.writers.lock().unwrap().push(edge);
     }
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         std::thread::sleep(Duration::from_millis(1));
-        Blocked::Again
+        Ok(Blocked::Again)
     }
 }
 

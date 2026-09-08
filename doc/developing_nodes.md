@@ -2,6 +2,8 @@
 
 Before trying to understand this document or avplumber's source code, read all the [README](../README.md).
 
+This document covers C++ nodes. Rust nodes are covered by [developing_nodes_rust.md](developing_nodes_rust.md).
+
 ## Directory structure
 
 Source codes of all nodes reside in `src/nodes/` directory. Each `.cpp` file corresponds to one or more nodes.

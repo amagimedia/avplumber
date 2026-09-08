@@ -16,12 +16,12 @@ use avplumber_f7k::graph::buffer::AvpMediaType;
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeHint, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{Media, PacketExt};
-use avplumber_f7k::graph::node::{Node, NodeBody, NodeKind, Tick};
+use avplumber_f7k::graph::node::Tick;
 use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::routing::{self, MEDIA_TYPE_VIDEO, RouteKey};
 use avplumber_f7k::graph::spec::{CatalogStream, Spec, StreamSelection};
-use avplumber_f7k::scaffold::{EdgeSlot, PollStep, poll_body};
+use avplumber_f7k::scaffold::{Io, PollNode, Polling};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct DemuxSpec {
@@ -41,7 +41,7 @@ pub struct DemuxSpec {
 
 impl NodeSpec for DemuxSpec {
     const TYPE_NAME: &'static str = "demux";
-    type Node = StreamDemuxer;
+    type Node = Polling<StreamDemuxer>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         if self.routing.is_empty() {
@@ -59,14 +59,13 @@ impl NodeSpec for DemuxSpec {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        Ok(StreamDemuxer {
-            name: name.into(),
+        Ok(Polling(StreamDemuxer {
+            io: Io::new(name, NodePhase::Poll),
             routes,
             params: self,
-            input: EdgeSlot::default(),
             outs: Mutex::new(BTreeMap::new()),
             state: Mutex::new(State::default()),
-        })
+        }))
     }
 
     /// The routing values *are* the output edge names, so a script does not
@@ -74,7 +73,13 @@ impl NodeSpec for DemuxSpec {
     fn bindings(&self) -> Vec<(avplumber_f7k::core::PadDirection, String, String)> {
         self.routing
             .iter()
-            .map(|(key, edge)| (avplumber_f7k::core::PadDirection::Output, key.clone(), edge.clone()))
+            .map(|(key, edge)| {
+                (
+                    avplumber_f7k::core::PadDirection::Output,
+                    key.clone(),
+                    edge.clone(),
+                )
+            })
             .collect()
     }
 }
@@ -105,39 +110,28 @@ struct State {
 }
 
 pub struct StreamDemuxer {
-    name: String,
+    io: Io,
     /// `params.routing`, parsed.
     routes: Vec<Route>,
     /// What the script asked for, verbatim: [`DemuxSpec`] documents each field, and
     /// holding it whole is what keeps them from being declared twice.
     params: DemuxSpec,
-    input: EdgeSlot,
     outs: Mutex<BTreeMap<String, Arc<dyn Edge>>>,
     state: Mutex<State>,
 }
 
-impl Node for StreamDemuxer {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn kind(&self) -> NodeKind {
-        NodeKind::Poll
+impl PollNode for StreamDemuxer {
+    fn io(&self) -> &Io {
+        &self.io
     }
 
     fn pads(&self) -> NodePads {
         NodePads {
-            sources: vec![PadDecl {
-                name: "in".into(),
-                media: AvpMediaType::PACKET,
-            }],
+            sources: vec![PadDecl::new("in", AvpMediaType::PACKET)],
             sinks: self
                 .routes
                 .iter()
-                .map(|route| PadDecl {
-                    name: route.pad.clone(),
-                    media: AvpMediaType::PACKET,
-                })
+                .map(|route| PadDecl::new(route.pad.clone(), AvpMediaType::PACKET))
                 .collect(),
         }
     }
@@ -147,7 +141,7 @@ impl Node for StreamDemuxer {
         // normally drains this before it ever publishes a catalog, so the very
         // first one already answers our filter.
         self.post_filter_hint(&edge);
-        self.input.bind(edge);
+        self.io.input_slot.bind(edge);
     }
 
     fn bind_sink(&self, pad: &str, edge: Arc<dyn Edge>) {
@@ -163,19 +157,13 @@ impl Node for StreamDemuxer {
         drop(state);
         // Re-posted for safety: a restart may have handed this edge a producer
         // that has never seen our filter.
-        if let Some(input) = self.input.get() {
+        if let Some(input) = self.io.input_slot.get() {
             self.post_filter_hint(&input);
         }
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        poll_body(self)
-    }
-}
-
-impl PollStep for StreamDemuxer {
     fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
-        let input = self.input.require(&self.name, NodePhase::Poll, "input")?;
+        let input = self.io.input()?;
         let mut state = self.state.lock().unwrap();
 
         // A held-back packet goes out before anything new is taken, so ordering
@@ -244,7 +232,7 @@ impl StreamDemuxer {
             Media::Packet(packet) => packet.stream_index,
             other => {
                 return Err(NodeError::new(
-                    &self.name,
+                    &self.io.name,
                     NodePhase::Poll,
                     format!("expected a packet, got {:?}", other.media_type()),
                 ));
@@ -272,7 +260,10 @@ impl StreamDemuxer {
             // packet is dropped — audio included.
             let is_key = matches!(&buffer, Media::Packet(packet) if packet.is_key());
             if is_key && state.video.contains(&index) {
-                log::debug!("{}: keyframe on stream {index}, forwarding now", self.name);
+                log::debug!(
+                    "{}: keyframe on stream {index}, forwarding now",
+                    self.io.name
+                );
                 state.waiting_for_keyframe = false;
             } else {
                 return Ok(Tick::Again);
@@ -301,7 +292,7 @@ impl StreamDemuxer {
                 Emitted::Parked
             }
             Err((Push::Closed, _)) => {
-                log::info!("{}: an output edge closed, finishing", self.name);
+                log::info!("{}: an output edge closed, finishing", self.io.name);
                 Emitted::Closed
             }
             // The edge took it and discarded it: nothing left to retry with.
@@ -322,7 +313,7 @@ impl StreamDemuxer {
             other => {
                 log::warn!(
                     "{}: ignoring a {:?} spec on the input; expected a stream catalog",
-                    self.name,
+                    self.io.name,
                     other.media()
                 );
                 return Ok(());
@@ -333,7 +324,7 @@ impl StreamDemuxer {
             // hint yet. Ignore it and wait; the next catalog will match.
             log::debug!(
                 "{}: catalog is for streams_filter {filter:?}, waiting for {:?}",
-                self.name,
+                self.io.name,
                 self.params.streams_filter
             );
             return Ok(());
@@ -344,7 +335,7 @@ impl StreamDemuxer {
         if state.resolved && indices == state.indices {
             log::debug!(
                 "{}: catalog re-delivered unchanged, keeping routes",
-                self.name
+                self.io.name
             );
             return Ok(());
         }
@@ -364,7 +355,7 @@ impl StreamDemuxer {
 
         log::info!(
             "{}: routing streams {:?} to {:?}",
-            self.name,
+            self.io.name,
             indices,
             resolved.iter().map(|(_, s)| &s.pad).collect::<Vec<_>>()
         );
@@ -387,14 +378,14 @@ impl StreamDemuxer {
                 if route.key.optional {
                     log::info!(
                         "{}: no optional stream `{}`, leaving `{}` unbound",
-                        self.name,
+                        self.io.name,
                         route.pad,
                         route.edge_name
                     );
                     continue;
                 }
                 return Err(NodeError::new(
-                    &self.name,
+                    &self.io.name,
                     NodePhase::Spec,
                     format!("no stream `{}` in the input", route.pad),
                 ));
@@ -402,7 +393,7 @@ impl StreamDemuxer {
             if let Some((_, first)) = out.iter().find(|(routed, _)| *routed == index) {
                 // C++ `addStream` throws on the same thing.
                 return Err(NodeError::new(
-                    &self.name,
+                    &self.io.name,
                     NodePhase::Spec,
                     format!(
                         "routing keys `{}` and `{}` both resolve to stream {index}",
@@ -429,7 +420,7 @@ impl StreamDemuxer {
     fn output(&self, pad: &str) -> Result<Arc<dyn Edge>, NodeError> {
         self.outs.lock().unwrap().get(pad).cloned().ok_or_else(|| {
             NodeError::new(
-                &self.name,
+                &self.io.name,
                 NodePhase::Spec,
                 format!("output pad `{pad}` is not bound"),
             )
@@ -440,14 +431,14 @@ impl StreamDemuxer {
         if state.dropped_early > 0 {
             log::info!(
                 "{}: dropped {} packet(s) that arrived before the catalog",
-                self.name,
+                self.io.name,
                 state.dropped_early
             );
         }
         if state.dropped_unrouted > 0 {
             log::info!(
                 "{}: dropped {} packet(s) of unrouted streams",
-                self.name,
+                self.io.name,
                 state.dropped_unrouted
             );
         }

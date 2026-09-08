@@ -24,13 +24,13 @@ use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeHint};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::{Blocked, Node, NodeBody, NodeKind};
-use avplumber_f7k::graph::pad::{NodePads, PadDecl};
+use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{CatalogStream, PacketSpec, Spec, StreamSelection};
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::error::{av_error, code_of, is_eagain};
-use avplumber_f7k::scaffold::{BlockingStep, EdgeSlot, Park, Pushed, blocking_body, push_blocking};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, BlockingNode};
 
 /// C++ `int timeout = 5`.
 const DEFAULT_TIMEOUT_S: f64 = 5.0;
@@ -67,7 +67,7 @@ pub struct InputSpec {
 
 impl NodeSpec for InputSpec {
     const TYPE_NAME: &'static str = "input";
-    type Node = StreamInput;
+    type Node = Blocking<StreamInput>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         let eof_drain = match self.eof_mode.as_deref() {
@@ -97,14 +97,12 @@ impl NodeSpec for InputSpec {
         let ctx = ctx?;
         log_streams(name, &self.url, &ctx);
 
-        Ok(StreamInput {
-            name: name.into(),
+        Ok(Blocking(StreamInput {
+            io: BlockingIo::new(name),
             params: self,
             timeout_s,
             eof_drain,
             interrupt,
-            park: Arc::new(Park::default()),
-            out: EdgeSlot::default(),
             state: Mutex::new(Some(State {
                 ctx,
                 filter: None,
@@ -112,12 +110,12 @@ impl NodeSpec for InputSpec {
                 eof_sent: false,
                 finish_at_us: None,
             })),
-        })
+        }))
     }
 }
 
 /// Read by the libav interrupt callback, written by the node's own thread and by
-/// [`Node::interrupt`].
+/// [`BlockingNode::interrupt`].
 #[derive(Default)]
 struct InterruptState {
     /// Monotonic microseconds past which a blocking libav call gives up.
@@ -193,7 +191,7 @@ struct State {
 }
 
 pub struct StreamInput {
-    name: String,
+    io: BlockingIo,
     /// What the script asked for, verbatim: [`InputSpec`] documents each field, and
     /// holding it whole is what keeps them from being declared twice.
     params: InputSpec,
@@ -204,40 +202,20 @@ pub struct StreamInput {
     /// Aborts a blocking call *inside* libav, through the context's
     /// `AVIOInterruptCB`.
     interrupt: Arc<InterruptState>,
-    /// Where the node waits on the Rust side: for room on a full output edge, and
-    /// for the `stop_delay` countdown. [`Park`] documents why it is a field of its
-    /// own rather than part of `state`.
-    park: Arc<Park>,
-    out: EdgeSlot,
     state: Mutex<Option<State>>,
 }
 
-impl Node for StreamInput {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
+impl BlockingNode for StreamInput {
+    fn io(&self) -> &BlockingIo {
+        &self.io
     }
 
     fn pads(&self) -> NodePads {
-        NodePads {
-            sources: Vec::new(),
-            sinks: vec![PadDecl {
-                name: "out".into(),
-                media: AvpMediaType::PACKET,
-            }],
-        }
-    }
-
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.out.bind(edge);
+        NodePads::output(AvpMediaType::PACKET)
     }
 
     fn start(&self) {
         self.interrupt.reset();
-        self.park.reset();
         if let Some(state) = self.state.lock().unwrap().as_mut() {
             // Re-publish the catalog for this run: the edge may have been reset,
             // and a consumer rebuilt with us needs the spec again.
@@ -247,13 +225,12 @@ impl Node for StreamInput {
         }
     }
 
-    /// Two blocking sites in two different worlds, so two wake mechanisms. This
-    /// node declares no source pads, so the executor's "interrupt the node's
-    /// source edges" pass finds nothing — this call is the only handle anyone has
-    /// on a running `input`.
+    /// The second blocking site, inside libav: [`Blocking`] wakes the park, this
+    /// reaches the `AVIOInterruptCB`. This node declares no source pads, so the
+    /// executor's "interrupt the node's source edges" pass finds nothing — the
+    /// node's own interrupt is the only handle anyone has on a running `input`.
     fn interrupt(&self) {
         self.interrupt.request_end();
-        self.park.interrupt();
     }
 
     fn stop(&self) {
@@ -261,22 +238,17 @@ impl Node for StreamInput {
         // as soon as the body is done; packets already pushed are refcounted and
         // outlive the context.
         if self.state.lock().unwrap().take().is_some() {
-            log::debug!("{}: closed {}", self.name, self.params.url);
+            log::debug!("{}: closed {}", self.io.name, self.params.url);
         }
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
-    }
-}
-
-impl BlockingStep for StreamInput {
     fn step(&self) -> Result<Blocked, NodeError> {
-        let out = self.out.require(&self.name, NodePhase::Process, "output")?;
+        let out = self.io.output()?;
         let mut guard = self.state.lock().unwrap();
-        let state = guard
-            .as_mut()
-            .ok_or_else(|| self.error(NodePhase::Process, "the input is already closed"))?;
+        let state = guard.as_mut().ok_or_else(|| {
+            self.io
+                .error(NodePhase::Process, "the input is already closed")
+        })?;
 
         if self.interrupt.should_end() {
             return Ok(Blocked::Done);
@@ -285,10 +257,10 @@ impl BlockingStep for StreamInput {
         // EOF already announced, `stop_delay` running down.
         if let Some(finish_at) = state.finish_at_us {
             if now_us() >= finish_at {
-                log::info!("{}: stop_delay elapsed, finishing input", self.name);
+                log::info!("{}: stop_delay elapsed, finishing input", self.io.name);
                 return Ok(Blocked::Done);
             }
-            self.park.wait(10);
+            self.io.wait(10);
             return Ok(Blocked::Again);
         }
 
@@ -303,11 +275,11 @@ impl BlockingStep for StreamInput {
             Ok(None) => return self.on_eof(state, &out),
             Err(error) => {
                 if self.interrupt.should_end() {
-                    log::info!("{}: read interrupted by stop", self.name);
+                    log::info!("{}: read interrupted by stop", self.io.name);
                     return Ok(Blocked::Done);
                 }
                 if self.interrupt.take_timed_out() {
-                    return Err(self.error(
+                    return Err(self.io.error(
                         NodePhase::Process,
                         format!(
                             "timeout of {}s exceeded reading {}",
@@ -320,7 +292,7 @@ impl BlockingStep for StreamInput {
                 if code_of(&error).is_some_and(is_eagain) {
                     return Ok(Blocked::Again);
                 }
-                return Err(self.error(
+                return Err(self.io.error(
                     NodePhase::Process,
                     format!("reading {} failed: {error}", self.params.url),
                 ));
@@ -328,11 +300,11 @@ impl BlockingStep for StreamInput {
         };
 
         if packet.is_corrupt() {
-            log::warn!("{}: got incomplete packet, dropping", self.name);
+            log::warn!("{}: got incomplete packet, dropping", self.io.name);
             return Ok(Blocked::Again);
         }
         if !packet.ts().is_valid() && !packet.dts().is_valid() {
-            log::warn!("{}: got packet without PTS & DTS, dropping", self.name);
+            log::warn!("{}: got packet without PTS & DTS, dropping", self.io.name);
             return Ok(Blocked::Again);
         }
 
@@ -340,7 +312,7 @@ impl BlockingStep for StreamInput {
         // timestamps through it, so it is stamped from the stream here, once.
         let index = packet.stream_index;
         let time_base = stream_time_base(&state.ctx, index).ok_or_else(|| {
-            self.error(
+            self.io.error(
                 NodePhase::Process,
                 format!("packet from unknown stream {index}"),
             )
@@ -357,26 +329,15 @@ impl BlockingStep for StreamInput {
             },
         );
 
-        match push_blocking(&self.park, &out, Media::Packet(packet), || {
+        self.io.push_with(&out, Media::Packet(packet), || {
             // The anti-deadlock rule: a producer with no room still answers the
             // question its consumer is parked on.
             self.serve_hints(state, &out)
-        })? {
-            Pushed::Ok => Ok(Blocked::Again),
-            Pushed::Interrupted => Ok(Blocked::Done),
-            Pushed::Closed => {
-                log::info!("{}: output edge closed, finishing", self.name);
-                Ok(Blocked::Done)
-            }
-        }
+        })
     }
 }
 
 impl StreamInput {
-    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
-        NodeError::new(&self.name, phase, message)
-    }
-
     /// Drains the consumer's hints and (re-)publishes the catalog when it no
     /// longer answers the current question. Idempotent, and cheap when nothing
     /// changed: one uncontended lock.
@@ -385,7 +346,7 @@ impl StreamInput {
             match hint {
                 EdgeHint::StreamsFilter(filter) => {
                     if state.filter.as_deref() != Some(filter.as_str()) {
-                        log::info!("{}: streams_filter is now `{filter}`", self.name);
+                        log::info!("{}: streams_filter is now `{filter}`", self.io.name);
                         state.filter = Some(filter);
                         state.catalog_published = false;
                     }
@@ -427,7 +388,7 @@ impl StreamInput {
 
         log::debug!(
             "{}: publishing a catalog of {} streams (filter {:?})",
-            self.name,
+            self.io.name,
             streams.len(),
             filter
         );
@@ -441,7 +402,7 @@ impl StreamInput {
     /// a specifier, since only it owns the `AVFormatContext`.
     fn match_streams(&self, state: &mut State, filter: &str) -> Result<Vec<bool>, NodeError> {
         let specifier = CString::new(filter).map_err(|_| {
-            self.error(
+            self.io.error(
                 NodePhase::Spec,
                 format!("streams_filter `{filter}` contains a NUL"),
             )
@@ -454,7 +415,7 @@ impl StreamInput {
             let matched =
                 unsafe { ffi::avformat_match_stream_specifier(ctx, stream, specifier.as_ptr()) };
             if matched < 0 {
-                return Err(self.error(
+                return Err(self.io.error(
                     NodePhase::Spec,
                     format!("invalid streams_filter `{filter}`: {}", av_error(matched)),
                 ));
@@ -481,18 +442,18 @@ impl StreamInput {
         }
         log::info!(
             "{}: demuxing streams {:?} only",
-            self.name,
+            self.io.name,
             selection.enabled
         );
     }
 
     fn on_eof(&self, state: &mut State, out: &Arc<dyn Edge>) -> Result<Blocked, NodeError> {
-        log::info!("{}: end of input", self.name);
+        log::info!("{}: end of input", self.io.name);
         if let Some(delay_ms) = self.params.stop_delay {
             // C++ sends the EOF marker here regardless of eof_mode.
             self.send_eof_once(state, out);
             state.finish_at_us = Some(now_us().saturating_add(delay_ms.saturating_mul(1000)));
-            log::info!("{}: delaying finish by {delay_ms} ms", self.name);
+            log::info!("{}: delaying finish by {delay_ms} ms", self.io.name);
             return Ok(Blocked::Again);
         }
         if self.eof_drain {

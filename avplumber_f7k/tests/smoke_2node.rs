@@ -14,7 +14,7 @@ use avplumber_f7k::abi::{
 };
 use avplumber_f7k::graph::AvpMediaType;
 use avplumber_f7k::{
-    AvpNodeVtable, Blocked, Edge, EdgeEvent, EdgeItem, Media, Node, NodeKind, Push,
+    AvpNodeVtable, Blocked, Edge, EdgeEvent, EdgeItem, Media, Node, NodeError, NodeKind, Push,
     register_factory,
 };
 
@@ -90,21 +90,21 @@ impl Node for StubSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.sink.set(edge);
     }
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         let sink = self.sink.get().expect("sink bound before process");
         let n = self.produced.load(Ordering::Acquire);
         if n >= NFRAMES {
             sink.push_event(EdgeEvent::Eof);
-            return Blocked::Done;
+            return Ok(Blocked::Done);
         }
         let buf = make_media(n as i64);
         match sink.push(buf) {
             Push::Accepted => {
                 self.produced.store(n + 1, Ordering::Release);
-                Blocked::Again
+                Ok(Blocked::Again)
             }
-            Push::Full => Blocked::Again,
-            Push::Closed | Push::Dropped => Blocked::Done,
+            Push::Full => Ok(Blocked::Again),
+            Push::Closed | Push::Dropped => Ok(Blocked::Done),
         }
     }
 }
@@ -144,16 +144,16 @@ impl Node for StubSink {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.source.set(edge);
     }
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         let source = self.source.get().expect("source bound before process");
         match source.take(-1) {
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::Release);
-                Blocked::Again
+                Ok(Blocked::Again)
             }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => Blocked::Done,
-            Some(_) => Blocked::Again,
-            None => Blocked::Done,
+            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Blocked::Done),
+            Some(_) => Ok(Blocked::Again),
+            None => Ok(Blocked::Done),
         }
     }
 }

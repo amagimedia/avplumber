@@ -240,7 +240,7 @@ impl Node for Sentinel {
     fn start(&self) {
         self.state.starts.lock().unwrap().push(self.name.clone());
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let video_input = self.video_input.get().unwrap();
         let audio_input = self.audio_input.get().unwrap();
         for (input, video) in [(video_input, true), (audio_input, false)] {
@@ -280,19 +280,19 @@ impl Node for Sentinel {
             ctx.wait_readable(video_input.clone());
             ctx.wait_readable(audio_input.clone());
             ctx.wait_deadline(Instant::now() + Duration::from_micros(delay_us));
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         let video_output = self.video_output.get().unwrap();
         let audio_output = self.audio_output.get().unwrap();
         if video_output.is_full() || audio_output.is_full() {
             ctx.wait_writable(video_output.clone());
             ctx.wait_writable(audio_output.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         if video_output.push(stub(AvpMediaType::VIDEO, pts)) != Push::Accepted
             || audio_output.push(stub(AvpMediaType::AUDIO, pts)) != Push::Accepted
         {
-            return Tick::Done;
+            return Ok(Tick::Done);
         }
 
         let pending = std::mem::take(&mut *self.pending_raw.lock().unwrap());
@@ -323,7 +323,7 @@ impl Node for Sentinel {
                 cursor.generation,
             )
             .expect("Sentinel owns the only correction member");
-        Tick::Again
+        Ok(Tick::Again)
     }
 }
 
@@ -354,21 +354,21 @@ impl Node for Forward {
     fn start(&self) {
         self.state.starts.lock().unwrap().push(self.name.clone());
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let input = self.input.get().unwrap();
         match input.try_take() {
             Some(EdgeItem::Buffer(media)) => match self.output.get().unwrap().push(media) {
-                Push::Accepted => Tick::Again,
+                Push::Accepted => Ok(Tick::Again),
                 Push::Full => {
                     ctx.wait_writable(self.output.get().unwrap().clone());
-                    Tick::Idle
+                    Ok(Tick::Idle)
                 }
-                Push::Closed | Push::Dropped => Tick::Done,
+                Push::Closed | Push::Dropped => Ok(Tick::Done),
             },
-            Some(_) => Tick::Again,
+            Some(_) => Ok(Tick::Again),
             None => {
                 ctx.wait_readable(input.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
         }
     }
@@ -412,7 +412,7 @@ impl Node for Mux {
     fn start(&self) {
         self.state.starts.lock().unwrap().push("mux".into());
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.pending_video.lock().unwrap().is_none()
             && let Some(EdgeItem::Buffer(media)) = self.video.get().unwrap().try_take()
         {
@@ -436,18 +436,18 @@ impl Node for Mux {
                 Push::Accepted => {
                     *self.pending_video.lock().unwrap() = None;
                     *self.pending_audio.lock().unwrap() = None;
-                    return Tick::Again;
+                    return Ok(Tick::Again);
                 }
-                Push::Closed | Push::Dropped => return Tick::Done,
+                Push::Closed | Push::Dropped => return Ok(Tick::Done),
                 Push::Full => {
                     ctx.wait_writable(self.output.get().unwrap().clone());
-                    return Tick::Idle;
+                    return Ok(Tick::Idle);
                 }
             }
         }
         ctx.wait_readable(self.video.get().unwrap().clone());
         ctx.wait_readable(self.audio.get().unwrap().clone());
-        Tick::Idle
+        Ok(Tick::Idle)
     }
 }
 
@@ -472,18 +472,18 @@ impl Node for Output {
     fn start(&self) {
         self.state.starts.lock().unwrap().push("output".into());
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let input = self.input.get().unwrap();
         match input.try_take() {
             Some(EdgeItem::Buffer(media)) => {
                 self.state.output_pts.lock().unwrap().push(media.ts().val);
                 self.state.output_ready.notify_all();
-                Tick::Again
+                Ok(Tick::Again)
             }
-            Some(_) => Tick::Again,
+            Some(_) => Ok(Tick::Again),
             None => {
                 ctx.wait_readable(input.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
         }
     }
@@ -501,15 +501,15 @@ impl Node for DelayNode {
     fn kind(&self) -> NodeKind {
         NodeKind::Poll
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.trigger.try_take().is_none() {
             ctx.wait_readable(self.trigger.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         self.state.delay_entered.store(true, Ordering::Release);
         std::thread::sleep(Duration::from_millis(STEP as u64 * 5));
         self.state.delay_done.store(true, Ordering::Release);
-        Tick::Done
+        Ok(Tick::Done)
     }
 }
 

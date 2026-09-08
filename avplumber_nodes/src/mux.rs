@@ -41,12 +41,12 @@ use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{Media, Ts};
-use avplumber_f7k::graph::node::{Node, NodeBody, NodeKind, Tick};
+use avplumber_f7k::graph::node::Tick;
 use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::{MuxStream, PacketSpec, Spec};
 use avplumber_f7k::graph::timebase::{MILLISECONDS, tb_cmp, ts_cmp};
-use avplumber_f7k::scaffold::{EdgeSlot, PollStep, poll_body};
+use avplumber_f7k::scaffold::{Io, PollNode, Polling};
 
 #[cfg(feature = "ffmpeg")]
 use avplumber_f7k::graph::media::PacketExt;
@@ -89,7 +89,7 @@ pub struct MuxSpec {
 
 impl NodeSpec for MuxSpec {
     const TYPE_NAME: &'static str = "mux";
-    type Node = StreamMuxer;
+    type Node = Polling<StreamMuxer>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         let names = src_names(self.src.as_ref())?;
@@ -139,14 +139,13 @@ impl NodeSpec for MuxSpec {
             Some(seconds) => (seconds * 1000.0) as i64,
             None => DEFAULT_TS_SORT_WAIT_MS,
         };
-        Ok(StreamMuxer {
-            name: name.into(),
+        Ok(Polling(StreamMuxer {
+            io: Io::new(name, NodePhase::Poll),
             params: self,
             sync_wait_max_ms,
             pad_names: names,
-            out: EdgeSlot::default(),
             state: Mutex::new(State::new(inputs)),
-        })
+        }))
     }
 }
 
@@ -273,26 +272,21 @@ impl State {
 }
 
 pub struct StreamMuxer {
-    name: String,
+    io: Io,
     /// What the script asked for, verbatim: [`MuxSpec`] documents each field, and
     /// holding it whole is what keeps them from being declared twice.
     params: MuxSpec,
     /// `params.ts_sort_wait` in milliseconds, C++ `sync_wait_max_ms_`; `<= 0`
     /// disables the grace.
     sync_wait_max_ms: i64,
-    /// The input pad names, so [`Node::pads`] does not take the state lock.
+    /// The input pad names, so [`PollNode::pads`] does not take the state lock.
     pad_names: Vec<String>,
-    out: EdgeSlot,
     state: Mutex<State>,
 }
 
-impl Node for StreamMuxer {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn kind(&self) -> NodeKind {
-        NodeKind::Poll
+impl PollNode for StreamMuxer {
+    fn io(&self) -> &Io {
+        &self.io
     }
 
     /// One source pad per `src` entry, named after it. Declaring them (rather
@@ -304,15 +298,9 @@ impl Node for StreamMuxer {
             sources: self
                 .pad_names
                 .iter()
-                .map(|name| PadDecl {
-                    name: name.clone(),
-                    media: AvpMediaType::PACKET,
-                })
+                .map(|name| PadDecl::new(name.clone(), AvpMediaType::PACKET))
                 .collect(),
-            sinks: vec![PadDecl {
-                name: "out".into(),
-                media: AvpMediaType::PACKET,
-            }],
+            sinks: vec![PadDecl::new("out", AvpMediaType::PACKET)],
         }
     }
 
@@ -320,12 +308,8 @@ impl Node for StreamMuxer {
         let mut state = self.state.lock().unwrap();
         match state.inputs.iter_mut().find(|input| input.name == pad) {
             Some(input) => input.edge = Some(edge),
-            None => log::warn!("{}: no input pad `{pad}` to bind", self.name),
+            None => log::warn!("{}: no input pad `{pad}` to bind", self.io.name),
         }
-    }
-
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.out.bind(edge);
     }
 
     fn start(&self) {
@@ -343,20 +327,14 @@ impl Node for StreamMuxer {
         state.dropped_nopts = 0;
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        poll_body(self)
-    }
-}
-
-impl PollStep for StreamMuxer {
     fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
-        let out = self.out.require(&self.name, NodePhase::Poll, "output")?;
+        let out = self.io.output()?;
         let state = &mut *self.state.lock().unwrap();
 
         if let Some(unbound) = state.inputs.iter().find(|input| input.edge.is_none()) {
             // A muxer cannot do without one of its streams, so this fails the
             // group instead of stalling on an input that will never speak.
-            return Err(self.error(
+            return Err(self.io.error(
                 NodePhase::Poll,
                 format!("input `{}` is not bound", unbound.name),
             ));
@@ -436,7 +414,7 @@ impl PollStep for StreamMuxer {
                         // the queue behind it, and its wake is long consumed.
                         log::warn!(
                             "{}: dropping a packet with no timestamp on `{}`",
-                            self.name,
+                            self.io.name,
                             input.name
                         );
                         input.head = None;
@@ -541,10 +519,6 @@ enum Grace {
 }
 
 impl StreamMuxer {
-    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
-        NodeError::new(&self.name, phase, message)
-    }
-
     /// Drains one input until a buffer sits at its head, recording the events on
     /// the way. The C++ `peek`, minus the copy.
     fn fill(&self, input: &mut Input, published: bool) {
@@ -565,7 +539,7 @@ impl StreamMuxer {
                         log::warn!(
                             "{}: `{}` re-published its spec after the container was described, \
                              keeping the original stream",
-                            self.name,
+                            self.io.name,
                             input.name
                         );
                     } else {
@@ -575,7 +549,7 @@ impl StreamMuxer {
                 Some(EdgeItem::Event(EdgeEvent::Spec(other))) => {
                     log::warn!(
                         "{}: ignoring a {} spec on `{}`; a muxer input carries encoded packets",
-                        self.name,
+                        self.io.name,
                         other.variant_name(),
                         input.name
                     );
@@ -598,7 +572,7 @@ impl StreamMuxer {
                     if edge.is_closed() {
                         log::debug!(
                             "{}: `{}` closed without an EOF marker, treating it as finished",
-                            self.name,
+                            self.io.name,
                             input.name
                         );
                         input.at_eof = true;
@@ -616,7 +590,7 @@ impl StreamMuxer {
         for input in &state.inputs {
             let Some(spec) = &input.spec else {
                 if input.at_eof {
-                    return Err(self.error(
+                    return Err(self.io.error(
                         NodePhase::Spec,
                         format!(
                             "`{}` reached EOF without ever describing its stream, so the output \
@@ -635,7 +609,7 @@ impl StreamMuxer {
         }
         log::info!(
             "{}: output container of {} stream(s): {:?}",
-            self.name,
+            self.io.name,
             streams.len(),
             self.pad_names
         );
@@ -682,7 +656,7 @@ impl StreamMuxer {
                 log::warn!(
                     "{}: time went backwards in the muxer: `{}` idle since {since} ms, `{}` is at \
                      {now_ms} ms",
-                    self.name,
+                    self.io.name,
                     input.name,
                     least_name
                 );
@@ -696,7 +670,7 @@ impl StreamMuxer {
                     input.warned = true;
                     log::warn!(
                         "{}: sync wait timeout exceeded: {diff} ms on `{}`",
-                        self.name,
+                        self.io.name,
                         input.name
                     );
                 }
@@ -750,7 +724,7 @@ impl StreamMuxer {
                 let forced = input.prev_dts.rescale(dts.tb).val + 1;
                 log::info!(
                     "{}: non-increasing DTS on `{}`: {} -> {}, fixing to {forced}",
-                    self.name,
+                    self.io.name,
                     input.name,
                     input.prev_dts.val,
                     dts.val
@@ -769,7 +743,7 @@ impl StreamMuxer {
         if pts.is_valid() && ts_cmp(pts.val, pts.tb, dts.val, dts.tb).is_lt() {
             log::info!(
                 "{}: PTS < DTS on `{}`: {} < {}, fixing",
-                self.name,
+                self.io.name,
                 input.name,
                 pts.val,
                 dts.val
@@ -804,7 +778,7 @@ impl StreamMuxer {
             let tb = input.prev_dts.tb;
             log::info!(
                 "{}: `{}` was shifted by {} in {}/{}",
-                self.name,
+                self.io.name,
                 input.name,
                 input.shift,
                 tb.num,
@@ -838,7 +812,7 @@ impl StreamMuxer {
         }
         log::info!(
             "{}: shifting everything by {} in {}/{}",
-            self.name,
+            self.io.name,
             shifted.val,
             coarsest.num,
             coarsest.den
@@ -861,7 +835,7 @@ impl StreamMuxer {
                 Emitted::Parked
             }
             Err((Push::Closed, _)) => {
-                log::info!("{}: output edge closed, finishing", self.name);
+                log::info!("{}: output edge closed, finishing", self.io.name);
                 Emitted::Closed
             }
             // The edge took it and discarded it: nothing left to retry with.
@@ -873,7 +847,7 @@ impl StreamMuxer {
         if state.dropped_nopts > 0 {
             log::info!(
                 "{}: dropped {} packet(s) that carried no timestamp",
-                self.name,
+                self.io.name,
                 state.dropped_nopts
             );
         }
@@ -936,6 +910,7 @@ mod tests {
     use avplumber_f7k::graph::buffered_edge::BufferedEdge;
     use avplumber_f7k::graph::edge::Wakeup;
     use avplumber_f7k::graph::media::test_media;
+    use avplumber_f7k::graph::node::Node;
     use std::sync::atomic::AtomicBool;
 
     /// A muxer plus its edges, stepped by hand.
@@ -944,7 +919,7 @@ mod tests {
     /// is observable one poll at a time, and the `ts_sort_wait` grace can be
     /// waited out with a `sleep` instead of a whole runtime.
     struct Harness {
-        node: StreamMuxer,
+        node: Polling<StreamMuxer>,
         inputs: Vec<Arc<dyn Edge>>,
         out: Arc<dyn Edge>,
         ctx: NodePollContext,

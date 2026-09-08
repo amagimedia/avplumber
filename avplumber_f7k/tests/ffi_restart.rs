@@ -463,7 +463,7 @@ fn stale_c_callback_cannot_push_through_stable_edge_handle() {
     stale.set_generation(1);
     let logical = unsafe { &*core }.edge_link("egress").unwrap().edge;
     logical.restart(1, 2, EdgeRestart::Egress);
-    stale.process();
+    stale.process().unwrap();
 
     assert_eq!(PUSH_FLOW.load(Ordering::SeqCst), 3);
     drop(stale);
@@ -650,9 +650,9 @@ impl Node for NativeInterfaceNode {
         &self.name
     }
 
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         std::thread::sleep(Duration::from_millis(1));
-        Blocked::Again
+        Ok(Blocked::Again)
     }
 
     fn query_interface(&self, _iface: AvpInterfaceId) -> Option<*const c_void> {
@@ -793,16 +793,16 @@ impl Node for DirectEndpoint {
         let _ = self.input.set(edge);
     }
 
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.drain.load(Ordering::SeqCst)
             && self
                 .input
                 .get()
                 .is_some_and(|input| input.try_take().is_some())
         {
-            Tick::Again
+            Ok(Tick::Again)
         } else {
-            Tick::Idle
+            Ok(Tick::Idle)
         }
     }
 }

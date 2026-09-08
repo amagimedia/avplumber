@@ -12,17 +12,24 @@
 //! - [`SisoPollAdapter`] — cooperative poll, shared event loop
 //! - [`SisoAsyncAdapter`] — `run_async`, same event loop, locals
 //!   survive `.await` (output backpressure, later clock-gated nodes)
+//!
+//! The first two are [`SingleInput`]/[`PollNode`] implementations behind the
+//! [`Blocking`]/[`Polling`] wrappers, so they carry an [`Io`] like every other
+//! scaffolded node, and all three drive the same [`InputHandler`] through
+//! [`react`]: what is Siso-specific is only the `Inner` and the three hooks.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use crate::graph::edge::{Edge, EdgeEvent, EdgeItem, Push};
+use crate::graph::edge::{Edge, Push};
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::media::Media;
-use crate::graph::node::{Blocked, Node, NodeBody, NodeFuture, NodeKind, Tick};
+use crate::graph::node::{Node, NodeFuture, NodeKind, Tick};
 use crate::graph::poll_ctx::NodePollContext;
 use crate::graph::spec::Spec;
-use crate::scaffold::body::{BlockingStep, PollStep, blocking_body, poll_body};
-use crate::scaffold::park::{Park, Pushed, push_blocking};
+use crate::scaffold::blocking::Blocking;
+use crate::scaffold::io::{BlockingIo, Io};
+use crate::scaffold::poll::{PollNode, Polling};
+use crate::scaffold::single_input::{InputHandler, Reaction, SingleInput, react};
 
 /// Per-buffer transform whose codec/size/layout state is rebuilt from `Spec`.
 ///
@@ -59,162 +66,93 @@ pub trait SisoNode: Send + Sync + 'static {
     fn on_flush(&self, _inner: &mut Self::Inner) {}
 }
 
-enum Drive {
-    Again,
-    Done,
-    Push(Media),
-}
-
-struct SisoIo<F: SisoNode> {
+/// The [`InputHandler`] every adapter drives: the `Inner` and the
+/// [`SisoNode`] hooks behind the generic ones.
+struct SisoCore<F: SisoNode> {
     f: F,
-    input: OnceLock<Arc<dyn Edge>>,
-    output: OnceLock<Arc<dyn Edge>>,
     inner: Mutex<Option<F::Inner>>,
 }
 
-impl<F: SisoNode> SisoIo<F> {
+impl<F: SisoNode> SisoCore<F> {
     fn new(f: F) -> Self {
         Self {
             f,
-            input: OnceLock::new(),
-            output: OnceLock::new(),
             inner: Mutex::new(None),
         }
     }
 
-    fn bind_source(&self, edge: Arc<dyn Edge>) {
-        let _ = self.input.set(edge);
+    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
+        NodeError::new(self.f.name(), phase, message)
     }
-    fn bind_sink(&self, edge: Arc<dyn Edge>) {
-        let _ = self.output.set(edge);
+}
+
+impl<F: SisoNode> InputHandler for SisoCore<F> {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        let (inner, out_spec) = self
+            .f
+            .on_spec(&spec)
+            .map_err(|message| self.error(NodePhase::Spec, message))?;
+        *self.inner.lock().unwrap() = Some(inner);
+        Ok(Some(out_spec))
     }
 
-    fn drive(&self, item: EdgeItem) -> Result<Drive, NodeError> {
-        match item {
-            EdgeItem::Event(EdgeEvent::Spec(spec)) => match self.f.on_spec(&spec) {
-                Ok((new_inner, out_spec)) => {
-                    *self.inner.lock().unwrap() = Some(new_inner);
-                    if let Some(out) = self.output.get() {
-                        out.push_event(EdgeEvent::Spec(out_spec));
-                    }
-                    Ok(Drive::Again)
-                }
-                Err(message) => Err(NodeError::new(self.f.name(), NodePhase::Spec, message)),
-            },
-            EdgeItem::Buffer(buf) => {
-                let mut guard = self.inner.lock().unwrap();
-                match guard.as_mut() {
-                    Some(inner) => match self.f.process(inner, buf) {
-                        Ok(Some(out_buf)) => Ok(Drive::Push(out_buf)),
-                        Ok(None) => Ok(Drive::Again),
-                        Err(message) => {
-                            Err(NodeError::new(self.f.name(), NodePhase::Process, message))
-                        }
-                    },
-                    None => Err(NodeError::new(
-                        self.f.name(),
-                        NodePhase::Process,
-                        "buffer received before initial Spec",
-                    )),
-                }
-            }
-            EdgeItem::Event(EdgeEvent::Eof) => Ok(Drive::Done),
-            EdgeItem::Event(EdgeEvent::FlushStart) => {
-                let mut guard = self.inner.lock().unwrap();
-                if let Some(inner) = guard.as_mut() {
-                    self.f.on_flush(inner);
-                }
-                drop(guard);
-                if let Some(out) = self.output.get() {
-                    out.push_event(EdgeEvent::FlushStart);
-                }
-                Ok(Drive::Again)
-            }
-            EdgeItem::Event(EdgeEvent::FlushStop) => {
-                if let Some(out) = self.output.get() {
-                    out.push_event(EdgeEvent::FlushStop);
-                }
-                Ok(Drive::Again)
-            }
+    fn on_buffer(&self, buf: Media) -> Result<Option<Media>, NodeError> {
+        let mut guard = self.inner.lock().unwrap();
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| self.error(NodePhase::Process, "buffer received before initial Spec"))?;
+        self.f
+            .process(inner, buf)
+            .map_err(|message| self.error(NodePhase::Process, message))
+    }
+
+    fn on_flush(&self) {
+        if let Some(inner) = self.inner.lock().unwrap().as_mut() {
+            self.f.on_flush(inner);
         }
     }
 }
 
-/// Blocking wrapper: `take(-1)` on a dedicated thread. A full output parks
-/// that thread on the node's own [`Park`] until the edge drains or
-/// [`Node::interrupt`] arrives, like every other blocking node.
-pub struct SisoAdapter<F: SisoNode> {
-    io: SisoIo<F>,
-    park: Arc<Park>,
+/// The blocking body: a [`SingleInput`] over [`SisoCore`], so the loop is the
+/// scaffold's. Like every scaffolded node it fails on an unbound pad.
+pub struct SisoBlocking<F: SisoNode> {
+    core: SisoCore<F>,
+    io: BlockingIo,
 }
 
-impl<F: SisoNode> SisoAdapter<F> {
+/// Blocking wrapper: [`SisoBlocking`] as a `Node`.
+pub type SisoAdapter<F> = Blocking<SisoBlocking<F>>;
+
+impl<F: SisoNode> Blocking<SisoBlocking<F>> {
     pub fn new(f: F) -> Self {
-        Self {
-            io: SisoIo::new(f),
-            park: Arc::new(Park::default()),
-        }
-    }
-
-    fn forward(&self, buf: Media) -> Result<Blocked, NodeError> {
-        let Some(out) = self.io.output.get() else {
-            return Ok(Blocked::Again);
-        };
-        Ok(match push_blocking(&self.park, out, buf, || Ok(()))? {
-            Pushed::Ok => Blocked::Again,
-            Pushed::Interrupted | Pushed::Closed => Blocked::Done,
+        Blocking(SisoBlocking {
+            io: BlockingIo::new(f.name()),
+            core: SisoCore::new(f),
         })
     }
 }
 
-impl<F: SisoNode> BlockingStep for SisoAdapter<F> {
-    fn step(&self) -> Result<Blocked, NodeError> {
-        let Some(input) = self.io.input.get() else {
-            return Ok(Blocked::Done);
-        };
-        match input.take(-1) {
-            Some(item) => match self.io.drive(item)? {
-                Drive::Again => Ok(Blocked::Again),
-                Drive::Done => Ok(Blocked::Done),
-                Drive::Push(buf) => self.forward(buf),
-            },
-            None => Ok(Blocked::Done),
-        }
+impl<F: SisoNode> InputHandler for SisoBlocking<F> {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        self.core.on_spec(spec)
+    }
+
+    fn on_buffer(&self, buf: Media) -> Result<Option<Media>, NodeError> {
+        self.core.on_buffer(buf)
+    }
+
+    fn on_flush(&self) {
+        self.core.on_flush()
     }
 }
 
-impl<F: SisoNode> Node for SisoAdapter<F> {
-    fn name(&self) -> &str {
-        self.io.f.name()
-    }
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
-    }
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_source(edge);
-    }
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_sink(edge);
-    }
-
-    fn start(&self) {
-        self.park.reset();
-    }
-    fn interrupt(&self) {
-        self.park.interrupt();
-    }
-
-    fn process(&self) -> Blocked {
-        self.step().unwrap_or(Blocked::Done)
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
+impl<F: SisoNode> SingleInput for SisoBlocking<F> {
+    fn io(&self) -> &BlockingIo {
+        &self.io
     }
 }
 
-/// Cooperative wrapper: `try_take` + `Tick::Idle`, no private thread.
+/// The cooperative body: `try_take` + `Tick::Idle`, no private thread.
 ///
 /// Output backpressure stashes the produced buffer and waits writable.
 /// That stash is the Poll cost of not keeping locals across a park.
@@ -222,23 +160,27 @@ impl<F: SisoNode> Node for SisoAdapter<F> {
 /// infallible, and opt in with `SisoNode::direct_consumer_is_infallible`; scheduled
 /// Poll bodies propagate their errors to supervision, while the fused Direct
 /// `Node::poll` contract cannot carry `NodeError`.
-pub struct SisoPollAdapter<F: SisoNode> {
-    io: SisoIo<F>,
+pub struct SisoPolling<F: SisoNode> {
+    core: SisoCore<F>,
+    io: Io,
     pending: Mutex<Option<Media>>,
 }
 
-impl<F: SisoNode> SisoPollAdapter<F> {
-    pub fn new(f: F) -> Self {
-        Self {
-            io: SisoIo::new(f),
-            pending: Mutex::new(None),
-        }
-    }
+/// Cooperative wrapper: [`SisoPolling`] as a `Node`.
+pub type SisoPollAdapter<F> = Polling<SisoPolling<F>>;
 
-    fn offer_or_park(&self, buf: Media, ctx: &mut NodePollContext) -> Tick {
-        let Some(out) = self.io.output.get() else {
-            return Tick::Again;
-        };
+impl<F: SisoNode> Polling<SisoPolling<F>> {
+    pub fn new(f: F) -> Self {
+        Polling(SisoPolling {
+            io: Io::new(f.name(), NodePhase::Poll),
+            core: SisoCore::new(f),
+            pending: Mutex::new(None),
+        })
+    }
+}
+
+impl<F: SisoNode> SisoPolling<F> {
+    fn offer_or_park(&self, out: &Arc<dyn Edge>, buf: Media, ctx: &mut NodePollContext) -> Tick {
         match out.offer(buf) {
             Ok(()) => Tick::Again,
             Err((Push::Dropped, _)) => Tick::Again,
@@ -253,106 +195,81 @@ impl<F: SisoNode> SisoPollAdapter<F> {
     }
 }
 
-impl<F: SisoNode> PollStep for SisoPollAdapter<F> {
+impl<F: SisoNode> PollNode for SisoPolling<F> {
+    fn io(&self) -> &Io {
+        &self.io
+    }
+
+    fn direct_consumer_is_infallible(&self) -> bool {
+        self.core.f.direct_consumer_is_infallible()
+    }
+
     fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        let out = self.io.output()?;
         let pending = self.pending.lock().unwrap().take();
         if let Some(buf) = pending {
-            return Ok(self.offer_or_park(buf, ctx));
+            return Ok(self.offer_or_park(&out, buf, ctx));
         }
-        if let Some(out) = self.io.output.get()
-            && out.is_full()
-        {
-            ctx.wait_writable(out.clone());
+        if out.is_full() {
+            ctx.wait_writable(out);
             return Ok(Tick::Idle);
         }
-        let input = match self.io.input.get() {
-            Some(edge) => edge,
-            None => return Ok(Tick::Done),
-        };
-        match input.try_take() {
-            None => {
-                if input.is_closed() {
-                    Ok(Tick::Done)
-                } else {
-                    ctx.wait_readable(input.clone());
-                    Ok(Tick::Idle)
-                }
+        let input = self.io.input()?;
+        let Some(item) = input.try_take() else {
+            if input.is_closed() {
+                return Ok(Tick::Done);
             }
-            Some(item) => match self.io.drive(item)? {
-                Drive::Again => Ok(Tick::Again),
-                Drive::Done => Ok(Tick::Done),
-                Drive::Push(buf) => Ok(self.offer_or_park(buf, ctx)),
-            },
-        }
-    }
-}
-
-impl<F: SisoNode> Node for SisoPollAdapter<F> {
-    fn name(&self) -> &str {
-        self.io.f.name()
-    }
-    fn kind(&self) -> NodeKind {
-        NodeKind::Poll
-    }
-    fn direct_consumer_is_infallible(&self) -> bool {
-        self.io.f.direct_consumer_is_infallible()
-    }
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_source(edge);
-    }
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_sink(edge);
-    }
-
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
-        self.step(ctx).unwrap_or(Tick::Done)
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        poll_body(self)
+            ctx.wait_readable(input);
+            return Ok(Tick::Idle);
+        };
+        Ok(match react(&self.core, Some(&out), item)? {
+            Reaction::Again => Tick::Again,
+            Reaction::Done => Tick::Done,
+            Reaction::Produced(buf) => self.offer_or_park(&out, buf, ctx),
+        })
     }
 }
 
 /// Async wrapper: one future, produced buffers stay on the stack across
-/// `wait_writable`. Same event loop as Poll.
+/// `wait_writable`. Same event loop as Poll. Implements `Node` directly, since
+/// the scaffold has no async node trait yet.
 pub struct SisoAsyncAdapter<F: SisoNode> {
-    io: SisoIo<F>,
+    core: SisoCore<F>,
+    io: Io,
 }
 
 impl<F: SisoNode> SisoAsyncAdapter<F> {
     pub fn new(f: F) -> Self {
-        Self { io: SisoIo::new(f) }
+        Self {
+            io: Io::new(f.name(), NodePhase::Async),
+            core: SisoCore::new(f),
+        }
     }
 }
 
 impl<F: SisoNode> Node for SisoAsyncAdapter<F> {
     fn name(&self) -> &str {
-        self.io.f.name()
+        &self.io.name
     }
     fn kind(&self) -> NodeKind {
         NodeKind::Async
     }
 
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_source(edge);
+        self.io.input_slot.bind(edge);
     }
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.io.bind_sink(edge);
+        self.io.output_slot.bind(edge);
     }
 
     fn run_async(self: Arc<Self>) -> NodeFuture {
         Box::pin(async move {
-            let Some(input) = self.io.input.get().cloned() else {
-                return Ok(());
-            };
-            let output = self.io.output.get().cloned();
+            let input = self.io.input()?;
+            let out = self.io.output()?;
             loop {
-                if let Some(out) = output.as_ref() {
-                    if out.is_full() && !out.is_closed() {
-                        out.wait_writable().await;
-                        continue;
-                    }
+                if out.is_full() && !out.is_closed() {
+                    out.wait_writable().await;
+                    continue;
                 }
                 if input.occupied() == 0 && !input.is_closed() {
                     input.wait_readable().await;
@@ -363,26 +280,21 @@ impl<F: SisoNode> Node for SisoAsyncAdapter<F> {
                     }
                     continue;
                 };
-                match self.io.drive(item)? {
-                    Drive::Again => {}
-                    Drive::Done => return Ok(()),
-                    Drive::Push(mut buf) => {
-                        let Some(out) = output.as_ref() else {
-                            continue;
-                        };
-                        loop {
-                            match out.offer(buf) {
-                                Ok(()) => break,
-                                Err((Push::Dropped, _)) => break,
-                                Err((Push::Closed, _)) => return Ok(()),
-                                Err((Push::Full, back)) => {
-                                    buf = back;
-                                    out.wait_writable().await;
-                                }
-                                Err((Push::Accepted, _)) => break,
+                match react(&self.core, Some(&out), item)? {
+                    Reaction::Again => {}
+                    Reaction::Done => return Ok(()),
+                    Reaction::Produced(mut buf) => loop {
+                        match out.offer(buf) {
+                            Ok(()) => break,
+                            Err((Push::Dropped, _)) => break,
+                            Err((Push::Closed, _)) => return Ok(()),
+                            Err((Push::Full, back)) => {
+                                buf = back;
+                                out.wait_writable().await;
                             }
+                            Err((Push::Accepted, _)) => break,
                         }
-                    }
+                    },
                 }
             }
         })
@@ -398,9 +310,10 @@ mod tests {
     use super::*;
     use crate::graph::BufferedEdge;
     use crate::graph::buffer::{AvpMediaType, AvpRational};
-    use crate::graph::edge::{EdgeEvent, Push, Wakeup};
+    use crate::graph::edge::{EdgeEvent, EdgeItem, Push, Wakeup};
     use crate::graph::error::NodePhase;
     use crate::graph::media::Media;
+    use crate::graph::node::Blocked;
     use crate::graph::node::{NodeBody, Tick};
     use crate::graph::poll_ctx::NodePollContext;
     use crate::graph::spec::Spec;
@@ -499,7 +412,7 @@ mod tests {
 
     fn pump_until_idle(node: &impl Node, ctx: &mut NodePollContext) {
         for _ in 0..32 {
-            match node.poll(ctx) {
+            match node.poll(ctx).unwrap() {
                 Tick::Idle | Tick::Done => return,
                 Tick::Again => {}
             }
@@ -512,7 +425,7 @@ mod tests {
         let node = SisoPollAdapter::new(Identity { name: "p" });
         let (_in, _out) = bind_pair(&node);
         let mut ctx = poll_ctx();
-        assert_eq!(node.poll(&mut ctx), Tick::Idle);
+        assert_eq!(node.poll(&mut ctx).unwrap(), Tick::Idle);
         assert!(ctx.needs_park());
     }
 
@@ -543,11 +456,11 @@ mod tests {
 
         assert_eq!(output.push(stub(1)), Push::Accepted);
         assert_eq!(input.push(stub(9)), Push::Accepted);
-        assert_eq!(node.poll(&mut ctx), Tick::Idle);
+        assert_eq!(node.poll(&mut ctx).unwrap(), Tick::Idle);
         assert!(ctx.needs_park());
 
         let _ = output.try_take();
-        assert_eq!(node.poll(&mut ctx), Tick::Again);
+        assert_eq!(node.poll(&mut ctx).unwrap(), Tick::Again);
         assert_eq!(take_bufs(&*output), vec![9]);
     }
 
@@ -642,7 +555,7 @@ mod tests {
         assert_eq!(output.push(stub(1)), Push::Accepted);
         input.push_event(EdgeEvent::Spec(video_spec()));
         assert_eq!(input.push(stub(9)), Push::Accepted);
-        assert_eq!(node.process(), Blocked::Again, "the Spec");
+        assert_eq!(node.process().unwrap(), Blocked::Again, "the Spec");
         (node, output)
     }
 
@@ -664,7 +577,11 @@ mod tests {
             })
         };
 
-        assert_eq!(node.process(), Blocked::Again, "parks, then pushes 9");
+        assert_eq!(
+            node.process().unwrap(),
+            Blocked::Again,
+            "parks, then pushes 9"
+        );
         assert_eq!(drained.join().unwrap(), Some(1));
         assert_eq!(take_bufs(&*output), vec![9]);
     }
@@ -680,7 +597,7 @@ mod tests {
             })
         };
 
-        assert_eq!(node.process(), Blocked::Done);
+        assert_eq!(node.process().unwrap(), Blocked::Done);
         interrupter.join().unwrap();
         assert_eq!(
             take_bufs(&*output),

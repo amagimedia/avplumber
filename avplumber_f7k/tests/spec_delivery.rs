@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use avplumber_f7k::{
     AvpMediaType, AvpRational, BufferedEdge, DirectEdge, Edge, EdgeEvent, EdgeItem, Media, Node,
-    NodeKind, NodePollContext, Push, SisoNode, SisoPollAdapter, Spec, Tick, Wakeup,
+    NodeError, NodeKind, NodePollContext, Push, SisoNode, SisoPollAdapter, Spec, Tick, Wakeup,
 };
 
 fn stub(pts: i64) -> Media {
@@ -91,7 +91,7 @@ fn pump(node: &dyn Node) {
     let tick = Arc::new(Wakeup::new());
     for _ in 0..64 {
         let mut ctx = NodePollContext::new(cancel.clone(), tick.clone());
-        match node.poll(&mut ctx) {
+        match node.poll(&mut ctx).unwrap() {
             Tick::Again => continue,
             Tick::Idle | Tick::Done => break,
         }
@@ -174,12 +174,12 @@ impl Node for PeekPopConsumer {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let Some(input) = self.input.get() else {
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         };
         let Some(item) = input.peek_clone(0) else {
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         };
         self.seen.lock().unwrap().push(match item {
             EdgeItem::Buffer(_) => "buffer",
@@ -187,7 +187,7 @@ impl Node for PeekPopConsumer {
             EdgeItem::Event(_) => "event",
         });
         input.pop();
-        Tick::Again
+        Ok(Tick::Again)
     }
 }
 

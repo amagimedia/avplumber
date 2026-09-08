@@ -8,8 +8,8 @@ use avplumber_f7k::graph::NodeFuture;
 use avplumber_f7k::{AsyncExecutor, ExecutorState, NodeKind};
 use avplumber_f7k::{
     AvpMediaType, Blocked, BlockingExecutor, BuildCtx, Edge, EdgeKind, ExecCtxId, Executor, Graph,
-    Group, GroupState, Instance, Node, NodeBody, NodeError, NodeOutcome, NodePads, NodePhase,
-    NodeRequest, NodeSpec, PadDecl, RestartPolicy, Vertex, register_factory, register_spec,
+    Group, GroupState, Instance, Node, NodeError, NodeOutcome, NodePads, NodePhase, NodeRequest,
+    NodeSpec, PadDecl, RestartPolicy, Vertex, register_factory, register_spec,
 };
 
 /// Any buffer at all. The one push in this suite goes to a closed edge and is
@@ -37,15 +37,12 @@ impl Node for FailingNode {
         &self.name
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        let name = self.name.clone();
-        NodeBody::Blocking(Box::new(move || {
-            Err(NodeError::new(
-                name.clone(),
-                NodePhase::Process,
-                "planned failure",
-            ))
-        }))
+    fn process(&self) -> Result<Blocked, NodeError> {
+        Err(NodeError::new(
+            &self.name,
+            NodePhase::Process,
+            "planned failure",
+        ))
     }
 }
 
@@ -58,9 +55,9 @@ impl Node for RunningNode {
         &self.name
     }
 
-    fn process(&self) -> Blocked {
+    fn process(&self) -> Result<Blocked, NodeError> {
         std::thread::sleep(Duration::from_millis(1));
-        Blocked::Again
+        Ok(Blocked::Again)
     }
 }
 
@@ -956,22 +953,16 @@ impl Node for RebuiltNode {
         &self.name
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
+    fn process(&self) -> Result<Blocked, NodeError> {
         if self.fail {
-            let name = self.name.clone();
-            NodeBody::Blocking(Box::new(move || {
-                Err(NodeError::new(
-                    name.clone(),
-                    NodePhase::Process,
-                    "first generation fails",
-                ))
-            }))
-        } else {
-            NodeBody::Blocking(Box::new(|| {
-                std::thread::sleep(Duration::from_millis(1));
-                Ok(Blocked::Again)
-            }))
+            return Err(NodeError::new(
+                &self.name,
+                NodePhase::Process,
+                "first generation fails",
+            ));
         }
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(Blocked::Again)
     }
 }
 
@@ -1204,22 +1195,16 @@ impl Node for BoundNode {
         assert!(self.edge.set(edge).is_ok());
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
+    fn process(&self) -> Result<Blocked, NodeError> {
         if self.fail {
-            let name = self.name.clone();
-            NodeBody::Blocking(Box::new(move || {
-                Err(NodeError::new(
-                    name.clone(),
-                    NodePhase::Process,
-                    "restart bound graph",
-                ))
-            }))
-        } else {
-            NodeBody::Blocking(Box::new(|| {
-                std::thread::sleep(Duration::from_millis(1));
-                Ok(Blocked::Again)
-            }))
+            return Err(NodeError::new(
+                &self.name,
+                NodePhase::Process,
+                "restart bound graph",
+            ));
         }
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(Blocked::Again)
     }
 }
 
@@ -1504,22 +1489,16 @@ impl Node for GatedNode {
         &self.name
     }
 
-    fn take_body(self: Arc<Self>) -> NodeBody {
+    fn process(&self) -> Result<Blocked, NodeError> {
         if self.fail {
-            let name = self.name.clone();
-            NodeBody::Blocking(Box::new(move || {
-                Err(NodeError::new(
-                    name.clone(),
-                    NodePhase::Process,
-                    "first generation fails",
-                ))
-            }))
-        } else {
-            NodeBody::Blocking(Box::new(|| {
-                std::thread::sleep(Duration::from_millis(1));
-                Ok(Blocked::Again)
-            }))
+            return Err(NodeError::new(
+                &self.name,
+                NodePhase::Process,
+                "first generation fails",
+            ));
         }
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(Blocked::Again)
     }
 }
 

@@ -17,14 +17,14 @@
 //!   so there is a second monotonic guard here: `mux`'s ran in the source time
 //!   base and cannot see the collapse.
 //! - The trailer is written whenever the node stops, not only on
-//!   [`EdgeEvent::Eof`]. C++ writes it from `flush()`, i.e. on the EOF marker
+//!   `EdgeEvent::Eof`. C++ writes it from `flush()`, i.e. on the EOF marker
 //!   only, and leaves an unfinalized — unplayable — MP4 behind when a group is
 //!   stopped mid-stream.
 //!
 //! Deferred: `seek_table` / `seek_table_text`, which belong with seek.
 
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use rsmpeg::avformat::AVFormatContextOutput;
 use rusty_ffmpeg::ffi;
@@ -32,16 +32,15 @@ use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::{Blocked, Node, NodeBody, NodeKind};
-use avplumber_f7k::graph::pad::{NodePads, PadDecl};
+use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{MuxStream, Spec};
 use avplumber_f7k::graph::timebase::rescale;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
-use avplumber_f7k::scaffold::{BlockingStep, EdgeSlot, blocking_body};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
 
 /// C++ `errors_ > 20`: a muxer that rejects one packet is usually still usable,
 /// one that rejects twenty in a row is not.
@@ -71,7 +70,7 @@ pub struct OutputSpec {
 
 impl NodeSpec for OutputSpec {
     const TYPE_NAME: &'static str = "output";
-    type Node = StreamOutput;
+    type Node = Blocking<StreamOutput>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         if self.seek_table.is_some() || self.seek_table_text.is_some() {
@@ -79,12 +78,11 @@ impl NodeSpec for OutputSpec {
         }
         // Unlike `input`, nothing is opened here: the container cannot be created
         // before its stream list arrives, and that is a runtime message.
-        Ok(StreamOutput {
-            name: name.into(),
+        Ok(Blocking(StreamOutput {
+            io: BlockingIo::new(name),
             params: self,
-            input: EdgeSlot::default(),
             state: Mutex::new(State::default()),
-        })
+        }))
     }
 }
 
@@ -118,122 +116,40 @@ struct State {
 }
 
 pub struct StreamOutput {
-    name: String,
+    io: BlockingIo,
     /// What the script asked for, verbatim: [`OutputSpec`] documents each field,
     /// and holding it whole is what keeps them from being declared twice.
     params: OutputSpec,
-    input: EdgeSlot,
     state: Mutex<State>,
 }
 
-impl Node for StreamOutput {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
-    }
-
-    fn pads(&self) -> NodePads {
-        NodePads {
-            sources: vec![PadDecl {
-                name: "in".into(),
-                media: AvpMediaType::PACKET,
-            }],
-            sinks: Vec::new(),
-        }
-    }
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.input.bind(edge);
-    }
-
-    fn start(&self) {
-        let state = &mut *self.state.lock().unwrap();
-        state.errors = 0;
-        state.dropped_early = 0;
-        state.dropped_unknown = 0;
-        // `ctx` and `mux_spec` are always `None` here: this node finalizes and
-        // closes in `stop()`, so a restart re-opens the file from the description
-        // the edge re-delivers.
-    }
-
-    fn stop(&self) {
-        let state = &mut *self.state.lock().unwrap();
-        self.finalize(state);
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
-    }
-}
-
-impl BlockingStep for StreamOutput {
-    fn step(&self) -> Result<Blocked, NodeError> {
-        let input = self
-            .input
-            .require(&self.name, NodePhase::Process, "input")?;
-        let state = &mut *self.state.lock().unwrap();
-
-        match input.take(-1) {
-            Some(EdgeItem::Event(EdgeEvent::Spec(spec))) => {
-                self.on_spec(state, spec)?;
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Buffer(buffer)) => self.write(state, buffer),
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => {
-                log::info!(
-                    "{}: end of stream, finishing {}",
-                    self.name,
-                    self.params.url
-                );
-                // The trailer is `stop()`'s job, which the executor calls as soon
-                // as this returns.
-                Ok(Blocked::Done)
-            }
-            // Nothing of ours to discard, and libavformat's interleaving buffer
-            // must not be: it holds packets already accepted for the file.
-            Some(EdgeItem::Event(EdgeEvent::FlushStart | EdgeEvent::FlushStop)) => {
-                Ok(Blocked::Again)
-            }
-            // A blocking take came back empty: the edge is closed, or the executor
-            // interrupted it to stop this node.
-            None => Ok(Blocked::Done),
-        }
-    }
-}
-
-impl StreamOutput {
-    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
-        NodeError::new(&self.name, phase, message)
-    }
-
+impl InputHandler for StreamOutput {
     /// The container description, which is the one thing this node cannot start
     /// without.
-    fn on_spec(&self, state: &mut State, spec: Spec) -> Result<(), NodeError> {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
         let Spec::Mux { streams } = &spec else {
             log::warn!(
                 "{}: ignoring a {} spec on the input; output needs the container description a \
                  `mux` publishes",
-                self.name,
+                self.io.name,
                 spec.variant_name()
             );
-            return Ok(());
+            return Ok(None);
         };
         if let Some(open_for) = &state.mux_spec {
             if codec::same_spec(open_for, &spec) {
                 log::debug!(
                     "{}: container description re-delivered unchanged, keeping {} open",
-                    self.name,
+                    self.io.name,
                     self.params.url
                 );
-                return Ok(());
+                return Ok(None);
             }
             // The header is on disk and names the streams; a different set of them
             // needs a different file. Failing lets the group restart, which is
             // what reopens it.
-            return Err(self.error(
+            return Err(self.io.error(
                 NodePhase::Spec,
                 format!(
                     "the stream layout of {} changed after its header was written",
@@ -244,14 +160,62 @@ impl StreamOutput {
 
         let (ctx, streams) = self
             .open(streams)
-            .map_err(|message| self.error(NodePhase::Spec, message))?;
+            .map_err(|message| self.io.error(NodePhase::Spec, message))?;
         state.ctx = Some(ctx);
         state.streams = streams;
         state.errors = 0;
         state.mux_spec = Some(spec);
-        Ok(())
+        Ok(None)
     }
 
+    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        self.write(state, buffer)?;
+        Ok(None)
+    }
+
+    /// Deliberately nothing: there is nothing of ours to discard, and
+    /// libavformat's interleaving buffer must not be, it holds packets already
+    /// accepted for the file.
+    fn on_flush(&self) {}
+
+    fn on_eof(&self) -> Result<Blocked, NodeError> {
+        log::info!(
+            "{}: end of stream, finishing {}",
+            self.io.name,
+            self.params.url
+        );
+        // The trailer is `stop`'s job, which runs as soon as this returns.
+        Ok(Blocked::Done)
+    }
+}
+
+impl SingleInput for StreamOutput {
+    fn io(&self) -> &BlockingIo {
+        &self.io
+    }
+
+    fn pads(&self) -> NodePads {
+        NodePads::input(AvpMediaType::PACKET)
+    }
+
+    fn start(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        state.errors = 0;
+        state.dropped_early = 0;
+        state.dropped_unknown = 0;
+        // `ctx` and `mux_spec` are always `None` here: this node finalizes and
+        // closes in `stop`, so a restart re-opens the file from the description
+        // the edge re-delivers.
+    }
+
+    fn stop(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        self.finalize(state);
+    }
+}
+
+impl StreamOutput {
     /// Creates the container, its streams and its header. Everything libav needs
     /// comes from `streams`; the encoders that produced those parameters are not
     /// consulted, and need not still exist.
@@ -313,7 +277,7 @@ impl StreamOutput {
         ctx.write_header(&mut options).map_err(|error| {
             format!("writing the header of {} failed: {error}", self.params.url)
         })?;
-        Options::from_av_dictionary(options).warn_leftovers(&self.name, "the muxer");
+        Options::from_av_dictionary(options).warn_leftovers(&self.io.name, "the muxer");
 
         let states = ctx
             .streams()
@@ -324,7 +288,7 @@ impl StreamOutput {
                 if time_base != wanted.spec.time_base {
                     log::info!(
                         "{}: {format_name} put stream {} in time base {}/{}, not {}/{}",
-                        self.name,
+                        self.io.name,
                         out.index,
                         time_base.num,
                         time_base.den,
@@ -342,7 +306,7 @@ impl StreamOutput {
             .collect::<Vec<_>>();
         log::info!(
             "{}: writing {} stream(s) as {format_name} to {}",
-            self.name,
+            self.io.name,
             states.len(),
             self.params.url
         );
@@ -350,14 +314,14 @@ impl StreamOutput {
     }
 
     /// Rescales one packet into its stream's time base and hands it to the muxer.
-    fn write(&self, state: &mut State, buffer: Media) -> Result<Blocked, NodeError> {
+    fn write(&self, state: &mut State, buffer: Media) -> Result<(), NodeError> {
         let Media::Packet(mut packet) = buffer else {
-            log::warn!("{}: dropping a buffer that is not a packet", self.name);
-            return Ok(Blocked::Again);
+            log::warn!("{}: dropping a buffer that is not a packet", self.io.name);
+            return Ok(());
         };
         if state.ctx.is_none() {
             state.dropped_early += 1;
-            return Ok(Blocked::Again);
+            return Ok(());
         }
         let index = packet.stream_index;
         let Some(stream) = usize::try_from(index)
@@ -365,7 +329,7 @@ impl StreamOutput {
             .and_then(|index| state.streams.get_mut(index))
         else {
             state.dropped_unknown += 1;
-            return Ok(Blocked::Again);
+            return Ok(());
         };
 
         // libavformat leaves `pkt.time_base` unset on the way in, so producers
@@ -397,7 +361,7 @@ impl StreamOutput {
                     log::warn!(
                         "{}: DTS {} of stream {index} is not past the previous {prev} in time base \
                          {}/{}, forcing it forward (further ones are only counted)",
-                        self.name,
+                        self.io.name,
                         dts.val,
                         to.num,
                         to.den
@@ -419,22 +383,22 @@ impl StreamOutput {
         packet.set_ts_dts(pts, dts);
         packet.set_duration(duration);
 
-        let ctx = state
-            .ctx
-            .as_mut()
-            .ok_or_else(|| self.error(NodePhase::Process, "the container is not open"))?;
+        let ctx = state.ctx.as_mut().ok_or_else(|| {
+            self.io
+                .error(NodePhase::Process, "the container is not open")
+        })?;
         // Interleaved, like C++ `octx_.writePacket`: the muxer reorders across
         // streams, which is what mp4 and mpegts need. It also takes the packet.
         match ctx.interleaved_write_frame(&mut packet) {
             Ok(()) => {
                 state.errors = 0;
-                Ok(Blocked::Again)
+                Ok(())
             }
             Err(error) => {
                 state.errors += 1;
-                log::error!("{}: writing a packet failed: {error}", self.name);
+                log::error!("{}: writing a packet failed: {error}", self.io.name);
                 if state.errors > MAX_CONSECUTIVE_ERRORS {
-                    return Err(self.error(
+                    return Err(self.io.error(
                         NodePhase::Process,
                         format!(
                             "{} consecutive write failures on {}, giving up",
@@ -442,7 +406,7 @@ impl StreamOutput {
                         ),
                     ));
                 }
-                Ok(Blocked::Again)
+                Ok(())
             }
         }
     }
@@ -455,10 +419,10 @@ impl StreamOutput {
             return;
         };
         match ctx.write_trailer() {
-            Ok(()) => log::info!("{}: finalized {}", self.name, self.params.url),
+            Ok(()) => log::info!("{}: finalized {}", self.io.name, self.params.url),
             Err(error) => log::error!(
                 "{}: writing the trailer of {} failed: {error}",
-                self.name,
+                self.io.name,
                 self.params.url
             ),
         }
@@ -471,7 +435,7 @@ impl StreamOutput {
             if stream.forced_dts > 0 {
                 log::info!(
                     "{}: forced the DTS of {} packet(s) of stream {index} forward",
-                    self.name,
+                    self.io.name,
                     stream.forced_dts
                 );
             }
@@ -483,14 +447,14 @@ impl StreamOutput {
         if state.dropped_early > 0 {
             log::info!(
                 "{}: dropped {} packet(s) that arrived before the container description",
-                self.name,
+                self.io.name,
                 state.dropped_early
             );
         }
         if state.dropped_unknown > 0 {
             log::warn!(
                 "{}: dropped {} packet(s) addressed to a stream this container has not got",
-                self.name,
+                self.io.name,
                 state.dropped_unknown
             );
         }

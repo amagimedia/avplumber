@@ -4,7 +4,7 @@
 
 avplumber is a graph-based real-time processing framework. Graphs reconfigure on the fly via a text TCP API. Nodes wrap FFmpeg libavcodec/libavformat/libavfilter. They handle timestamping, A/V sync, fallback slates. The framework handles queues, parallel processing.
 
-Full reference: [README.md](../README.md) (don't waste time reading it unless you want to dig deeper) | Node development: [developing_nodes.md](developing_nodes.md)
+Full reference: [README.md](../README.md) (don't waste time reading it unless you want to dig deeper) | Node development: [developing_nodes.md](developing_nodes.md) (C++), [developing_nodes_rust.md](developing_nodes_rust.md) (Rust)
 
 ---
 
@@ -137,7 +137,7 @@ Implement as `struct MyType : InstanceShared<MyType> { ... }`. For circular node
 
 ## Developing nodes
 
-Full guide: [developing_nodes.md](developing_nodes.md). Summary:
+Full guide: [developing_nodes.md](developing_nodes.md); Rust nodes: [developing_nodes_rust.md](developing_nodes_rust.md). Summary of the C++ side:
 
 - Node sources in `src/nodes/`; `make` auto-scans via `generate_node_list` – no index file to update.
 - Every `.cpp` starts with `#include "node_common.hpp"`.

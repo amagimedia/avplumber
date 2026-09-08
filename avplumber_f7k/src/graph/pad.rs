@@ -39,10 +39,50 @@ pub struct PadDecl {
     pub media: AvpMediaType,
 }
 
+impl PadDecl {
+    pub fn new(name: impl Into<String>, media: AvpMediaType) -> Self {
+        Self {
+            name: name.into(),
+            media,
+        }
+    }
+}
+
+/// The pads a node declares: `sources` are its inputs, `sinks` its outputs.
+///
+/// The constructors cover the common shapes with the conventional pad names
+/// `in` and `out`. A script's `src`/`dst` bind to a lone declared pad whatever
+/// it is called, so a node with one pad per side never has to name them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodePads {
     pub sources: Vec<PadDecl>,
     pub sinks: Vec<PadDecl>,
+}
+
+impl NodePads {
+    /// One input pad `in`, no output: a sink.
+    pub fn input(media: AvpMediaType) -> Self {
+        Self {
+            sources: vec![PadDecl::new("in", media)],
+            sinks: Vec::new(),
+        }
+    }
+
+    /// One output pad `out`, no input: a source.
+    pub fn output(media: AvpMediaType) -> Self {
+        Self {
+            sources: Vec::new(),
+            sinks: vec![PadDecl::new("out", media)],
+        }
+    }
+
+    /// `in` and `out`: a transform.
+    pub fn siso(input: AvpMediaType, output: AvpMediaType) -> Self {
+        Self {
+            sources: vec![PadDecl::new("in", input)],
+            sinks: vec![PadDecl::new("out", output)],
+        }
+    }
 }
 
 pub fn check_pad_media(

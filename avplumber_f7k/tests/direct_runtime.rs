@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use avplumber_f7k::graph::AvpMediaType;
 use avplumber_f7k::{
     AsyncExecutor, AvpRational, BufferedEdge, Edge, EdgeEvent, EdgeItem, EdgeKind, Executor, Media,
-    Node, NodeKind, NodeOutcome, NodePads, NodePollContext, PadDecl, Push, SisoNode,
+    Node, NodeError, NodeKind, NodeOutcome, NodePads, NodePollContext, PadDecl, Push, SisoNode,
     SisoPollAdapter, Spec, Tick, register_factory,
 };
 
@@ -64,30 +64,30 @@ impl Node for PollSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.sink.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let Some(out) = self.sink.get() else {
-            return Tick::Done;
+            return Ok(Tick::Done);
         };
         if !self.spec_sent.swap(true, Ordering::AcqRel) {
             out.push_event(EdgeEvent::Spec(video_spec()));
-            return Tick::Again;
+            return Ok(Tick::Again);
         }
         let n = self.produced.load(Ordering::Acquire);
         if n >= TARGET {
             out.push_event(EdgeEvent::Eof);
-            return Tick::Done;
+            return Ok(Tick::Done);
         }
         match out.offer(make_media(n as i64)) {
             Ok(()) => {
                 self.produced.fetch_add(1, Ordering::Release);
-                Tick::Again
+                Ok(Tick::Again)
             }
             Err((Push::Full, _)) => {
                 ctx.wait_writable(out.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
-            Err((Push::Closed | Push::Dropped, _)) => Tick::Done,
-            Err((Push::Accepted, _)) => Tick::Again,
+            Err((Push::Closed | Push::Dropped, _)) => Ok(Tick::Done),
+            Err((Push::Accepted, _)) => Ok(Tick::Again),
         }
     }
 }
@@ -119,26 +119,26 @@ impl Node for HoldSink {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.source.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         if self.hold.load(Ordering::Acquire) {
             ctx.wait_readable(self.release.clone());
-            return Tick::Idle;
+            return Ok(Tick::Idle);
         }
         let Some(input) = self.source.get() else {
-            return Tick::Done;
+            return Ok(Tick::Done);
         };
         match input.try_take() {
-            None if input.is_closed() => Tick::Done,
+            None if input.is_closed() => Ok(Tick::Done),
             None => {
                 ctx.wait_readable(input.clone());
-                Tick::Idle
+                Ok(Tick::Idle)
             }
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::Release);
-                Tick::Again
+                Ok(Tick::Again)
             }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => Tick::Done,
-            Some(_) => Tick::Again,
+            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Tick::Done),
+            Some(_) => Ok(Tick::Again),
         }
     }
 }
@@ -203,13 +203,13 @@ impl Node for DeadlineNode {
         NodeKind::Poll
     }
 
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
         if poll == 3 {
-            Tick::Done
+            Ok(Tick::Done)
         } else {
             ctx.wait_deadline(Instant::now() + Duration::from_millis(20));
-            Tick::Idle
+            Ok(Tick::Idle)
         }
     }
 }
@@ -265,7 +265,7 @@ impl Node for CancelDeadlineNode {
     fn start(&self) {
         self.run.fetch_add(1, Ordering::SeqCst);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
         let run = self.run.load(Ordering::SeqCst);
         if run == 1 {
             self.first_polls.fetch_add(1, Ordering::SeqCst);
@@ -279,7 +279,7 @@ impl Node for CancelDeadlineNode {
             };
             ctx.wait_deadline(Instant::now() + delay);
         }
-        Tick::Idle
+        Ok(Tick::Idle)
     }
 }
 

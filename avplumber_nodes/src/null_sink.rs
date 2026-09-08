@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
-use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem};
-use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::node::{Blocked, Node, NodeBody, NodeKind};
+use avplumber_f7k::graph::error::NodeError;
+use avplumber_f7k::graph::media::Media;
+use avplumber_f7k::graph::node::Blocked;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::scaffold::{BlockingStep, EdgeSlot, blocking_body};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
 
 /// What one `null_sink` instance has seen, cumulative across restarts.
 ///
@@ -72,71 +72,45 @@ pub struct NullSinkSpec {}
 
 impl NodeSpec for NullSinkSpec {
     const TYPE_NAME: &'static str = "null_sink";
-    type Node = NullSink;
+    type Node = Blocking<NullSink>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        Ok(NullSink {
-            name: name.into(),
-            input: EdgeSlot::default(),
+        Ok(Blocking(NullSink {
+            io: BlockingIo::new(name),
             counters: counters(name),
-        })
+        }))
     }
 }
 
 pub struct NullSink {
-    name: String,
-    input: EdgeSlot,
+    io: BlockingIo,
     counters: Arc<Counters>,
 }
 
-impl Node for NullSink {
-    fn name(&self) -> &str {
-        &self.name
+impl InputHandler for NullSink {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        self.counters.specs.fetch_add(1, Ordering::Relaxed);
+        *self.counters.last_spec.lock().unwrap() = Some(spec);
+        Ok(None)
     }
 
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
+    fn on_buffer(&self, _buffer: Media) -> Result<Option<Media>, NodeError> {
+        self.counters.buffers.fetch_add(1, Ordering::Relaxed);
+        Ok(None)
+    }
+
+    fn on_eof(&self) -> Result<Blocked, NodeError> {
+        self.counters.eof.store(true, Ordering::Release);
+        Ok(Blocked::Done)
+    }
+}
+
+impl SingleInput for NullSink {
+    fn io(&self) -> &BlockingIo {
+        &self.io
     }
 
     // Deliberately no `pads()`: C++ `DECLNODE_ATD(null_sink, NullSink)` accepts
     // every media type, and a vertex that declares no pads makes
     // `core::pad_media` skip the media-type check entirely.
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.input.bind(edge);
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
-    }
-}
-
-impl BlockingStep for NullSink {
-    fn step(&self) -> Result<Blocked, NodeError> {
-        let edge = self
-            .input
-            .require(&self.name, NodePhase::Process, "input")?;
-        match edge.take(-1) {
-            Some(EdgeItem::Buffer(_)) => {
-                self.counters.buffers.fetch_add(1, Ordering::Relaxed);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::Spec(spec))) => {
-                self.counters.specs.fetch_add(1, Ordering::Relaxed);
-                *self.counters.last_spec.lock().unwrap() = Some(spec);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => {
-                self.counters.eof.store(true, Ordering::Release);
-                Ok(Blocked::Done)
-            }
-            // Nothing is buffered here, so a flush is a no-op.
-            Some(EdgeItem::Event(EdgeEvent::FlushStart | EdgeEvent::FlushStop)) => {
-                Ok(Blocked::Again)
-            }
-            // A blocking `take` came back empty: the edge is closed, or the
-            // executor interrupted it to stop this node.
-            None => Ok(Blocked::Done),
-        }
-    }
 }

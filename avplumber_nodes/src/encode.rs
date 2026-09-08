@@ -30,17 +30,17 @@ use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem};
+use avplumber_f7k::graph::edge::{Edge, EdgeEvent};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{FrameExt, Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::{Blocked, Node, NodeBody, NodeKind};
-use avplumber_f7k::graph::pad::{NodePads, PadDecl};
+use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
-use avplumber_f7k::scaffold::{BlockingStep, EdgeSlot, Park, Pushed, blocking_body, push_blocking};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
 
 /// The parameters both encoder types share; C++ has one template for both.
 ///
@@ -71,12 +71,9 @@ impl EncoderParams {
             return Err("hwaccel is not implemented in the Rust core yet".into());
         }
         Ok(Encoder {
-            name: name.into(),
+            io: BlockingIo::new(name),
             media,
             params: self,
-            park: Arc::new(Park::default()),
-            input: EdgeSlot::default(),
-            out: EdgeSlot::default(),
             state: Mutex::new(State::new(name)),
         })
     }
@@ -90,10 +87,10 @@ pub struct VideoEncoderSpec(EncoderParams);
 
 impl NodeSpec for VideoEncoderSpec {
     const TYPE_NAME: &'static str = "enc_video";
-    type Node = Encoder;
+    type Node = Blocking<Encoder>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::VIDEO)
+        self.0.build(name, AvpMediaType::VIDEO).map(Blocking)
     }
 }
 
@@ -103,10 +100,10 @@ pub struct AudioEncoderSpec(EncoderParams);
 
 impl NodeSpec for AudioEncoderSpec {
     const TYPE_NAME: &'static str = "enc_audio";
-    type Node = Encoder;
+    type Node = Blocking<Encoder>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::AUDIO)
+        self.0.build(name, AvpMediaType::AUDIO).map(Blocking)
     }
 }
 
@@ -153,50 +150,109 @@ impl State {
 }
 
 pub struct Encoder {
-    name: String,
+    io: BlockingIo,
     /// `VIDEO` or `AUDIO`: which node type this is.
     media: AvpMediaType,
     /// What the script asked for, verbatim: [`EncoderParams`] documents each field,
     /// and holding it whole is what keeps them from being declared twice.
     params: EncoderParams,
-    park: Arc<Park>,
-    input: EdgeSlot,
-    out: EdgeSlot,
     state: Mutex<State>,
 }
 
-impl Node for Encoder {
-    fn name(&self) -> &str {
-        &self.name
+impl InputHandler for Encoder {
+    /// C++ built its encoder from three `findNodeUp` interfaces plus the output
+    /// stream; here the same description arrives as one spec, and a *changed* one
+    /// reopens the codec. What comes back is the muxer's half of the old
+    /// handshake: the opened context's codec parameters, extradata included,
+    /// published before the first packet reaches the edge.
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        if spec.media() != self.media {
+            log::warn!(
+                "{}: ignoring a {:?} spec on the input; this encoder needs {:?}",
+                self.io.name,
+                spec.media(),
+                self.media
+            );
+            return Ok(None);
+        }
+        if let Some(open_for) = &state.input_spec {
+            if codec::same_spec(open_for, &spec) {
+                log::debug!(
+                    "{}: input spec re-delivered unchanged, keeping the encoder",
+                    self.io.name
+                );
+                return Ok(None);
+            }
+            log::info!(
+                "{}: input format changed, reopening the encoder",
+                self.io.name
+            );
+            if state.pump.has_output() {
+                log::warn!(
+                    "{}: dropping packets the previous encoder had already produced",
+                    self.io.name
+                );
+            }
+        }
+
+        let ctx = self
+            .open(&spec)
+            .map_err(|message| self.io.error(NodePhase::Spec, message))?;
+        let packet_spec = codec::packet_spec_of(&ctx);
+        state.time_base = ctx.time_base.into();
+        state.ctx = Some(ctx);
+        state.pump.reset();
+        state.prev_pts = Ts::invalid();
+        state.input_pts.clear();
+        state.passthrough_warned = false;
+        state.input_spec = Some(spec);
+        Ok(Some(Spec::Packet(packet_spec)))
     }
 
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
+    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        self.load(state, buffer);
+        Ok(None)
+    }
+
+    fn on_flush(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(ctx) = state.ctx.as_mut() {
+            ctx.flush_buffers();
+        }
+        state.pump.reset();
+        state.prev_pts = Ts::invalid();
+        state.input_pts.clear();
+    }
+
+    /// The codec keeps producing after its last input, so this only starts the
+    /// drain; [`SingleInput::before_take`] finishes when it is over.
+    fn on_eof(&self) -> Result<Blocked, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(ctx) = state.ctx.as_mut() {
+            state.pump.flush(ctx);
+        }
+        state.eof = true;
+        Ok(Blocked::Again)
+    }
+
+    fn on_closed(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        self.log_drops(state);
+    }
+}
+
+impl SingleInput for Encoder {
+    fn io(&self) -> &BlockingIo {
+        &self.io
     }
 
     fn pads(&self) -> NodePads {
-        NodePads {
-            sources: vec![PadDecl {
-                name: "in".into(),
-                media: self.media,
-            }],
-            sinks: vec![PadDecl {
-                name: "out".into(),
-                media: AvpMediaType::PACKET,
-            }],
-        }
-    }
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.input.bind(edge);
-    }
-
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.out.bind(edge);
+        NodePads::siso(self.media, AvpMediaType::PACKET)
     }
 
     fn start(&self) {
-        self.park.reset();
         let state = &mut *self.state.lock().unwrap();
         state.pump.reset();
         if let Some(ctx) = state.ctx.as_mut() {
@@ -214,96 +270,36 @@ impl Node for Encoder {
         // codec parameters of the encoder that is still running.
     }
 
-    fn interrupt(&self) {
-        self.park.interrupt();
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
-    }
-}
-
-impl BlockingStep for Encoder {
-    fn step(&self) -> Result<Blocked, NodeError> {
-        let input = self
-            .input
-            .require(&self.name, NodePhase::Process, "input")?;
-        let out = self.out.require(&self.name, NodePhase::Process, "output")?;
-        let mut guard = self.state.lock().unwrap();
-        let state = &mut *guard;
-
-        if self.park.is_interrupted() {
-            return Ok(Blocked::Done);
-        }
-
-        // Encoded packets go downstream before anything new is taken in.
+    /// Encoded packets go downstream before anything new is taken in, and a
+    /// codec that refused the frame we are holding is offered it again.
+    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        let out = self.io.output()?;
         if let Some(buffer) = state.pump.take_output() {
-            return self.emit(state, &out, buffer);
+            return self.emit(state, &out, buffer).map(Some);
         }
         // Drained after `Eof`: pass the marker on and finish.
         if state.eof {
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
-            return Ok(Blocked::Done);
+            return Ok(Some(Blocked::Done));
         }
-        // The codec refused the frame we are holding: offer it again.
         if state.pump.is_loaded() {
-            return match self.drive(state)? {
-                Progress::Moved => Ok(Blocked::Again),
+            return Ok(Some(match self.drive(state)? {
+                Progress::Moved => Blocked::Again,
                 // Neither direction moved, which for an encoder means it wants
                 // time rather than data. Park instead of spinning.
                 Progress::Stalled => {
-                    self.park.wait(avplumber_f7k::scaffold::PARK_TIMEOUT_MS);
-                    Ok(Blocked::Again)
+                    self.io.wait(PARK_TIMEOUT_MS);
+                    Blocked::Again
                 }
-            };
+            }));
         }
-
-        match input.take(-1) {
-            Some(EdgeItem::Event(EdgeEvent::Spec(spec))) => {
-                self.on_spec(state, &out, spec)?;
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => {
-                if let Some(ctx) = state.ctx.as_mut() {
-                    state.pump.flush(ctx);
-                }
-                state.eof = true;
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::FlushStart)) => {
-                if let Some(ctx) = state.ctx.as_mut() {
-                    ctx.flush_buffers();
-                }
-                state.pump.reset();
-                state.prev_pts = Ts::invalid();
-                state.input_pts.clear();
-                out.push_event(EdgeEvent::FlushStart);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::FlushStop)) => {
-                out.push_event(EdgeEvent::FlushStop);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Buffer(buffer)) => {
-                self.load(state, buffer);
-                Ok(Blocked::Again)
-            }
-            // A blocking take came back empty: the edge is closed, or the
-            // executor interrupted it to stop this node.
-            None => {
-                self.log_drops(state);
-                Ok(Blocked::Done)
-            }
-        }
+        Ok(None)
     }
 }
 
 impl Encoder {
-    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
-        NodeError::new(&self.name, phase, message)
-    }
-
     /// Hands one frame to the pump, or drops it like C++ does.
     fn load(&self, state: &mut State, buffer: Media) {
         if state.ctx.is_none() {
@@ -321,7 +317,7 @@ impl Encoder {
         {
             log::warn!(
                 "{}: input PTS went backwards {} -> {}, discarding frame",
-                self.name,
+                self.io.name,
                 state.prev_pts.val,
                 ts.val
             );
@@ -349,11 +345,11 @@ impl Encoder {
         let ctx = state
             .ctx
             .as_mut()
-            .ok_or_else(|| self.error(NodePhase::Process, "the encoder is not open"))?;
+            .ok_or_else(|| self.io.error(NodePhase::Process, "the encoder is not open"))?;
         let progress = state
             .pump
             .drive(ctx)
-            .map_err(|message| self.error(NodePhase::Process, message))?;
+            .map_err(|message| self.io.error(NodePhase::Process, message))?;
         // The frame was taken but nothing came out, i.e. the encoder is holding
         // it back — which is exactly what `timestamps_passthrough` cannot model.
         if self.params.timestamps_passthrough
@@ -364,7 +360,7 @@ impl Encoder {
             state.passthrough_warned = true;
             log::warn!(
                 "{}: encoder does buffer but we overwrite timestamps, this may cause desync!",
-                self.name
+                self.io.name
             );
         }
         Ok(progress)
@@ -379,14 +375,7 @@ impl Encoder {
         buffer: Media,
     ) -> Result<Blocked, NodeError> {
         let buffer = self.stamp(state, buffer);
-        match push_blocking(&self.park, out, buffer, || Ok(()))? {
-            Pushed::Ok => Ok(Blocked::Again),
-            Pushed::Interrupted => Ok(Blocked::Done),
-            Pushed::Closed => {
-                log::info!("{}: output edge closed, finishing", self.name);
-                Ok(Blocked::Done)
-            }
-        }
+        self.io.push(out, buffer)
     }
 
     /// Every packet leaves with the encoder's time base written into it:
@@ -418,7 +407,7 @@ impl Encoder {
                             log::warn!(
                                 "{}: more packets than input timestamps, keeping the encoder's \
                                  own on this one",
-                                self.name
+                                self.io.name
                             );
                         }
                     }
@@ -427,53 +416,6 @@ impl Encoder {
             packet.set_ts_dts(pts, dts);
         }
         buffer
-    }
-
-    /// C++ built its encoder from three `findNodeUp` interfaces plus the output
-    /// stream; here the same description arrives as one spec, and a *changed* one
-    /// reopens the codec.
-    fn on_spec(&self, state: &mut State, out: &Arc<dyn Edge>, spec: Spec) -> Result<(), NodeError> {
-        if spec.media() != self.media {
-            log::warn!(
-                "{}: ignoring a {:?} spec on the input; this encoder needs {:?}",
-                self.name,
-                spec.media(),
-                self.media
-            );
-            return Ok(());
-        }
-        if let Some(open_for) = &state.input_spec {
-            if codec::same_spec(open_for, &spec) {
-                log::debug!(
-                    "{}: input spec re-delivered unchanged, keeping the encoder",
-                    self.name
-                );
-                return Ok(());
-            }
-            log::info!("{}: input format changed, reopening the encoder", self.name);
-            if state.pump.has_output() {
-                log::warn!(
-                    "{}: dropping packets the previous encoder had already produced",
-                    self.name
-                );
-            }
-        }
-
-        let ctx = self
-            .open(&spec)
-            .map_err(|message| self.error(NodePhase::Spec, message))?;
-        // What the muxer needs, extradata included, straight from the opened
-        // context — published before the first packet reaches the edge.
-        let packet_spec = codec::packet_spec_of(&ctx);
-        state.time_base = ctx.time_base.into();
-        state.ctx = Some(ctx);
-        state.pump.reset();
-        state.prev_pts = Ts::invalid();
-        state.input_pts.clear();
-        state.passthrough_warned = false;
-        state.input_spec = Some(spec);
-        out.push_event(EdgeEvent::Spec(Spec::Packet(packet_spec)));
-        Ok(())
     }
 
     fn open(&self, spec: &Spec) -> Result<AVCodecContext, String> {
@@ -501,11 +443,11 @@ impl Encoder {
         codec::open_codec(
             &mut ctx,
             Options::from_json(self.params.options.as_ref())?,
-            &self.name,
+            &self.io.name,
         )?;
         log::info!(
             "{}: opened encoder {} at {} bit/s, time base {}/{}",
-            self.name,
+            self.io.name,
             codec.name().to_string_lossy(),
             ctx.bit_rate,
             ctx.time_base.num,
@@ -514,7 +456,7 @@ impl Encoder {
         if self.media == AvpMediaType::AUDIO && ctx.frame_size > 0 {
             log::info!(
                 "{}: the encoder wants {} samples per frame",
-                self.name,
+                self.io.name,
                 ctx.frame_size
             );
         }
@@ -525,7 +467,7 @@ impl Encoder {
         if state.dropped_early > 0 {
             log::info!(
                 "{}: dropped {} frame(s) that arrived before the input spec",
-                self.name,
+                self.io.name,
                 state.dropped_early
             );
         }

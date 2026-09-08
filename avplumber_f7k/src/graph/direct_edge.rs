@@ -150,8 +150,17 @@ impl DirectEdge {
                     break;
                 }
                 match consumer.poll(&mut ctx) {
-                    Tick::Again => ctx.clear_park(),
-                    Tick::Idle | Tick::Done => break,
+                    Ok(Tick::Again) => ctx.clear_park(),
+                    Ok(Tick::Idle | Tick::Done) => break,
+                    // The consumer opted in as infallible when the edge was
+                    // connected, so this is a bug in it. There is no executor
+                    // here to report to; the buffer goes back to the producer as
+                    // `Full`, which is also what a consumer that merely stopped
+                    // would have produced.
+                    Err(err) => {
+                        log::error!("{err} (on a Direct edge, which cannot report it)");
+                        break;
+                    }
                 }
             }
         }
@@ -508,6 +517,7 @@ mod tests {
     use super::*;
     use crate::graph::buffer::{AvpMediaType, AvpRational};
     use crate::graph::buffered_edge::BufferedEdge;
+    use crate::graph::error::NodeError;
     use crate::graph::node::NodeKind;
     use crate::graph::spec::Spec;
 
@@ -540,33 +550,33 @@ mod tests {
         fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
             let _ = self.sink.set(edge);
         }
-        fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+        fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
             let Some(src) = self.src.get() else {
-                return Tick::Done;
+                return Ok(Tick::Done);
             };
             if let Some(sink) = self.sink.get() {
                 if sink.is_full() {
                     ctx.wait_writable(sink.clone());
-                    return Tick::Idle;
+                    return Ok(Tick::Idle);
                 }
             }
             match src.try_take() {
                 None => {
                     ctx.wait_readable(src.clone());
-                    Tick::Idle
+                    Ok(Tick::Idle)
                 }
                 Some(EdgeItem::Buffer(buf)) => {
                     let Some(sink) = self.sink.get() else {
-                        return Tick::Again;
+                        return Ok(Tick::Again);
                     };
                     match sink.offer(buf) {
-                        Ok(()) => Tick::Again,
-                        Err((Push::Full, _)) => Tick::Idle,
-                        Err((Push::Closed | Push::Dropped, _)) => Tick::Done,
-                        Err((Push::Accepted, _)) => Tick::Again,
+                        Ok(()) => Ok(Tick::Again),
+                        Err((Push::Full, _)) => Ok(Tick::Idle),
+                        Err((Push::Closed | Push::Dropped, _)) => Ok(Tick::Done),
+                        Err((Push::Accepted, _)) => Ok(Tick::Again),
                     }
                 }
-                Some(EdgeItem::Event(_)) => Tick::Again,
+                Some(EdgeItem::Event(_)) => Ok(Tick::Again),
             }
         }
     }
@@ -586,11 +596,11 @@ mod tests {
         fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
             let _ = self.src.set(edge);
         }
-        fn poll(&self, ctx: &mut NodePollContext) -> Tick {
+        fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
             if let Some(src) = self.src.get() {
                 ctx.wait_readable(src.clone());
             }
-            Tick::Idle
+            Ok(Tick::Idle)
         }
     }
 

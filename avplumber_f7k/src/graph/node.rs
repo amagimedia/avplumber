@@ -13,17 +13,18 @@ use crate::graph::pad::NodePads;
 use crate::graph::poll_ctx::NodePollContext;
 use crate::graph::spec::Spec;
 
-/// Result of one `Node::process` (blocking body). There is no Idle: the
-/// body waits inside `take(-1)` instead of yielding.
+/// Result of one [`Node::process`] (blocking body). There is no Idle: the
+/// body waits inside `take(-1)` instead of yielding. Failure is the `Err` side
+/// of the `Result` the method returns, not a variant here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blocked {
     Again,
     Done,
 }
 
-/// Result of one `Node::poll` (cooperative body). Idle is C++
+/// Result of one [`Node::poll`] (cooperative body). Idle is C++
 /// `processWhenSignalled` / `sleepAndProcess` then return; Again is
-/// `yieldAndProcess`.
+/// `yieldAndProcess`. Failure is the `Err` side of the `Result`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tick {
     Again,
@@ -85,11 +86,20 @@ pub trait Node: Send + Sync + 'static {
         Ok(spec.clone())
     }
 
-    fn process(&self) -> Blocked {
-        Blocked::Done
+    /// One step of a blocking body. `Err` fails the node: the executor reports
+    /// it and the supervisor restarts the group, per its policy.
+    fn process(&self) -> Result<Blocked, NodeError> {
+        Ok(Blocked::Done)
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Tick {
-        Tick::Done
+    /// One step of a cooperative body; `Err` fails the node the same way.
+    ///
+    /// One path cannot carry the error: a [`DirectEdge`](crate::graph::DirectEdge)
+    /// runs its consumer's `poll` from inside the producer's `offer`, where there
+    /// is no executor to report to. That is what
+    /// [`Self::direct_consumer_is_infallible`] promises never happens; an `Err`
+    /// there is logged and ends the fused run, nothing more.
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        Ok(Tick::Done)
     }
 
     fn run_async(self: Arc<Self>) -> NodeFuture {
@@ -102,10 +112,14 @@ pub trait Node: Send + Sync + 'static {
     fn bind_source(&self, _name: &str, _edge: Arc<dyn Edge>) {}
     fn bind_sink(&self, _name: &str, _edge: Arc<dyn Edge>) {}
 
+    /// The body the executor drives, taken once at start. The default calls
+    /// [`Self::process`] / [`Self::poll`] / [`Self::run_async`] by
+    /// [`Self::kind`]; override it only for a body that needs locals of its own
+    /// across steps.
     fn take_body(self: Arc<Self>) -> NodeBody {
         match self.kind() {
-            NodeKind::Blocking => NodeBody::Blocking(Box::new(move || Ok(self.process()))),
-            NodeKind::Poll => NodeBody::Poll(Box::new(move |ctx| Ok(self.poll(ctx)))),
+            NodeKind::Blocking => NodeBody::Blocking(Box::new(move || self.process())),
+            NodeKind::Poll => NodeBody::Poll(Box::new(move |ctx| self.poll(ctx))),
             NodeKind::Async => NodeBody::Async(self.run_async()),
         }
     }

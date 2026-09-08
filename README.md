@@ -106,7 +106,7 @@ Example: `library_examples/obs-avplumber-source` - source plugin for [OBS](https
 
 ## Developing custom nodes
 
-See [doc/developing_nodes.md](doc/developing_nodes.md)
+See [doc/developing_nodes.md](doc/developing_nodes.md) for C++ nodes and [doc/developing_nodes_rust.md](doc/developing_nodes_rust.md) for Rust nodes.
 
 ## Graph
 An avplumber instance consists of a [directed acyclic graph](https://en.wikipedia.org/wiki/Directed_acyclic_graph) of interconnected nodes.

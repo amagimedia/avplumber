@@ -49,7 +49,10 @@ pub use graph::{
     PadDecl, Push, Spec, StreamSelection, Tick, Ts, Vertex, Wakeup, generation_reader,
     generation_writer,
 };
-pub use scaffold::{SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter};
+pub use scaffold::{
+    Blocking, BlockingIo, BlockingNode, InputHandler, Io, PollNode, Polling, SingleInput,
+    SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter,
+};
 pub use services::ServiceRegistry;
 pub use supervisor::{
     Group, GroupState, GroupStatus, Reconstruction, RestartHook, RestartRequest, SupervisorAction,

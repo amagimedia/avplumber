@@ -21,17 +21,17 @@ use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem};
+use avplumber_f7k::graph::edge::{Edge, EdgeEvent};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::media::{FrameExt, Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::{Blocked, Node, NodeBody, NodeKind};
-use avplumber_f7k::graph::pad::{NodePads, PadDecl};
+use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{PacketSpec, Spec};
 use avplumber_f7k::graph::timebase::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
-use avplumber_f7k::scaffold::{BlockingStep, EdgeSlot, Park, Pushed, blocking_body, push_blocking};
+use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
 
 /// The parameters both decoder types share; C++ has one template for both.
 ///
@@ -90,13 +90,10 @@ impl DecoderParams {
         };
 
         Ok(Decoder {
-            name: name.into(),
+            io: BlockingIo::new(name),
             media,
             params: self,
             pixel_format,
-            park: Arc::new(Park::default()),
-            input: EdgeSlot::default(),
-            out: EdgeSlot::default(),
             state: Mutex::new(State::new(media, name)),
         })
     }
@@ -110,10 +107,10 @@ pub struct VideoDecoderSpec(DecoderParams);
 
 impl NodeSpec for VideoDecoderSpec {
     const TYPE_NAME: &'static str = "dec_video";
-    type Node = Decoder;
+    type Node = Blocking<Decoder>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::VIDEO)
+        self.0.build(name, AvpMediaType::VIDEO).map(Blocking)
     }
 }
 
@@ -123,10 +120,10 @@ pub struct AudioDecoderSpec(DecoderParams);
 
 impl NodeSpec for AudioDecoderSpec {
     const TYPE_NAME: &'static str = "dec_audio";
-    type Node = Decoder;
+    type Node = Blocking<Decoder>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::AUDIO)
+        self.0.build(name, AvpMediaType::AUDIO).map(Blocking)
     }
 }
 
@@ -212,7 +209,7 @@ impl State {
 }
 
 pub struct Decoder {
-    name: String,
+    io: BlockingIo,
     /// `VIDEO` or `AUDIO`: which node type this is.
     media: AvpMediaType,
     /// What the script asked for, verbatim: [`DecoderParams`] documents each
@@ -222,44 +219,106 @@ pub struct Decoder {
     /// the pointer the context carries in `opaque` stays valid for the context's
     /// whole life.
     pixel_format: Option<Arc<PixelFormatRequest>>,
-    park: Arc<Park>,
-    input: EdgeSlot,
-    out: EdgeSlot,
     state: Mutex<State>,
 }
 
-impl Node for Decoder {
-    fn name(&self) -> &str {
-        &self.name
+impl InputHandler for Decoder {
+    /// C++ built its decoder from the input `AVStream`; here the same
+    /// description arrives as a spec, and a *changed* one reopens the codec.
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        let Spec::Packet(packet_spec) = &spec else {
+            log::warn!(
+                "{}: ignoring a {:?} spec on the input; a decoder needs a packet spec",
+                self.io.name,
+                spec.media()
+            );
+            return Ok(None);
+        };
+        if let Some(published) = &state.input_spec {
+            if codec::same_spec(published, &spec) {
+                log::debug!(
+                    "{}: input spec re-delivered unchanged, keeping the decoder",
+                    self.io.name
+                );
+                return Ok(None);
+            }
+            log::info!(
+                "{}: input format changed, reopening the decoder",
+                self.io.name
+            );
+            if state.pump.has_output() {
+                log::warn!(
+                    "{}: dropping frames the previous decoder had already produced",
+                    self.io.name
+                );
+            }
+        }
+
+        let ctx = self
+            .open(packet_spec)
+            .map_err(|message| self.io.error(NodePhase::Spec, message))?;
+        state.time_base = packet_spec.time_base;
+        state.frame_rate = ctx.framerate.into();
+        state.ctx = Some(ctx);
+        state.pump.reset();
+        state.last_pts = Ts::invalid();
+        state.last_key = false;
+        state.input_spec = Some(spec);
+        // Nothing to publish yet: the output format is read off the first
+        // decoded frame, in `emit`.
+        Ok(None)
     }
 
-    fn kind(&self) -> NodeKind {
-        NodeKind::Blocking
+    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        if state.ctx.is_none() {
+            // Only reachable when a producer pushed packets before its spec;
+            // there is nothing to decode them with yet.
+            state.dropped_early += 1;
+            return Ok(None);
+        }
+        state.last_key = matches!(&buffer, Media::Packet(packet) if packet.is_key());
+        state.pump.load(buffer);
+        Ok(None)
+    }
+
+    fn on_flush(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(ctx) = state.ctx.as_mut() {
+            ctx.flush_buffers();
+        }
+        state.pump.reset();
+        state.last_pts = Ts::invalid();
+    }
+
+    /// The codec keeps producing after its last input, so this only starts the
+    /// drain; [`SingleInput::before_take`] finishes when it is over.
+    fn on_eof(&self) -> Result<Blocked, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        if let Some(ctx) = state.ctx.as_mut() {
+            state.pump.flush(ctx);
+        }
+        state.eof = true;
+        Ok(Blocked::Again)
+    }
+
+    fn on_closed(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        self.log_drops(state);
+    }
+}
+
+impl SingleInput for Decoder {
+    fn io(&self) -> &BlockingIo {
+        &self.io
     }
 
     fn pads(&self) -> NodePads {
-        NodePads {
-            sources: vec![PadDecl {
-                name: "in".into(),
-                media: AvpMediaType::PACKET,
-            }],
-            sinks: vec![PadDecl {
-                name: "out".into(),
-                media: self.media,
-            }],
-        }
-    }
-
-    fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.input.bind(edge);
-    }
-
-    fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
-        self.out.bind(edge);
+        NodePads::siso(AvpMediaType::PACKET, self.media)
     }
 
     fn start(&self) {
-        self.park.reset();
         let state = &mut *self.state.lock().unwrap();
         state.pump.reset();
         if let Some(ctx) = state.ctx.as_mut() {
@@ -274,111 +333,45 @@ impl Node for Decoder {
         // the re-delivery is recognised as "unchanged" instead of reopening.
     }
 
-    fn interrupt(&self) {
-        self.park.interrupt();
-    }
-
-    fn take_body(self: Arc<Self>) -> NodeBody {
-        blocking_body(self)
-    }
-}
-
-impl BlockingStep for Decoder {
-    fn step(&self) -> Result<Blocked, NodeError> {
-        let input = self
-            .input
-            .require(&self.name, NodePhase::Process, "input")?;
-        let out = self.out.require(&self.name, NodePhase::Process, "output")?;
-        let mut guard = self.state.lock().unwrap();
-        let state = &mut *guard;
-
-        if self.park.is_interrupted() {
-            return Ok(Blocked::Done);
-        }
-
-        // Decoded output goes downstream before anything new is taken in.
+    /// Decoded frames go downstream before anything new is taken in, and a
+    /// codec that refused the packet we are holding is offered it again.
+    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+        let state = &mut *self.state.lock().unwrap();
+        let out = self.io.output()?;
         if let Some(buffer) = state.pump.take_output() {
-            return self.emit(state, &out, buffer);
+            return self.emit(state, &out, buffer).map(Some);
         }
         // Drained after `Eof`: pass the marker on and finish.
         if state.eof {
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
-            return Ok(Blocked::Done);
+            return Ok(Some(Blocked::Done));
         }
-        // The codec refused the packet we are holding: offer it again.
         if state.pump.is_loaded() {
-            return match self.drive(state)? {
-                Progress::Moved => Ok(Blocked::Again),
+            return Ok(Some(match self.drive(state)? {
+                Progress::Moved => Blocked::Again,
                 // Neither direction moved, which for a decoder means the codec
                 // wants time rather than data. Park instead of spinning.
                 Progress::Stalled => {
-                    self.park.wait(avplumber_f7k::scaffold::PARK_TIMEOUT_MS);
-                    Ok(Blocked::Again)
+                    self.io.wait(PARK_TIMEOUT_MS);
+                    Blocked::Again
                 }
-            };
+            }));
         }
-
-        match input.take(-1) {
-            Some(EdgeItem::Event(EdgeEvent::Spec(spec))) => {
-                self.on_spec(state, spec)?;
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => {
-                if let Some(ctx) = state.ctx.as_mut() {
-                    state.pump.flush(ctx);
-                }
-                state.eof = true;
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::FlushStart)) => {
-                if let Some(ctx) = state.ctx.as_mut() {
-                    ctx.flush_buffers();
-                }
-                state.pump.reset();
-                state.last_pts = Ts::invalid();
-                out.push_event(EdgeEvent::FlushStart);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Event(EdgeEvent::FlushStop)) => {
-                out.push_event(EdgeEvent::FlushStop);
-                Ok(Blocked::Again)
-            }
-            Some(EdgeItem::Buffer(buffer)) => {
-                if state.ctx.is_none() {
-                    // Only reachable when a producer pushed packets before its
-                    // spec; there is nothing to decode them with yet.
-                    state.dropped_early += 1;
-                    return Ok(Blocked::Again);
-                }
-                state.last_key = matches!(&buffer, Media::Packet(packet) if packet.is_key());
-                state.pump.load(buffer);
-                Ok(Blocked::Again)
-            }
-            // A blocking take came back empty: the edge is closed, or the
-            // executor interrupted it to stop this node.
-            None => {
-                self.log_drops(state);
-                Ok(Blocked::Done)
-            }
-        }
+        Ok(None)
     }
 }
 
 impl Decoder {
-    fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
-        NodeError::new(&self.name, phase, message)
-    }
-
     fn drive(&self, state: &mut State) -> Result<Progress, NodeError> {
         let ctx = state
             .ctx
             .as_mut()
-            .ok_or_else(|| self.error(NodePhase::Process, "the decoder is not open"))?;
+            .ok_or_else(|| self.io.error(NodePhase::Process, "the decoder is not open"))?;
         state
             .pump
             .drive(ctx)
-            .map_err(|message| self.error(NodePhase::Process, message))
+            .map_err(|message| self.io.error(NodePhase::Process, message))
     }
 
     /// Stamps the frame, publishes its spec if it is new, then pushes it.
@@ -390,14 +383,7 @@ impl Decoder {
     ) -> Result<Blocked, NodeError> {
         let buffer = self.stamp(state, buffer);
         self.publish_spec(state, out, &buffer);
-        match push_blocking(&self.park, out, buffer, || Ok(()))? {
-            Pushed::Ok => Ok(Blocked::Again),
-            Pushed::Interrupted => Ok(Blocked::Done),
-            Pushed::Closed => {
-                log::info!("{}: output edge closed, finishing", self.name);
-                Ok(Blocked::Done)
-            }
-        }
+        self.io.push(out, buffer)
     }
 
     /// libavcodec 6 and 7/8 disagree about whether `frame.time_base` comes back
@@ -418,7 +404,7 @@ impl Decoder {
             {
                 log::warn!(
                     "{}: got an out of order frame from the decoder: {} -> {}",
-                    self.name,
+                    self.io.name,
                     state.last_pts.val,
                     ts.val
                 );
@@ -444,54 +430,13 @@ impl Decoder {
             }
             log::info!(
                 "{}: decoded format changed, re-publishing the spec: {spec:?}",
-                self.name
+                self.io.name
             );
         } else {
-            log::info!("{}: decoding to {spec:?}", self.name);
+            log::info!("{}: decoding to {spec:?}", self.io.name);
         }
         out.push_event(EdgeEvent::Spec(spec.clone()));
         state.output_spec = Some(spec);
-    }
-
-    /// C++ built its decoder from the input `AVStream`; here the same
-    /// description arrives as a spec, and a *changed* one reopens the codec.
-    fn on_spec(&self, state: &mut State, spec: Spec) -> Result<(), NodeError> {
-        let Spec::Packet(packet_spec) = &spec else {
-            log::warn!(
-                "{}: ignoring a {:?} spec on the input; a decoder needs a packet spec",
-                self.name,
-                spec.media()
-            );
-            return Ok(());
-        };
-        if let Some(published) = &state.input_spec {
-            if codec::same_spec(published, &spec) {
-                log::debug!(
-                    "{}: input spec re-delivered unchanged, keeping the decoder",
-                    self.name
-                );
-                return Ok(());
-            }
-            log::info!("{}: input format changed, reopening the decoder", self.name);
-            if state.pump.has_output() {
-                log::warn!(
-                    "{}: dropping frames the previous decoder had already produced",
-                    self.name
-                );
-            }
-        }
-
-        let ctx = self
-            .open(packet_spec)
-            .map_err(|message| self.error(NodePhase::Spec, message))?;
-        state.time_base = packet_spec.time_base;
-        state.frame_rate = ctx.framerate.into();
-        state.ctx = Some(ctx);
-        state.pump.reset();
-        state.last_pts = Ts::invalid();
-        state.last_key = false;
-        state.input_spec = Some(spec);
-        Ok(())
     }
 
     fn open(&self, spec: &PacketSpec) -> Result<AVCodecContext, String> {
@@ -522,7 +467,7 @@ impl Decoder {
                 Some(name) => {
                     log::info!(
                         "{}: detected codec {input_name}, using implementation {name}",
-                        self.name
+                        self.io.name
                     );
                     Some(name.clone())
                 }
@@ -531,7 +476,7 @@ impl Decoder {
                         log::info!(
                             "{}: detected codec {input_name}, not in codec_map, using the \
                              libavcodec default",
-                            self.name
+                            self.io.name
                         );
                     }
                     None
@@ -554,11 +499,11 @@ impl Decoder {
         codec::open_codec(
             &mut ctx,
             Options::from_json(self.params.options.as_ref())?,
-            &self.name,
+            &self.io.name,
         )?;
         log::info!(
             "{}: opened decoder {} for {input_name}",
-            self.name,
+            self.io.name,
             codec.name().to_string_lossy()
         );
         Ok(ctx)
@@ -568,7 +513,7 @@ impl Decoder {
         if state.dropped_early > 0 {
             log::info!(
                 "{}: dropped {} packet(s) that arrived before the input spec",
-                self.name,
+                self.io.name,
                 state.dropped_early
             );
         }
