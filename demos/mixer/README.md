@@ -10,29 +10,23 @@
 Sixteen sources — **live browser pages and video files together** — composited
 on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from
 the browser control surface on the left, with the whole show described by one
-JSON document. The picture on the right is what it was cutting: `grid_16_page_0`,
-sixteen distinct sources in one 9:16 raster.
+JSON document.
 
-| Measured on a Tesla T4 | |
-| --- | --- |
-| **16** | unique sources: seven live pages, nine clips, one decode or capture each |
-| **17–18%** | GPU, canvas rendering at 30 fps |
-| **2.86 Mbit/s** | on the wire from a 2 700 kbit/s WebRTC rendition |
-| **5** | media wipes held decoded in GPU memory, ~482 MiB |
-
+[**Watch it run** (21 s)](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-webui-demo.mp4) ·
 [Demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
 [Configuration reference](docs/config.md) ·
-[Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer) ·
-[Earlier 15-second recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4)
-(360p sources, terminal UI, before the browser surface)
+[Processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
+
+On a Tesla T4, that run costs **17–18% GPU** with the canvas at 30 fps and
+sends **2.86 Mbit/s** from a 2 700 kbit/s WebRTC rendition, with five media
+wipes held decoded in GPU memory.
 
 ## Run
 
-Use a Linux NVIDIA host with hardware decode and NVENC. Follow the
-[shared Docker/NVIDIA setup](../README.md); no company account, private runtime,
-neural models or TensorRT is needed.
+A Linux NVIDIA host with hardware decode and NVENC; see the
+[shared Docker/NVIDIA setup](../README.md). Nothing private is needed.
 
-From the repository root, build the image and start the shared Janus preview:
+Build the image and start the Janus preview:
 
 ```sh
 docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
@@ -40,216 +34,104 @@ docker compose --env-file demos/dmabuf-browser/.env.example \
   -f demos/dmabuf-browser/compose.yaml up -d --build janus janus-preview
 ```
 
-Put your input clips and an optional alpha wipe in `media/`, then run:
+Put clips (and an alpha wipe clip) in `media/`, then run the mixer:
 
 ```sh
 docker run --rm --gpus all --network host \
   -v "$PWD/media:/media:ro,z" \
   avplumber-mixer:local \
   --input /media/camera-1.mp4 --input /media/camera-2.mp4 \
-  --loop-inputs --fps 60 --janus-output \
-  --janus-video-bitrate-kbps 8000 --remote-control-port 7777
+  --loop-inputs --janus-output --remote-control-port 7777 \
+  --wipe-file /media/wipe.mov
 ```
 
-Repeat `--input` for each source; the recording uses sixteen generated clips.
-Open the output at <http://127.0.0.1:8080>. In another terminal:
+Repeat `--input` per source. The program plays at <http://127.0.0.1:8080>.
+
+## Control it
+
+Two surfaces speak the same protocol and can run at once.
 
 ```sh
-python3 -m venv .venv-tui
-.venv-tui/bin/python -m pip install -r demos/mixer/requirements.txt
-.venv-tui/bin/python demos/mixer/tui.py --host 127.0.0.1 --port 7777 \
-  --fade-duration 0.8 --wipe-file /media/wipe.mov
+# browser: scene tiles, a button per wipe clip, Cut / Fade / Direct
+python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --http-port 7681
+
+# terminal
+python3 -m venv .venv-tui && .venv-tui/bin/python -m pip install -r demos/mixer/requirements.txt
+.venv-tui/bin/python demos/mixer/tui.py --host 127.0.0.1 --port 7777
 ```
 
-The wipe path is resolved by the mixer backend, including inside its container.
-Pass the same clip to the mixer as `--wipe-file` (compose: `MIXER_WIPE_FILE`) and
-it runs the wipe chain once, invisibly, at start, so the first wipe is as fast as
-the following ones instead of paying for file open, decoder and GPU filter setup.
-Use a clip with alpha, such as QTRLE/ARGB or ProRes 4444. The clip plays over the
-program and the scene changes at its midpoint. The demo has no audio.
+| Control | Result |
+| --- | --- |
+| A scene tile | Loads Preview; in Direct mode, takes it to Program |
+| Cut / `c` | Immediate take |
+| Fade / `f` | Blend over the chosen duration |
+| A wipe button / `w` | Play that transparent clip over the change |
+| Direct / `d` (`t` in the TUI) | Picks go straight to Program |
+| `1`–`9` | Pick one of the first nine scenes |
+
+A new take interrupts a running transition from the current picture. Wipe
+clips are decoded once at start and replayed from GPU memory, so the first
+wipe is as quick as the tenth; use a clip with alpha (QTRLE/ARGB, ProRes 4444).
 
 ## Browser pages as sources
 
 Any input can be a live page rendered by the
 [DMA-BUF browser demo](../dmabuf-browser/README.md) instead of a clip:
-`--input dmabuf://<window-id>` takes the window's DRM PRIME frames straight
-into the compositor with no decoder, using the same chain as that demo. File
-and browser inputs mix freely and share every layout, transition and control.
+`--input dmabuf://<window-id>` takes the window's frames straight into the
+compositor with no decoder. Pages and files mix freely and share every layout,
+transition and control. Pages that only paint once are held, so a static
+graphic keeps feeding the mixer.
 
-The compose override runs this mixer inside the DMA-BUF stack and opens the
-pages itself. From the repository root:
+The compose override runs the mixer inside the DMA-BUF stack and opens the
+pages itself:
 
 ```sh
-cd demos/dmabuf-browser
-cp .env.example .env
-MIXER_SOURCE_COUNT=4 docker compose --env-file .env   -f compose.yaml -f compose.mixer.yaml up --build
+cd demos/dmabuf-browser && cp .env.example .env
+MIXER_SOURCE_COUNT=4 docker compose --env-file .env \
+  -f compose.yaml -f compose.mixer.yaml up --build
 ```
 
-Open <http://127.0.0.1:8080> and drive it with `tui.py` as above. `HTML_OVERLAY_URL`
-selects the page (default: the bundled animation), `MIXER_SOURCE_COUNT` the
-number of windows, `MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size.
-Outside compose, the switches are `--dmabuf-open URL` (open the windows through
-the browser's REST API, `--dmabuf-rest`), `--dmabuf-size WxH` and
-`--dmabuf-socket-dir`.
+`HTML_OVERLAY_URL` picks the page, `MIXER_SOURCE_COUNT` the number of windows,
+`MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size. Outside compose:
+`--dmabuf-open URL`, `--dmabuf-size WxH`, `--dmabuf-socket-dir`.
 
-Pages that only paint on load (a static graphic) are held: each browser chain
-ends in `repeat_last_frame`, which re-emits the last frame at the mixer rate
-while the page is idle, so scene switches never wait on a page that has nothing
-new to draw.
-
-Sixteen Singular.live pages on the Tesla T4 host (16 vCPU), 60 fps, all
-sixteen windows painting at 60 fps with zero capture drops and the encoder at
-60 fps, ten one-second samples after warm-up:
-
-| Page size | GPU busy | GPU memory | Host CPU busy |
-| --- | ---: | ---: | ---: |
-| 480x270 | 33.7 % | 584 MiB | 52 % |
-| 960x540 | 37.4 % | 1308 MiB | 60 % |
-| 1280x720 | 40.8 % | 1394 MiB | 72 % |
-| 1920x1080 | 51.1 % | 3585 MiB | 78 % |
-
-The same sixteen clips decoded by NVDEC cost 2 % GPU; the browser rendering and
-capture is the load. Each DMA-BUF allocation is imported once and copied per
-frame; browser frames are converted from RGB to the NV12 canvas inside the
-compositor's draw pass, so video and browser sources mix on one canvas without
-extra passes.
-
-## Configuration file
+## Describe a show in one file
 
 `--config mixer.json` replaces `--input` and the built-in layouts with a
-document of sources, wipes, scenes, control defaults and encoded outputs.
-**Every field is documented in [docs/config.md](docs/config.md)**; the design
-rationale is in the
-[schema note](../../doc/research/2026-09-08-mixer-config-schema.md). Sources
-are unique clips or pages, each decoded or captured once; scenes are ordered
-item lists (`dst` rect, `fit` stretch/contain/cover, optional `crop`), item
-order is z-order, and a source may appear several times in one scene. All
-declared wipes are warmed up at start. `make_config.py` writes the demo's own
-layouts out in this form:
+document of sources, scenes, wipes, control defaults and encoded outputs — no
+2/4/8/16-box layout lives in code. Every field is documented in
+**[docs/config.md](docs/config.md)**; [`config.example.json`](config.example.json)
+is a worked example.
 
 ```sh
-python3 demos/mixer/make_config.py --fps 30 --wipe /media/wipe.mov   cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
+docker run ... avplumber-mixer:local --config /media/mixer.json --janus-output
 ```
 
-## Generated input size and FPS
-
-Generate sixteen native-resolution test clips (requires NumPy and FFmpeg with
-`libx264`; generation does not require a GPU):
+`make_config.py` writes the demo's own layouts out in that form:
 
 ```sh
-python3 demos/mixer/tests/frame_codes.py media \
-  --sources 16 --width 1920 --height 1080 --fps 60 --seconds 30
+python3 demos/mixer/make_config.py --wipe /media/wipe.mov \
+  cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
 ```
 
-`--width`, `--height` and `--fps` control the generated source files. Defaults
-are **1920×1080 at 60 fps**; `--ffmpeg` selects the FFmpeg executable. Existing
-files are not overwritten. For example, use `--width 1280 --height 720 --fps 30`
-for a 720p30 input test. Supplied video files retain their encoded dimensions.
-The mixer's separate `--fps` option sets the processing/output rate; keep it at
-60 when comparing different source sizes.
+## Test sources
 
-To run all sixteen generated inputs from Bash:
+Sixteen generated clips with visible frame IDs (needs NumPy and FFmpeg):
 
 ```sh
-demo_inputs=()
-for i in {0..15}; do demo_inputs+=(--input "/media/source-$i.mp4"); done
-docker run --rm --gpus all --network host \
-  -v "$PWD/media:/media:ro,z" avplumber-mixer:local \
-  "${demo_inputs[@]}" --loop-inputs --fps 60 --janus-output \
-  --janus-video-bitrate-kbps 8000 --remote-control-port 7777
+python3 demos/mixer/tests/frame_codes.py media --sources 16 --width 1920 --height 1080 --fps 60 --seconds 30
 ```
 
-## Controls
-
-Two control surfaces speak the same protocol and can be used at once: a browser
-UI and a terminal UI. The browser one is the demo's own page — one click per
-scene, one button per wipe clip, and the transition a pick takes with:
-
-```sh
-python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --bind 0.0.0.0 --http-port 7681
-```
-
-The tiles are the scenes the mixer publishes, the wipe buttons are its cached
-clip library, and `control` in the configuration file
-([docs/config.md](docs/config.md)) decides what a fresh page starts with.
-
-| Control | Result |
-| --- | --- |
-| Scene, layout and Page | Prepare Preview; in Direct mode, put the selection on air |
-| Cut / `c` | Immediate take |
-| Fade / `f` | Blend for the selected duration |
-| Media Wipe / `w` | Play the selected transparent clip |
-| Direct / `t` | Use the current Cut, Fade or Media Wipe for each selection |
-| `1`–`9` | Select one of the first nine scenes |
-| `r` / `q` | Reconnect / quit the TUI |
-
-The keys are the same in both surfaces; `t` toggles Direct in the TUI, `d` in
-the browser.
-
-A new take can interrupt a transition, starting from the current mixer picture.
-Sources retain their positions if one stalls. Output is 1080×1920 portrait;
-inputs keep their aspect ratio. More sources than cells create additional pages.
-
-## Processing graph
+## Under the hood
 
 <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
 
-**122 nodes / 140 queues**, grouped into six blocks. Click the overview for the
-full-resolution ungrouped graph in an HTML viewer with Fit and zoom controls.
-On the [demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/#graph)
-it opens in a new tab. In the live WebUI, click a group to enter it and use
-**← Back** to return. Static edge colours and fill markers show sampled flow
-without animated edges.
+Two compositor slots draw every scene; a transition filter blends them and the
+wipe is one more layer in the same kernel, so nothing round-trips through the
+CPU. Browser frames are converted from RGB to the NV12 canvas inside the draw
+pass. The program is composited once and each rendition re-times and rescales
+it, so a second output costs an encode, not another composite.
 
-## Timing and measured load
-
-Both compositor slots use the native timing shared with the
-[DMA-BUF demo](../dmabuf-browser/README.md). `--mixer-latency-ms` sets the jitter
-budget; the default is two output frame periods (about 33 ms at 60 fps).
-Late sources repeat their previous image and discard overdue frames to recover.
-This budget is not the full click-to-display latency.
-
-A different configuration from the figures at the top: **sixteen 1080p clips,
-no browser pages, everything at 60 fps**, which is what the numbers below were
-taken from.
-
-With **sixteen native 1920×1080@60 H.264 inputs**, a Tesla T4 / 16-vCPU
-host measured the following over 30 seconds in the steady 16-box scene.
-Output was **1080×1920@60**, H.264 NVENC at 8 Mbit/s; the two-frame jitter
-budget and automatic GPU clocks were retained.
-
-| Measurement | Average |
-| --- | ---: |
-| GPU compute utilization | **8.0%** (min/max: 8%/8%) |
-| NVDEC decoder utilization | **76.7%** (min/max: 76%/79%) |
-| NVENC encoder utilization | **23.0%** |
-| GPU memory activity | **16.0%** |
-| AVPlumber CPU | **0.58 cores** |
-| Whole-device GPU memory | **1,958 MiB** |
-
-These are separate engine/activity measurements; **8% does not mean the entire
-GPU is only 8% occupied**. Decoder capacity matters for scaling source count.
-The input clips contain native-resolution animated test patterns and visible
-frame IDs. No fixture generation or DMA-BUF browser workload ran during the
-measurement. See [samples and exact conditions](docs/runtime-load-1080p.json).
-A separate 11.4-second decoded-output check had regular 60 fps RTP timestamps
-and no packet loss, but source 14 repeated **33.43%** and skipped **33.28%**
-of source frames (229 repeats / 228 skipped frames across 685 intervals).
-The other fifteen sources had **0%** repeats and skips. An earlier short
-capture also showed smaller continuity errors on other sources. This is an
-unresolved per-source timing issue: the load figures do **not** establish
-frame-perfect delivery. See [both pixel-level checks](docs/continuity-1080p.json).
-
-The earlier **4%** measurement used **640×360 inputs** and is retained only as
-historical data in [the earlier report](docs/runtime-load.json).
-
-Click latency was measured separately with the earlier 360p inputs: eleven
-warm Cut trials had **182.3 ms minimum, 237.7 ms mean, 188.8 ms median and
-503.9 ms maximum**. The viewer ran on the same host; these measurements include
-browser presentation and probe overhead. They are not a new 1080p latency
-measurement. See [raw samples and method](docs/latency.md).
-Content, resolution, transitions and viewer/network conditions affect results.
-
-For output files, Janus settings, keyboard details, layouts and tests, see the
-[full reference](docs/guide.md). GPU program frames remain on the GPU; the
-separate alpha-media wipe branch decodes on CPU and uploads its frames.
+Output files, Janus settings, layouts and tests: [docs/guide.md](docs/guide.md).
+Measured samples and conditions: [runtime-load-1080p.json](docs/runtime-load-1080p.json),
+[latency.md](docs/latency.md).
