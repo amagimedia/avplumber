@@ -74,7 +74,6 @@ class GraphOptions:
     dmabuf_size: tuple[int, int] = (1280, 720)
     dmabuf_open: str | None = None       # page URL: open the named windows before building
     dmabuf_rest: str = "http://127.0.0.1:9009"
-    dmabuf_render_node: str = "/dev/dri/renderD128"
 
     @property
     def dmabuf_inputs(self) -> list[str]:
@@ -259,7 +258,7 @@ def _build_input(
         nodes, fps_edge = dmabuf_cuda_input_nodes(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
-            width=width, height=height, fps=fps, drm_hwaccel="@drm", cuda_hwaccel=HWACCEL,
+            width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
             source_group=group, processing_group=group)
         for node in nodes:
             avp.addNode(node)
@@ -439,9 +438,6 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     )
     dmabuf_ids = options.dmabuf_inputs
     if dmabuf_ids:
-        avp.executeCommandsFromString(
-            f'hwaccel.init {{ "name": "@drm", "type": "drm", "device": "{options.dmabuf_render_node}" }}'
-        )
         if options.dmabuf_open:
             width, height = options.dmabuf_size
             open_browser_windows(options.dmabuf_rest, dmabuf_ids, options.dmabuf_open,
@@ -510,7 +506,6 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--dmabuf-open", metavar="URL",
                         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
-    parser.add_argument("--dmabuf-render-node", default="/dev/dri/renderD128")
     parser.add_argument(
         "--output-format",
         help="Muxer format when it cannot be inferred from the output",
@@ -575,7 +570,6 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         dmabuf_size=parse_size(args.dmabuf_size),
         dmabuf_open=args.dmabuf_open,
         dmabuf_rest=args.dmabuf_rest,
-        dmabuf_render_node=args.dmabuf_render_node,
     )
 
 

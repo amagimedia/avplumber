@@ -314,9 +314,9 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     )
     nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
 
-    assert any('"name": "@drm", "type": "drm"' in c for c in application.avp.commands)
+    assert not any("drm" in c for c in application.avp.commands)   # DRM frames are imported by CUDA directly
     receive = nodes["input_1_receive"]
-    assert receive["type"] == "ipc_dmabuf_source"
+    assert receive["type"] == "ipc_dmabuf_source" and "hwaccel" not in receive
     assert receive["socket"] == str(tmp_path / "page_00.sock")
     assert receive["fps"] == "60/1" and receive["group"] == "input_1"
     assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
