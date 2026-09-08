@@ -50,7 +50,7 @@ class FakeAvp:
         for line in commands.splitlines():
             parts = line.split()
             if parts[:1] == ["node.param.set"] and parts[2:3] == ["url"]:
-                self.armed_clips.append(parts[3])
+                self.armed_clips.append(json.loads(parts[3]))
 
     def enableControlServer(self, port):
         self.control_port = port
@@ -422,8 +422,8 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     # Cached by default: the clip is armed on the loader and decoded once, so
     # mixer.wipe.warmup (which only compiles the filter) is not used.
     armed = "\n".join(application.avp.commands)
-    assert "node.param.set mixer_wipe_input url /media/wipe.mov" in armed
-    assert "node.param.set mixer_wipe_cache url /media/wipe.mov" in armed
+    assert 'node.param.set mixer_wipe_input url "/media/wipe.mov"' in armed
+    assert 'node.param.set mixer_wipe_cache url "/media/wipe.mov"' in armed
     assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
     assert application.avp.ready
 

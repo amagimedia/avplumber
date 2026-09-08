@@ -151,9 +151,10 @@ class MixerApplication:
             started = time.monotonic()
             # Both nodes need the clip before their group starts: the reader to
             # open the file, the cache to know which clip it is filling.
+            value = json.dumps(clip)   # node.param.set parses the value as JSON
             self.avp.executeCommandsFromString(
-                f"node.param.set {MIXER_NAME}_wipe_input url {clip}\n"
-                f"node.param.set {cache_node} url {clip}")
+                f"node.param.set {MIXER_NAME}_wipe_input url {value}\n"
+                f"node.param.set {cache_node} url {value}")
             self.avp.group(player).startNodes()
             self.avp.group(loader).startNodes()
             deadline = started + self.preheat_timeout_sec
