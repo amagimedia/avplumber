@@ -158,6 +158,20 @@ docker run --rm --gpus all --network host \
 
 ## Controls
 
+Two control surfaces speak the same protocol and can be used at once: a browser
+UI and a terminal UI. The browser one is the demo's own page — one click per
+scene, one button per wipe clip, and the transition a pick takes with:
+
+```sh
+python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --bind 0.0.0.0 --http-port 7681
+```
+
+<img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length" width="100%">
+
+The tiles are the scenes the mixer publishes, the wipe buttons are its cached
+clip library, and `control` in the configuration file
+([docs/config.md](docs/config.md)) decides what a fresh page starts with.
+
 | Control | Result |
 | --- | --- |
 | Scene, layout and Page | Prepare Preview; in Direct mode, put the selection on air |
@@ -167,6 +181,9 @@ docker run --rm --gpus all --network host \
 | Direct / `t` | Use the current Cut, Fade or Media Wipe for each selection |
 | `1`–`9` | Select one of the first nine scenes |
 | `r` / `q` | Reconnect / quit the TUI |
+
+The keys are the same in both surfaces; `t` toggles Direct in the TUI, `d` in
+the browser.
 
 A new take can interrupt a transition, starting from the current mixer picture.
 Sources retain their positions if one stalls. Output is 1080×1920 portrait;
