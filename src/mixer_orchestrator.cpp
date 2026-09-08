@@ -651,15 +651,22 @@ void MixerOrchestrator::ensureIdle() const {
 
 void MixerOrchestrator::interruptTransition() {
     if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
+    const auto previous_mode = state_->transition_mode.load();
+    // A crossfade's blended picture exists only inside the transition compositor,
+    // so it has to be frozen to survive the interruption. A wipe's does not: the
+    // output carries the wipe graphic, and freezing that would paint the graphic
+    // into the program, where the next wipe would composite over it and the two
+    // would stack. In every other mode the program slot keeps rendering, so the
+    // direct branch restored below is already the right picture.
+    const bool freeze = previous_mode == MixerState::TransitionMode::Crossfade;
     auto snapshot = InstanceSharedObjects<avp::mixer::OutputSnapshot>::get(
         nodes_->instanceData(), state_->source_switcher_name + "_snapshot");
-    {
+    if (freeze) {
         std::lock_guard<std::mutex> lock(snapshot->mutex);
         if (!snapshot->output_connected)
             throw Error("mixer: interruption requires mixer_snapshot output and slot nodes");
         snapshot->frames.capture(state_->pgmSourceSwitcherIndex());
     }
-    const auto previous_mode = state_->transition_mode.load();
     const auto generation = ++state_->transition_generation;
     TransitionPrepGuard guard([&] { abortTransition(generation); });
     restoreProgramRouting();
@@ -672,10 +679,17 @@ void MixerOrchestrator::interruptTransition() {
     state_->transition_mode = MixerState::TransitionMode::Idle;
     {
         std::lock_guard<std::mutex> lock(snapshot->mutex);
-        snapshot->frames.arm(wallclock.pts() * 1000000);
+        if (freeze) {
+            snapshot->frames.arm(wallclock.pts() * 1000000);
+        } else {
+            // Drop any substitution an earlier interruption left in the slot.
+            snapshot->frames.finish();
+            snapshot->frames.arm(wallclock.pts() * 1000000, false);
+        }
     }
     guard.release();
-    logstream << "mixer: interrupted transition; retained current output picture";
+    logstream << "mixer: interrupted transition; " << (freeze ? "retained the blended picture"
+                                                             : "returned to the program picture");
 }
 
 void MixerOrchestrator::restoreProgramRouting() {
