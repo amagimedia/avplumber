@@ -254,9 +254,10 @@ WipeReadyResult waitForWipeOverlayReady(std::shared_ptr<NodeManager> nodes,
                                         const std::string& edge_name,
                                         av::Timestamp initial_ts,
                                         int64_t earliest_visible_pts_ms,
-                                        const std::shared_ptr<MixerState>& state, uint64_t generation) {
+                                        const std::shared_ptr<MixerState>& state, uint64_t generation,
+                                        int64_t timeout_ms = kWipeReadyTimeoutMs) {
     WipeReadyResult result;
-    while (result.waited_ms < kWipeReadyTimeoutMs) {
+    while (result.waited_ms < timeout_ms) {
         if (state->transition_generation.load() != generation) return result;
         const bool time_ready = wallclock.pts() >= earliest_visible_pts_ms;
         av::Timestamp ts = edgeLastTsIfExists(nodes, edge_name);
@@ -1576,6 +1577,47 @@ int64_t MixerOrchestrator::prepareWipe(
         MixerOrchestrator(nodes, state, timeline, scheduler).abortTransition(transition_generation);
         return -1;
     }
+}
+
+void MixerOrchestrator::warmupWipe(const std::string& wipe_file, int64_t timeout_ms) {
+    std::string overlay_edge_name;
+    av::Timestamp overlay_initial_ts = NOTS;
+    uint64_t generation;
+    const int64_t t0 = wallclock.pts();
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->wipe_otm_name.empty() || state_->wipe_selector_name.empty() ||
+            state_->wipe_group_name.empty() || state_->wipe_input_node_name.empty())
+            throw Error("mixer: wipe warm-up requires the wipe subgraph (see mixer.init)");
+        if (state_->transition_mode.load() != MixerState::TransitionMode::Idle)
+            throw Error("mixer: cannot warm up the wipe during a transition");
+        generation = state_->transition_generation.load();
+        overlay_edge_name = edgeNameAt(nodes_, state_->wipe_selector_name, "src", 1);
+        overlay_initial_ts = edgeLastTsIfExists(nodes_, overlay_edge_name);
+        nodes_->group(state_->wipe_group_name)->stopNodesAndWait();
+        nodes_->node(state_->wipe_input_node_name)->stop(true);
+        setNodeParam(state_->wipe_input_node_name, "url", wipe_file);
+        flushWipeEdges();
+        resetInputIf(nodes_, state_->wipe_base_fps_name);
+        startGroup(state_->wipe_group_name);
+        // Feed the overlay's program input as a real wipe would; the selector
+        // stays on the direct branch so nothing of this reaches the output.
+        timeline_->clearKey(state_->wipe_otm_name, "outputs");
+        setNodeObject(state_->wipe_otm_name, "outputs", Parameters(3u));
+    }
+    WipeReadyResult ready = waitForWipeOverlayReady(nodes_, overlay_edge_name, overlay_initial_ts, 0,
+                                                    state_, generation, timeout_ms);
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        timeline_->clearKey(state_->wipe_otm_name, "outputs");
+        setNodeObject(state_->wipe_otm_name, "outputs", Parameters(1u));
+        stopGroup(state_->wipe_group_name);
+        flushWipeEdges();
+    }
+    logstream << "mixer wipe warm-up: file=" << wipe_file << (ready.ready ? " ready" : " NOT ready")
+              << " after " << (wallclock.pts() - t0) << "ms (overlay waited " << ready.waited_ms << "ms)";
+    if (!ready.ready)
+        throw Error("mixer: wipe warm-up did not produce an overlay frame within " + std::to_string(timeout_ms) + "ms");
 }
 
 void MixerOrchestrator::wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,

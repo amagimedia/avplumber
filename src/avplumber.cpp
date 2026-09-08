@@ -981,6 +981,16 @@ public:
             orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
         };
 
+        // mixer.wipe.warmup {"mixer":"mixer","wipe_file":"/path/wipe.mov","timeout_ms":30000}:
+        // initialise the wipe chain once (file, decoder, GPU filters) without showing it
+        commands_["mixer.wipe.warmup"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.wipe.warmup", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string wipe_file = req.at("wipe_file").get<std::string>();
+            int64_t timeout_ms = req.value("timeout_ms", int64_t(30000));
+            mixerOrchestrator(mixer_name).warmupWipe(wipe_file, timeout_ms);
+        };
+
         // mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src",
         //                     "overlay_otm":"otm_html_overlay","selector":"overlay_sel"}
         commands_["mixer.overlay.init"] = [this, mixerJsonRequest](ClientStream &cs, std::string &arg) {

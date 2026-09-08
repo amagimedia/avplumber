@@ -59,6 +59,9 @@ python3 -m venv .venv-tui
 ```
 
 The wipe path is resolved by the mixer backend, including inside its container.
+Pass the same clip to the mixer as `--wipe-file` (compose: `MIXER_WIPE_FILE`) and
+it runs the wipe chain once, invisibly, at start, so the first wipe is as fast as
+the following ones instead of paying for file open, decoder and GPU filter setup.
 Use a clip with alpha, such as QTRLE/ARGB or ProRes 4444. The clip plays over the
 program and the scene changes at its midpoint. The demo has no audio.
 

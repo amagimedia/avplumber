@@ -345,6 +345,15 @@ class MixerGraphBuilder:
         """Last scene requested (local tracking; not polled from the mixer)."""
         return self._current_pgm
 
+    def warmup_wipe(self, wipe_file: str, timeout_ms: int = 30000) -> None:
+        """Initialise the wipe chain on *wipe_file* once, invisibly, so the
+        first real wipe does not pay for file open, decoder and GPU filter
+        setup (PTX compilation included)."""
+        if not self.enable_wipe:
+            raise RuntimeError("Wipe subgraph not enabled (pass enable_wipe=True)")
+        cmd = {"mixer": self.name, "wipe_file": wipe_file, "timeout_ms": timeout_ms}
+        self.avp.executeCommandsFromString(f"mixer.wipe.warmup {json.dumps(cmd)}")
+
     def start_groups(self) -> None:
         """Start the mixer's internal compositor and output groups.
 

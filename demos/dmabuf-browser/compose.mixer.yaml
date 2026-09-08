@@ -23,6 +23,7 @@ services:
       MIXER_SOURCE_URL: ${HTML_OVERLAY_URL:-file:///opt/dma-browser/tests/fixtures/smoke.html}
       MIXER_FPS: ${HTML_OVERLAY_FPS:-60}
       MIXER_BITRATE_KBPS: ${DMABUF_VIDEO_BITRATE_KBPS:-8000}
+      MIXER_WIPE_FILE: ${MIXER_WIPE_FILE:-}   # alpha clip inside the container to warm the wipe up with
     volumes:
       - dma-browser-sockets:/tmp/dma-page
       - ../../avpmixer:/opt/avplumber/avpmixer:ro,z
@@ -37,6 +38,7 @@ services:
           set -- "$$@" --input "dmabuf://page_$$(printf %02d "$$i")"
           i=$$((i + 1))
         done
+        [ -n "$$MIXER_WIPE_FILE" ] && set -- "$$@" --wipe-file "$$MIXER_WIPE_FILE"
         exec python3 /opt/avplumber/demos/mixer/mixer.py "$$@" \
           --fps "$$MIXER_FPS" --janus-output --janus-host "$$JANUS_HOST" \
           --janus-video-port "$$JANUS_VIDEO_PORT" \

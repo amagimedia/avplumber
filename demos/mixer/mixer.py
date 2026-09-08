@@ -69,6 +69,7 @@ class GraphOptions:
     janus_rtcp_bind: str = "0.0.0.0"
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
+    wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -121,6 +122,7 @@ class MixerApplication:
     routed_inputs: bool
     preheat_timeout_sec: float
     rtcp_feedback_listener: object | None = None
+    wipe_file: str | None = None
 
     def _wait_for_edges(self, edges: tuple[str, ...], phase: str) -> None:
         deadline = time.monotonic() + self.preheat_timeout_sec
@@ -167,6 +169,8 @@ class MixerApplication:
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
         self._wait_for_edges(("mixer_final_out",), "program output")
+        if self.wipe_file:
+            self.mixer.warmup_wipe(self.wipe_file)
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.start()
         self.avp.setReady()
@@ -485,6 +489,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         routed_inputs=routed_inputs,
         preheat_timeout_sec=options.preheat_timeout_sec,
         rtcp_feedback_listener=rtcp_feedback_listener,
+        wipe_file=options.wipe_file,
     )
 
 
@@ -546,6 +551,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
     parser.add_argument("--janus-rtcp-port", type=int, default=0)
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
+    parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
+                        "(the TUI still selects the clip for each wipe)")
     args = parser.parse_args(argv)
     return GraphOptions(
         inputs=tuple(args.inputs),
@@ -566,6 +573,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         janus_rtcp_bind=args.janus_rtcp_bind,
         janus_rtcp_port=args.janus_rtcp_port,
         preheat_timeout_sec=args.preheat_timeout,
+        wipe_file=args.wipe_file,
         dmabuf_socket_dir=args.dmabuf_socket_dir,
         dmabuf_size=parse_size(args.dmabuf_size),
         dmabuf_open=args.dmabuf_open,

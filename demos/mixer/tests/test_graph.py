@@ -84,6 +84,21 @@ class FakeMixer:
     def build(self):
         return "mixer_final_out"
 
+    def initialize_routes(self):
+        pass
+
+    def begin_transition_preheat(self):
+        pass
+
+    def finish_transition_preheat(self):
+        pass
+
+    def start_output(self):
+        pass
+
+    def warmup_wipe(self, wipe_file, timeout_ms=30000):
+        self.warmed_wipe = (wipe_file, timeout_ms)
+
     def start_groups(self):
         pass
 
@@ -369,3 +384,21 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
     assert calls[1][2] == {"id": "page_00"}
     assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
                            "audio": False}
+
+
+def test_wipe_file_warms_the_wipe_chain_up_at_start(monkeypatch):
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov"), api=fake_api())
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
+    application.start()
+    assert FakeMixer.instances[-1].warmed_wipe == ("/media/wipe.mov", 30000)
+    assert application.avp.ready
+
+    FakeMixer.instances.clear()
+    plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    monkeypatch.setattr(plain, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(plain, "_wait_for_node", lambda *a, **k: None)
+    plain.start()
+    assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
