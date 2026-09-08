@@ -1,27 +1,30 @@
 # Live mixer demo
 
-**60 fps throughout: all 16 native 1920×1080 inputs → 1080×1920 portrait output at 60 fps.**
-Input files and encoded output are 60 fps; per-source frame continuity is qualified below.
-Measured on Tesla T4, 30 seconds per scene, with all sixteen sources active:
+<table>
+<tr>
+<td width="74%" valign="top"><img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and take buttons — Cut, Fade, one per cached wipe clip, the Direct toggle and the fade length."></td>
+<td width="26%" valign="top"><img src="docs/program-16box.png" alt="The 1080x1920 program: a sixteen-box grid, two columns of eight, each cell a different source — live browser pages down the left, video clips down the right."></td>
+</tr>
+</table>
 
-| Scene | GPU compute | NVDEC | NVENC | AVPlumber CPU |
-| --- | ---: | ---: | ---: | ---: |
-| **16-box** | **8.0%** | **76.7%** | **23.0%** | **0.58 cores** |
-| Fullscreen | 7.0% | 76.5% | 22.2% | 0.53 cores |
+Sixteen sources — **live browser pages and video files together** — composited
+on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from
+the browser control surface on the left, with the whole show described by one
+JSON document. The picture on the right is what it was cutting: `grid_16_page_0`,
+sixteen distinct sources in one 9:16 raster.
 
-[Samples and conditions](docs/runtime-load-1080p.json).
+| Measured on a Tesla T4 | |
+| --- | --- |
+| **16** | unique sources: seven live pages, nine clips, one decode or capture each |
+| **17–18%** | GPU, canvas rendering at 30 fps |
+| **2.86 Mbit/s** | on the wire from a 2 700 kbit/s WebRTC rendition |
+| **5** | media wipes held decoded in GPU memory, ~482 MiB |
 
-[![Watch the mixer: program output beside the TUI](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
-
-[Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
-
-The 15-second, 0.95 MB recording shows Direct editing with Cut, Fade and
-transparent media wipes, switching between fullscreen, 16-box, 8-box, 4-box
-and 2-box. Program output is on the left and real terminal controls on the
-right, in a 1600×900, 60 fps MP4. Click the first-frame preview to play it with
-chapter buttons and inspect the web UI graph. This earlier recording uses 360p
-sources; the current 1080p benchmark below was measured separately. The page is hosted on GitHub
-Pages; media comes from public release assets, outside Git history.
+[Demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
+[Configuration reference](docs/config.md) ·
+[Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer) ·
+[Earlier 15-second recording](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4)
+(360p sources, terminal UI, before the browser surface)
 
 ## Run
 
@@ -166,8 +169,6 @@ scene, one button per wipe clip, and the transition a pick takes with:
 python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --bind 0.0.0.0 --http-port 7681
 ```
 
-<img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length" width="100%">
-
 The tiles are the scenes the mixer publishes, the wipe buttons are its cached
 clip library, and `control` in the configuration file
 ([docs/config.md](docs/config.md)) decides what a fresh page starts with.
@@ -207,6 +208,10 @@ Both compositor slots use the native timing shared with the
 budget; the default is two output frame periods (about 33 ms at 60 fps).
 Late sources repeat their previous image and discard overdue frames to recover.
 This budget is not the full click-to-display latency.
+
+A different configuration from the figures at the top: **sixteen 1080p clips,
+no browser pages, everything at 60 fps**, which is what the numbers below were
+taken from.
 
 With **sixteen native 1920×1080@60 H.264 inputs**, a Tesla T4 / 16-vCPU
 host measured the following over 30 seconds in the steady 16-box scene.
