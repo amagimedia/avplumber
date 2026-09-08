@@ -1070,6 +1070,7 @@ public:
                     throw Error("mixer.init: switch_margin_ms must be >= 0");
             }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
+            if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
             if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
             if (cfg.contains("initial_pgm_slot")) {

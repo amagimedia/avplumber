@@ -96,6 +96,7 @@ class MixerGraphBuilder:
         defer_initial_routes: bool = False,
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
+        keyframe_node: Optional[str] = None,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -107,6 +108,9 @@ class MixerGraphBuilder:
         self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
         self.switch_margin_ms = switch_margin_ms
+        # Triggered when a transition reaches the output, so receivers do not wait
+        # for the next periodic keyframe to see the new scene.
+        self.keyframe_node = keyframe_node
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
         self._output_started = not defer_output
@@ -671,6 +675,7 @@ class MixerGraphBuilder:
             "fps_den": self.fps_den,
             "switch_margin_ms": self.switch_margin_ms,
             "source_switcher": self._n("out_sel"),
+            **({"keyframe_node": self.keyframe_node} if self.keyframe_node else {}),
             "initial_pgm_slot": self._initial_pgm_slot,
             "initial_pgm_scene": self._initial_pgm_scene,
             "wipe_otm": self._n("otm_final"),

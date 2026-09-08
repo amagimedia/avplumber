@@ -866,6 +866,17 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
     setNodeObject(state_->source_switcher_name, "active",
                   Parameters(new_pgm_is_slot_a ? 0 : 1));
 
+    // The encoder must not make the receiver wait for the next periodic keyframe:
+    // a cut changes the whole picture, and a P-frame carrying it can exceed what
+    // the receiver can recover from. The node coalesces bursts into one keyframe.
+    if (!state_->keyframe_node_name.empty()) {
+        try {
+            setNodeObject(state_->keyframe_node_name, "trigger", Parameters(true));
+        } catch (const std::exception& e) {
+            logstream << "mixer: keyframe trigger failed: " << e.what();
+        }
+    }
+
     for (const auto& [src_name, info] : state_->sources) {
         if (info.routed)
             continue;

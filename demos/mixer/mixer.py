@@ -17,7 +17,7 @@ from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
-from avpmixer.janus import JanusVideoConfig, build_janus_output
+from avpmixer.janus import JANUS_KEYFRAME_NODE, JanusVideoConfig, build_janus_output
 
 try:
     from .layouts import (
@@ -492,6 +492,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         enable_wipe=True,
         defer_initial_routes=True,
         defer_output=True,
+        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
     )
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
@@ -532,6 +533,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         avp, name=MIXER_NAME, canvas=(cfg.canvas_w, cfg.canvas_h), fps=(cfg.fps, FPS_DEN),
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
         defer_initial_routes=True, defer_output=True,
+        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
     )
     aliases = cfg.alias_counts
     input_edges: list[str] = []

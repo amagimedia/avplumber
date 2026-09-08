@@ -78,6 +78,10 @@ struct MixerState : public InstanceShared<MixerState> {
     };
     SlotNodes slot_a, slot_b;
     std::string source_switcher_name;  // "out_sel"
+    /// Optional force_keyframe node triggered when a transition reaches the output,
+    /// so a WebRTC receiver can decode the new picture immediately instead of
+    /// waiting for the next periodic keyframe.
+    std::string keyframe_node_name;
     std::string timeline_name;         // "mixer_tl"
     std::string hwaccel_name;          // "@gpu"
 

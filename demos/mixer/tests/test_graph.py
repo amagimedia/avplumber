@@ -516,3 +516,13 @@ def test_cli_requires_inputs_or_config():
     with pytest.raises(SystemExit):
         parse_args(["--output", "p.mp4"])
     assert parse_args(["--config", "m.json", "--janus-output"]).config == "m.json"
+
+
+def test_transitions_trigger_a_keyframe_only_when_streaming():
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("a.mp4",), janus_output=True), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["keyframe_node"] == "janus_force_keyframe"
+
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["keyframe_node"] is None

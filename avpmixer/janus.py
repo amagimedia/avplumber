@@ -41,7 +41,8 @@ class JanusVideoConfig:
                 f"&rtcp_port={self.rtcp_port_remote}")
 
 
-KEYFRAME_COMMAND = "node.object.set janus_force_keyframe trigger true"
+JANUS_KEYFRAME_NODE = "janus_force_keyframe"
+KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
 
 
 def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps: int,
@@ -54,7 +55,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         "group": group,
     }))
     avp.addNode(api.ForceKeyFrame({
-        "name": "janus_force_keyframe", "src": "janus_fps", "dst": "janus_keyframed",
+        "name": JANUS_KEYFRAME_NODE, "src": "janus_fps", "dst": "janus_keyframed",
         "interval_sec": "1/1", "auto_restart": "panic", "group": group,
     }))
     avp.addNode(api.AssumeVideoFormat({
