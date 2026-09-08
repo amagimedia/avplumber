@@ -17,11 +17,9 @@ Pages; media comes from public release assets, outside Git history.
 ## Frame continuity, measured
 
 Every generated clip carries a machine-readable frame code, and a recorded
-program is checked boundary by boundary against the configured cue-in and
-cue-out frames (`tests/verify_recording.py`). The results for a 50 s LoopAll
-pass on a Tesla T4 are on the [demo page](https://amagimedia.github.io/avplumber/demos/playlist/docs/):
-which frame each element left on, which frame the next one arrived on, and
-every repeated or skipped frame with its position.
+program is checked frame by frame against the configured cue points
+(`tests/verify_recording.py`). The report for a 50 s pass on a Tesla T4 is on
+the [demo page](https://amagimedia.github.io/avplumber/demos/playlist/docs/).
 
 ## Run
 
