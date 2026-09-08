@@ -17,9 +17,9 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
   later items draw over earlier ones. The same scene can be used on either
   slot; both slots read the same frames.
 - **Placement is explicit.** Every item says where it goes on the canvas and
-  what to do with the aspect: `stretch`, `contain` (letterbox/pillarbox in the
-  pad colour), `cover` (fill the box, crop the overflow), plus an optional
-  crop in source pixels applied first.
+  what to do with the aspect: `stretch`, `contain` (letterbox/pillarbox, always
+  black), `cover` (fill the box, crop the overflow), plus an optional crop in
+  source pixels applied first. No pad colours: padding is black, period.
 
 ## Schema (JSON Schema 2020-12, abridged)
 
@@ -31,7 +31,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
   "properties": {
     "canvas": {"type": "object", "required": ["width", "height", "fps"],
       "properties": {"width": {"type": "integer"}, "height": {"type": "integer"},
-                     "fps": {"type": "integer"}, "background": {"$ref": "#/$defs/color"}}},
+                     "fps": {"type": "integer"}}},
     "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
     "wipes": {"type": "array", "items": {"$ref": "#/$defs/wipe"}},
     "transitions": {"type": "object",
@@ -40,7 +40,6 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
     "initial_scene": {"type": "string"}
   },
   "$defs": {
-    "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"},
     "rect": {"type": "object", "required": ["x", "y", "w", "h"],
       "properties": {"x": {"type": "integer"}, "y": {"type": "integer"},
                      "w": {"type": "integer"}, "h": {"type": "integer"}}},
@@ -68,9 +67,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
         "source": {"type": "string", "description": "id of a declared source"},
         "dst": {"$ref": "#/$defs/rect", "description": "box on the canvas, pixels"},
         "fit": {"enum": ["stretch", "contain", "cover"], "default": "contain"},
-        "crop": {"$ref": "#/$defs/rect", "description": "source pixels, applied before fit"},
-        "pad": {"$ref": "#/$defs/color", "description": "letterbox colour for contain"},
-        "align": {"enum": ["center", "start", "end"], "default": "center"}
+        "crop": {"$ref": "#/$defs/rect", "description": "source pixels, applied before fit"}
       }},
     "scene": {"type": "object", "required": ["id", "items"],
       "properties": {"id": {"type": "string"}, "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}}}
@@ -82,7 +79,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
 
 ```json
 {
-  "canvas": {"width": 1920, "height": 1080, "fps": 60, "background": "#000000"},
+  "canvas": {"width": 1920, "height": 1080, "fps": 60},
   "sources": [
     {"id": "cam1", "kind": "video", "path": "/media/cam-1.mp4"},
     {"id": "cam2", "kind": "video", "path": "/media/cam-2.mp4"},
@@ -124,7 +121,6 @@ of the engine.
 | duplicate `url`/`path` | — | loader rejects; alias support (one chain, two ids) is a second `one_to_many` output, ~10 lines |
 | `item.dst`, `crop`, `fit: stretch\|contain` | `cuda_rect_overlay` layer: `dst_*`, `crop`, `fit` | none |
 | `fit: cover` | — | compute the crop from the aspect in the loader; no compositor change |
-| `pad` colour | canvas is cleared to black only | per-item rect fill before the draw (memset per plane), small compositor change |
 | item order = z-order | draw order is source registration order | order ops by item index instead; small compositor change |
 | same source twice in one scene | one layer per source | alias source (above) |
 | `wipes[]` | `mixer.wipe` takes any path; `mixer.wipe.warmup` | loader warms every declared wipe at start |
