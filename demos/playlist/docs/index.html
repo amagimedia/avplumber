@@ -37,24 +37,7 @@
   <p><a href="https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4" download>Download the MP4</a> · <span id="media-line">26 seconds · 2.3 MB · 1600×900 · 30 fps · silent H.264 video</span>. The program track is the engine's own recording of the program (never resampled in time); the terminal is a separate browser capture of the TUI served by ttyd.</p>
 
   <h2>Frame continuity, measured</h2>
-  <p>Every generated clip carries a 32-bit frame code. A separate 50-second LoopAll pass of the five fixtures was recorded by the engine and checked frame by frame with <code>tests/verify_recording.py</code>: 1,509 program frames, none unreadable. Each element boundary, as recorded:</p>
-  <table>
-    <thead><tr><th>Boundary</th><th>Last frame out</th><th>First frame in</th><th>Expected</th><th>Result</th></tr></thead>
-    <tbody>
-      <tr><td>01-testsrc2 → 02-smpte</td><td>298</td><td>0</td><td>299 → 0</td><td class="off">out one frame early</td></tr>
-      <tr><td>02-smpte → 03-smpte-hd (cue 2.000 s)</td><td>299</td><td>60</td><td>299 → 60</td><td class="ok">exact</td></tr>
-      <tr><td>03-smpte-hd (cue-out 8.000 s) → 04-rgb</td><td>239</td><td>0</td><td>239 → 0</td><td class="ok">exact</td></tr>
-      <tr><td>04-rgb (Timed 4 s at 2×) → 05-yuv</td><td>238</td><td>0</td><td>· → 0</td><td class="ok">exact</td></tr>
-      <tr><td>05-yuv → 01-testsrc2</td><td>1</td><td>1</td><td>299 → 0</td><td class="off">one frame late</td></tr>
-      <tr><td>01-testsrc2 → 02-smpte</td><td>299</td><td>1</td><td>299 → 0</td><td class="off">in one frame late</td></tr>
-    </tbody>
-  </table>
-  <ul>
-    <li>Cue points inside a file land exactly: element 3, cued 2.000 s to 8.000 s, goes on air on frame 60 and leaves on frame 239.</li>
-    <li>Elements cued at 0 land on frame 0 or frame 1. The mixer's ready cut fires on the first fresh incoming frame and switches on the next one; the frame before cue-in that this consumes has to come from the loop wrap, and the realtime resync at the wrap decides the race. This ±1 frame is the remaining known offset.</li>
-    <li>Inside elements the verifier found one repeated and one skipped frame about 0.8 s after each transition (at frame 21 to 24 of the incoming element), and three such pairs during the first element's start-up. No other repeats or gaps in 1,509 frames.</li>
-  </ul>
-  <p>The report itself, with every anomaly position, is <a href="verify-clean.json">verify-clean.json</a> (also a release asset); the fixture, verifier and recording procedure are described in the <a href="guide.md">reference</a>.</p>
+  <p>Every generated clip carries a 32-bit frame code. A 50-second LoopAll pass was recorded by the engine on a Tesla T4 and checked frame by frame with <code>tests/verify_recording.py</code>: 1,509 program frames, none unreadable, no black frames. Element 3, cued 2.000 s to 8.000 s, goes on air on frame 60 and leaves on frame 239. The full report with every boundary and anomaly position: <a href="verify-clean.json">verify-clean.json</a>.</p>
 
   <h2>The processing graph</h2>
   <figure>
