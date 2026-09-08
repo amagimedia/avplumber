@@ -1,4 +1,9 @@
-"""NVIDIA integration: retain the actual last output when interrupting a take.
+"""NVIDIA integration: interrupting a take keeps the right picture on air.
+
+Interrupting a crossfade retains the actual last output, blend included.
+Interrupting a media wipe returns to the live program instead: the wipe graphic
+belongs to the cancelled transition, and freezing it painted the graphic into
+the program, so every further wipe composited over the last one and they stacked.
 
 Use the two numbered 640x360/60 fixtures from frame_codes.py and a transparent
 media wipe. The owned native mixer downloads its final output for assertions;
@@ -118,7 +123,13 @@ def check_graph(avp, mixer, output, errors, wipe_file, wipe_seconds):
                 # fails rather than selecting a convenient later reference.
                 following = collect(0.5)
                 held = [image for _, image in following]
-                assert_frozen(reference, held)
+                if first == 'media_wipe':
+                    expected = 0 if phase == 'before' else 1
+                    codes = [read_code(image) for image in held[-12:]]
+                    assert len(codes) >= 8 and all(code and code[0] == expected for code in codes), codes
+                    assert len({code[1] for code in codes}) >= 6, 'program did not resume after the interruption'
+                else:
+                    assert_frozen(reference, held)
                 # Let both new and cancelled callbacks expire, then inspect
                 # actual source IDs and progression, not only mixer.status.
                 collect(max(2.0, wipe_seconds + 1))

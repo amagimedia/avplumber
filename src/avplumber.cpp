@@ -29,8 +29,8 @@
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
 #include "SharedTimeline.hpp"
-#include "MixerState.hpp"
-#include "mixer_orchestrator.hpp"
+#include "mixer/MixerState.hpp"
+#include "mixer/mixer_orchestrator.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
@@ -981,6 +981,16 @@ public:
             orch.wipe(scene_name, wipe_file, duration_sec, start_pts_ms);
         };
 
+        // mixer.wipe.warmup {"mixer":"mixer","wipe_file":"/path/wipe.mov","timeout_ms":30000}:
+        // initialise the wipe chain once (file, decoder, GPU filters) without showing it
+        commands_["mixer.wipe.warmup"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            json req = mixerJsonRequest("mixer.wipe.warmup", arg);
+            std::string mixer_name = req.at("mixer").get<std::string>();
+            std::string wipe_file = req.at("wipe_file").get<std::string>();
+            int64_t timeout_ms = req.value("timeout_ms", int64_t(30000));
+            mixerOrchestrator(mixer_name).warmupWipe(wipe_file, timeout_ms);
+        };
+
         // mixer.overlay.init {"mixer":"mixer","source_otm":"otm_html_overlay_src",
         //                     "overlay_otm":"otm_html_overlay","selector":"overlay_sel"}
         commands_["mixer.overlay.init"] = [this, mixerJsonRequest](ClientStream &cs, std::string &arg) {
@@ -1060,6 +1070,7 @@ public:
                     throw Error("mixer.init: switch_margin_ms must be >= 0");
             }
             if (cfg.contains("source_switcher")) state->source_switcher_name = cfg["source_switcher"].get<std::string>();
+            if (cfg.contains("keyframe_node")) state->keyframe_node_name = cfg["keyframe_node"].get<std::string>();
             if (cfg.contains("initial_pgm_scene")) state->pgm_scene_name = cfg["initial_pgm_scene"].get<std::string>();
             if (cfg.contains("initial_pvw_scene")) state->pvw_scene_name = cfg["initial_pvw_scene"].get<std::string>();
             if (cfg.contains("initial_pgm_slot")) {

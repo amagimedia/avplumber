@@ -11,7 +11,7 @@ Measured on Tesla T4, 30 seconds per scene, with all sixteen sources active:
 
 [Samples and conditions](docs/runtime-load-1080p.json).
 
-[![Watch the mixer: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+[![Watch the mixer: program output beside the TUI](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
 
@@ -59,8 +59,74 @@ python3 -m venv .venv-tui
 ```
 
 The wipe path is resolved by the mixer backend, including inside its container.
+Pass the same clip to the mixer as `--wipe-file` (compose: `MIXER_WIPE_FILE`) and
+it runs the wipe chain once, invisibly, at start, so the first wipe is as fast as
+the following ones instead of paying for file open, decoder and GPU filter setup.
 Use a clip with alpha, such as QTRLE/ARGB or ProRes 4444. The clip plays over the
 program and the scene changes at its midpoint. The demo has no audio.
+
+## Browser pages as sources
+
+Any input can be a live page rendered by the
+[DMA-BUF browser demo](../dmabuf-browser/README.md) instead of a clip:
+`--input dmabuf://<window-id>` takes the window's DRM PRIME frames straight
+into the compositor with no decoder, using the same chain as that demo. File
+and browser inputs mix freely and share every layout, transition and control.
+
+The compose override runs this mixer inside the DMA-BUF stack and opens the
+pages itself. From the repository root:
+
+```sh
+cd demos/dmabuf-browser
+cp .env.example .env
+MIXER_SOURCE_COUNT=4 docker compose --env-file .env   -f compose.yaml -f compose.mixer.yaml up --build
+```
+
+Open <http://127.0.0.1:8080> and drive it with `tui.py` as above. `HTML_OVERLAY_URL`
+selects the page (default: the bundled animation), `MIXER_SOURCE_COUNT` the
+number of windows, `MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size.
+Outside compose, the switches are `--dmabuf-open URL` (open the windows through
+the browser's REST API, `--dmabuf-rest`), `--dmabuf-size WxH` and
+`--dmabuf-socket-dir`.
+
+Pages that only paint on load (a static graphic) are held: each browser chain
+ends in `repeat_last_frame`, which re-emits the last frame at the mixer rate
+while the page is idle, so scene switches never wait on a page that has nothing
+new to draw.
+
+Sixteen Singular.live pages on the Tesla T4 host (16 vCPU), 60 fps, all
+sixteen windows painting at 60 fps with zero capture drops and the encoder at
+60 fps, ten one-second samples after warm-up:
+
+| Page size | GPU busy | GPU memory | Host CPU busy |
+| --- | ---: | ---: | ---: |
+| 480x270 | 33.7 % | 584 MiB | 52 % |
+| 960x540 | 37.4 % | 1308 MiB | 60 % |
+| 1280x720 | 40.8 % | 1394 MiB | 72 % |
+| 1920x1080 | 51.1 % | 3585 MiB | 78 % |
+
+The same sixteen clips decoded by NVDEC cost 2 % GPU; the browser rendering and
+capture is the load. Each DMA-BUF allocation is imported once and copied per
+frame; browser frames are converted from RGB to the NV12 canvas inside the
+compositor's draw pass, so video and browser sources mix on one canvas without
+extra passes.
+
+## Configuration file
+
+`--config mixer.json` replaces `--input` and the built-in layouts with a
+document of sources, wipes, scenes, control defaults and encoded outputs.
+**Every field is documented in [docs/config.md](docs/config.md)**; the design
+rationale is in the
+[schema note](../../doc/research/2026-09-08-mixer-config-schema.md). Sources
+are unique clips or pages, each decoded or captured once; scenes are ordered
+item lists (`dst` rect, `fit` stretch/contain/cover, optional `crop`), item
+order is z-order, and a source may appear several times in one scene. All
+declared wipes are warmed up at start. `make_config.py` writes the demo's own
+layouts out in this form:
+
+```sh
+python3 demos/mixer/make_config.py --fps 30 --wipe /media/wipe.mov   cam1=/media/camera-1.mp4 page=https://example.org/page@1920x1080 > mixer.json
+```
 
 ## Generated input size and FPS
 
@@ -92,6 +158,20 @@ docker run --rm --gpus all --network host \
 
 ## Controls
 
+Two control surfaces speak the same protocol and can be used at once: a browser
+UI and a terminal UI. The browser one is the demo's own page — one click per
+scene, one button per wipe clip, and the transition a pick takes with:
+
+```sh
+python3 demos/mixer/webui.py --host 127.0.0.1 --port 7777 --bind 0.0.0.0 --http-port 7681
+```
+
+<img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length" width="100%">
+
+The tiles are the scenes the mixer publishes, the wipe buttons are its cached
+clip library, and `control` in the configuration file
+([docs/config.md](docs/config.md)) decides what a fresh page starts with.
+
 | Control | Result |
 | --- | --- |
 | Scene, layout and Page | Prepare Preview; in Direct mode, put the selection on air |
@@ -102,13 +182,16 @@ docker run --rm --gpus all --network host \
 | `1`–`9` | Select one of the first nine scenes |
 | `r` / `q` | Reconnect / quit the TUI |
 
+The keys are the same in both surfaces; `t` toggles Direct in the TUI, `d` in
+the browser.
+
 A new take can interrupt a transition, starting from the current mixer picture.
 Sources retain their positions if one stalls. Output is 1080×1920 portrait;
 inputs keep their aspect ratio. More sources than cells create additional pages.
 
 ## Processing graph
 
-<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
 
 **122 nodes / 140 queues**, grouped into six blocks. Click the overview for the
 full-resolution ungrouped graph in an HTML viewer with Fit and zoom controls.

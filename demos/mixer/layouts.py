@@ -16,7 +16,6 @@ GRID_SHAPES = {
     8: (2, 4),
     16: (2, 8),
 }
-PREHEAT_CAPACITIES = (1, *GRID_SHAPES)
 
 
 @dataclass(frozen=True)
@@ -57,24 +56,6 @@ def cell_size(capacity: int) -> tuple[int, int]:
     except KeyError as exc:
         raise ValueError(f"unsupported layout capacity: {capacity}") from exc
     return CANVAS_WIDTH // columns, CANVAS_HEIGHT // rows
-
-
-def layout_source_name(capacity: int, slot_index: int) -> str:
-    if capacity not in PREHEAT_CAPACITIES:
-        raise ValueError(f"unsupported layout capacity: {capacity}")
-    if not 0 <= slot_index < capacity:
-        raise ValueError(f"slot {slot_index} is outside capacity {capacity}")
-    return f"layout_{capacity}_slot_{slot_index}"
-
-
-def layout_filter_graph(capacity: int) -> str:
-    width, height = cell_size(capacity)
-    return (
-        f"scale_cuda=w={width}:h={height}:"
-        "force_original_aspect_ratio=decrease:force_divisible_by=2,"
-        f"pad_cuda=w={width}:h={height}:"
-        "x=(ow-iw)/2:y=(oh-ih)/2:color=black"
-    )
 
 
 def fitted_even_size(

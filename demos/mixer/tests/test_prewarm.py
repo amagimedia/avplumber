@@ -159,9 +159,12 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     init = next(event for event in engine.events if event.startswith("mixer.init "))
     config = json.loads(init.split(" ", 2)[2])
     assert config["wipe_group"] == "mixer_wipe"
-    assert config["wipe_input_node"] == "mixer_wipe_input"
-    assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe"
-    assert "mixer_wipe" not in engine.started
+    # With clips cached, the take arms the cache node and the decode chain sits
+    # in a group a take never starts (see avpmixer.clipcache).
+    assert config["wipe_input_node"] == "mixer_wipe_cache"
+    assert engine.nodes["mixer_wipe_cache"]["group"] == "mixer_wipe"
+    assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe_load"
+    assert "mixer_wipe" not in engine.started and "mixer_wipe_load" not in engine.started
     upload = engine.nodes["mixer_wipe_fmt"]
     assert upload["hwaccel"] == config["hwaccel"]
     assert upload["graph"].split(",")[-1] == "hwupload"

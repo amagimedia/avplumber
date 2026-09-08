@@ -13,6 +13,8 @@ private:
     int dropped_ = 0;
     int duplicated_ = 0;
     int total_out_ = 0;
+    int64_t last_gap_log_ms_ = 0;
+    int gap_bursts_since_log_ = 0;
     int total_in_ = 0;
     av::Timestamp last_printed_stats_ = NOTS;
 
@@ -123,9 +125,17 @@ public:
                             }
                             next_ts_ = addTS(next_ts_, frame_delta_);
                         }
-                        if (dup_burst > 1)
-                            logstream << "force_fps[" << label_ << "]: filled PTS gap with " << dup_burst << " duplicate(s); "
-                                      << "grid " << gap_start << " ..< " << in_ts;
+                        if (dup_burst > 1) {
+                            ++gap_bursts_since_log_;
+                            const int64_t now_ms = wallclock.pts();
+                            if (now_ms - last_gap_log_ms_ >= 1000) {
+                                logstream << "force_fps[" << label_ << "]: filled PTS gap with " << dup_burst
+                                          << " duplicate(s); grid " << gap_start << " ..< " << in_ts
+                                          << (gap_bursts_since_log_ > 1 ? " (" + std::to_string(gap_bursts_since_log_) + " gaps since last report)" : "");
+                                last_gap_log_ms_ = now_ms;
+                                gap_bursts_since_log_ = 0;
+                            }
+                        }
                         // now in_ts <= next_ts_
                         //  if in_ts == next_ts, all OK
                         //  if in_ts < next_ts_, it means that in_ts is too small and unaligned

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,7 @@ class FakeAvp:
     def __init__(self):
         self.nodes = []
         self.commands = []
+        self.armed_clips = []
         self.control_port = None
         self.ready = False
         self.edges = FakeEdges()
@@ -45,9 +47,25 @@ class FakeAvp:
 
     def executeCommandsFromString(self, commands):
         self.commands.append(commands)
+        for line in commands.splitlines():
+            parts = line.split()
+            if parts[:1] == ["node.param.set"] and parts[2:3] == ["url"]:
+                self.armed_clips.append(json.loads(parts[3]))
 
     def enableControlServer(self, port):
         self.control_port = port
+
+    def node(self, name):
+        # The clip cache reports every requested clip as already held, so start()
+        # exercises the preload path without a decoder.
+        return SimpleNamespace(getObject=lambda key: {
+            "clips": [{"path": path, "frames": 30, "bytes": 1 << 20, "complete": True}
+                      for path in self.armed_clips],
+            "bytes": 1 << 20, "budget_bytes": 768 << 20})
+
+    def registerControlCommand(self, name, handler, _payload):
+        self.commands_registered = getattr(self, "commands_registered", {})
+        self.commands_registered[name] = handler
 
     def setReady(self):
         self.ready = True
@@ -75,7 +93,7 @@ class FakeMixer:
     def add_routed_source(self, name, **parameters):
         self.routed_sources.append((name, parameters))
 
-    def add_scene(self, name, sources, *, routes):
+    def add_scene(self, name, sources, *, routes=None):
         self.scenes[name] = {"sources": sources, "routes": routes}
 
     def set_initial_scene(self, name, slot):
@@ -83,6 +101,21 @@ class FakeMixer:
 
     def build(self):
         return "mixer_final_out"
+
+    def initialize_routes(self):
+        pass
+
+    def begin_transition_preheat(self):
+        pass
+
+    def finish_transition_preheat(self):
+        pass
+
+    def start_output(self):
+        pass
+
+    def warmup_wipe(self, wipe_file, timeout_ms=30000):
+        self.warmed_wipe = (wipe_file, timeout_ms)
 
     def start_groups(self):
         pass
@@ -104,17 +137,22 @@ def fake_api():
     names = (
         "assume_video_format",
         "bsf",
+        "clip_cache",
         "dec_video",
         "demux",
+        "drm_prime_to_cuda",
         "enc_video",
         "filter_video",
         "force_fps",
         "force_key_frame",
         "input_rec",
+        "ipc_dmabuf_source",
         "mux",
+        "one_to_many",
         "output",
         "preheat_video_router",
         "realtime",
+        "repeat_last_frame",
         "split",
     )
     api = {
@@ -126,17 +164,22 @@ def fake_api():
         {
             "assume_video_format": "AssumeVideoFormat",
             "bsf": "Bsf",
+            "clip_cache": "ClipCache",
             "dec_video": "DecVideo",
             "demux": "Demux",
+            "drm_prime_to_cuda": "DrmPrimeToCuda",
             "enc_video": "EncVideo",
             "filter_video": "FilterVideo",
             "force_fps": "ForceFPS",
             "force_key_frame": "ForceKeyFrame",
             "input_rec": "InputRec",
+            "ipc_dmabuf_source": "IpcDmabufSource",
             "mux": "Mux",
+            "one_to_many": "OneToMany",
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
             "realtime": "Realtime",
+            "repeat_last_frame": "RepeatLastFrame",
             "split": "Split",
         }[name]: node_type(name)
         for name in names
@@ -298,3 +341,344 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     assert mixer.scenes["fullscreen_64"]["routes"] == {"source_0": 64}
     assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
     assert all(params["default_graph"] == "" for _, params in mixer.routed_sources)
+
+
+def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
+    FakeMixer.instances.clear()
+    (tmp_path / "page_00.sock").touch()
+    application = build_application(
+        GraphOptions(inputs=("camera.mp4", "dmabuf://page_00"), output="program.mp4",
+                     dmabuf_socket_dir=str(tmp_path), dmabuf_size=(480, 270), fps=60),
+        api=fake_api(),
+    )
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+
+    assert not any("drm" in c for c in application.avp.commands)   # DRM frames are imported by CUDA directly
+    receive = nodes["input_1_receive"]
+    assert receive["type"] == "ipc_dmabuf_source" and "hwaccel" not in receive
+    assert receive["socket"] == str(tmp_path / "page_00.sock")
+    assert receive["fps"] == "60/1" and receive["group"] == "input_1"
+    assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
+    stamp = nodes["input_1_timestamp"]
+    assert (stamp["dst_width"], stamp["dst_height"], stamp["dst_frame_rate"]) == (480, 270, "60/1")
+    assert stamp["dst"] == "input_1_cuda"
+    hold = nodes["input_1_hold"]
+    assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
+    assert "decode_1" not in nodes and "decode_0" in nodes
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert sources["source_1"]["pre_otm_edge"] == "input_1_held"
+    assert sources["source_0"]["pre_otm_edge"] == "input_0_fps"
+
+
+def test_file_inputs_do_not_touch_drm_or_sockets(tmp_path):
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", dmabuf_socket_dir=str(tmp_path / "missing")),
+        api=fake_api(),
+    )
+    assert not any("drm" in c for c in application.avp.commands)
+
+
+def test_cli_parses_dmabuf_options():
+    options = parse_args(["--input", "dmabuf://page_03", "--janus-output", "--dmabuf-size", "480x270",
+                          "--dmabuf-open", "http://pages/smoke.html"])
+    assert options.dmabuf_inputs == ["page_03"]
+    assert options.dmabuf_size == (480, 270)
+    assert options.dmabuf_open == "http://pages/smoke.html"
+    with pytest.raises(ValueError):
+        parse_args(["--input", "dmabuf://x", "--janus-output", "--dmabuf-size", "wide"])
+    with pytest.raises(ValueError):
+        GraphOptions(inputs=("dmabuf://", ), output="p.mp4").validate()
+
+
+def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
+    from avpmixer import dmabuf_inputs
+
+    calls = []
+
+    def fake_rest(base_url, method, path, body=None):
+        calls.append((method, path, body))
+        if path == "/status":
+            return {"windows": [{"id": "page_00"}]}
+        return {"ok": True}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01"], "http://p", 480, 270, 60)
+
+    assert [c[:2] for c in calls] == [
+        ("GET", "/status"), ("POST", "/window/close"), ("POST", "/window/open"), ("POST", "/window/open")]
+    assert calls[1][2] == {"id": "page_00"}
+    assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
+                           "audio": False}
+
+
+def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov"), api=fake_api())
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
+    application.start()
+    # Cached by default: the clip is armed on the loader and decoded once, so
+    # mixer.wipe.warmup (which only compiles the filter) is not used.
+    armed = "\n".join(application.avp.commands)
+    assert 'node.param.set mixer_wipe_input url "/media/wipe.mov"' in armed
+    assert 'node.param.set mixer_wipe_cache url "/media/wipe.mov"' in armed
+    assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
+    assert application.avp.ready
+
+    FakeMixer.instances.clear()
+    plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    monkeypatch.setattr(plain, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(plain, "_wait_for_node", lambda *a, **k: None)
+    plain.start()
+    assert not any("node.param.set" in c for c in plain.avp.commands)
+
+
+CONFIG = {
+    "canvas": {"width": 1920, "height": 1080, "fps": 60},
+    "sources": [
+        {"id": "cam", "kind": "video", "path": "/media/cam.mp4", "width": 1920, "height": 1080},
+        {"id": "page", "kind": "browser", "url": "https://example.org/", "width": 1280, "height": 720},
+    ],
+    "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
+    "control": {"direct": False, "fade_seconds": 0.8},
+    "scenes": [
+        {"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "cover"}]},
+        {"id": "pip", "items": [
+            {"source": "page", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}},
+            {"source": "cam", "dst": {"x": 1440, "y": 60, "w": 420, "h": 236}},
+            {"source": "cam", "dst": {"x": 60, "y": 60, "w": 420, "h": 236},
+             "crop": {"x": 480, "y": 270, "w": 960, "h": 540}}]},
+    ],
+    "initial_scene": "pip",
+}
+
+
+def test_config_scene_layers_carry_z_cover_and_aliases():
+    from avpmixer import config as mc
+    cfg = mc.parse(CONFIG)
+    assert cfg.alias_counts == {"cam": 2, "page": 1}
+    full = mc.scene_layers(cfg, cfg.scenes[0])
+    assert full["cam"] == {"dst_x": 0, "dst_y": 0, "dst_w": 1920, "dst_h": 1080, "z": 0, "fit": "stretch",
+                           "crop": {"x": 0, "y": 0, "w": 1920, "h": 1080}}
+    pip = mc.scene_layers(cfg, cfg.scenes[1])
+    assert list(pip) == ["page", "cam", "cam#2"]
+    assert [layer["z"] for layer in pip.values()] == [0, 1, 2]
+    assert pip["cam#2"]["crop"] == {"x": 480, "y": 270, "w": 960, "h": 540} and pip["cam#2"]["fit"] == "contain"
+    # cover of a 16:9 source into a 9:16 box keeps the full height and a centred slice
+    tall = mc.cover_crop(1920, 1080, mc.Rect(0, 0, 1080, 1920), None)
+    assert (tall.w, tall.h, tall.x) == (606, 1080, 657)
+
+
+def test_config_rejects_duplicate_locations_and_bad_references():
+    from avpmixer import config as mc
+    import copy
+    dup = copy.deepcopy(CONFIG)
+    dup["sources"].append({"id": "cam2", "kind": "video", "path": "/media/cam.mp4"})
+    with pytest.raises(mc.ConfigError, match="already declared"):
+        mc.parse(dup)
+    bad = copy.deepcopy(CONFIG)
+    bad["scenes"][0]["items"][0]["source"] = "nope"
+    with pytest.raises(mc.ConfigError, match="unknown source"):
+        mc.parse(bad)
+    nocover = copy.deepcopy(CONFIG)
+    del nocover["sources"][0]["width"]
+    cfg = mc.parse(nocover)
+    with pytest.raises(mc.ConfigError, match="needs its size"):
+        mc.scene_layers(cfg, cfg.scenes[0])
+    probed = mc.with_probed_sizes(cfg, probe=lambda path: (640, 360))
+    assert (probed.source("cam").width, probed.source("cam").height) == (640, 360)
+    assert probed.source("page").width == 1280          # declared sizes are kept
+    # cover of a 16:9 clip into the full 16:9 box keeps the whole frame
+    assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
+
+
+def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch):
+    import json as _json
+    from avpmixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    path = tmp_path / "mixer.json"
+    path.write_text(_json.dumps(CONFIG))
+    opened = []
+    monkeypatch.setattr(dmabuf_inputs, "rest_request",
+                        lambda base, method, p, body=None: opened.append((method, p, body)) or {"windows": []})
+    from avpmixer import config as mc
+    monkeypatch.setattr(mc, "probe_video_size", lambda path: (_ for _ in ()).throw(AssertionError("declared sizes must not be probed")))
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    mixer = FakeMixer.instances[-1]
+
+    assert [name for name in nodes if name and name.startswith("decode_")] == ["decode_0"]
+    assert nodes["alias_0"]["dst"] == ["input_0_fps_alias1", "input_0_fps_alias2"]
+    assert nodes["alias_0"]["outputs"] == 3
+    assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
+    assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
+    assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
+                             "fps": 60, "audio": False}
+    assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
+    assert mixer.parameters["canvas"] == (1920, 1080)
+    assert application.wipe_files == ("/media/swoosh.mov",)
+    assert application.browser_windows == ("page",)
+    monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
+    monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
+    del opened[:]
+    application.start()
+    assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
+    assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
+        "direct": False, "fade_seconds": 0.8, "transition": "fade",
+        "wipe_file": "/media/swoosh.mov",
+        "default_wipe": "swoosh",
+        "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
+                   "duration_seconds": 0.0}]}
+    assert nodes["program_format"]["width"] == 1920
+    assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
+
+
+def test_cli_passes_the_web_ui_url_through_to_the_options():
+    assert parse_args(["--config", "m.json", "--janus-output",
+                       "--webui-url", "http://ui:22222"]).webui_url == "http://ui:22222"
+    assert parse_args(["--config", "m.json", "--janus-output"]).webui_url == ""
+
+
+def test_cli_requires_inputs_or_config():
+    with pytest.raises(SystemExit):
+        parse_args(["--output", "p.mp4"])
+    assert parse_args(["--config", "m.json", "--janus-output"]).config == "m.json"
+
+
+def test_transitions_trigger_a_keyframe_only_when_streaming():
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("a.mp4",), janus_output=True), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["keyframe_node"] == "janus_force_keyframe"
+
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["keyframe_node"] is None
+
+
+def test_wipe_dir_scans_a_library_and_explicit_entries_win(tmp_path):
+    from avpmixer import config as mc
+    for name in ("b_swoosh.mov", "a_dip.webm", "notes.txt", "c_star.mp4"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {**CONFIG, "wipe_dir": str(tmp_path),
+           "wipes": [{"id": "a_dip", "path": str(tmp_path / "a_dip.webm"),
+                      "duration_seconds": 1.2, "name": "Dip"}]}
+    cfg = mc.parse(doc)
+
+    assert [(w.id, w.label, w.duration_seconds) for w in cfg.wipes] == [
+        ("a_dip", "Dip", 1.2), ("b_swoosh", "b_swoosh", 0.0), ("c_star", "c_star", 0.0)]
+    assert cfg.settings()["default_wipe"] == "a_dip"
+    assert [w["id"] for w in cfg.settings()["wipes"]] == ["a_dip", "b_swoosh", "c_star"]
+    with pytest.raises(mc.ConfigError, match="not a directory"):
+        mc.parse({**CONFIG, "wipe_dir": str(tmp_path / "nope")})
+
+
+def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
+    from avpmixer import clipcache
+
+    FakeMixer.instances.clear()
+    default = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    assert default.wipe_cache_mb == 768.0            # on by default
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 768.0
+
+    FakeMixer.instances.clear()
+    off = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=0), api=fake_api())
+    assert not off.wipe_cache_mb
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
+
+    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 768.0
+    assert parse_args(["--input", "a.mp4", "--janus-output", "--wipe-cache-mb", "0"]).wipe_cache_mb == 0
+    assert clipcache.loader_group("mixer") == "mixer_wipe_load"
+
+
+def test_clip_cache_node_parameters_name_the_clip_by_url():
+    from avpmixer import clipcache
+
+    node = clipcache.cache_node(name="mixer_wipe_cache", src="in", dst="out", group="g",
+                                fps="60/1", budget_mb=256, url="/media/w.mov")
+    assert node == {"name": "mixer_wipe_cache", "src": "in", "dst": "out", "group": "g",
+                    "fps": "60/1", "cache": "clips", "url": "/media/w.mov", "budget_mb": 256}
+    assert "budget_mb" not in clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+
+
+RENDITION_CONFIG = {**CONFIG, "canvas": {"width": 1080, "height": 1920, "fps": 30},
+                    "renditions": [{"id": "program", "target": "janus", "width": 1080,
+                                    "height": 1920, "fps": 30, "aspect": "9:16",
+                                    "bitrate_kbps": 3000, "profile": "baseline", "preset": "p7"}]}
+
+
+def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
+    import json as _json
+    from avpmixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    doc = {**RENDITION_CONFIG,
+           "renditions": [RENDITION_CONFIG["renditions"][0],
+                          {"id": "square", "target": "/rec/square.mp4", "width": 1080,
+                           "height": 1080, "fps": 30, "bitrate_kbps": 2000}]}
+    path = tmp_path / "m.json"
+    path.write_text(_json.dumps(doc))
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True,
+                                         dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_square"]
+    assert "scale_program" not in nodes                      # already the canvas size
+    assert nodes["scale_square"]["graph"] == "scale_cuda=w=1080:h=1080"
+    assert nodes["janus_encoder"]["options"]["preset"] == "p7"
+    assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
+    assert nodes["janus_fps"]["fps"] == "30/1"
+    assert FakeMixer.instances[-1].parameters["fps"] == (30, 1)
+
+
+def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
+    from avpmixer import config as mc
+    with pytest.raises(mc.ConfigError, match="exceeds the canvas rate"):
+        mc.parse({**RENDITION_CONFIG,
+                  "renditions": [{**RENDITION_CONFIG["renditions"][0], "fps": 60}]})
+    with pytest.raises(mc.ConfigError, match="is 9:16, not 16:9"):
+        mc.parse({**RENDITION_CONFIG,
+                  "renditions": [{**RENDITION_CONFIG["renditions"][0], "aspect": "16:9"}]})
+    cfg = mc.parse(RENDITION_CONFIG)
+    assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
+
+
+def test_control_section_carries_the_defaults_the_surfaces_start_from():
+    from avpmixer import config as mc
+    import copy
+    doc = copy.deepcopy(CONFIG)
+    del doc["control"]
+    del doc["canvas"]["fps"]
+    cfg = mc.parse(doc)
+    # An undeclared canvas rate is 30, and a pick takes with a half-second fade.
+    assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "fade")
+    assert cfg.settings()["transition"] == "fade"
+    chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False}})
+    assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
+    with pytest.raises(mc.ConfigError, match="control.transition must be"):
+        mc.parse({**doc, "control": {"transition": "dissolve"}})
+    with pytest.raises(mc.ConfigError, match="needs a wipe library"):
+        mc.parse({**{k: v for k, v in doc.items() if k != "wipes"}, "control": {"transition": "wipe"}})
+    with pytest.raises(mc.ConfigError, match="fade_seconds must be positive"):
+        mc.parse({**doc, "control": {"fade_seconds": 0}})
+
+
+def test_generated_grids_show_every_distinct_source_before_any_repeat():
+    import make_config
+    import io
+    import contextlib
+    args = [f"clip{i}=/media/clip{i}.mp4" for i in range(4)] + ["dup=/media/clip0.mp4"]
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        make_config.main(args)
+    doc = json.loads(out.getvalue())
+    assert [s["id"] for s in doc["sources"]] == ["clip0", "clip1", "clip2", "clip3"]
+    four_box = next(s for s in doc["scenes"] if s["id"] == "grid_4_page_0")
+    assert [i["source"] for i in four_box["items"]] == ["clip0", "clip1", "clip2", "clip3"]
+    assert doc["canvas"]["fps"] == 30 and doc["control"]["transition"] == "fade"
+    assert doc["renditions"][0]["bitrate_kbps"] == 2700 and doc["renditions"][0]["aspect"] == "9:16"

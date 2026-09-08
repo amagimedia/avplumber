@@ -1,6 +1,6 @@
 # Playlist demo
 
-[![Watch the playlist: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.jpg)](https://amagimedia.github.io/avplumber/demos/playlist/docs/)
+[![Watch the playlist: program output beside the TUI](https://amagimedia.github.io/avplumber/demos/playlist/docs/playlist-demo.jpg)](https://amagimedia.github.io/avplumber/demos/playlist/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/playlist/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/playlist-demo-media-2026-09/playlist-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=playlist) · [Reference](docs/guide.md)
 

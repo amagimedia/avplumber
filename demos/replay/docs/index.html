@@ -34,9 +34,9 @@
     <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/replay">Code &amp; setup guide</a>
   </header>
   <p>Real terminal controls beside their live Janus/WebRTC output. The source frame counter makes pauses, exact frame steps, time seeks, and playback speed visible.</p>
-  <video id="demo" controls playsinline preload="metadata" poster="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg">
+  <video id="demo" controls playsinline preload="metadata" poster="replay-demo.jpg">
     <source src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4" type="video/mp4">
-    <a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4"><img src="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.jpg" alt="Replay video beside terminal controls; click to download the MP4."></a>
+    <a href="https://github.com/amagimedia/avplumber/releases/download/replay-demo-media-2026-09/replay-demo.mp4"><img src="replay-demo.jpg" alt="Replay video beside terminal controls; click to download the MP4."></a>
   </video>
   <nav class="chapters" aria-label="Jump to a demonstration">
     <button data-seek="0">Play</button>
@@ -54,7 +54,7 @@
   <h2>The complete processing graph</h2>
   <p>A fresh capture of the current player graph: all 14 nodes and 13 queues with orthogonal routes and directional arrows. Flow runs left to right, from the recording through decoding and transport controls to encoding and RTP output.</p>
   <figure>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/replay-graph.png" alt="Live AVPlumber web UI showing all Replay nodes, their connections, with routed arrows and queue-state markers." loading="lazy"></a>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer"><img src="replay-graph.png" alt="Live AVPlumber web UI showing all Replay nodes, their connections, with routed arrows and queue-state markers." loading="lazy"></a>
     <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=replay" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in the HTML viewer to zoom and inspect every node. Edge colours and fill markers reflect queue state at capture time.</figcaption>
   </figure>
   <footer>

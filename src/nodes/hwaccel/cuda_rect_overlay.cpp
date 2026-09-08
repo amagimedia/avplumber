@@ -55,9 +55,11 @@ struct LayerSpec {
     int source_canvas_h = 0;
     int crop_w= 0;
     int crop_h = 0;
+    int z = 0;   // draw order: lower first, ties by source index
+    bool blend = false;   // honour the source's alpha instead of overwriting
 
     bool operator==(const LayerSpec &other) const {
-        return dst_x == other.dst_x && dst_y == other.dst_y &&
+        return dst_x == other.dst_x && dst_y == other.dst_y && z == other.z && blend == other.blend &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
@@ -88,6 +90,8 @@ static void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     out.dst_y = obj.value("dst_y", 0);
     out.dst_w = obj.value("dst_w", 0);
     out.dst_h = obj.value("dst_h", 0);
+    out.z = obj.value("z", 0);
+    out.blend = obj.value("blend", false);
     const std::string fit = obj.value("fit", std::string("stretch"));
     if (fit != "stretch" && fit != "contain")
         throw Error("cuda_rect_overlay: fit must be stretch or contain");
@@ -293,6 +297,35 @@ static bool isAlphaCompatible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
     return true;
 }
 
+// Packed 8-bit RGB with 3 or 4 bytes per pixel (rgb0, bgr0, rgba, bgra, rgb24, ...): the compositor
+// converts such sources onto an NV12 canvas on the GPU, so browser pages and video mix freely.
+static bool isPackedRgb8(AVPixelFormat fmt, int &step, int &r_off, int &g_off, int &b_off) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    if (!d || !(d->flags & AV_PIX_FMT_FLAG_RGB) || (d->flags & (AV_PIX_FMT_FLAG_PLANAR | AV_PIX_FMT_FLAG_BITSTREAM)))
+        return false;
+    if (d->nb_components < 3) return false;
+    for (int c = 0; c < 3; ++c)
+        if (d->comp[c].depth != 8 || d->comp[c].plane != 0) return false;
+    step = d->comp[0].step;
+    r_off = d->comp[0].offset;
+    g_off = d->comp[1].offset;
+    b_off = d->comp[2].offset;
+    return step == 3 || step == 4;
+}
+
+/// Byte offset of alpha inside a packed 8-bit pixel, or -1 when there is none.
+static int packedAlphaOffset(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    if (!d || !(d->flags & AV_PIX_FMT_FLAG_ALPHA) || d->nb_components < 4) return -1;
+    const AVComponentDescriptor &a = d->comp[3];
+    return (a.depth == 8 && a.plane == 0) ? a.offset : -1;
+}
+
+static bool isRgbToNv12Convertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    int step, r, g, b;
+    return canvas_fmt == AV_PIX_FMT_NV12 && isPackedRgb8(src_fmt, step, r, g, b);
+}
+
 // Returns the plane index of the alpha component for planar formats, or -1 if there is none /
 // the format is packed (all components on plane 0).
 static int alphaPlaneIndex(AVPixelFormat fmt) {
@@ -398,6 +431,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     AVCUDADeviceContext *cuda_dev_ = nullptr;
     CUmodule scale_module_ = nullptr;
     CUfunction scale_kernel_ = nullptr;
+    CUfunction rgb_kernel_ = nullptr;
+    CUfunction rgba_kernel_ = nullptr;
+    std::string last_ops_desc_;
     bool sent_eof_ = false;
 
     std::vector<bool> input_eof_;
@@ -449,9 +485,37 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         ensureCudaDevice();
         const std::string image(avpl_rect_scale_ptx, avpl_rect_scale_ptx + avpl_rect_scale_ptx_len);
         if (CHECK_CU(cuModuleLoadDataEx(&scale_module_, image.c_str(), 0, nullptr, nullptr)) ||
-            CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")))
+            CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")) ||
+            CHECK_CU(cuModuleGetFunction(&rgb_kernel_, scale_module_, "rgb_to_nv12")) ||
+            CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_nv12")))
             throw Error("cuda_rect_overlay: cannot load scaling kernel");
 #endif
+    }
+
+    /// Draw a packed RGB source onto the NV12 canvas: one fused scale + colour
+    /// conversion pass, alpha-blended over what is already there when the layer
+    /// asks for it and the source carries alpha.
+    void convertRgbLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer,
+                         int step, int r_off, int g_off, int b_off, int a_off = -1) {
+        ensureScaleKernel();
+        const bool blend = layer.blend && a_off >= 0;
+        if (!rgb_kernel_ || (blend && !rgba_kernel_))
+            throw Error("cuda_rect_overlay: RGB conversion kernel unavailable");
+        int sx = layer.crop_x, sy = layer.crop_y, sw = layer.crop_w, sh = layer.crop_h;
+        int dx = layer.dst_x, dy = layer.dst_y;
+        int dw = layer.dst_w > 0 ? layer.dst_w : layer.crop_w, dh = layer.dst_w > 0 ? layer.dst_h : layer.crop_h;
+        int cw = canvas_w_, ch = canvas_h_;
+        CUdeviceptr source = (CUdeviceptr)src->data[0], luma = (CUdeviceptr)dst->data[0],
+                    chroma = (CUdeviceptr)dst->data[1];
+        int source_pitch = src->linesize[0], luma_pitch = dst->linesize[0], chroma_pitch = dst->linesize[1];
+        void *opaque_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off,
+                               &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch};
+        void *blend_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off, &a_off,
+                              &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch};
+        const int blocks_x = (dw + 1) / 2, blocks_y = (dh + 1) / 2;
+        if (CHECK_CU(cuLaunchKernel(blend ? rgba_kernel_ : rgb_kernel_, (blocks_x + 31) / 32, (blocks_y + 7) / 8, 1,
+                                    32, 8, 1, 0, stream, blend ? blend_args : opaque_args, nullptr)))
+            throw Error("cuda_rect_overlay: RGB conversion launch failed");
     }
 
     void scaleLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer) {
@@ -521,7 +585,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             return false;
         AVHWFramesContext *ctx = (AVHWFramesContext *)f.raw()->hw_frames_ctx->data;
         if (!ctx) return false;
-        return ctx->sw_format == sw_fmt_ || isAlphaCompatible(ctx->sw_format, sw_fmt_);
+        return ctx->sw_format == sw_fmt_ || isAlphaCompatible(ctx->sw_format, sw_fmt_) ||
+               isRgbToNv12Convertible(ctx->sw_format, sw_fmt_);
     }
 
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f) {
@@ -559,7 +624,10 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                     placement->destination.y >= canvas_h_ ||
                     int64_t(placement->destination.x) + placement->destination.w <= 0 ||
                     int64_t(placement->destination.y) + placement->destination.h <= 0) {
-                    ops.push_back({});
+                    DrawOp rejected;
+                    rejected.src_w = -srcp->width(); rejected.src_h = srcp->height();   // marks "rejected" in the log
+                    rejected.layer = L;
+                    ops.push_back(rejected);
                     continue;
                 }
                 const auto &p = *placement;
@@ -591,6 +659,9 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             }
             ops.push_back({srcp, srcp->width(), srcp->height(), L});
         }
+        // z decides who draws on top; equal z keeps source order (stable).
+        std::stable_sort(ops.begin(), ops.end(),
+                         [](const DrawOp &a, const DrawOp &b) { return a.layer.z < b.layer.z; });
         return ops;
     }
 
@@ -612,6 +683,28 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
         std::vector<DrawOp> ops = resolveDrawOps(sources, layers);
+        {
+            // Log the resolved layer set whenever it changes (scene switches), not per tick.
+            std::ostringstream desc;
+            for (size_t i = 0; i < ops.size(); ++i) {
+                const DrawOp &op = ops[i];
+                const LayerSpec &L = op.layer;
+                if (!op.src) {
+                    if (op.src_w < 0)
+                        desc << " [" << i << ":REJECTED src " << -op.src_w << "x" << op.src_h << " crop " << L.crop_x
+                             << "," << L.crop_y << " " << L.crop_w << "x" << L.crop_h << " box " << L.dst_x << ","
+                             << L.dst_y << " " << L.dst_w << "x" << L.dst_h << "]";
+                    continue;
+                }
+                desc << " [" << i << ":" << op.src_w << "x" << op.src_h << " crop " << L.crop_x << "," << L.crop_y
+                     << " " << L.crop_w << "x" << L.crop_h << " -> " << L.dst_x << "," << L.dst_y << " "
+                     << L.dst_w << "x" << L.dst_h << " z" << L.z << "]";
+            }
+            if (desc.str() != last_ops_desc_) {
+                last_ops_desc_ = desc.str();
+                logstream << "cuda_rect_overlay layers:" << last_ops_desc_;
+            }
+        }
         clearCanvas(outf, metadata_src ? metadata_src->raw() : nullptr);
 
         for (const DrawOp &op : ops) {
@@ -623,7 +716,13 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             const bool sized = L.dst_w > 0;
             const bool full_copy = !sized || (L.dst_w == L.crop_w && L.dst_h == L.crop_h &&
                 L.dst_x >= 0 && L.dst_y >= 0 && L.dst_x + L.dst_w <= canvas_w_ && L.dst_y + L.dst_h <= canvas_h_);
-            if (!full_copy) {
+            const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
+            int rgb_step, r_off, g_off, b_off;
+            if (src_sw_fmt != sw_fmt_ && sw_fmt_ == AV_PIX_FMT_NV12 &&
+                isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
+                convertRgbLayer(stream, srcp->raw(), outf.raw(), L, rgb_step, r_off, g_off, b_off,
+                                packedAlphaOffset(src_sw_fmt));
+            } else if (!full_copy) {
                 scaleLayer(stream, srcp->raw(), outf.raw(), L);
             } else if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,
                                  L.crop_h, L.dst_x, L.dst_y))
@@ -631,7 +730,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
             // When a non-alpha source is drawn onto an alpha canvas, fill the destination
             // alpha rect with 255 (fully opaque) so the output alpha is well-defined.
-            const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
             if (src_sw_fmt != AV_PIX_FMT_NONE && src_sw_fmt != sw_fmt_) {
                 const int alpha_p = alphaPlaneIndex(sw_fmt_);
                 int x = L.dst_x, y = L.dst_y;

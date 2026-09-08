@@ -9,7 +9,6 @@ from layouts import (
     fitted_even_size,
     grid_page_count,
     grid_scene,
-    layout_filter_graph,
 )
 
 
@@ -72,15 +71,6 @@ def test_landscape_content_is_even_and_never_cropped(box, expected):
     assert fitted[0] <= box[0]
     assert fitted[1] <= box[1]
     assert fitted[0] % 2 == fitted[1] % 2 == 0
-
-
-def test_filter_graph_scales_to_fit_then_pads_black():
-    graph = layout_filter_graph(8)
-    assert "scale_cuda=w=540:h=480" in graph
-    assert "force_original_aspect_ratio=decrease" in graph
-    assert "force_divisible_by=2" in graph
-    assert "pad_cuda=w=540:h=480" in graph
-    assert "color=black" in graph
 
 
 def test_invalid_capacity_and_page_are_rejected():
