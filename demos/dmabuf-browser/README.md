@@ -1,6 +1,6 @@
 # DMA-BUF browser demo
 
-[![Watch sixteen browser sources composed on the GPU](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.jpg)](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/)
+[![Watch sixteen browser sources composed on the GPU](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/dmabuf-demo.jpg)](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/) · [Download MP4](https://github.com/amagimedia/avplumber/releases/download/dmabuf-demo-media-2026-09/dmabuf-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser) · [Technical reference](docs/guide.md)
 
@@ -71,7 +71,7 @@ For the tested full-resolution sixteen-source configuration, also set
 
 ## Processing graph
 
-<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/dmabuf-graph.png" alt="Current sixteen-input DMA-BUF graph with orthogonal routes and directional arrows." width="640"></a>
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=dmabuf-browser" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/dmabuf-browser/docs/dmabuf-graph.png" alt="Current sixteen-input DMA-BUF graph with orthogonal routes and directional arrows." width="640"></a>
 
 **54 nodes / 53 queues**. Click the current WebUI capture to open the full graph
 in an HTML viewer with Fit and zoom controls.

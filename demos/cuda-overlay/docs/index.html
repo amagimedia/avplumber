@@ -35,13 +35,13 @@
   </header>
   <p>One base plus fifteen transparent overlays, composed by overlay_many_cuda. Generated labels, alpha ramps and overlapping shapes show layer order and transparency. An independent CPU reference checks every output plane.</p>
   <figure>
-    <a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" alt="Sixteen labelled inputs composed into one 1920×1080 CUDA output."></a>
+    <a href="cuda-overlay-result.png" target="_blank" rel="noopener noreferrer"><img src="cuda-overlay-result.png" alt="Sixteen labelled inputs composed into one 1920×1080 CUDA output."></a>
   </figure>
-  <p><a href="https://github.com/amagimedia/avplumber/releases/download/cuda-overlay-demo-media-2026-09/cuda-overlay-result.png" download>Download the result image</a> · 1920×1080 · sixteen inputs · static validation example.</p>
+  <p><a href="cuda-overlay-result.png" download>Download the result image</a> · 1920×1080 · sixteen inputs · static validation example.</p>
   <h2 id="graph">The complete processing graph</h2>
   <p>All 50 nodes and 49 queues from the completed 641×360 validation case. Sixteen source branches feed one CUDA composition filter, then raw output for the pixel comparison. CPU/GPU transfers are explicit test boundaries.</p>
   <figure>
-    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/cuda-overlay-graph.png" alt="Live WebUI capture of sixteen input-reader, demux and decode branches feeding overlay_many_cuda and raw output." loading="lazy"></a>
+    <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay" target="_blank" rel="noopener noreferrer"><img src="cuda-overlay-graph.png" alt="Live WebUI capture of sixteen input-reader, demux and decode branches feeding overlay_many_cuda and raw output." loading="lazy"></a>
     <figcaption><a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=cuda-overlay" target="_blank" rel="noopener noreferrer">Open the full processing graph</a> in a new tab to read every node and connection.</figcaption>
   </figure>
   <footer>

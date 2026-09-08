@@ -11,7 +11,7 @@ Measured on Tesla T4, 30 seconds per scene, with all sixteen sources active:
 
 [Samples and conditions](docs/runtime-load-1080p.json).
 
-[![Watch the mixer: program output beside the TUI](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
+[![Watch the mixer: program output beside the TUI](https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-demo.jpg)](https://amagimedia.github.io/avplumber/demos/mixer/docs/)
 
 [Watch the demo](https://amagimedia.github.io/avplumber/demos/mixer/docs/) · [MP4](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-demo.mp4) · [Full processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
 
@@ -152,7 +152,7 @@ inputs keep their aspect ratio. More sources than cells create additional pages.
 
 ## Processing graph
 
-<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://github.com/amagimedia/avplumber/releases/download/webui-graphs-2026-09/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
+<a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
 
 **122 nodes / 140 queues**, grouped into six blocks. Click the overview for the
 full-resolution ungrouped graph in an HTML viewer with Fit and zoom controls.
