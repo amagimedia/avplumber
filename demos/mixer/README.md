@@ -62,6 +62,30 @@ The wipe path is resolved by the mixer backend, including inside its container.
 Use a clip with alpha, such as QTRLE/ARGB or ProRes 4444. The clip plays over the
 program and the scene changes at its midpoint. The demo has no audio.
 
+## Browser pages as sources
+
+Any input can be a live page rendered by the
+[DMA-BUF browser demo](../dmabuf-browser/README.md) instead of a clip:
+`--input dmabuf://<window-id>` takes the window's DRM PRIME frames straight
+into the compositor with no decoder, using the same chain as that demo. File
+and browser inputs mix freely and share every layout, transition and control.
+
+The compose override runs this mixer inside the DMA-BUF stack and opens the
+pages itself. From the repository root:
+
+```sh
+cd demos/dmabuf-browser
+cp .env.example .env
+MIXER_SOURCE_COUNT=4 docker compose --env-file .env   -f compose.yaml -f compose.mixer.yaml up --build
+```
+
+Open <http://127.0.0.1:8080> and drive it with `tui.py` as above. `HTML_OVERLAY_URL`
+selects the page (default: the bundled animation), `MIXER_SOURCE_COUNT` the
+number of windows, `MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size; use
+`480x270` for a sixteen-page grid. Outside compose, the switches are
+`--dmabuf-open URL` (open the windows through the browser's REST API,
+`--dmabuf-rest`), `--dmabuf-size WxH` and `--dmabuf-socket-dir`.
+
 ## Generated input size and FPS
 
 Generate sixteen native-resolution test clips (requires NumPy and FFmpeg with

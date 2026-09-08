@@ -48,6 +48,10 @@ Stop it with:
 docker compose --env-file .env -f compose.yaml -f compose.scaling.yaml down
 ```
 
+To switch live between pages with the mixer demo's layouts and transitions,
+use `compose.mixer.yaml` as described in
+[the mixer demo](../mixer/README.md#browser-pages-as-sources).
+
 ## Configuration
 
 | Variable | Default | Purpose |

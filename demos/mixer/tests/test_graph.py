@@ -106,11 +106,13 @@ def fake_api():
         "bsf",
         "dec_video",
         "demux",
+        "drm_prime_to_cuda",
         "enc_video",
         "filter_video",
         "force_fps",
         "force_key_frame",
         "input_rec",
+        "ipc_dmabuf_source",
         "mux",
         "output",
         "preheat_video_router",
@@ -128,11 +130,13 @@ def fake_api():
             "bsf": "Bsf",
             "dec_video": "DecVideo",
             "demux": "Demux",
+            "drm_prime_to_cuda": "DrmPrimeToCuda",
             "enc_video": "EncVideo",
             "filter_video": "FilterVideo",
             "force_fps": "ForceFPS",
             "force_key_frame": "ForceKeyFrame",
             "input_rec": "InputRec",
+            "ipc_dmabuf_source": "IpcDmabufSource",
             "mux": "Mux",
             "output": "Output",
             "preheat_video_router": "PreheatVideoRouter",
@@ -298,3 +302,49 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     assert mixer.scenes["fullscreen_64"]["routes"] == {"source_0": 64}
     assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
     assert all(params["default_graph"] == "" for _, params in mixer.routed_sources)
+
+
+def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
+    FakeMixer.instances.clear()
+    (tmp_path / "page_00.sock").touch()
+    application = build_application(
+        GraphOptions(inputs=("camera.mp4", "dmabuf://page_00"), output="program.mp4",
+                     dmabuf_socket_dir=str(tmp_path), dmabuf_size=(480, 270), fps=60),
+        api=fake_api(),
+    )
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+
+    assert any('"name": "@drm", "type": "drm"' in c for c in application.avp.commands)
+    receive = nodes["input_1_receive"]
+    assert receive["type"] == "ipc_dmabuf_source"
+    assert receive["socket"] == str(tmp_path / "page_00.sock")
+    assert receive["fps"] == "60/1" and receive["group"] == "input_1"
+    assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
+    stamp = nodes["input_1_timestamp"]
+    assert (stamp["dst_width"], stamp["dst_height"], stamp["dst_frame_rate"]) == (480, 270, "60/1")
+    assert stamp["dst"] == "input_1_cuda"
+    assert "decode_1" not in nodes and "decode_0" in nodes
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert sources["source_1"]["pre_otm_edge"] == "input_1_cuda"
+    assert sources["source_0"]["pre_otm_edge"] == "input_0_fps"
+
+
+def test_file_inputs_do_not_touch_drm_or_sockets(tmp_path):
+    FakeMixer.instances.clear()
+    application = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", dmabuf_socket_dir=str(tmp_path / "missing")),
+        api=fake_api(),
+    )
+    assert not any("drm" in c for c in application.avp.commands)
+
+
+def test_cli_parses_dmabuf_options():
+    options = parse_args(["--input", "dmabuf://page_03", "--janus-output", "--dmabuf-size", "480x270",
+                          "--dmabuf-open", "http://pages/smoke.html"])
+    assert options.dmabuf_inputs == ["page_03"]
+    assert options.dmabuf_size == (480, 270)
+    assert options.dmabuf_open == "http://pages/smoke.html"
+    with pytest.raises(ValueError):
+        parse_args(["--input", "dmabuf://x", "--janus-output", "--dmabuf-size", "wide"])
+    with pytest.raises(ValueError):
+        GraphOptions(inputs=("dmabuf://", ), output="p.mp4").validate()

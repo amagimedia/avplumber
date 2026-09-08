@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
+                                    wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
 from avpmixer.janus import JanusVideoConfig, build_janus_output
 
@@ -67,6 +69,16 @@ class GraphOptions:
     janus_rtcp_bind: str = "0.0.0.0"
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
+    # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
+    dmabuf_socket_dir: str = "/tmp/dma-page"
+    dmabuf_size: tuple[int, int] = (1280, 720)
+    dmabuf_open: str | None = None       # page URL: open the named windows before building
+    dmabuf_rest: str = "http://127.0.0.1:9009"
+    dmabuf_render_node: str = "/dev/dri/renderD128"
+
+    @property
+    def dmabuf_inputs(self) -> list[str]:
+        return [window_id(url) for url in self.inputs if is_dmabuf_url(url)]
 
     def validate(self) -> None:
         if not self.inputs:
@@ -83,6 +95,11 @@ class GraphOptions:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
             raise ValueError("preheat_timeout_sec must be positive")
+        if any(v <= 0 for v in self.dmabuf_size):
+            raise ValueError("--dmabuf-size must be WxH with positive numbers")
+        ids = self.dmabuf_inputs
+        if len(ids) != len(set(ids)):
+            raise ValueError("dmabuf window ids must be unique")
         if self.janus_output:
             if not self.janus_host:
                 raise ValueError("janus_host is required for Janus output")
@@ -173,11 +190,13 @@ def load_avp_api():
         Bsf,
         DecVideo,
         Demux,
+        DrmPrimeToCuda,
         EncVideo,
         FilterVideo,
         ForceFPS,
         ForceKeyFrame,
         InputRec,
+        IpcDmabufSource,
         Mux,
         Output,
         PreheatVideoRouter,
@@ -193,11 +212,13 @@ def load_avp_api():
         Bsf=Bsf,
         DecVideo=DecVideo,
         Demux=Demux,
+        DrmPrimeToCuda=DrmPrimeToCuda,
         EncVideo=EncVideo,
         FilterVideo=FilterVideo,
         ForceFPS=ForceFPS,
         ForceKeyFrame=ForceKeyFrame,
         InputRec=InputRec,
+        IpcDmabufSource=IpcDmabufSource,
         Mux=Mux,
         Output=Output,
         PreheatVideoRouter=PreheatVideoRouter,
@@ -227,11 +248,24 @@ def _input_group(index: int) -> str:
 
 
 def _build_input(
-    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool
+    avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
+    options: "GraphOptions | None" = None,
 ) -> str:
     group = _input_group(index)
-    fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
-                           fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
+    if is_dmabuf_url(url):
+        # A dma-browser window: DRM PRIME frames over its socket, already on the
+        # shared monotonic clock; the same chain the DMA-BUF demo composes from.
+        width, height = options.dmabuf_size
+        nodes, fps_edge = dmabuf_cuda_input_nodes(
+            api, prefix=f"input_{index}",
+            socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
+            width=width, height=height, fps=fps, drm_hwaccel="@drm", cuda_hwaccel=HWACCEL,
+            source_group=group, processing_group=group)
+        for node in nodes:
+            avp.addNode(node)
+    else:
+        fps_edge = build_input(avp, api, str(index), url, group=group, fps=fps,
+                               fps_den=FPS_DEN, hwaccel=HWACCEL, loop=loop)
     if not normalize:
         return fps_edge
     normalized_edge = f"input_{index}_normalized"
@@ -403,6 +437,17 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     avp.executeCommandsFromString(
         f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}'
     )
+    dmabuf_ids = options.dmabuf_inputs
+    if dmabuf_ids:
+        avp.executeCommandsFromString(
+            f'hwaccel.init {{ "name": "@drm", "type": "drm", "device": "{options.dmabuf_render_node}" }}'
+        )
+        if options.dmabuf_open:
+            width, height = options.dmabuf_size
+            open_browser_windows(options.dmabuf_rest, dmabuf_ids, options.dmabuf_open,
+                                 width, height, options.fps)
+        wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
+                         options.preheat_timeout_sec)
     avp.edges.planCapacity("*", 4)
 
     input_edges = [
@@ -414,6 +459,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
             loop=options.loop_inputs,
             fps=options.fps,
             normalize=len(options.inputs) > 32,
+            options=options,
         )
         for index, url in enumerate(options.inputs)
     ]
@@ -457,6 +503,14 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="Input media file or URL; repeat for each mixer input",
     )
     parser.add_argument("--output", help="Optional video-only output URL or path")
+    parser.add_argument("--dmabuf-socket-dir", default="/tmp/dma-page",
+                        help="dma-browser socket directory for dmabuf://<window-id> inputs")
+    parser.add_argument("--dmabuf-size", default="1280x720", metavar="WxH",
+                        help="browser window size for dmabuf:// inputs")
+    parser.add_argument("--dmabuf-open", metavar="URL",
+                        help="open the dmabuf:// windows with this page through the dma-browser REST API")
+    parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
+    parser.add_argument("--dmabuf-render-node", default="/dev/dri/renderD128")
     parser.add_argument(
         "--output-format",
         help="Muxer format when it cannot be inferred from the output",
@@ -517,7 +571,20 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         janus_rtcp_bind=args.janus_rtcp_bind,
         janus_rtcp_port=args.janus_rtcp_port,
         preheat_timeout_sec=args.preheat_timeout,
+        dmabuf_socket_dir=args.dmabuf_socket_dir,
+        dmabuf_size=parse_size(args.dmabuf_size),
+        dmabuf_open=args.dmabuf_open,
+        dmabuf_rest=args.dmabuf_rest,
+        dmabuf_render_node=args.dmabuf_render_node,
     )
+
+
+def parse_size(text: str) -> tuple[int, int]:
+    try:
+        width, height = (int(v) for v in text.lower().split("x"))
+    except ValueError:
+        raise ValueError(f"expected WxH, got {text!r}") from None
+    return width, height
 
 
 def main(argv: list[str] | None = None) -> None:
