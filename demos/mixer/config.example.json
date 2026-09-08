@@ -61,7 +61,8 @@
       "path": "/media/wipe.mov"
     }
   ],
-  "transitions": {
+  "control": {
+    "direct": true,
     "fade_seconds": 0.8,
     "default_wipe": "wipe"
   },

@@ -64,11 +64,18 @@ class MixerConfig:
     scenes: Tuple[Scene, ...]
     wipes: Tuple[Wipe, ...] = ()
     initial_scene: str = ""
+    direct: bool = True            # TUI: scene picks go straight to program
     fade_seconds: float = 0.5
     default_wipe: str = ""
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
+
+    def settings(self) -> Dict[str, Any]:
+        """What a control surface needs: direct mode, fade length, wipe paths."""
+        wipes = {w.id: w.path for w in self.wipes}
+        return {"direct": self.direct, "fade_seconds": self.fade_seconds,
+                "wipe_file": wipes.get(self.default_wipe, ""), "wipes": wipes}
 
     @property
     def alias_counts(self) -> Dict[str, int]:
@@ -179,12 +186,14 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     initial = str(doc.get("initial_scene", scenes[0].id))
     if not any(s.id == initial for s in scenes):
         raise ConfigError(f"initial_scene '{initial}' is not a scene")
-    transitions = doc.get("transitions", {})
-    default_wipe = str(transitions.get("default_wipe", ""))
+    control = doc.get("control", {})
+    if not isinstance(control, dict):
+        raise ConfigError("control must be an object")
+    default_wipe = str(control.get("default_wipe", wipes[0].id if wipes else ""))
     if default_wipe and not any(w.id == default_wipe for w in wipes):
-        raise ConfigError(f"transitions.default_wipe '{default_wipe}' is not a wipe")
+        raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), initial,
-                       float(transitions.get("fade_seconds", 0.5)), default_wipe)
+                       bool(control.get("direct", True)), float(control.get("fade_seconds", 0.5)), default_wipe)
 
 
 def load(path: str) -> MixerConfig:

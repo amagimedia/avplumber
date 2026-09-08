@@ -8,6 +8,7 @@ path; use ``tui.py`` to preview and take scenes manually.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -555,6 +556,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
+    settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
+    avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     mixer_edge = mixer.build()
     rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
                                             width=cfg.canvas_w, height=cfg.canvas_h)

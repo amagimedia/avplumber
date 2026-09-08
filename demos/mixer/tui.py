@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 
 from textual import on, work
@@ -173,6 +174,7 @@ class MixerTui(App):
         *,
         fade_duration: float,
         wipe_file: str = "",
+        direct: bool = True,
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
@@ -184,7 +186,7 @@ class MixerTui(App):
         self.pgm_scene = ""
         self.pvw_scene = ""
         self.transition = "idle"
-        self.direct_mode = False
+        self.direct_mode = direct
         self._poll_timer = None
 
     def compose(self) -> ComposeResult:
@@ -220,7 +222,8 @@ class MixerTui(App):
             yield Button("✂ CUT", id="cut", variant="error")
             yield Button("⟿ FADE", id="fade", variant="success")
             yield Button("▶ MEDIA WIPE", id="wipe", variant="primary")
-            yield Button("Direct: OFF", id="direct")
+            yield Button("Direct: ON" if self.direct_mode else "Direct: OFF", id="direct",
+                         variant="warning" if self.direct_mode else "default")
             yield Select([("Cut", "cut"), ("Fade", "fade"), ("Media Wipe", "wipe")],
                          value="cut", allow_blank=False, id="direct_transition",
                          tooltip="Current transition, shared by take buttons and Direct mode")
@@ -305,6 +308,7 @@ class MixerTui(App):
         try:
             await self.connection.connect()
             await self._fetch_scenes()
+            await self._apply_settings()
             await self._read_status()
         except Exception as exc:
             await self.connection.disconnect()
@@ -420,7 +424,24 @@ class MixerTui(App):
         self._take(transition, scene)
 
     def action_toggle_direct(self) -> None:
-        self.direct_mode = not self.direct_mode
+        self._set_direct(not self.direct_mode)
+
+    async def _apply_settings(self) -> None:
+        """Defaults published by a config-driven mixer; older mixers have none."""
+        try:
+            content = await self.connection.command(f"mixer.settings {self.mixer_name}")
+            settings = json.loads(content or "{}")
+        except Exception:
+            return
+        if "direct" in settings:
+            self._set_direct(bool(settings["direct"]))
+        if "fade_seconds" in settings:
+            self.query_one("#fade_duration", Input).value = str(settings["fade_seconds"])
+        if settings.get("wipe_file"):
+            self.query_one("#wipe_file", Input).value = str(settings["wipe_file"])
+
+    def _set_direct(self, enabled: bool) -> None:
+        self.direct_mode = enabled
         button = self.query_one("#direct", Button)
         button.label = "Direct: ON" if self.direct_mode else "Direct: OFF"
         button.variant = "warning" if self.direct_mode else "default"
@@ -490,6 +511,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--fade-duration", type=float, default=0.5)
     parser.add_argument("--wipe-file", default="",
                         help="Transparent media wipe path on the mixer host")
+    parser.add_argument("--no-direct", action="store_true",
+                        help="Start with scene picks loading preview instead of taking to program")
     args = parser.parse_args(argv)
     MixerTui(
         args.host,
@@ -497,6 +520,7 @@ def main(argv: list[str] | None = None) -> None:
         args.mixer,
         fade_duration=args.fade_duration,
         wipe_file=args.wipe_file,
+        direct=not args.no_direct,
     ).run()
 
 

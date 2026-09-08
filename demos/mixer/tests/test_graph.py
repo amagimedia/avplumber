@@ -49,6 +49,10 @@ class FakeAvp:
     def enableControlServer(self, port):
         self.control_port = port
 
+    def registerControlCommand(self, name, handler, _payload):
+        self.commands_registered = getattr(self, "commands_registered", {})
+        self.commands_registered[name] = handler
+
     def setReady(self):
         self.ready = True
 
@@ -413,6 +417,7 @@ CONFIG = {
         {"id": "page", "kind": "browser", "url": "https://example.org/", "width": 1280, "height": 720},
     ],
     "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
+    "control": {"direct": False, "fade_seconds": 0.8},
     "scenes": [
         {"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "cover"}]},
         {"id": "pip", "items": [
@@ -483,6 +488,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
+    assert application.avp.commands_registered["mixer.settings"]("") == (
+        '{"direct":false,"fade_seconds":0.8,"wipe_file":"/media/swoosh.mov","wipes":{"swoosh":"/media/swoosh.mov"}}\n')
     assert nodes["program_format"]["width"] == 1920
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 

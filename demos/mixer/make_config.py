@@ -61,8 +61,8 @@ def main(argv=None) -> None:
         "canvas": {"width": width, "height": height, "fps": args.fps},
         "sources": sources,
         "wipes": [{"id": Path(p).stem, "path": p} for p in args.wipe],
-        "transitions": {"fade_seconds": args.fade_seconds,
-                        **({"default_wipe": Path(args.wipe[0]).stem} if args.wipe else {})},
+        "control": {"direct": True, "fade_seconds": args.fade_seconds,
+                    **({"default_wipe": Path(args.wipe[0]).stem} if args.wipe else {})},
         "scenes": scenes,
         "initial_scene": scenes[0]["id"],
     }

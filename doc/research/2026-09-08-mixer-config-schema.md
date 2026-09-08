@@ -34,8 +34,9 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
                      "fps": {"type": "integer"}}},
     "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
     "wipes": {"type": "array", "items": {"$ref": "#/$defs/wipe"}},
-    "transitions": {"type": "object",
-      "properties": {"fade_seconds": {"type": "number"}, "default_wipe": {"type": "string"}}},
+    "control": {"type": "object", "description": "defaults for the control surface",
+      "properties": {"direct": {"type": "boolean", "default": true},
+                     "fade_seconds": {"type": "number"}, "default_wipe": {"type": "string"}}},
     "scenes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scene"}},
     "initial_scene": {"type": "string"}
   },
@@ -91,7 +92,7 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
     {"id": "swoosh", "path": "/media/swoosh-alpha.mov"},
     {"id": "stinger", "path": "/media/stinger.mov", "duration_seconds": 1.2}
   ],
-  "transitions": {"fade_seconds": 0.8, "default_wipe": "swoosh"},
+  "control": {"direct": true, "fade_seconds": 0.8, "default_wipe": "swoosh"},
   "scenes": [
     {"id": "cam1_full", "items": [{"source": "cam1", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "fit": "cover"}]},
     {"id": "two_up", "items": [
@@ -124,7 +125,7 @@ of the engine.
 | item order = z-order | draw order is source registration order | order ops by item index instead; small compositor change |
 | same source twice in one scene | one layer per source | alias source (above) |
 | `wipes[]` | `mixer.wipe` takes any path; `mixer.wipe.warmup` | loader warms every declared wipe at start |
-| `transitions.fade_seconds` | TUI argument | loader passes defaults to the TUI/control |
+| `control.*` | TUI arguments | the mixer publishes them as `mixer.settings`; the TUI applies them on connect |
 | `initial_scene` | `set_initial_scene` | none |
 
 Scaling is done in the compositor's draw pass (bilinear, with RGB→NV12 for

@@ -43,6 +43,8 @@ class FakeConnection:
         if command.startswith("mixer.preview"):
             self.preview = json.loads(command.partition(" ")[2])["scene"]
             return None
+        if command.startswith("mixer.settings"):
+            return "{}"
         raise AssertionError(command)
 
 
@@ -54,6 +56,7 @@ def test_direct_mode_scene_tile_cuts_to_program():
             "mixer",
             fade_duration=0.5,
             wipe_file="",
+            direct=False,
         )
         connection = FakeConnection()
         app.connection = connection
@@ -97,7 +100,7 @@ def test_direct_selection_honors_transition(transition, selection):
             return await super().command(command)
 
     async def exercise():
-        app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.25,
+        app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.25, direct=False,
                        wipe_file="/media/My wipe.mov")
         connection = TransitionConnection()
         app.connection = connection
@@ -138,7 +141,7 @@ def test_direct_mode_reuses_current_transition_button(transition):
             return await super().command(command)
 
     async def exercise():
-        app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.25,
+        app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.25, direct=False,
                        wipe_file="/media/My wipe.mov")
         connection = TransitionConnection()
         app.connection = connection
@@ -189,6 +192,8 @@ def test_rapid_tui_cuts_keep_tcp_replies_aligned():
                             await release_first.wait()
                         else:
                             second_cut.set()
+                    elif command.startswith("mixer.settings"):
+                        content = {}
                     else:
                         raise AssertionError(command)
                     writer.write(("200 OK\n" if content is None else
@@ -200,7 +205,7 @@ def test_rapid_tui_cuts_keep_tcp_replies_aligned():
 
         server = await asyncio.start_server(serve, "127.0.0.1", 0)
         app = MixerTui("127.0.0.1", server.sockets[0].getsockname()[1], "mixer",
-                       fade_duration=0.5, wipe_file="")
+                       fade_duration=0.5, wipe_file="", direct=False)
         try:
             async with app.run_test(size=(160, 45)) as pilot:
                 await pilot.pause()
@@ -233,7 +238,7 @@ def test_media_wipe_uses_edited_backend_path_and_clip_duration():
 
     async def exercise():
         app = MixerTui("127.0.0.1", 7777, "mixer",
-                       fade_duration=0.5, wipe_file="/media/initial.mov")
+                       fade_duration=0.5, wipe_file="/media/initial.mov", direct=False)
         connection = MediaConnection()
         app.connection = connection
         async with app.run_test(size=(160, 45)) as pilot:
@@ -270,7 +275,7 @@ def test_new_direct_selection_reaches_backend_while_busy(current, requested):
             return await super().command(command)
     async def exercise():
         app = MixerTui('127.0.0.1', 7777, 'mixer', fade_duration=.5,
-                       wipe_file='/media/wipe.mov')
+                       wipe_file='/media/wipe.mov', direct=False)
         app.connection = connection = BusyConnection()
         async with app.run_test(size=(160,45)) as pilot:
             await pilot.pause()
@@ -290,7 +295,7 @@ def test_return_to_current_program_reaches_backend_during_pending_cut():
                     'pvw_scene': 'grid_2_page_0', 'transition': 'cut'})
             return await super().command(command)
     async def exercise():
-        app = MixerTui('127.0.0.1', 7777, 'mixer', fade_duration=.5, wipe_file='')
+        app = MixerTui('127.0.0.1', 7777, 'mixer', fade_duration=.5, wipe_file='', direct=False)
         app.connection = connection = PendingConnection()
         async with app.run_test(size=(160,45)) as pilot:
             await pilot.pause()
@@ -298,3 +303,23 @@ def test_return_to_current_program_reaches_backend_during_pending_cut():
             await pilot.pause()
             assert any(c.startswith('mixer.cut ') for c in connection.commands), connection.commands
     asyncio.run(exercise())
+
+
+@pytest.mark.asyncio
+async def test_direct_is_on_by_default_and_mixer_settings_apply():
+    class SettingsConnection(FakeConnection):
+        async def command(self, command):
+            if command.startswith("mixer.settings"):
+                self.commands.append(command)
+                return json.dumps({"direct": False, "fade_seconds": 1.5, "wipe_file": "/media/w.mov"})
+            return await super().command(command)
+
+    app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.5, wipe_file="")
+    assert app.direct_mode is True
+    app.connection = SettingsConnection()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.direct_mode is False
+        assert app.query_one("#fade_duration").value == "1.5"
+        assert app.query_one("#wipe_file").value == "/media/w.mov"
+        assert str(app.query_one("#direct").label) == "Direct: OFF"
