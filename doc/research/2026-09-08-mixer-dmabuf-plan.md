@@ -104,3 +104,25 @@ python3 /opt/avplumber/demos/mixer/mixer.py --fps 60 --janus-output \
 3. Same with 16 pages at 480×270, then with the Singular URL.
 4. Record a short movie in the mixer's recording format, publish under a new
    media release, link it from the mixer page as a second recording.
+
+## Findings on the T4 (2026-09-08)
+
+- **Compositor format.** `cuda_rect_overlay` required every input to match its
+  NV12 canvas, so browser frames (`rgb0` CUDA) were rejected. The compositor now
+  draws packed 8-bit RGB inputs through a fused scale-and-convert kernel (BT.709
+  limited range, one launch per layer), so browser pages and NVDEC video share
+  one NV12 canvas. The video-only demo is unchanged: sixteen clips, 2 % GPU.
+- **Per-frame DMA-BUF import.** `drm_prime_to_cuda` re-imported every frame
+  (EGL image, GL copy, `glFinish`, CUDA map, copy, sync, destroy). With sixteen
+  pages that is 960 imports per second and the GPU sat at 74 % with the encoder
+  at 54 fps regardless of page size (960x540, 640x360, 480x270 all measured the
+  same), while the DMA-BUF demo's production path (`drm_prime_to_egl_image` →
+  `egl_image_cuda_overlay`) caches one import per physical allocation. The node
+  now keeps the same allocation-identity cache (inode + geometry, `dup` of the
+  fd, TTL 3 s, 64 entries) with a CUDA registration per allocation and one
+  device copy per frame.
+- The DRM hwaccel on the source only annotated frames for filters; the mixer
+  no longer initialises it, matching the sixteen-source configuration the
+  DMA-BUF demo measured.
+- The mixer demo canvas is portrait 1080x1920 by design, so 16:9 pages are
+  letterboxed in fullscreen.
