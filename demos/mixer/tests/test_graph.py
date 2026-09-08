@@ -421,7 +421,9 @@ def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     application.start()
     # Cached by default: the clip is armed on the loader and decoded once, so
     # mixer.wipe.warmup (which only compiles the filter) is not used.
-    assert "node.param.set mixer_wipe_input url /media/wipe.mov" in application.avp.commands
+    armed = "\n".join(application.avp.commands)
+    assert "node.param.set mixer_wipe_input url /media/wipe.mov" in armed
+    assert "node.param.set mixer_wipe_cache url /media/wipe.mov" in armed
     assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
     assert application.avp.ready
 

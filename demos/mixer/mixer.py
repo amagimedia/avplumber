@@ -149,7 +149,11 @@ class MixerApplication:
         cache_node = f"{MIXER_NAME}_wipe_cache"
         for clip in dict.fromkeys(c for c in (self.wipe_file, *self.wipe_files) if c):
             started = time.monotonic()
-            self.avp.executeCommandsFromString(f"node.param.set {MIXER_NAME}_wipe_input url {clip}")
+            # Both nodes need the clip before their group starts: the reader to
+            # open the file, the cache to know which clip it is filling.
+            self.avp.executeCommandsFromString(
+                f"node.param.set {MIXER_NAME}_wipe_input url {clip}\n"
+                f"node.param.set {cache_node} url {clip}")
             self.avp.group(player).startNodes()
             self.avp.group(loader).startNodes()
             deadline = started + self.preheat_timeout_sec
