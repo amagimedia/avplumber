@@ -126,3 +126,9 @@ python3 /opt/avplumber/demos/mixer/mixer.py --fps 60 --janus-output \
   DMA-BUF demo measured.
 - The mixer demo canvas is portrait 1080x1920 by design, so 16:9 pages are
   letterboxed in fullscreen.
+
+Measured with the cached import (sixteen Singular pages, sixteen windows at
+60 fps, zero drops, encoder 59.4–59.6 fps): 480x270 33.7 % GPU / 584 MiB,
+960x540 37.4 % / 1308 MiB, 1280x720 40.8 % / 1394 MiB, 1920x1080 51.1 % /
+3585 MiB, host CPU 52–78 % busy. Before the cache, 74 % GPU and 54 fps encode at
+every size.

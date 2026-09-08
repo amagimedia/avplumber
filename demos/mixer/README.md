@@ -81,10 +81,27 @@ MIXER_SOURCE_COUNT=4 docker compose --env-file .env   -f compose.yaml -f compose
 
 Open <http://127.0.0.1:8080> and drive it with `tui.py` as above. `HTML_OVERLAY_URL`
 selects the page (default: the bundled animation), `MIXER_SOURCE_COUNT` the
-number of windows, `MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size; use
-`480x270` for a sixteen-page grid. Outside compose, the switches are
-`--dmabuf-open URL` (open the windows through the browser's REST API,
-`--dmabuf-rest`), `--dmabuf-size WxH` and `--dmabuf-socket-dir`.
+number of windows, `MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size.
+Outside compose, the switches are `--dmabuf-open URL` (open the windows through
+the browser's REST API, `--dmabuf-rest`), `--dmabuf-size WxH` and
+`--dmabuf-socket-dir`.
+
+Sixteen Singular.live pages on the Tesla T4 host (16 vCPU), 60 fps, all
+sixteen windows painting at 60 fps with zero capture drops and the encoder at
+60 fps, ten one-second samples after warm-up:
+
+| Page size | GPU busy | GPU memory | Host CPU busy |
+| --- | ---: | ---: | ---: |
+| 480x270 | 33.7 % | 584 MiB | 52 % |
+| 960x540 | 37.4 % | 1308 MiB | 60 % |
+| 1280x720 | 40.8 % | 1394 MiB | 72 % |
+| 1920x1080 | 51.1 % | 3585 MiB | 78 % |
+
+The same sixteen clips decoded by NVDEC cost 2 % GPU; the browser rendering and
+capture is the load. Each DMA-BUF allocation is imported once and copied per
+frame; browser frames are converted from RGB to the NV12 canvas inside the
+compositor's draw pass, so video and browser sources mix on one canvas without
+extra passes.
 
 ## Generated input size and FPS
 
