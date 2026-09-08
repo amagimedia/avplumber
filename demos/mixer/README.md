@@ -89,6 +89,11 @@ Outside compose, the switches are `--dmabuf-open URL` (open the windows through
 the browser's REST API, `--dmabuf-rest`), `--dmabuf-size WxH` and
 `--dmabuf-socket-dir`.
 
+Pages that only paint on load (a static graphic) are held: each browser chain
+ends in `repeat_last_frame`, which re-emits the last frame at the mixer rate
+while the page is idle, so scene switches never wait on a page that has nothing
+new to draw.
+
 Sixteen Singular.live pages on the Tesla T4 host (16 vCPU), 60 fps, all
 sixteen windows painting at 60 fps with zero capture drops and the encoder at
 60 fps, ten one-second samples after warm-up:
