@@ -25,15 +25,13 @@
     h1 span, a { color: var(--accent); }
     a { text-underline-offset: 4px; }
     p { color: var(--body); line-height: 1.6; max-width: 78ch; }
-    .lede { font-size: 17px; color: #d5e2f2; margin: 0; }
+    .lede { font-size: 17px; color: #d5e2f2; margin: 22px 0 0; }
     figure { margin: 0; }
     figure img { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #10131a; }
     figcaption { color: var(--muted); line-height: 1.55; margin-top: 10px; font-size: 14px; }
-    /* Control surface beside the picture it is cutting: the operator's two screens. */
-    .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 0.32fr); gap: 22px; align-items: start; margin-top: 24px; }
-    .stage .desk { display: grid; gap: 18px; }
-    @media (max-width: 860px) { .stage { grid-template-columns: 1fr; } .stage .program { max-width: 320px; } }
-    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .reel { margin-top: 24px; }
+    .reel video { width: 100%; display: block; border: 1px solid #334157; border-radius: 10px; background: #000; }
+    .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 22px 0 0; padding: 0; list-style: none; }
     .figures li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
     .figures b { display: block; font-size: 25px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
     .figures span { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; line-height: 1.45; }
@@ -50,25 +48,23 @@
     <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/mixer">Code &amp; setup guide</a>
   </header>
 
-  <div class="stage">
-    <div class="desk">
-    <figure>
-      <img src="webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and a footer of take buttons — Cut, Fade, one button per cached wipe clip, the Direct toggle and the fade length.">
-      <figcaption>A tile per published scene, a button per cached wipe clip, Direct on and a half-second fade. A terminal UI speaks the same protocol and can run beside it.</figcaption>
-    </figure>
-    <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from this page, with the whole show described by one JSON document.</p>
-    <ul class="figures">
-      <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
-      <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
-      <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
-      <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
-    </ul>
-    </div>
-    <figure class="program">
-      <img src="program-16box.png" alt="The 1080×1920 program: a sixteen-box grid, two columns of eight, each cell a different source — live browser pages down the left, video clips down the right.">
-      <figcaption>The program at that moment: <code>grid_16_page_0</code>, sixteen distinct sources in one 9:16 raster — live pages on the left, clips on the right.</figcaption>
-    </figure>
-  </div>
+  <figure class="reel">
+    <video controls autoplay muted loop playsinline preload="metadata" poster="mixer-demo-poster.jpg">
+      <source src="https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-webui-demo.mp4" type="video/mp4">
+    </video>
+    <figcaption>Thirty seconds of the mixer being operated: the control surface on the left, the
+      1080×1920 program it is cutting on the right. Cut, fade, and three media wipes across live
+      browser pages, clip grids and the sixteen-box.</figcaption>
+  </figure>
+
+  <p class="lede">Sixteen sources — live browser pages and video files together — composited on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from one page, with the whole show described by one JSON document.</p>
+
+  <ul class="figures">
+    <li><b>16</b><span>unique sources: live pages and clips, one decode or capture each</span></li>
+    <li><b>17–18%</b><span>GPU on a Tesla T4, canvas at 30 fps</span></li>
+    <li><b>2.86 Mbit/s</b><span>on the wire from a 2 700 kbit/s WebRTC rendition</span></li>
+    <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
+  </ul>
 
   <p class="closing">Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips are decoded once at start and replayed from GPU memory, drawn as one alpha-blended layer by the compositor kernel the scenes use — no CPU scaling anywhere. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
 
