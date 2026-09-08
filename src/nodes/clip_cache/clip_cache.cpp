@@ -42,7 +42,7 @@ protected:
         return size > 0 ? (size_t)size : 0;
     }
 
-    av::Timestamp ptsFor(size_t index) const {
+    av::Timestamp ptsFor(size_t index) {
         return av::Timestamp((int64_t)index, timeBase());
     }
 
