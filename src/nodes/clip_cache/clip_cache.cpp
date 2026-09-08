@@ -27,6 +27,7 @@ protected:
     bool started_ = false;
     std::vector<av::VideoFrame> playback_;
     size_t index_ = 0;
+    size_t cached_frames_ = 0;
     int64_t first_frame_ns_ = 0;
     int64_t frame_ns_ = 16666667;
 
@@ -57,6 +58,7 @@ public:
             started_ = true;
             playback_ = key_.empty() ? std::vector<av::VideoFrame>() : cache_->take(key_);
             caching_ = playback_.empty() && !key_.empty();
+            cached_frames_ = 0;
             if (caching_) {
                 cache_->begin(key_);
                 logstream << "clip_cache: loading " << key_;
@@ -88,10 +90,18 @@ public:
 
         av::VideoFrame in = this->source_->get();
         if (!in) return;
-        if (caching_ && in.isComplete() && in.pts().isValid()) {
-            if (!cache_->append(key_, in, frameBytes(in))) {
+        if (caching_) {
+            if (!in.isComplete() || !in.pts().isValid()) {
+                // The end-of-clip marker: the cache holds a whole clip now, which
+                // is what a preload waits for.
+                cache_->finish(key_);
+                caching_ = false;
+                logstream << "clip_cache: cached " << cached_frames_ << " frame(s) of " << key_;
+            } else if (!cache_->append(key_, in, frameBytes(in))) {
                 caching_ = false;   // over budget: stay a passthrough for this clip
                 logstream << "clip_cache: " << key_ << " does not fit the budget; not cached";
+            } else {
+                ++cached_frames_;
             }
         }
         if (caching_) {
