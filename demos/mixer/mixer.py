@@ -565,6 +565,49 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     )
 
 
+def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
+    """One encoder per rendition, all fed from the single composited program.
+
+    The compositor renders once at the canvas rate; a rendition re-times and
+    rescales that picture for its own target, so extra renditions cost an
+    encode, not another composite.
+    """
+    edges = [mixer_edge]
+    if len(cfg.renditions) > 1:
+        edges = [f"program_rendition_{r.id}" for r in cfg.renditions]
+        avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
+                               "group": OUTPUT_GROUP, "on_error": "panic"}))
+    listener = None
+    for rendition, edge in zip(cfg.renditions, edges):
+        scaled = edge
+        if (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h):
+            scaled = f"program_scaled_{rendition.id}"
+            avp.addNode(api.FilterVideo({
+                "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
+                "graph": f"scale_cuda=w={rendition.width}:h={rendition.height}",
+                "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            }))
+        if rendition.target == "janus":
+            listener = build_janus_output(
+                avp, api, scaled,
+                JanusVideoConfig(
+                    host=options.janus_host,
+                    video_port=rendition.port or options.janus_video_port,
+                    payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
+                    bitrate_kbps=rendition.bitrate_kbps,
+                    rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
+                ),
+                fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
+                hwaccel=HWACCEL, group=OUTPUT_GROUP,
+                profile=rendition.profile, preset=rendition.preset,
+            )
+        else:
+            _build_record_output(avp, api, replace(options, output=rendition.target,
+                                                   codec=rendition.codec, fps=rendition.fps),
+                                 scaled, width=rendition.width, height=rendition.height)
+    return listener
+
+
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
     """Sources, wipes and scenes from a JSON document; one chain per source."""
     options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
@@ -620,8 +663,11 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     mixer_edge = mixer.build()
-    rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
-                                            width=cfg.canvas_w, height=cfg.canvas_h)
+    if cfg.renditions:
+        rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, mixer_edge)
+    else:
+        rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
+                                                width=cfg.canvas_w, height=cfg.canvas_h)
     return MixerApplication(
         avp=avp, mixer=mixer,
         input_groups=tuple(_input_group(index) for index in range(len(cfg.sources))),

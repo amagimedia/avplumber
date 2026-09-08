@@ -16,6 +16,11 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
 - **Scenes are data.** A scene is an ordered list of items. Order is z-order:
   later items draw over earlier ones. The same scene can be used on either
   slot; both slots read the same frames.
+- **The composer rate and the output rates are separate.** `canvas.fps` is how
+  often the compositor renders; each rendition re-times and rescales that one
+  program for its own target, so a second rendition costs an encode rather than
+  another composite. A rendition may not ask for more frames than the composer
+  produces.
 - **Placement is explicit.** Every item says where it goes on the canvas and
   what to do with the aspect: `stretch`, `contain` (letterbox/pillarbox, always
   black), `cover` (fill the box, crop the overflow), plus an optional crop in
@@ -38,6 +43,8 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
     "control": {"type": "object", "description": "defaults for the control surface",
       "properties": {"direct": {"type": "boolean", "default": true},
                      "fade_seconds": {"type": "number"}, "default_wipe": {"type": "string"}}},
+    "renditions": {"type": "array", "description": "encoded outputs; the compositor renders once",
+      "items": {"$ref": "#/$defs/rendition"}},
     "scenes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scene"}},
     "initial_scene": {"type": "string"}
   },
@@ -72,6 +79,15 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
         "fit": {"enum": ["stretch", "contain", "cover"], "default": "contain"},
         "crop": {"$ref": "#/$defs/rect", "description": "source pixels, applied before fit"}
       }},
+    "rendition": {"type": "object", "required": ["id"],
+      "properties": {"id": {"type": "string"},
+                     "target": {"type": "string", "description": "\"janus\" or a file path"},
+                     "width": {"type": "integer"}, "height": {"type": "integer"},
+                     "aspect": {"type": "string", "description": "checked against width:height"},
+                     "fps": {"type": "integer", "description": "at most the canvas rate"},
+                     "bitrate_kbps": {"type": "integer"}, "codec": {"type": "string"},
+                     "profile": {"type": "string"}, "preset": {"type": "string"},
+                     "port": {"type": "integer"}}},
     "scene": {"type": "object", "required": ["id", "items"],
       "properties": {"id": {"type": "string"}, "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}}}
   }
@@ -82,7 +98,10 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
 
 ```json
 {
-  "canvas": {"width": 1920, "height": 1080, "fps": 60},
+  "canvas": {"width": 1080, "height": 1920, "fps": 30},
+  "renditions": [{"id": "program", "target": "janus", "width": 1080, "height": 1920,
+                  "aspect": "9:16", "fps": 30, "bitrate_kbps": 3000,
+                  "profile": "baseline", "preset": "p7"}],
   "sources": [
     {"id": "cam1", "kind": "video", "path": "/media/cam-1.mp4"},
     {"id": "cam2", "kind": "video", "path": "/media/cam-2.mp4"},

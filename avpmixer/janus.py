@@ -47,7 +47,8 @@ KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
 
 def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps: int,
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
-                       group: str = "output"):
+                       group: str = "output", profile: str = "baseline", preset: str = "p7",
+                       prefix: str = "janus"):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener."""
     bitrate = f"{janus.bitrate_kbps}k"
     avp.addNode(api.ForceFPS({
@@ -68,7 +69,11 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         "codec": "h264_nvenc", "hwaccel": hwaccel,
         "options": {
             "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps, "bf": 0,
-            "preset": "p6", "profile": "baseline", "tune": "ull", "rc": "cbr",
+            # p7 is NVENC's highest-quality preset; with tune=ull it stays a
+            # one-pass, no-lookahead, no-reordering encode, so the extra quality
+            # costs GPU time rather than latency. B-frames stay off: they need
+            # reordering, and WebRTC negotiates constrained baseline anyway.
+            "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
             "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
             "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
         },

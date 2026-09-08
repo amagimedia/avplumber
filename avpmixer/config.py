@@ -39,6 +39,30 @@ class Source:
 
 
 @dataclass(frozen=True)
+class Rendition:
+    """One encoded output. The compositor renders once, at the canvas rate;
+    each rendition re-times and rescales that program for its own target."""
+    id: str
+    target: str = "janus"            # "janus" or a file path
+    width: int = 0                   # 0 keeps the canvas size
+    height: int = 0
+    fps: int = 0                     # 0 keeps the canvas rate
+    bitrate_kbps: int = 3000
+    codec: str = "h264_nvenc"
+    profile: str = "baseline"        # WebRTC negotiates constrained baseline
+    preset: str = "p7"               # NVENC quality preset
+    port: int = 0                    # janus target: 0 keeps the configured port
+
+    @property
+    def aspect(self) -> str:
+        from math import gcd
+        if not (self.width and self.height):
+            return ""
+        divisor = gcd(self.width, self.height)
+        return f"{self.width // divisor}:{self.height // divisor}"
+
+
+@dataclass(frozen=True)
 class Wipe:
     id: str
     path: str
@@ -72,6 +96,7 @@ class MixerConfig:
     sources: Tuple[Source, ...]
     scenes: Tuple[Scene, ...]
     wipes: Tuple[Wipe, ...] = ()
+    renditions: Tuple[Rendition, ...] = ()
     initial_scene: str = ""
     direct: bool = True            # TUI: scene picks go straight to program
     fade_seconds: float = 0.5
@@ -161,6 +186,33 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     if not sources:
         raise ConfigError("sources must not be empty")
 
+    renditions: List[Rendition] = []
+    for i, r in enumerate(doc.get("renditions", [])):
+        where = f"renditions[{i}]"
+        rid = str(r.get("id", ""))
+        if not rid:
+            raise ConfigError(f"{where}: id required")
+        if any(x.id == rid for x in renditions):
+            raise ConfigError(f"{where}: duplicate id '{rid}'")
+        rendition = Rendition(
+            rid, str(r.get("target", "janus")),
+            int(r.get("width", canvas_w)), int(r.get("height", canvas_h)),
+            int(r.get("fps", fps)), int(r.get("bitrate_kbps", 3000)),
+            str(r.get("codec", "h264_nvenc")), str(r.get("profile", "baseline")),
+            str(r.get("preset", "p7")), int(r.get("port", 0)))
+        if rendition.width <= 0 or rendition.height <= 0:
+            raise ConfigError(f"{where}: width and height must be positive")
+        if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
+            raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
+        if rendition.fps > fps:
+            raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
+                              "a rendition can only re-time the program downwards")
+        wanted = str(r.get("aspect", ""))
+        if wanted and wanted != rendition.aspect:
+            raise ConfigError(f"{where}: {rendition.width}x{rendition.height} is "
+                              f"{rendition.aspect}, not {wanted}")
+        renditions.append(rendition)
+
     wipes: List[Wipe] = []
     for i, w in enumerate(doc.get("wipes", [])):
         if "id" not in w or "path" not in w:
@@ -206,7 +258,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     default_wipe = str(control.get("default_wipe", wipes[0].id if wipes else ""))
     if default_wipe and not any(w.id == default_wipe for w in wipes):
         raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
-    return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), initial,
+    return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes),
+                       tuple(renditions), initial,
                        bool(control.get("direct", True)), float(control.get("fade_seconds", 0.5)), default_wipe)
 
 

@@ -602,3 +602,46 @@ def test_clip_cache_node_parameters_name_the_clip_by_url():
     assert node == {"name": "mixer_wipe_cache", "src": "in", "dst": "out", "group": "g",
                     "fps": "60/1", "cache": "clips", "url": "/media/w.mov", "budget_mb": 256}
     assert "budget_mb" not in clipcache.cache_node(name="n", src="a", dst="b", group="g", fps="60/1")
+
+
+RENDITION_CONFIG = {**CONFIG, "canvas": {"width": 1080, "height": 1920, "fps": 30},
+                    "renditions": [{"id": "program", "target": "janus", "width": 1080,
+                                    "height": 1920, "fps": 30, "aspect": "9:16",
+                                    "bitrate_kbps": 3000, "profile": "baseline", "preset": "p7"}]}
+
+
+def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
+    import json as _json
+    from avpmixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    doc = {**RENDITION_CONFIG,
+           "renditions": [RENDITION_CONFIG["renditions"][0],
+                          {"id": "square", "target": "/rec/square.mp4", "width": 1080,
+                           "height": 1080, "fps": 30, "bitrate_kbps": 2000}]}
+    path = tmp_path / "m.json"
+    path.write_text(_json.dumps(doc))
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True,
+                                         dmabuf_socket_dir=str(tmp_path)), api=fake_api())
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_square"]
+    assert "scale_program" not in nodes                      # already the canvas size
+    assert nodes["scale_square"]["graph"] == "scale_cuda=w=1080:h=1080"
+    assert nodes["janus_encoder"]["options"]["preset"] == "p7"
+    assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
+    assert nodes["janus_fps"]["fps"] == "30/1"
+    assert FakeMixer.instances[-1].parameters["fps"] == (30, 1)
+
+
+def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
+    from avpmixer import config as mc
+    with pytest.raises(mc.ConfigError, match="exceeds the canvas rate"):
+        mc.parse({**RENDITION_CONFIG,
+                  "renditions": [{**RENDITION_CONFIG["renditions"][0], "fps": 60}]})
+    with pytest.raises(mc.ConfigError, match="is 9:16, not 16:9"):
+        mc.parse({**RENDITION_CONFIG,
+                  "renditions": [{**RENDITION_CONFIG["renditions"][0], "aspect": "16:9"}]})
+    cfg = mc.parse(RENDITION_CONFIG)
+    assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
