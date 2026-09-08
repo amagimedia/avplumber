@@ -75,7 +75,9 @@ class GraphOptions:
     wipe_file: str | None = None         # warm the media wipe chain up with this clip at start
     config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
     webui_url: str = ""                  # AVPlumber web UI to register the graph with
-    wipe_cache_mb: float | None = None   # hold decoded wipe clips in GPU memory
+    # Wipe clips are held decoded in GPU memory by default: a take then costs no
+    # file open, no decoder and no thread startup. 0 turns it off.
+    wipe_cache_mb: float = 768.0
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -134,7 +136,7 @@ class MixerApplication:
     wipe_files: tuple[str, ...] = ()
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
-    wipe_cache_mb: float | None = None      # hold decoded wipes in GPU memory
+    wipe_cache_mb: float = 0.0              # hold decoded wipes in GPU memory
 
     def _preload_wipes(self) -> None:
         """Decode every wipe once into GPU memory (see avpmixer.clipcache).
@@ -211,7 +213,7 @@ class MixerApplication:
         self.mixer.start_output()
         self.avp.group(OUTPUT_GROUP).startNodes()
         self._wait_for_edges(("mixer_final_out",), "program output")
-        if self.wipe_cache_mb is not None:
+        if self.wipe_cache_mb:
             self._preload_wipes()
         else:
             for wipe_file in dict.fromkeys((self.wipe_file, *self.wipe_files)):
@@ -528,7 +530,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         defer_initial_routes=True,
         defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
-        cache_wipes_mb=options.wipe_cache_mb,
+        cache_wipes_mb=options.wipe_cache_mb or None,
     )
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
@@ -571,7 +573,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
-        cache_wipes_mb=options.wipe_cache_mb,
+        cache_wipes_mb=options.wipe_cache_mb or None,
     )
     aliases = cfg.alias_counts
     input_edges: list[str] = []
@@ -683,9 +685,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
     parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                         "(the TUI still selects the clip for each wipe)")
-    parser.add_argument("--wipe-cache-mb", type=float, default=None,
+    parser.add_argument("--wipe-cache-mb", type=float, default=768.0,
                         help="Hold decoded wipe clips in GPU memory, up to this many MiB "
-                             "(default: decode each wipe on every take)")
+                             "(0 decodes each wipe on every take)")
     parser.add_argument("--webui-url", default="",
                         help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     args = parser.parse_args(argv)

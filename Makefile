@@ -55,9 +55,10 @@ PYTHON_NODE_SRCS = $(shell find $(SRCDIR)/nodes/python -maxdepth 1 -name '*.cpp'
 ifneq ($(filter python_module,$(MAKECMDGOALS)),)
 NODES_SRC += $(PYTHON_NODE_SRCS)
 endif
-ifeq ($(NEURAL_NET),1)
 # Optional module: decoded clips held in GPU memory (media wipe playback).
 NODES_SRC += $(SRCDIR)/nodes/clip_cache/clip_cache.cpp
+
+ifeq ($(NEURAL_NET),1)
 NODES_SRC += $(SRCDIR)/nodes/neural_net/tracking/object_tracker.cpp
 BYTETRACK_SRC = $(wildcard deps/bytetrack/src/*.cpp)
 override CXXFLAGS += -I/usr/include/eigen3 -Ideps/bytetrack/include

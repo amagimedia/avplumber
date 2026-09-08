@@ -37,6 +37,7 @@ class FakeAvp:
     def __init__(self):
         self.nodes = []
         self.commands = []
+        self.armed_clips = []
         self.control_port = None
         self.ready = False
         self.edges = FakeEdges()
@@ -46,9 +47,21 @@ class FakeAvp:
 
     def executeCommandsFromString(self, commands):
         self.commands.append(commands)
+        for line in commands.splitlines():
+            parts = line.split()
+            if parts[:1] == ["node.param.set"] and parts[2:3] == ["url"]:
+                self.armed_clips.append(parts[3])
 
     def enableControlServer(self, port):
         self.control_port = port
+
+    def node(self, name):
+        # The clip cache reports every requested clip as already held, so start()
+        # exercises the preload path without a decoder.
+        return SimpleNamespace(getObject=lambda key: {
+            "clips": [{"path": path, "frames": 30, "bytes": 1 << 20, "complete": True}
+                      for path in self.armed_clips],
+            "bytes": 1 << 20, "budget_bytes": 768 << 20})
 
     def registerControlCommand(self, name, handler, _payload):
         self.commands_registered = getattr(self, "commands_registered", {})
@@ -399,14 +412,17 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
                            "audio": False}
 
 
-def test_wipe_file_warms_the_wipe_chain_up_at_start(monkeypatch):
+def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     FakeMixer.instances.clear()
     application = build_application(
         GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov"), api=fake_api())
     monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     application.start()
-    assert FakeMixer.instances[-1].warmed_wipe == ("/media/wipe.mov", 30000)
+    # Cached by default: the clip is armed on the loader and decoded once, so
+    # mixer.wipe.warmup (which only compiles the filter) is not used.
+    assert "node.param.set mixer_wipe_input url /media/wipe.mov" in application.avp.commands
+    assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
     assert application.avp.ready
 
     FakeMixer.instances.clear()
@@ -414,7 +430,7 @@ def test_wipe_file_warms_the_wipe_chain_up_at_start(monkeypatch):
     monkeypatch.setattr(plain, "_wait_for_edges", lambda *a, **k: None)
     monkeypatch.setattr(plain, "_wait_for_node", lambda *a, **k: None)
     plain.start()
-    assert not hasattr(FakeMixer.instances[-1], "warmed_wipe")
+    assert not any("node.param.set" in c for c in plain.avp.commands)
 
 
 CONFIG = {
@@ -561,15 +577,18 @@ def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
     from avpmixer import clipcache
 
     FakeMixer.instances.clear()
-    plain = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
-    assert plain.wipe_cache_mb is None
-    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
+    default = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
+    assert default.wipe_cache_mb == 768.0            # on by default
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 768.0
 
     FakeMixer.instances.clear()
-    cached = build_application(
-        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=512), api=fake_api())
-    assert cached.wipe_cache_mb == 512
-    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 512
+    off = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=0), api=fake_api())
+    assert not off.wipe_cache_mb
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
+
+    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 768.0
+    assert parse_args(["--input", "a.mp4", "--janus-output", "--wipe-cache-mb", "0"]).wipe_cache_mb == 0
     assert clipcache.loader_group("mixer") == "mixer_wipe_load"
 
 

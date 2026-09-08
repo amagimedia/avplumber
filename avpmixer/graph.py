@@ -99,7 +99,7 @@ class MixerGraphBuilder:
         latency_ms: Optional[float] = None,
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
-        cache_wipes_mb: Optional[float] = None,
+        cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
