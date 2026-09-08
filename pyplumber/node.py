@@ -160,6 +160,10 @@ class Realtime(InternalNode):
     TYPE = "realtime"
 
 
+class RepeatLastFrame(InternalNode):
+    TYPE = "repeat_last_frame"
+
+
 class RescaleVideo(InternalNode):
     TYPE = "rescale_video"
 
