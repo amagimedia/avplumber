@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from avpmixer import config as mixer_config
@@ -507,6 +507,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
 
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
     """Sources, wipes and scenes from a JSON document; one chain per source."""
+    options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
     avp = api.AVPlumber()
     if options.remote_control_port:
         avp.enableControlServer(options.remote_control_port)

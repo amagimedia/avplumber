@@ -484,6 +484,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
     assert nodes["program_format"]["width"] == 1920
+    assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
 
 def test_cli_requires_inputs_or_config():
