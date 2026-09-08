@@ -9,7 +9,9 @@ the same scene gets alias names (``id#2``, ``id#3``...) that share its frames.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import shutil
+import subprocess
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 FITS = ("stretch", "contain", "cover")
@@ -173,10 +175,6 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             fit = it.get("fit", "contain")
             if fit not in FITS:
                 raise ConfigError(f"{iw}: fit must be one of {FITS}")
-            src = ids[it["source"]]
-            if fit == "cover" and not (src.width and src.height):
-                raise ConfigError(f"{iw}: cover needs the source's width and height "
-                                  f"(declare them on source '{src.id}')")
             crop = _rect(it["crop"], iw + ".crop") if "crop" in it else None
             items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop))
         scenes.append(Scene(str(sc["id"]), tuple(items)))
@@ -201,6 +199,28 @@ def load(path: str) -> MixerConfig:
         return parse(json.load(f))
 
 
+def probe_video_size(path: str) -> Tuple[int, int]:
+    """Width and height of the first video stream, via ffprobe."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise ConfigError(f"ffprobe not found; declare width and height for '{path}'")
+    out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height", "-of", "csv=p=0", path],
+                         capture_output=True, text=True, timeout=30)
+    try:
+        width, height = (int(v) for v in out.stdout.strip().split(",")[:2])
+    except ValueError:
+        raise ConfigError(f"cannot probe the size of '{path}': {out.stderr.strip() or out.stdout.strip()}") from None
+    return width, height
+
+
+def with_probed_sizes(cfg: MixerConfig, probe=probe_video_size) -> MixerConfig:
+    """Fill in video sizes the document did not declare; cover needs them."""
+    sources = tuple(replace(s, **dict(zip(("width", "height"), probe(s.location))))
+                    if s.kind == "video" and not (s.width and s.height) else s for s in cfg.sources)
+    return replace(cfg, sources=sources)
+
+
 def cover_crop(src_w: int, src_h: int, dst: Rect, crop: Optional[Rect]) -> Rect:
     """The centred region of the (cropped) source with the box's aspect."""
     base = crop or Rect(0, 0, src_w, src_h)
@@ -223,6 +243,8 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
         crop = item.crop
         if item.fit == "cover":
             src = cfg.source(item.source)
+            if not (src.width and src.height):
+                raise ConfigError(f"scene '{scene.id}': cover of '{src.id}' needs its size (see with_probed_sizes)")
             crop = cover_crop(src.width, src.height, item.dst, crop)
             layer["fit"] = "stretch"
         else:

@@ -446,7 +446,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     options.validate()
     api = api or load_avp_api()
     if options.config:
-        return _build_from_config(options, mixer_config.load(options.config), api)
+        return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(options.config)), api)
     avp = api.AVPlumber()
     if options.remote_control_port:
         avp.enableControlServer(options.remote_control_port)

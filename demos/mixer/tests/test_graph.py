@@ -459,8 +459,14 @@ def test_config_rejects_duplicate_locations_and_bad_references():
         mc.parse(bad)
     nocover = copy.deepcopy(CONFIG)
     del nocover["sources"][0]["width"]
-    with pytest.raises(mc.ConfigError, match="cover needs"):
-        mc.parse(nocover)
+    cfg = mc.parse(nocover)
+    with pytest.raises(mc.ConfigError, match="needs its size"):
+        mc.scene_layers(cfg, cfg.scenes[0])
+    probed = mc.with_probed_sizes(cfg, probe=lambda path: (640, 360))
+    assert (probed.source("cam").width, probed.source("cam").height) == (640, 360)
+    assert probed.source("page").width == 1280          # declared sizes are kept
+    # cover of a 16:9 clip into the full 16:9 box keeps the whole frame
+    assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
 
 
 def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch):
@@ -472,6 +478,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
                         lambda base, method, p, body=None: opened.append((method, p, body)) or {"windows": []})
+    from avpmixer import config as mc
+    monkeypatch.setattr(mc, "probe_video_size", lambda path: (_ for _ in ()).throw(AssertionError("declared sizes must not be probed")))
     FakeMixer.instances.clear()
     application = build_application(
         GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)), api=fake_api())

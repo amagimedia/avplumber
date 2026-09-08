@@ -15,44 +15,32 @@
     {
       "id": "cam0",
       "kind": "video",
-      "path": "/media/camera-0.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-0.mp4"
     },
     {
       "id": "cam1",
       "kind": "video",
-      "path": "/media/camera-1.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-1.mp4"
     },
     {
       "id": "cam2",
       "kind": "video",
-      "path": "/media/camera-2.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-2.mp4"
     },
     {
       "id": "cam3",
       "kind": "video",
-      "path": "/media/camera-3.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-3.mp4"
     },
     {
       "id": "cam4",
       "kind": "video",
-      "path": "/media/camera-4.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-4.mp4"
     },
     {
       "id": "cam5",
       "kind": "video",
-      "path": "/media/camera-5.mp4",
-      "width": 1920,
-      "height": 1080
+      "path": "/media/camera-5.mp4"
     }
   ],
   "wipes": [

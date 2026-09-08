@@ -422,6 +422,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     CUmodule scale_module_ = nullptr;
     CUfunction scale_kernel_ = nullptr;
     CUfunction rgb_kernel_ = nullptr;
+    std::string last_ops_desc_;
     bool sent_eof_ = false;
 
     std::vector<bool> input_eof_;
@@ -605,6 +606,12 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                     placement->destination.y >= canvas_h_ ||
                     int64_t(placement->destination.x) + placement->destination.w <= 0 ||
                     int64_t(placement->destination.y) + placement->destination.h <= 0) {
+                    DrawOp rejected;
+                    rejected.src_w = -srcp->width(); rejected.src_h = srcp->height();   // marks "rejected" in the log
+                    rejected.layer = L;
+                    ops.push_back(rejected);
+                    continue;
+                }
                     ops.push_back({});
                     continue;
                 }
@@ -661,6 +668,28 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
         std::vector<DrawOp> ops = resolveDrawOps(sources, layers);
+        {
+            // Log the resolved layer set whenever it changes (scene switches), not per tick.
+            std::ostringstream desc;
+            for (size_t i = 0; i < ops.size(); ++i) {
+                const DrawOp &op = ops[i];
+                const LayerSpec &L = op.layer;
+                if (!op.src) {
+                    if (op.src_w < 0)
+                        desc << " [" << i << ":REJECTED src " << -op.src_w << "x" << op.src_h << " crop " << L.crop_x
+                             << "," << L.crop_y << " " << L.crop_w << "x" << L.crop_h << " box " << L.dst_x << ","
+                             << L.dst_y << " " << L.dst_w << "x" << L.dst_h << "]";
+                    continue;
+                }
+                desc << " [" << i << ":" << op.src_w << "x" << op.src_h << " crop " << L.crop_x << "," << L.crop_y
+                     << " " << L.crop_w << "x" << L.crop_h << " -> " << L.dst_x << "," << L.dst_y << " "
+                     << L.dst_w << "x" << L.dst_h << " z" << L.z << "]";
+            }
+            if (desc.str() != last_ops_desc_) {
+                last_ops_desc_ = desc.str();
+                logstream << "cuda_rect_overlay layers:" << last_ops_desc_;
+            }
+        }
         clearCanvas(outf, metadata_src ? metadata_src->raw() : nullptr);
 
         for (const DrawOp &op : ops) {
