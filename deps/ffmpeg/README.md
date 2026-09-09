@@ -47,6 +47,36 @@ and the filter changes) is base-independent.
    white and HDR peak, HDR-to-SDR operators with a knee parameter, automatic
    per-frame contract resolution (untagged frames are BT.709 SDR), zero-copy
    identity frames and fixed NV12/P010 output storage.
+10. **libmxl demuxer and muxer** — [MXL](https://github.com/dmf-mxl/mxl)
+    shared-memory flows: demuxer, muxer, URI parser, JSON/diagnostic helpers,
+    FATE coverage and `--enable-libmxl` glue. Squashed from `cbcrc/FFmpeg`
+    branch `dmf-mxl/8.1` (pinned at `9eddb90`), which forks from the same
+    n8.1 commit `8/bases.env` pins. Consumed by `demos/mixer/Dockerfile` for
+    `demos/mxl`; the MXL SDK itself is pinned in that Dockerfile.
+
+### Regenerating `8/0010-avformat-libmxl-demuxer-muxer.patch`
+
+Docker only, and no compiler needed — the container just replays git history
+(works on Linux and macOS hosts):
+
+```bash
+docker build -f deps/ffmpeg/Dockerfile.mkpatch \
+    -t avplumber-mxl-mkpatch:local deps/ffmpeg
+docker run --rm \
+    -v "$PWD/deps/ffmpeg/8:/out" \
+    -v "$PWD/deps/ffmpeg/8:/patches:ro" \
+    avplumber-mxl-mkpatch:local
+```
+
+Set `MXL_REMOTE_REF`/`MXL_PIN` (and `FFMPEG_TAG`) to move to a newer fork
+branch, e.g. `dmf-mxl/9.0` for a future base. Afterwards refresh
+`8/bases.env`: `verify.sh` prints the actual tree per base when the pinned
+one no longer matches, and `patch_count` must match the file count.
+
+Cherry-pick conflicts stop the container with instructions; re-run it with
+`--entrypoint bash` and finish by hand (`git cherry-pick --continue`, then
+`/usr/local/bin/mkpatch-finish`).
+>>>>>>> fcd616d (Add the MXL demuxer/muxer patch to the FFmpeg 8.x series)
 
 ## FFmpeg 8 notes
 
