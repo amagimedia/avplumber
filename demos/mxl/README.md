@@ -16,48 +16,49 @@ Two graphs run in one process:
   → fragmented mp4.
 
 Verified end-to-end on Docker Desktop (aarch64) producing 28k mpeg4
-packets of the testsrc pattern in a 10-second run.
-
-## Status
-
-NVIDIA support is temporarily disabled in this image. The Dockerfile
-applies only patches `0001`, `0005`, `0006`, `0008` from
-`deps/ffmpeg-patches/`; `0002` (CUDA composition suite), `0003` (NPP
-CUDA13 compat), `0004` (NVDEC intra), and `0007` (NDI) are held back
-until the mxl path is folded into `demos/mixer/Dockerfile` alongside
-CUDA.
+packets of the testsrc pattern in a 10-second run — that run was on the
+earlier FFmpeg 7.1.5 build of this patch stack; the 8.1 series has not
+been re-run yet.
 
 ## Requirements
 
-* Linux x86_64 or aarch64 (MXL SDK is Linux-only — no macOS support).
+* Linux x86_64 (MXL SDK is Linux-only — no macOS support).
 * Docker with enough tmpfs at `/dev/shm` (default is fine for the demo).
-* The 8-patch stack applied to `n7.1.5`. `deps/ffmpeg-patches/verify.sh`
-  confirms the tree hash; the MXL patch (`0008-...`) is generated
-  from `cbcrc/FFmpeg` via `deps/ffmpeg-patches/Dockerfile.mkpatch`
-  — see that directory's README.
+* NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  are optional for the MXL demo itself (CUDA init fails silently at
+  runtime without them), but the shared mixer image is built with
+  CUDA support and other demos need it.
+* The FFmpeg 8.x series applied to `n8.1` (or `n8.0`).
+  `deps/ffmpeg/verify.sh n8.1 <ffmpeg-repo>` confirms the tree hash; the
+  MXL patch (`8/0011-...`) is generated from `cbcrc/FFmpeg` branch
+  `dmf-mxl/8.1` via `deps/ffmpeg/Dockerfile.mkpatch` — see
+  `deps/ffmpeg/README.md`.
 
 ## Build
 
-From the repository root (after `git submodule update --init --recursive`):
+This demo shares its runtime image with `demos/mixer/`. Build once
+from the repository root (after `git submodule update --init --recursive`):
 
 ```sh
-docker build -f demos/mxl/Dockerfile -t avplumber-mxl:local .
+docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
 ```
 
-The build:
+The image build:
 
-1. Bootstraps `microsoft/vcpkg` and Rust 1.88.0.
-2. Builds and installs the MXL SDK (`dmf-mxl/mxl` @ `v1.1.0-beta-1`)
+1. Installs distro `gcc-11` plus `gcc-13` from
+   `ppa:ubuntu-toolchain-r/test` (the MXL SDK needs C++20; FFmpeg and
+   avplumber keep using gcc-11).
+2. Bootstraps `microsoft/vcpkg` and Rust 1.88.0.
+3. Builds and installs the MXL SDK (`dmf-mxl/mxl` @ `v1.1.0`)
    into `/usr/local` — libmxl is statically linked against spdlog, so
    its `.pc` file is scrubbed of the private `Requires` before FFmpeg
    configure.
-3. Applies the reduced patch stack to FFmpeg `n7.1.5`, strips a
-   handful of fork-side test scaffolding that references files not
-   present in `n7.1.5` (`tests/fate/ogg-*.mak`, duplicated
-   `fate-mxl-uri` rule), and configures with `--enable-libmxl
-   --enable-demuxer=mxl --enable-muxer=mxl --enable-protocol=mxl`.
-4. Builds `pyplumber` with `HAVE_CUDA=0 NEURAL_NET=0` (`-j2` to stay
-   inside Docker Desktop's memory ceiling on Apple Silicon).
+4. Applies the eleven-patch FFmpeg 8.x series (`deps/ffmpeg/apply.sh`)
+   to FFmpeg `n8.1` and configures with CUDA (`--enable-cuda
+   --enable-cuda-nvcc --enable-cuvid --enable-nvdec --enable-nvenc`)
+   plus MXL (`--enable-libmxl --enable-demuxer=mxl --enable-muxer=mxl
+   --enable-protocol=mxl`).
+5. Builds `pyplumber` with `HAVE_CUDA=1 HAVE_NVCC=1`.
 
 Verified inside the image:
 
@@ -78,11 +79,15 @@ echo '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' \
   > /dev/shm/mxl/options.json
 
 docker run --rm --ipc=host \
+    --entrypoint python3 \
     -v /dev/shm/mxl:/dev/shm/mxl \
     -v "$PWD/demos/mxl/test-media:/media" \
     -e AVP_OUTPUT=/media/out.mp4 \
-    avplumber-mxl:local
+    avplumber-mixer:local /build/demos/mxl/mxl_demo.py
 ```
+
+Add `--gpus all` if you're on an NVIDIA host and want CUDA
+initialization to succeed (the MXL demo itself doesn't need it).
 
 Defaults to publishing an `lavfi testsrc` pattern; override with
 `-e AVP_INPUT=/media/your-file.mp4` for a real file (played back
@@ -99,7 +104,7 @@ Split writer and reader across two containers by passing
 ## Codec choices
 
 MXL flows carry uncompressed frames. The muxer registered by
-`0008-*.patch` insists on `v210` (10-bit 4:2:2 packed) for video —
+`8/0011-*.patch` insists on `v210` (10-bit 4:2:2 packed) for video —
 `rawvideo` is rejected at header write. The reader re-encodes to
 `mpeg4` (rather than H.264) because the NVIDIA-off image does not
 link `libx264`.
@@ -115,9 +120,15 @@ link `libx264`.
   at 320×240) because we didn't wire in a realtime pacer on the
   reader side. Adding a `RealtimeVideoFrame` node between decode and
   encode would cap the reader to the source frame rate.
+* Both sides still go through swscale and the CPU `v210` codec. The
+  demuxer hands out one packed frame per grain, which is exactly what
+  the `v210_to_cuda` node consumes, so the read path can become
+  `input(mxl) -> demux -> v210_to_cuda` with a single pinned upload and
+  no CPU colour conversion. Nothing packs CUDA frames back to v210 yet,
+  so the write path keeps the CPU encoder.
 
 ## References
 
 * MXL SDK: <https://github.com/dmf-mxl/mxl>
-* MXL FFmpeg fork (source for the 0008 patch): <https://github.com/cbcrc/FFmpeg>
+* MXL FFmpeg fork (source for the 0011 patch, branch `dmf-mxl/8.1`): <https://github.com/cbcrc/FFmpeg>
 * Reference build guidance: <https://github.com/cbcrc/guidance-for-building-ffmpeg-with-mxl>
