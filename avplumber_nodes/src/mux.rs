@@ -568,6 +568,9 @@ impl StreamMuxer {
                     input.shifted_for = 0;
                 }
                 Some(EdgeItem::Event(EdgeEvent::FlushStop { .. })) => {}
+                // A muxer holds no codec, and there is nothing downstream of it
+                // that could: the request stops here.
+                Some(EdgeItem::Event(EdgeEvent::Drain)) => {}
                 None => {
                     if edge.is_closed() {
                         log::debug!(

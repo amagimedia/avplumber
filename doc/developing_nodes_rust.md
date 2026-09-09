@@ -59,7 +59,7 @@ newtype:
 
 `SingleInput` is the one to reach for. A blocking node with one input never
 writes a loop, only reactions — `on_spec`, `on_buffer`, `on_flush`,
-`on_flush_stop`, `on_eof` —
+`on_flush_stop`, `on_drain`, `on_eof` —
 and, when it has output that is not a reaction to an input, what happens before
 each read (`before_take`). It is a `BlockingNode` through a blanket impl, so it
 is wrapped and registered like one. `BlockingNode` itself is for the nodes with
@@ -302,11 +302,18 @@ A `SingleInput` never reads its edge. The scaffold's loop does, once per step:
    closed or the stop interrupted the wait, so `on_closed` runs and the node
    is done;
 4. classify the item and call its hook (`react`): `on_spec`, `on_buffer`,
-   `on_flush`, `on_flush_stop` or `on_eof`;
+   `on_flush`, `on_flush_stop`, `on_drain` or `on_eof`;
 5. forward what the hook did not: the spec `on_spec` returned, `FlushStart`
    after `on_flush`, `FlushStop` with its `resume_at` after `on_flush_stop`,
-   and `Eof` when `on_eof` said `Done`; push what `on_buffer` produced,
-   parking for room.
+   `Drain` after `on_drain`, and `Eof` when `on_eof` said `Done`; push what
+   `on_buffer` produced, parking for room.
+
+`on_drain` is for a codec's pipeline delay, not for anything a node holds on
+purpose. A source that has run out of packets sends `Drain` so a decoder gives
+up the frames libavcodec is still sitting on — NVDEC holds the last one until
+the next packet arrives, which never comes at the end of a recording — and then
+keeps decoding. It ends nothing: only `Eof` does. A node whose held buffers are
+its own business (a pacing node's paused frame) ignores it and passes it on.
 
 `on_flush_stop` is where seek precision lives. A source that can only
 reposition to a keyframe says in the `FlushStop` which position it aimed for,

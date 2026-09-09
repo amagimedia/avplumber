@@ -2,6 +2,9 @@
 
 pub mod clock;
 pub mod correction;
+/// Named hardware devices; only a build with libav can open one.
+#[cfg(feature = "ffmpeg")]
+pub mod hwaccel;
 pub mod playback;
 pub mod timeline;
 
@@ -13,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use crate::graph::AvpServiceId;
 use crate::services::clock::ClockService;
 use crate::services::correction::CorrectionService;
+#[cfg(feature = "ffmpeg")]
+use crate::services::hwaccel::HwAccelService;
 use crate::services::playback::PlaybackService;
 use crate::services::timeline::TimelineService;
 
@@ -23,6 +28,9 @@ pub struct ServiceRegistry {
     pub corrections: CorrectionService,
     pub timelines: TimelineService,
     pub playbacks: PlaybackService,
+    /// The devices `hwaccel.init` opened, by name.
+    #[cfg(feature = "ffmpeg")]
+    pub hwaccels: HwAccelService,
 }
 
 impl ServiceRegistry {
@@ -34,6 +42,8 @@ impl ServiceRegistry {
             corrections: CorrectionService::new(),
             timelines: TimelineService::new(),
             playbacks: PlaybackService::new(),
+            #[cfg(feature = "ffmpeg")]
+            hwaccels: HwAccelService::new(),
         }
     }
 

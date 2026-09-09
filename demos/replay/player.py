@@ -13,7 +13,8 @@ from pathlib import Path
 
 from control_client import parse_endpoint
 from replay import (JanusVideoConfig, PlaybackOperation as Op, PlayerConfig,
-                    ReplaySlotConfig, build_player_application)
+                    ReplaySlotConfig, build_player_application, describe_backend,
+                    resolve_backend)
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ class ExerciseResult:
 
 
 @dataclass(frozen=True)
-class Backend:
+class Executable:
     """Which Rust avplumber runs the graph: one to spawn, or one to connect to."""
     binary: str | None = None
     connect: tuple[str, int] | None = None
@@ -321,7 +322,8 @@ else:
             state.update(
                 f"SOURCE  {self.application.artifact.path}\n"
                 f"JANUS   {self.application.config.janus.host}:{self.application.config.janus.video_port}  "
-                f"PT={self.application.config.janus.payload_type}  SSRC=0x{self.application.config.janus.ssrc:08x}\n"
+                f"PT={self.application.config.janus.payload_type}  SSRC=0x{self.application.config.janus.ssrc:08x}  "
+                f"CODECS={describe_backend(self.application.config.backend)}\n"
                 f"{'▶ PLAY' if status.playing else '⏸ PAUSE'}  {status.direction.upper()}  "
                 f"speed={status.speed_percent:g}% scrub={status.scrubbing_percent:g}%  "
                 f"frame={status.frame_number if status.frame_number is not None else '—'}  "
@@ -395,6 +397,9 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--janus-video-ssrc", type=lambda value: int(value, 0), default=0x41565001)
     parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
     parser.add_argument("--janus-rtcp-port", type=int, default=0)
+    parser.add_argument("--janus-bitrate", default="4000k", metavar="RATE",
+                        help="constant output bitrate, e.g. 4000k or 20M; raise it with the "
+                             "picture size (default: 4000k)")
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--control-timeout", type=float, default=5.0)
     parser.add_argument("--no-tui", action="store_true")
@@ -403,6 +408,9 @@ def parse_args(argv: list[str] | None = None):
                         help="the Rust avplumber executable to spawn (default: $AVPLUMBER_BIN)")
     parser.add_argument("--connect", metavar="HOST:PORT",
                         help="use an avplumber already serving its control protocol instead")
+    parser.add_argument("--backend", choices=("auto", "cpu", "nvidia"), default="auto",
+                        help="codecs: NVDEC/NVENC with frames kept on the GPU, software "
+                             "H.264 and libx264, or whichever this machine supports")
     parser.add_argument("--avplumber-log", type=Path, metavar="PATH",
                         help="where the spawned avplumber writes its log (default: discarded)")
     args = parser.parse_args(argv)
@@ -412,25 +420,29 @@ def parse_args(argv: list[str] | None = None):
             JanusVideoConfig(
                 args.janus_host, args.janus_video_port, args.janus_video_pt,
                 args.janus_video_ssrc, args.janus_rtcp_bind, args.janus_rtcp_port,
+                args.janus_bitrate,
             ),
+            resolve_backend(args.backend),
         )
     except ValueError as exc:
         parser.error(str(exc))
-    backend = Backend(
+    executable = Executable(
         binary=args.avplumber,
         connect=parse_endpoint(args.connect) if args.connect else None,
         log=args.avplumber_log,
     )
-    return config, args.no_tui, args.exercise_v2, backend
+    return config, args.no_tui, args.exercise_v2, executable
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        config, no_tui, run_exercise, backend = parse_args(argv)
+        config, no_tui, run_exercise, executable = parse_args(argv)
         application = build_player_application(
-            config, binary=backend.binary, connect=backend.connect, avplumber_log=backend.log,
+            config, binary=executable.binary, connect=executable.connect,
+            avplumber_log=executable.log,
         )
         application.start()
+        print(f"[replay] codecs: {describe_backend(config.backend)}", flush=True)
         try:
             if run_exercise:
                 results = exercise_v2(application.controller, config.slot.control_timeout)

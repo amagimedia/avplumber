@@ -42,3 +42,6 @@ __pycache__/
 
 # Replay on the Rust core: generated sample clip and recordings.
 /demos/replay-rust/media/
+
+# GPU override run.sh generates for a host without the NVIDIA container toolkit.
+/demos/replay-rust/.compose.gpu-devices.yaml

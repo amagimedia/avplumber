@@ -117,6 +117,13 @@ impl<'a> BuildCtx<'a> {
     pub fn playback(&self, name: &str) -> Arc<crate::services::playback::Playback> {
         self.instance.services.playback(name)
     }
+    /// The hardware device `hwaccel.init` opened under `name`. Resolved while
+    /// the node is built, so a name nothing has initialized fails at
+    /// `node.add`, as it does in C++.
+    #[cfg(feature = "ffmpeg")]
+    pub fn hwaccel(&self, name: &str) -> Result<Arc<crate::services::hwaccel::HwDevice>, String> {
+        self.instance.services.hwaccels.get(name)
+    }
 }
 
 pub struct BuiltNode {

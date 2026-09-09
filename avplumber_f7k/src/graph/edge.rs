@@ -26,6 +26,17 @@ pub enum EdgeEvent {
     FlushStop {
         resume_at: Option<Ts>,
     },
+    /// "Emit what you are holding; more input may follow." A codec with a
+    /// pipeline delay — NVDEC holds a frame until the next packet arrives —
+    /// would otherwise never surface the last frame of a source that has run
+    /// out of packets, which is what a paused seek to the end of a recording
+    /// asks for. C++ did this with a magic packet (`flush_magic`).
+    ///
+    /// Unlike [`EdgeEvent::Eof`] it does not end anything: the node drains its
+    /// codec, keeps running, and accepts input again. Nodes that hold buffers
+    /// for their own reasons (a paused pacing node, a frame-rate grid) ignore
+    /// it and pass it on.
+    Drain,
     Spec(Spec),
 }
 

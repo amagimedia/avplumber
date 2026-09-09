@@ -1,6 +1,9 @@
 # The replay demo on the Rust core: Janus and its browser preview from the
 # shared images, plus the player image (Rust avplumber + Python TUI).
 #
+# On an NVIDIA machine `run.sh` adds a GPU override so the player decodes with
+# NVDEC and encodes with NVENC, keeping every frame on the card.
+#
 #   docker compose -f demos/replay-rust/compose.yaml up -d janus janus-preview
 #   docker compose -f demos/replay-rust/compose.yaml run --rm replay sample
 #   docker compose -f demos/replay-rust/compose.yaml run --rm replay
@@ -70,3 +73,6 @@ services:
       JANUS_HOST: 127.0.0.1
       JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
       JANUS_VIDEO_PORT: ${JANUS_VIDEO_PORT:-5004}
+      # `auto` uses the GPU when the container can reach one, see run.sh.
+      REPLAY_BACKEND: ${REPLAY_BACKEND:-auto}
+      JANUS_BITRATE: ${JANUS_BITRATE:-4000k}

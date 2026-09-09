@@ -155,6 +155,13 @@ fn main() {
                     log::warn!("stopping group {name}: {error}");
                 }
             }
+            // Release the graph — codecs, and with them the hardware device —
+            // before leaving. `process::exit` runs libc's exit handlers without
+            // running any Rust destructor, and the NVIDIA driver's handler
+            // deadlocks joining its own worker thread while a CUDA context is
+            // still alive. C++ calls its global destructors here for the same
+            // reason.
+            drop(instance);
             std::process::exit(if failed { 1 } else { 0 });
         }
     }

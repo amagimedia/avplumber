@@ -16,10 +16,19 @@
 //! always reaches `output` through the spec; the muxers that need it in-band
 //! (mpegts and friends) re-insert it themselves.
 //!
-//! Deferred: `hwaccel` (rejected rather than silently ignored), and
-//! `INeedsOutputFrameSize`, the hint an audio encoder gives a resampler about
-//! its `frame_size`. Without a resampler in the graph the input has to be
-//! chunked correctly already, which it is when the sample rate is unchanged.
+//! Hardware encoding takes the device `hwaccel` names plus, when the frames
+//! arriving are already on it, a frame pool describing them: the input spec's
+//! `sw_pix_fmt` becomes the pool's software format and the device's surface
+//! format becomes the context's `pix_fmt`, which is what NVENC and friends
+//! expect. Frames are never uploaded or downloaded here; a hardware encoder
+//! fed software frames simply keeps its own `pix_fmt` and lets libavcodec
+//! upload, and a software encoder fed hardware frames fails at open with the
+//! format it cannot take.
+//!
+//! Deferred: `INeedsOutputFrameSize`, the hint an audio encoder gives a
+//! resampler about its `frame_size`. Without a resampler in the graph the input
+//! has to be chunked correctly already, which it is when the sample rate is
+//! unchanged.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -41,12 +50,12 @@ use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
 use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
+use avplumber_f7k::services::hwaccel::HwDevice;
 
 /// The parameters both encoder types share; C++ has one template for both.
 ///
 /// The node keeps this whole struct rather than copying fields out of it, so each
-/// parameter is declared exactly once. `hwaccel` is the one field that means
-/// nothing after a successful build.
+/// parameter is declared exactly once.
 #[derive(Debug, serde::Deserialize)]
 pub struct EncoderParams {
     /// Required, unlike a decoder's: nothing else says what to produce.
@@ -63,10 +72,10 @@ pub struct EncoderParams {
     /// the codec, see [`FlushMode`].
     #[serde(default)]
     flush: FlushMode,
-    /// Build-time only: rejected outright, see the module docs. Always `None` on a
-    /// node that was built successfully.
+    /// The name of a device `hwaccel.init` opened. Resolved while the node is
+    /// built, into [`Encoder::hwaccel`].
     #[serde(default)]
-    hwaccel: Option<Value>,
+    hwaccel: Option<String>,
 }
 
 /// How the codec takes an in-band discontinuity. An `Eof` is different: it
@@ -91,14 +100,16 @@ pub enum FlushMode {
 }
 
 impl EncoderParams {
-    fn build(self, name: &str, media: AvpMediaType) -> Result<Encoder, String> {
-        if self.hwaccel.is_some() {
-            return Err("hwaccel is not implemented in the Rust core yet".into());
-        }
+    fn build(self, name: &str, media: AvpMediaType, ctx: &BuildCtx<'_>) -> Result<Encoder, String> {
+        let hwaccel = match &self.hwaccel {
+            Some(device) => Some(ctx.hwaccel(device)?),
+            None => None,
+        };
         Ok(Encoder {
             io: BlockingIo::new(name),
             media,
             params: self,
+            hwaccel,
             state: Mutex::new(State::new(name)),
         })
     }
@@ -114,8 +125,8 @@ impl NodeSpec for VideoEncoderSpec {
     const TYPE_NAME: &'static str = "enc_video";
     type Node = Blocking<Encoder>;
 
-    fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::VIDEO).map(Blocking)
+    fn build(self, name: &str, ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+        self.0.build(name, AvpMediaType::VIDEO, ctx).map(Blocking)
     }
 }
 
@@ -127,8 +138,8 @@ impl NodeSpec for AudioEncoderSpec {
     const TYPE_NAME: &'static str = "enc_audio";
     type Node = Blocking<Encoder>;
 
-    fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::AUDIO).map(Blocking)
+    fn build(self, name: &str, ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+        self.0.build(name, AvpMediaType::AUDIO, ctx).map(Blocking)
     }
 }
 
@@ -189,6 +200,8 @@ pub struct Encoder {
     /// What the script asked for, verbatim: [`EncoderParams`] documents each field,
     /// and holding it whole is what keeps them from being declared twice.
     params: EncoderParams,
+    /// The device `params.hwaccel` named, resolved at build.
+    hwaccel: Option<Arc<HwDevice>>,
     state: Mutex<State>,
 }
 
@@ -497,6 +510,45 @@ impl Encoder {
         buffer
     }
 
+    /// The device and, for frames that are already on it, the pool that
+    /// describes them. C++ `openEncoder` does the same three assignments, with
+    /// the surface format hardcoded to CUDA; here it comes from the device.
+    fn attach_hwaccel(&self, ctx: &mut AVCodecContext, spec: &Spec) -> Result<(), String> {
+        let Some(device) = &self.hwaccel else {
+            return Ok(());
+        };
+        ctx.set_hw_device_ctx(device.device_ref());
+        let Spec::Video { pix_fmt, .. } = spec else {
+            // Audio has no surfaces; the device is set in case the codec wants
+            // it, and nothing else changes.
+            return Ok(());
+        };
+        if !codec::is_hw_pix_fmt(*pix_fmt) {
+            log::info!(
+                "{}: frames arrive in {}, so `{}` uploads them to `{}` itself",
+                self.io.name,
+                codec::pix_fmt_name(*pix_fmt),
+                self.params.codec,
+                device.name
+            );
+            return Ok(());
+        }
+        let sw_pix_fmt = ctx.pix_fmt;
+        let frames = device.frames_ctx(ctx.width, ctx.height, sw_pix_fmt)?;
+        ctx.set_hw_frames_ctx(frames);
+        ctx.set_pix_fmt(device.hw_pix_fmt());
+        log::info!(
+            "{}: encoding {}x{} {} surfaces on hardware device `{}`, no round trip through host \
+             memory",
+            self.io.name,
+            ctx.width,
+            ctx.height,
+            codec::pix_fmt_name(sw_pix_fmt),
+            device.name
+        );
+        Ok(())
+    }
+
     fn open(&self, spec: &Spec) -> Result<AVCodecContext, String> {
         let codec = codec::find_encoder(&self.params.codec)?;
         let wanted = match self.media {
@@ -516,9 +568,13 @@ impl Encoder {
         }
 
         let mut ctx = AVCodecContext::new(&codec);
+        // A hardware spec leaves `pix_fmt` at the software format the surface
+        // holds; that is what the pool below is made of, and what an encoder
+        // that uploads its own frames wants anyway.
         codec::apply_media_spec(&mut ctx, spec)?;
         // Always, since this node cannot see the container — see the module docs.
         ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
+        self.attach_hwaccel(&mut ctx, spec)?;
         codec::open_codec(
             &mut ctx,
             Options::from_json(self.params.options.as_ref())?,

@@ -39,15 +39,56 @@ The player provides:
 - a built-in **RUN V2** playback regression exercise.
 
 The status panel shows the recording, Janus destination, RTP payload type and
-SSRC, Play/Pause state, direction, configured and scrub speeds, current frame,
-position and duration, mapped UTC time, loop state, an `END` marker when the
-recording has run out, last command, and errors. Controls remain disabled until
-the first source frame is ready.
+SSRC, the codecs in use (`CODECS=nvidia …` or `CODECS=cpu …`), Play/Pause
+state, direction, configured and scrub speeds, current frame, position and
+duration, mapped UTC time, loop state, an `END` marker when the recording has
+run out, last command, and errors. Controls remain disabled until the first
+source frame is ready.
 
 Keyboard controls are Space for Play/Pause, Left/Right for one frame, Down/Up
 for one second, and `q` to quit. The footer displays these bindings.
 
 ## Requirements
+
+### Codecs
+
+Both scripts take `--backend`:
+
+| `--backend` | Decode | Encode | Frames |
+| --- | --- | --- | --- |
+| `auto` (default) | whichever the machine supports | | |
+| `nvidia` | `h264_cuvid` into CUDA surfaces | `h264_nvenc` | stay on the GPU |
+| `cpu` | software H.264 | `libx264` | host memory |
+
+`auto` picks `nvidia` when the NVIDIA driver answers and this FFmpeg has both
+codecs, and `cpu` otherwise. Naming a backend explicitly makes a machine that
+cannot run it fail rather than quietly fall back.
+
+Both scripts say which they resolved to, so a silent fallback is visible.
+`player.py` prints one line once the graph is running, and repeats it in the
+TUI's status panel:
+
+```text
+[replay] codecs: nvidia (h264_cuvid -> h264_nvenc, frames stay on the GPU)
+```
+
+`transcode.py` says the same in its closing summary:
+
+```text
+Replay recording: /media/replay.ts (60 fps, wallclock 2026-09-09T10:12:48+00:00,
+codecs nvidia (h264_cuvid -> h264_nvenc, frames stay on the GPU))
+```
+
+The graph's own account is in the avplumber log (`--avplumber-log PATH`),
+which names the device, the decoder that opened on it, and whether the encoder
+took the frames in place.
+
+On the NVIDIA backend nothing between the decoder and the encoder touches
+pixels, so a frame is decoded, paced, marked as a keyframe and encoded without
+ever reaching host memory. There is no `hwupload`/`hwdownload` node in the
+graph and none is wanted.
+
+### Build
 
 Build the Rust executable and point the scripts at it:
 
@@ -58,9 +99,9 @@ export AVPLUMBER_BIN=$PWD/target/debug/avplumber
 
 (Pick the `ffmpeg*` feature matching the FFmpeg the crate links against, see
 `avplumber_nodes/Cargo.toml`.) The FFmpeg libraries must provide software H.264
-decoding and `libx264`; hardware acceleration is not used. Both scripts also
-take `--avplumber PATH`; nothing is taken from `PATH`, because the C++ binary
-of the same name does not run these graphs.
+decoding and `libx264` for the CPU backend, and `h264_cuvid` plus `h264_nvenc`
+for the NVIDIA one. Both scripts also take `--avplumber PATH`; nothing is taken
+from `PATH`, because the C++ binary of the same name does not run these graphs.
 
 Install the TUI dependency into the same Python environment:
 
@@ -80,7 +121,8 @@ python3 demos/replay/transcode.py \
 ```
 
 The frame rate must be an integer from 1 to 240. The output is all-intra H.264
-baseline video encoded by libx264 at constant quality (`crf=17`). It preserves
+baseline video at constant quality, from libx264 (`crf=17`) or NVENC
+(`cq=17`). It preserves
 the source dimensions and creates four files that must stay together:
 
 ```text
@@ -117,7 +159,8 @@ demo uses the following defaults:
 | RTCP destination | `127.0.0.1:5005` | follows the video RTP port |
 | RTP payload type | `96` | `--janus-video-pt` |
 | SSRC | `0x41565001` | `--janus-video-ssrc` |
-| output bitrate | 4000 kbit/s CBR | fixed by the demo |
+| output bitrate | 4000 kbit/s CBR | `--janus-bitrate` |
+| encoder | `libx264` or `h264_nvenc` | `--backend` |
 | local RTCP listener | `0.0.0.0` on an automatic port | `--janus-rtcp-bind`, `--janus-rtcp-port` |
 
 The demo sends RTCP sender announcements and listens for PLI/FIR feedback;
@@ -140,6 +183,9 @@ opens the TUI. It rejects inconsistent frame cadence.
 
 Useful options are:
 
+- `--backend auto|cpu|nvidia` to choose the codecs;
+- `--janus-bitrate RATE` for the constant output bitrate, `4000k` by default;
+  raise it with the picture size (`20M` at 1080p, `40M` at 4K);
 - `--no-loop` to stop at the end instead of looping;
 - `--no-tui` to keep the player running without the terminal interface;
 - `--control-timeout <seconds>` to change the five-second operation timeout;
@@ -203,6 +249,9 @@ structure and queue state.
 python3 -m pytest demos/replay/tests -q
 ```
 
+The end-to-end tests run on both backends, skipping the NVIDIA ones when the
+machine has no usable device.
+
 The unit tests cover the controller's command translation, the graphs the
 scripts send, the player's lifecycle over a fake connection, the TUI (when
 `textual` is installed), the recording sidecars, and the paused-picture
@@ -239,6 +288,12 @@ Rust core's playback service plus its `realtime` node. The Janus encoder runs
 with `flush: keep`: a seek must not touch a live encoder (libavcodec's flush
 stops libx264 for good), and the paced frames keep monotonic timestamps
 across it anyway.
+
+The other half of what C++ `flush_magic` did is in band as well. NVDEC holds a
+decoded frame until the next packet arrives, so a paused seek to the last frame
+of a recording would surface nothing: there is no next packet. The seekable
+source sends `Drain` when it idles with nothing left to read, and the decoder
+gives up what libavcodec is holding without ending the stream.
 
 The binary seek table contains native-endian `(int64 timestamp_ms, uint64
 byte_offset)` records. The history contains native-endian `(int64 changed_at,

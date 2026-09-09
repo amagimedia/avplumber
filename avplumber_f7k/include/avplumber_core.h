@@ -69,12 +69,14 @@ void avp_register_media_type(AvpCore*, AvpMediaType, const AvpMediaVtable*);
  * the pipe: it clears queued buffers on the way down. SPEC (stream format)
  * is causal and latched on the edge: a (re)connecting consumer sees the
  * current SPEC as the head item, before any buffer, so it does not walk
- * upstream to recover format. */
+ * upstream to recover format. DRAIN asks the codecs downstream for what they
+ * are holding (a hardware decoder's pipeline delay) without ending anything. */
 typedef enum {
     AVP_EV_EOF         = 1,
     AVP_EV_FLUSH_START  = 2,   /* preempts: clears queues downstream */
     AVP_EV_FLUSH_STOP   = 3,
-    AVP_EV_SPEC        = 4    /* uses .spec; latched on the edge */
+    AVP_EV_SPEC        = 4,   /* uses .spec; latched on the edge */
+    AVP_EV_DRAIN       = 5    /* emit what a codec holds; ends nothing */
 } AvpEventType;
 
 /* Stream format: the resolved values that flow through an edge. Latched on
@@ -85,6 +87,8 @@ typedef struct {
     /* video */
     int          width, height;
     int          pixel_format;        /* AVPixelFormat                     */
+    int          sw_pixel_format;     /* AVPixelFormat behind a hardware surface,
+                                         AV_PIX_FMT_NONE (-1) for host memory  */
     AvpRational  frame_rate;
     AvpRational  sample_aspect_ratio;
     /* audio */

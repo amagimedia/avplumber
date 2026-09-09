@@ -1,0 +1,9 @@
+# GPU access through the NVIDIA container toolkit, the usual way. `run.sh`
+# adds this file when the toolkit is installed; without it, the toolkit-free
+# override `run.sh` generates passes the devices and the driver libraries by
+# hand instead.
+services:
+  replay:
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility

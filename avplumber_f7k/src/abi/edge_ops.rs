@@ -15,6 +15,8 @@ pub enum AvpEventType {
     FlushStart = 2,
     FlushStop = 3,
     Spec = 4,
+    /// Emit what a codec is holding, without ending the stream.
+    Drain = 5,
 }
 
 #[repr(C)]
@@ -71,6 +73,7 @@ fn event_to_c(ev: &EdgeEvent) -> AvpEdgeEvent {
     match ev {
         EdgeEvent::Eof => AvpEdgeEvent::plain(AvpEventType::Eof),
         EdgeEvent::FlushStart => AvpEdgeEvent::plain(AvpEventType::FlushStart),
+        EdgeEvent::Drain => AvpEdgeEvent::plain(AvpEventType::Drain),
         EdgeEvent::FlushStop { resume_at } => {
             let mut event = AvpEdgeEvent::plain(AvpEventType::FlushStop);
             if let Some(ts) = resume_at {
@@ -153,6 +156,7 @@ pub extern "C" fn avp_edge_push_event(edge: *mut AvpEdge, ev: *const AvpEdgeEven
     let ev_c = unsafe { *ev };
     let ev = match ev_c.r#type {
         AvpEventType::Eof => EdgeEvent::Eof,
+        AvpEventType::Drain => EdgeEvent::Drain,
         AvpEventType::FlushStart => EdgeEvent::FlushStart,
         AvpEventType::FlushStop => EdgeEvent::FlushStop {
             resume_at: (ev_c.resume_at != AVP_NOPTS).then(|| Ts {

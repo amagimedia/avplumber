@@ -446,6 +446,56 @@ pub fn decoded_frame_hashes(path: &Path) -> Vec<u64> {
 /// The planes of a decoded yuv420p frame, laid out like `rawvideo` writes them,
 /// so [`fnv1a`] of it compares against [`decoded_frame_hashes`].
 #[cfg(feature = "ffmpeg")]
+/// The frame's pixels in yuv420p plane order, whatever it arrived as: a
+/// hardware surface is downloaded first and nv12 chroma is de-interleaved, so
+/// a frame decoded on the GPU hashes exactly like the software decode of the
+/// same picture. Only the test does this; the graph under test never moves a
+/// surface to host memory.
+#[cfg(feature = "ffmpeg")]
+pub fn frame_bytes(frame: &rsmpeg::avutil::AVFrame) -> Vec<u8> {
+    let downloaded;
+    let frame = if frame.hw_frames_ctx.is_null() {
+        frame
+    } else {
+        let mut host = rsmpeg::avutil::AVFrame::new();
+        host.hwframe_transfer_data(frame)
+            .expect("downloading a hardware surface");
+        downloaded = host;
+        &downloaded
+    };
+    match frame.format {
+        rusty_ffmpeg::ffi::AV_PIX_FMT_YUV420P => yuv420p_bytes(frame),
+        rusty_ffmpeg::ffi::AV_PIX_FMT_NV12 => nv12_as_yuv420p_bytes(frame),
+        other => panic!("the test cannot read pixel format {other}"),
+    }
+}
+
+/// nv12's interleaved chroma, split into the two planes yuv420p has. The
+/// values are the same bytes in a different order, so the hash is comparable.
+#[cfg(feature = "ffmpeg")]
+fn nv12_as_yuv420p_bytes(frame: &rsmpeg::avutil::AVFrame) -> Vec<u8> {
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let mut out = Vec::with_capacity(width * height * 3 / 2);
+    let stride = frame.linesize[0] as usize;
+    for row in 0..height {
+        let line = unsafe { std::slice::from_raw_parts(frame.data[0].add(row * stride), width) };
+        out.extend_from_slice(line);
+    }
+    let stride = frame.linesize[1] as usize;
+    for offset in [0usize, 1] {
+        for row in 0..chroma_height {
+            let line = unsafe {
+                std::slice::from_raw_parts(frame.data[1].add(row * stride), chroma_width * 2)
+            };
+            out.extend(line.iter().skip(offset).step_by(2));
+        }
+    }
+    out
+}
+
 pub fn yuv420p_bytes(frame: &rsmpeg::avutil::AVFrame) -> Vec<u8> {
     let width = frame.width as usize;
     let height = frame.height as usize;

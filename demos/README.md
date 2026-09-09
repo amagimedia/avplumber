@@ -38,8 +38,9 @@ enabled, as on Fedora. Mount only the demo's media directory.
 ## Build the Python video runtime
 
 The [mixer image](mixer/README.md#run) builds avplumber, its Python module,
-and patched FFmpeg together. Playlist can reuse this image (Replay now runs
-on the Rust core without CUDA, see its README):
+and patched FFmpeg together. Playlist can reuse this image (Replay now runs on
+the Rust core, on the GPU where there is one and on the CPU otherwise, see its
+README):
 
 ```sh
 docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
@@ -49,7 +50,8 @@ Then follow [Mixer](mixer/README.md#run),
 [Playlist](playlist/README.md#run-in-docker), or
 [Replay](replay/README.md#requirements) for commands and controls. Replay also
 has its own Compose setup, [replay-rust](replay-rust/README.md), which builds
-the Rust core image and starts Janus and the preview for you.
+the Rust core image, starts Janus and the preview, and hands the container the
+GPU when the machine has one — with or without the NVIDIA container toolkit.
 The first build compiles FFmpeg and avplumber; subsequent builds reuse Docker's
 cache. These demos do not require neural models or TensorRT.
 

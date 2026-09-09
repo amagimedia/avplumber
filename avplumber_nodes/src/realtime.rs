@@ -341,6 +341,8 @@ impl Realtime {
                 output.push_event(EdgeEvent::FlushStop { resume_at });
             }
             EdgeEvent::Spec(spec) => output.push_event(EdgeEvent::Spec(self.restamped_spec(spec))),
+            // Nothing here is held inside a codec, so a drain only travels on.
+            EdgeEvent::Drain => output.push_event(EdgeEvent::Drain),
             EdgeEvent::Eof => output.push_event(EdgeEvent::Eof),
         }
     }
@@ -352,6 +354,7 @@ impl Realtime {
                 width,
                 height,
                 pix_fmt,
+                sw_pix_fmt,
                 frame_rate,
                 sar,
                 ..
@@ -359,6 +362,7 @@ impl Realtime {
                 width,
                 height,
                 pix_fmt,
+                sw_pix_fmt,
                 frame_rate,
                 sar,
                 time_base: self.timebase,
@@ -700,6 +704,7 @@ mod tests {
             width: 2,
             height: 2,
             pix_fmt: 0,
+            sw_pix_fmt: -1,
             frame_rate: AvpRational { num: 25, den: 1 },
             sar: AvpRational { num: 1, den: 1 },
             time_base: AvpRational { num: 1, den: 90000 },

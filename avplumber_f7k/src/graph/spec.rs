@@ -206,6 +206,15 @@ pub enum Spec {
         width: i32,
         height: i32,
         pix_fmt: i32,
+        /// The software format behind `pix_fmt` when it is a hardware surface
+        /// (`cuda` carrying `nv12`, say), `AV_PIX_FMT_NONE` otherwise. C++
+        /// carried the same pair as `IVideoFormatSource::pixelFormat` and
+        /// `realPixelFormat`.
+        ///
+        /// It is here because a hardware encoder has to describe its frame pool
+        /// at open time, before any frame has reached it: the surface itself
+        /// knows its software format, but the spec arrives first.
+        sw_pix_fmt: i32,
         frame_rate: AvpRational,
         sar: AvpRational,
         time_base: AvpRational,

@@ -54,6 +54,12 @@ pub trait InputHandler: Send + Sync + 'static {
     /// `FlushStop` is forwarded, payload intact, once this returns.
     fn on_flush_stop(&self, _resume_at: Option<Ts>) {}
 
+    /// [`EdgeEvent::Drain`]: give up what the node is holding *inside a codec*,
+    /// without ending anything. The event is forwarded once this returns, so a
+    /// node that holds nothing of the kind can ignore it. Whatever the node
+    /// produces goes out the usual way, from `before_take`.
+    fn on_drain(&self) {}
+
     /// The input ended. `Done` finishes the node, after `Eof` is forwarded. A
     /// node that has to drain first — a codec — returns `Again`, keeps stepping
     /// from [`SingleInput::before_take`], and forwards `Eof` itself when the
@@ -103,6 +109,11 @@ pub fn react<H: InputHandler + ?Sized>(
         EdgeItem::Event(EdgeEvent::FlushStart) => {
             handler.on_flush();
             forward(EdgeEvent::FlushStart);
+            Ok(Reaction::Again)
+        }
+        EdgeItem::Event(EdgeEvent::Drain) => {
+            handler.on_drain();
+            forward(EdgeEvent::Drain);
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::FlushStop { resume_at }) => {
@@ -231,6 +242,7 @@ mod tests {
             width: 2,
             height: 2,
             pix_fmt: 0,
+            sw_pix_fmt: -1,
             frame_rate: AvpRational { num: 1, den: 1 },
             sar: AvpRational { num: 1, den: 1 },
             time_base: AvpRational { num: 1, den: 1000 },
@@ -318,6 +330,7 @@ mod tests {
                 EdgeItem::Event(EdgeEvent::FlushStart) => "flush-start",
                 EdgeItem::Event(EdgeEvent::FlushStop { resume_at: None }) => "flush-stop",
                 EdgeItem::Event(EdgeEvent::FlushStop { resume_at: Some(_) }) => "flush-stop+resume",
+                EdgeItem::Event(EdgeEvent::Drain) => "drain",
                 EdgeItem::Event(EdgeEvent::Eof) => "eof",
             });
         }

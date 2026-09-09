@@ -4,8 +4,13 @@ The [replay demo](../replay/README.md) as three containers: Janus with its
 streaming plugin and the browser preview, both from the shared images the
 other demos use (`docker-compose/images`), and a player image with the Rust
 `avplumber` executable and the Python TUI that drives it over the control
-protocol. Software H.264 in and libx264 out; no GPU, no CUDA, no NVIDIA
-container toolkit.
+protocol.
+
+The player uses the GPU when it can reach one: NVDEC decodes into CUDA
+surfaces and NVENC encodes them, and no frame ever reaches host memory. On a
+machine without a usable NVIDIA card it runs the same graph with software
+H.264 and libx264 instead. Nothing else changes: same nodes, same edges, same
+controls.
 
 ## Run
 
@@ -33,11 +38,89 @@ demos/replay-rust/run.sh play
 | --- | --- |
 | `run.sh up` / `run.sh down` | start or stop Janus and the preview |
 | `run.sh build` | build the player image (and Janus) |
-| `run.sh sample [seconds] [fps]` | a `testsrc2` clip, transcoded into `media/` |
+| `run.sh sample [seconds] [fps] [WxH]` | a `testsrc2` clip, transcoded into `media/` (default 20 s, 30 fps, 640x360) |
 | `run.sh transcode <vod> [fps]` | convert a file into `media/replay.ts` (replaces an existing one) |
 | `run.sh play [player options]` | the TUI; options go to `player.py`, e.g. `--no-loop` |
 | `run.sh exercise` | the **RUN V2** checks headless, exit code 1 on any failure |
 | `run.sh shell` | a shell in the player image |
+
+Both `sample`/`transcode` and `play` follow the same rule, so a recording made
+on the GPU is played on the GPU.
+
+## The GPU
+
+`run.sh` decides how the container reaches the card, and says which way it
+chose:
+
+| `REPLAY_GPU` | Wiring |
+| --- | --- |
+| `auto` (default) | the toolkit when it works, otherwise the devices by hand, otherwise the CPU |
+| `toolkit` | `gpus: all`, the [NVIDIA container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| `devices` | pass `/dev/nvidia*` and the host's driver libraries in directly, no toolkit needed |
+| `off` | no GPU; the player runs on the CPU |
+
+The `toolkit` mode asks for `gpus: all` and for the `video` driver capability,
+which is what puts `libnvcuvid` and `libnvidia-encode` in the container. The
+`devices` mode bind-mounts the running driver's own libraries instead, because
+their version has to match the loaded kernel module, and the entrypoint runs
+`ldconfig` over them; it is generated into `.compose.gpu-devices.yaml`, which
+is not committed. Both were exercised on an RTX 5080: the headless checks pass
+either way, and while the player runs the host reports one NVENC session at the
+recording's frame rate.
+
+`REPLAY_BACKEND` overrides what the player then asks for: `auto` (default),
+`nvidia` or `cpu`. Naming `nvidia` on a machine that cannot run it fails
+instead of quietly using the CPU, which is what you want in a check.
+
+### Watching the card work
+
+The default clip is small enough to leave the engines near idle. For something
+visible in `nvtop`, make a bigger one and raise the bitrate to match:
+
+```sh
+JANUS_BITRATE=40M demos/replay-rust/run.sh sample 20 60 3840x2160
+JANUS_BITRATE=40M demos/replay-rust/run.sh play
+```
+
+On an RTX 5080, playing at 1x:
+
+| Recording | Encoder | Decoder |
+| --- | --- | --- |
+| 640x360, 30 fps | ~1% | ~0% |
+| 1920x1080, 60 fps | ~8% | ~1% |
+| 3840x2160, 60 fps | ~28% | ~4% |
+
+Playback speed does not change those numbers. At 2x the source reads every
+other frame, so the same number of pictures per second is decoded and the
+pacing node still releases one per tick; what changes is how fast the position
+moves, not how much pixel work there is.
+
+The recording is all-intra, which is what makes a frame-exact seek cheap and
+the files large: about 15 MB per second at 4K60, 5 MB at 1080p60. `media/` is
+not committed, and `run.sh sample` replaces what is there.
+
+Every run says which codecs it resolved to, so a silent fallback to the CPU is
+visible without digging:
+
+```text
+[replay] GPU wired in through demos/replay-rust/compose.gpu.yaml
+[replay] codecs: nvidia (h264_cuvid -> h264_nvenc, frames stay on the GPU)
+```
+
+The first line is `run.sh` saying how the container reaches the card, the
+second is the player saying what it then asked for. The TUI repeats it in its
+status panel as `CODECS=…`, and `sample`/`transcode` end with the same wording
+in their summary.
+
+Whether the card was really used is in the avplumber log
+(`/tmp/replay-demo/avplumber.log` inside the container):
+
+```text
+hwaccel `replay_gpu`: opened cuda device, frames are cuda
+replay_decode: decoding h264 on hardware device `replay_gpu`
+janus_encoder: encoding 640x360 nv12 surfaces on hardware device `replay_gpu`,
+               no round trip through host memory
+```
 
 The same through Compose directly:
 
@@ -65,7 +148,9 @@ the ones the [browser demo](../dmabuf-browser/README.md) uses.
 `Dockerfile` builds the Rust workspace against RPM Fusion's FFmpeg 7.1 on
 Fedora (`--features ffmpeg7_1,async`) with a current stable toolchain from
 rustup, then copies the binary into a runtime image with FFmpeg's libraries
-and CLI, Python and Textual, and `demos/replay`. Rebuilds are incremental:
+and CLI, Python and Textual, and `demos/replay`. That FFmpeg already carries
+`h264_cuvid` and `h264_nvenc`, so the image needs nothing NVIDIA-specific: the
+driver comes from the host at run time. Rebuilds are incremental:
 the cargo registry and the build directory are BuildKit cache mounts, the
 dependencies are fetched in a layer keyed on the lock file before the sources
 are copied, and the pip install sits before the demo sources.
@@ -88,3 +173,7 @@ are handed to the owner of that directory, so the host user can remove them.
   browser uses, and that UDP 20000–20100 reach the host.
 - `run.sh exercise` prints one `PASS`/`FAIL`/`SKIP` line per check; a short
   recording skips the 30-second nudges by design.
+- The player runs on the CPU when you expected the GPU: the two lines above
+  say which half went wrong — no GPU wiring, or wiring but no codecs. Then try
+  `nvidia-smi` inside the container (`run.sh shell`). `REPLAY_BACKEND=nvidia`
+  turns a silent fallback into an error that says what is missing.

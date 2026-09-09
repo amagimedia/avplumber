@@ -13,8 +13,8 @@ from pathlib import Path
 
 from replay import (HISTORY_STRUCT, HISTORY_SUFFIX, SEEK_TABLE_SUFFIX,
                     TEXT_SEEK_TABLE_SUFFIX, TranscodeConfig,
-                    build_transcode_application, read_seek_table,
-                    validate_recording)
+                    build_transcode_application, describe_backend,
+                    read_seek_table, resolve_backend, validate_recording)
 
 
 def parse_wallclock_start(value: str, *, now=lambda: datetime.now(timezone.utc)) -> datetime:
@@ -57,6 +57,9 @@ def parse_args(argv: list[str] | None = None) -> tuple[TranscodeConfig, str | No
     parser.add_argument("--fps", required=True, type=int)
     parser.add_argument("--wallclock-start", default="now", metavar="ISO8601|now")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--backend", choices=("auto", "cpu", "nvidia"), default="auto",
+                        help="codecs: NVDEC/NVENC with frames kept on the GPU, software "
+                             "H.264 and libx264, or whichever this machine supports")
     parser.add_argument("--avplumber", metavar="PATH",
                         help="the Rust avplumber executable (default: $AVPLUMBER_BIN)")
     args = parser.parse_args(argv)
@@ -68,6 +71,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[TranscodeConfig, str | No
             args.fps,
             wallclock_start,
             args.force,
+            resolve_backend(args.backend),
         ), args.avplumber
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
@@ -131,7 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         f"Replay recording: {config.output} ({config.fps} fps, "
-        f"wallclock {config.wallclock_start.isoformat()})"
+        f"wallclock {config.wallclock_start.isoformat()}, "
+        f"codecs {describe_backend(config.backend)})"
     )
     return 0
 

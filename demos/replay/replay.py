@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import struct
 import math
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -34,6 +36,7 @@ HISTORY_SUFFIX = "+history"
 GROUP = "replay"
 PLAYER_NODE_GROUP = "player"
 TRANSCODE_NODE_GROUP = "transcode"
+GPU_DEVICE = "replay_gpu"
 JANUS_FORCE_KEYFRAME_NODE = "janus_force_keyframe"
 JANUS_FORCE_KEYFRAME_COMMAND = (
     f"node.object.set {JANUS_FORCE_KEYFRAME_NODE} trigger true"
@@ -431,6 +434,61 @@ class PlaybackController:
             return self._status
 
 
+class Backend(str, Enum):
+    """Which codecs the graphs use. `NVIDIA` keeps every frame on the GPU:
+    NVDEC decodes into CUDA surfaces and NVENC encodes them, with nothing in
+    between that would copy them to host memory."""
+
+    CPU = "cpu"
+    NVIDIA = "nvidia"
+
+    @property
+    def is_gpu(self) -> bool:
+        return self is Backend.NVIDIA
+
+
+def detect_backend() -> Backend:
+    """`nvidia` when this machine can actually run it: a working driver and an
+    FFmpeg with both NVIDIA codecs. Anything missing means `cpu`."""
+    if shutil.which("nvidia-smi") is None:
+        return Backend.CPU
+    try:
+        if subprocess.run(["nvidia-smi"], capture_output=True, timeout=20).returncode:
+            return Backend.CPU
+    except (OSError, subprocess.SubprocessError):
+        return Backend.CPU
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return Backend.CPU
+    try:
+        listed = subprocess.run([ffmpeg, "-hide_banner", "-codecs"],
+                                capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return Backend.CPU
+    if "h264_nvenc" not in listed.stdout or "h264_cuvid" not in listed.stdout:
+        return Backend.CPU
+    return Backend.NVIDIA
+
+
+def describe_backend(backend: Backend) -> str:
+    """One line for a status panel or a log: which codecs, and where the frames
+    live."""
+    if backend.is_gpu:
+        return "nvidia (h264_cuvid -> h264_nvenc, frames stay on the GPU)"
+    return "cpu (software h264 -> libx264)"
+
+
+def resolve_backend(choice: str | Backend) -> Backend:
+    """`auto` asks the machine; anything else is taken at its word, so a
+    misconfigured host fails loudly instead of silently transcoding on the
+    CPU."""
+    if isinstance(choice, Backend):
+        return choice
+    if choice == "auto":
+        return detect_backend()
+    return Backend(choice)
+
+
 @dataclass(frozen=True)
 class TranscodeConfig:
     source: Path
@@ -438,6 +496,7 @@ class TranscodeConfig:
     fps: int
     wallclock_start: datetime
     force: bool = False
+    backend: Backend = Backend.CPU
 
     def __post_init__(self):
         if not Path(self.source).is_file():
@@ -469,10 +528,15 @@ class JanusVideoConfig:
     ssrc: int = 0x41565001
     rtcp_bind: str = "0.0.0.0"
     rtcp_port: int = 0
+    # What the encoder is told to produce, constant bitrate. A bigger picture
+    # needs a bigger number to stay watchable.
+    bitrate: str = "4000k"
 
     def __post_init__(self):
         if not self.host:
             raise ValueError("Janus host is required")
+        if not str(self.bitrate).strip():
+            raise ValueError("Janus bitrate is required")
         if not 1 <= self.video_port < 65535:
             raise ValueError("Janus video and paired RTCP ports must be valid")
         if not 0 <= self.payload_type <= 127:
@@ -487,6 +551,7 @@ class JanusVideoConfig:
 class PlayerConfig:
     slot: ReplaySlotConfig
     janus: JanusVideoConfig
+    backend: Backend = Backend.CPU
 
 
 def node_add(node_type: str, name: str, group: str, **parameters) -> str:
@@ -504,13 +569,82 @@ def _stringify(options: dict) -> dict:
     return {key: str(value) for key, value in options.items()}
 
 
+def hwaccel_init(backend: Backend) -> list[str]:
+    """The one command that opens the GPU, before any node names it."""
+    if not backend.is_gpu:
+        return []
+    return [f'hwaccel.init {{"name":"{GPU_DEVICE}","type":"cuda"}}']
+
+
+def decoder_params(backend: Backend, codecs: tuple[str, ...]) -> dict:
+    """What `dec_video` needs for this backend. On NVIDIA the decoder produces
+    CUDA surfaces (`pixel_format`), through the cuvid implementation of each
+    codec, and only for those codecs: a device handed to a decoder that has no
+    hardware path for the stream has been seen to corrupt frames."""
+    if not backend.is_gpu:
+        return {"codec_map": {codec: codec for codec in codecs}}
+    return {
+        "pixel_format": "cuda",
+        "hwaccel": GPU_DEVICE,
+        "codec_map": {codec: f"{codec}_cuvid" for codec in codecs},
+        "hwaccel_only_for_codecs": list(codecs),
+    }
+
+
+def transcode_encoder_params(backend: Backend) -> dict:
+    """All-intra H.264 at constant quality. NVENC's `cq` is the counterpart of
+    x264's `crf`, and `tune=ull` with no lookahead keeps it one frame in, one
+    frame out."""
+    if not backend.is_gpu:
+        return {
+            "codec": "libx264",
+            "options": {"g": 1, "bf": 0, "profile": "baseline", "preset": "ultrafast",
+                        "tune": "zerolatency", "crf": 17,
+                        "x264-params": "keyint=1:scenecut=0"},
+        }
+    return {
+        "codec": "h264_nvenc",
+        "hwaccel": GPU_DEVICE,
+        "options": {"g": 1, "bf": 0, "profile": "baseline", "rc": "vbr", "cq": 17,
+                    "b": 0, "tune": "ull", "rc-lookahead": 0, "zerolatency": 1,
+                    "delay": 0},
+    }
+
+
+def janus_encoder_params(backend: Backend, fps: int, bitrate: str) -> dict:
+    """The live leg: constant bitrate, a keyframe on demand, no encoder delay.
+    `flush: keep` on both backends, because a seek must not touch a live
+    encoder."""
+    if not backend.is_gpu:
+        return {
+            "codec": "libx264",
+            "flush": "keep",
+            "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
+                        "bf": 0, "preset": "ultrafast", "profile": "baseline",
+                        "tune": "zerolatency", "x264-params": "aud=1:scenecut=0"},
+        }
+    return {
+        "codec": "h264_nvenc",
+        "hwaccel": GPU_DEVICE,
+        "flush": "keep",
+        "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
+                    "bf": 0, "preset": "p6", "profile": "baseline", "tune": "ull",
+                    "rc": "cbr", "rc-lookahead": 0, "zerolatency": 1, "delay": 0,
+                    "forced-idr": 1, "no-scenecut": 1, "strict_gop": 1, "aud": 1,
+                    "spatial-aq": 1, "temporal-aq": 0},
+    }
+
+
 def transcode_script(config: TranscodeConfig) -> list[str]:
-    """The transcode graph, video only, all-intra H.264 with a seek table.
-    CPU codecs: software decode and libx264."""
+    """The transcode graph, video only, all-intra H.264 with a seek table. On
+    the NVIDIA backend the frames go from NVDEC to NVENC without ever reaching
+    host memory."""
     group = TRANSCODE_NODE_GROUP
     fps = config.fps
     output = str(config.output)
+    backend = config.backend
     return [
+        *hwaccel_init(backend),
         "queue.plan_capacity * 4",
         node_add("input", "replay_input", group,
                  url=str(config.source), dst="transcode_packets", eof_mode="drain"),
@@ -519,16 +653,14 @@ def transcode_script(config: TranscodeConfig) -> list[str]:
                  wait_for_keyframe=False),
         node_add("dec_video", "replay_decode", group,
                  src="transcode_video_packets", dst="transcode_decoded",
-                 codec_map={"h264": "h264", "hevc": "hevc"}),
+                 **decoder_params(backend, ("h264", "hevc"))),
         node_add("force_fps", "replay_fps", group,
                  src="transcode_decoded", dst="transcode_fps", fps=f"{fps}/1"),
         node_add("force_keyframe", "replay_keyframes", group,
                  src="transcode_fps", dst="transcode_keyframes", interval_sec=f"1/{fps}"),
         node_add("enc_video", "replay_encoder", group,
-                 src="transcode_keyframes", dst="transcode_encoded", codec="libx264",
-                 options={"g": 1, "bf": 0, "profile": "baseline", "preset": "ultrafast",
-                          "tune": "zerolatency", "crf": 17,
-                          "x264-params": "keyint=1:scenecut=0"}),
+                 src="transcode_keyframes", dst="transcode_encoded",
+                 **transcode_encoder_params(backend)),
         node_add("mux", "replay_mux", group,
                  src=["transcode_encoded"], dst="transcode_muxed", ts_sort_wait=0),
         node_add("output", "replay_output", group,
@@ -548,12 +680,15 @@ def _rtp_url(config: JanusVideoConfig) -> str:
 
 def player_script(config: PlayerConfig, artifact: ReplayArtifact) -> list[str]:
     """The player graph: a seekable input paced by the `replay` group, then the
-    Janus leg with a forced keyframe every second, libx264, SPS/PPS repeated
-    in band, RTP out."""
+    Janus leg with a forced keyframe every second, SPS/PPS repeated in band,
+    RTP out. On the NVIDIA backend the decoded surfaces reach the encoder
+    without leaving the GPU; nothing between them touches pixels."""
     group = PLAYER_NODE_GROUP
     fps = artifact.fps
-    bitrate = "4000k"
+    bitrate = config.janus.bitrate
+    backend = config.backend
     return [
+        *hwaccel_init(backend),
         "queue.plan_capacity * 1",
         node_add("input", "replay_input", group, sync_group=GROUP,
                  url=str(artifact.path), dst="player_packets", loop=config.slot.loop),
@@ -561,19 +696,15 @@ def player_script(config: PlayerConfig, artifact: ReplayArtifact) -> list[str]:
                  src="player_packets", routing={"v:0": "player_video_packets"}),
         node_add("dec_video", "replay_decode", group,
                  src="player_video_packets", dst="player_decoded",
-                 codec_map={"h264": "h264"},
+                 **decoder_params(backend, ("h264",)),
                  options={"threads": 1, "flags": "low_delay"}),
         node_add("realtime", "replay_realtime", group, sync_group=GROUP,
                  src="player_decoded", dst="player_realtime", tick_period=f"1/{fps}"),
         node_add("force_keyframe", JANUS_FORCE_KEYFRAME_NODE, group,
                  src="player_realtime", dst="janus_keyframes", interval_sec="1/1"),
-        # A live output: a seek must not touch the encoder (`flush: keep`), the
-        # paced frames keep monotonic timestamps across it anyway.
         node_add("enc_video", "janus_encoder", group,
-                 src="janus_keyframes", dst="janus_encoded", codec="libx264", flush="keep",
-                 options={"b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps,
-                          "bf": 0, "preset": "ultrafast", "profile": "baseline",
-                          "tune": "zerolatency", "x264-params": "aud=1:scenecut=0"}),
+                 src="janus_keyframes", dst="janus_encoded",
+                 **janus_encoder_params(backend, fps, bitrate)),
         node_add("bsf", "janus_headers", group,
                  src="janus_encoded", dst="janus_headers", bsf="dump_extra=freq=keyframe"),
         node_add("mux", "janus_mux", group,

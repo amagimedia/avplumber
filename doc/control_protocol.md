@@ -252,6 +252,15 @@ Linking teams will also copy team's current status (like pause status) to linked
 Init hardware accelerator which may be used for encoding, decoding or filtering video frames.
 * name - identifier, supports global objects syntax (`@`). If accelerator with given name already exists, it isn't touched and no error is returned.
 * type - currently only `cuda` is supported
+* device - optional, the device string `av_hwdevice_ctx_create` takes: a CUDA
+  device index (`"0"`), a DRM render node (`"/dev/dri/renderD128"`)
+* options - optional, dictionary passed to `av_hwdevice_ctx_create`
+
+The Rust core implements this command and the `hwaccel` parameter on
+`dec_video` and `enc_video`. The name is per instance there; the `@` prefix for
+process-global objects is a C++ notion and is not special. A device is opened
+once and shared by every node that names it, so a decoder and an encoder on the
+same device pass frames without a round trip through host memory.
 
 ### Statistics
 

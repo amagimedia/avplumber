@@ -78,6 +78,7 @@ pub fn exec_line(core: &Instance, line: &str) -> Result<String, String> {
         "speed.set" => speed_set(core, rest),
         "speed.get" => speed_get(core, rest),
         "playback.status" => playback_status(core, rest),
+        "hwaccel.init" => hwaccel_init(core, rest),
         "hello" | "version" => Ok("ok".into()),
         "bye" => Ok("bye".into()),
         _ => Err(format!("unknown command {cmd}")),
@@ -357,6 +358,22 @@ fn playback_status(core: &Instance, rest: &str) -> Result<String, String> {
         .next()
         .ok_or("playback.status <group>")?;
     serde_json::to_string(&playback(core, group)?.status()).map_err(|e| e.to_string())
+}
+
+/// `hwaccel.init {"name": …, "type": "cuda", "device": …, "options": {…}}` —
+/// opens one hardware device and keeps it under `name`, for the codecs that
+/// name it. Re-initializing an existing name keeps the device it has, as C++
+/// does.
+#[cfg(feature = "ffmpeg")]
+fn hwaccel_init(core: &Instance, rest: &str) -> Result<String, String> {
+    let params: Value = serde_json::from_str(rest.trim())
+        .map_err(|e| format!("hwaccel.init expects a JSON object: {e}"))?;
+    core.services().hwaccels.init(&params)
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn hwaccel_init(_core: &Instance, _rest: &str) -> Result<String, String> {
+    Err("this build has no libav, so it cannot open a hardware device".into())
 }
 
 fn group_status(core: &Instance, rest: &str) -> Result<String, String> {

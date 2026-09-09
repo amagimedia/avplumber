@@ -74,7 +74,7 @@ impl InputHandler for Capture {
 
     fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
         if let Media::Video(frame) = &buffer {
-            let hash = super::fnv1a(&super::yuv420p_bytes(frame));
+            let hash = super::fnv1a(&super::frame_bytes(frame));
             log::debug!(
                 "{}: captured hash {hash:016x} at pts {}",
                 self.io.name,
@@ -104,6 +104,11 @@ pub struct Config {
     /// seek surfaces its one frame at once. `false` leaves the decoder at its
     /// defaults, frame threads and their delay included.
     pub low_delay: bool,
+    /// Decode on a hardware device of this type (`"cuda"`) instead of in
+    /// software, exactly as the demo's NVIDIA backend does: `h264_cuvid` into
+    /// `cuda` surfaces. The capture sink downloads them to compare pixels; the
+    /// graph itself never does.
+    pub hwaccel_type: Option<&'static str>,
 }
 
 impl Config {
@@ -113,7 +118,14 @@ impl Config {
             seconds,
             loop_,
             low_delay: true,
+            hwaccel_type: None,
         }
+    }
+
+    /// The same, decoding on a hardware device.
+    pub fn on_hardware(mut self, device_type: &'static str) -> Self {
+        self.hwaccel_type = Some(device_type);
+        self
     }
 }
 
@@ -194,21 +206,35 @@ impl Player {
         } else {
             ""
         };
-        let script = [
-            "queue.plan_capacity * 1".to_string(),
+        // The demo's NVIDIA decoder, verbatim: the device, the surface format,
+        // and cuvid for h264 only.
+        let decoder_hw = match cfg.hwaccel_type {
+            Some(_) => concat!(
+                r#","pixel_format":"cuda","hwaccel":"gpu""#,
+                r#","codec_map":{"h264":"h264_cuvid"},"hwaccel_only_for_codecs":["h264"]"#
+            ),
+            None => "",
+        };
+        let mut script = vec!["queue.plan_capacity * 1".to_string()];
+        if let Some(device_type) = cfg.hwaccel_type {
+            script.push(format!(
+                r#"hwaccel.init {{"name":"gpu","type":"{device_type}"}}"#
+            ));
+        }
+        script.extend([
             format!(
                 r#"node.add {{"type":"input","name":"in","group":"p","sync_group":"replay","dst":"pkt","url":"{url}","loop":{}}}"#,
                 cfg.loop_
             ),
             r#"node.add {"type":"demux","name":"dx","group":"p","src":"pkt","routing":{"v:0":"vpkt"}}"#.into(),
             format!(
-                r#"node.add {{"type":"dec_video","name":"dv","group":"p","src":"vpkt","dst":"raw"{decoder_options}}}"#
+                r#"node.add {{"type":"dec_video","name":"dv","group":"p","src":"vpkt","dst":"raw"{decoder_options}{decoder_hw}}}"#
             ),
             format!(
                 r#"node.add {{"type":"realtime","name":"rt","group":"p","sync_group":"replay","src":"raw","dst":"paced","tick_period":"1/{fps}"}}"#
             ),
             format!(r#"node.add {{"type":"test_capture","name":"{name}","group":"p","src":"paced"}}"#),
-        ];
+        ]);
         for line in &script {
             control::exec_line(&inst, line).unwrap_or_else(|e| panic!("`{line}`: {e}"));
         }

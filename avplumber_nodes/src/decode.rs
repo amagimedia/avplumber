@@ -14,8 +14,13 @@
 //! and with it `flush_magic`/`waiting_for_frame`, which only existed to make
 //! that call land on the right frame.
 //!
-//! Deferred: `hwaccel`/`hwaccel_only_for_codecs` (rejected rather than silently
-//! ignored).
+//! Hardware decoding is one device reference plus the pixel format the
+//! `get_format` callback picks: `hw_device_ctx` names the device `hwaccel.init`
+//! opened, `pixel_format: "cuda"` makes the callback choose the surface format,
+//! and libavcodec allocates the frame pool itself. Frames then leave this node
+//! on the device, and the [`Spec::Video`] published with them says which
+//! software format the surface holds, so a hardware encoder downstream can
+//! describe its own pool before the first frame reaches it.
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -38,6 +43,7 @@ use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
 use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
+use avplumber_f7k::services::hwaccel::HwDevice;
 
 /// The parameters both decoder types share; C++ has one template for both.
 ///
@@ -65,19 +71,45 @@ pub struct DecoderParams {
     /// Passed to `avcodec_open2`; unconsumed entries are logged.
     #[serde(default)]
     options: Option<Value>,
-    /// Build-time only: rejected outright, see the module docs. Always `None` on a
-    /// node that was built successfully.
+    /// The name of a device `hwaccel.init` opened. Resolved while the node is
+    /// built, into [`Decoder::hwaccel`].
     #[serde(default)]
-    hwaccel: Option<Value>,
-    /// Build-time only, like `hwaccel`.
+    hwaccel: Option<String>,
+    /// Use the device only when the *input* stream is one of these codecs, by
+    /// libavcodec's name for it (`"h264"`). A string or a list of them; absent
+    /// means every codec. C++ has the same gate, because setting
+    /// `hw_device_ctx` on a decoder that has no hardware path for the stream
+    /// has been seen to corrupt frames.
     #[serde(default)]
     hwaccel_only_for_codecs: Option<Value>,
 }
 
 impl DecoderParams {
-    fn build(self, name: &str, media: AvpMediaType) -> Result<Decoder, String> {
-        if self.hwaccel.is_some() || self.hwaccel_only_for_codecs.is_some() {
-            return Err("hwaccel is not implemented in the Rust core yet".into());
+    fn build(self, name: &str, media: AvpMediaType, ctx: &BuildCtx<'_>) -> Result<Decoder, String> {
+        let hwaccel = match &self.hwaccel {
+            Some(device) => Some(resolve_hwaccel(ctx, device)?),
+            None => None,
+        };
+        let hwaccel_codecs = match &self.hwaccel_only_for_codecs {
+            Some(Value::String(one)) => Some(vec![one.clone()]),
+            Some(Value::Array(many)) => Some(
+                many.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| "hwaccel_only_for_codecs holds codec names".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Some(Value::Null) | None => None,
+            Some(other) => {
+                return Err(format!(
+                    "hwaccel_only_for_codecs expects a codec name or a list of them, got {other}"
+                ));
+            }
+        };
+        if hwaccel.is_none() && hwaccel_codecs.is_some() {
+            log::warn!("{name}: hwaccel_only_for_codecs without hwaccel does nothing");
         }
         let pixel_format = match (self.pixel_format.as_deref(), media) {
             (Some(spec), AvpMediaType::VIDEO) => {
@@ -100,6 +132,8 @@ impl DecoderParams {
             media,
             params: self,
             pixel_format,
+            hwaccel,
+            hwaccel_codecs,
             state: Mutex::new(State::new(media, name)),
         })
     }
@@ -115,8 +149,8 @@ impl NodeSpec for VideoDecoderSpec {
     const TYPE_NAME: &'static str = "dec_video";
     type Node = Blocking<Decoder>;
 
-    fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::VIDEO).map(Blocking)
+    fn build(self, name: &str, ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+        self.0.build(name, AvpMediaType::VIDEO, ctx).map(Blocking)
     }
 }
 
@@ -128,8 +162,8 @@ impl NodeSpec for AudioDecoderSpec {
     const TYPE_NAME: &'static str = "dec_audio";
     type Node = Blocking<Decoder>;
 
-    fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
-        self.0.build(name, AvpMediaType::AUDIO).map(Blocking)
+    fn build(self, name: &str, ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
+        self.0.build(name, AvpMediaType::AUDIO, ctx).map(Blocking)
     }
 }
 
@@ -194,6 +228,10 @@ struct State {
     last_key: bool,
     /// `Eof` seen: drain the codec, forward it, finish.
     eof: bool,
+    /// A [`EdgeEvent::Drain`] was taken: the codec has been asked for
+    /// everything it holds, and once that is out it is flushed so it can take
+    /// packets again. Unlike `eof` this does not end the node.
+    draining: bool,
     dropped_early: u64,
     /// The position the last `FlushStop` aimed for: frames below it are
     /// dropped, and the first frame at or past it clears it. C++
@@ -217,6 +255,7 @@ impl State {
             last_pts: Ts::invalid(),
             last_key: false,
             eof: false,
+            draining: false,
             dropped_early: 0,
             resume_at: None,
             dropped_before_resume: 0,
@@ -235,7 +274,16 @@ pub struct Decoder {
     /// the pointer the context carries in `opaque` stays valid for the context's
     /// whole life.
     pixel_format: Option<Arc<PixelFormatRequest>>,
+    /// The device `params.hwaccel` named, resolved at build.
+    hwaccel: Option<Arc<HwDevice>>,
+    /// `params.hwaccel_only_for_codecs`, parsed. `None` means every codec.
+    hwaccel_codecs: Option<Vec<String>>,
     state: Mutex<State>,
+}
+
+/// The device a node named, or an error that says so at `node.add`.
+fn resolve_hwaccel(ctx: &BuildCtx<'_>, name: &str) -> Result<Arc<HwDevice>, String> {
+    ctx.hwaccel(name)
 }
 
 impl InputHandler for Decoder {
@@ -308,6 +356,7 @@ impl InputHandler for Decoder {
         state.last_pts = Ts::invalid();
         // A new discontinuity supersedes whatever the previous one aimed for.
         state.resume_at = None;
+        state.draining = false;
         state.dropped_before_resume = 0;
     }
 
@@ -334,6 +383,23 @@ impl InputHandler for Decoder {
         }
         state.eof = true;
         Ok(Blocked::Again)
+    }
+
+    /// The source has run out of packets for now, so whatever the codec is
+    /// holding has to come out: NVDEC keeps the last frame until the next
+    /// packet arrives, and a paused seek to the end of a recording is exactly
+    /// the case where no next packet exists. The codec is flushed once it is
+    /// empty, in `before_take`, so it can decode again.
+    fn on_drain(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        if state.eof || state.draining {
+            return;
+        }
+        let Some(ctx) = state.ctx.as_mut() else {
+            return;
+        };
+        state.pump.flush(ctx);
+        state.draining = true;
     }
 
     fn on_closed(&self) {
@@ -385,6 +451,17 @@ impl SingleInput for Decoder {
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
             return Ok(Some(Blocked::Done));
+        }
+        // Drained after `Drain`: everything the codec held is out, so put it
+        // back in a state that takes packets. libavcodec requires the flush
+        // before anything can be sent again.
+        if state.draining {
+            if let Some(ctx) = state.ctx.as_mut() {
+                ctx.flush_buffers();
+            }
+            state.pump.rearm();
+            state.draining = false;
+            log::debug!("{}: drained, ready for packets again", self.io.name);
         }
         if state.pump.is_loaded() {
             return Ok(Some(match self.drive(state)? {
@@ -560,6 +637,27 @@ impl Decoder {
         let codec = codec::find_decoder(implementation.as_deref(), codec_id)?;
         let mut ctx = AVCodecContext::new(&codec);
         codec::apply_packet_spec(&mut ctx, spec)?;
+        if let Some(device) = &self.hwaccel {
+            match &self.hwaccel_codecs {
+                Some(allowed) if !allowed.iter().any(|c| *c == input_name) => {
+                    log::info!(
+                        "{}: {input_name} is not in hwaccel_only_for_codecs, decoding in software",
+                        self.io.name
+                    );
+                }
+                _ => {
+                    // The device only; the frame pool is libavcodec's business,
+                    // and `get_format` (from `pixel_format`) is what keeps the
+                    // frames on it.
+                    ctx.set_hw_device_ctx(device.device_ref());
+                    log::info!(
+                        "{}: decoding {input_name} on hardware device `{}`",
+                        self.io.name,
+                        device.name
+                    );
+                }
+            }
+        }
         if let Some(request) = &self.pixel_format {
             // Safety: `request` is owned by the node, which outlives every
             // context it builds, and rsmpeg does not use `opaque` itself.
@@ -603,11 +701,54 @@ mod tests {
     use avplumber_f7k::graph::AVP_NOPTS;
     use avplumber_f7k::graph::media::test_media;
 
+    fn build_decoder(params: serde_json::Value) -> Result<Decoder, String> {
+        let instance = avplumber_f7k::Instance::new();
+        let ctx = BuildCtx {
+            instance: &instance,
+            name: "dec",
+            params: &params,
+            sync_group: None,
+        };
+        serde_json::from_value::<DecoderParams>(params.clone())
+            .map_err(|e| e.to_string())?
+            .build("dec", AvpMediaType::VIDEO, &ctx)
+    }
+
     fn decoder() -> Decoder {
-        serde_json::from_value::<DecoderParams>(serde_json::json!({}))
-            .expect("empty params")
-            .build("dec", AvpMediaType::VIDEO)
-            .expect("a decoder with no parameters builds")
+        build_decoder(serde_json::json!({})).expect("a decoder with no parameters builds")
+    }
+
+    /// A device that was never initialized is a `node.add` error, not a
+    /// silently software decoder.
+    #[test]
+    fn naming_an_unknown_hardware_device_fails_to_build() {
+        let Err(message) = build_decoder(serde_json::json!({"hwaccel": "gpu"})) else {
+            panic!("building must fail: no hwaccel.init has run");
+        };
+        assert!(message.contains("no hardware device `gpu`"), "{message}");
+    }
+
+    /// The codec gate is parsed from either shape C++ accepts.
+    #[test]
+    fn hwaccel_only_for_codecs_takes_a_name_or_a_list() {
+        let one = build_decoder(serde_json::json!({"hwaccel_only_for_codecs": "h264"}))
+            .expect("without hwaccel it only warns");
+        assert_eq!(
+            one.hwaccel_codecs.as_deref(),
+            Some(&["h264".to_string()][..])
+        );
+        let many = build_decoder(serde_json::json!({"hwaccel_only_for_codecs": ["h264", "hevc"]}))
+            .expect("a list");
+        assert_eq!(
+            many.hwaccel_codecs.as_deref(),
+            Some(&["h264".to_string(), "hevc".to_string()][..])
+        );
+        let none = build_decoder(serde_json::json!({})).expect("absent");
+        assert_eq!(none.hwaccel_codecs, None);
+        let Err(bad) = build_decoder(serde_json::json!({"hwaccel_only_for_codecs": 7})) else {
+            panic!("a number is not a codec name");
+        };
+        assert!(bad.contains("codec name"), "{bad}");
     }
 
     fn ms(val: i64) -> Ts {

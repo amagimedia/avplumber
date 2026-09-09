@@ -80,6 +80,7 @@ avplumber_f7k/
 │   │   ├── clock.rs            source-time to monotonic-time snapshots
 │   │   ├── correction.rs       shared reference plus per-member cursors
 │   │   ├── playback.rs         seek index, targets, read planning, position (§ playback)
+│   │   ├── hwaccel.rs          named hardware devices (`hwaccel.init`), frame pools
 │   │   ├── timeline.rs         named PTS-indexed JSON histories
 │   │   └── mod.rs              typed and C-vtable registries
 │   ├── control/
@@ -110,6 +111,7 @@ avplumber_f7k/
 │   ├── playback.rs             seek/play/speed/reverse/tail, frames identified by pixels
 │   ├── playback_scenarios.rs   the demo's old scenario sweeps (fps, speeds, edges, EOF)
 │   ├── encode_after_seek.rs    the live encoder survives seeks and reversal
+│   ├── hwaccel_nvidia.rs       NVDEC → NVENC with frames never leaving the GPU
 │   ├── rtp_output.rs           the Janus leg into a UDP socket
 │   ├── common/mod.rs           ffmpeg/ffprobe fixtures and ground truth
 │   └── common/player.rs        the player graph + capture sink the playback tests drive
@@ -733,14 +735,27 @@ defaults to `keep` (the codec is left alone; `avcodec_flush_buffers` on libx264
 stops it for good), with `reopen` for a recorder that wants a clean cut. An
 `Eof` still drains the codec.
 
+### Hardware devices
+
+`hwaccel.init` opens one `AVHWDeviceContext` per name (`services/hwaccel.rs`);
+`dec_video` and `enc_video` name it in their `hwaccel` parameter and resolve it
+while they are built, so a typo fails at `node.add`. The decoder sets
+`hw_device_ctx` and lets `pixel_format` (`cuda`) pick the surface format
+through its `get_format` callback — libavcodec owns the pool. The encoder sets
+`hw_device_ctx` too and, when the frames arriving are already surfaces,
+describes them with a frame pool of its own (`sw_format` from the spec's
+`sw_pix_fmt`, `format` from the device) and encodes them in place. Nothing in
+between copies a frame, so a decode-to-encode chain on one device never
+touches host memory. `hwaccel_only_for_codecs` keeps the device off a stream
+libavcodec would decode in software anyway.
+
 ### Deferrals
 
-`hwaccel` is declared and **rejected** with "not implemented in the Rust core
-yet", so a script asking for it fails at `node.add` instead of quietly
-transcoding on the CPU. The seek-only C++ decoder params (`flush_magic`,
-`waiting_for_frame`) are not declared and are ignored like any other unknown
-key: their job is done by `resume_at`. Sentinel, filters/rescale/resample and
-the C++ shim are not in this layer.
+The seek-only C++ decoder params (`flush_magic`, `waiting_for_frame`) are not
+declared and are ignored like any other unknown key: `resume_at` gives the
+precision, and [`EdgeEvent::Drain`](src/graph/edge.rs) gives the pipeline
+flush. Sentinel, filters/rescale/resample and the C++ shim are not in this
+layer, so a graph that needs `scale_cuda` or `hwupload` has no node for it yet.
 
 ## Shared services
 

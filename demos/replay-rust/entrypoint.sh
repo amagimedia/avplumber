@@ -6,15 +6,27 @@
 #   replay-entrypoint play [player.py options]       the TUI
 #   replay-entrypoint exercise [player.py options]   the RUN V2 checks, no TUI
 #   replay-entrypoint transcode [transcode.py opts]  convert a VOD into a recording
-#   replay-entrypoint sample [seconds] [fps]         a testsrc2 clip into /media, transcoded
+#   replay-entrypoint sample [seconds] [fps] [size]  a testsrc2 clip into /media, transcoded
 #   replay-entrypoint avplumber [args]               the Rust executable itself
 #   replay-entrypoint shell                          bash
+#
+# REPLAY_BACKEND picks the codecs: `auto` (default), `nvidia` for NVDEC and
+# NVENC with every frame kept on the GPU, or `cpu`.
 set -euo pipefail
 
 readonly demo_dir=/opt/avplumber/demos/replay
 readonly media_dir=/media
 readonly log_dir=/tmp/replay-demo
+readonly backend="${REPLAY_BACKEND:-auto}"
 mkdir -p "${log_dir}"
+
+# With the NVIDIA devices passed in directly, the driver libraries are
+# bind-mounted at their own paths but nothing has indexed them yet; ldconfig
+# builds the soname links libcuda and friends are loaded by. The container
+# toolkit does this itself, and then this is a no-op.
+if [[ -e /dev/nvidiactl ]]; then
+    ldconfig 2>/dev/null || true
+fi
 
 wait_for_janus() {
     local url="http://${JANUS_HOST}:${JANUS_HTTP_PORT}/janus/info"
@@ -36,6 +48,7 @@ own_media() {
 
 player_args() {
     echo --janus-host "${JANUS_HOST}" --janus-video-port "${JANUS_VIDEO_PORT}" \
+         --backend "${backend}" --janus-bitrate "${JANUS_BITRATE:-4000k}" \
          --avplumber-log "${log_dir}/avplumber.log"
 }
 
@@ -55,17 +68,21 @@ case "${mode}" in
         exec python3 player.py --no-tui --exercise-v2 $(player_args) "$@"
         ;;
     transcode)
-        python3 transcode.py "$@"
+        python3 transcode.py --backend "${backend}" "$@"
         own_media
         ;;
     sample)
         seconds="${1:-20}"
         fps="${2:-30}"
+        size="${3:-640x360}"
         source="${media_dir}/source.mp4"
-        echo "[replay] generating ${seconds} s of testsrc2 at ${fps} fps into ${source}"
-        ffmpeg -nostdin -y -v error -f lavfi -i "testsrc2=size=640x360:rate=${fps}:duration=${seconds}" \
+        echo "[replay] generating ${seconds} s of ${size} testsrc2 at ${fps} fps into ${source}"
+        # The recording is all-intra, so a big picture makes a big file: about
+        # 30 MB per second at 1080p60. `-threads 0` lets x264 use the machine.
+        ffmpeg -nostdin -y -v error -f lavfi -i "testsrc2=size=${size}:rate=${fps}:duration=${seconds}" \
             -c:v libx264 -preset veryfast -g 15 -pix_fmt yuv420p "${source}"
-        python3 transcode.py --input "${source}" --output "${media_dir}/replay.ts" --fps "${fps}" --force
+        python3 transcode.py --backend "${backend}" \
+            --input "${source}" --output "${media_dir}/replay.ts" --fps "${fps}" --force
         own_media
         ;;
     avplumber)

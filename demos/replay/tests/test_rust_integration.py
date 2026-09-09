@@ -15,9 +15,9 @@ import pytest
 
 import transcode
 from player import exercise_v2
-from replay import (JanusVideoConfig, PlaybackOperation as Op, PlayerConfig,
+from replay import (Backend, JanusVideoConfig, PlaybackOperation as Op, PlayerConfig,
                     ReplaySlotConfig, TranscodeConfig, build_player_application,
-                    read_seek_table, validate_recording)
+                    detect_backend, read_seek_table, validate_recording)
 
 
 pytestmark = pytest.mark.skipif(
@@ -26,6 +26,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 FPS = 30
+
+
+@pytest.fixture(params=[Backend.CPU, Backend.NVIDIA], ids=["cpu", "nvidia"])
+def backend(request):
+    """Both codec backends, where the machine supports them. The NVIDIA one
+    keeps every frame on the GPU."""
+    if request.param is Backend.NVIDIA and detect_backend() is not Backend.NVIDIA:
+        pytest.skip("no working NVIDIA driver with h264_cuvid and h264_nvenc")
+    return request.param
 # Long enough for a five-second nudge from the middle; the thirty-second
 # nudges stay SKIPped, as on any short recording.
 SECONDS = 14
@@ -162,6 +171,26 @@ def test_finite_transcode_publishes_every_all_intra_packet(tmp_path, frame_count
     assert all("K" in packet["flags"] for packet in packets)
 
 
+@pytest.mark.skipif(shutil.which("ffprobe") is None, reason="needs the ffprobe CLI")
+def test_transcode_on_each_backend_produces_the_same_kind_of_recording(tmp_path, backend):
+    """The transcode leg on both backends. On NVIDIA the frames go straight
+    from NVDEC to NVENC; either way the recording is all-intra with one seek
+    entry per frame, which is what playback depends on."""
+    source = _source_clip(tmp_path, 45, FPS, "interframe")
+    output = tmp_path / f"replay-{backend.value}.ts"
+    transcode.run(TranscodeConfig(source, output, FPS,
+                                  datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
+                                  backend=backend))
+
+    packets = _probe(output, "packet=flags")["packets"]
+    assert len(packets) == 45
+    assert all("K" in packet["flags"] for packet in packets)
+    assert len(read_seek_table(Path(f"{output}+seek"))) == 45
+    stream = _probe(output, "stream=codec_name,width,height")["streams"][0]
+    assert stream["codec_name"] == "h264"
+    assert (stream["width"], stream["height"]) == (160, 120)
+
+
 # ------------------------------------------------------- RTP across seeks
 
 def _fresh_packets(receiver, seconds):
@@ -178,11 +207,13 @@ def _fresh_packets(receiver, seconds):
     return packets
 
 
-def _player(recording, receiver, tmp_path, *, loop=True, payload_type=96, ssrc=0x41565001):
+def _player(recording, receiver, tmp_path, *, loop=True, payload_type=96, ssrc=0x41565001,
+            backend=Backend.CPU):
     config = PlayerConfig(
         ReplaySlotConfig(recording, loop=loop, control_timeout=5.0),
         JanusVideoConfig(video_port=receiver.getsockname()[1], rtcp_port=0,
                          payload_type=payload_type, ssrc=ssrc),
+        backend,
     )
     return build_player_application(config, avplumber_log=tmp_path / "avplumber.log")
 
@@ -197,12 +228,14 @@ def receiver():
         sock.close()
 
 
-def test_rtp_keeps_flowing_across_seeks_reverse_and_scrubbing(recording, receiver, tmp_path):
+def test_rtp_keeps_flowing_across_seeks_reverse_and_scrubbing(recording, receiver, tmp_path,
+                                                              backend):
     """The browser's view of the player: encoded video must keep arriving
     after every kind of discontinuity, with the configured payload type and
     SSRC. Regression: the encoder used to die at the first seek (the
     picture froze on REVERSE), while playback status carried on."""
-    application = _player(recording, receiver, tmp_path, payload_type=97, ssrc=0x12345678)
+    application = _player(recording, receiver, tmp_path, payload_type=97, ssrc=0x12345678,
+                          backend=backend)
     application.start()
     control = application.controller
     try:

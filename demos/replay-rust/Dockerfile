@@ -2,8 +2,11 @@
 #
 # The replay demo's player image on the Rust core: the Rust `avplumber`
 # executable and the Python TUI that drives it over the control protocol.
-# Software H.264 in and libx264 out, from RPM Fusion's FFmpeg; no GPU. Janus
-# and the browser preview are their own containers (`compose.yaml`).
+# RPM Fusion's FFmpeg gives it both backends: NVDEC and NVENC when the
+# container can reach an NVIDIA card, software H.264 and libx264 otherwise. The
+# driver itself comes from the host at run time, so nothing NVIDIA-specific is
+# installed here. Janus and the browser preview are their own containers
+# (`compose.yaml`).
 #
 # Build from the repository root (Compose does this for you):
 #

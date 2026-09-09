@@ -10,6 +10,7 @@ import pytest
 
 from replay import (
     GROUP,
+    Backend,
     JANUS_FORCE_KEYFRAME_COMMAND,
     JanusVideoConfig,
     PlayerApplication,
@@ -66,6 +67,7 @@ def test_transcode_graph_is_video_only_all_intra_with_seek_tables(tmp_path):
     assert nodes["replay_demux"]["routing"] == {"?v:0": "transcode_video_packets"}
     assert nodes["replay_decode"]["src"] == "transcode_video_packets"
     assert "hwaccel" not in nodes["replay_decode"]
+    assert nodes["replay_decode"]["codec_map"] == {"h264": "h264", "hevc": "hevc"}
     assert nodes["replay_fps"]["fps"] == "30/1"
     assert nodes["replay_keyframes"]["interval_sec"] == "1/30"
     encoder = nodes["replay_encoder"]
@@ -79,6 +81,42 @@ def test_transcode_graph_is_video_only_all_intra_with_seek_tables(tmp_path):
     assert output["seek_table"] == str(tmp_path / "replay.ts+seek")
     assert output["seek_table_text"] == str(tmp_path / "replay.ts+txt")
     assert {params["group"] for params in nodes.values()} == {"transcode"}
+
+
+def test_nvidia_transcode_graph_decodes_and_encodes_on_the_gpu(tmp_path):
+    """The NVIDIA backend: one device, cuvid in, NVENC out, and nothing that
+    could move a frame to host memory in between."""
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"vod")
+    config = TranscodeConfig(
+        source=source,
+        output=tmp_path / "replay.ts",
+        fps=30,
+        wallclock_start=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        backend=Backend.NVIDIA,
+    )
+
+    nodes, others = nodes_of(transcode_script(config))
+
+    assert others[0] == 'hwaccel.init {"name":"replay_gpu","type":"cuda"}', \
+        "the device opens before any node names it"
+    decoder = nodes["replay_decode"]
+    assert decoder["hwaccel"] == "replay_gpu"
+    assert decoder["pixel_format"] == "cuda"
+    assert decoder["codec_map"] == {"h264": "h264_cuvid", "hevc": "hevc_cuvid"}
+    assert decoder["hwaccel_only_for_codecs"] == ["h264", "hevc"]
+    encoder = nodes["replay_encoder"]
+    assert encoder["codec"] == "h264_nvenc" and encoder["hwaccel"] == "replay_gpu"
+    assert encoder["options"]["cq"] == "17" and encoder["options"]["rc"] == "vbr"
+    assert encoder["options"]["delay"] == "0"
+    # No node between them may download, upload or convert.
+    between = ["replay_fps", "replay_keyframes"]
+    assert [name for name in nodes if name not in
+            {"replay_input", "replay_demux", "replay_decode", "replay_encoder",
+             "replay_mux", "replay_output"}] == between
+    for name in between:
+        assert "pixel_format" not in nodes[name], name
+        assert "hwaccel" not in nodes[name], name
 
 
 def test_player_graph_is_one_seekable_slot_paced_into_a_janus_rtp_leg(tmp_path):
@@ -111,6 +149,7 @@ def test_player_graph_is_one_seekable_slot_paced_into_a_janus_rtp_leg(tmp_path):
     assert output["url"] == "rtp://10.0.0.5:6000?pkt_size=1200&rtcp_port=6001"
     assert output["options"] == {"payload_type": "97", "rtpflags": "skip_rtcp", "ssrc": "4660"}
     assert {params["group"] for params in nodes.values()} == {"player"}
+    assert "hwaccel" not in nodes["replay_decode"]
     # One chain, every edge produced once and consumed once.
     produced = [params["dst"] for params in nodes.values() if "dst" in params]
     produced += [edge for params in nodes.values() for edge in params.get("routing", {}).values()]
@@ -179,6 +218,69 @@ def build(tmp_path, client, **slot):
     )
     application.client = client
     return application
+
+
+def test_nvidia_player_graph_keeps_the_live_leg_on_the_gpu(tmp_path):
+    """The player on NVIDIA: NVDEC surfaces are paced, given a keyframe and
+    encoded by NVENC in place. The encoder still refuses to be flushed by a
+    seek, which is what a live output needs whatever the codec."""
+    recording = replay_file(tmp_path)
+    config = PlayerConfig(
+        ReplaySlotConfig(recording, loop=False),
+        JanusVideoConfig("10.0.0.5", 6000, 97, 0x1234),
+        Backend.NVIDIA,
+    )
+
+    nodes, others = nodes_of(player_script(config, validate_recording(recording)))
+
+    assert others == ['hwaccel.init {"name":"replay_gpu","type":"cuda"}',
+                      "queue.plan_capacity * 1"]
+    decoder = nodes["replay_decode"]
+    assert decoder["hwaccel"] == "replay_gpu" and decoder["pixel_format"] == "cuda"
+    assert decoder["codec_map"] == {"h264": "h264_cuvid"}
+    assert decoder["hwaccel_only_for_codecs"] == ["h264"]
+    assert decoder["options"] == {"threads": "1", "flags": "low_delay"}
+    encoder = nodes["janus_encoder"]
+    assert encoder["codec"] == "h264_nvenc" and encoder["hwaccel"] == "replay_gpu"
+    assert encoder["flush"] == "keep"
+    assert encoder["options"]["tune"] == "ull" and encoder["options"]["delay"] == "0"
+    assert encoder["options"]["forced-idr"] == "1"
+    assert encoder["options"]["b"] == "4000k" and encoder["options"]["g"] == "25"
+
+
+def test_the_output_bitrate_follows_the_configuration(tmp_path):
+    """A bigger picture needs a bigger number, so the encoder takes it from the
+    Janus configuration rather than a constant."""
+    recording = replay_file(tmp_path)
+    nodes, _ = nodes_of(player_script(
+        PlayerConfig(ReplaySlotConfig(recording), JanusVideoConfig(bitrate="40M"),
+                     Backend.NVIDIA),
+        validate_recording(recording),
+    ))
+    options = nodes["janus_encoder"]["options"]
+    assert options["b"] == "40M" and options["maxrate"] == "40M"
+    assert options["bufsize"] == "40M"
+    # Between decoder and encoder, only pacing and the keyframe request: no
+    # node that would touch pixels or move them off the device.
+    for name in ("replay_realtime", "janus_force_keyframe"):
+        assert "hwaccel" not in nodes[name] and "pixel_format" not in nodes[name], name
+
+
+@pytest.mark.parametrize("backend", [Backend.CPU, Backend.NVIDIA])
+def test_only_the_codecs_differ_between_backends(tmp_path, backend):
+    """Everything that is not a codec is the same graph on both backends: same
+    nodes, same edges, same order."""
+    recording = replay_file(tmp_path)
+
+    def shape(chosen):
+        nodes, _ = nodes_of(player_script(
+            PlayerConfig(ReplaySlotConfig(recording), JanusVideoConfig(), chosen),
+            validate_recording(recording),
+        ))
+        return [(name, params["type"], params.get("src"), params.get("dst"))
+                for name, params in nodes.items()]
+
+    assert shape(backend) == shape(Backend.CPU)
 
 
 def test_player_start_sends_the_graph_waits_for_a_frame_then_listens(tmp_path):

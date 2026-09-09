@@ -164,10 +164,40 @@ pub fn video_spec_of(frame: &AVFrame, time_base: AvpRational, frame_rate: AvpRat
         width: frame.width,
         height: frame.height,
         pix_fmt: frame.format,
+        sw_pix_fmt: frame_sw_pix_fmt(frame),
         frame_rate,
         sar: frame.sample_aspect_ratio.into(),
         time_base,
     }
+}
+
+/// The software format a hardware frame's surface holds, read from the pool it
+/// came out of, or `AV_PIX_FMT_NONE` for a frame that is already in system
+/// memory. C++ read the same value in `VideoParameters`.
+pub fn frame_sw_pix_fmt(frame: &AVFrame) -> i32 {
+    let buffer = frame.hw_frames_ctx;
+    if buffer.is_null() {
+        return ffi::AV_PIX_FMT_NONE;
+    }
+    // Safety: a non-null `hw_frames_ctx` on a frame is a reference to an
+    // `AVHWFramesContext`, by libavutil's own contract.
+    let data = unsafe { (*buffer).data } as *const ffi::AVHWFramesContext;
+    if data.is_null() {
+        return ffi::AV_PIX_FMT_NONE;
+    }
+    unsafe { (*data).sw_format }
+}
+
+/// Whether a pixel format names a hardware surface rather than pixels in
+/// system memory.
+pub fn is_hw_pix_fmt(pix_fmt: i32) -> bool {
+    // Safety: the call handles an unknown format by returning null.
+    let desc = unsafe { ffi::av_pix_fmt_desc_get(pix_fmt) };
+    if desc.is_null() {
+        return false;
+    }
+    let flags = unsafe { (*desc).flags };
+    flags & u64::from(ffi::AV_PIX_FMT_FLAG_HWACCEL) != 0
 }
 
 pub fn audio_spec_of(frame: &AVFrame, time_base: AvpRational) -> Spec {
@@ -189,6 +219,7 @@ pub fn same_spec(a: &Spec, b: &Spec) -> bool {
                 width: aw,
                 height: ah,
                 pix_fmt: af,
+                sw_pix_fmt: asw,
                 frame_rate: ar,
                 sar: asar,
                 time_base: atb,
@@ -197,11 +228,12 @@ pub fn same_spec(a: &Spec, b: &Spec) -> bool {
                 width: bw,
                 height: bh,
                 pix_fmt: bf,
+                sw_pix_fmt: bsw,
                 frame_rate: br,
                 sar: bsar,
                 time_base: btb,
             },
-        ) => (aw, ah, af, ar, asar, atb) == (bw, bh, bf, br, bsar, btb),
+        ) => (aw, ah, af, asw, ar, asar, atb) == (bw, bh, bf, bsw, br, bsar, btb),
         (
             Spec::Audio {
                 sample_rate: ar,
@@ -244,6 +276,7 @@ pub fn apply_media_spec(ctx: &mut AVCodecContext, spec: &Spec) -> Result<(), Str
             width,
             height,
             pix_fmt,
+            sw_pix_fmt,
             frame_rate,
             sar,
             time_base,
@@ -253,7 +286,16 @@ pub fn apply_media_spec(ctx: &mut AVCodecContext, spec: &Spec) -> Result<(), Str
             }
             ctx.set_width(*width);
             ctx.set_height(*height);
-            ctx.set_pix_fmt(*pix_fmt);
+            // A hardware surface is configured by the format it *holds*: an
+            // encoder needs that as its frame pool's `sw_format`, and the one
+            // that goes on to encode hardware frames overwrites `pix_fmt` with
+            // the surface format afterwards. C++ did the same in
+            // `initEncoderPreOpen`, from `realPixelFormat`.
+            ctx.set_pix_fmt(if *sw_pix_fmt != ffi::AV_PIX_FMT_NONE {
+                *sw_pix_fmt
+            } else {
+                *pix_fmt
+            });
             ctx.set_sample_aspect_ratio((*sar).into());
             if frame_rate.num > 0 && frame_rate.den > 0 {
                 ctx.set_framerate((*frame_rate).into());

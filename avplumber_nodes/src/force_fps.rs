@@ -187,6 +187,11 @@ impl PollNode for ForceFps {
                 output.push_event(event);
                 Ok(Tick::Again)
             }
+            EdgeItem::Event(EdgeEvent::Drain) => {
+                // The grid holds frames on purpose; only codecs drain.
+                output.push_event(EdgeEvent::Drain);
+                Ok(Tick::Again)
+            }
             EdgeItem::Event(EdgeEvent::Eof) => {
                 self.log_stats(&mut state, true);
                 output.push_event(EdgeEvent::Eof);
@@ -255,12 +260,14 @@ impl ForceFps {
                 width,
                 height,
                 pix_fmt,
+                sw_pix_fmt,
                 sar,
                 ..
             } => Spec::Video {
                 width,
                 height,
                 pix_fmt,
+                sw_pix_fmt,
                 frame_rate: self.fps,
                 sar,
                 time_base: self.timebase,
@@ -570,6 +577,7 @@ mod tests {
             width: 4,
             height: 4,
             pix_fmt: 0,
+            sw_pix_fmt: -1,
             frame_rate: AvpRational { num: 60, den: 1 },
             sar: AvpRational { num: 1, den: 1 },
             time_base: AvpRational { num: 1, den: 1000 },

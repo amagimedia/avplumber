@@ -148,6 +148,7 @@ fn video_spec() -> Spec {
         width: 8,
         height: 8,
         pix_fmt: 0,
+        sw_pix_fmt: -1,
         frame_rate: AvpRational { num: 1, den: 1 },
         sar: AvpRational { num: 1, den: 1 },
         time_base: AvpRational { num: 1, den: 1000 },

@@ -81,6 +81,15 @@ impl Pump {
         self.drained = false;
     }
 
+    /// After a drain that is *not* the end of the stream: the codec has given
+    /// up everything it held and the caller has flushed it, so it can take
+    /// input again. Unlike [`Self::reset`] this keeps whatever output is still
+    /// queued, which is the point — that output is what the drain was for.
+    pub fn rearm(&mut self) {
+        self.drained = false;
+        self.errors = 0;
+    }
+
     /// Whether the pump is holding an input the codec has not accepted yet.
     pub fn is_loaded(&self) -> bool {
         self.stash.is_some()

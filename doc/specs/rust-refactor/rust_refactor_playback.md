@@ -391,6 +391,12 @@ pacing node, so the last frame stays on the output. A later seek clears
   replaces `pyplumber` with a socket, `PositionProbe` with `playback.status`
   polling, and `isWorking` with `group.status`. The paused-picture oracle's
   self-test stayed as `tests/test_playback_assertions.py`.
+- Hardware decode and encode: `avplumber_nodes/tests/hwaccel_nvidia.rs` runs
+  the demo's NVIDIA graph and checks the surfaces between the codecs, then
+  repeats the seek, play, speed and reverse assertions with `h264_cuvid` as
+  the decoder, comparing pixels against the software decode of the same
+  recording. Skipped, loudly, without a usable device. The demo's Python
+  suite runs its end-to-end tests on both backends.
 - The live encoder across discontinuities: `avplumber_nodes/tests/encode_after_seek.rs`
   (packets keep coming after a paused seek, reversal and rapid seeks, in both
   `flush` modes) and the RTP-across-seeks test of the Python suite. Regression
@@ -419,10 +425,23 @@ pacing node, so the last frame stays on the output. A later seek clears
 
 ## 13. Deferred
 
-- Hardware acceleration: a named device-context service plus `hwaccel.init`,
-  `hw_device_ctx` and `hw_frames_ctx` in the codecs. When it lands, verify that
-  a byte-exact seek surfaces the target frame first from `h264_cuvid`; that is
-  what `flush_magic` worked around, and `resume_at` is the intended fallback.
+- ~~Hardware acceleration~~ **landed**: `services/hwaccel.rs` holds the named
+  devices, `hwaccel.init` opens them, and `dec_video`/`enc_video` take
+  `hwaccel` (plus `hwaccel_only_for_codecs` on the decoder). The demo's NVIDIA
+  backend is the C++ one: `h264_cuvid` into `cuda` surfaces, `h264_nvenc` out
+  of them, nothing in between that could copy a frame to host memory.
+  `avplumber_nodes/tests/hwaccel_nvidia.rs` asserts that every frame between
+  the two is a pooled CUDA surface.
+
+  The check this section asked for found a real gap. A byte-exact seek *is*
+  frame exact on `h264_cuvid` — `resume_at` was never needed for precision —
+  but NVDEC holds its last frame until another packet arrives, so a paused
+  seek to the final frame of a recording surfaced nothing: there is no next
+  packet. That is the other half of what `flush_magic` did, and it is now
+  [`EdgeEvent::Drain`](../../../avplumber_f7k/src/graph/edge.rs): the seekable
+  source sends it once each time it idles with nothing left to read, the
+  decoder gives up what libavcodec holds and carries on. Every target except
+  the very last frame worked without it, which is exactly why it needed a test.
 - Live, still-growing recordings: `SeekIndex::reload` on a timer, `live` with
   a delay.
 - Audio and several sources per group: the service already fans out; the clock

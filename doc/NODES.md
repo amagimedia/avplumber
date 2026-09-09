@@ -160,10 +160,13 @@ Recommended options for displaying live video:
         it's incompatible with codec or stream
 -   `hwaccel` (string, name of instance-shared object) - optional, name of
     hwaccel previously created with `hwaccel.init`
--   `hwaccel_only_for_codecs` (list of strings) - use hwaccel only for
+-   `hwaccel_only_for_codecs` (string or list of strings) - use hwaccel only for
     specified input stream codecs, useful because apparently setting
     `hw_device_ctx` in normally-software libavcodecs triggers frame
-    corruption bugs
+    corruption bugs. Names are libavcodec's for the *input* stream (`h264`),
+    and `codec_map` chooses the implementation separately, so a hardware
+    decode usually names the codec in both (`{"h264": "h264_cuvid"}` plus
+    `["h264"]`).
 -   `options` (dictionary) - optional, options passed to libavcodec
 
 ### `extract_timestamps`
@@ -455,7 +458,10 @@ Encodes video or audio frames.
 -   `options` (dictionary) - options passed to libavcodec
 -   `hwaccel` (string, name of instance-shared object) - optional
     (mandatory for some encoders), name of hwaccel previously created
-    with `hwaccel.init`
+    with `hwaccel.init`. When the frames arriving are already on that device
+    the encoder describes them to libavcodec and encodes them in place; when
+    they are in host memory it only takes the device, and an encoder that can
+    upload does so itself.
 -   `timestamps_passthrough` (bool) - default `false`, intended for codecs
     that don't buffer data (otherwise bad things like repeated
     timestamps may happen), replace PTS & DTS in outgoing packet with

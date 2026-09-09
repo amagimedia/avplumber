@@ -14,6 +14,9 @@ pub struct AvpSpec {
     pub width: i32,
     pub height: i32,
     pub pixel_format: i32,
+    /// The software format behind `pixel_format` when it names a hardware
+    /// surface, `AVP_PIX_FMT_NONE` (-1) otherwise.
+    pub sw_pixel_format: i32,
     pub frame_rate: AvpRational,
     pub sample_aspect_ratio: AvpRational,
     pub sample_rate: i32,
@@ -31,6 +34,7 @@ impl From<&Spec> for AvpSpec {
                 width,
                 height,
                 pix_fmt,
+                sw_pix_fmt,
                 frame_rate,
                 sar,
                 time_base,
@@ -39,6 +43,7 @@ impl From<&Spec> for AvpSpec {
                 width: *width,
                 height: *height,
                 pixel_format: *pix_fmt,
+                sw_pixel_format: *sw_pix_fmt,
                 frame_rate: *frame_rate,
                 sample_aspect_ratio: *sar,
                 time_base: *time_base,
@@ -94,6 +99,9 @@ impl AvpSpec {
             width: 0,
             height: 0,
             pixel_format: 0,
+            // Not zero: zero is a real pixel format, and "no software format
+            // behind this one" is what an unfilled field has to mean.
+            sw_pixel_format: -1,
             frame_rate: AvpRational::default(),
             sample_aspect_ratio: AvpRational::default(),
             sample_rate: 0,
@@ -125,6 +133,7 @@ impl AvpSpec {
                 width: self.width,
                 height: self.height,
                 pix_fmt: self.pixel_format,
+                sw_pix_fmt: self.sw_pixel_format,
                 frame_rate: self.frame_rate,
                 sar: self.sample_aspect_ratio,
                 time_base: self.time_base,

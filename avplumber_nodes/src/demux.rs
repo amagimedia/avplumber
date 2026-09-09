@@ -203,7 +203,9 @@ impl PollNode for StreamDemuxer {
                 self.log_drops(&state);
                 Ok(Tick::Done)
             }
-            EdgeItem::Event(event @ (EdgeEvent::FlushStart | EdgeEvent::FlushStop { .. })) => {
+            EdgeItem::Event(
+                event @ (EdgeEvent::FlushStart | EdgeEvent::FlushStop { .. } | EdgeEvent::Drain),
+            ) => {
                 for (_, edge) in &state.map {
                     edge.push_event(event.clone());
                 }

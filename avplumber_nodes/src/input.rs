@@ -163,6 +163,7 @@ impl NodeSpec for InputSpec {
                 eof_sent: false,
                 finish_at_us: None,
                 last_pos: None,
+                drained_here: false,
             })),
         }))
     }
@@ -309,6 +310,9 @@ struct State {
     /// Seekable mode: byte offset of the last video packet delivered, which is
     /// what the playback group plans the next read from.
     last_pos: Option<u64>,
+    /// Seekable mode: a [`EdgeEvent::Drain`] has already gone out for this stop
+    /// at the tail. Cleared by the next reposition, so each arrival asks once.
+    drained_here: bool,
 }
 
 pub struct StreamInput {
@@ -506,11 +510,19 @@ impl StreamInput {
             ReadPlan::Continue => Ok(None),
             ReadPlan::Idle => {
                 // The tail without loop, or the start when reversing: wait for a
-                // command, which wakes the park.
+                // command, which wakes the park. First, once per arrival here,
+                // ask the codecs downstream for what they hold: a decoder with
+                // a pipeline delay is still sitting on the frame the viewer
+                // asked for, and no further packet is coming to push it out.
+                if !state.drained_here {
+                    state.drained_here = true;
+                    out.push_event(EdgeEvent::Drain);
+                }
                 self.io.wait(50);
                 Ok(Some(Blocked::Again))
             }
             ReadPlan::Reposition(Reposition { to, discontinuity }) => {
+                state.drained_here = false;
                 if discontinuity {
                     out.push_event(EdgeEvent::FlushStart);
                 }
