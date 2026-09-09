@@ -18,19 +18,14 @@ Two graphs run in one process:
 Verified end-to-end on Docker Desktop (aarch64) producing 28k mpeg4
 packets of the testsrc pattern in a 10-second run.
 
-## Status
-
-NVIDIA support is temporarily disabled in this image. The Dockerfile
-applies only patches `0001`, `0005`, `0006`, `0008` from
-`deps/ffmpeg-patches/`; `0002` (CUDA composition suite), `0003` (NPP
-CUDA13 compat), `0004` (NVDEC intra), and `0007` (NDI) are held back
-until the mxl path is folded into `demos/mixer/Dockerfile` alongside
-CUDA.
-
 ## Requirements
 
-* Linux x86_64 or aarch64 (MXL SDK is Linux-only — no macOS support).
+* Linux x86_64 (MXL SDK is Linux-only — no macOS support).
 * Docker with enough tmpfs at `/dev/shm` (default is fine for the demo).
+* NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  are optional for the MXL demo itself (CUDA init fails silently at
+  runtime without them), but the shared mixer image is built with
+  CUDA support and other demos need it.
 * The 8-patch stack applied to `n7.1.5`. `deps/ffmpeg-patches/verify.sh`
   confirms the tree hash; the MXL patch (`0008-...`) is generated
   from `cbcrc/FFmpeg` via `deps/ffmpeg-patches/Dockerfile.mkpatch`
@@ -38,26 +33,31 @@ CUDA.
 
 ## Build
 
-From the repository root (after `git submodule update --init --recursive`):
+This demo shares its runtime image with `demos/mixer/`. Build once
+from the repository root (after `git submodule update --init --recursive`):
 
 ```sh
-docker build -f demos/mxl/Dockerfile -t avplumber-mxl:local .
+docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
 ```
 
-The build:
+The image build:
 
-1. Bootstraps `microsoft/vcpkg` and Rust 1.88.0.
-2. Builds and installs the MXL SDK (`dmf-mxl/mxl` @ `v1.1.0-beta-1`)
+1. Installs distro `gcc-11` plus `gcc-13` from
+   `ppa:ubuntu-toolchain-r/test` (the MXL SDK needs C++20; FFmpeg and
+   avplumber keep using gcc-11).
+2. Bootstraps `microsoft/vcpkg` and Rust 1.88.0.
+3. Builds and installs the MXL SDK (`dmf-mxl/mxl` @ `v1.1.0-beta-1`)
    into `/usr/local` — libmxl is statically linked against spdlog, so
    its `.pc` file is scrubbed of the private `Requires` before FFmpeg
    configure.
-3. Applies the reduced patch stack to FFmpeg `n7.1.5`, strips a
+4. Applies the full 8-patch stack to FFmpeg `n7.1.5`, strips a
    handful of fork-side test scaffolding that references files not
    present in `n7.1.5` (`tests/fate/ogg-*.mak`, duplicated
-   `fate-mxl-uri` rule), and configures with `--enable-libmxl
-   --enable-demuxer=mxl --enable-muxer=mxl --enable-protocol=mxl`.
-4. Builds `pyplumber` with `HAVE_CUDA=0 NEURAL_NET=0` (`-j2` to stay
-   inside Docker Desktop's memory ceiling on Apple Silicon).
+   `fate-mxl-uri` rule), and configures with CUDA (`--enable-cuda
+   --enable-cuda-nvcc --enable-cuvid --enable-nvdec --enable-nvenc`)
+   plus MXL (`--enable-libmxl --enable-demuxer=mxl --enable-muxer=mxl
+   --enable-protocol=mxl`).
+5. Builds `pyplumber` with `HAVE_CUDA=1 HAVE_NVCC=1`.
 
 Verified inside the image:
 
@@ -78,11 +78,15 @@ echo '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' \
   > /dev/shm/mxl/options.json
 
 docker run --rm --ipc=host \
+    --entrypoint python3 \
     -v /dev/shm/mxl:/dev/shm/mxl \
     -v "$PWD/demos/mxl/test-media:/media" \
     -e AVP_OUTPUT=/media/out.mp4 \
-    avplumber-mxl:local
+    avplumber-mixer:local /build/demos/mxl/mxl_demo.py
 ```
+
+Add `--gpus all` if you're on an NVIDIA host and want CUDA
+initialization to succeed (the MXL demo itself doesn't need it).
 
 Defaults to publishing an `lavfi testsrc` pattern; override with
 `-e AVP_INPUT=/media/your-file.mp4` for a real file (played back
