@@ -5,15 +5,28 @@ ARG AVPLUMBER_REVISION=workspace
 ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n13.0.19.0
 ARG BUILD_JOBS=4
+ARG MXL_TAG=v1.1.0-beta-1
 
+# gcc-13 is required by the MXL SDK (C++20 features + newer libstdc++).
+# Ubuntu 22.04 defaults to gcc-11, so pull gcc-13 from the ubuntu
+# toolchain PPA and keep it alongside; FFmpeg and avplumber continue
+# to use gcc-11.
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         autoconf \
         automake \
+        bison \
         build-essential \
         ca-certificates \
         cmake \
         curl \
+        flex \
+        g++-13 \
+        gcc-13 \
         git \
         libboost-all-dev \
         libcurl4-openssl-dev \
@@ -22,24 +35,70 @@ RUN apt-get update \
         libgles-dev \
         libglvnd-dev \
         libgnutls28-dev \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libpcap-dev \
         libssl-dev \
         libtool \
+        libx11-dev \
         make \
         nasm \
+        ninja-build \
         pkg-config \
         python3 \
         python3-dev \
         python3-numpy \
         python3-pil \
         python3-pip \
+        tar \
+        unzip \
         xxd \
+        zip \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 22.04 ships cmake 3.22 but the MXL SDK requires >= 3.24.
+# Upgrade via pip so a modern cmake is on PATH before FFmpeg configure.
+RUN python3 -m pip install --no-cache-dir --upgrade 'cmake>=3.28'
 
 RUN git clone --quiet --branch "${NV_CODEC_HEADERS_TAG}" --depth 1 \
         https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
     && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
     && rm -rf /tmp/nv-codec-headers
+
+# --- Rust (MXL's ada-url dep pulled through vcpkg needs a rustc) --------
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+ENV PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain 1.88.0 --profile minimal \
+    && rustc --version
+
+# --- vcpkg (used by the MXL SDK's CMake toolchain) ----------------------
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_FORCE_SYSTEM_BINARIES=1
+RUN git clone --quiet https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT" \
+    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+# --- MXL SDK ------------------------------------------------------------
+# Built with gcc-13 (required by the SDK). FFmpeg + avplumber below keep
+# using the distro gcc-11 that the CUDA composition suite is validated
+# with. libmxl statically links spdlog, so its pkg-config file is
+# scrubbed of the private Requires before FFmpeg configure looks at it.
+RUN git clone --quiet --branch "${MXL_TAG}" --depth 1 \
+        https://github.com/dmf-mxl/mxl.git /tmp/mxl \
+    && CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 \
+       cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+        -DVCPKG_MANIFEST_MODE=ON \
+        -DBUILD_DOCS=OFF \
+        -DBUILD_TESTS=OFF \
+    && cmake --build /tmp/mxl/build --parallel "$(nproc)" \
+    && cmake --install /tmp/mxl/build \
+    && ldconfig \
+    && sed -i '/^Requires.private: spdlog$/d' /usr/local/lib/pkgconfig/libmxl.pc \
+    && rm -rf /tmp/mxl
 
 COPY deps/ffmpeg /build/deps/ffmpeg
 
@@ -50,7 +109,8 @@ RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
 RUN cd /tmp/ffmpeg \
-    && ./configure \
+    && PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+       ./configure \
         --prefix=/usr/local \
         --libdir=/usr/local/lib \
         --incdir=/usr/local/include \
@@ -67,6 +127,10 @@ RUN cd /tmp/ffmpeg \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
+        --enable-libmxl \
+        --enable-demuxer=mxl \
+        --enable-muxer=mxl \
+        --enable-protocol=mxl \
         --disable-doc \
         --disable-htmlpages \
         --disable-manpages \
@@ -85,7 +149,11 @@ RUN cd /tmp/ffmpeg \
 RUN for f in scale_cuda tonemap_cuda; do /usr/local/bin/ffmpeg -hide_banner -filters | grep -q " $f " || exit 1; done \
     && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda \
        | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
-              END { exit !(m && d && c) }'
+              END { exit !(m && d && c) }' \
+    && /usr/local/bin/ffmpeg -hide_banner -demuxers 2>/dev/null \
+       | awk '$1 ~ /D/ && $2 == "mxl" { found = 1 } END { exit !found }' \
+    && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null \
+       | awk '$1 ~ /E/ && $2 == "mxl" { found = 1 } END { exit !found }'
 
 WORKDIR /build
 
@@ -125,8 +193,13 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        PYTHONPATH=/build \
        python3 -c 'import pyplumber'
 
-
 RUN python3 -m pip install --no-cache-dir -r /build/pyplumber/mixer/gui/requirements.txt
+
+COPY demos/mxl /build/demos/mxl
+
+RUN if [ -s /build/demos/mxl/requirements.txt ]; then \
+        python3 -m pip install --no-cache-dir -r /build/demos/mxl/requirements.txt; \
+    fi
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
