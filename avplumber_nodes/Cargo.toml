@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["async", "ffmpeg"]
 # Mirrors `avplumber_f7k`'s selectors and forwards them: `ffmpeg` is only the
 # code gate, and each selector picks the ABI in this crate, in the framework and
 # in the two libav crates at once, so a mixed set is impossible.

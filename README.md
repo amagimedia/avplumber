@@ -1,5 +1,52 @@
 # avplumber - make your own libav processing graph
 
+## 🚧🚧🚧 🦀 Rust refactor in progress 🦀 🚧🚧🚧
+
+Currently we're in progress of porting the framework and some nodes to Rust. Besides usual gains of C++ -> Rust migration (language more liked by developers, memory safety, race conditions more difficult to create accidentally), it gives us a chance to reconsider wrong, [9-years-old assumptions](https://medium.com/amagi-engineering/story-of-avplumber-open-source-multimedia-streaming-engine-from-amagi-fc649cce2637), and now avplumber will have:
+
+* direct, unbuffered edges in the graph
+* first-class support for non-blocking nodes, including async/await
+* control packets (drain, flush, EOF, format change) travelling the graph just like media packets, no out-of-band mumbo-jumbo
+
+The new Rust code is located in `avplumber_f7k/` and `avplumber_nodes/`. The standalone binary is built from `avplumber_nodes/src/bin/avplumber.rs`.
+
+When we're ready for it (see Roadmap below), the Rust version is intended to eventually supersede the C++ version.
+
+**Node development Rust API is not considered stable - reviews are in progress.**
+
+### Roadmap
+
+* ✅ simple transcoder
+* ✅ GPU-backed transcoder, with hardware frames (no wasting PCIe bandwidth)
+* ✅ playback control (pause, seek, speed)
+* macros for node authoring with less boilerplate
+* test direct edges
+* port some nodes to async/await
+* video filtering via libavfilter
+* sentinel (timestamp correction for non-ideal input streams)
+* C API, for both node authoring and embedding avplumber
+* support for legacy C++ nodes, via a shim - this will enable us to use already written nodes that would be impractical to port to Rust, because libraries used have only C or C++ APIs
+* pyplumber (Python bindings)
+
+### Demo in Docker
+We have video player demo working in Docker, with WebRTC output via Janus, with or without hardware acceleration: [`demos/replay_rust/`](demos/replay-rust/README.md).
+
+### Just run the standalone executable
+
+```
+cargo run --features=ffmpeg6
+```
+
+Change `ffmpeg6` to the version you have on the host system. See [`avplumber_f7k/Cargo.toml`](avplumber_f7k/Cargo.toml) for supported versions.
+
+----
+
+**End of the description of the Rust port, the text below and other doc files may contain outdated information, but commands and nodes, if they are ported, should be backward-compatible.**
+
+----
+
+## What is avplumber
+
 avplumber is a graph-based real-time processing framework. Graph can be reconfigured on the fly using a text API. Most nodes are based on FFmpeg's libavcodec, libavformat & libavfilter. You can create entire transcoding & filtering chain in it, replacing FFmpeg in many use cases.
 
 avplumber was created because we were experienced with FFmpeg and wanted to have its features, plus more flexibility. For example, it is possible to:
@@ -17,7 +64,7 @@ However, it does not replace FFmpeg in all use cases. For example, subtitles are
 
 Curious about history and applications of this project? **Read [Story of avplumber — open source multimedia streaming engine from Amagi](https://medium.com/amagi-engineering/story-of-avplumber-open-source-multimedia-streaming-engine-from-amagi-fc649cce2637)** at [Amagi Engineering](https://medium.com/amagi-engineering) blog.
 
-## Quick start
+## Quick start (C++)
 
 Note: be sure to [check other branches](https://github.com/amagimedia/avplumber/branches/active) ([tree view](https://github.com/amagimedia/avplumber/network)) if you want to test latest features.
 
@@ -50,7 +97,7 @@ Development on Windows can be done using Docker and VSCode Dev Containers.
 
 Development container comes with all required dependencies and clangd installed.
 
-### Test stream demo
+### Test stream demo (C++)
 
 To quickly run demo with FFmpeg test source, use the provided Docker Compose file:
 
@@ -69,7 +116,7 @@ This demo uses [MediaMTX](https://github.com/bluenviron/mediamtx) as streaming s
     brew install docker docker-compose colima
     colima start
 
-## Demos
+## Demos (C++)
 
 Start with the [demo setup guide](demos/README.md) for public-source Docker
 builds, NVIDIA requirements, and a local WebRTC preview.
@@ -86,7 +133,7 @@ These demos produce video only. For smaller building blocks, see the
 [fixed graph examples](examples/README.md) and
 [Python examples](pyplumber/examples/README.md).
 
-## Build process details
+## Build process details (C++)
 
 The build is driven by Makefile variables. Set them on the `make` command line, e.g.:
 
