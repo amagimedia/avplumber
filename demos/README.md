@@ -86,3 +86,7 @@ docker compose -f docker-compose/dmabuf/compose.yaml down
   try the controls without video or GPU setup.
 - [Browser capture and overlays](../doc/dmabuf.md): shared services and mixer base API;
   use the [mixer demo](mixer/README.md) to run them.
+- [MXL round-trip](mxl/README.md): publish a file into an MXL shared-memory
+  domain and read it back. Linux-only, no GPU required, but depends on the
+  pending `0013-avformat-libmxl-demuxer-muxer.patch`.
+
