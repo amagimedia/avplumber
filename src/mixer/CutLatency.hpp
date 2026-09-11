@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace avp::mixer {
 
@@ -24,6 +25,7 @@ public:
     };
     struct Snapshot {
         Sample direct, previewed;
+        std::vector<Sample> direct_recent, previewed_recent;
     };
 
 private:
@@ -107,6 +109,9 @@ public:
         pending_->encoded_pts = pts;
         pending_->state = "measured";
         publish();
+        auto& recent = pending_->previewed ? samples_.previewed_recent : samples_.direct_recent;
+        if (recent.size() == 3) recent.erase(recent.begin());
+        recent.push_back(*pending_);
         pending_.reset();
         armed_ = false;
         input_pts_.clear();

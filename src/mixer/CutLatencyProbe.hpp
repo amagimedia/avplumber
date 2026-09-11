@@ -24,8 +24,15 @@ struct CutLatencyProbe {
             value["encoded_pts"] = sample.encoded_pts ? Parameters(*sample.encoded_pts) : Parameters(nullptr);
             return value;
         };
+        auto withRecent = [&](const CutLatency::Sample& sample, const std::vector<CutLatency::Sample>& recent) {
+            auto value = json(sample);
+            value["recent"] = Parameters::array();
+            for (const auto& entry : recent) value["recent"].push_back(json(entry));
+            return value;
+        };
         return {{"endpoint", "encoder_output"}, {"encoder", encoder_name},
-                {"direct", json(samples.direct)}, {"previewed", json(samples.previewed)}};
+                {"direct", withRecent(samples.direct, samples.direct_recent)},
+                {"previewed", withRecent(samples.previewed, samples.previewed_recent)}};
     }
 
     uint64_t frameToken(const av::VideoFrame& frame) const {

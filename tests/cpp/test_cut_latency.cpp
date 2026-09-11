@@ -27,6 +27,8 @@ int main() {
     assert(sample.encoded_pts == 13);
     meter.encoderOutput(12, start + 150ms);
     assert(meter.snapshot(start).direct.milliseconds == sample.milliseconds);
+    assert(meter.snapshot(start).direct_recent.size() == 1);
+    assert(meter.snapshot(start).previewed_recent.empty());
 
     meter.begin("A", true, 0, start);
     meter.arm();
@@ -63,6 +65,26 @@ int main() {
     token = meter.tokenForInput(1, false);
     for (int i = 100; i <= 356; ++i) meter.encoderInput(token, i);
     assert(meter.snapshot(start).direct.state == "unmatched");
+
+    // Failed cuts and duplicate output packets never enter the rolling window.
+    assert(meter.snapshot(start).direct_recent.size() == 1);
+    assert(meter.snapshot(start).previewed_recent.size() == 1);
+    for (int i = 0; i < 4; ++i) {
+        meter.begin("B", false, 1, start);
+        meter.arm();
+        meter.encoderInput(meter.tokenForInput(1, false), 400 + i);
+        meter.encoderOutput(400 + i, start + std::chrono::milliseconds(100 + i));
+        meter.encoderOutput(400 + i, start + 500ms);
+    }
+    const auto history = meter.snapshot(start);
+    assert(history.direct_recent.size() == 3);
+    assert(history.previewed_recent.size() == 1);
+    for (int i = 0; i < 3; ++i) {
+        assert(*history.direct_recent[i].milliseconds == 101 + i);
+        assert(history.direct_recent[i].state == "measured");
+        assert(history.direct_recent[i].encoded_pts == 401 + i);
+    }
+    assert(CutLatency().snapshot().direct_recent.empty());
 
     CommandTiming outer(start);
     { CommandTiming inner(start + 1s); assert(CommandTiming::received() == start + 1s); }

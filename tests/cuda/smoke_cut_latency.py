@@ -139,10 +139,16 @@ def run(args):
                 picture = next(f for f in frames if f["pts"] == sample["encoded_pts"])
                 observed_ms = (picture["at"] - before) * 1000
                 assert sample["scene"] == f"scene{target}", sample
+                assert len(sample["recent"]) == min(_ + 1, 3), sample
+                assert sample["recent"][-1]["id"] == sample["id"], sample
                 assert -5 <= observed_ms - sample["ms"] < 30, (sample, observed_ms)
                 results.append({"mode": mode, "avp_ms": sample["ms"], "observed_encoded_ms": observed_ms,
                                 "before": before, "target": target, "pts": sample["encoded_pts"]})
                 previous = target
+        status = command("mixer.status cut_test")["cut_latency"]
+        for mode in ("direct", "previewed"):
+            assert [s["encoded_pts"] for s in status[mode]["recent"]] == [
+                s["pts"] for s in results if s["mode"] == mode][-3:], status
         assert not errors, errors
         captured = tuple(frames)
         # Decode the captured access units independently. A command ACK or an
