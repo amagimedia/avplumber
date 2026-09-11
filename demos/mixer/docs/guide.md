@@ -20,7 +20,7 @@ The interface provides:
 
 With Direct mode off, selecting a scene or layout loads it into Preview.
 Cut, Fade, and Media Wipe take the selected scene to Program. With Direct mode
-on, scene and layout selections use the current transition immediately. The
+on, scene and layout selections use the current transition immediately (Cut by default). The
 take buttons and adjacent selector share this choice. Fade uses the configured
 duration; Media Wipe uses the file path and the clip's duration.
 

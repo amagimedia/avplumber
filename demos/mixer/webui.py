@@ -31,9 +31,11 @@ TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
 class MixerBridge:
     """Serialized access to the mixer's control connection from HTTP threads."""
 
-    def __init__(self, host: str, port: int, mixer: str, timeout: float = 10.0):
+    def __init__(self, host: str, port: int, mixer: str, timeout: float = 10.0,
+                 transition: str | None = None):
         self.mixer = mixer
         self.timeout = timeout
+        self.transition = transition
         self._connection = AvpConnection(host, port)
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="mixer-bridge").start()
@@ -61,6 +63,8 @@ class MixerBridge:
             state["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}") or "{}")
         except Exception:
             state["settings"] = {}   # older mixers, or one started without a config
+        if self.transition is not None:
+            state["settings"]["transition"] = self.transition
         return state
 
     def take(self, request: dict) -> None:
@@ -136,8 +140,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mixer", default="mixer")
     parser.add_argument("--bind", default="0.0.0.0", help="address to serve the page on")
     parser.add_argument("--http-port", type=int, default=7681)
+    parser.add_argument("--transition", choices=("cut", "fade", "wipe"),
+                        help="Override the page's initial transition without changing the running mixer")
     args = parser.parse_args(argv)
-    server = serve(MixerBridge(args.host, args.port, args.mixer), args.bind, args.http_port)
+    server = serve(MixerBridge(args.host, args.port, args.mixer, transition=args.transition),
+                   args.bind, args.http_port)
     print(f"mixer web UI on http://{args.bind}:{args.http_port} "
           f"controlling {args.mixer} at {args.host}:{args.port}", flush=True)
     server.serve_forever()

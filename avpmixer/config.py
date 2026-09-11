@@ -20,7 +20,7 @@ FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 DEFAULT_FADE_SECONDS = 0.5
-DEFAULT_TRANSITION = "fade"
+DEFAULT_TRANSITION = "cut"
 
 
 @dataclass(frozen=True)

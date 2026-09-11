@@ -99,7 +99,7 @@
   ],
   "control": {
     "direct": true,
-    "transition": "fade",
+    "transition": "cut",
     "fade_seconds": 0.5,
     "default_wipe": "wipe"
   },

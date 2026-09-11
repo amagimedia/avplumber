@@ -165,7 +165,7 @@ class MixerTui(App):
         fade_duration: float,
         wipe_file: str = "",
         direct: bool = True,
-        transition: str = "fade",
+        transition: str = "cut",
     ) -> None:
         super().__init__()
         self.connection = AvpConnection(host, port)
@@ -523,7 +523,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--fade-duration", type=float, default=0.5)
     parser.add_argument("--wipe-file", default="",
                         help="Transparent media wipe path on the mixer host")
-    parser.add_argument("--transition", default="fade", choices=("cut", "fade", "wipe"),
+    parser.add_argument("--transition", default="cut", choices=("cut", "fade", "wipe"),
                         help="Transition a direct-mode pick takes with until the mixer says otherwise")
     parser.add_argument("--no-direct", action="store_true",
                         help="Start with scene picks loading preview instead of taking to program")

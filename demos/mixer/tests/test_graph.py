@@ -529,7 +529,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
-        "direct": False, "fade_seconds": 0.8, "transition": "fade",
+        "direct": False, "fade_seconds": 0.8, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
         "wipes": [{"id": "swoosh", "name": "swoosh", "path": "/media/swoosh.mov",
@@ -672,9 +672,9 @@ def test_control_section_carries_the_defaults_the_surfaces_start_from():
     del doc["control"]
     del doc["canvas"]["fps"]
     cfg = mc.parse(doc)
-    # An undeclared canvas rate is 30, and a pick takes with a half-second fade.
-    assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "fade")
-    assert cfg.settings()["transition"] == "fade"
+    # An undeclared canvas rate is 30, and a pick cuts directly to program.
+    assert (cfg.fps, cfg.direct, cfg.fade_seconds, cfg.transition) == (30, True, 0.5, "cut")
+    assert cfg.settings()["transition"] == "cut"
     chosen = mc.parse({**doc, "control": {"transition": "wipe", "fade_seconds": 1.5, "direct": False}})
     assert (chosen.transition, chosen.fade_seconds, chosen.direct) == ("wipe", 1.5, False)
     with pytest.raises(mc.ConfigError, match="control.transition must be"):
@@ -697,5 +697,5 @@ def test_generated_grids_show_every_distinct_source_before_any_repeat():
     assert [s["id"] for s in doc["sources"]] == ["clip0", "clip1", "clip2", "clip3"]
     four_box = next(s for s in doc["scenes"] if s["id"] == "grid_4_page_0")
     assert [i["source"] for i in four_box["items"]] == ["clip0", "clip1", "clip2", "clip3"]
-    assert doc["canvas"]["fps"] == 30 and doc["control"]["transition"] == "fade"
+    assert doc["canvas"]["fps"] == 30 and doc["control"]["transition"] == "cut"
     assert doc["renditions"][0]["bitrate_kbps"] == 2700 and doc["renditions"][0]["aspect"] == "9:16"
