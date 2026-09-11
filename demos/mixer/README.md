@@ -103,10 +103,9 @@ document of sources, scenes, wipes, control defaults and encoded outputs — no
 **[docs/config.md](docs/config.md)**; [`config.example.json`](config.example.json)
 is a worked example.
 
-[`config.demo.json`](config.demo.json) is the running demo's full show: **41
-scenes, 16 unique sources and five wipes**, with private locations replaced by
-placeholders. See [the deployment snapshot](docs/live-demo.md) for source sizes,
-launch settings and the distinction between startup prewarming and direct cuts.
+The example uses placeholder locations. Supply your own source IDs, URLs, media
+paths and scenes in a deployment configuration kept outside the public checkout.
+The running show's source list is not a mixer default.
 
 ```sh
 docker run ... avplumber-mixer:local --config /media/mixer.json --janus-output
