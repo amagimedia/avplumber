@@ -13,9 +13,10 @@ python3 demos/mixer/mixer.py --config mixer.json --janus-output
 in the [schema note](../../../doc/research/2026-09-08-mixer-config-schema.md);
 this file is the reference.
 
-For the full deployed 41-scene show, use [`config.demo.json`](../config.demo.json)
-and its [snapshot notes](live-demo.md). Its private media and browser locations
-are placeholders that must be filled in before running.
+[`config.example.json`](../config.example.json) is a generic schema example, not
+a deployed source list. Replace its placeholder URLs and paths in your own show
+file, kept outside the public checkout. Source IDs, source count and scenes are
+supplied by that file; the runtime does not depend on the recorded demo's inputs.
 
 ## Shape
 

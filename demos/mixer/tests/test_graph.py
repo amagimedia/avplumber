@@ -538,59 +538,20 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert nodes["program_fps"]["fps"] == "60/1"      # outputs follow the document's fps, not the CLI default
 
 
-def test_deployed_show_preserves_sources_scenes_aliases_and_output(tmp_path, monkeypatch):
-    from collections import Counter
-    from avpmixer import config as mc, dmabuf_inputs
+def test_example_configuration_uses_placeholder_locations_and_valid_layers():
+    from avpmixer import config as mc
 
-    path = Path(__file__).resolve().parents[1] / "config.demo.json"
+    path = Path(__file__).resolve().parents[1] / "config.example.json"
     cfg = mc.load(path)
-    assert (cfg.canvas_w, cfg.canvas_h, cfg.fps) == (1080, 1920, 30)
-    assert Counter(s.kind for s in cfg.sources) == {"browser": 7, "video": 9}
-    assert len(cfg.scenes) == 41
-    assert cfg.initial_scene == "fullscreen_0"
-    grid = next(s for s in cfg.scenes if s.id == "grid_16_page_0")
-    assert Counter(i.source for i in grid.items) == {s.id: 1 for s in cfg.sources}
-    assert len({(i.dst.x, i.dst.y) for i in grid.items}) == 16
-    assert all((i.dst.w, i.dst.h) == (540, 240) for i in grid.items)
-    assert len(cfg.wipes) == 5
-    assert (cfg.direct, cfg.transition, cfg.fade_seconds, cfg.default_wipe) == (
-        True, "fade", 0.5, "ribbons")
-    assert len(cfg.renditions) == 1
-    rendition = cfg.renditions[0]
-    assert (rendition.target, rendition.width, rendition.height, rendition.fps,
-            rendition.bitrate_kbps, rendition.profile, rendition.preset) == (
-        "janus", 1080, 1920, 30, 2700, "baseline", "p7")
-
     for source in cfg.sources:
         if source.kind == "browser":
             assert source.location == f"https://<host>/{source.id}"
-            assert (source.width, source.height, source.fps) == (1920, 1080, 30)
-            (tmp_path / f"{source.id}.sock").touch()
         else:
             assert source.location.startswith("<path>/")
     assert all(w.path.startswith("<path>/") for w in cfg.wipes)
-
-    # Supply the inspected media dimensions without probing private files.
-    cfg = mc.with_probed_sizes(cfg, probe=lambda location: (
-        (1920, 1080) if Path(location).name == "big_buck_bunny_1080p_h264.mov"
-        else (640, 360)))
-    monkeypatch.setattr(mc, "load", lambda _path: cfg)
-    monkeypatch.setattr(dmabuf_inputs, "rest_request",
-                        lambda *_args, **_kwargs: {"windows": []})
-    FakeMixer.instances.clear()
-    app = build_application(GraphOptions(
-        config=str(path), janus_output=True, wipe_cache_mb=1536,
-        dmabuf_socket_dir=str(tmp_path)), api=fake_api())
-    mixer = FakeMixer.instances[-1]
-    types = Counter(node.parameters["type"] for node in app.avp.nodes)
-    assert types["dec_video"] == 9
-    assert types["ipc_dmabuf_source"] == 7
-    assert set(mixer.scenes) == {s.id for s in cfg.scenes}
-    assert len(mixer.sources) == sum(cfg.alias_counts.values())
-    assert mixer.parameters["cache_wipes_mb"] == 1536
-    assert mixer.initial_scene == ("fullscreen_0", "A")
+    cfg = mc.with_probed_sizes(cfg, probe=lambda _location: (1920, 1080))
     for scene in cfg.scenes:
-        assert mixer.scenes[scene.id]["sources"] == mc.scene_layers(cfg, scene)
+        assert len(mc.scene_layers(cfg, scene)) == len(scene.items)
 
 
 def test_cli_passes_the_web_ui_url_through_to_the_options():

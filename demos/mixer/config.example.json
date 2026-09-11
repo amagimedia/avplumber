@@ -19,82 +19,82 @@
   ],
   "sources": [
     {
-      "id": "sg_static_rect",
+      "id": "page0",
       "kind": "browser",
-      "url": "https://app.singular.live/output/5ZzzJADkEiSGsfZxxbltbJ/Output?aspect=16:9",
+      "url": "https://<host>/page0",
       "width": 1920,
       "height": 1080
     },
     {
-      "id": "sg_moving_rect",
+      "id": "page1",
       "kind": "browser",
-      "url": "https://app.singular.live/output/7oTbGvhQYlmEHWIWE4NWCg/Output?aspect=16:9",
+      "url": "https://<host>/page1",
       "width": 1920,
       "height": 1080
     },
     {
-      "id": "sg_text20",
+      "id": "page2",
       "kind": "browser",
-      "url": "https://app.singular.live/output/4BxIZCOM2J5PPgojAnZfRj/Output?aspect=16:9",
+      "url": "https://<host>/page2",
       "width": 1920,
       "height": 1080
     },
     {
-      "id": "sg_graphics",
+      "id": "page3",
       "kind": "browser",
-      "url": "https://app.singular.live/output/6MAXCzTulkAyZlGPHfYJoM/Output?aspect=16:9",
+      "url": "https://<host>/page3",
       "width": 1920,
       "height": 1080
     },
     {
-      "id": "sg_fillrate",
+      "id": "page4",
       "kind": "browser",
-      "url": "https://app.singular.live/output/3KM3hemkGlLdPfBrHVCXuK/Output?aspect=16:9",
+      "url": "https://<host>/page4",
       "width": 1920,
       "height": 1080
     },
     {
-      "id": "sg_combined",
+      "id": "page5",
       "kind": "browser",
-      "url": "https://app.singular.live/output/6W76ei5ZNekKkYhe8nw5o8/Output?aspect=16:9",
+      "url": "https://<host>/page5",
       "width": 1920,
       "height": 1080
     },
     {
       "id": "cam0",
       "kind": "video",
-      "path": "/media/camera-0.mp4"
+      "path": "<path>/camera-0.mp4"
     },
     {
       "id": "cam1",
       "kind": "video",
-      "path": "/media/camera-1.mp4"
+      "path": "<path>/camera-1.mp4"
     },
     {
       "id": "cam2",
       "kind": "video",
-      "path": "/media/camera-2.mp4"
+      "path": "<path>/camera-2.mp4"
     },
     {
       "id": "cam3",
       "kind": "video",
-      "path": "/media/camera-3.mp4"
+      "path": "<path>/camera-3.mp4"
     },
     {
       "id": "cam4",
       "kind": "video",
-      "path": "/media/camera-4.mp4"
+      "path": "<path>/camera-4.mp4"
     },
     {
       "id": "cam5",
       "kind": "video",
-      "path": "/media/camera-5.mp4"
+      "path": "<path>/camera-5.mp4"
     }
   ],
   "wipes": [
     {
       "id": "wipe",
-      "path": "/media/wipe.mov"
+      "path": "<path>/wipe.mov"
     }
   ],
   "control": {
@@ -158,7 +158,7 @@
           "fit": "cover"
         },
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 60,
             "y": 120,
@@ -203,7 +203,7 @@
           "fit": "contain"
         },
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 60,
             "y": 120,
@@ -234,7 +234,7 @@
           }
         },
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 0,
             "y": 960,
@@ -255,7 +255,7 @@
       "id": "twins",
       "items": [
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 0,
             "y": 0,
@@ -265,7 +265,7 @@
           "fit": "contain"
         },
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 540,
             "y": 0,
@@ -326,7 +326,7 @@
           }
         },
         {
-          "source": "sg_combined",
+          "source": "page5",
           "dst": {
             "x": 40,
             "y": 100,
