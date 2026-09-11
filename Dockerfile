@@ -1,6 +1,11 @@
-FROM alpine:3.21 AS builder
+ARG WOLFI_IMAGE=public.ecr.aws/amagi-media-labs-sec/secure-container-base/wolfi-base
 
-RUN apk add ffmpeg-dev git g++ cmake build-base curl-dev openssl-dev libssl3 boost-dev perl bash automake autoconf libtool
+FROM ${WOLFI_IMAGE} AS builder
+
+RUN apk add --no-cache \
+    ffmpeg-dev git gcc cmake build-base \
+    curl-dev openssl-dev boost-dev \
+    perl bash automake autoconf libtool
 
 # We build dependencies first because they'll probably change less often than src/
 # so we can use Docker build cache to save some time
@@ -19,8 +24,8 @@ COPY .git /build/.git
 RUN make -C /build -j `nproc`
 
 
-FROM alpine:3.21
+FROM ${WOLFI_IMAGE}
 
-RUN apk add ffmpeg libcurl libssl3 musl boost-thread
+RUN apk add --no-cache ffmpeg libcurl-openssl4 boost-thread
 COPY --from=builder /build/avplumber /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/avplumber"]
