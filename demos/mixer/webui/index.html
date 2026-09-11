@@ -103,7 +103,7 @@ let selected = "";        // scene the take buttons act on
 let direct = false;       // a pick goes straight to program
 let pgm = "", pvw = "", transition = "idle";
 let touched = { fade: false, wipe: false };   // stop polling from overwriting typing
-let currentTransition = "fade";  // what a pick uses in direct mode; the config may change it
+let currentTransition = "cut";  // what a pick uses in direct mode; the config may change it
 let tookTransition = false;      // once the operator picks one, stop following the config
 let wipes = [];                  // the library published by the mixer
 let currentWipe = null;          // the clip a direct-mode wipe uses

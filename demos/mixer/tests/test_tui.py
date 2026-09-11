@@ -318,7 +318,7 @@ async def test_direct_is_on_by_default_and_mixer_settings_apply():
             return await super().command(command)
 
     app = MixerTui("127.0.0.1", 7777, "mixer", fade_duration=0.5, wipe_file="")
-    assert app.direct_mode is True and app.default_transition == "fade"
+    assert app.direct_mode is True and app.default_transition == "cut"
     app.connection = SettingsConnection()
     async with app.run_test() as pilot:
         await pilot.pause()

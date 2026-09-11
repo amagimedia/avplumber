@@ -27,7 +27,7 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
   "sources":      [ ... ],
   "wipes":        [ ... ],
   "wipe_dir":     "/media/wipes",
-  "control":      { "direct": true, "transition": "fade", "fade_seconds": 0.5 },
+  "control":      { "direct": true, "transition": "cut", "fade_seconds": 0.5 },
   "scenes":       [ ... ],
   "initial_scene": "fullscreen_0"
 }
@@ -130,11 +130,14 @@ always outranks these; they are the state a fresh browser tab picks up.
 | field | default | meaning |
 | --- | --- | --- |
 | `direct` | `true` | a scene pick goes straight to program rather than loading preview |
-| `transition` | `"fade"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
+| `transition` | `"cut"` | what a direct-mode pick takes with: `cut`, `fade` or `wipe` |
 | `fade_seconds` | `0.5` | length of a fade |
 | `default_wipe` | first wipe | the clip a direct-mode wipe uses |
 
 The mixer publishes this over the control protocol as `mixer.settings`.
+The web bridge's optional `--transition cut` overrides its page's starting
+choice without reconfiguring or restarting the media pipeline. It does not
+override an operator's subsequent transition selection.
 
 ## scenes
 

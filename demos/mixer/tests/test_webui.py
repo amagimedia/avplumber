@@ -15,9 +15,10 @@ from webui import MixerBridge, serve
 class FakeBridge(MixerBridge):
     """A bridge with the control connection replaced by a scripted stub."""
 
-    def __init__(self, replies=None, fail_take=None):
+    def __init__(self, replies=None, fail_take=None, transition=None):
         self.mixer = "mixer"
         self.timeout = 5.0
+        self.transition = transition
         self.sent: list[str] = []
         self.replies = replies or {}
         self.fail_take = fail_take
@@ -81,6 +82,17 @@ def test_state_survives_a_mixer_without_settings(client):
     bridge = FakeBridge({"mixer.status": "{}", "mixer.scenes": "[]"}, fail_take="mixer.settings")
     url, _ = client(bridge)
     assert get(url, "/api/state")[1]["settings"] == {}
+
+
+@pytest.mark.parametrize("override, expected", [(None, "fade"), ("cut", "cut")])
+def test_transition_override_only_changes_page_settings(client, override, expected):
+    bridge = FakeBridge({"mixer.status": "{}", "mixer.scenes": "[]",
+                         "mixer.settings": '{"transition":"fade","fade_seconds":0.8}'},
+                        transition=override)
+    url, _ = client(bridge)
+    settings = get(url, "/api/state")[1]["settings"]
+    assert settings == {"transition": expected, "fade_seconds": 0.8}
+    assert bridge.sent == ["mixer.status mixer", "mixer.scenes mixer", "mixer.settings mixer"]
 
 
 def test_takes_reach_the_mixer_as_control_commands(client):
