@@ -1,3 +1,6 @@
 .env
 demos/*.env
 artifacts/
+
+# Viewer-to-control connection details belong to the deployment.
+/images/preview/metrics.json

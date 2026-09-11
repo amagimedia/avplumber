@@ -47,9 +47,30 @@ docker run --rm --gpus all --network host \
 
 Repeat `--input` per source. The program plays at <http://127.0.0.1:8080>.
 
+## Faster cuts and latency
+
+For a catalogue of fixed, filter-free scenes, append these options to the
+Janus mixer command:
+
+```sh
+--prewarm-cut-scene '*' --cut-latency-encoder janus_encoder
+```
+
+Prewarm retains recent decoded source frames for direct cuts, sharing bounded
+queues across scene definitions without rendering every hidden scene. It is
+off by default; repeat `--prewarm-cut-scene SCENE` to select only some scenes.
+The cost is extra queue handling and potentially more retained GPU surfaces.
+
+The preview can show **avplumber latency** beside **WebRTC RTT**, outside the
+video. The AVP value is the median of the last up to three measured CUTs, from
+command receipt to the first matching encoded frame—not capture-to-browser
+latency. See [measurement setup and prewarm limits](../../doc/mixer_cut_latency.md)
+for the WebUI connection and deployment-local `metrics.json` configuration.
+
 ## Control it
 
-Two surfaces speak the same protocol and can run at once.
+Two surfaces speak the same protocol and can run at once. Cut is the default
+transition; explicit show settings and operator choices can select Fade or Wipe.
 
 ```sh
 # browser: scene tiles, a button per wipe clip, Cut / Fade / Direct
