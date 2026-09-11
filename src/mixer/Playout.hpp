@@ -36,11 +36,13 @@ private:
     struct Input {
         std::deque<Entry> queue;
         std::optional<Frame> held;
+        std::optional<int64_t> held_index;
         std::optional<int64_t> next_index;
         std::optional<Cadence> cadence;
         std::optional<int64_t> valid_from_ns;
         bool ended = false;
         bool active = true;
+        bool prewarm = false;
         Stats stats;
     };
     FrameRate rate_;
@@ -75,7 +77,7 @@ public:
     void push(size_t input, Frame frame, int64_t timestamp_ns) {
         if (pending_) throw std::logic_error("commit mixer decision before pushing");
         auto &state = inputs_.at(input);
-        if (!state.active) return;
+        if (!state.active && !state.prewarm) return;
         if (state.valid_from_ns && timestamp_ns < *state.valid_from_ns) {
             ++state.stats.discarded;
             return;
@@ -158,6 +160,7 @@ public:
             if (consume_[i]) {
                 input.stats.discarded += consume_[i] - 1;
                 input.held = std::move(pending_->frames[i]);
+                input.held_index = input.queue[consume_[i] - 1].index;
                 for (size_t count = consume_[i]; count; --count) input.queue.pop_front();
             } else if (input.held) {
                 ++input.stats.repeats;
@@ -171,12 +174,29 @@ public:
     }
 
     const Stats &stats(size_t input) const { return inputs_.at(input).stats; }
-    void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}) {
+    void resetInput(size_t input, std::optional<int64_t> valid_from_ns = {}, bool preserve_warm = false) {
         if (pending_) throw std::logic_error("commit mixer decision before resetting");
         auto &state = inputs_.at(input);
+        if (preserve_warm && state.prewarm && valid_from_ns) {
+            // Scene geometry may change while source identity stays fixed.
+            // Retain only frames in the current playout window, never an old
+            // held picture from a source that stopped while the slot was idle.
+            while (!state.queue.empty() && rate_.time(state.queue.front().index) < *valid_from_ns) {
+                state.queue.pop_front();
+                ++state.stats.discarded;
+            }
+            if (state.held_index && rate_.time(*state.held_index) < *valid_from_ns) {
+                state.held.reset();
+                state.held_index.reset();
+            }
+            state.valid_from_ns = valid_from_ns;
+            waiting_deadline_.reset();
+            return;
+        }
         state.stats.discarded += state.queue.size();
         state.queue.clear();
         state.held.reset();
+        state.held_index.reset();
         state.next_index.reset();
         state.cadence.reset();
         state.valid_from_ns = valid_from_ns;
@@ -186,8 +206,14 @@ public:
     void setActive(size_t input, bool active) {
         auto &state = inputs_.at(input);
         if (state.active == active) return;
-        resetInput(input);
+        if (!state.prewarm) resetInput(input);
         state.active = active;
+    }
+    void setPrewarm(size_t input, bool prewarm) {
+        auto &state = inputs_.at(input);
+        if (state.prewarm == prewarm) return;
+        state.prewarm = prewarm;
+        if (!prewarm && !state.active) resetInput(input);
     }
     void endInput(size_t input) { inputs_.at(input).ended = true; }
     bool finished() const {

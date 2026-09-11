@@ -965,6 +965,13 @@ public:
             orch.enableCutMeasurements(mixer, req.at("encoder").get<std::string>());
         };
 
+        // Keep source references warm, without rendering hidden scenes.
+        commands_["mixer.prewarm"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            const auto req = mixerJsonRequest("mixer.prewarm", arg);
+            auto orch = mixerOrchestrator(req.at("mixer").get<std::string>());
+            orch.prewarmCuts(req.at("scenes").get<std::vector<std::string>>());
+        };
+
         // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}
         commands_["mixer.fade"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
             json req = mixerJsonRequest("mixer.fade", arg);

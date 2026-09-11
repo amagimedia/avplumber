@@ -440,6 +440,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<av::VideoFrame> held_;
     std::vector<bool> held_valid_;
     std::atomic<uint32_t> active_inputs_{~0u};
+    std::atomic<uint32_t> prewarm_inputs_{0};
 
     // An explicit fps opts live, monotonic-PTS inputs into shared playout.
     // Unclocked callers retain the established timestamp-driven behavior.
@@ -447,8 +448,10 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     av::Rational frame_rate_{0, 1};
     std::atomic<uint64_t> input_generation_{0};
     std::atomic<int64_t> input_valid_from_ns_{0};
+    std::atomic<bool> preserve_warm_input_{false};
     uint64_t applied_generation_ = 0;
     uint32_t applied_active_mask_ = 0;
+    uint32_t applied_prewarm_mask_ = 0;
 
 
     // Bound how long we will wait for every active layer to produce a fresh
@@ -812,6 +815,7 @@ public:
     void processClocked() {
         const int64_t now = avp::mixer::monotonicNs();
         uint32_t active = active_inputs_.load(std::memory_order_acquire);
+        const uint32_t prewarm = prewarm_inputs_.load(std::memory_order_acquire);
         if (hasTimeline()) {
             const auto deadline = playout_->nextDeadline();
             const int64_t content_time = std::max(now - playout_->latencyNs(),
@@ -820,26 +824,29 @@ public:
             if (value) active = parseBitmask(*value);
         }
         const auto generation = input_generation_.load(std::memory_order_acquire);
-        if (generation != applied_generation_ || active != applied_active_mask_) {
+        if (generation != applied_generation_ || active != applied_active_mask_ || prewarm != applied_prewarm_mask_) {
             for (size_t i = 0; i < source_edges_.size(); ++i) {
+                playout_->setPrewarm(i, (prewarm & (1u << i)) != 0);
                 playout_->setActive(i, (active & (1u << i)) != 0);
                 if (generation != applied_generation_) {
                     const auto from = input_valid_from_ns_.load(std::memory_order_acquire);
-                    playout_->resetInput(i, from ? std::optional<int64_t>(from) : std::nullopt);
+                    playout_->resetInput(i, from ? std::optional<int64_t>(from) : std::nullopt,
+                                         preserve_warm_input_.load(std::memory_order_acquire));
                 }
             }
             applied_generation_ = generation;
             applied_active_mask_ = active;
+            applied_prewarm_mask_ = prewarm;
             warmup_started_pts_ = wallclock.pts();
             sent_eof_ = false;
         }
         if (sent_eof_) return;
-        if (!active) {
+        if (!(active | prewarm)) {
             this->waitForInput();
             return;
         }
         for (size_t i = 0; i < source_edges_.size(); ++i) {
-            if (!(active & (1u << i))) continue;
+            if (!((active | prewarm) & (1u << i))) continue;
             // Bound ingestion as well as storage; an unpaced producer must not
             // monopolize the output thread before it reaches its deadline.
             for (size_t received = 0; received < 8; ++received) {
@@ -877,11 +884,15 @@ public:
         }
         std::vector<const av::VideoFrame *> sources;
         const av::VideoFrame *metadata = nullptr;
-        for (const auto &frame : decision->frames) {
-            sources.push_back(frame ? &*frame : nullptr);
-            if (frame) metadata = &*frame;
+        for (size_t i = 0; i < decision->frames.size(); ++i) {
+            const auto &frame = decision->frames[i];
+            const bool visible = (active & (1u << i)) != 0;
+            sources.push_back(visible && frame ? &*frame : nullptr);
+            if (visible && frame) metadata = &*frame;
         }
-        processComposite(av::Timestamp(decision->index,
+        // Warm inputs advance their bounded reference queues without allocating
+        // an output surface or issuing any CUDA composition for an idle slot.
+        if (active) processComposite(av::Timestamp(decision->index,
             {frame_rate_.getDenominator(), frame_rate_.getNumerator()}), sources, metadata);
         playout_->commit();
         if (debug_log_every_n_ > 0 && frame_counter_ % debug_log_every_n_ == 0) {
@@ -1141,6 +1152,7 @@ public:
 
     void resetInput() override {
         if (!playout_) return;
+        preserve_warm_input_.store(false, std::memory_order_release);
         input_valid_from_ns_.store(avp::mixer::monotonicNs(), std::memory_order_release);
         input_generation_.fetch_add(1, std::memory_order_release);
         for (auto &edge : source_edges_) edge->producedEvent().signal();
@@ -1159,6 +1171,18 @@ public:
             for (auto& edge : this->source_edges_) {
                 edge->producedEvent().signal();
             }
+        } else if (key == "prewarm_inputs") {
+            if (!playout_) throw Error("cuda_rect_overlay: prewarm_inputs requires clocked playout");
+            prewarm_inputs_.store(parseBitmask(value), std::memory_order_release);
+            for (auto &edge : source_edges_) edge->producedEvent().signal();
+        } else if (key == "warm_reset") {
+            if (!playout_) throw Error("cuda_rect_overlay: warm_reset requires clocked playout");
+            const auto period = avp::mixer::FrameRate(frame_rate_.getNumerator(), frame_rate_.getDenominator()).time(1);
+            input_valid_from_ns_.store(avp::mixer::monotonicNs() - playout_->latencyNs() - period,
+                                       std::memory_order_release);
+            preserve_warm_input_.store(true, std::memory_order_release);
+            input_generation_.fetch_add(1, std::memory_order_release);
+            for (auto &edge : source_edges_) edge->producedEvent().signal();
         } else if (key == "layers") {
             auto new_layers = parseLayersArray(value);
             std::lock_guard<std::mutex> lock(layers_mutex_);

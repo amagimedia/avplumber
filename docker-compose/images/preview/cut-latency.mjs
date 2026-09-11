@@ -1,3 +1,15 @@
+export function combinedCutSample(sample) {
+  if (!sample) return null;
+  const categories = [sample.direct, sample.previewed];
+  if (!categories.every(entry => Array.isArray(entry?.recent))) return {};
+  // Cut IDs are monotonic across both categories; their bounded histories
+  // therefore contain the latest three successful cuts overall.
+  const recent = categories.flatMap(entry => entry.recent)
+    .sort((a, b) => a.id - b.id).slice(-3);
+  const latest = categories.reduce((a, b) => a.id > b.id ? a : b);
+  return { recent, state: latest.state };
+}
+
 export function renderCutSample(element, label, sample, unavailable = "No measurement") {
   // History comes from AVP, not browser polls: repeated polls do not count as
   // cuts, and several completed cuts between polls are not lost.
@@ -115,11 +127,9 @@ export class CutLatencyMeter {
 }
 
 if (typeof document !== "undefined") {
-  const direct = document.getElementById("cut-direct");
-  const previewed = document.getElementById("cut-previewed");
+  const latency = document.getElementById("cut-latency");
   const render = (sample, reason) => {
-    renderCutSample(direct, "AVP Direct", sample?.direct, reason);
-    renderCutSample(previewed, "AVP Previewed", sample?.previewed, reason);
+    renderCutSample(latency, "avplumber", combinedCutSample(sample), reason);
   };
   let meter;
   let stopped = false;

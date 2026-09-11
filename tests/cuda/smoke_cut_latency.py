@@ -24,7 +24,8 @@ def run(args):
     avp.enableControlServer(args.port)
     avp.executeCommandsFromString('hwaccel.init {"name":"cut_test_gpu","type":"cuda"}')
     avp.edges.planCapacity("*", 3)
-    for i, path in enumerate(args.inputs):
+    for i in range(args.source_count):
+        path = args.inputs[i % len(args.inputs)]
         stages = (
             (InputRec, {"url": path, "loop": True, "dst": f"p{i}"}),
             (Demux, {"src": f"p{i}", "routing": {"v:0": f"v{i}"}}),
@@ -36,11 +37,25 @@ def run(args):
             avp.addNode(node({"name": f"input_{i}_{j}", "group": "inputs", **params}))
     mixer = MixerGraphBuilder(avp, name="cut_test", canvas=(1080, 1920), fps=(30, 1),
                               hwaccel="cut_test_gpu", defer_output=True, enable_wipe=False)
-    for i in range(2):
+    for i in range(args.source_count):
         mixer.add_source(f"camera{i}", f"f{i}", "inputs", default_graph="")
         mixer.add_scene(f"scene{i}", {f"camera{i}": {
             "dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain"}})
     mixer.set_initial_scene("scene0")
+    if args.layout_test:
+        assert args.source_count == 2
+        for i in range(2):
+            mixer.define_scene(f"scene{i}", {f"camera{j}": {
+                "dst_x": 0 if i == j else 540, "dst_y": 0,
+                "dst_w": 540, "dst_h": 1920, "fit": "contain"} for j in range(2)})
+    if args.source_count > 2:
+        # A larger catalogue shares decoded inputs; definitions are not
+        # independently running renderers. Keep two layouts per input.
+        for i in range(args.source_count):
+            mixer.add_scene(f"grid{i}", {f"camera{j}": {
+                "dst_x": (j % 4) * 270, "dst_y": (j // 4) * 480,
+                "dst_w": 270, "dst_h": 480, "fit": "contain"}
+                for j in range(args.source_count)})
     output = mixer.build()
     for node, params in (
         (ForceFPS, {"name": "test_fps", "src": output, "dst": "test_fps", "fps": "30/1"}),
@@ -82,7 +97,7 @@ def run(args):
     channel = None
     try:
         avp.group("inputs").startNodes()
-        wait_for(lambda: all(avp.getEdge(f"f{i}").enqueued_total for i in range(2)), "input startup")
+        wait_for(lambda: all(avp.getEdge(f"f{i}").enqueued_total for i in range(args.source_count)), "input startup")
         mixer.start_groups()
         wait_for(lambda: all(avp.node(name).isWorking for name in (
             "cut_test_comp_a", "cut_test_comp_b", "cut_test_otm_scene_a",
@@ -115,6 +130,18 @@ def run(args):
                 body.append(part)
 
         command('mixer.measurements {"mixer":"cut_test","encoder":"test_encoder"}')
+        if args.prewarm:
+            command('mixer.prewarm ' + json.dumps({"mixer": "cut_test", "scenes": mixer.scenes()}))
+            time.sleep(.5)
+        print("CUT_LOAD_BEGIN", flush=True)
+        cpu_before = time.process_time()
+        load_before = time.monotonic()
+        time.sleep(args.hold_seconds)
+        load_elapsed = time.monotonic() - load_before
+        cpu_percent = 100 * (time.process_time() - cpu_before) / load_elapsed
+        print("CUT_LOAD_END " + json.dumps({"prewarm": args.prewarm, "sources": args.source_count,
+                                           "scenes": len(mixer.scenes()), "cpu_percent": cpu_percent,
+                                           "seconds": load_elapsed}), flush=True)
         results = []
         previous = 0
         for mode in ("direct", "previewed"):
@@ -155,7 +182,7 @@ def run(args):
         # old output packet with a new timestamp cannot satisfy the pixel check.
         decoded = subprocess.run(["/usr/local/bin/ffmpeg", "-hide_banner", "-loglevel", "error",
                                   "-threads", "1", "-f", "h264", "-i", "pipe:0", "-vf",
-                                  "crop=2:2:540:960", "-pix_fmt", "gray", "-fps_mode", "passthrough",
+                                  "crop=2:2:270:960", "-pix_fmt", "gray", "-fps_mode", "passthrough",
                                   "-f", "rawvideo", "pipe:1"], input=b"".join(f["data"] for f in captured),
                                  capture_output=True, check=True, timeout=30).stdout
         assert len(decoded) == len(captured) * 4, (len(decoded), len(captured))
@@ -165,6 +192,20 @@ def run(args):
         for sample in results:
             first = next(f for f in captured if f["at"] >= sample["before"] and f["source"] == sample["target"])
             assert first["pts"] == sample["pts"], (sample, {k: v for k, v in first.items() if k != "data"})
+        if args.prewarm:
+            # Geometry edits remain warm. New scene-control semantics instead
+            # fall back to normal preparation without rejecting the edit.
+            layer = {"dst_x": 0, "dst_y": 0, "dst_w": 1080, "dst_h": 1920, "fit": "contain"}
+            mixer.define_scene("scene0", {"camera0": layer})
+            assert "scene0" in command("mixer.status cut_test")["prewarm_cut_scenes"]
+            mixer.define_scene("scene0", {"camera0": layer}, controls=[
+                {"node": "test_encoder", "key": "test_only_not_executed", "value": True}])
+            assert "scene0" not in command("mixer.status cut_test")["prewarm_cut_scenes"]
+            mixer.define_scene("scene0", {"camera0": layer})
+            command('mixer.prewarm {"mixer":"cut_test","scenes":[]}')
+            assert command("mixer.status cut_test")["prewarm_source_mask"] == 0
+            command('mixer.prewarm ' + json.dumps({"mixer": "cut_test", "scenes": mixer.scenes()}))
+            assert len(command("mixer.status cut_test")["prewarm_cut_scenes"]) == len(mixer.scenes())
         print("CUT_LATENCY_RESULT " + json.dumps({"samples": results, "summary": {
             mode: {"median_ms": statistics.median(r["avp_ms"] for r in results if r["mode"] == mode),
                    "count": sum(r["mode"] == mode for r in results)} for mode in ("direct", "previewed")}}), flush=True)
@@ -188,4 +229,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, required=True, help="unused control port for this isolated instance")
     parser.add_argument("--webui", required=True, help="existing WebUI backend; register the isolated graph")
     parser.add_argument("--trials", type=int, default=8)
+    parser.add_argument("--prewarm", action="store_true", help="retain source queues before direct cuts")
+    parser.add_argument("--source-count", type=int, default=2, choices=(2, 16))
+    parser.add_argument("--layout-test", action="store_true", help="swap two layers while source set stays fixed")
+    parser.add_argument("--hold-seconds", type=float, default=1, help="steady-state load sampling interval")
     run(parser.parse_args())

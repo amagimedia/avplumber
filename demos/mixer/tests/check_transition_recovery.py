@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -83,9 +84,28 @@ def recovery_graph(paths):
         mixer.finish_transition_preheat()
         avp.group('readback').startNodes()
         mixer.start_output()
+        deadline = time.monotonic() + 30
+        while not (avp.node('pixel_readback').isWorking and output.enqueued_total):
+            assert time.monotonic() < deadline, 'pixel assertion branch startup timed out'
+            assert not errors, errors
+            time.sleep(.01)
         yield avp, mixer, output, errors
     finally:
-        avp.shutdown()
+        # A bounded assertion edge must keep draining while groups shut down.
+        stop = threading.Event()
+        def drain():
+            while not stop.is_set():
+                try:
+                    output.get(50)
+                except ValueError:
+                    pass
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        try:
+            avp.shutdown()
+        finally:
+            stop.set()
+            reader.join(timeout=1)
 
 
 def check_recovery(avp, mixer, output, errors):
@@ -180,12 +200,24 @@ def check_recovery(avp, mixer, output, errors):
     print(json.dumps({'passed': results, 'expected_input_errors': errors}), flush=True)
 
 
-def run(paths):
+def run(paths, prewarm=False, webui=None, port=None):
     with recovery_graph(paths) as graph:
+        avp = graph[0]
+        if webui:
+            avp.enableControlServer(port)
+            avp.registerWithWebUI(webui, "prewarm-transition-recovery", "")
+        if prewarm:
+            avp.executeCommandsFromString('mixer.prewarm {"mixer":"recovery","scenes":["full0","full1"]}')
         check_recovery(*graph)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('inputs', nargs=2)
-    run(parser.parse_args().inputs)
+    parser.add_argument('--prewarm', action='store_true')
+    parser.add_argument('--webui')
+    parser.add_argument('--port', type=int)
+    args = parser.parse_args()
+    if args.webui and not args.port:
+        parser.error('--webui requires an unused --port')
+    run(args.inputs, args.prewarm, args.webui, args.port)

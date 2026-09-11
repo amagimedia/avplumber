@@ -94,20 +94,17 @@
     <footer>
       <span id="status">Idle</span>
       <span class="metrics">
-        <span class="metric" title="Median of the last 3 measured direct CUTs: AVP command receipt to first matching encoded frame. Not command ACK, frame age, or browser display latency.">
-          <span>AVP Direct · median 3</span><span id="cut-direct" class="metric-value" aria-label="AVP Direct median cut latency unavailable">—</span>
-        </span>
-        <span class="metric" title="Median of the last 3 measured CUTs to already-previewed scenes. Timing starts at CUT, excluding earlier preview preparation.">
-          <span>AVP Previewed · median 3</span><span id="cut-previewed" class="metric-value" aria-label="AVP Previewed median cut latency unavailable">—</span>
+        <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
+          <span>avplumber latency</span><span id="cut-latency" class="metric-value" aria-label="avplumber median cut latency unavailable">—</span>
         </span>
         <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
-          <span>RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
+          <span>WebRTC RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
         </span>
       </span>
     </footer>
   </main>
 
-  <script type="module" src="cut-latency.mjs?v=median3"></script>
+  <script type="module" src="cut-latency.mjs?v=combined"></script>
   <script>
     const MOUNTPOINT_ID = 1;
     const serverUrl = `${location.origin}/janus`;

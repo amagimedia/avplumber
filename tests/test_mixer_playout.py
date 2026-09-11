@@ -23,6 +23,7 @@ def playout_binary(tmp_path_factory):
 
 
 @pytest.mark.parametrize("case", [
+    "inactive_prewarm_retains_live_frames_without_rendering",
     "complete_jitter_plateau_is_not_rate_drift",
     "stale_burst_is_not_retimestamped_as_fresh",
     "rational_source_drift_does_not_amplify",
