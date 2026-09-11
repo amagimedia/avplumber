@@ -8,11 +8,12 @@ composition and media-input workflows.
 - Upstream repository: `https://github.com/FFmpeg/FFmpeg`
 - Upstream tag: `n7.1.5`
 - Upstream commit: `3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587`
-- Expected patched tree: `52361f7251069ef74fbb41460e6e1b65d6f9947c`
+- Expected patched tree: `f4eebb6a255d1f4b76eb795885102d1cfea8cd08`
+  (`52361f7251069ef74fbb41460e6e1b65d6f9947c` for the 0001-0007 subset)
 
 ## Series
 
-The seven patches are ordered by filename and grouped by feature rather than by
+The eight patches are ordered by filename and grouped by feature rather than by
 the chronology of incomplete ports and follow-up fixes:
 
 1. `0001-swscale-aarch64-argb-yuva420p.patch` — AArch64 fast color conversion.
@@ -25,8 +26,59 @@ the chronology of incomplete ports and follow-up fixes:
    handling.
 6. `0006-avdevice-v4l2-compat.patch` — V4L2 timestamp compatibility.
 7. `0007-avdevice-ndi-v5.patch` — NDI v5 device registration and documentation.
+8. `0008-avformat-libmxl-demuxer-muxer.patch` — [MXL](https://github.com/dmf-mxl/mxl)
+   demuxer, muxer, URI parser, monitoring/diag interface, and
+   `--enable-libmxl` configure glue. Squashed from 32 upstream commits on
+   `cbcrc/FFmpeg` branch `dmf-mxl/master` (pinned at `5c5d593`); the MXL
+   SDK is pinned to `v1.1.0-beta-1`. Consumed by `demos/mxl/Dockerfile`.
 
 Each patch message lists the original exported FFmpeg commits it replaces.
+
+### Regenerating `0008-avformat-libmxl-demuxer-muxer.patch`
+
+Producing the patch (Docker only — works on Linux and macOS hosts):
+
+```bash
+docker build -f deps/ffmpeg-patches/Dockerfile.mkpatch \
+    -t avplumber-mxl-mkpatch:local deps/ffmpeg-patches
+docker run --rm \
+    -v "$PWD/deps/ffmpeg-patches:/out" \
+    -v "$PWD/deps/ffmpeg-patches:/patches:ro" \
+    avplumber-mxl-mkpatch:local
+```
+
+On success the container writes:
+
+* `deps/ffmpeg-patches/0008-avformat-libmxl-demuxer-muxer.patch`
+* `deps/ffmpeg-patches/expected-tree.txt` — paste this hash into the
+  "Expected patched tree" line above.
+
+Then run the verifier to confirm the tree matches:
+
+```bash
+deps/ffmpeg-patches/verify.sh /path/to/any/FFmpeg
+```
+
+If the cherry-pick hits conflicts (usually `configure`,
+`libavformat/allformats.c`, or `libavformat/Makefile`), the container
+exits with instructions. Re-run it with `--entrypoint bash` to finish
+by hand:
+
+```bash
+docker run --rm -it \
+    -v "$PWD/deps/ffmpeg-patches:/out" \
+    -v "$PWD/deps/ffmpeg-patches:/patches:ro" \
+    --entrypoint bash avplumber-mxl-mkpatch:local
+# inside:  /usr/local/bin/mkpatch-0008-mxl
+# fix conflicts under /tmp/ffmpeg-mxl-build/ffmpeg, then:
+#   git cherry-pick --continue
+#   /usr/local/bin/mkpatch-finish
+```
+
+Once landed, remove this "Pending" subsection and add the patch to the
+numbered list. The `demos/mxl/Dockerfile` startup check
+(`ffmpeg -demuxers | grep mxl`) will then pass and the demo becomes
+runnable end-to-end.
 
 The old FFmpeg `af_whisper` port is intentionally absent. Speech-to-text belongs
 in an AVPlumber node and is not part of this FFmpeg variant.
