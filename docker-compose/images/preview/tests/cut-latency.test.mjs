@@ -2,20 +2,40 @@ import assert from "node:assert/strict";
 import { CutLatencyMeter, renderCutSample } from "../cut-latency.mjs";
 
 const element = { dataset: {}, setAttribute() {} };
+const sample = (ms, id = 1) => ({ state: "measured", ms, scene: "B", id });
+const history = (...values) => ({ state: "measured", recent: values.map((ms, i) => sample(ms, i + 1)) });
 for (const [ms, level] of [[0, "good"], [200, "good"], [201, "warn"], [400, "warn"], [401, "bad"]]) {
-  renderCutSample(element, "Direct", { state: "measured", ms, scene: "B" });
+  renderCutSample(element, "Direct", history(ms));
   assert.equal(element.textContent, `${ms} ms`);
   assert.equal(element.dataset.level, level);
 }
 for (const ms of [null, undefined, NaN, Infinity, -1, "100"]) {
-  renderCutSample(element, "Direct", { state: "measured", ms });
+  renderCutSample(element, "Direct", history(ms));
   assert.equal(element.textContent, "—");
   assert.equal(element.dataset.level, "unknown");
 }
 for (const state of ["pending", "interrupted", "timeout", "unmatched"]) {
-  renderCutSample(element, "Direct", { state, ms: 50 });
+  renderCutSample(element, "Direct", { state, recent: [{ ...sample(50), state }] });
   assert.equal(element.textContent, "—");
 }
+for (const [values, expected] of [[[5], 5], [[5, 25], 15], [[5, 25, 23], 23],
+  [[5, 25, 23, 400], 25], [[400, 25, 23, 5], 23], [[200, 201], 201]]) {
+  renderCutSample(element, "Previewed", history(...values));
+  assert.equal(element.textContent, `${expected} ms`);
+  assert.match(element.title, /Median of last [123] measured/);
+}
+renderCutSample(element, "Direct", { ...history(100, 120, 140), state: "pending" });
+assert.equal(element.textContent, "120 ms", "pending cuts do not erase successful history");
+renderCutSample(element, "Direct", { state: "measured", recent: [sample(10), sample(30)] });
+assert.equal(element.textContent, "—", "duplicate cut IDs cannot make a median");
+for (const value of [history(), sample(5), null]) {
+  renderCutSample(element, "Direct", value);
+  assert.equal(element.textContent, "—");
+  assert.equal(element.dataset.level, "unknown");
+}
+renderCutSample(element, "Direct", history(120, 130, 140));
+renderCutSample(element, "Direct", history(120, 130, 140));
+assert.equal(element.textContent, "130 ms", "repeat polls do not change the window");
 
 const timers = new Map();
 let timerId = 0;

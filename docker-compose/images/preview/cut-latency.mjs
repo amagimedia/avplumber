@@ -1,11 +1,24 @@
 export function renderCutSample(element, label, sample, unavailable = "No measurement") {
-  const ms = sample?.state === "measured" && Number.isFinite(sample.ms) && sample.ms >= 0
-    ? Math.round(sample.ms) : null;
-  element.textContent = ms === null ? "—" : `${ms} ms`;
+  // History comes from AVP, not browser polls: repeated polls do not count as
+  // cuts, and several completed cuts between polls are not lost.
+  const recent = Array.isArray(sample?.recent) ? sample.recent.slice(-3) : null;
+  const valid = recent && recent.every(entry => entry.state === "measured"
+    && Number.isSafeInteger(entry.id) && entry.id > 0
+    && Number.isFinite(entry.ms) && entry.ms >= 0)
+    && new Set(recent.map(entry => entry.id)).size === recent.length;
+  const values = valid ? recent.map(entry => entry.ms).sort((a, b) => a - b) : [];
+  const middle = Math.floor(values.length / 2);
+  const ms = values.length ? Math.round(values.length % 2 ? values[middle]
+    : (values[middle - 1] + values[middle]) / 2) : null;
+  element.textContent = ms !== null ? `${ms} ms` : "—";
   element.dataset.level = ms === null ? "unknown" : ms <= 200 ? "good" : ms <= 400 ? "warn" : "bad";
-  element.title = ms === null ? (sample?.state || unavailable)
-    : `Last measured cut to ${sample.scene}; command receipt → encoder output (${sample.ms.toFixed(2)} ms)`;
-  element.setAttribute("aria-label", `${label} cut latency ${ms === null ? "unavailable" : `${ms} milliseconds`}`);
+  element.title = valid
+    ? `Median of last ${values.length} measured ${label} cuts (up to 3). `
+      + recent.map(entry => `#${entry.id} ${entry.scene}: ${entry.ms.toFixed(2)} ms`).join("; ")
+      + `. Command receipt → encoder output. Latest cut state: ${sample.state}.`
+    : sample ? "Three-cut history unavailable; update the AVP measurement probe" : unavailable;
+  element.setAttribute("aria-label", `${label} median cut latency ${ms !== null
+    ? `${ms} milliseconds over last ${values.length} cuts` : "unavailable"}`);
 }
 
 // Uses the existing graph UI's WS→TCP bridge. This client only reads status;

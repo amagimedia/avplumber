@@ -27,6 +27,10 @@ rewiring, flushing, restarting, or changing prewarm or routing behavior.
 `mixer.status` contains `cut_latency` with independent `direct` and `previewed`
 samples. Each has `id`, `scene`, `state`, and `ms` (null until measured).
 `encoded_pts` identifies the matching access unit in the encoder's time base.
+Each category also has `recent`, its last three successfully measured cuts in
+completion order. This bounded history is maintained in AVP, so cuts between
+viewer polls are retained. Failed or interrupted measurements do not enter it;
+it resets when the probe is recreated, including on mixer process restart.
 Previewed means the target was already loaded in PVW at CUT receipt; earlier
 preview preparation is excluded. Loading PVW is not proof it was fully warmed.
 
@@ -43,11 +47,16 @@ not optical image differences: identical-looking scenes can still be measured.
 
 ## Preview page
 
-The preview footer shows AVP Direct, AVP Previewed and WebRTC RTT side by side,
-outside the video. All use integer milliseconds and green through 200 ms,
-orange through 400 ms, then red. Cut values are the last event in each category,
-not continuously recomputed latency. Missing, pending or disconnected data is
-gray `—`; hover explains the state.
+The preview footer shows AVP Direct · median 3, AVP Previewed · median 3 and
+WebRTC RTT side by side, outside the video. All use integer milliseconds and
+green through 200 ms, orange through 400 ms, then red. Each cut value is the
+median of up to the last three successfully measured cuts in that category,
+not continuously recomputed pipeline latency. One result is shown immediately;
+with two, their midpoint is shown; from three onward the window rolls. Existing
+history remains visible during a pending or failed cut. No measurements or
+disconnected data is gray `—`; hover lists
+the contributing cuts and explains the latest state. Browser reloads do not
+reset AVP's history. Older probes without history cannot display a median.
 
 Supply a deployment-local `metrics.json` alongside the preview's `index.html`:
 
