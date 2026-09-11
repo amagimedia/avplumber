@@ -42,6 +42,7 @@
       border-color: var(--line);
       background: var(--panel);
       color: var(--muted);
+      flex-wrap: wrap;
     }
 
     .stage {
@@ -64,20 +65,20 @@
       overflow-wrap: anywhere;
     }
 
-    .rtt {
+    .metrics, .metric {
       display: inline-flex;
       align-items: baseline;
       gap: 6px;
-      margin-left: auto;
       flex-shrink: 0;
       font-size: 12px;
       font-variant-numeric: tabular-nums;
     }
 
-    #rtt-value { min-width: 48px; text-align: right; }
-    #rtt-value[data-level="good"] { color: #76c99a; }
-    #rtt-value[data-level="warn"] { color: #edb264; }
-    #rtt-value[data-level="bad"] { color: #ef8585; }
+    .metrics { margin-left: auto; gap: 20px; flex-wrap: wrap; }
+    .metric-value { min-width: 48px; text-align: right; }
+    .metric-value[data-level="good"] { color: #76c99a; }
+    .metric-value[data-level="warn"] { color: #edb264; }
+    .metric-value[data-level="bad"] { color: #ef8585; }
 
     .error {
       color: var(--danger);
@@ -92,12 +93,21 @@
 
     <footer>
       <span id="status">Idle</span>
-      <span class="rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
-        <span>RTT</span><span id="rtt-value" aria-label="WebRTC RTT unavailable">—</span>
+      <span class="metrics">
+        <span class="metric" title="Last direct CUT: AVP command receipt to first matching encoded frame at encoder output. Not command ACK, frame age, or browser display latency.">
+          <span>AVP Direct</span><span id="cut-direct" class="metric-value" aria-label="AVP Direct cut latency unavailable">—</span>
+        </span>
+        <span class="metric" title="Last CUT to the already-previewed scene. Timing starts at CUT, excluding the earlier preview preparation.">
+          <span>AVP Previewed</span><span id="cut-previewed" class="metric-value" aria-label="AVP Previewed cut latency unavailable">—</span>
+        </span>
+        <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
+          <span>RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
+        </span>
       </span>
     </footer>
   </main>
 
+  <script type="module" src="cut-latency.mjs"></script>
   <script>
     const MOUNTPOINT_ID = 1;
     const serverUrl = `${location.origin}/janus`;

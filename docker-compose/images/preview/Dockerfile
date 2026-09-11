@@ -6,6 +6,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 
 WORKDIR /srv/janus-preview
 COPY index.html ./
+COPY cut-latency.mjs ./
 COPY preview-server.py ./
 
 CMD ["python3", "preview-server.py"]

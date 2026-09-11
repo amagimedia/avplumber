@@ -1,11 +1,13 @@
 #include "node_common.hpp"
 #include "../SharedTimeline.hpp"
+#include "../mixer/CutLatencyProbe.hpp"
 
 template <typename T>
 class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>,
                             public TimelineReader, public IInputsObjects,
                             public IVideoFormatSource, public IFrameRateSource,
-                            public IAudioMetadataSource, public ITimeBaseSource {
+                            public IAudioMetadataSource, public ITimeBaseSource,
+                            public avp::mixer::CutLatencyObserver {
     std::atomic<int> active_input_{0};
     int fallback_input_ = -1;
     int timeline_reference_input_ = -1;
@@ -60,6 +62,25 @@ public:
         }
         last_selected_input_ = input_index;
         last_output_pts_ = pts;
+        if constexpr (std::is_same_v<T, av::VideoFrame>) {
+            if (auto probe = this->cutLatencyProbe()) {
+                const uint64_t token = probe->timing.tokenForInput(input_index, fallback);
+                // An interrupted fade can temporarily substitute the old
+                // picture into the target slot. Selecting it is not a cut.
+                if (token && !av_dict_get(data->raw()->metadata, "avp.mixer.snapshot", nullptr, 0)) {
+                    // av::VideoFrame copies AVFrame properties, not CUDA pixels.
+                    // Never edit the upstream frame shared with other branches.
+                    av::VideoFrame tagged(*data);
+                    const auto value = std::to_string(token);
+                    if (av_dict_set(&tagged.raw()->metadata, probe->metadata_key.c_str(), value.c_str(), 0) < 0) {
+                        probe->timing.cancel("tag_failed");
+                    } else {
+                        this->sink_->put(tagged);
+                        return true;
+                    }
+                }
+            }
+        }
         this->sink_->put(*data);
         return true;
     }

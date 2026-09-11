@@ -3,8 +3,9 @@
 #include <avcpp/codeccontext.h>
 #include <avcpp/avutils.h>
 #include "../hwaccel.hpp"
+#include "../mixer/CutLatencyProbe.hpp"
 
-template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable {
+template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable, public avp::mixer::CutLatencyObserver {
 protected:
     AVCodecParameters* codecpar_ = nullptr;
     std::unordered_set<AVCodecParameters*> codecpars_;
@@ -16,6 +17,12 @@ protected:
     bool timestamps_passthrough_ = false;
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
+    void emitPacket(const av::Packet& pkt) {
+        this->sink_->put(pkt);
+        const auto emitted = avp::mixer::CutLatency::Clock::now();
+        if (auto probe = this->cutLatencyProbe(); probe && pkt.pts().isValid())
+            probe->timing.encoderOutput(pkt.pts().timestamp(enc_.timeBase()), emitted);
+    }
     virtual void initEncoderPreOpen(av::Stream&) {
     }
     virtual void initEncoderPostOpen() {
@@ -128,7 +135,7 @@ public:
                 if (!(pkt.timeBase().getDenominator() && pkt.timeBase().getNumerator())) {
                     logstream << "enc flush out: invalid timebase, not outputting! " << pkt.timeBase();
                 } else {
-                    this->sink_->put(pkt);
+                    emitPacket(pkt);
                 }
             } catch (std::exception &e) {
                 logstream << "Warning: Exception " << e.what() << " when flushing encoder." << std::endl;
@@ -150,6 +157,10 @@ public:
                     logstream << "input PTS went backwards " << prev_ts_ << " -> " << frame.pts() << ", discarding frame";
                     return;
                 }
+                if constexpr (std::is_same_v<InputFrame, av::VideoFrame>) {
+                    if (auto probe = this->cutLatencyProbe(); probe && frame.pts().isValid())
+                        probe->timing.encoderInput(probe->frameToken(frame), frame.pts().timestamp(enc_.timeBase()));
+                }
                 av::Packet pkt = enc_.encode(frame);
                 if (pkt) {
                     if (timestamps_passthrough_) {
@@ -158,7 +169,7 @@ public:
                         pkt.setDts(rescaleTS(frame.pts(), pkt.dts().timebase()));
                     }
                     //logstream << "enc out: PTS = " << pkt.pts() << std::endl;
-                    this->sink_->put(pkt);
+                    emitPacket(pkt);
                 } else if (timestamps_passthrough_) {
                     logstream << "WARNING: encoder does buffer but we overwrite timestamps, this may cause desync!";
                 }

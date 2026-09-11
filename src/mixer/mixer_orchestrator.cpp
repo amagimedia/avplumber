@@ -650,6 +650,7 @@ void MixerOrchestrator::ensureIdle() const {
 }
 
 void MixerOrchestrator::interruptTransition() {
+    if (state_->cut_latency) state_->cut_latency->timing.cancel();
     if (state_->transition_mode == MixerState::TransitionMode::Idle) return;
     const auto previous_mode = state_->transition_mode.load();
     // A crossfade's blended picture exists only inside the transition compositor,
@@ -713,6 +714,7 @@ void MixerOrchestrator::abortTransition(uint64_t generation) noexcept {
     // All callers hold the control mutex. A cancelled worker must never undo
     // the routing of its replacement transition.
     if (state_->transition_generation != generation) return;
+    if (state_->cut_latency) state_->cut_latency->timing.cancel("failed");
     ++state_->transition_generation;
     const auto mode = state_->transition_mode.load();
     auto cleanup = [](auto action) {
@@ -1159,9 +1161,11 @@ void MixerOrchestrator::readyCutTask(
         return;
     try {
         MixerOrchestrator orch(nodes, state, timeline, scheduler);
+        if (state->cut_latency) state->cut_latency->timing.arm();
         orch.applyPostTransitionRouting(new_pgm_is_slot_a, new_pgm_scene);
         orch.finishSnapshot();
     } catch (const std::exception& e) {
+        if (state->cut_latency) state->cut_latency->timing.cancel("failed");
         logstream << "mixer: ready cut error restoring routing: " << e.what();
     }
     state->pgm_is_slot_a = new_pgm_is_slot_a;
@@ -1174,7 +1178,8 @@ void MixerOrchestrator::readyCutTask(
 // cut: PTS-scheduled hard cut.  Graph work + timeline entries happen now;
 // state flip is deferred until the timeline entries have taken effect.
 // ---------------------------------------------------------------------------
-void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms) {
+void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms,
+                            avp::mixer::CutLatency::Clock::time_point received) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (!state_->scenes.count(scene_name))
         throw Error("mixer: unknown scene: " + scene_name);
@@ -1186,6 +1191,8 @@ void MixerOrchestrator::cut(const std::string& scene_name, int64_t start_pts_ms)
     TransitionPrepGuard prep_guard([&] { abortTransition(transition_generation); });
     bool pvw_is_slot_a = !state_->pgm_is_slot_a;
     bool was_preloaded = state_->pvw_scene_name == scene_name;
+    if (state_->cut_latency)
+        state_->cut_latency->timing.begin(scene_name, was_preloaded, pvw_is_slot_a ? 0 : 1, received);
 
     scheduleSceneControls(state_->scenes.at(scene_name), T_cut);
     cutInternal(scene_name, T_cut);
@@ -1809,6 +1816,7 @@ Parameters MixerOrchestrator::status() const {
     s["pgm_slot"] = state_->pgm_is_slot_a ? "A" : "B";
     s["switch_margin_ms"] = state_->switch_margin_ms;
     s["now_pts_ms"] = wallclock.pts();
+    s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
     if (!state_->overlay_selector_name.empty()) {
         s["overlay_enabled"] = state_->overlay_enabled;
         s["overlay_selector"] = state_->overlay_selector_name;
@@ -1821,4 +1829,23 @@ Parameters MixerOrchestrator::status() const {
         case MixerState::TransitionMode::Wipe: s["transition"] = "wipe"; break;
     }
     return s;
+}
+
+void MixerOrchestrator::enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto selector = std::dynamic_pointer_cast<avp::mixer::CutLatencyObserver>(nodes_->node(state_->source_switcher_name)->node());
+    auto encoder = std::dynamic_pointer_cast<avp::mixer::CutLatencyObserver>(nodes_->node(encoder_name)->node());
+    if (!selector || !encoder || nodes_->node(encoder_name)->parameters().value("type", std::string()) != "enc_video")
+        throw Error("mixer.measurements requires created source_switcher and enc_video nodes");
+    if (state_->cut_latency) {
+        if (state_->cut_latency->encoder_name != encoder_name)
+            throw Error("mixer.measurements is already bound to another encoder");
+        return;
+    }
+    if (selector->cutLatencyProbe() || encoder->cutLatencyProbe())
+        throw Error("mixer.measurements node already belongs to another probe");
+    auto probe = std::make_shared<avp::mixer::CutLatencyProbe>(mixer_name, encoder_name);
+    selector->setCutLatencyProbe(probe);
+    encoder->setCutLatencyProbe(probe);
+    state_->cut_latency = std::move(probe);
 }

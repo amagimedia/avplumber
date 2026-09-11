@@ -151,7 +151,9 @@ public:
     void initializeRoutedRoutes();
 
     void preview(const std::string& scene_name);
-    void cut(const std::string& scene_name, int64_t start_pts_ms = -1);
+    void cut(const std::string& scene_name, int64_t start_pts_ms = -1,
+             avp::mixer::CutLatency::Clock::time_point received = avp::mixer::CutLatency::Clock::now());
+    void enableCutMeasurements(const std::string& mixer_name, const std::string& encoder_name);
     void fade(const std::string& scene_name, double duration_sec, int64_t start_pts_ms = -1);
     void wipe(const std::string& scene_name, const std::string& wipe_file, double duration_sec,
               int64_t start_pts_ms = -1);
