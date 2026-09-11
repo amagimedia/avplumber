@@ -60,7 +60,24 @@
 
     #status {
       min-height: 20px;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
+
+    .rtt {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      margin-left: auto;
+      flex-shrink: 0;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #rtt-value { min-width: 48px; text-align: right; }
+    #rtt-value[data-level="good"] { color: #76c99a; }
+    #rtt-value[data-level="warn"] { color: #edb264; }
+    #rtt-value[data-level="bad"] { color: #ef8585; }
 
     .error {
       color: var(--danger);
@@ -75,6 +92,9 @@
 
     <footer>
       <span id="status">Idle</span>
+      <span class="rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
+        <span>RTT</span><span id="rtt-value" aria-label="WebRTC RTT unavailable">—</span>
+      </span>
     </footer>
   </main>
 
@@ -83,6 +103,7 @@
     const serverUrl = `${location.origin}/janus`;
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
+    const rttValue = document.getElementById("rtt-value");
 
     let sessionId = null;
     let handleId = null;
@@ -93,6 +114,51 @@
     let transactionId = 0;
     let connecting = false;
     let stopping = false;
+    let rttTimer = null;
+    let rttGeneration = 0;
+
+    function selectedRttMs(report) {
+      // Only the selected connection is relevant; a nominated/checking pair
+      // may not be carrying this viewer's video.
+      const stats = [...report.values()];
+      const video = stats.find(stat => stat.type === "inbound-rtp" && stat.kind === "video");
+      const transport = video?.transportId ? report.get(video.transportId)
+        : stats.find(stat => stat.type === "transport" && stat.selectedCandidatePairId);
+      const pair = report.get(transport?.selectedCandidatePairId);
+      const seconds = pair?.currentRoundTripTime;
+      return pair?.state === "succeeded" && Number.isFinite(seconds) && seconds >= 0
+        ? Math.round(seconds * 1000) : null;
+    }
+
+    function renderRtt(ms) {
+      rttValue.textContent = ms === null ? "—" : `${ms} ms`;
+      rttValue.dataset.level = ms === null ? "unknown" : ms <= 200 ? "good" : ms <= 400 ? "warn" : "bad";
+      rttValue.setAttribute("aria-label", ms === null ? "WebRTC RTT unavailable" : `WebRTC RTT ${ms} milliseconds`);
+    }
+
+    function stopRttMeter() {
+      rttGeneration += 1;
+      window.clearTimeout(rttTimer);
+      rttTimer = null;
+      renderRtt(null);
+    }
+
+    function startRttMeter(connection) {
+      stopRttMeter();
+      const generation = rttGeneration;
+      async function sample() {
+        let ms = null;
+        try {
+          if (connection.connectionState === "connected") {
+            ms = selectedRttMs(await connection.getStats());
+          }
+        } catch (_) { /* Stats failures must not interrupt playback. */ }
+        if (generation !== rttGeneration || peer !== connection) return;
+        renderRtt(connection.connectionState === "connected" ? ms : null);
+        rttTimer = window.setTimeout(sample, 1000);
+      }
+      sample();
+    }
 
     function transaction() {
       transactionId += 1;
@@ -156,7 +222,11 @@
       peer.onicecandidate = event => {
         sendTrickle(event.candidate).catch(error => setStatus(error.message, true));
       };
-      peer.onconnectionstatechange = () => setStatus(`WebRTC ${peer.connectionState}`);
+      peer.onconnectionstatechange = () => {
+        setStatus(`WebRTC ${peer.connectionState}`);
+        if (peer.connectionState !== "connected") renderRtt(null);
+      };
+      startRttMeter(peer);
       await peer.setRemoteDescription(offer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
@@ -238,6 +308,7 @@
 
     async function disconnect(showIdle = true) {
       stopping = true;
+      stopRttMeter();
       if (pollAbort) pollAbort.abort();
       window.clearInterval(keepaliveTimer);
       keepaliveTimer = null;
@@ -269,6 +340,7 @@
 
     window.addEventListener("beforeunload", () => {
       stopping = true;
+      stopRttMeter();
       window.clearTimeout(retryTimer);
       if (pollAbort) pollAbort.abort();
       if (peer) peer.close();
