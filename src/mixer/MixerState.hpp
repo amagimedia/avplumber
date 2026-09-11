@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include "CutLatencyProbe.hpp"
 
 struct SourceLayout {
     std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
@@ -82,6 +83,7 @@ struct MixerState : public InstanceShared<MixerState> {
     /// so a WebRTC receiver can decode the new picture immediately instead of
     /// waiting for the next periodic keyframe.
     std::string keyframe_node_name;
+    std::shared_ptr<avp::mixer::CutLatencyProbe> cut_latency;
     std::string timeline_name;         // "mixer_tl"
     std::string hwaccel_name;          // "@gpu"
 

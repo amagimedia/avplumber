@@ -31,6 +31,7 @@
 #include "SharedTimeline.hpp"
 #include "mixer/MixerState.hpp"
 #include "mixer/mixer_orchestrator.hpp"
+#include "CommandTiming.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
     #include "instance_shared.hpp"
@@ -122,6 +123,7 @@ struct ControlPacket {
     };
     Type type;
     std::string data;
+    CommandTiming::Clock::time_point received = CommandTiming::Clock::now();
     ControlPacket(Type _type = None, std::string _data = ""): type(_type), data(_data) {
     }
 };
@@ -192,7 +194,7 @@ public:
                 std::istringstream line(pkt.data);
                 std::ostringstream result;
                 try {
-                    readExecCommands(line, result, false, true, &disconnect);
+                    readExecCommands(line, result, false, true, &disconnect, pkt.received);
                 } catch (std::exception &e) {
                     logstream << "BUG: readExecCommands error (should never happen) " << e.what();
                     break;
@@ -209,7 +211,8 @@ public:
         pipe.to_client.emplace(ControlPacket::End);
         pipe.send_to_client();
     }
-    template<typename InStream, typename OutStream> bool readExecCommands(InStream &in, OutStream &out, bool is_terminal = false, bool is_subcommand = false, bool* disconnect = nullptr) {
+    template<typename InStream, typename OutStream> bool readExecCommands(InStream &in, OutStream &out, bool is_terminal = false, bool is_subcommand = false, bool* disconnect = nullptr,
+            std::optional<CommandTiming::Clock::time_point> received = std::nullopt) {
         bool dowork = true;
         bool all_good = true;
         if (!is_subcommand) {
@@ -243,6 +246,8 @@ public:
 
             // get argument:
             std::getline(in, arg);
+
+            CommandTiming command_timing(received.value_or(CommandTiming::Clock::now()));
 
             auto mngr = manager_;
             if (!mngr) {
@@ -949,7 +954,15 @@ public:
             std::string scene_name = req.at("scene").get<std::string>();
             int64_t start_pts_ms = req.value("start_pts_ms", int64_t(-1));
             auto orch = mixerOrchestrator(mixer_name);
-            orch.cut(scene_name, start_pts_ms);
+            orch.cut(scene_name, start_pts_ms, CommandTiming::received());
+        };
+
+        // Opt-in observers only; no node replacement or graph rewiring.
+        commands_["mixer.measurements"] = [this, mixerOrchestrator, mixerJsonRequest](ClientStream &cs, std::string &arg) {
+            const auto req = mixerJsonRequest("mixer.measurements", arg);
+            const auto mixer = req.at("mixer").get<std::string>();
+            auto orch = mixerOrchestrator(mixer);
+            orch.enableCutMeasurements(mixer, req.at("encoder").get<std::string>());
         };
 
         // mixer.fade {"mixer":"mixer","scene":"scene_name","duration_sec":2.0,"start_pts_ms":123456789}

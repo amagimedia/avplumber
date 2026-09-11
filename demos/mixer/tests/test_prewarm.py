@@ -103,6 +103,17 @@ def test_ready_requires_inputs_compositors_and_transition_prewarm(native_boundar
     assert engine.ready
 
 
+def test_cut_measurements_are_opt_in_and_enabled_after_encoder_start(native_boundary):
+    app = application(native_boundary, cut_latency_encoder="program_encoder")
+    app.start()
+    command = 'mixer.measurements {"mixer": "mixer", "encoder": "program_encoder"}'
+    assert app.avp.events.index("start output") < app.avp.events.index(command)
+    assert app.avp.events.index(command) < app.avp.events.index("READY")
+    ordinary = application(native_boundary)
+    ordinary.start()
+    assert not any(event.startswith("mixer.measurements ") for event in ordinary.avp.events)
+
+
 @pytest.mark.parametrize("phase", ["input", "transition"])
 def test_missing_prewarm_frame_never_publishes_ready(native_boundary, monkeypatch, phase):
     app = application(native_boundary, preheat_timeout_sec=0.01)

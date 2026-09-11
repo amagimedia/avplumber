@@ -45,3 +45,7 @@ docker-compose/run-demo.sh --env docker-compose/.env up -d
 The web UI defaults to `http://127.0.0.1:22222`, Janus HTTP to
 `http://127.0.0.1:8088/janus`, and the preview server to
 `http://127.0.0.1:8080`.
+
+The preview footer supports [cut-to-encoded-output measurements](../doc/mixer_cut_latency.md)
+beside WebRTC RTT. Enable the optional native probe and supply a deployment-local
+`metrics.json`; the viewer never changes the mixer itself.
