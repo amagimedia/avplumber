@@ -47,10 +47,10 @@ not optical image differences: identical-looking scenes can still be measured.
 
 ## Preview page
 
-The preview footer shows AVP Direct · median 3, AVP Previewed · median 3 and
-WebRTC RTT side by side, outside the video. All use integer milliseconds and
-green through 200 ms, orange through 400 ms, then red. Each cut value is the
-median of up to the last three successfully measured cuts in that category,
+The preview footer shows one avplumber latency value followed by
+WebRTC RTT, outside the video. Both use integer milliseconds and
+green through 200 ms, orange through 400 ms, then red. The avplumber value is the
+median of up to the last three successfully measured cuts across both categories,
 not continuously recomputed pipeline latency. One result is shown immediately;
 with two, their midpoint is shown; from three onward the window rolls. Existing
 history remains visible during a pending or failed cut. No measurements or
@@ -90,3 +90,37 @@ Media integration must additionally be verified on a CUDA/NVENC host, checking
 the identity of decoded encoded-output frames for both direct and previewed
 cuts. Installing a new native binary in a running demo requires a separately
 agreed rollout; serving this viewer does not upgrade the mixer.
+
+## Optional direct-cut source prewarm
+
+`mixer.prewarm {"mixer":"mixer","scenes":["scene_a","scene_b"]}` keeps bounded
+GPU-frame reference queues for the sources used by those scenes in both mixer
+slots. `scenes: []` disables it. Call after the source nodes and clocked scene
+compositors are created, while the mixer is idle. The demo can enable it at
+startup with repeated `--prewarm-cut-scene SCENE`; `--prewarm-cut-scene '*'`
+selects the entire scene catalogue. It is off by default.
+
+Eligible scenes use fixed, filter-free sources and compositor geometry, without
+route changes or scene control commands. Several scene definitions share the
+same input queues: this does not continuously render every scene. An idle slot
+advances its playout queues without allocating output surfaces or launching
+composition kernels. Direct cuts reuse only frames within the current playout
+window; an old held picture from a stalled source cannot prove readiness.
+There is no GPU download/upload or additional source decoding. The existing
+frame rate, playout delay, visible routing and ready-frame gate are retained.
+Preview, fade and wipe preparation still use their ordinary reset path.
+
+The price is additional CPU reference/queue handling and potentially more VRAM
+because decoded surfaces remain referenced longer. It is not zero-cost.
+History has the existing eight-entry-per-input bound plus a held frame. Actual
+memory depends on source dimensions, decoder pools and shared references, not
+the number of scene definitions. `mixer.status` reports `prewarm_cut_scenes`
+and `prewarm_source_mask`. A scene edit adding unsupported behavior or an
+unwarmed source automatically removes that scene from the optimized set; it
+continues to cut through the normal path until prewarm is configured again.
+
+The isolated CUDA smoke test supports `--prewarm`, `--source-count 16` (32 scene
+definitions), `--layout-test` (same sources, different geometry) and
+`--hold-seconds` for steady-state load sampling. Compare with and without
+`--prewarm` using the same graph and fixtures. Neither synthetic scene tests
+nor network RTT measure capture-to-browser latency.

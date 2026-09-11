@@ -76,6 +76,7 @@ class GraphOptions:
     config: str | None = None            # JSON document (sources, wipes, scenes) instead of --input
     webui_url: str = ""                  # AVPlumber web UI to register the graph with
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
+    prewarm_cut_scenes: tuple[str, ...] = ()  # '*' selects all scene definitions
     # Wipe clips are held decoded in GPU memory by default: a take then costs no
     # file open, no decoder and no thread startup. 0 turns it off.
     wipe_cache_mb: float = 768.0
@@ -139,6 +140,7 @@ class MixerApplication:
     dmabuf_rest: str = ""
     wipe_cache_mb: float = 0.0              # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
+    prewarm_cut_scenes: tuple[str, ...] = ()
 
     def _preload_wipes(self) -> None:
         """Decode every wipe once into GPU memory (see avpmixer.clipcache).
@@ -240,6 +242,9 @@ class MixerApplication:
             self.avp.executeCommandsFromString("mixer.measurements " + json.dumps({
                 "mixer": MIXER_NAME, "encoder": self.cut_latency_encoder,
             }))
+        if self.prewarm_cut_scenes:
+            scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
+            self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
         self.avp.setReady()
         print(
             "Generic mixer preheat complete: compositors and transition ready",
@@ -570,6 +575,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         browser_windows=tuple(options.dmabuf_inputs), dmabuf_rest=options.dmabuf_rest,
         wipe_cache_mb=options.wipe_cache_mb,
         cut_latency_encoder=options.cut_latency_encoder,
+        prewarm_cut_scenes=options.prewarm_cut_scenes,
     )
 
 
@@ -686,6 +692,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         browser_windows=tuple(s.id for s in browsers), dmabuf_rest=options.dmabuf_rest,
         wipe_cache_mb=options.wipe_cache_mb,
         cut_latency_encoder=options.cut_latency_encoder,
+        prewarm_cut_scenes=options.prewarm_cut_scenes,
     )
 
 
@@ -759,6 +766,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
                         help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     parser.add_argument("--cut-latency-encoder", default="", metavar="NODE",
                         help="Measure CUT receipt to matching encoded frame at NODE (e.g. janus_encoder)")
+    parser.add_argument("--prewarm-cut-scene", action="append", default=[], metavar="SCENE",
+                        help="Keep source buffers warm for direct cuts (repeat; '*' selects all scenes)")
     args = parser.parse_args(argv)
     if not args.inputs and not args.config:
         parser.error("pass --input (repeatable) or --config FILE")
@@ -789,6 +798,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         config=args.config,
         webui_url=args.webui_url,
         cut_latency_encoder=args.cut_latency_encoder,
+        prewarm_cut_scenes=tuple(args.prewarm_cut_scene),
         wipe_cache_mb=args.wipe_cache_mb,
     )
 

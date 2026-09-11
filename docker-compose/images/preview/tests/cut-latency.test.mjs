@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { CutLatencyMeter, renderCutSample } from "../cut-latency.mjs";
+import { CutLatencyMeter, combinedCutSample, renderCutSample } from "../cut-latency.mjs";
 
 const element = { dataset: {}, setAttribute() {} };
 const sample = (ms, id = 1) => ({ state: "measured", ms, scene: "B", id });
@@ -36,6 +36,31 @@ for (const value of [history(), sample(5), null]) {
 renderCutSample(element, "Direct", history(120, 130, 140));
 renderCutSample(element, "Direct", history(120, 130, 140));
 assert.equal(element.textContent, "130 ms", "repeat polls do not change the window");
+
+const combined = combinedCutSample({
+  direct: { id: 7, state: "pending", recent: [sample(140, 1), sample(120, 3), sample(100, 5)] },
+  previewed: { id: 6, state: "measured", recent: [sample(10, 2), sample(20, 4), sample(30, 6)] },
+});
+assert.deepEqual(combined.recent.map(entry => entry.id), [4, 5, 6]);
+assert.equal(combined.state, "pending");
+renderCutSample(element, "avplumber", combined);
+assert.equal(element.textContent, "30 ms", "one median across direct and previewed cuts");
+for (const [direct, previewed, expected] of [
+  [history(53), history(), "53 ms"],
+  [history(), history(25), "25 ms"],
+  [history(), history(), "—"],
+  [history(53), {}, "—"],
+]) {
+  renderCutSample(element, "avplumber", combinedCutSample({ direct, previewed }));
+  assert.equal(element.textContent, expected);
+}
+assert.equal(combinedCutSample(null), null);
+
+const html = await (await import("node:fs/promises")).readFile(new URL("../index.html", import.meta.url), "utf8");
+assert.match(html, /avplumber latency/);
+assert.match(html, /<span>WebRTC RTT<\/span>/);
+assert.equal((html.match(/id="cut-latency"/g) || []).length, 1);
+assert.doesNotMatch(html, /cut-direct|cut-previewed|AVP Direct|AVP Previewed/);
 
 const timers = new Map();
 let timerId = 0;

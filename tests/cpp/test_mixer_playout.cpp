@@ -503,8 +503,47 @@ void resumed_source_is_live_after_an_eof_marker() {
     CHECK(!mix.finished());
 }
 
+void inactive_prewarm_retains_live_frames_without_rendering() {
+    using namespace avp::mixer;
+    const FrameRate rate(30, 1);
+    Playout<int> mix(2, rate, {}, TimestampMode::Presentation);
+    mix.setPrewarm(0, true);
+    mix.setPrewarm(1, true);
+    mix.setActive(0, false);
+    mix.setActive(1, false);
+    for (int tick = 0; tick < 30; ++tick) {
+        mix.push(0, tick, rate.time(tick));
+        // Missing inactive input 1 must not hold up the warm clock.
+        const auto now = rate.time(tick) + mix.latencyNs();
+        auto frame = mix.prepare(now, true);
+        CHECK(frame && *frame->frames[0] == tick);
+        mix.commit();
+    }
+    // Reuse fresh input state for new scene geometry at the next output tick.
+    mix.setActive(0, true);
+    mix.resetInput(0, rate.time(28), true);
+    auto frame = mix.prepare(rate.time(30) + mix.latencyNs(), true);
+    CHECK(frame && *frame->frames[0] == 29);
+    mix.commit();
+    CHECK(mix.queued(0) <= 8);
+    // A stalled source's old held picture is NOT evidence of a ready warm cut.
+    mix.setActive(0, false);
+    mix.resetInput(0, rate.time(100), true);
+    mix.setActive(0, true);
+    CHECK(!mix.prepare(rate.time(102), true));
+    mix.push(0, 101, rate.time(101));
+    frame = mix.prepare(rate.time(103) + 1, true);
+    CHECK(frame && *frame->frames[0] == 101);
+    mix.commit();
+    mix.setActive(0, false);
+    mix.setPrewarm(0, false);
+    mix.setActive(0, true);
+    CHECK(!mix.prepare(rate.time(110), true));
+}
+
 int main(int argc, char **argv) {
     const std::pair<const char *, void (*)()> cases[] = {
+        {"inactive_prewarm_retains_live_frames_without_rendering", inactive_prewarm_retains_live_frames_without_rendering},
         {"complete_jitter_plateau_is_not_rate_drift", complete_jitter_plateau_is_not_rate_drift},
         {"stale_burst_is_not_retimestamped_as_fresh", stale_burst_is_not_retimestamped_as_fresh},
         {"rational_source_drift_does_not_amplify", rational_source_drift_does_not_amplify},

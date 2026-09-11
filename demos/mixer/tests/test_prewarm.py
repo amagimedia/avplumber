@@ -114,6 +114,24 @@ def test_cut_measurements_are_opt_in_and_enabled_after_encoder_start(native_boun
     assert not any(event.startswith("mixer.measurements ") for event in ordinary.avp.events)
 
 
+def test_direct_cut_prewarm_is_opt_in_and_enabled_before_ready(native_boundary):
+    app = application(native_boundary, prewarm_cut_scenes=("fullscreen_0", "fullscreen_1"))
+    app.start()
+    command = 'mixer.prewarm {"mixer": "mixer", "scenes": ["fullscreen_0", "fullscreen_1"]}'
+    assert app.avp.events.index("start output") < app.avp.events.index(command)
+    assert app.avp.events.index(command) < app.avp.events.index("READY")
+    ordinary = application(native_boundary)
+    ordinary.start()
+    assert not any(event.startswith("mixer.prewarm ") for event in ordinary.avp.events)
+
+
+def test_direct_cut_prewarm_wildcard_uses_the_current_catalogue(native_boundary):
+    app = application(native_boundary, prewarm_cut_scenes=("*",))
+    app.start()
+    command = next(event for event in app.avp.events if event.startswith("mixer.prewarm "))
+    assert json.loads(command.partition(" ")[2])["scenes"] == app.mixer.scenes()
+
+
 @pytest.mark.parametrize("phase", ["input", "transition"])
 def test_missing_prewarm_frame_never_publishes_ready(native_boundary, monkeypatch, phase):
     app = application(native_boundary, preheat_timeout_sec=0.01)
