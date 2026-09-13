@@ -4,7 +4,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG AVPLUMBER_REVISION=workspace
 ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
-ARG MXL_TAG=v1.1.0-beta-1
+ARG MXL_TAG=v1.1.0
 
 # gcc-13 is required by the MXL SDK (C++20 features + newer libstdc++).
 # Ubuntu 22.04 defaults to gcc-11, so pull gcc-13 from the ubuntu
