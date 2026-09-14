@@ -185,13 +185,11 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
     """mxl:// -> demux -> decode -> rescale -> mpeg4 encode -> file."""
     from pyplumber.node import RescaleVideo, AssumeVideoFormat
 
-    # The MXL demuxer returns EAGAIN when the writer hasn't published
-    # a new grain yet, which avplumber's Input node treats as fatal.
-    # `auto_restart:"group"` restarts the reader chain when that
-    # happens; the group's own auto-restart handling reopens the edge
-    # cleanly. `blocking=1` should make av_read_frame block instead,
-    # but passing it via the `options` dict does not yet reach the
-    # demuxer's private AVOptions (see TODO in README).
+    # `blocking=1` makes the demuxer wait up to one frame period for
+    # the next grain instead of returning EAGAIN immediately, so the
+    # reader stays open once the writer has produced its first grain.
+    # `auto_restart:"group"` still covers the brief startup race
+    # before grain 0 is available.
     avp.addNode(Input({
         "url": _reader_url(args.domain, args.video_flow_id),
         "format": "mxl",
