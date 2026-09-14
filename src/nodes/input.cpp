@@ -174,6 +174,12 @@ public:
         }
         setTimeout(initial_timeout);
         ictx_.openInput(params["url"], opts, ifmt);
+        if (opts.count() > 0) {
+            for (auto &entry : opts) {
+                logstream << "WARNING: input option not consumed by libavformat: "
+                          << entry.key() << "=" << entry.value();
+            }
+        }
         ictx_.findStreamInfo();
         logstream << "Opened URL " << params["url"] << " . Streams:";
         for (unsigned i=0; i<ictx_.streamsCount(); i++) {
