@@ -111,11 +111,6 @@ link `libx264`.
 
 ## Known gaps
 
-* Passing `blocking=1` to the MXL demuxer through avplumber's `options`
-  dict does not currently reach the demuxer's private AVOptions
-  — the reader survives EAGAIN via `auto_restart:"group"` instead.
-  Root-cause is in the order of format assignment vs `openInput` in
-  `src/nodes/input.cpp`; direct `ffmpeg -blocking 1` on the CLI works.
 * The demo runs the reader at wall-clock max (~2800 fps into mpeg4
   at 320×240) because we didn't wire in a realtime pacer on the
   reader side. Adding a `RealtimeVideoFrame` node between decode and
