@@ -70,13 +70,14 @@ private:
 	av::Timestamp prev_pts_ = NOTS;
 
 	// Multi-output per input frame: we need a small state machine to handle backpressure.
-	enum class Stage { NeedInput, EmitInterp, EmitInput };
-	Stage stage_ = Stage::NeedInput;
-	av::VideoFrame pending_in_;
-	av::VideoFrame pending_interp_;
+	// pending_out_ holds (factor_-1) interpolated frames followed by the current input frame.
+	// emit_idx_ is the next index to emit; source is popped after the last one is put.
+	std::vector<av::VideoFrame> pending_out_;
+	size_t emit_idx_ = 0;
 
 	std::string fruc_library_path_;
 	bool passthrough_on_fail_ = true;
+	int factor_ = 2;
 
 	static av::PixelFormat getHwSwPixelFormat(av::VideoFrame &frm)
 	{
@@ -346,48 +347,14 @@ private:
 		return av::Timestamp(mi, tb);
 	}
 
-	bool run_fruc_for_frame(const av::VideoFrame &in, const av::Timestamp &in_pts, const av::Timestamp &out_pts)
+	// Linear interpolation of PTS at fraction f in [0,1] between a and b (in b's timebase).
+	av::Timestamp lerp_pts(const av::Timestamp &a, const av::Timestamp &b, double f)
 	{
-		// Copies input into next render buffer and invokes FRUC to generate into interp_buf_.
-		render_idx_ = (render_idx_ + 1) & 1;
-		CUarray cur_render = render_buf_[render_idx_];
-
-		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
-			logstream << "nvof_fruc: cuCtxPushCurrent failed (run_fruc_for_frame)";
-			return false;
-		}
-
-		bool ok = true;
-		if (!copy_frame_to_nv12_buffer(in, cur_render)) {
-			logstream << "nvof_fruc: failed to copy input frame to FRUC buffer";
-			ok = false;
-		}
-
-		if (ok) {
-			NvOFFRUC_PROCESS_IN_PARAMS inParams{};
-			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
-			bool repeated = false;
-
-			inParams.stFrameDataInput.pFrame = cur_render; // CUarray
-			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
-			inParams.stFrameDataInput.nCuSurfacePitch = 0;
-			inParams.bSkipWarp = 0;
-
-			outParams.stFrameDataOutput.pFrame = interp_buf_; // CUarray
-			outParams.stFrameDataOutput.nTimeStamp = (double)out_pts.timestamp({1, 1000});
-			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
-			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
-
-			NvOFFRUC_STATUS st = fn_process_(h_fruc_, &inParams, &outParams);
-			if (st != NvOFFRUC_SUCCESS) {
-				logstream << "nvof_fruc: NvOFFRUCProcess failed: " << (int)st;
-				ok = false;
-			}
-		}
-
-		CUcontext dummy;
-		CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
-		return ok;
+		const av::Rational tb = b.timebase();
+		const int64_t ai = a.timestamp(tb);
+		const int64_t bi = b.timestamp(tb);
+		const int64_t mi = ai + (int64_t)((double)(bi - ai) * f);
+		return av::Timestamp(mi, tb);
 	}
 
 	bool make_interp_frame_from_buffer(const av::VideoFrame &ref_in, const av::Timestamp &out_pts, av::VideoFrame &out)
@@ -427,24 +394,18 @@ private:
 public:
 	void process() override
 	{
-		// Emit pending frames first (backpressure-safe)
-		if (stage_ == Stage::EmitInterp) {
-			if (this->sink_->put(pending_interp_, true)) {
-				stage_ = Stage::EmitInput;
-			} else {
-				return;
+		// Emit any pending frames first (backpressure-safe).
+		while (emit_idx_ < pending_out_.size()) {
+			if (!this->sink_->put(pending_out_[emit_idx_], true)) {
+				return; // downstream full; try again later
 			}
+			emit_idx_++;
 		}
-		if (stage_ == Stage::EmitInput) {
-			if (this->sink_->put(pending_in_, true)) {
-				// Done with this input
-				pending_in_ = av::VideoFrame();
-				pending_interp_ = av::VideoFrame();
-				stage_ = Stage::NeedInput;
-				this->source_->pop();
-			} else {
-				return;
-			}
+		if (!pending_out_.empty()) {
+			// All buffered outputs delivered — commit by popping the source input we produced them from.
+			pending_out_.clear();
+			emit_idx_ = 0;
+			this->source_->pop();
 		}
 
 		av::VideoFrame *pin = this->source_->peek();
@@ -546,36 +507,88 @@ public:
 			return;
 		}
 
-		// For each subsequent frame: generate one interpolated frame at midpoint(prev, cur),
-		// then output interpolated, then output current.
-		av::Timestamp out_pts = midpoint_pts(prev_pts_, in_pts);
-		if (!run_fruc_for_frame(in, in_pts, out_pts)) {
+		// For each subsequent input: generate (factor_ - 1) interpolated frames spaced evenly
+		// between prev_pts_ and in_pts, then emit them followed by the current input.
+		//
+		// NvOFFRUC's Process() consumes the incoming frame to update its internal 2-frame
+		// window each call. To sample multiple intermediate times we must copy the input
+		// into a render buffer *once* and then call Process() multiple times with different
+		// output timestamps but the same input render buffer. render_idx_ is advanced only
+		// once per input frame.
+		const int nsteps = factor_ - 1;
+		pending_out_.clear();
+		pending_out_.reserve((size_t)nsteps + 1);
+
+		// Advance render buffer index and copy input into it once.
+		render_idx_ = (render_idx_ + 1) & 1;
+		CUarray cur_render = render_buf_[render_idx_];
+		bool copy_ok = false;
+		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx)) == 0) {
+			copy_ok = copy_frame_to_nv12_buffer(in, cur_render);
+			CUcontext dummy;
+			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
+		}
+		if (!copy_ok) {
 			if (passthrough_on_fail_) {
 				if (!this->sink_->put(in, true)) return;
 				this->source_->pop();
 				prev_pts_ = in_pts;
-				return;
 			}
 			return;
 		}
 
-		av::VideoFrame interp;
-		if (!make_interp_frame_from_buffer(in, out_pts, interp)) {
+		bool step_failed = false;
+		for (int i = 1; i <= nsteps; ++i) {
+			double f = (double)i / (double)factor_;
+			av::Timestamp out_pts = lerp_pts(prev_pts_, in_pts, f);
+
+			if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
+				step_failed = true;
+				break;
+			}
+			NvOFFRUC_PROCESS_IN_PARAMS inParams{};
+			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
+			bool repeated = false;
+			inParams.stFrameDataInput.pFrame = cur_render;
+			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
+			inParams.stFrameDataInput.nCuSurfacePitch = 0;
+			inParams.bSkipWarp = 0;
+			outParams.stFrameDataOutput.pFrame = interp_buf_;
+			outParams.stFrameDataOutput.nTimeStamp = (double)out_pts.timestamp({1, 1000});
+			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
+			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
+			NvOFFRUC_STATUS st = fn_process_(h_fruc_, &inParams, &outParams);
+			CUcontext dummy;
+			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
+			if (st != NvOFFRUC_SUCCESS) {
+				logstream << "nvof_fruc: NvOFFRUCProcess failed at step " << i << "/" << nsteps << ": " << (int)st;
+				step_failed = true;
+				break;
+			}
+
+			av::VideoFrame interp;
+			if (!make_interp_frame_from_buffer(in, out_pts, interp)) {
+				step_failed = true;
+				break;
+			}
+			pending_out_.push_back(std::move(interp));
+		}
+
+		if (step_failed) {
+			pending_out_.clear();
 			if (passthrough_on_fail_) {
 				if (!this->sink_->put(in, true)) return;
 				this->source_->pop();
 				prev_pts_ = in_pts;
-				return;
 			}
 			return;
 		}
 
-		// Set up pending output sequence. Don't pop source until both are emitted.
-		pending_interp_ = interp;
-		pending_in_ = in;
-		stage_ = Stage::EmitInterp;
+		// Append current input as the last frame in the burst.
+		pending_out_.push_back(in);
+		emit_idx_ = 0;
 
-		// Update prev PTS immediately (so if we get re-entered we still use correct state).
+		// Update prev PTS immediately so state stays coherent across re-entries.
 		prev_pts_ = in_pts;
 	}
 
@@ -607,6 +620,13 @@ public:
 		}
 		if (params.count("passthrough_on_fail")) {
 			r->passthrough_on_fail_ = (bool)params["passthrough_on_fail"];
+		}
+		if (params.count("factor")) {
+			int f = (int)params["factor"];
+			if (f < 2 || f > 16) {
+				throw Error("nvof_fruc: factor must be in [2, 16]");
+			}
+			r->factor_ = f;
 		}
 		return r;
 	}
