@@ -1,0 +1,69 @@
+# Super-slomo for sports: file (60fps) -> NVDEC -> NvOFFRUC 4x interpolation -> speed 0.25 -> 60fps CFR -> NVENC -> MP4
+#
+# Result: input is played back at 1/4 speed with 4x synthetic frames per input, so playback
+# stays smooth at 60fps output. For 8x slomo set factor=8 and speed=0.125.
+#
+# Requirements:
+# - NVIDIA GPU, Turing+ (RTX 20xx / T-series or newer)
+# - libNvOFFRUC.so available at runtime (adjust `library` path below)
+# - Build with HAVE_CUDA=1 HAVE_NVOF_FRUC=1
+#
+# Tuning notes for sports:
+# - factor=4 handles most action; factor=8 works but ball/limb warp becomes visible on very fast motion.
+# - Keep passthrough_on_fail=false for offline renders so failures are loud rather than silent.
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+# --- Input ---------------------------------------------------------------------------------
+node.add { "type": "input", "url": "input.mp4", "dst": "in0", "group": "in", "auto_restart": "off", "name": "input" }
+
+queue.plan_capacity v_in 240
+node.add { "type": "demux", "src": "in0", "routing": { "v:0": "v_in" }, "group": "in", "auto_restart": "off" }
+
+# --- HW decode to CUDA/NV12 ---------------------------------------------------------------
+queue.plan_capacity v_dec 30
+node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "in", "name": "Video_Dec", "auto_restart": "off",
+           "pixel_format": "?cuda", "hwaccel": "@gpu",
+           "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" },
+           "hwaccel_only_for_codecs": ["h264", "hevc"] }
+
+# --- FRUC 4x interpolation (3 synthetic frames per input pair) ----------------------------
+queue.plan_capacity v_fruc 120
+node.add { "type": "nvof_fruc", "src": "v_dec", "dst": "v_fruc", "group": "in",
+           "hwaccel": "@gpu",
+           "library": "/usr/local/Optical_Flow_SDK_5.0.7/NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so",
+           "factor": 4,
+           "passthrough_on_fail": false }
+
+# --- Retime PTS to 1/4 speed so the extra frames stretch the timeline instead of dropping fps
+queue.plan_capacity v_slow 120
+node.add { "type": "speed_video", "src": "v_fruc", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.25 }
+
+# --- Force CFR 60fps output ---------------------------------------------------------------
+queue.plan_capacity v_cfr 120
+node.add { "type": "force_fps", "src": "v_slow", "dst": "v_cfr", "fps": "60/1", "group": "out", "auto_restart": "panic" }
+
+queue.plan_capacity v0 60
+node.add { "type": "fake_video_format", "pixel_format": "cuda", "real_pixel_format": "yuv420p",
+           "group": "out", "auto_restart": "panic", "src": "v_cfr", "dst": "v0" }
+
+# --- NVENC h264 -> MP4 --------------------------------------------------------------------
+queue.plan_capacity keyframed 120
+node.add { "type": "force_keyframe", "src": "v0", "dst": "keyframed", "interval_sec": "2/1",
+           "group": "out", "auto_restart": "panic" }
+
+queue.plan_capacity venc 240
+node.add { "type": "enc_video", "codec": "h264_nvenc", "hwaccel": "@gpu",
+           "options": { "preset": "p5", "b": "12000k", "maxrate": "16000k", "bufsize": "16000k",
+                        "rc": "vbr", "profile": "high", "level": "51", "g": 120 },
+           "auto_restart": "panic", "name": "VEncode", "group": "out",
+           "src": "keyframed", "dst": "venc" }
+
+queue.plan_capacity mux0 240
+node.add { "type": "mux", "src": ["venc"], "dst": "mux0", "group": "out", "auto_restart": "panic", "ts_sort_wait": 0 }
+
+node.add { "type": "output", "format": "mp4", "url": "slomo_out.mp4", "src": "mux0",
+           "group": "out", "auto_restart": "panic", "name": "Out_mp4" }
+
+group.start out
+group.start in

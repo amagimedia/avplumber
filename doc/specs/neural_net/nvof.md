@@ -8,6 +8,7 @@ Frame Rate Up Conversion via NVIDIA Optical Flow SDK.
 |-------|---------|-------------|
 | `fruc_library_path` | required | Path to libNvOFFRUC.so |
 | `passthrough_on_fail` | true | Pass through frames if FRUC fails |
+| `factor` | 2 | Frame-rate multiplication factor (2–16). `factor=N` emits N-1 interpolated frames per input pair, i.e. `factor=4` → 4× fps (3 synthesized + 1 original per input). For super-slomo pair with `speed_video { "speed": 1/N }` to preserve realtime playback. |
 
 ### Pipeline
 1. Load NvOFFRUC library via dlopen
