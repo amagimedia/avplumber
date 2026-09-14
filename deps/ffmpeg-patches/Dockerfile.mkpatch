@@ -1,0 +1,32 @@
+# Build the MXL "0008" patch on top of the existing FFmpeg patch stack.
+#
+# Usage from the repository root:
+#
+#   docker build -f deps/ffmpeg-patches/Dockerfile.mkpatch \
+#       -t avplumber-mxl-mkpatch:local deps/ffmpeg-patches
+#   docker run --rm \
+#       -v "$PWD/deps/ffmpeg-patches:/out" \
+#       -v "$PWD/deps/ffmpeg-patches:/patches:ro" \
+#       avplumber-mxl-mkpatch:local
+#
+# On success this writes:
+#   deps/ffmpeg-patches/0008-avformat-libmxl-demuxer-muxer.patch
+#   deps/ffmpeg-patches/expected-tree.txt   (paste into README.md)
+#
+# On cherry-pick conflicts the container exits with instructions; drop
+# into it with `-it --entrypoint bash` on the same image to finish by hand.
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mkpatch-0008-mxl.sh /usr/local/bin/mkpatch-0008-mxl
+COPY mkpatch-finish.sh   /usr/local/bin/mkpatch-finish
+RUN chmod +x /usr/local/bin/mkpatch-0008-mxl /usr/local/bin/mkpatch-finish
+
+ENTRYPOINT ["/usr/local/bin/mkpatch-0008-mxl"]
