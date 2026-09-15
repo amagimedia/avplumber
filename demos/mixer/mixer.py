@@ -18,7 +18,8 @@ from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input
-from avpmixer.janus import JANUS_KEYFRAME_NODE, JanusVideoConfig, build_janus_output
+from avpmixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
+                           JanusVideoConfig, build_janus_output)
 
 try:
     from .layouts import (
@@ -69,6 +70,7 @@ class GraphOptions:
     janus_video_pt: int = JANUS_DEFAULT_VIDEO_PT
     janus_video_ssrc: int = JANUS_DEFAULT_VIDEO_SSRC
     janus_video_bitrate_kbps: int = JANUS_DEFAULT_VIDEO_BITRATE_KBPS
+    keyframe_min_interval_ms: int = DEFAULT_KEYFRAME_MIN_INTERVAL_MS
     janus_rtcp_bind: str = "0.0.0.0"
     janus_rtcp_port: int = 0
     preheat_timeout_sec: float = 60.0
@@ -107,6 +109,9 @@ class GraphOptions:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
             raise ValueError("preheat_timeout_sec must be positive")
+        if (type(self.keyframe_min_interval_ms) is not int
+                or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
+            raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
         if any(v <= 0 for v in self.dmabuf_size):
             raise ValueError("--dmabuf-size must be WxH with positive numbers")
         ids = self.dmabuf_inputs
@@ -502,6 +507,7 @@ def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str, *,
             host=options.janus_host, video_port=options.janus_video_port,
             payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
             bitrate_kbps=options.janus_video_bitrate_kbps,
+            keyframe_min_interval_ms=options.keyframe_min_interval_ms,
             rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
         ),
         fps=options.fps, fps_den=FPS_DEN, width=width, height=height,
@@ -609,6 +615,7 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                     video_port=rendition.port or options.janus_video_port,
                     payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
                     bitrate_kbps=rendition.bitrate_kbps,
+                    keyframe_min_interval_ms=options.keyframe_min_interval_ms,
                     rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
                 ),
                 fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
@@ -755,6 +762,10 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         default=JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
     )
     parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
+    parser.add_argument("--keyframe-min-interval-ms", type=int,
+                        default=DEFAULT_KEYFRAME_MIN_INTERVAL_MS,
+                        help="Minimum forced-keyframe spacing for Janus output in media time "
+                             "(default: 150 ms; 0 disables rate limiting)")
     parser.add_argument("--janus-rtcp-port", type=int, default=0)
     parser.add_argument("--preheat-timeout", type=float, default=60.0)
     parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
@@ -787,6 +798,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         janus_video_pt=args.janus_video_pt,
         janus_video_ssrc=args.janus_video_ssrc,
         janus_video_bitrate_kbps=args.janus_video_bitrate_kbps,
+        keyframe_min_interval_ms=args.keyframe_min_interval_ms,
         janus_rtcp_bind=args.janus_rtcp_bind,
         janus_rtcp_port=args.janus_rtcp_port,
         preheat_timeout_sec=args.preheat_timeout,
