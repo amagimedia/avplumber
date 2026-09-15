@@ -13,7 +13,7 @@ import time
 from pyplumber import AVPlumber
 from pyplumber.node import (
     AssumeVideoFormat, CropMetadataCuda, DecVideo, Demux, EncVideo,
-    FilterVideo, InputRec,
+    FilterVideo, ForceFPS, InputRec,
 )
 
 
@@ -51,7 +51,10 @@ def run(args):
                      "hwaccel": "filter_chain_gpu", "dst_width": 640, "dst_height": 360,
                      "dst_pixel_format": "cuda", "dst_frame_rate": "25/1",
                      "defer_preliminary_init": True}),
-        AssumeVideoFormat({"name": "format", "src": "filtered", "dst": "nv12",
+        # Match the recorder's static timebase boundary before NVENC. The
+        # deferred CUDA filter has no output timebase until its first frame.
+        ForceFPS({"name": "fps", "src": "filtered", "dst": "paced", "fps": "25/1"}),
+        AssumeVideoFormat({"name": "format", "src": "paced", "dst": "nv12",
                            "width": 640, "height": 360, "pixel_format": "cuda",
                            "real_pixel_format": "nv12"}),
         EncVideo({"name": "encode", "src": "nv12", "dst": "encoded",
@@ -83,6 +86,14 @@ def run(args):
         assert not errors, errors
         assert finished, "encoded stream did not reach EOF"
         assert len(packets) == args.frames, f"only {len(packets)}/{args.frames} encoded frames"
+        # The encoder can enqueue EOF before its worker (or an upstream
+        # decoder) has unwound. Await those EOF-driven workers before shutdown;
+        # they deliberately have no interface for an abrupt mid-frame stop.
+        eof_workers = [node.parameters["name"] for node in nodes
+                       if node.parameters["name"] != "fps"]
+        while any(avp.node(name).isWorking for name in eof_workers):
+            assert time.monotonic() < deadline, "EOF workers did not finish"
+            time.sleep(0.01)
     finally:
         # The crop node is EOF-driven, so use a finite fixture and drain the
         # stream instead of forcing a stop midway through its filter graph.
