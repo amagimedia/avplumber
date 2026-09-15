@@ -425,11 +425,24 @@ encoder option in FFmpeg, works with non-integer FPS.
 -   `interval_sec` (int / float / string of rational) - optional, keyframe
     interval, in seconds. If omitted, periodic forcing is disabled and the
     node acts as a pass-through until triggered externally.
+-   `min_interval_ms` (non-negative int, default `0`) - minimum media-PTS
+    spacing between forced keyframes, shared by periodic and external requests.
+    `0` preserves unrestricted forcing. Requires valid PTS when enabled; a
+    backwards jump before the last forced PTS resets the limiter. The Janus
+    mixer output defaults to `150` (9 frames at 60 fps), configurable with
+    `--keyframe-min-interval-ms` or `JanusVideoConfig.keyframe_min_interval_ms`.
+
+While rate-limited, ordinary frames pass through without waiting. Requests
+coalesce and remain pending until the first eligible frame, including requests
+from RTCP PLI/FIR; these may wait up to the minimum interval plus frame rounding.
+Periodic forcing cannot bypass the limit. This limits the node's forced frames,
+not keyframes independently inserted by an encoder, and is not a wall-clock RTP
+packet pacer.
 
 Runtime control (via `node.object.set` / `node.object.get`):
 
 -   `node.object.set <name> trigger true` — request one keyframe on the next
-    processed frame (one-shot, edge-triggered). Also accepted as key `force`
+    eligible frame (one-shot, edge-triggered). Also accepted as key `force`
     or `request`.
 -   `node.object.get <name> status` — returns a JSON object:
     ```json
@@ -439,7 +452,8 @@ Runtime control (via `node.object.set` / `node.object.get`):
       "pending": false,
       "triggered_frames": 2,
       "periodic_frames": 60,
-      "interval_enabled": true
+      "interval_enabled": true,
+      "min_interval_ms": 150
     }
     ```
 -   `node.object.get <name> pending` — bool, `true` if a trigger has been

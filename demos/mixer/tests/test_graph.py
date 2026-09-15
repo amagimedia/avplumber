@@ -568,12 +568,50 @@ def test_cli_requires_inputs_or_config():
 
 def test_transitions_trigger_a_keyframe_only_when_streaming():
     FakeMixer.instances.clear()
-    build_application(GraphOptions(inputs=("a.mp4",), janus_output=True), api=fake_api())
+    application = build_application(GraphOptions(inputs=("a.mp4",), janus_output=True), api=fake_api())
     assert FakeMixer.instances[-1].parameters["keyframe_node"] == "janus_force_keyframe"
+    node = next(n for n in application.avp.nodes if n.parameters.get("name") == "janus_force_keyframe")
+    assert node.parameters["min_interval_ms"] == 150
+    assert node.parameters["interval_sec"] == "1/1"
 
     FakeMixer.instances.clear()
     build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
     assert FakeMixer.instances[-1].parameters["keyframe_node"] is None
+
+
+@pytest.mark.parametrize("minimum", [0, 100, 150, 200, 500])
+def test_janus_keyframe_limit_is_configurable(minimum):
+    from avpmixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(keyframe_min_interval_ms=minimum),
+                       fps=60, width=1920, height=1080)
+    node = next(n for n in avp.nodes if n.parameters.get("name") == "janus_force_keyframe")
+    assert node.parameters["min_interval_ms"] == minimum
+
+
+@pytest.mark.parametrize("minimum", [-1, 0.2, True, "200", 2**31])
+def test_janus_rejects_invalid_keyframe_limit(minimum):
+    from avpmixer.janus import JanusVideoConfig
+    with pytest.raises(ValueError, match="keyframe_min_interval_ms"):
+        JanusVideoConfig(keyframe_min_interval_ms=minimum)
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_mixer_keyframe_option_reaches_each_output_path(tmp_path, configured):
+    if configured:
+        path = tmp_path / "mixer.json"
+        path.write_text(json.dumps({
+            **CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],
+            "initial_scene": "full", "wipes": [],
+            "renditions": [{"id": "program", "target": "janus"}],
+        }))
+        options = GraphOptions(config=str(path), janus_output=True, keyframe_min_interval_ms=200)
+    else:
+        options = parse_args(["--input", "a.mp4", "--janus-output", "--keyframe-min-interval-ms", "200"])
+    application = build_application(options, api=fake_api())
+    node = next(n for n in application.avp.nodes if n.parameters.get("name") == "janus_force_keyframe")
+    assert node.parameters["min_interval_ms"] == 200
+    assert parse_args(["--input", "a.mp4", "--janus-output"]).keyframe_min_interval_ms == 150
 
 
 def test_wipe_dir_scans_a_library_and_explicit_entries_win(tmp_path):

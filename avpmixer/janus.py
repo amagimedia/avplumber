@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 RTP_PACKET_SIZE = 1_200
+DEFAULT_KEYFRAME_MIN_INTERVAL_MS = 150
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class JanusVideoConfig:
     bitrate_kbps: int = 4_500
     rtcp_bind: str = "0.0.0.0"
     rtcp_port: int = 0
+    keyframe_min_interval_ms: int = DEFAULT_KEYFRAME_MIN_INTERVAL_MS
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -30,6 +32,9 @@ class JanusVideoConfig:
             raise ValueError("Janus bitrate must be positive")
         if not 0 <= self.rtcp_port <= 65535:
             raise ValueError("RTCP port must be between 0 and 65535")
+        if (type(self.keyframe_min_interval_ms) is not int
+                or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
+            raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
 
     @property
     def rtcp_port_remote(self) -> int:
@@ -58,6 +63,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     avp.addNode(api.ForceKeyFrame({
         "name": JANUS_KEYFRAME_NODE, "src": "janus_fps", "dst": "janus_keyframed",
         "interval_sec": "1/1", "auto_restart": "panic", "group": group,
+        "min_interval_ms": janus.keyframe_min_interval_ms,
     }))
     avp.addNode(api.AssumeVideoFormat({
         "name": "janus_format", "src": "janus_keyframed", "dst": "janus_video",
