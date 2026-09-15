@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_commit=3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587
-expected_tree=52361f7251069ef74fbb41460e6e1b65d6f9947c
-expected_patch_count=7
-
-if [[ $# -ne 1 ]]; then
-    echo "usage: $0 /path/to/FFmpeg" >&2
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <7.1.5|8.1> /path/to/FFmpeg" >&2
     exit 2
 fi
 
-source_repo=$(git -C "$1" rev-parse --show-toplevel)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$1" in
+    7.1.5|8.1) series_dir="$script_dir/$1" ;;
+    *) echo "unsupported FFmpeg series: $1" >&2; exit 2 ;;
+esac
+source "$series_dir/base.env"
+source_repo=$(git -C "$2" rev-parse --show-toplevel)
 if ! git -C "$source_repo" cat-file -e "${base_commit}^{commit}"; then
     echo "FFmpeg checkout does not contain base commit ${base_commit}" >&2
     exit 2
 fi
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 shopt -s nullglob
-patches=("$script_dir"/*.patch)
+patches=("$series_dir"/*.patch)
 if [[ ${#patches[@]} -ne $expected_patch_count ]]; then
     echo "expected ${expected_patch_count} patches, found ${#patches[@]}" >&2
     exit 1
@@ -38,9 +39,8 @@ trap cleanup EXIT
 
 git -C "$source_repo" worktree add --detach "$audit_worktree" "$base_commit" \
     >/dev/null
-git -C "$audit_worktree" config user.name "avplumber patch verifier"
-git -C "$audit_worktree" config user.email "patch-verifier@local"
-git -C "$audit_worktree" am --whitespace=nowarn "${patches[@]}" >/dev/null
+git -C "$audit_worktree" -c user.name="avplumber patch verifier" \
+    -c user.email="patch-verifier@local" am --whitespace=nowarn "${patches[@]}" >/dev/null
 
 actual_tree=$(git -C "$audit_worktree" rev-parse 'HEAD^{tree}')
 if [[ "$actual_tree" != "$expected_tree" ]]; then

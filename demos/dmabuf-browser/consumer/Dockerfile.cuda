@@ -50,13 +50,13 @@ RUN git clone --quiet --branch "${NV_CODEC_HEADERS_TAG}" --depth 1 \
     && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
     && rm -rf /tmp/nv-codec-headers
 
-COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
+COPY deps/ffmpeg /build/deps/ffmpeg
 
 RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
     && git -C /tmp/ffmpeg config user.name "dmabuf-browser-demo builder" \
     && git -C /tmp/ffmpeg config user.email "dmabuf-browser-demo@local" \
-    && git -C /tmp/ffmpeg am /build/deps/ffmpeg-patches/*.patch
+    && git -C /tmp/ffmpeg am /build/deps/ffmpeg/${FFMPEG_TAG#n}/*.patch
 
 RUN cd /tmp/ffmpeg \
     && ./configure \
