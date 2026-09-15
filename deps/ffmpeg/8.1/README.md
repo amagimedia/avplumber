@@ -41,6 +41,13 @@ filter help instead; this check works with both series.
 The AVP filter node sets the buffer source's `hw_frames_ctx` before initializing
 the filter. FFmpeg 8.1 validates CUDA input formats during initialization;
 setting the context after `avfilter_graph_create_filter` is too late.
+Filters that request a hardware device also receive it before initialization.
+The AVP node uses FFmpeg's segmented graph parser to attach `hw_device_ctx`
+between filter allocation and initialization; this is needed by `hwupload`
+when preloading alpha wipes. These APIs are also available in FFmpeg 7.1.5,
+so the same AVP filter source supports both versions without a version fork.
+The binaries and Python modules must still be built separately for each
+FFmpeg ABI. The 7.1.5 patch series and default Docker build version are unchanged.
 
 ## Apply and verify
 
