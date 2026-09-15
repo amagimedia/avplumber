@@ -8,7 +8,7 @@ Frame Rate Up Conversion via NVIDIA Optical Flow SDK.
 |-------|---------|-------------|
 | `fruc_library_path` | required | Path to libNvOFFRUC.so |
 | `passthrough_on_fail` | true | Pass through frames if FRUC fails |
-| `factor` | 2 | Frame-rate multiplication factor (2–16). `factor=N` emits N-1 interpolated frames per input pair, i.e. `factor=4` → 4× fps (3 synthesized + 1 original per input). For super-slomo pair with `speed_video { "speed": 1/N }` to preserve realtime playback. |
+| `factor` | 2 | Frame-rate multiplication factor (2–9). `factor=N` emits N-1 interpolated frames per input pair, i.e. `factor=4` → 4× fps (3 synthesized + 1 original per input). For super-slomo pair with `speed_video { "speed": 1/N }` to preserve realtime playback. **For factor > 2 prefer cascading multiple factor=2 nodes** (see `examples/super_slomo_cascade.avplumber`): FRUC's flow refinement is tuned for the midpoint output, so a single factor=4 stage requesting t={0.25, 0.5, 0.75} gets lower-quality flow on the off-midpoint samples than two factor=2 stages in series. Same total FRUC work, better quality, and the two stages pipeline so throughput is unchanged or slightly better. Max is 9 (registered CUarrays: 2 render + up to 8 interp = NvOFFRUC_MAX_RESOURCE). |
 
 ### Pipeline
 1. Load NvOFFRUC library via dlopen
