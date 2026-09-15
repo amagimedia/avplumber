@@ -1,4 +1,4 @@
-From 4040eeb26441ebae9f07a0b175b7d7f77688def7 Mon Sep 17 00:00:00 2001
+From 9492ef1cc9a0473ee4e99549cff3eb08166c9675 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Wed, 12 Aug 2026 15:54:13 +0000
 Subject: [PATCH 3/7] avfilter/npp: support CUDA 13 stream context APIs
@@ -7,13 +7,29 @@ Add an NPP compatibility layer and use explicit CUDA stream contexts in scale, s
 
 Original-commit: 30b851f13d97bad9b0b28e7310122d914ac6fc1d
 ---
+ configure                      |  4 +--
  libavfilter/cuda/npp_compat.h  | 65 ++++++++++++++++++++++++++++++++++
  libavfilter/vf_scale_npp.c     | 56 ++++++++++++++++++++---------
  libavfilter/vf_sharpen_npp.c   | 12 +++++--
  libavfilter/vf_transpose_npp.c | 35 ++++++++++++------
- 4 files changed, 140 insertions(+), 28 deletions(-)
+ 5 files changed, 142 insertions(+), 30 deletions(-)
  create mode 100644 libavfilter/cuda/npp_compat.h
 
+diff --git a/configure b/configure
+index 584e1df313..932be316d4 100755
+--- a/configure
++++ b/configure
+@@ -7338,8 +7338,8 @@ enabled libnpp            && { test_cpp_condition "$(cd "$source_path"; pwd)/lib
+                              { check_lib libnpp npp.h nppGetLibVersion -lnppig -lnppicc -lnppc -lnppidei -lnppif ||
+                                check_lib libnpp npp.h nppGetLibVersion -lnppi -lnppif -lnppc -lnppidei ||
+                                die "ERROR: libnpp not found"; } &&
+-                             { check_func_headers "nppi.h" nppiYCbCr420_8u_P2P3R $libnpp_extralibs ||
+-                               die "ERROR: libnpp support is deprecated, version 13.0 and up are not supported"; }
++                             { check_func_headers "nppi.h" nppiYCbCr420_8u_P2P3R_Ctx $libnpp_extralibs ||
++                               die "ERROR: libnpp stream context APIs not found"; }
+ enabled libopencore_amrnb && { check_pkg_config libopencore_amrnb opencore-amrnb opencore-amrnb/interf_dec.h Decoder_Interface_init ||
+                                require libopencore_amrnb opencore-amrnb/interf_dec.h Decoder_Interface_init -lopencore-amrnb; }
+ enabled libopencore_amrwb && { check_pkg_config libopencore_amrwb opencore-amrwb opencore-amrwb/dec_if.h D_IF_init ||
 diff --git a/libavfilter/cuda/npp_compat.h b/libavfilter/cuda/npp_compat.h
 new file mode 100644
 index 0000000000..bf5d73e6cd

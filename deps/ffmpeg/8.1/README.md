@@ -18,7 +18,8 @@ pixel-format or mixer pipeline design.
    carry the existing scaling-edge and overlay-context fixes. Retain YUVA444P
    CUDA frame support. Use upstream's existing compute-75 compiler fallback.
 3. **NPP CUDA 13 compatibility:** carry the stream-context helper and filter
-   changes; the demo build keeps NPP disabled.
+   changes; probe the stream-context API in configure, since NPP 13 removes
+   the legacy API checked by upstream. The mixer demo build keeps NPP disabled.
 4. **NVDEC intra-only handling:** move the existing initialization hunk to its
    corresponding 8.1 location.
 5. **RFC 4175:** carry the existing frame handling patch.
