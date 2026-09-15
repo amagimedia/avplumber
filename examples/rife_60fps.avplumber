@@ -1,0 +1,50 @@
+# Frame doubling via RIFE 4.26 (no slomo, output at 60 fps CFR).
+#
+# Takes an input at any source fps and interpolates one midpoint per input
+# pair, then normalizes to a 60 fps CFR grid. Output plays at the source's
+# real speed; the extra frames just make motion smoother.
+#
+# Pipeline math for a 29.25 fps source at target 60 fps output:
+#   rife_vfi factor=2  -> 58.5 fps
+#   force_fps 60/1     -> 60 fps CFR, ~2.6% padding for the residual
+#
+# For a 30 fps source the residual is essentially zero. For a 24 fps source
+# use factor=3 (RIFE 4.26 supports arbitrary timesteps -- but see the caveat
+# in rife_vfi's create()).
+#
+# Requirements:
+# - TensorRT engine built via src/nodes/neural_net/rife/tools/ (fixed at
+#   1088x1920 for 1080p inputs).
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "input.mp4", "dst": "in0", "group": "in", "auto_restart": "off", "name": "input" }
+
+queue.plan_capacity v_in 240
+node.add { "type": "demux", "src": "in0", "routing": { "v:0": "v_in" }, "group": "in", "auto_restart": "off" }
+
+queue.plan_capacity v_dec 30
+node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "in", "name": "Video_Dec", "auto_restart": "off", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
+
+queue.plan_capacity v_rife 120
+node.add { "type": "rife_vfi", "src": "v_dec", "dst": "v_rife", "group": "in", "hwaccel": "@gpu", "engine": "/root/rife.engine", "factor": 2, "passthrough_on_fail": false }
+
+queue.plan_capacity v_cfr 120
+node.add { "type": "force_fps", "src": "v_rife", "dst": "v_cfr", "fps": "60/1", "group": "out", "auto_restart": "panic" }
+
+queue.plan_capacity v0 60
+node.add { "type": "fake_video_format", "pixel_format": "cuda", "real_pixel_format": "yuv420p", "group": "out", "auto_restart": "panic", "src": "v_cfr", "dst": "v0" }
+
+queue.plan_capacity keyframed 120
+node.add { "type": "force_keyframe", "src": "v0", "dst": "keyframed", "interval_sec": "2/1", "group": "out", "auto_restart": "panic" }
+
+queue.plan_capacity venc 240
+node.add { "type": "enc_video", "codec": "h264_nvenc", "hwaccel": "@gpu", "options": { "preset": "p5", "b": "12000k", "maxrate": "16000k", "bufsize": "16000k", "rc": "vbr", "profile": "high", "level": "51", "g": 120 }, "auto_restart": "panic", "name": "VEncode", "group": "out", "src": "keyframed", "dst": "venc" }
+
+queue.plan_capacity mux0 240
+node.add { "type": "mux", "src": ["venc"], "dst": "mux0", "group": "out", "auto_restart": "panic", "ts_sort_wait": 0 }
+
+node.add { "type": "output", "format": "mp4", "url": "smooth_60fps.mp4", "options": { "movflags": "+empty_moov+frag_keyframe+default_base_moof" }, "src": "mux0", "group": "out", "auto_restart": "panic", "name": "Out_mp4" }
+
+group.start out
+group.start in
