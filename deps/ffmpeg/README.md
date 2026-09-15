@@ -6,7 +6,7 @@ Do not apply the 7.1.5 series and then the 8.1 series to the same checkout.
 | Directory | Upstream tag | Purpose |
 | --- | --- | --- |
 | `7.1.5/` | `n7.1.5` | Existing default; patch contents preserved unchanged. |
-| `8.1/` | `n8.1` | Compile-compatibility port; not a validated demo upgrade. |
+| `8.1/` | `n8.1` | Compatibility port with 8-bit CUDA mixer runtime checks; see its README for coverage. |
 
 The mixer, CUDA-overlay and DMA-BUF CUDA consumer Dockerfiles select the series
 using their existing `FFMPEG_TAG` argument. Their default remains `n7.1.5`.

@@ -68,9 +68,20 @@ Validated on 2026-09-15 in an isolated x86-64 CUDA development container:
 - FFmpeg 8.1 builds; all seven composition/scaling filters are registered.
 - Pinned avcpp `31de3f4f937ed3bb30d083275e5e76192dfc9cb3` builds unchanged.
 - avplumber binary and Python module build with CUDA/NVCC/DRM/GL enabled,
-  FRUC/neural/TensorRT disabled. EGL/CUDA binary linking uses the toolkit's
-  driver stub; the module import check also uses that link-only stub.
+  FRUC/neural/TensorRT disabled.
 - No GPU media graph or running demo was changed by this compile check.
+
+Subsequent GPU runtime checks covered the 8-bit mixer at 30 and 60 fps, 41 prewarmed
+scenes, video and DMA-BUF browser inputs, all five wipe-cache loads, cut/fade/wipe
+commands, and NVENC output received by a WebRTC browser. The same filter source
+also compiled against FFmpeg 7.1.5 and passed CUDA scaling and alpha-upload tests.
+
+When reusing a build tree with different GL feature flags, rebuild
+`deps/cuda_loader/cuda_drvapi_dynlink.o` with the new flags. A loader compiled
+without GL lacks the EGL function-pointer variables. Linking `libcuda` directly
+to satisfy those missing symbols is incorrect: it supplies functions where AVP
+expects variables and crashes during DMA-BUF import. The validated mixer module
+uses the GL-enabled dynamic loader, without direct `libcuda` linkage.
 
 The current avcpp pin additionally backports custom-IO allocation/cleanup fixes
 and CMake link-list handling. These retain the existing wrapper API; they are
