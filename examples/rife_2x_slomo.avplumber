@@ -1,24 +1,12 @@
-# 4x slomo at 60 fps CFR via RIFE 4.26.
+# 2x slomo at 60 fps CFR via RIFE 4.26.
 #
-# For a source at S fps, target output at M fps, slomo factor k, the RIFE
-# multiplication factor is  ceil(M * k / S).  For a 29.25 fps source at
-# 60 fps output with 4x slomo: ceil(60 * 4 / 29.25) = 9. In practice
-# factor=8 is close enough (force_fps 60/1 fills the ~2.6% residual with
-# a handful of duplicated frames).
-#
-# Verified on a real 29.25 fps clip: near-uniform motion (step-size ratio
-# 1.04x across t={0.125..0.875} for factor=8) with the corrected warp shim
-# used at ONNX export time. See src/nodes/neural_net/rife/tools/README.md.
-#
-# Requirements:
-# - TensorRT engine built via src/nodes/neural_net/rife/tools/ (fp16,
-#   fixed at 1088x1920 for 1080p inputs).
-# - Build with HAVE_TENSORRT=1 and NEURAL_NET_COMMON=1.
+# Middle-ground between rife_60fps.avplumber (real-time frame doubling)
+# and super_slomo_rife.avplumber (4x slomo). For a 29.25 fps source at
+# 60 fps output with 2x slomo, factor is ceil(60 * 2 / 29.25) = 5. We use
+# 4 here (close enough; force_fps fills the small residual).
 #
 # Perf on RTX 4000 Ada (54.5s source at 1080p):
-#   wall ~180s -> input processed at 0.30x realtime, output produced at
-#   1.17x realtime (i.e. output content plays slightly faster than we
-#   generate it, so live 4x slomo is achievable).
+#   wall ~73s -> input at 0.75x realtime, output at 1.48x realtime.
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
@@ -31,10 +19,10 @@ queue.plan_capacity v_dec 30
 node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "in", "name": "Video_Dec", "auto_restart": "off", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
 
 queue.plan_capacity v_rife 240
-node.add { "type": "rife_vfi", "src": "v_dec", "dst": "v_rife", "group": "in", "hwaccel": "@gpu", "engine": "/root/rife.engine", "factor": 8, "passthrough_on_fail": false }
+node.add { "type": "rife_vfi", "src": "v_dec", "dst": "v_rife", "group": "in", "hwaccel": "@gpu", "engine": "/root/rife.engine", "factor": 4, "passthrough_on_fail": false }
 
 queue.plan_capacity v_slow 240
-node.add { "type": "speed_video", "src": "v_rife", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.25 }
+node.add { "type": "speed_video", "src": "v_rife", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.5 }
 
 queue.plan_capacity v_cfr 240
 node.add { "type": "force_fps", "src": "v_slow", "dst": "v_cfr", "fps": "60/1", "group": "out", "auto_restart": "panic" }
