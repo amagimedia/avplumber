@@ -60,9 +60,14 @@ private:
 	NvOFFRUCHandle h_fruc_ = nullptr;
 	bool resources_registered_ = false;
 
-	// CUDA arrays shared with FRUC (we copy into these)
+	// CUDA arrays shared with FRUC. Two rolling render buffers hold the pair of
+	// input frames FRUC's optical-flow state operates on. One interp buffer per
+	// interpolated output slot lets us pipeline: FRUC writes to interp_bufs_[i]
+	// while the previous output copy from interp_bufs_[i-1] is still in flight.
+	// Sharing a single interp buffer would force a sync between every output
+	// copy and the next Process() call.
 	CUarray render_buf_[2]{nullptr, nullptr};
-	CUarray interp_buf_{nullptr};
+	std::vector<CUarray> interp_bufs_;
 	int render_idx_ = 0;
 
 	// State for 2x output scheduling
@@ -122,10 +127,13 @@ private:
 	{
 		if (resources_registered_ && fn_unregister_ && h_fruc_) {
 			NvOFFRUC_UNREGISTER_RESOURCE_PARAM unreg{};
-			unreg.uiCount = NvOFFRUC_MIN_RESOURCE;
-			unreg.pArrResource[0] = interp_buf_;
-			unreg.pArrResource[1] = render_buf_[0];
-			unreg.pArrResource[2] = render_buf_[1];
+			uint32_t idx = 0;
+			for (auto &b : interp_bufs_) {
+				if (idx < NvOFFRUC_MAX_RESOURCE) unreg.pArrResource[idx++] = b;
+			}
+			if (idx < NvOFFRUC_MAX_RESOURCE) unreg.pArrResource[idx++] = render_buf_[0];
+			if (idx < NvOFFRUC_MAX_RESOURCE) unreg.pArrResource[idx++] = render_buf_[1];
+			unreg.uiCount = idx;
 			(void)fn_unregister_(h_fruc_, &unreg);
 			resources_registered_ = false;
 		}
@@ -133,10 +141,13 @@ private:
 			(void)fn_destroy_(h_fruc_);
 			h_fruc_ = nullptr;
 		}
-		if (interp_buf_) {
-			CHECK_CU_FRUC(cuArrayDestroy(interp_buf_));
-			interp_buf_ = nullptr;
+		for (auto &b : interp_bufs_) {
+			if (b) {
+				CHECK_CU_FRUC(cuArrayDestroy(b));
+				b = nullptr;
+			}
 		}
+		interp_bufs_.clear();
 		for (auto &b : render_buf_) {
 			if (b) {
 				CHECK_CU_FRUC(cuArrayDestroy(b));
@@ -184,7 +195,9 @@ private:
 		if (!cuda_dev_ctx_) return false;
 		if (!load_fruc_library()) return false;
 
-		if (h_fruc_ && w == width_ && h == height_ && interp_buf_ && render_buf_[0] && render_buf_[1]) {
+		const size_t needed_interp = (size_t)(factor_ - 1);
+		if (h_fruc_ && w == width_ && h == height_ && interp_bufs_.size() == needed_interp
+			&& render_buf_[0] && render_buf_[1]) {
 			return true;
 		}
 
@@ -204,7 +217,10 @@ private:
 		desc.Height = (size_t)h + (size_t)h / 2;
 		desc.NumChannels = 1;
 		int cuerr = 0;
-		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&interp_buf_, &desc));
+		interp_bufs_.assign(needed_interp, nullptr);
+		for (auto &b : interp_bufs_) {
+			cuerr |= CHECK_CU_FRUC(cuArrayCreate(&b, &desc));
+		}
 		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&render_buf_[0], &desc));
 		cuerr |= CHECK_CU_FRUC(cuArrayCreate(&render_buf_[1], &desc));
 		if (cuerr) {
@@ -232,12 +248,16 @@ private:
 			return false;
 		}
 
-		// Register resources (1 interpolate + 2 render) like the sample
+		// Register resources: (factor_-1) interp buffers + 2 render buffers.
 		NvOFFRUC_REGISTER_RESOURCE_PARAM reg{};
-		reg.uiCount = NvOFFRUC_MIN_RESOURCE;
-		reg.pArrResource[0] = interp_buf_;
-		reg.pArrResource[1] = render_buf_[0];
-		reg.pArrResource[2] = render_buf_[1];
+		uint32_t idx = 0;
+		for (auto &b : interp_bufs_) {
+			if (idx >= NvOFFRUC_MAX_RESOURCE) break;
+			reg.pArrResource[idx++] = b;
+		}
+		if (idx < NvOFFRUC_MAX_RESOURCE) reg.pArrResource[idx++] = render_buf_[0];
+		if (idx < NvOFFRUC_MAX_RESOURCE) reg.pArrResource[idx++] = render_buf_[1];
+		reg.uiCount = idx;
 		st = fn_register_(h_fruc_, &reg);
 		if (st != NvOFFRUC_SUCCESS) {
 			logstream << "nvof_fruc: NvOFFRUCRegisterResource failed: " << (int)st;
@@ -256,9 +276,10 @@ private:
 		return true;
 	}
 
-	bool copy_frame_to_nv12_buffer(const av::VideoFrame &in, CUarray dst_nv12)
+	// Issue an async device->array copy of an NV12 CUDA frame. Callers must
+	// synchronize the stream before FRUC reads from dst_nv12.
+	bool copy_frame_to_nv12_buffer_async(const av::VideoFrame &in, CUarray dst_nv12)
 	{
-		// Copy input CUDA NV12 planes into our CUDA array (Y then UV).
 		const int w = in.width();
 		const int h = in.height();
 		if (w <= 0 || h <= 0) return false;
@@ -293,11 +314,18 @@ private:
 		int cuerr = 0;
 		cuerr |= CHECK_CU_FRUC(cuMemcpy2DAsync(&cpyY, cuda_dev_ctx_->stream));
 		cuerr |= CHECK_CU_FRUC(cuMemcpy2DAsync(&cpyUV, cuda_dev_ctx_->stream));
-		cuerr |= CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream));
 		return cuerr == 0;
 	}
 
-	bool copy_nv12_buffer_to_frame(CUarray src_nv12, av::VideoFrame &out)
+	bool copy_frame_to_nv12_buffer(const av::VideoFrame &in, CUarray dst_nv12)
+	{
+		if (!copy_frame_to_nv12_buffer_async(in, dst_nv12)) return false;
+		return CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream)) == 0;
+	}
+
+	// Issue an async array->device copy of an NV12 CUDA frame. Callers must
+	// synchronize the stream before downstream reads out.
+	bool copy_nv12_buffer_to_frame_async(CUarray src_nv12, av::VideoFrame &out)
 	{
 		const int w = out.width();
 		const int h = out.height();
@@ -333,8 +361,13 @@ private:
 		int cuerr = 0;
 		cuerr |= CHECK_CU_FRUC(cuMemcpy2DAsync(&cpyY, cuda_dev_ctx_->stream));
 		cuerr |= CHECK_CU_FRUC(cuMemcpy2DAsync(&cpyUV, cuda_dev_ctx_->stream));
-		cuerr |= CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream));
 		return cuerr == 0;
+	}
+
+	bool copy_nv12_buffer_to_frame(CUarray src_nv12, av::VideoFrame &out)
+	{
+		if (!copy_nv12_buffer_to_frame_async(src_nv12, out)) return false;
+		return CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream)) == 0;
 	}
 
 	av::Timestamp midpoint_pts(const av::Timestamp &a, const av::Timestamp &b)
@@ -357,7 +390,11 @@ private:
 		return av::Timestamp(mi, tb);
 	}
 
-	bool make_interp_frame_from_buffer(const av::VideoFrame &ref_in, const av::Timestamp &out_pts, av::VideoFrame &out)
+	// Allocate an output CUDA VideoFrame and issue an async copy from src_nv12.
+	// The caller is responsible for a single cuStreamSynchronize at the end of
+	// the burst before publishing the frame downstream.
+	bool make_interp_frame_from_buffer_async(const av::VideoFrame &ref_in, const av::Timestamp &out_pts,
+		CUarray src_nv12, av::VideoFrame &out)
 	{
 		out = av::VideoFrame();
 		out.setTimeBase(ref_in.timeBase());
@@ -376,15 +413,9 @@ private:
 		}
 		out.raw()->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
 
-		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
-			logstream << "nvof_fruc: cuCtxPushCurrent failed (make_interp_frame_from_buffer)";
-			return false;
-		}
-		bool ok = copy_nv12_buffer_to_frame(interp_buf_, out);
-		CUcontext dummy;
-		CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
+		bool ok = copy_nv12_buffer_to_frame_async(src_nv12, out);
 		if (!ok) {
-			logstream << "nvof_fruc: failed to copy interpolated buffer into output frame";
+			logstream << "nvof_fruc: failed to schedule copy of interpolated buffer into output frame";
 			return false;
 		}
 		out.setComplete(true);
@@ -491,7 +522,7 @@ public:
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 1;
-			outParams.stFrameDataOutput.pFrame = interp_buf_;
+			outParams.stFrameDataOutput.pFrame = interp_bufs_[0];
 			outParams.stFrameDataOutput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
 			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
@@ -519,16 +550,13 @@ public:
 		pending_out_.clear();
 		pending_out_.reserve((size_t)nsteps + 1);
 
-		// Advance render buffer index and copy input into it once.
-		render_idx_ = (render_idx_ + 1) & 1;
-		CUarray cur_render = render_buf_[render_idx_];
-		bool copy_ok = false;
-		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx)) == 0) {
-			copy_ok = copy_frame_to_nv12_buffer(in, cur_render);
-			CUcontext dummy;
-			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
-		}
-		if (!copy_ok) {
+		// Pipelining: one CUDA context push covers the whole burst. Input copy
+		// is issued async but MUST be synced before the first Process() call
+		// because FRUC uses its own internal stream. Each Process() writes to a
+		// distinct interp buffer, so subsequent output copies can be issued
+		// back-to-back without draining the stream. A single sync at the end
+		// covers all output copies before we publish the frames.
+		if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
 			if (passthrough_on_fail_) {
 				if (!this->sink_->put(in, true)) return;
 				this->source_->pop();
@@ -537,15 +565,19 @@ public:
 			return;
 		}
 
+		render_idx_ = (render_idx_ + 1) & 1;
+		CUarray cur_render = render_buf_[render_idx_];
 		bool step_failed = false;
-		for (int i = 1; i <= nsteps; ++i) {
+
+		if (!copy_frame_to_nv12_buffer_async(in, cur_render)
+			|| CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream))) {
+			step_failed = true;
+		}
+
+		for (int i = 1; !step_failed && i <= nsteps; ++i) {
 			double f = (double)i / (double)factor_;
 			av::Timestamp out_pts = lerp_pts(prev_pts_, in_pts, f);
 
-			if (CHECK_CU_FRUC(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) {
-				step_failed = true;
-				break;
-			}
 			NvOFFRUC_PROCESS_IN_PARAMS inParams{};
 			NvOFFRUC_PROCESS_OUT_PARAMS outParams{};
 			bool repeated = false;
@@ -553,13 +585,12 @@ public:
 			inParams.stFrameDataInput.nTimeStamp = (double)in_pts.timestamp({1, 1000});
 			inParams.stFrameDataInput.nCuSurfacePitch = 0;
 			inParams.bSkipWarp = 0;
-			outParams.stFrameDataOutput.pFrame = interp_buf_;
+			CUarray out_buf = interp_bufs_[(size_t)(i - 1)];
+			outParams.stFrameDataOutput.pFrame = out_buf;
 			outParams.stFrameDataOutput.nTimeStamp = (double)out_pts.timestamp({1, 1000});
 			outParams.stFrameDataOutput.nCuSurfacePitch = 0;
 			outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &repeated;
 			NvOFFRUC_STATUS st = fn_process_(h_fruc_, &inParams, &outParams);
-			CUcontext dummy;
-			CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 			if (st != NvOFFRUC_SUCCESS) {
 				logstream << "nvof_fruc: NvOFFRUCProcess failed at step " << i << "/" << nsteps << ": " << (int)st;
 				step_failed = true;
@@ -567,12 +598,20 @@ public:
 			}
 
 			av::VideoFrame interp;
-			if (!make_interp_frame_from_buffer(in, out_pts, interp)) {
+			if (!make_interp_frame_from_buffer_async(in, out_pts, out_buf, interp)) {
 				step_failed = true;
 				break;
 			}
 			pending_out_.push_back(std::move(interp));
 		}
+
+		// One sync covers every output copy issued in the burst.
+		if (!step_failed && CHECK_CU_FRUC(cuStreamSynchronize(cuda_dev_ctx_->stream))) {
+			step_failed = true;
+		}
+
+		CUcontext dummy;
+		CHECK_CU_FRUC(cuCtxPopCurrent(&dummy));
 
 		if (step_failed) {
 			pending_out_.clear();
@@ -623,8 +662,11 @@ public:
 		}
 		if (params.count("factor")) {
 			int f = (int)params["factor"];
-			if (f < 2 || f > 16) {
-				throw Error("nvof_fruc: factor must be in [2, 16]");
+			// FRUC registers (factor-1) interp buffers + 2 render buffers and
+			// caps total registered resources at NvOFFRUC_MAX_RESOURCE.
+			const int max_factor = (int)NvOFFRUC_MAX_RESOURCE - 2 + 1;
+			if (f < 2 || f > max_factor) {
+				throw Error("nvof_fruc: factor must be in [2, " + std::to_string(max_factor) + "]");
 			}
 			r->factor_ = f;
 		}
