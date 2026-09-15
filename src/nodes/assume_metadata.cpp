@@ -1,6 +1,24 @@
 #include "node_common.hpp"
 
-class AssumeAudioFormat: public TransparentNode<av::AudioSamples>, public IAudioMetadataSource, public ITimeBaseSource {
+// Live format declarations must remain available while upstream reconnects.
+// Keep ordinary EOF propagation as the default for finite graphs.
+template<typename T> class FormatDeclaration: public TransparentNode<T> {
+public:
+    using TransparentNode<T>::TransparentNode;
+    bool ignore_eof = false;
+
+    bool consumeEofIfPresent() override {
+        if (!ignore_eof) return TransparentNode<T>::consumeEofIfPresent();
+        T* frame = this->source_->peek(0);
+        if (frame && isEofMarker(*frame)) {
+            this->source_->pop();
+            logstream << "Ignoring upstream EOF at live format boundary";
+        }
+        return false;
+    }
+};
+
+class AssumeAudioFormat: public FormatDeclaration<av::AudioSamples>, public IAudioMetadataSource, public ITimeBaseSource {
 private:
     int sample_rate_;
     av::SampleFormat sample_format_;
@@ -19,7 +37,7 @@ public:
         return {1, sample_rate_};
     }
     AssumeAudioFormat(std::unique_ptr<Source<av::AudioSamples>> &&source, std::unique_ptr<Sink<av::AudioSamples>> &&sink, const int sample_rate, const av::SampleFormat sample_format, const uint64_t channel_layout):
-        TransparentNode<av::AudioSamples>(std::move(source), std::move(sink)),
+        FormatDeclaration<av::AudioSamples>(std::move(source), std::move(sink)),
         sample_rate_(sample_rate), sample_format_(sample_format), channel_layout_(channel_layout) {
     }
     static std::shared_ptr<AssumeAudioFormat> create(NodeCreationInfo &nci) {
@@ -31,13 +49,15 @@ public:
         if (params.count("sample_rate")) sr = params["sample_rate"];
         if (params.count("sample_format")) fmt = av::SampleFormat(params["sample_format"].get<std::string>());
         if (params.count("channel_layout")) chl = stringToChannelLayout(params["channel_layout"].get<std::string>().c_str());
-        return NodeSISO<av::AudioSamples, av::AudioSamples>::template createCommon<AssumeAudioFormat>(edges, params, sr, fmt, chl);
+        auto node = NodeSISO<av::AudioSamples, av::AudioSamples>::template createCommon<AssumeAudioFormat>(edges, params, sr, fmt, chl);
+        node->ignore_eof = params.value("ignore_eof", false);
+        return node;
     }
     virtual ~AssumeAudioFormat() {
     }
 };
 
-class AssumeVideoFormat: public TransparentNode<av::VideoFrame>, public IVideoFormatSource {
+class AssumeVideoFormat: public FormatDeclaration<av::VideoFrame>, public IVideoFormatSource {
 private:
     int width_, height_;
     av::PixelFormat pix_fmt_;
@@ -57,7 +77,7 @@ public:
     }
     AssumeVideoFormat(std::unique_ptr<Source<av::VideoFrame>> &&source, std::unique_ptr<Sink<av::VideoFrame>> &&sink,
         const int width, const int height, const av::PixelFormat pixfmt, const av::PixelFormat real_pixfmt):
-        TransparentNode<av::VideoFrame>(std::move(source), std::move(sink)),
+        FormatDeclaration<av::VideoFrame>(std::move(source), std::move(sink)),
         width_(width), height_(height), pix_fmt_(pixfmt), real_pix_fmt_(real_pixfmt) {
     }
     static std::shared_ptr<AssumeVideoFormat> create(NodeCreationInfo &nci) {
@@ -71,7 +91,9 @@ public:
         if (params.count("height")) height = params["height"];
         if (params.count("pixel_format")) pixel_format = av::PixelFormat(params["pixel_format"].get<std::string>());
         if (params.count("real_pixel_format")) real_pixel_format = av::PixelFormat(params["real_pixel_format"].get<std::string>());
-        return NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<AssumeVideoFormat>(edges, params, width, height, pixel_format, real_pixel_format);
+        auto node = NodeSISO<av::VideoFrame, av::VideoFrame>::template createCommon<AssumeVideoFormat>(edges, params, width, height, pixel_format, real_pixel_format);
+        node->ignore_eof = params.value("ignore_eof", false);
+        return node;
     }
 };
 

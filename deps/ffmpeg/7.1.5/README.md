@@ -38,7 +38,7 @@ git clone --branch n7.1.5 --depth 1 \
   https://github.com/FFmpeg/FFmpeg clean-ffmpeg
 git -C clean-ffmpeg config user.name "patch application"
 git -C clean-ffmpeg config user.email "patch-application@local"
-git -C clean-ffmpeg am /path/to/avplumber/deps/ffmpeg-patches/*.patch
+git -C clean-ffmpeg am /path/to/avplumber/deps/ffmpeg/7.1.5/*.patch
 ```
 
 ## Verify
@@ -48,7 +48,7 @@ commit. It creates and removes an isolated temporary worktree; it does not alter
 the checkout's active branch:
 
 ```bash
-deps/ffmpeg-patches/verify.sh /path/to/FFmpeg
+deps/ffmpeg/7.1.5/verify.sh /path/to/FFmpeg
 ```
 
 Verification succeeds only when all seven patches apply and produce the exact

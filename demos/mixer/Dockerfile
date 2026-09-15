@@ -36,13 +36,13 @@ RUN git clone --quiet --branch "${NV_CODEC_HEADERS_TAG}" --depth 1 \
     && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
     && rm -rf /tmp/nv-codec-headers
 
-COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
+COPY deps/ffmpeg /build/deps/ffmpeg
 
 RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
     && git -C /tmp/ffmpeg config user.name "mixer-demo builder" \
     && git -C /tmp/ffmpeg config user.email "mixer-demo@local" \
-    && git -C /tmp/ffmpeg am /build/deps/ffmpeg-patches/*.patch
+    && git -C /tmp/ffmpeg am /build/deps/ffmpeg/${FFMPEG_TAG#n}/*.patch
 
 RUN cd /tmp/ffmpeg \
     && ./configure \
@@ -77,8 +77,8 @@ RUN cd /tmp/ffmpeg \
     && rm -rf /tmp/ffmpeg
 
 RUN /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' overlay_many_cuda ' \
-    && /usr/local/bin/ffmpeg -hide_banner -filters \
-       | awk '$2 == "transition_cuda" && $1 ~ /C/ { found = 1 } END { exit !found }'
+    && /usr/local/bin/ffmpeg -hide_banner -h filter=transition_cuda \
+       | awk '$1 == "mode" && $3 ~ /T/ { found = 1 } END { exit !found }'
 
 WORKDIR /build
 
