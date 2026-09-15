@@ -467,6 +467,17 @@ public:
 			int f = (int)params["factor"];
 			if (f < 2 || f > 16) throw Error("rife_vfi: factor must be in [2, 16]");
 			r->factor_ = f;
+			// RIFE 4.26's timestep input is effectively only reliable at t=0.5
+			// (empirically it produces near-endpoint output for other values,
+			// giving highly non-uniform motion). For factor > 2 always cascade
+			// multiple rife_vfi factor=2 stages -- each stage only samples the
+			// midpoint of its input pair, so 2^N stages give 2^N x multiplication
+			// with genuinely uniform motion. See examples/super_slomo_rife.avplumber.
+			if (f > 2) {
+				logstream << "rife_vfi: factor=" << f << " requested; RIFE 4.26 timestep is only "
+				             "reliable at t=0.5. Motion will be non-uniform (dead zones near "
+				             "input frames). Prefer cascading multiple factor=2 rife_vfi nodes.";
+			}
 		}
 		if (params.count("passthrough_on_fail"))
 			r->passthrough_on_fail_ = (bool)params["passthrough_on_fail"];
