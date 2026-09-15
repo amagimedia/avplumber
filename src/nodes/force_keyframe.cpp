@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include <atomic>
+#include <limits>
 
 class ForceKeyFrame: public NodeSISO<av::VideoFrame, av::VideoFrame>,
                      public IInputsObjects,
@@ -8,6 +9,8 @@ protected:
     av::Rational interval_sec_;
     bool interval_enabled_ = false;
     int64_t last_result_ = -(1L<<62);
+    int min_interval_ms_ = 0;
+    av::Timestamp last_forced_pts_;
     std::atomic<uint64_t> requested_generation_{0};
     std::atomic<uint64_t> forced_generation_{0};
     std::atomic<uint64_t> triggered_frames_{0};
@@ -45,11 +48,11 @@ protected:
         return true;
     }
 
-    // Coalescing semantics: any number of triggers received between two frames
-    // results in *one* forced keyframe. forced_generation_ is set to the latest
-    // requested value, so callers polling getObject("pending") cannot distinguish
+    // Coalescing semantics: any number of triggers received before the next
+    // eligible frame results in *one* forced keyframe. forced_generation_ is set
+    // to the latest requested value, so callers polling getObject("pending") cannot distinguish
     // their individual trigger from triggers emitted by other clients in the
-    // same inter-frame window. This is intentional — emitting one keyframe per
+    // same rate-limit window. This is intentional — emitting one keyframe per
     // received trigger would let a misbehaving controller spike the bitrate
     // arbitrarily.
     bool shouldForceTriggered() {
@@ -73,13 +76,32 @@ public:
             return;
         }
         av::VideoFrame frm = *ptr;
-        const bool force_triggered = shouldForceTriggered();
-        const bool force_periodic = shouldForcePeriodic(frm);
+        const auto pts = frm.pts();
+        if (min_interval_ms_ > 0) {
+            if (!pts.isValid() || pts.timebase().getNumerator() <= 0 ||
+                pts.timebase().getDenominator() <= 0) {
+                throw Error("force_keyframe: min_interval_ms requires valid frame PTS");
+            }
+            // A seek/reconnect starts a new media timeline. Do not wait for the
+            // old timeline to catch up before allowing a recovery keyframe.
+            if (last_forced_pts_.isValid() && pts < last_forced_pts_) {
+                last_forced_pts_ = av::Timestamp();
+                last_result_ = -(1L<<62);
+            }
+        }
+        const bool eligible = min_interval_ms_ == 0 || !last_forced_pts_.isValid() ||
+            pts - last_forced_pts_ >= av::Timestamp(min_interval_ms_, av::Rational(1, 1000));
+        // Do not acknowledge triggers or advance the periodic bucket while
+        // throttled: both remain due until one eligible frame satisfies them.
+        const bool force_triggered = eligible && shouldForceTriggered();
+        const bool force_periodic = eligible && shouldForcePeriodic(frm);
         if (force_triggered || force_periodic) {
             frm.setPictureType(AV_PICTURE_TYPE_I);
             frm.setKeyFrame(true);
+            last_forced_pts_ = pts;
         } else {
             frm.setPictureType(AV_PICTURE_TYPE_NONE);
+            frm.setKeyFrame(false);
         }
         this->sink_->put(frm);
         this->source_->pop();
@@ -113,6 +135,7 @@ public:
             status["triggered_frames"] = triggered_frames_.load(std::memory_order_relaxed);
             status["periodic_frames"] = periodic_frames_.load(std::memory_order_relaxed);
             status["interval_enabled"] = interval_enabled_;
+            status["min_interval_ms"] = min_interval_ms_;
             return status;
         }
         if (key == "pending") {
@@ -128,10 +151,12 @@ public:
         std::unique_ptr<Source<av::VideoFrame>> &&source,
         std::unique_ptr<Sink<av::VideoFrame>> &&sink,
         bool interval_enabled,
-        const av::Rational interval_sec
+        const av::Rational interval_sec,
+        int min_interval_ms
     ): NodeSISO<av::VideoFrame, av::VideoFrame>(std::move(source), std::move(sink)),
        interval_sec_(interval_sec),
-       interval_enabled_(interval_enabled) {
+       interval_enabled_(interval_enabled),
+       min_interval_ms_(min_interval_ms) {
     }
 
     static std::shared_ptr<ForceKeyFrame> create(NodeCreationInfo &nci) {
@@ -139,6 +164,15 @@ public:
         const Parameters &params = nci.params;
         bool interval_enabled = false;
         av::Rational interval_sec(0, 1);
+        int min_interval_ms = 0;
+        if (params.contains("min_interval_ms")) {
+            const auto& value = params["min_interval_ms"];
+            if (!value.is_number_integer() || value.get<double>() < 0 ||
+                value.get<double>() > std::numeric_limits<int>::max()) {
+                throw Error("min_interval_ms must be a non-negative integer in milliseconds");
+            }
+            min_interval_ms = value.get<int>();
+        }
         if (params.count("interval_sec") > 0) {
             interval_sec = parseInterval(params["interval_sec"]);
             if (interval_sec.getNumerator() <= 0 || interval_sec.getDenominator() <= 0) {
@@ -150,9 +184,10 @@ public:
             edges,
             params,
             interval_enabled,
-            interval_sec
+            interval_sec,
+            min_interval_ms
         );
     }
 };
 
-DECLNODE(force_keyframe, ForceKeyFrame);
+DECLNODE(force_keyframe, ForceKeyFrame)

@@ -149,6 +149,12 @@ python3 demos/mixer/tests/frame_codes.py media --sources 16 --width 1920 --heigh
 
 ## Under the hood
 
+Janus output limits forced keyframes to one per 150 ms by default (9 frames at
+60 fps). Override with `--keyframe-min-interval-ms 200`; `0` disables the limit.
+The option also applies to Janus renditions loaded with `--config`. Cuts and
+ordinary frames are not delayed: pending cut/RTCP requests coalesce until the
+next eligible frame. Periodic keyframes share the same limit.
+
 <a href="https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer" target="_blank" rel="noopener noreferrer"><img src="https://amagimedia.github.io/avplumber/demos/mixer/docs/mixer-graph-grouped.png" alt="Grouped mixer graph: inputs, two compositor slots, transitions, media wipe and output. Click for the full ungrouped graph." width="640"></a>
 
 Two compositor slots draw every scene; a transition filter blends them and the
