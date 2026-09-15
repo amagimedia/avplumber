@@ -187,6 +187,22 @@ else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
 endif
 
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
+override CXXFLAGS += -DHAVE_TENSORRT=1
+ifneq ($(strip $(TENSORRT_ROOT)),)
+override CXXFLAGS += -I$(TENSORRT_ROOT)/include
+override LFLAGS += -L$(TENSORRT_ROOT)/lib -Wl,-rpath,$(TENSORRT_ROOT)/lib
+endif
+override LIBS_FLAGS += -lnvinfer -lnvinfer_plugin
+endif
+
+# rife_vfi -- RIFE 4.26 learned video frame interpolation via TensorRT.
+# Requires TensorRT (HAVE_TENSORRT=1) so we can link the C++ inference runtime,
+# and NVCC/PTX for the NV12<->RGB fp16 color-conversion kernels.
+ifeq ($(HAVE_CUDA)$(NEURAL_NET)$(HAVE_TENSORRT)$(HAVE_NVCC),1111)
+NODES_SRC += $(SRCDIR)/nodes/neural_net/rife/rife_vfi.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/rife/rife_kernels.cu,avpl_rife_ptx,objs/src/nodes/neural_net/rife/rife_vfi.o))
+endif
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
 ifeq ($(HAVE_CUDA)$(HAVE_NVOF_FRUC)$(NEURAL_NET),111)
 ifneq (,$(wildcard $(OPTICAL_FLOW_SDK_DIR_NAME)/NvOFFRUC/Interface/NvOFFRUC.h))
