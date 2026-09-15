@@ -1,21 +1,20 @@
-# Super-slomo, cascaded FRUC variant (recommended quality preset).
+# Super-slomo, cascaded FRUC variant (4x slomo at 60 fps output).
 #
-# Two nvof_fruc factor=2 stages in series produce the same 4x frame density as
-# factor=4 in a single stage, but every interpolated frame is a true midpoint
-# of its input pair -- FRUC's optical-flow refinement is tuned for t=0.5, so
-# off-midpoint samples (t=0.25, t=0.75 in single-stage factor=4) get lower
-# quality flow. Cascade avoids that.
+# For a source at S fps, target output at M fps, and slomo factor k, the FRUC
+# multiplication factor must be   ceil(M * k / S)   or duplication is silently
+# added downstream (typically by force_fps). Under-specifying this is the most
+# common way to end up with a "FRUC didn't interpolate" perception -- what
+# actually happened is force_fps had to duplicate every frame ~2x to fill the
+# CFR grid.
 #
-# Trace: 30 fps input -> FRUC_A(2x) -> 60 fps -> FRUC_B(2x) -> 120 fps
-#   FRUC_A: midpoint of (F0, F1) = M
-#   FRUC_B: midpoint of (F0, M) = Q1; midpoint of (M, F1) = Q3
-# All three interpolated frames (Q1, M, Q3) are true midpoints.
+#   input.mp4 = 29.25 fps, target = 60 fps, slomo = 4x
+#   required factor = ceil(60 * 4 / 29.25) = ceil(8.2) = 9
 #
-# Throughput: identical or slightly better than single-stage factor=4 because
-# the two FRUC nodes pipeline (stage B processes frame N while stage A works
-# on frame N+1).
-#
-# For 8x slomo add a third nvof_fruc factor=2 stage and set speed=0.125.
+# NvOFFRUC's flow refinement is tuned for midpoint (t=0.5) output, so a single
+# high-factor stage requesting off-midpoint samples gets worse flow. Cascade
+# multiple factor=2 stages instead -- every interpolated frame is a true
+# midpoint of its input pair. Three factor=2 stages give factor=8 (close enough
+# to the 8.2 target that force_fps only fills a 2.6% residual jitter).
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
@@ -27,16 +26,24 @@ node.add { "type": "demux", "src": "in0", "routing": { "v:0": "v_in" }, "group":
 queue.plan_capacity v_dec 30
 node.add { "type": "dec_video", "src": "v_in", "dst": "v_dec", "group": "in", "name": "Video_Dec", "auto_restart": "off", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid", "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["h264", "hevc"] }
 
+# Stage A: 29.25 fps -> 58.5 fps
 queue.plan_capacity v_fruc_a 120
 node.add { "type": "nvof_fruc", "src": "v_dec", "dst": "v_fruc_a", "group": "in", "hwaccel": "@gpu", "library": "/usr/local/Optical_Flow_SDK_5.0.7/NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so", "factor": 2, "passthrough_on_fail": false }
 
+# Stage B: 58.5 fps -> 117 fps
 queue.plan_capacity v_fruc_b 120
 node.add { "type": "nvof_fruc", "src": "v_fruc_a", "dst": "v_fruc_b", "group": "in", "hwaccel": "@gpu", "library": "/usr/local/Optical_Flow_SDK_5.0.7/NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so", "factor": 2, "passthrough_on_fail": false }
 
-queue.plan_capacity v_slow 120
-node.add { "type": "speed_video", "src": "v_fruc_b", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.25 }
+# Stage C: 117 fps -> 234 fps  (matches the ~240 fps needed for 4x slomo at 60 fps)
+queue.plan_capacity v_fruc_c 240
+node.add { "type": "nvof_fruc", "src": "v_fruc_b", "dst": "v_fruc_c", "group": "in", "hwaccel": "@gpu", "library": "/usr/local/Optical_Flow_SDK_5.0.7/NvOFFRUC/NvOFFRUCSample/bin/ubuntu/libNvOFFRUC.so", "factor": 2, "passthrough_on_fail": false }
 
-queue.plan_capacity v_cfr 120
+# speed_video 0.25 stretches PTS 4x -> effective 58.5 fps timing
+queue.plan_capacity v_slow 240
+node.add { "type": "speed_video", "src": "v_fruc_c", "dst": "v_slow", "group": "in", "team": "slomo", "speed": 0.25 }
+
+# force_fps only fills the tiny 58.5 -> 60 fps residual (~2.6% duplication)
+queue.plan_capacity v_cfr 240
 node.add { "type": "force_fps", "src": "v_slow", "dst": "v_cfr", "fps": "60/1", "group": "out", "auto_restart": "panic" }
 
 queue.plan_capacity v0 60
