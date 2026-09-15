@@ -191,16 +191,13 @@ protected:
                 logstream << "Unable to init source filter " << name << ": in_args_ not initialized";
             }
             
-            // create buffersrc filter
             const AVFilter* buffersrc = avfilter_get_by_name(ms_.source_filter_name);
-            int ret = avfilter_graph_create_filter(&ctx_, buffersrc, name.c_str(), in_args_.c_str(), nullptr, filter_graph);
-            if (ret < 0) {
-                throw Error("Couldn't create buffer source");
+            if (!buffersrc) {
+                throw Error("Couldn't find buffer source filter");
             }
-            
-            ret = avfilter_link(ctx_, 0, dst->filter_ctx, dst->pad_idx);
-            if (ret != 0) {
-                throw Error("Couldn't link " + name);
+            ctx_ = avfilter_graph_alloc_filter(filter_graph, buffersrc, name.c_str());
+            if (!ctx_) {
+                throw Error("Couldn't allocate buffer source");
             }
             
             // Prefer copying hw_frames_ctx from the first frame (if captured),
@@ -237,6 +234,17 @@ protected:
                 // av_buffersrc_parameters_set has increased the refcount, we should unref
                 av_buffer_unref(&params->hw_frames_ctx);
                 av_freep(&params);
+            }
+
+            // FFmpeg 8.1 validates hardware inputs during initialization, so the
+            // buffersrc must already have its hw_frames_ctx at this point.
+            int ret = avfilter_init_str(ctx_, in_args_.c_str());
+            if (ret < 0) {
+                throw Error("Couldn't initialize buffer source: " + av::error2string(ret));
+            }
+            ret = avfilter_link(ctx_, 0, dst->filter_ctx, dst->pad_idx);
+            if (ret != 0) {
+                throw Error("Couldn't link " + name);
             }
         }
         void initSinkFilter(const int index, AVFilterGraph *filter_graph, AVFilterInOut *src) {

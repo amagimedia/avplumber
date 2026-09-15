@@ -38,6 +38,10 @@ FFmpeg 8 also removed the `C` command-support marker from `-filters` output.
 The mixer Dockerfile checks the transition's runtime-capable `mode` option in
 filter help instead; this check works with both series.
 
+The AVP filter node sets the buffer source's `hw_frames_ctx` before initializing
+the filter. FFmpeg 8.1 validates CUDA input formats during initialization;
+setting the context after `avfilter_graph_create_filter` is too late.
+
 ## Apply and verify
 
 ```bash
@@ -60,3 +64,7 @@ Validated on 2026-09-15 in an isolated x86-64 CUDA development container:
   FRUC/neural/TensorRT disabled. EGL/CUDA binary linking uses the toolkit's
   driver stub; the module import check also uses that link-only stub.
 - No GPU media graph or running demo was changed by this compile check.
+
+The current avcpp pin additionally backports custom-IO allocation/cleanup fixes
+and CMake link-list handling. These retain the existing wrapper API; they are
+maintenance fixes, not requirements for FFmpeg 8.1 compilation or a v3 migration.
