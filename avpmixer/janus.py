@@ -52,10 +52,27 @@ KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
 
 def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps: int,
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
-                       group: str = "output", profile: str = "baseline", preset: str = "p7",
+                       group: str = "output", codec: str = "hevc_nvenc", profile: str = "",
+                       preset: str = "p5", enc_format: str = "nv12", color=None,
                        prefix: str = "janus"):
-    """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener."""
+    """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
+
+    Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
+    over WebRTC on hardware-decode machines: ~2x the efficiency of H.264 at the
+    same bitrate and it carries 10-bit + HDR signaling. ``enc_format`` is the
+    encoder's CUDA input (``p010le`` keeps 10-bit, ``nv12`` is 8-bit) and
+    ``color`` supplies the VUI so an HLG program signals BT.2020/arib-std-b67.
+    """
     bitrate = f"{janus.bitrate_kbps}k"
+    ten_bit = enc_format in ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
+    if not profile:
+        profile = ("main10" if ten_bit else "main") if "hevc" in codec else "baseline"
+    color_opts = {} if not color else {
+        "color_primaries": color.get("color_primaries", "bt709"),
+        "color_trc": color.get("color_trc", "bt709"),
+        "colorspace": color.get("colorspace", "bt709"),
+        "color_range": color.get("color_range", "tv"),
+    }
     avp.addNode(api.ForceFPS({
         "name": "janus_fps", "src": src_edge, "dst": "janus_fps", "fps": f"{fps}/{fps_den}",
         "group": group,
@@ -67,21 +84,22 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     }))
     avp.addNode(api.AssumeVideoFormat({
         "name": "janus_format", "src": "janus_keyframed", "dst": "janus_video",
-        "width": width, "height": height, "pixel_format": "cuda", "real_pixel_format": "nv12",
+        "width": width, "height": height, "pixel_format": "cuda", "real_pixel_format": enc_format,
         "auto_restart": "panic", "group": group,
     }))
     avp.addNode(api.EncVideo({
         "name": "janus_encoder", "src": "janus_video", "dst": "janus_encoded",
-        "codec": "h264_nvenc", "hwaccel": hwaccel,
+        "codec": codec, "hwaccel": hwaccel,
         "options": {
             "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": fps, "bf": 0,
-            # p7 is NVENC's highest-quality preset; with tune=ull it stays a
+            # p5..p7 are NVENC's quality presets; with tune=ull it stays a
             # one-pass, no-lookahead, no-reordering encode, so the extra quality
             # costs GPU time rather than latency. B-frames stay off: they need
-            # reordering, and WebRTC negotiates constrained baseline anyway.
+            # reordering, which WebRTC's jitter budget will not absorb.
             "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
             "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
             "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
+            **color_opts,
         },
         "auto_restart": "panic", "group": group,
     }))

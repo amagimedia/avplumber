@@ -63,9 +63,9 @@ class Rendition:
     height: int = 0
     fps: int = 0                     # 0 keeps the canvas rate
     bitrate_kbps: int = 3000
-    codec: str = "h264_nvenc"
-    profile: str = "baseline"        # WebRTC negotiates constrained baseline
-    preset: str = "p7"               # NVENC quality preset
+    codec: str = "hevc_nvenc"        # WebRTC HEVC: 2x efficiency, carries 10-bit/HDR
+    profile: str = ""                # "" lets the encoder pick main/main10/baseline
+    preset: str = "p5"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
 
     @property
@@ -118,6 +118,17 @@ class MixerConfig:
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
+    # Output color signalling for encoders (VUI). An HLG program declares
+    # BT.2020/arib-std-b67 here so the browser treats the stream as HDR.
+    out_color_trc: str = "bt709"
+    out_color_primaries: str = "bt709"
+    out_colorspace: str = "bt709"
+    out_color_range: str = "tv"
+
+    @property
+    def out_color(self) -> Dict[str, str]:
+        return {"color_trc": self.out_color_trc, "color_primaries": self.out_color_primaries,
+                "colorspace": self.out_colorspace, "color_range": self.out_color_range}
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -178,6 +189,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     working_format = str(canvas.get("working_format", "nv12"))
     if working_format not in WORKING_FORMATS:
         raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
+    out_color = {k: str(canvas.get(k, d)) for k, d in
+                 (("color_trc", "bt709"), ("color_primaries", "bt709"),
+                  ("colorspace", "bt709"), ("color_range", "tv"))}
 
     sources: List[Source] = []
     locations: Dict[Tuple[str, str], str] = {}
@@ -228,8 +242,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             rid, str(r.get("target", "janus")),
             int(r.get("width", canvas_w)), int(r.get("height", canvas_h)),
             int(r.get("fps", fps)), int(r.get("bitrate_kbps", 3000)),
-            str(r.get("codec", "h264_nvenc")), str(r.get("profile", "baseline")),
-            str(r.get("preset", "p7")), int(r.get("port", 0)))
+            str(r.get("codec", "hevc_nvenc")), str(r.get("profile", "")),
+            str(r.get("preset", "p5")), int(r.get("port", 0)))
         if rendition.width <= 0 or rendition.height <= 0:
             raise ConfigError(f"{where}: width and height must be positive")
         if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
@@ -299,7 +313,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes),
                        tuple(renditions), initial,
                        bool(control.get("direct", True)), fade_seconds, transition, default_wipe,
-                       working_format)
+                       working_format, out_color["color_trc"], out_color["color_primaries"],
+                       out_color["colorspace"], out_color["color_range"])
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

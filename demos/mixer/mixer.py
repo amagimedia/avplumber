@@ -484,6 +484,13 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
     }))
 
 
+def _encode_format(working_format: str, codec: str) -> str:
+    """Encoder input format for a program in *working_format*: keep 10-bit as
+    P010 for HEVC Main10; otherwise NV12 (H.264, or 8-bit HEVC)."""
+    ten_bit = working_format not in ("nv12", "yuv420p", "yuv422p", "yuv444p")
+    return "p010le" if (ten_bit and "hevc" in codec) else "nv12"
+
+
 def _nv12_program_edge(avp, api, working_format: str, mixer_edge: str) -> str:
     """Encoded outputs stay 8-bit H.264 for now: one zero-copy GPU conversion
     feeds them NV12 while the program edge keeps the 10-bit working format for
@@ -621,14 +628,17 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                                "group": OUTPUT_GROUP, "on_error": "panic"}))
     listener = None
     for rendition, edge in zip(cfg.renditions, edges):
-        scaled = edge
-        if (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h):
-            scaled = f"program_scaled_{rendition.id}"
-            avp.addNode(api.FilterVideo({
-                "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
-                "graph": f"scale_cuda=w={rendition.width}:h={rendition.height}",
-                "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
-            }))
+        # One GPU pass converts the P210 program to this encoder's format
+        # (P010 for HEVC Main10 keeps 10-bit; NV12 for H.264/8-bit) and resizes.
+        enc_format = _encode_format(cfg.working_format, rendition.codec)
+        resize = (f"scale_cuda=w={rendition.width}:h={rendition.height}:format={enc_format}"
+                  if (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
+                  else f"scale_cuda=format={enc_format}")
+        scaled = f"program_scaled_{rendition.id}"
+        avp.addNode(api.FilterVideo({
+            "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
+            "graph": resize, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+        }))
         if rendition.target == "janus":
             listener = build_janus_output(
                 avp, api, scaled,
@@ -642,7 +652,8 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                 ),
                 fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
                 hwaccel=HWACCEL, group=OUTPUT_GROUP,
-                profile=rendition.profile, preset=rendition.preset,
+                codec=rendition.codec, profile=rendition.profile, preset=rendition.preset,
+                enc_format=enc_format, color=cfg.out_color,
             )
         else:
             _build_record_output(avp, api, replace(options, output=rendition.target,
@@ -715,12 +726,15 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
-    mixer_edge = _nv12_program_edge(avp, api, cfg.working_format, mixer.build())
+    program_edge = mixer.build()
     if cfg.renditions:
-        rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, mixer_edge)
+        # Renditions convert the program to each encoder's format themselves,
+        # keeping 10-bit (P010) for HEVC Main10 instead of forcing NV12.
+        rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, program_edge)
     else:
-        rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge,
-                                                width=cfg.canvas_w, height=cfg.canvas_h)
+        rtcp_feedback_listener = _build_outputs(
+            avp, api, options, _nv12_program_edge(avp, api, cfg.working_format, program_edge),
+            width=cfg.canvas_w, height=cfg.canvas_h)
     return MixerApplication(
         avp=avp, mixer=mixer,
         input_groups=tuple(_input_group(index) for index in range(len(cfg.sources))),
