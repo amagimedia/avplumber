@@ -60,6 +60,7 @@ class GraphOptions:
     output_format: str | None = None
     remote_control_port: int = 7777
     codec: str = "h264_nvenc"
+    working_format: str = "nv12"   # compositor/transition sw_format; p210le keeps 10-bit 4:2:2
     bitrate: str = "8M"
     fps: int = DEFAULT_FPS
     mixer_latency_ms: float | None = None
