@@ -285,6 +285,7 @@ def load_avp_api():
         Realtime,
         RepeatLastFrame,
         Split,
+        V210ToCuda,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
@@ -310,6 +311,7 @@ def load_avp_api():
         RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
         Split=Split,
+        V210ToCuda=V210ToCuda,
     )
 
 
