@@ -39,12 +39,14 @@ and the filter changes) is base-independent.
 6. **V4L2 source timestamps.**
 7. **NDI v5 registration** — registers the optional integration only; no SDK
    or device implementation is supplied, and NDI stays disabled in demo builds.
-8. **10-bit CUDA transitions** — P010/P210 and planar 10-bit frame handling.
+8. **10-bit CUDA transitions** — P210 and planar 10-bit frame handling.
 9. **CUDA HDR-to-SDR tone mapping** — HLG/PQ input, selectable operators and
    BT.709 output, with fast-math transfer functions.
 10. **CUDA source color conversion** — explicit SDR/HLG/PQ input and output
     transfers, display-light and gamut conversion, configurable SDR white,
     and output color metadata; the legacy tone-mapping interface is retained.
+11. **P010 CUDA transitions** — accepts 10-bit 4:2:0 in the existing word-sample
+    kernel, allowing NVDEC P010 frames to stay P010 through the mixer and NVENC.
 
 ## FFmpeg 8 notes
 

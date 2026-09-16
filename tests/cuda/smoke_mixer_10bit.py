@@ -2,7 +2,7 @@
 raw verification against an exact CPU reference.
 
 P210 runs ingest packed v210 (HLG and SDR-promoted families) through
-v210_to_cuda; the planar 444 run uploads a labeled CPU fixture. Scene A is a
+v210_to_cuda; P010 and planar 444 runs upload labeled CPU fixtures. Scene A is a
 two-tile grid (scaled path), scene B is source 0 fullscreen (copy path), and
 the transition blends them at exact binary-fraction alphas so the float
 arithmetic reproduces bit-exactly on the CPU. Run on the NVIDIA host with the
@@ -39,15 +39,23 @@ def planes444(index, source):
 
 
 def source_planes(family, index, source):
+    if family == "420":
+        y, u, v = planes444(index, source)
+        return y, u[::2, ::2], v[::2, ::2]
     if family == "444":
         return planes444(index, source)
     return tuple(p.astype(np.int64) for p in FAMILIES[family](W, H, index + source * 1000))
 
 
-def write_444_fixture(path, source):
+def write_upload_fixture(path, source, family):
     with Path(path).open("wb") as stream:
         for index in range(GEN_FRAMES):
-            for plane in planes444(index, source):
+            planes = source_planes(family, index, source)
+            if family == "420":
+                y, u, v = planes
+                uv = np.stack((u, v), axis=-1).reshape(H // 2, W)
+                planes = (y << 6, uv << 6)
+            for plane in planes:
                 stream.write(plane.astype("<u2").tobytes())
 
 
@@ -71,16 +79,18 @@ def scene_a(family, index, n=2):
     """n-tile grid over depth-aware black; tiles reduce by the column count."""
     cols, tw, th = grid(n)
     cw = W if family == "444" else W // 2
+    ch = H // 2 if family == "420" else H
     y = np.full((H, W), 64, np.int64)
-    u = np.full((H, cw), 512, np.int64)
-    v = np.full((H, cw), 512, np.int64)
+    u = np.full((ch, cw), 512, np.int64)
+    v = np.full((ch, cw), 512, np.int64)
     for source in range(n):
         sy, su, sv = source_planes(family, index, source)
         x0, y0 = (source % cols) * tw, (source // cols) * th
         y[y0:y0 + th, x0:x0 + tw] = reduce_scale(sy, cols)
         cx0, ctw = (x0, tw) if family == "444" else (x0 // 2, tw // 2)
-        u[y0:y0 + th, cx0:cx0 + ctw] = reduce_scale(su, cols)
-        v[y0:y0 + th, cx0:cx0 + ctw] = reduce_scale(sv, cols)
+        cy0, cth = (y0 // 2, th // 2) if family == "420" else (y0, th)
+        u[cy0:cy0 + cth, cx0:cx0 + ctw] = reduce_scale(su, cols)
+        v[cy0:cy0 + cth, cx0:cx0 + ctw] = reduce_scale(sv, cols)
     return y, u, v
 
 
@@ -98,11 +108,11 @@ def blend(a_planes, b_planes, mode, coef):
     return out
 
 
-def upload_chain(nodes, tag, path, hwaccel):
+def upload_chain(nodes, tag, path, hwaccel, fmt):
     from pyplumber.node import DecVideo, Demux, FilterVideo, Input
     nodes += [
         Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
-               "options": {"pixel_format": "yuv444p10le", "video_size": f"{W}x{H}", "framerate": "60"}}),
+               "options": {"pixel_format": fmt, "video_size": f"{W}x{H}", "framerate": "60"}}),
         Demux({"name": f"demux_{tag}", "src": f"pkt_{tag}", "routing": {"v:0": f"raw_{tag}"}}),
         DecVideo({"name": f"dec_{tag}", "src": f"raw_{tag}", "dst": f"cpu_{tag}"}),
         FilterVideo({"name": f"up_{tag}", "src": f"cpu_{tag}", "dst": f"gpu_{tag}",
@@ -117,14 +127,14 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
     avp, errors = make_avp("mix_gpu")
     nodes = []
     chains = [(f"a{s}", s) for s in range(n)] + [("b0", 0)]
-    if family == "444":
+    if family in ("420", "444"):
         paths = []
         for source in range(n):
-            path = Path(root) / f"src{source}.yuv444p10"
+            path = Path(root) / f"src{source}.{fmt}"
             if not path.exists():
-                write_444_fixture(path, source)
+                write_upload_fixture(path, source, family)
             paths.append(path)
-        edges = [upload_chain(nodes, tag, paths[src], "mix_gpu") for tag, src in chains]
+        edges = [upload_chain(nodes, tag, paths[src], "mix_gpu", fmt) for tag, src in chains]
     else:
         stride = frame_stride(W)
         paths = []
@@ -171,17 +181,17 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60)
-    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "444"])
+    parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-mix10-") as root:
         for family in args.families:
-            fmt = "yuv444p10le" if family == "444" else "p210le"
+            fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
             for mode, coef in TRANSITIONS:
                 run(root, family, fmt, mode, coef, args.timeout)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
         # 16 simultaneous full-resolution sources drawn as a 4x4 grid.
         for family in args.families:
-            if family == "444":
+            if family in ("420", "444"):
                 continue  # 17 CPU upload chains add nothing over the v210 grid
             run(root, family, "p210le", "fade", 0.25, args.timeout, n=16)
             print(f"PASS {family}/p210le 4x4 grid of 16, fade alpha=0.25", flush=True)

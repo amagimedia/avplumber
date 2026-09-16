@@ -19,7 +19,7 @@ from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input, build_v210_input
 from avpmixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
-                           JanusVideoConfig, build_janus_output)
+                           JanusVideoConfig, RtcpFeedbackGroup, build_janus_output)
 
 try:
     from .layouts import (
@@ -643,17 +643,18 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
         edges = [f"program_rendition_{r.id}" for r in cfg.renditions]
         avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
                                "group": OUTPUT_GROUP, "on_error": "panic"}))
-    listener = None
+    listeners = []
     for rendition, edge in zip(cfg.renditions, edges):
         resized = (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
         codec = rendition.codec or _default_codec(cfg.working_format)
         if rendition.tonemap:
-            # HDR program -> SDR: scale/convert to P010, then tonemap_cuda to
-            # BT.709 SDR NV12 (zero-copy) before an 8-bit encoder. Always a node.
+            # Match the display-light conversion used by source embedding;
+            # the legacy transfer= path uses a different SDR transfer curve.
             wh = f"w={rendition.width}:h={rendition.height}:" if resized else ""
             t = _TONEMAP_TRANSFER.get(cfg.out_color_trc, "hlg")
             graph = (f"scale_cuda={wh}format=p010le,"
-                     f"tonemap_cuda=transfer={t}:tonemap={rendition.tonemap}:peak={rendition.tonemap_peak}"
+                     f"tonemap_cuda=transfer_in={t}:transfer_out=sdr:tonemap={rendition.tonemap}"
+                     f":sdr_white=203:hdr_peak={rendition.tonemap_peak * 100:g}"
                      f":desat={rendition.tonemap_desat}")
             enc_format, out_color = "nv12", _SDR_COLOR
         else:
@@ -673,6 +674,7 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                 "graph": graph, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
             }))
         if rendition.target == "janus":
+            prefix = "janus" if not listeners else f"janus_{rendition.id}"
             listener = build_janus_output(
                 avp, api, scaled,
                 JanusVideoConfig(
@@ -681,18 +683,21 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                     payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
                     bitrate_kbps=rendition.bitrate_kbps,
                     keyframe_min_interval_ms=options.keyframe_min_interval_ms,
-                    rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
+                    rtcp_bind=options.janus_rtcp_bind,
+                    rtcp_port=options.janus_rtcp_port if not listeners else 0,
                 ),
                 fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
                 hwaccel=HWACCEL, group=OUTPUT_GROUP,
                 codec=codec, profile=rendition.profile, preset=rendition.preset,
                 enc_format=enc_format, color=out_color,
+                prefix=prefix,
             )
+            listeners.append(listener)
         else:
             _build_record_output(avp, api, replace(options, output=rendition.target,
                                                    codec=rendition.codec, fps=rendition.fps),
                                  scaled, width=rendition.width, height=rendition.height)
-    return listener
+    return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
 
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:

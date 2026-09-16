@@ -59,10 +59,13 @@ output costs an encode, not another composite.
 | `aspect` | — | optional, e.g. `"9:16"`; checked against `width:height` |
 | `fps` | canvas fps | may only re-time **downwards**; a higher rate is rejected |
 | `bitrate_kbps` | `3000` | CBR target, also the `maxrate` and `bufsize` |
-| `codec` | `"h264_nvenc"` | file targets only; the Janus target is always H.264 |
-| `profile` | `"baseline"` | WebRTC negotiates constrained baseline; B-frames stay off |
+| `codec` | from canvas depth | `h264_nvenc` for 8-bit or `hevc_nvenc` for 10-bit by default; applies to Janus and file targets |
+| `profile` | from codec/depth | H.264 baseline, HEVC main or main10; B-frames stay off |
 | `preset` | `"p7"` | NVENC quality preset |
 | `port` | — | Janus target: overrides the RTP port from the command line |
+| `tonemap` | empty | HDR-to-SDR operator, e.g. `clip` or `hable`; produces BT.709 NV12 using a 203-nit SDR reference white |
+| `tonemap_peak` | `10` | HDR display peak in units of 100 nits |
+| `tonemap_desat` | `0` | highlight desaturation; zero preserves saturation |
 
 With no `renditions` the demo builds its usual single output from the command
 line flags.
@@ -74,6 +77,27 @@ line flags.
    "profile": "baseline", "preset": "p7"}
 ]
 ```
+
+Multiple Janus renditions need separate RTP ports and matching Janus
+mountpoints. Each has its own encoder and RTCP feedback. The first keeps the
+`janus_encoder` name used by cut-latency measurement; additional outputs use
+`janus_<id>_encoder`.
+
+For a P010 HLG canvas, these outputs provide simultaneous HDR and SDR previews:
+
+```json
+"renditions": [
+  {"id": "hdr", "target": "janus", "port": 5006,
+   "codec": "hevc_nvenc", "profile": "main10"},
+  {"id": "sdr", "target": "janus", "port": 5004,
+   "codec": "h264_nvenc", "profile": "baseline", "tonemap": "clip"}
+]
+```
+
+`clip` preserves SDR content embedded into HLG with the same 203-nit white;
+HDR highlights above that white are clipped. Operators such as `hable` compress
+highlights and also change midtone brightness. A preview selector chooses
+between the two continuously running outputs; the canvas remains HDR.
 
 ## sources
 

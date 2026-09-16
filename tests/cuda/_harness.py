@@ -36,12 +36,13 @@ def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color, 
 
 
 def frame_planes(frame, fmt):
-    """Downloaded frame -> (Y, U, V) logical 10-bit planes for P210 or planar 4:2:2/4:4:4."""
-    if fmt == "p210le":
-        y, uv = [np.frombuffer(d, "<u2").reshape(frame.height, p // 2)
-                 for d, p in zip(frame.data[:2], frame.linesize[:2])]
+    """Downloaded frame -> (Y, U, V) logical 10-bit planes."""
+    if fmt in ("p010le", "p210le"):
+        heights = (frame.height, (frame.height + 1) // 2 if fmt == "p010le" else frame.height)
+        y, uv = [np.frombuffer(d, "<u2").reshape(h, p // 2)
+                 for d, p, h in zip(frame.data[:2], frame.linesize[:2], heights)]
         y, uv = y[:, :frame.width], uv[:, :frame.width]
-        assert not np.any(y & 63) and not np.any(uv & 63), "P210 low bits must be zero"
+        assert not np.any(y & 63) and not np.any(uv & 63), f"{fmt} low bits must be zero"
         return y >> 6, uv[:, 0::2] >> 6, uv[:, 1::2] >> 6
     widths = [frame.width, frame.width // 2, frame.width // 2] if fmt != "yuv444p10le" \
         else [frame.width] * 3

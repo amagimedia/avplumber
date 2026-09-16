@@ -1,0 +1,49 @@
+From e0aa453f7680196ed9569f0c0dc11c707b6ad3ef Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Wed, 16 Sep 2026 21:31:24 +0200
+Subject: [PATCH] avfilter/transition_cuda: accept P010 in the word-sample path
+
+---
+ libavfilter/vf_transition_cuda.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 9b6397fe1f..77132f84ce 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -55,6 +55,7 @@ static const enum AVPixelFormat supported_main_formats[] = {
+     AV_PIX_FMT_YUV420P10,
+     AV_PIX_FMT_YUV422P10,
+     AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
+     AV_PIX_FMT_P210,
+     AV_PIX_FMT_NONE,
+ };
+@@ -68,6 +69,7 @@ static const enum AVPixelFormat supported_overlay_formats[] = {
+     AV_PIX_FMT_YUV420P10,
+     AV_PIX_FMT_YUV422P10,
+     AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
+     AV_PIX_FMT_P210,
+     AV_PIX_FMT_NONE,
+ };
+@@ -202,6 +204,7 @@ static int formats_match(const enum AVPixelFormat format_main, const enum AVPixe
+     case AV_PIX_FMT_YUV420P10:
+     case AV_PIX_FMT_YUV422P10:
+     case AV_PIX_FMT_YUV444P10:
++    case AV_PIX_FMT_P010:
+     case AV_PIX_FMT_P210:
+         /* No alpha-carrying CUDA frame formats exist for these yet: both
+          * inputs must arrive in the identical layout and depth. */
+@@ -341,7 +344,7 @@ static int transition_cuda_blend(FFFrameSync *fs)
+                ctx->alpha_coef);
+     }
+ 
+-    // Word-stored formats (P210, planar 10-bit) arrive as identical
++    // Word-stored formats (P010/P210, planar 10-bit) arrive as identical
+     // main/overlay layouts with no alpha plane; every plane blends through
+     // the sample kernel with its own geometry.
+ 
+-- 
+2.55.0
+

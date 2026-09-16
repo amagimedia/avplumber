@@ -720,6 +720,50 @@ def test_a_rendition_may_not_ask_for_more_than_the_composer_renders():
     assert cfg.renditions[0].aspect == "9:16" and cfg.renditions[0].fps == 30
 
 
+def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
+    doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],
+           "initial_scene": "full", "wipes": [],
+           "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p010le",
+                      "color_trc": "arib-std-b67", "color_primaries": "bt2020", "colorspace": "bt2020nc"},
+           "renditions": [
+               {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10"},
+               {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc",
+                "profile": "baseline", "tonemap": "hable"}]}
+    path = tmp_path / "dual.json"
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert len(nodes) == len(app.avp.nodes)
+    assert nodes["janus_encoder"]["options"]["profile"] == "main10"
+    assert nodes["janus_sdr_encoder"]["options"]["profile"] == "baseline"
+    assert nodes["janus_sdr_encoder"]["options"]["color_trc"] == "bt709"
+    assert nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
+    assert "tonemap_cuda=transfer_in=hlg:transfer_out=sdr" in nodes["scale_sdr"]["graph"]
+    assert ":sdr_white=203:hdr_peak=1000" in nodes["scale_sdr"]["graph"]
+    assert ":5006?" in nodes["janus_rtp_output"]["url"]
+    assert ":5004?" in nodes["janus_sdr_rtp_output"]["url"]
+    feedback = app.rtcp_feedback_listener
+    feedback.start()
+    assert all(listener.started for listener in feedback.listeners)
+    for listener in feedback.listeners:
+        listener.parameters["on_keyframe_request"](None)
+    assert app.avp.commands[-2:] == [
+        "node.object.set janus_force_keyframe trigger true",
+        "node.object.set janus_sdr_force_keyframe trigger true"]
+    feedback.stop()
+    assert not any(listener.started for listener in feedback.listeners)
+
+
+def test_fractional_janus_rate_uses_one_second_gop():
+    from avpmixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=60000, fps_den=1001,
+                       width=1920, height=1080)
+    nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
+    assert nodes["janus_fps"]["fps"] == "60000/1001"
+    assert nodes["janus_encoder"]["options"]["g"] == 60
+
+
 def test_control_section_carries_the_defaults_the_surfaces_start_from():
     from avpmixer import config as mc
     import copy
