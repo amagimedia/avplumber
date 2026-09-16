@@ -5,7 +5,7 @@ services:
       dockerfile: demos/cuda-overlay/Dockerfile
       args:
         AVPLUMBER_REVISION: ${AVPLUMBER_REVISION:-workspace}
-        FFMPEG_TAG: n7.1.5
+        FFMPEG_TAG: ${FFMPEG_TAG:-n8.1}
     image: avplumber-cuda-overlay-demo:local
     gpus: all
     environment:
