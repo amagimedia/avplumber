@@ -772,119 +772,62 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
 
 
 def parse_args(argv: list[str] | None = None) -> GraphOptions:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--input",
-        dest="inputs",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Input media file or URL; repeat for each mixer input",
-    )
-    parser.add_argument("--config", metavar="FILE",
-                        help="JSON document with sources, wipes and scenes (replaces --input and the "
-                             "built-in layouts; see doc/research/2026-09-08-mixer-config-schema.md)")
-    parser.add_argument("--output", help="Optional video-only output URL or path")
-    parser.add_argument("--dmabuf-socket-dir", default="/tmp/dma-page",
-                        help="dma-browser socket directory for dmabuf://<window-id> inputs")
-    parser.add_argument("--dmabuf-size", default="1280x720", metavar="WxH",
-                        help="browser window size for dmabuf:// inputs")
-    parser.add_argument("--dmabuf-open", metavar="URL",
-                        help="open the dmabuf:// windows with this page through the dma-browser REST API")
-    parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
-    parser.add_argument(
-        "--output-format",
-        help="Muxer format when it cannot be inferred from the output",
-    )
-    parser.add_argument("--remote-control-port", type=int, default=7777)
-    parser.add_argument("--codec", default="h264_nvenc")
-    parser.add_argument("--working-format", default="nv12",
-                        help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 "
-                             "(encoded outputs then need an explicit output conversion)")
-    parser.add_argument("--bitrate", default="8M")
-    parser.add_argument(
-        "--fps",
-        type=int,
-        default=DEFAULT_FPS,
-        help=f"Mixer and output frame rate (default: {DEFAULT_FPS})",
-    )
-    parser.add_argument("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
-    parser.add_argument("--loop-inputs", action="store_true")
-    parser.add_argument(
-        "--janus-output",
-        action="store_true",
-        help="Publish the video-only program to Janus over RTP",
-    )
-    parser.add_argument("--janus-host", default=JANUS_DEFAULT_HOST)
-    parser.add_argument(
-        "--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT
-    )
-    parser.add_argument(
-        "--janus-video-pt", type=int, default=JANUS_DEFAULT_VIDEO_PT
-    )
-    parser.add_argument(
-        "--janus-video-ssrc",
-        type=lambda value: int(value, 0),
-        default=JANUS_DEFAULT_VIDEO_SSRC,
-    )
-    parser.add_argument(
-        "--janus-video-bitrate-kbps",
-        type=int,
-        default=JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
-    )
-    parser.add_argument("--janus-rtcp-bind", default="0.0.0.0")
-    parser.add_argument("--keyframe-min-interval-ms", type=int,
-                        default=DEFAULT_KEYFRAME_MIN_INTERVAL_MS,
-                        help="Minimum forced-keyframe spacing for Janus output in media time "
-                             "(default: 150 ms; 0 disables rate limiting)")
-    parser.add_argument("--janus-rtcp-port", type=int, default=0)
-    parser.add_argument("--preheat-timeout", type=float, default=60.0)
-    parser.add_argument("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
-                        "(the TUI still selects the clip for each wipe)")
-    parser.add_argument("--wipe-cache-mb", type=float, default=768.0,
-                        help="Hold decoded wipe clips in GPU memory, up to this many MiB "
-                             "(0 decodes each wipe on every take)")
-    parser.add_argument("--webui-url", default="",
-                        help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
-    parser.add_argument("--cut-latency-encoder", default="", metavar="NODE",
-                        help="Measure CUT receipt to matching encoded frame at NODE (e.g. janus_encoder)")
-    parser.add_argument("--prewarm-cut-scene", action="append", default=[], metavar="SCENE",
-                        help="Keep source buffers warm for direct cuts (repeat; '*' selects all scenes)")
-    args = parser.parse_args(argv)
-    if not args.inputs and not args.config:
-        parser.error("pass --input (repeatable) or --config FILE")
-    return GraphOptions(
-        inputs=tuple(args.inputs),
-        output=args.output,
-        output_format=args.output_format,
-        remote_control_port=args.remote_control_port,
-        codec=args.codec,
-        bitrate=args.bitrate,
-        fps=args.fps,
-        mixer_latency_ms=args.mixer_latency_ms,
-        loop_inputs=args.loop_inputs,
-        janus_output=args.janus_output,
-        janus_host=args.janus_host,
-        janus_video_port=args.janus_video_port,
-        janus_video_pt=args.janus_video_pt,
-        janus_video_ssrc=args.janus_video_ssrc,
-        janus_video_bitrate_kbps=args.janus_video_bitrate_kbps,
-        keyframe_min_interval_ms=args.keyframe_min_interval_ms,
-        janus_rtcp_bind=args.janus_rtcp_bind,
-        janus_rtcp_port=args.janus_rtcp_port,
-        preheat_timeout_sec=args.preheat_timeout,
-        wipe_file=args.wipe_file,
-        dmabuf_socket_dir=args.dmabuf_socket_dir,
-        dmabuf_size=parse_size(args.dmabuf_size),
-        dmabuf_open=args.dmabuf_open,
-        dmabuf_rest=args.dmabuf_rest,
-        config=args.config,
-        webui_url=args.webui_url,
-        cut_latency_encoder=args.cut_latency_encoder,
-        prewarm_cut_scenes=tuple(args.prewarm_cut_scene),
-        wipe_cache_mb=args.wipe_cache_mb,
-    )
-
+    """Every option's ``dest`` is a GraphOptions field, so the parsed namespace
+    maps onto the dataclass directly; an unmapped option fails loudly instead
+    of being silently dropped."""
+    p = argparse.ArgumentParser(description=__doc__)
+    add = p.add_argument
+    add("--input", dest="inputs", action="append", default=[], metavar="PATH",
+        help="Input media file or URL; repeat for each mixer input")
+    add("--config", metavar="FILE",
+        help="JSON document with sources, wipes and scenes (replaces --input and the built-in "
+             "layouts; see doc/research/2026-09-08-mixer-config-schema.md)")
+    add("--output", help="Optional video-only output URL or path")
+    add("--output-format", help="Muxer format when it cannot be inferred from the output")
+    add("--codec", default="h264_nvenc")
+    add("--bitrate", default="8M")
+    add("--fps", type=int, default=DEFAULT_FPS, help=f"Mixer and output frame rate (default: {DEFAULT_FPS})")
+    add("--working-format", default="nv12",
+        help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 "
+             "(encoded outputs then need an explicit output conversion)")
+    add("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
+    add("--loop-inputs", action="store_true")
+    add("--remote-control-port", type=int, default=7777)
+    add("--dmabuf-socket-dir", default="/tmp/dma-page",
+        help="dma-browser socket directory for dmabuf://<window-id> inputs")
+    add("--dmabuf-size", default="1280x720", metavar="WxH",
+        help="browser window size for dmabuf:// inputs")
+    add("--dmabuf-open", metavar="URL",
+        help="open the dmabuf:// windows with this page through the dma-browser REST API")
+    add("--dmabuf-rest", default="http://127.0.0.1:9009")
+    add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
+    add("--janus-host", default=JANUS_DEFAULT_HOST)
+    add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
+    add("--janus-video-pt", type=int, default=JANUS_DEFAULT_VIDEO_PT)
+    add("--janus-video-ssrc", type=lambda v: int(v, 0), default=JANUS_DEFAULT_VIDEO_SSRC)
+    add("--janus-video-bitrate-kbps", type=int, default=JANUS_DEFAULT_VIDEO_BITRATE_KBPS)
+    add("--janus-rtcp-bind", default="0.0.0.0")
+    add("--janus-rtcp-port", type=int, default=0)
+    add("--keyframe-min-interval-ms", type=int, default=DEFAULT_KEYFRAME_MIN_INTERVAL_MS,
+        help="Minimum forced-keyframe spacing for Janus output in media time "
+             "(default: 150 ms; 0 disables rate limiting)")
+    add("--preheat-timeout", dest="preheat_timeout_sec", type=float, default=60.0)
+    add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
+                            "(the TUI still selects the clip for each wipe)")
+    add("--wipe-cache-mb", type=float, default=768.0,
+        help="Hold decoded wipe clips in GPU memory, up to this many MiB (0 decodes each wipe on every take)")
+    add("--webui-url", default="", help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
+    add("--cut-latency-encoder", default="", metavar="NODE",
+        help="Measure CUT receipt to matching encoded frame at NODE (e.g. janus_encoder)")
+    add("--prewarm-cut-scene", dest="prewarm_cut_scenes", action="append", default=[], metavar="SCENE",
+        help="Keep source buffers warm for direct cuts (repeat; '*' selects all scenes)")
+    args = vars(p.parse_args(argv))
+    if not args["inputs"] and not args["config"]:
+        p.error("pass --input (repeatable) or --config FILE")
+    args["inputs"] = tuple(args["inputs"])
+    args["prewarm_cut_scenes"] = tuple(args["prewarm_cut_scenes"])
+    args["dmabuf_size"] = parse_size(args["dmabuf_size"])   # ValueError on bad WxH, not a usage exit
+    return GraphOptions(**args)
 
 def parse_size(text: str) -> tuple[int, int]:
     try:
