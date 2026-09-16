@@ -51,6 +51,7 @@ class Source:
     color_primaries: str = "bt709"
     colorspace: str = "bt709"
     color_range: str = "tv"
+    filter_graph: str = ""         # optional CUDA source filter, before scene/alias fan-out
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                          str(s.get("colorspace", "bt709")), str(s.get("color_range", "tv")))
         else:
             raise ConfigError(f"{where}: kind must be browser, video or v210")
+        source_filter = s.get("filter", "")
+        if not isinstance(source_filter, str):
+            raise ConfigError(f"{where}: filter must be a CUDA filter graph string")
+        src = replace(src, filter_graph=source_filter)
         key = (kind, src.location)
         if key in locations:
             raise ConfigError(f"{where}: '{src.location}' already declared as '{locations[key]}'; "

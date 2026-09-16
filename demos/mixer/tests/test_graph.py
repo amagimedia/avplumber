@@ -483,6 +483,10 @@ def test_config_rejects_duplicate_locations_and_bad_references():
     bad["scenes"][0]["items"][0]["source"] = "nope"
     with pytest.raises(mc.ConfigError, match="unknown source"):
         mc.parse(bad)
+    bad_filter = copy.deepcopy(CONFIG)
+    bad_filter["sources"][0]["filter"] = {"transfer_in": "sdr"}
+    with pytest.raises(mc.ConfigError, match="filter must be a CUDA filter graph string"):
+        mc.parse(bad_filter)
     nocover = copy.deepcopy(CONFIG)
     del nocover["sources"][0]["width"]
     cfg = mc.parse(nocover)
@@ -495,12 +499,15 @@ def test_config_rejects_duplicate_locations_and_bad_references():
     assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
 
 
-def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_filter", ["", "tonemap_cuda=transfer_in=sdr:transfer_out=hlg,scale_cuda=format=p210le"])
+def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch, source_filter):
     import json as _json
     from avpmixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     path = tmp_path / "mixer.json"
-    path.write_text(_json.dumps(CONFIG))
+    doc = {**CONFIG, "sources": [{**CONFIG["sources"][0], "filter": source_filter},
+                                *CONFIG["sources"][1:]]}
+    path.write_text(_json.dumps(doc))
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
                         lambda base, method, p, body=None: opened.append((method, p, body)) or {"windows": []})
@@ -513,7 +520,17 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     mixer = FakeMixer.instances[-1]
 
     assert [name for name in nodes if name and name.startswith("decode_")] == ["decode_0"]
-    assert nodes["alias_0"]["dst"] == ["input_0_fps_alias1", "input_0_fps_alias2"]
+    source_edge = "input_0_filtered" if source_filter else "input_0_fps"
+    assert nodes["alias_0"]["src"] == source_edge
+    assert nodes["alias_0"]["dst"] == [f"{source_edge}_alias1", f"{source_edge}_alias2"]
+    if source_filter:
+        assert nodes["source_filter_0"]["graph"] == source_filter
+        assert nodes["source_filter_0"]["src"] == "input_0_fps"
+        assert nodes["source_filter_0"]["hwaccel"] == "@gpu"
+        assert nodes["source_filter_0"]["group"] == "input_0"
+        assert [n for n in nodes if n and n.startswith("source_filter_")] == ["source_filter_0"]
+    else:
+        assert "source_filter_0" not in nodes
     assert nodes["alias_0"]["outputs"] == 3
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"

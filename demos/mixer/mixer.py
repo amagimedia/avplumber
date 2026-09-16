@@ -731,6 +731,14 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
+        if source.filter_graph:
+            filtered_edge = f"input_{index}_filtered"
+            avp.addNode(api.FilterVideo({
+                "name": f"source_filter_{index}", "src": edge, "dst": filtered_edge,
+                "graph": source.filter_graph, "hwaccel": HWACCEL,
+                "group": group, "auto_restart": "group",
+            }))
+            edge = filtered_edge
         input_edges.append(edge)
         count = aliases[source.id]
         edges = [edge]

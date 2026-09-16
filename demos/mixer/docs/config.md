@@ -98,9 +98,27 @@ decoder.
 | `fps` | browser | paint rate; defaults to the canvas rate |
 | `width`, `height` | video | optional; probed with ffprobe/ffmpeg when a `cover` item needs them |
 | `loop` | both | default `true` |
+| `filter` | all sources | optional CUDA filter graph, applied once before scene/alias fan-out; preserve source dimensions |
 
 Browser sources arrive over DMA-BUF from the `dma-page` service and are
 imported straight into CUDA; they mix with video sources on the same canvas.
+
+For an SDR BT.709 video on a BT.2020 HLG canvas, the FFmpeg 8.1 patch series
+provides source conversion through `tonemap_cuda`. For a P210 working canvas:
+
+```json
+{"id": "sdr_clip", "kind": "video", "path": "<path>",
+ "filter": "tonemap_cuda=transfer_in=sdr:transfer_out=hlg:sdr_white=203:hdr_peak=1000,scale_cuda=format=p210le"}
+```
+
+The filter accepts limited-range NV12/P010; other YUV layouts need a preceding
+`scale_cuda=format=p010le`. Select `sdr`, `pq`, or `hlg` for each transfer.
+SDR uses BT.709/BT.1886; HDR uses BT.2020. `sdr_white` controls the SDR white
+level in nits; `hdr_peak` sets the HLG display peak (and HDR-to-SDR mapping
+peak). Inputs already matching the canvas need no conversion. The same source
+conversion applies in fullscreen scenes, tiles and transitions. Source filters
+must keep frames on CUDA; this setting does not automatically infer colorimetry
+from untagged files.
 
 ## wipes
 

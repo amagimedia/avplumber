@@ -69,6 +69,8 @@ TONE = {
     "reinhard": lambda s, peak, p: s / (s + p) * (peak + p) / peak,
     "hable": lambda s, peak, p: hable_f(s) / hable_f(peak),
     "mobius": lambda s, peak, p: _mobius(s, peak, p),
+    "gamma": lambda s, peak, p: np.where(s > 0.05, (s / peak) ** (1 / p),
+                                          s * (0.05 / peak) ** (1 / p) / 0.05),
 }
 
 
@@ -151,6 +153,86 @@ def tonemap_codes(y10, cb10, cr10, transfer, peak, tonemap="hable", param=None, 
     rgb_src = yuv2rgb_2020(np.asarray(y10, float), np.asarray(cb10, float), np.asarray(cr10, float))
     sdr = tonemap_hdr_to_sdr(rgb_src, transfer, peak, tonemap, param, desat)
     return rgb2yuv_709_8bit(sdr)
+
+
+# Explicit-transfer reference uses display light in nits (BT.1886/BT.2100).
+# Derive the gamut transform from published chromaticities, independently of
+# the rounded CUDA coefficient tables.
+def _rgb_to_xyz(primaries):
+    p = np.array(primaries)
+    basis = np.stack((p[:, 0] / p[:, 1], np.ones(3),
+                      (1 - p.sum(axis=1)) / p[:, 1]))
+    white = np.array([0.3127 / 0.3290, 1.0, (1 - 0.3127 - 0.3290) / 0.3290])
+    return basis * np.linalg.solve(basis, white)
+
+
+_XYZ709 = _rgb_to_xyz([(0.640, 0.330), (0.300, 0.600), (0.150, 0.060)])
+_XYZ2020 = _rgb_to_xyz([(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)])
+_TO2020 = np.linalg.solve(_XYZ2020, _XYZ709)
+
+
+def display_light(rgb, transfer, sdr_white=203.0, hdr_peak=1000.0):
+    """Encoded RGB -> display-linear nits, ideal black, no surround adjustment."""
+    rgb = np.maximum(rgb, 0.0)
+    if transfer == "sdr":
+        return rgb ** 2.4 * sdr_white
+    if transfer == "pq":
+        return eotf_st2084(rgb) * REFERENCE_WHITE
+    scene = np.where(rgb <= 0.5, rgb * rgb / 3,
+                     (np.exp((rgb - HLG_C) / HLG_A) + HLG_B) / 12)
+    gamma = max(1.0, 1.2 + 0.42 * np.log10(hdr_peak / 1000))
+    gain = hdr_peak * np.maximum(scene @ LUMA_2020, 1e-12) ** (gamma - 1)
+    return scene * gain[..., None]
+
+
+def encode_display_light(rgb, transfer, sdr_white=203.0, hdr_peak=1000.0):
+    """Display-linear nits -> encoded RGB, inverse of display_light."""
+    rgb = np.maximum(rgb, 0.0)
+    if transfer == "sdr":
+        return (rgb / sdr_white) ** (1 / 2.4)
+    if transfer == "pq":
+        p = (rgb / 10000) ** ST2084_M1
+        return ((ST2084_C1 + ST2084_C2 * p) / (1 + ST2084_C3 * p)) ** ST2084_M2
+    gamma = max(1.0, 1.2 + 0.42 * np.log10(hdr_peak / 1000))
+    luma = rgb @ LUMA_2020
+    scene = rgb * ((luma / hdr_peak) ** (1 / gamma) / np.maximum(luma, 1e-12))[..., None]
+    return np.where(scene <= 1 / 12, np.sqrt(3 * scene),
+                    HLG_A * np.log(np.maximum(12 * scene - HLG_B, 1e-12)) + HLG_C)
+
+
+def rgb_to_codes(rgb, transfer, depth):
+    weights = LUMA_709 if transfer == "sdr" else LUMA_2020
+    y = rgb @ weights
+    u = (rgb[..., 2] - y) / (2 * (1 - weights[2]))
+    v = (rgb[..., 0] - y) / (2 * (1 - weights[0]))
+    scale = 1 << (depth - 8)
+    return np.stack(((219 * y + 16) * scale, (224 * u + 128) * scale,
+                     (224 * v + 128) * scale), axis=-1)
+
+
+def codes_to_rgb(codes, transfer, depth):
+    weights = LUMA_709 if transfer == "sdr" else LUMA_2020
+    codes = codes / (1 << (depth - 8))
+    y, u, v = (codes[..., 0] - 16) / 219, (codes[..., 1] - 128) / 224, (codes[..., 2] - 128) / 224
+    r = y + 2 * (1 - weights[0]) * v
+    b = y + 2 * (1 - weights[2]) * u
+    g = (y - weights[0] * r - weights[2] * b) / weights[1]
+    return np.stack((r, g, b), axis=-1)
+
+
+def convert_transfer_codes(codes, source, target, depth, *, sdr_white=203.0,
+                           hdr_peak=1000.0, tonemap="direct", desat=0.0):
+    if source == target:
+        return codes.copy()
+    light = display_light(codes_to_rgb(codes, source, depth), source, sdr_white, hdr_peak)
+    if source == "sdr":
+        light = light @ _TO2020.T
+    elif target == "sdr":
+        light = light @ np.linalg.inv(_TO2020).T
+        light = map_one_pixel_rgb(light / sdr_white, hdr_peak / sdr_white, SDR_AVG,
+                                  tonemap, DEFAULT_PARAM[tonemap], desat) * sdr_white
+    rgb = np.clip(encode_display_light(light, target, sdr_white, hdr_peak), 0, 1)
+    return rgb_to_codes(rgb, target, 8 if target == "sdr" else 10)
 
 
 if __name__ == "__main__":
