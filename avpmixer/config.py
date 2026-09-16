@@ -18,6 +18,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
+# Compositor/transition working formats. NV12 is the 8-bit default; the rest are
+# the qualified 10-bit and planar 4:2:0/4:2:2/4:4:4 layouts. Encoded outputs
+# convert to NV12 (8-bit H.264) unless a rendition asks otherwise.
+WORKING_FORMATS = ("nv12", "p010le", "p210le", "yuv420p", "yuv422p", "yuv444p",
+                   "yuv420p10le", "yuv422p10le", "yuv444p10le")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
@@ -106,6 +111,7 @@ class MixerConfig:
     fade_seconds: float = DEFAULT_FADE_SECONDS
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
+    working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -163,6 +169,9 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError("canvas needs integer width, height and fps") from None
     if canvas_w <= 0 or canvas_h <= 0 or fps <= 0:
         raise ConfigError("canvas width, height and fps must be positive")
+    working_format = str(canvas.get("working_format", "nv12"))
+    if working_format not in WORKING_FORMATS:
+        raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
 
     sources: List[Source] = []
     locations: Dict[Tuple[str, str], str] = {}
@@ -276,7 +285,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError("control.fade_seconds must be positive")
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes),
                        tuple(renditions), initial,
-                       bool(control.get("direct", True)), fade_seconds, transition, default_wipe)
+                       bool(control.get("direct", True)), fade_seconds, transition, default_wipe,
+                       working_format)
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")
