@@ -48,6 +48,10 @@ and the filter changes) is base-independent.
 11. **P010 CUDA transitions** — accepts 10-bit 4:2:0 in the existing word-sample
     kernel, allowing NVDEC P010 frames to stay P010 through the mixer and NVENC.
 
+12. **Automatic CUDA color conversion** — resolves complete SDR/HLG/PQ frame
+    metadata on every frame, rejects missing or unsupported contracts, supports
+    fixed NV12/P010 output storage and preserves matching frames without a copy.
+
 ## FFmpeg 8 notes
 
 - `AVFrame.pkt_pos` is gone: `transition_cuda`'s legacy `pos` expression

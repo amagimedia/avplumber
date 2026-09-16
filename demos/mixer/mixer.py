@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+from avpmixer.color import Color, conversion_graph, rendition_color
 from avpmixer import clipcache
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
@@ -345,7 +346,7 @@ def _init_avp(avp_options, api):
     return avp
 
 
-def _make_builder(avp, api, options, *, canvas, fps, working_format):
+def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr", wipe_color=None):
     """The mixer builder, configured identically for both build paths (canvas,
     rate and working_format are the only per-path differences)."""
     return api.MixerGraphBuilder(
@@ -353,7 +354,7 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format):
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
-        cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format)
+        cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format, color=color, wipe_color=wipe_color)
 
 
 def _build_input(
@@ -447,57 +448,63 @@ def _define_scenes(mixer, input_count: int, routed: bool) -> None:
 
 
 def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
-                         width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT) -> None:
+                         width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT,
+                         enc_format="nv12", color=None, prefix="program", profile="", preset="p3", bitrate=None) -> None:
     if options.output is None:
         raise ValueError("record output needs an output URL or path")
-    fps_edge = "program_fps"
-    assumed_edge = "program_video"
-    encoded_edge = "program_encoded"
-    muxed_edge = "program_muxed"
+    color = Color.parse(color or "sdr").tags
+    bitrate = bitrate or options.bitrate
+    if not profile:
+        profile = ("main10" if enc_format == "p010le" else "main") if "hevc" in options.codec else "high"
+    fps_edge = f"{prefix}_fps"
+    assumed_edge = f"{prefix}_video"
+    encoded_edge = f"{prefix}_encoded"
+    muxed_edge = f"{prefix}_muxed"
     avp.addNode(api.ForceFPS({
-        "name": "program_fps",
+        "name": f"{prefix}_fps",
         "src": mixer_edge,
         "dst": fps_edge,
         "fps": f"{options.fps}/{FPS_DEN}",
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.AssumeVideoFormat({
-        "name": "program_format",
+        "name": f"{prefix}_format",
         "src": fps_edge,
         "dst": assumed_edge,
         "width": width,
         "height": height,
         "pixel_format": "cuda",
-        "real_pixel_format": "nv12",
+        "real_pixel_format": enc_format,
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.EncVideo({
-        "name": "program_encoder",
+        "name": f"{prefix}_encoder",
         "src": assumed_edge,
         "dst": encoded_edge,
         "codec": options.codec,
         "hwaccel": HWACCEL,
         "options": {
-            "b": options.bitrate,
-            "maxrate": options.bitrate,
-            "bufsize": options.bitrate,
-            "g": options.fps * 2,
+            "b": bitrate,
+            "maxrate": bitrate,
+            "bufsize": bitrate,
+            "g": max(1, round(options.fps / FPS_DEN)) * 2,
             "bf": 0,
-            "preset": "p3",
+            "preset": preset,
             "tune": "ll",
-            "profile": "high",
+            "profile": profile,
+            **color,
         },
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.Mux({
-        "name": "program_mux",
+        "name": f"{prefix}_mux",
         "src": [encoded_edge],
         "dst": muxed_edge,
         "ts_sort_wait": 0,
         "group": OUTPUT_GROUP,
     }))
     avp.addNode(api.Output({
-        "name": "program_output",
+        "name": f"{prefix}_output",
         "src": muxed_edge,
         "url": options.output,
         "format": infer_output_format(options.output, options.output_format),
@@ -520,25 +527,12 @@ def _encode_format(working_format: str, codec: str) -> str:
     return "p010le" if (ten_bit and "hevc" in codec) else "nv12"
 
 
-# Map a canvas transfer tag to tonemap_cuda's input-transfer option.
-_TONEMAP_TRANSFER = {"arib-std-b67": "hlg", "smpte2084": "pq"}
-_SDR_COLOR = {"color_trc": "bt709", "color_primaries": "bt709",
-              "colorspace": "bt709", "color_range": "tv"}
-
-
 def _nv12_program_edge(avp, api, working_format: str, mixer_edge: str) -> str:
-    """Encoded outputs stay 8-bit H.264 for now: one zero-copy GPU conversion
-    feeds them NV12 while the program edge keeps the 10-bit working format for
-    raw taps and future Main10/MXL branches. Call once per application."""
-    if working_format == "nv12":
-        return mixer_edge
+    """The default output contract is SDR, including when the canvas is HDR."""
     avp.addNode(api.FilterVideo({
-        "name": "program_to_nv12",
-        "src": mixer_edge,
-        "dst": "program_nv12",
-        "graph": "scale_cuda=format=nv12",
-        "hwaccel": HWACCEL,
-        "group": OUTPUT_GROUP,
+        "name": "program_to_nv12", "src": mixer_edge, "dst": "program_nv12",
+        "graph": conversion_graph("sdr", "nv12", source_format=working_format),
+        "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
     }))
     return "program_nv12"
 
@@ -647,25 +641,20 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
     for rendition, edge in zip(cfg.renditions, edges):
         resized = (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
         codec = rendition.codec or _default_codec(cfg.working_format)
-        if rendition.tonemap:
-            # Match the display-light conversion used by source embedding;
-            # the legacy transfer= path uses a different SDR transfer curve.
-            wh = f"w={rendition.width}:h={rendition.height}:" if resized else ""
-            t = _TONEMAP_TRANSFER.get(cfg.out_color_trc, "hlg")
-            graph = (f"scale_cuda={wh}format=p010le,"
-                     f"tonemap_cuda=transfer_in={t}:transfer_out=sdr:tonemap={rendition.tonemap}"
-                     f":sdr_white=203:hdr_peak={rendition.tonemap_peak * 100:g}"
-                     f":desat={rendition.tonemap_desat}")
-            enc_format, out_color = "nv12", _SDR_COLOR
-        else:
-            # HDR passthrough: convert to the encoder's format (P010 for Main10,
-            # NV12 for 8-bit) keeping the program's depth/transfer.
-            enc_format = _encode_format(cfg.working_format, codec)
-            parts = ([f"w={rendition.width}", f"h={rendition.height}"] if resized else [])
-            if enc_format != cfg.working_format:
-                parts.append(f"format={enc_format}")
-            graph = "scale_cuda=" + ":".join(parts) if parts else ""   # skip a no-op pass
-            out_color = cfg.out_color
+        target_color = rendition_color(cfg.out_color, codec, rendition.color or None, rendition.tonemap)
+        enc_format = _encode_format(cfg.working_format, codec)
+        if target_color.transfer != "sdr":
+            enc_format = "p010le"
+        parts = []
+        if resized:
+            parts.append(f"scale_cuda=w={rendition.width}:h={rendition.height}")
+        parts.append(conversion_graph(target_color, enc_format, source=cfg.out_color,
+                                      source_format=cfg.working_format,
+                                      tonemap=rendition.tonemap or "clip",
+                                      hdr_peak=rendition.tonemap_peak * 100,
+                                      desat=rendition.tonemap_desat))
+        graph = ",".join(parts)
+        out_color = target_color.tags
         scaled = edge
         if graph:
             scaled = f"program_scaled_{rendition.id}"
@@ -695,8 +684,10 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
             listeners.append(listener)
         else:
             _build_record_output(avp, api, replace(options, output=rendition.target,
-                                                   codec=rendition.codec, fps=rendition.fps),
-                                 scaled, width=rendition.width, height=rendition.height)
+                                                   codec=codec, fps=rendition.fps),
+                                 scaled, width=rendition.width, height=rendition.height,
+                                 enc_format=enc_format, color=out_color, prefix=f"record_{rendition.id}",
+                                 profile=rendition.profile, preset=rendition.preset, bitrate=f"{rendition.bitrate_kbps}k")
     return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
 
@@ -712,7 +703,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                          options.preheat_timeout_sec)
 
     mixer = _make_builder(avp, api, options, canvas=(cfg.canvas_w, cfg.canvas_h),
-                          fps=cfg.fps, working_format=cfg.working_format)
+                          fps=cfg.fps, working_format=cfg.working_format, color=cfg.out_color, wipe_color=cfg.wipe_color or None)
     aliases = cfg.alias_counts
     input_edges: list[str] = []
     for index, source in enumerate(cfg.sources):
@@ -730,7 +721,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                working_format=cfg.working_format,
+                working_format="p010le",
                 color={"color_trc": source.color_trc, "color_primaries": source.color_primaries,
                        "colorspace": source.colorspace, "color_range": source.color_range})
         else:
@@ -740,23 +731,18 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             filtered_edge = f"input_{index}_filtered"
             avp.addNode(api.FilterVideo({
                 "name": f"source_filter_{index}", "src": edge, "dst": filtered_edge,
-                "graph": source.filter_graph, "hwaccel": HWACCEL,
+                "graph": (source.color.setparams + "," if source.color else "") + source.filter_graph, "hwaccel": HWACCEL,
                 "group": group, "auto_restart": "group",
             }))
             edge = filtered_edge
         input_edges.append(edge)
-        count = aliases[source.id]
-        edges = [edge]
-        if count > 1:
-            # The same frames under several names: one fan-out, no second decoder.
-            edges = [f"{edge}_alias{k}" for k in range(1, count + 1)]
-            avp.addNode(api.OneToMany({
-                "type": "one_to_many", "name": f"alias_{index}", "src": edge, "dst": edges,
-                "outputs": (1 << count) - 1, "group": group,
-            }))
-        for k, alias_edge in enumerate(edges, start=1):
-            mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=alias_edge,
-                             input_group=group, default_graph="")
+        for k in range(1, aliases[source.id] + 1):
+            # The reusable builder shares conversion and fan-out for identical edges.
+            mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
+                             input_group=group, default_graph="",
+                             color=None if source.filter_graph else source.color,
+                             packed_rgb=source.kind == "browser",
+                             pixel_format=source.filter_output_format or None)
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")

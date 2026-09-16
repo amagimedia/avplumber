@@ -258,5 +258,5 @@ def test_existing_explicit_filter_sources_still_create_slot_filters(native_bound
     mixer.set_initial_scene("program")
     mixer.build()
     for slot in ("a", "b"):
-        assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph
+        assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph + ",scale_cuda=format=nv12"
         assert engine.nodes[f"mixer_comp_{slot}"]["src"] == [f"mixer_camera_scaled_{slot}"]

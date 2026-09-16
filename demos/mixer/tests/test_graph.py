@@ -440,7 +440,7 @@ CONFIG = {
     "canvas": {"width": 1920, "height": 1080, "fps": 60},
     "sources": [
         {"id": "cam", "kind": "video", "path": "/media/cam.mp4", "width": 1920, "height": 1080},
-        {"id": "page", "kind": "browser", "url": "https://example.org/", "width": 1280, "height": 720},
+        {"id": "page", "kind": "browser", "color": "sdr", "url": "https://example.org/", "width": 1280, "height": 720},
     ],
     "wipes": [{"id": "swoosh", "path": "/media/swoosh.mov"}],
     "control": {"direct": False, "fade_seconds": 0.8},
@@ -505,7 +505,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     from avpmixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     path = tmp_path / "mixer.json"
-    doc = {**CONFIG, "sources": [{**CONFIG["sources"][0], "filter": source_filter},
+    doc = {**CONFIG, "sources": [{**CONFIG["sources"][0], "filter": source_filter, "filter_output_format": "p210le" if source_filter else ""},
                                 *CONFIG["sources"][1:]]}
     path.write_text(_json.dumps(doc))
     opened = []
@@ -521,8 +521,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
 
     assert [name for name in nodes if name and name.startswith("decode_")] == ["decode_0"]
     source_edge = "input_0_filtered" if source_filter else "input_0_fps"
-    assert nodes["alias_0"]["src"] == source_edge
-    assert nodes["alias_0"]["dst"] == [f"{source_edge}_alias1", f"{source_edge}_alias2"]
+    assert dict(mixer.sources)["cam"]["pre_otm_edge"] == source_edge
+    assert dict(mixer.sources)["cam#2"]["pre_otm_edge"] == source_edge
     if source_filter:
         assert nodes["source_filter_0"]["graph"] == source_filter
         assert nodes["source_filter_0"]["src"] == "input_0_fps"
@@ -531,7 +531,7 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
         assert [n for n in nodes if n and n.startswith("source_filter_")] == ["source_filter_0"]
     else:
         assert "source_filter_0" not in nodes
-    assert nodes["alias_0"]["outputs"] == 3
+    assert "alias_0" not in nodes  # shared fan-out belongs to the reusable builder
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
@@ -700,8 +700,9 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
 
     assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_square"]
-    assert "scale_program" not in nodes                      # already the canvas size
-    assert nodes["scale_square"]["graph"] == "scale_cuda=w=1080:h=1080"
+    assert "scale_cuda" not in nodes["scale_program"]["graph"]
+    assert "transfer_in=auto:transfer_out=sdr" in nodes["scale_program"]["graph"]
+    assert nodes["scale_square"]["graph"].startswith("scale_cuda=w=1080:h=1080,")
     assert nodes["janus_encoder"]["options"]["preset"] == "p7"
     assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
     assert nodes["janus_fps"]["fps"] == "30/1"
@@ -724,7 +725,7 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
     doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1],
            "initial_scene": "full", "wipes": [],
            "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p010le",
-                      "color_trc": "arib-std-b67", "color_primaries": "bt2020", "colorspace": "bt2020nc"},
+                      "color": "hlg"},
            "renditions": [
                {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10"},
                {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc",
@@ -738,7 +739,7 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
     assert nodes["janus_sdr_encoder"]["options"]["profile"] == "baseline"
     assert nodes["janus_sdr_encoder"]["options"]["color_trc"] == "bt709"
     assert nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
-    assert "tonemap_cuda=transfer_in=hlg:transfer_out=sdr" in nodes["scale_sdr"]["graph"]
+    assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr" in nodes["scale_sdr"]["graph"]
     assert ":sdr_white=203:hdr_peak=1000" in nodes["scale_sdr"]["graph"]
     assert ":5006?" in nodes["janus_rtp_output"]["url"]
     assert ":5004?" in nodes["janus_sdr_rtp_output"]["url"]

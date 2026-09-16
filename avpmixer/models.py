@@ -15,6 +15,9 @@ class MixerSource:
     route_router: Optional[str] = None
     route_output_label_a: Optional[str] = None
     route_output_label_b: Optional[str] = None
+    color: Any = None
+    pixel_format: Optional[str] = None
+    packed_rgb: bool = False
 
 
 @dataclass

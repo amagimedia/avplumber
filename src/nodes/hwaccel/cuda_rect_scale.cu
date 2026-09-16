@@ -104,12 +104,57 @@ __device__ __forceinline__ void sample_rgb(
     }
 }
 
+// Embed SDR RGB graphics at the same display white as tonemap_cuda. Transfer
+// codes match that filter: HLG=0, PQ=1, SDR=2. Alpha stays separate.
+__device__ static inline float pq_code(float nits) {
+    const float p = powf(fmaxf(nits, 0.f) / 10000.f, 0.1593017578125f);
+    return powf((0.8359375f + 18.8515625f * p) / (1.f + 18.6875f * p), 78.84375f);
+}
+
+__device__ static inline void convert_graphic_rgb(float *rgb, int transfer, float white, float peak) {
+    if (transfer == 2) return;
+    float r = powf(fmaxf(rgb[0] / 255.f, 0.f), 2.4f) * white;
+    float g = powf(fmaxf(rgb[1] / 255.f, 0.f), 2.4f) * white;
+    float b = powf(fmaxf(rgb[2] / 255.f, 0.f), 2.4f) * white;
+    rgb[0] = 0.627404f * r + 0.329283f * g + 0.043313f * b;
+    rgb[1] = 0.069097f * r + 0.919540f * g + 0.011362f * b;
+    rgb[2] = 0.016391f * r + 0.088013f * g + 0.895595f * b;
+    if (transfer == 1) {
+        for (int i = 0; i < 3; ++i) rgb[i] = 255.f * pq_code(rgb[i]);
+        return;
+    }
+    const float luma = 0.2627f * rgb[0] + 0.6780f * rgb[1] + 0.0593f * rgb[2];
+    const float gamma = fmaxf(1.f, 1.2f + 0.42f * log10f(peak / 1000.f));
+    const float gain = luma > 0.f ? 12.f * powf(luma / peak, 1.f / gamma) / luma : 0.f;
+    for (int i = 0; i < 3; ++i) {
+        const float c = fmaxf(rgb[i] * gain, 0.f);
+        rgb[i] = 255.f * (c <= 1.f ? 0.5f * sqrtf(c) : 0.17883277f * logf(c - 0.28466892f) + 0.55991073f);
+    }
+}
+
+__device__ static inline float graphic_luma(const float *rgb, int transfer) {
+    return transfer == 2 ? 16.f + 0.1826f * rgb[0] + 0.6142f * rgb[1] + 0.0620f * rgb[2]
+        : 16.f + (219.f / 255.f) * (0.2627f * rgb[0] + 0.6780f * rgb[1] + 0.0593f * rgb[2]);
+}
+
+__device__ static inline void graphic_chroma(float r, float g, float b, int transfer, float &cb, float &cr) {
+    if (transfer == 2) {
+        cb = 128.f - 0.1006f * r - 0.3386f * g + 0.4392f * b;
+        cr = 128.f + 0.4392f * r - 0.3989f * g - 0.0403f * b;
+    } else {
+        const float y = 0.2627f * r + 0.6780f * g + 0.0593f * b;
+        cb = 128.f + (224.f / 255.f) * (b - y) / 1.8814f;
+        cr = 128.f + (224.f / 255.f) * (r - y) / 1.4746f;
+    }
+}
+
 extern "C" __global__ void rgb_to_yuv(
     const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
     int step, int r_off, int g_off, int b_off,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
     int dx, int dy, int dw, int dh, int canvas_w, int canvas_h,
-    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y) {
+    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y,
+    int transfer = 2, float white = 203.f, float peak = 1000.f) {
     const int bw = 1 << sub_x, bh = 1 << sub_y;
     const int ox = (blockIdx.x * blockDim.x + threadIdx.x) * bw;
     const int oy = (blockIdx.y * blockDim.y + threadIdx.y) * bh;
@@ -125,7 +170,8 @@ extern "C" __global__ void rgb_to_yuv(
             float rgb[3];
             sample_rgb(src, src_pitch, sx, sy, sw, sh, step, r_off, g_off, b_off,
                        (ox + i + 0.5f) * xs - 0.5f, (oy + j + 0.5f) * ys - 0.5f, rgb);
-            const float luma = (16.f + 0.1826f * rgb[0] + 0.6142f * rgb[1] + 0.0620f * rgb[2]) * dst_scale;
+            convert_graphic_rgb(rgb, transfer, white, peak);
+            const float luma = graphic_luma(rgb, transfer) * dst_scale;
             store_sample(dst_y + (y + j) * y_pitch + (x + i) * dst_sb, dst_sb, dst_shift,
                          min(max(luma, 0.f), maxv));
             sum[0] += rgb[0]; sum[1] += rgb[1]; sum[2] += rgb[2];
@@ -133,8 +179,9 @@ extern "C" __global__ void rgb_to_yuv(
         }
     }
     const float r = sum[0] / n, g = sum[1] / n, b = sum[2] / n;
-    const float cb = (128.f - 0.1006f * r - 0.3386f * g + 0.4392f * b) * dst_scale;
-    const float cr = (128.f + 0.4392f * r - 0.3989f * g - 0.0403f * b) * dst_scale;
+    float cb, cr;
+    graphic_chroma(r, g, b, transfer, cb, cr);
+    cb *= dst_scale; cr *= dst_scale;
     unsigned char *uv = dst_uv + (y >> sub_y) * uv_pitch + (x >> sub_x) * 2 * dst_sb;
     store_sample(uv, dst_sb, dst_shift, min(max(cb, 0.f), maxv));
     store_sample(uv + dst_sb, dst_sb, dst_shift, min(max(cr, 0.f), maxv));
@@ -151,7 +198,8 @@ extern "C" __global__ void rgba_over_yuv(
     int step, int r_off, int g_off, int b_off, int a_off,
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
     int dx, int dy, int dw, int dh, int canvas_w, int canvas_h,
-    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y) {
+    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y,
+    int transfer = 2, float white = 203.f, float peak = 1000.f) {
     const int bw = 1 << sub_x, bh = 1 << sub_y;
     const int ox = (blockIdx.x * blockDim.x + threadIdx.x) * bw;
     const int oy = (blockIdx.y * blockDim.y + threadIdx.y) * bh;
@@ -176,7 +224,8 @@ extern "C" __global__ void rgba_over_yuv(
             const float a10 = src[y1 * src_pitch + x0 * step + a_off], a11 = src[y1 * src_pitch + x1 * step + a_off];
             const float a = ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
 
-            const float luma = (16.f + 0.1826f * rgb[0] + 0.6142f * rgb[1] + 0.0620f * rgb[2]) * dst_scale;
+            convert_graphic_rgb(rgb, transfer, white, peak);
+            const float luma = graphic_luma(rgb, transfer) * dst_scale;
             unsigned char *py = dst_y + (y + j) * y_pitch + (x + i) * dst_sb;
             store_sample(py, dst_sb, dst_shift,
                          min(max(a * luma + (1.f - a) * load_sample(py, dst_sb, dst_shift), 0.f), maxv));
@@ -189,8 +238,9 @@ extern "C" __global__ void rgba_over_yuv(
     // Premultiplied average keeps a transparent corner of the block from
     // dragging the blended chroma toward black.
     const float r = sum[0] / sum_a, g = sum[1] / sum_a, b = sum[2] / sum_a, a = sum_a / n;
-    const float cb = (128.f - 0.1006f * r - 0.3386f * g + 0.4392f * b) * dst_scale;
-    const float cr = (128.f + 0.4392f * r - 0.3989f * g - 0.0403f * b) * dst_scale;
+    float cb, cr;
+    graphic_chroma(r, g, b, transfer, cb, cr);
+    cb *= dst_scale; cr *= dst_scale;
     unsigned char *uv = dst_uv + (y >> sub_y) * uv_pitch + (x >> sub_x) * 2 * dst_sb;
     store_sample(uv, dst_sb, dst_shift,
                  min(max(a * cb + (1.f - a) * load_sample(uv, dst_sb, dst_shift), 0.f), maxv));

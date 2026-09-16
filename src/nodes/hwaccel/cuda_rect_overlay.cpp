@@ -15,6 +15,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/frame.h>
 }
 
 #include <algorithm>
@@ -319,7 +320,8 @@ static int packedAlphaOffset(AVPixelFormat fmt) {
 
 // The fused RGB(A) path renders onto semiplanar YUV canvases (NV12, P210): two
 // planes, no alpha, interleaved Cb/Cr. Planar-chroma canvases reject packed RGB
-// sources instead of growing a third store path here. BT.709 SDR only.
+// sources instead of growing a third store path here. SDR graphics are embedded
+// into the explicitly selected SDR/HLG/PQ canvas color contract.
 static bool isRgbToYuvConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
     const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
     int step, r, g, b;
@@ -443,6 +445,19 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     int canvas_w_ = 0;
     int canvas_h_ = 0;
     AVPixelFormat sw_fmt_ = AV_PIX_FMT_NONE;
+    // Unset preserves the node's existing metadata inheritance for non-mixer callers.
+    int color_transfer_ = -1;
+    float sdr_white_ = 203.f, hdr_peak_ = 1000.f;
+
+    void setCanvasColor(AVFrame *frame) const {
+        if (color_transfer_ < 0) return;
+        frame->color_trc = color_transfer_ == 2 ? AVCOL_TRC_BT709 :
+                          color_transfer_ == 0 ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
+        frame->color_primaries = color_transfer_ == 2 ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
+        frame->colorspace = color_transfer_ == 2 ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL;
+        frame->color_range = AVCOL_RANGE_MPEG;
+    }
+
 
     std::vector<LayerSpec> default_layers_;
     mutable std::mutex layers_mutex_;
@@ -538,12 +553,13 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         CUdeviceptr source = (CUdeviceptr)src->data[0], luma = (CUdeviceptr)dst->data[0],
                     chroma = (CUdeviceptr)dst->data[1];
         int source_pitch = src->linesize[0], luma_pitch = dst->linesize[0], chroma_pitch = dst->linesize[1];
+        int transfer = color_transfer_ < 0 ? 2 : color_transfer_;
         void *opaque_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off,
                                &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
-                               &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y};
+                               &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y, &transfer, &sdr_white_, &hdr_peak_};
         void *blend_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off, &a_off,
                               &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
-                              &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y};
+                              &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y, &transfer, &sdr_white_, &hdr_peak_};
         const int bw = 1 << sub_x, bh = 1 << sub_y;
         const int blocks_x = (dw + bw - 1) / bw, blocks_y = (dh + bh - 1) / bh;
         if (CHECK_CU(cuLaunchKernel(blend ? rgba_kernel_ : rgb_kernel_, (blocks_x + 31) / 32, (blocks_y + 7) / 8, 1,
@@ -778,7 +794,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 logstream << "cuda_rect_overlay layers:" << last_ops_desc_;
             }
         }
-        clearCanvas(outf, metadata_src ? metadata_src->raw() : nullptr);
+        setCanvasColor(outf.raw());
+        clearCanvas(outf, color_transfer_ >= 0 ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
 
         for (const DrawOp &op : ops) {
             const av::VideoFrame *srcp = op.src;
@@ -791,6 +808,18 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 L.dst_x >= 0 && L.dst_y >= 0 && L.dst_x + L.dst_w <= canvas_w_ && L.dst_y + L.dst_h <= canvas_h_);
             const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
             int rgb_step, r_off, g_off, b_off;
+            if (color_transfer_ >= 0) {
+                const AVFrame *frame = srcp->raw();
+                const bool rgb = isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off);
+                const bool valid = rgb
+                    ? frame->color_trc == AVCOL_TRC_BT709 && frame->color_primaries == AVCOL_PRI_BT709
+                    : frame->color_trc == outf.raw()->color_trc &&
+                      frame->color_primaries == outf.raw()->color_primaries &&
+                      frame->colorspace == outf.raw()->colorspace && frame->color_range == AVCOL_RANGE_MPEG;
+                if (!valid)
+                    throw Error("cuda_rect_overlay: missing or mismatched source color metadata; "
+                                "declare source color and normalize to the canvas before compositing");
+            }
             if (src_sw_fmt != sw_fmt_ && isRgbToYuvConvertible(src_sw_fmt, sw_fmt_) &&
                 isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
                 convertRgbLayer(stream, srcp->raw(), outf.raw(), L, rgb_step, r_off, g_off, b_off,
@@ -821,6 +850,10 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             if (cpy < 0)
                 throw Error(std::string("cuda_rect_overlay: av_frame_copy_props failed: ") + av::error2string(cpy));
         }
+        setCanvasColor(outf.raw());
+        if (color_transfer_ >= 0)
+            av_frame_side_data_remove_by_props(&outf.raw()->side_data, &outf.raw()->nb_side_data,
+                                               AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
         outf.setPts(pts);
 
         if (CHECK_CU(cuStreamSynchronize(stream)))
@@ -1314,6 +1347,19 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     auto node = std::make_shared<CudaRectOverlay>(
         make_unique<EdgeSink<av::VideoFrame>>(out_edge), std::move(hw), cw, ch, sw_fmt, std::move(layers), mdkey,
         dbg);
+    if (params.contains("color")) {
+        const auto color = params.at("color").get<std::string>();
+        if (color != "sdr" && color != "hlg" && color != "pq")
+            throw Error("cuda_rect_overlay: color must be sdr, hlg or pq");
+        node->color_transfer_ = color == "sdr" ? 2 : color == "hlg" ? 0 : 1;
+        if (node->color_transfer_ != 2 && av_pix_fmt_desc_get(sw_fmt)->comp[0].depth < 10)
+            throw Error("cuda_rect_overlay: HDR canvas requires 10-bit storage");
+        node->sdr_white_ = params.value("sdr_white", 203.f);
+        node->hdr_peak_ = params.value("hdr_peak", 1000.f);
+        if (!(node->sdr_white_ >= 1.f && node->sdr_white_ <= node->hdr_peak_ &&
+              node->hdr_peak_ >= 100.f && node->hdr_peak_ <= 10000.f))
+            throw Error("cuda_rect_overlay: invalid display white/peak");
+    }
     node->createSourcesFromParameters(edges, params);
     out_edge->setProducer(node);
     node->initTimeline(nci);

@@ -16,6 +16,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .color import Color, declared_color, OPERATORS
+
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
 # Compositor/transition working formats. NV12 is the 8-bit default; the rest are
@@ -45,13 +47,19 @@ class Source:
     height: int = 0
     fps: int = 0                   # browser paint rate; 0 = canvas fps
     loop: bool = True
-    # v210 raw sources declare their color contract; the packed bytes carry no
-    # metadata, so HLG/BT.2020 must travel as configuration.
-    color_trc: str = "bt709"
-    color_primaries: str = "bt709"
-    colorspace: str = "bt709"
-    color_range: str = "tv"
+    # Empty fields require complete decoded frame metadata. Raw inputs must
+    # declare a contract because their bytes carry no color metadata.
+    color_trc: str = ""
+    color_primaries: str = ""
+    colorspace: str = ""
+    color_range: str = ""
     filter_graph: str = ""         # optional CUDA source filter, before scene/alias fan-out
+    filter_output_format: str = ""
+
+    @property
+    def color(self):
+        tags = {k: getattr(self, k) for k in ("color_trc", "color_primaries", "colorspace", "color_range")}
+        return Color.parse(tags) if any(tags.values()) else None
 
 
 @dataclass(frozen=True)
@@ -68,12 +76,13 @@ class Rendition:
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
     preset: str = "p7"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
-    # "" = HDR passthrough (keep the working format's depth/transfer). An operator
-    # name (hable/mobius/reinhard/...) tone-maps the HDR program to BT.709 SDR
-    # 8-bit via tonemap_cuda before encoding (e.g. an SDR H.264 delivery).
+    # An explicit operator requests SDR. Otherwise codec/color select the target
+    # and automatic HDR-to-SDR conversion uses clip to preserve SDR reference white.
     tonemap: str = ""
     tonemap_peak: float = 10.0       # source peak in REFERENCE_WHITE units (HLG 1000 nits)
     tonemap_desat: float = 0.0       # 0 keeps saturation; FFmpeg's 0.5 default washes colours out
+
+    color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
 
     @property
     def aspect(self) -> str:
@@ -131,6 +140,7 @@ class MixerConfig:
     out_color_primaries: str = "bt709"
     out_colorspace: str = "bt709"
     out_color_range: str = "tv"
+    wipe_color: str = ""          # optional explicit override for all alpha wipe clips
 
     @property
     def out_color(self) -> Dict[str, str]:
@@ -196,9 +206,12 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     working_format = str(canvas.get("working_format", "nv12"))
     if working_format not in WORKING_FORMATS:
         raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
-    out_color = {k: str(canvas.get(k, d)) for k, d in
-                 (("color_trc", "bt709"), ("color_primaries", "bt709"),
-                  ("colorspace", "bt709"), ("color_range", "tv"))}
+    try:
+        output_color = declared_color(canvas) or Color()
+        output_color.validate_format(working_format)
+    except ValueError as e:
+        raise ConfigError(f"canvas: {e}") from e
+    out_color = output_color.tags
 
     sources: List[Source] = []
     locations: Dict[Tuple[str, str], str] = {}
@@ -223,15 +236,27 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             if not all(k in s for k in ("path", "width", "height")):
                 raise ConfigError(f"{where}: v210 source needs path, width, height")
             src = Source(sid, kind, str(s["path"]), int(s["width"]), int(s["height"]),
-                         0, bool(s.get("loop", True)),
-                         str(s.get("color_trc", "bt709")), str(s.get("color_primaries", "bt709")),
-                         str(s.get("colorspace", "bt709")), str(s.get("color_range", "tv")))
+                         0, bool(s.get("loop", True)))
         else:
             raise ConfigError(f"{where}: kind must be browser, video or v210")
         source_filter = s.get("filter", "")
         if not isinstance(source_filter, str):
             raise ConfigError(f"{where}: filter must be a CUDA filter graph string")
-        src = replace(src, filter_graph=source_filter)
+        try:
+            color = declared_color(s)
+            if kind in ("v210", "browser") and color is None:
+                raise ValueError("raw input has no color metadata; declare an explicit color setting")
+            if kind == "browser" and color != Color():
+                raise ValueError("browser input supports SDR only")
+        except ValueError as e:
+            raise ConfigError(f"{where}: {e}") from e
+        filter_format = str(s.get("filter_output_format", ""))
+        if source_filter and filter_format not in WORKING_FORMATS:
+            raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
+        if source_filter and kind == "browser":
+            raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
+        src = replace(src, filter_graph=source_filter, filter_output_format=filter_format,
+                      **(color.tags if color else {}))
         key = (kind, src.location)
         if key in locations:
             raise ConfigError(f"{where}: '{src.location}' already declared as '{locations[key]}'; "
@@ -256,7 +281,14 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             str(r.get("codec", "")), str(r.get("profile", "")),
             str(r.get("preset", "p7")), int(r.get("port", 0)),
             str(r.get("tonemap", "")), float(r.get("tonemap_peak", 10.0)),
-            float(r.get("tonemap_desat", 0.0)))
+            float(r.get("tonemap_desat", 0.0)), str(r.get("color", "")))
+        if rendition.tonemap and rendition.tonemap not in OPERATORS:
+            raise ConfigError(f"{where}: unsupported tone-map operator")
+        if rendition.color:
+            try:
+                Color.parse(rendition.color)
+            except ValueError as e:
+                raise ConfigError(f"{where}: {e}") from e
         if rendition.width <= 0 or rendition.height <= 0:
             raise ConfigError(f"{where}: width and height must be positive")
         if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
@@ -327,7 +359,7 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                        tuple(renditions), initial,
                        bool(control.get("direct", True)), fade_seconds, transition, default_wipe,
                        working_format, out_color["color_trc"], out_color["color_primaries"],
-                       out_color["colorspace"], out_color["color_range"])
+                       out_color["colorspace"], out_color["color_range"], str(doc.get("wipe_color", "")))
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

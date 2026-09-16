@@ -63,7 +63,8 @@ output costs an encode, not another composite.
 | `profile` | from codec/depth | H.264 baseline, HEVC main or main10; B-frames stay off |
 | `preset` | `"p7"` | NVENC quality preset |
 | `port` | — | Janus target: overrides the RTP port from the command line |
-| `tonemap` | empty | HDR-to-SDR operator, e.g. `clip` or `hable`; produces BT.709 NV12 using a 203-nit SDR reference white |
+| `color` | automatic | `sdr`, `hlg`, or `pq`; H.264 always requires SDR, HEVC otherwise inherits the canvas |
+| `tonemap` | `clip` when conversion is needed | Explicit operator requests SDR; 203-nit reference white, selectable highlight compression |
 | `tonemap_peak` | `10` | HDR display peak in units of 100 nits |
 | `tonemap_desat` | `0` | highlight desaturation; zero preserves saturation |
 
@@ -110,7 +111,7 @@ decoder.
 ```json
 {"id": "cam0", "kind": "video",   "path": "/media/camera-0.mp4", "loop": true}
 {"id": "page", "kind": "browser", "url": "https://example.org/live",
- "width": 1920, "height": 1080, "fps": 30}
+ "width": 1920, "height": 1080, "fps": 30, "color": "sdr"}
 ```
 
 | field | applies to | meaning |
@@ -122,27 +123,46 @@ decoder.
 | `fps` | browser | paint rate; defaults to the canvas rate |
 | `width`, `height` | video | optional; probed with ffprobe/ffmpeg when a `cover` item needs them |
 | `loop` | both | default `true` |
-| `filter` | all sources | optional CUDA filter graph, applied once before scene/alias fan-out; preserve source dimensions |
+| `color` | all sources | explicit `sdr`, `hlg`, or `pq` override; required for untagged/raw inputs |
+| `filter` | video/v210 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
+| `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
 
 Browser sources arrive over DMA-BUF from the `dma-page` service and are
 imported straight into CUDA; they mix with video sources on the same canvas.
 
-For an SDR BT.709 video on a BT.2020 HLG canvas, the FFmpeg 8.x patch series
-provides source conversion through `tonemap_cuda`. For a P210 working canvas:
+Color normalization is automatic in `MixerGraphBuilder`, before alias and scene
+fan-out. Video sources use decoded frame metadata, including live SRT streams.
+Missing transfer, primaries, matrix or range is an error; bit depth never selects
+a color space. An explicit `color` preset supplies all four fields. Individual
+`color_trc`, `color_primaries`, `colorspace` and `color_range` fields must be complete
+and consistent. Raw `v210` and browser inputs require an explicit setting.
+
+For SDR Bunny on an HLG canvas, no manual tone-map filter is needed:
 
 ```json
-{"id": "sdr_clip", "kind": "video", "path": "<path>",
- "filter": "tonemap_cuda=transfer_in=sdr:transfer_out=hlg:sdr_white=203:hdr_peak=1000,scale_cuda=format=p210le"}
+"canvas": {"width": 1920, "height": 1080, "fps": 60,
+           "working_format": "p010le", "color": "hlg"},
+"sources": [{"id": "bunny", "kind": "video", "path": "<path>", "color": "sdr"}]
 ```
 
-The filter accepts limited-range NV12/P010; other YUV layouts need a preceding
-`scale_cuda=format=p010le`. Select `sdr`, `pq`, or `hlg` for each transfer.
-SDR uses BT.709/BT.1886; HDR uses BT.2020. `sdr_white` controls the SDR white
-level in nits; `hdr_peak` sets the HLG display peak (and HDR-to-SDR mapping
-peak). Inputs already matching the canvas need no conversion. The same source
-conversion applies in fullscreen scenes, tiles and transitions. Source filters
-must keep frames on CUDA; this setting does not automatically infer colorimetry
-from untagged files.
+Supported video contracts are limited-range BT.709/BT.1886 SDR and BT.2020
+non-constant-luminance HLG/PQ. Full-range YUV, other gamuts/matrices and missing
+metadata fail explicitly. SDR uses a 203-nit reference white and HLG a 1000-nit
+peak. Matching NV12/P010 frames pass without GPU copies. Other declared CUDA YUV
+storage uses `scale_cuda` around conversion. Custom source filters receive the
+explicit source override first; their output metadata drives normalization, so
+a manually converted source is not converted from its original transfer again.
+
+Packed SDR RGB graphics retain alpha and convert in the compositor to its target
+transfer/gamut. This path requires NV12, P010 or P210 canvas storage. HDR alpha
+sources are unsupported. Set top-level `wipe_color: "sdr"` to explicitly declare
+an untagged SDR wipe library; otherwise wipes must carry usable metadata.
+
+H.264 renditions and the default output path automatically convert HDR to SDR.
+HEVC renditions inherit the canvas unless `color` requests another supported
+contract. HDR outputs require 10-bit storage. The `clip` default preserves the
+brightness of SDR embedded in HDR; it clips highlights above SDR white. Select
+another operator explicitly when highlight compression is preferred.
 
 ## wipes
 

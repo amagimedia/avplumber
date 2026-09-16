@@ -66,6 +66,7 @@ from pyplumber.node import (
 )
 
 
+from .color import Color, conversion_graph
 from . import clipcache
 from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
@@ -100,7 +101,9 @@ class MixerGraphBuilder:
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
         cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
-        working_format: str = "nv12",   # compositor/transition sw_format, e.g. "p210le" for 10-bit 4:2:2
+        working_format: str = "nv12",   # compositor/transition sw_format
+        color="sdr",
+        wipe_color=None,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -121,6 +124,11 @@ class MixerGraphBuilder:
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
         self.working_format = working_format
+        self.color = Color.parse(color)
+        self.color.validate_format(working_format)
+        self.wipe_color = Color.parse(wipe_color) if wipe_color is not None else None
+        if self.wipe_color is not None and self.wipe_color != Color():
+            raise ValueError("Alpha wipes currently require SDR; HDR alpha decode is unsupported")
         self._output_started = not defer_output
         self._transition_prewarm = TransitionPrewarm(avp, self.name, self.timeline)
 
@@ -143,8 +151,15 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         default_graph: Optional[str] = None,
+        *, color=None, pixel_format=None, packed_rgb=False,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
+
+        Color defaults to strict decoded-frame metadata. An explicit color
+        contract overrides source tags. Sources sharing pre_otm_edge are aliases:
+        the builder converts once, then fans out to their scene-slot routers.
+        pixel_format is required for CUDA layouts other than NV12/P010.
+        packed_rgb keeps alpha for fused compositing and requires explicit SDR.
 
         The source's one_to_many and per-slot crop-scale nodes will be
         created in *input_group* during build() so that they restart
@@ -171,8 +186,13 @@ class MixerGraphBuilder:
             raise RuntimeError("Cannot add sources after build()")
         if name in self._source_index:
             raise ValueError(f"Source '{name}' already registered")
+        if color is not None:
+            color = Color.parse(color)
+        if packed_rgb and color != Color():
+            raise ValueError(f"Source '{name}': packed RGB requires an explicit SDR color setting")
         idx = len(self._sources)
-        self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph))
+        self._sources.append(MixerSource(name, pre_otm_edge, input_group, default_graph,
+                                               color=color, pixel_format=pixel_format, packed_rgb=packed_rgb))
         self._source_index[name] = idx
         return self
 
@@ -260,12 +280,13 @@ class MixerGraphBuilder:
         return self
 
     def _normalized_graph(self, graph: str) -> str:
-        """Per-source chains must emit the working format: NVDEC/browser-scaled
-        NV12 promotes explicitly (e.g. to P210) with one GPU conversion pass.
-        Chains already choosing a format, and passthrough sources, are kept."""
-        if not graph or self.working_format == "nv12" or "format=" in graph:
-            return graph
-        return f"{graph},scale_cuda=format={self.working_format}"
+        """Keep scene geometry filters in the canvas storage format.
+
+        Color conversions belong before source fan-out. The compositor checks
+        the contract again so a custom scene filter cannot silently retag pixels.
+        """
+        suffix = f"scale_cuda=format={self.working_format}"
+        return graph if not graph or graph.endswith(suffix) else f"{graph},{suffix}"
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
         """Declare which scene starts on PGM.
@@ -444,8 +465,53 @@ class MixerGraphBuilder:
             mask |= 1 << idx
         return mask
 
+    def _prepare_source_edges(self):
+        shared = {}
+        result = {}
+        for source in self._sources:
+            if source.route_router is None:
+                shared.setdefault(source.pre_otm_edge, []).append(source)
+            else:
+                # Routed edges may change cameras at runtime. Resolve color from
+                # every frame after the router, before per-slot scene geometry.
+                for slot, edge in (("a", source.pre_filter_edge_a), ("b", source.pre_filter_edge_b)):
+                    result[(source.name, slot)] = self._color_edge(source, edge, f"{source.name}_{slot}")
+        for edge, sources in shared.items():
+            first = sources[0]
+            contract = lambda s: (s.input_group, s.color, s.pixel_format, s.packed_rgb)
+            if any(contract(s) != contract(first) for s in sources):
+                raise ValueError(f"Conflicting color contracts for shared input edge {edge!r}")
+            prepared = self._color_edge(first, edge, first.name)
+            outputs = [prepared]
+            if len(sources) > 1:
+                outputs = [self._e(f"{s.name}_color_alias") for s in sources]
+                self.avp.addNode(OneToMany({
+                    "name": self._n(f"color_alias_{first.name}"), "src": prepared, "dst": outputs,
+                    "outputs": (1 << len(outputs)) - 1, "group": first.input_group,
+                }))
+            result.update((s.name, output) for s, output in zip(sources, outputs))
+        return result
+
+    def _color_edge(self, source, edge, label):
+        if source.packed_rgb:
+            if self.working_format not in ("nv12", "p010le", "p210le"):
+                raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
+            graph = source.color.setparams
+        else:
+            graph = conversion_graph(self.color, self.working_format,
+                                     source=source.color, source_format=source.pixel_format)
+        output = self._e(f"{label}_color")
+        self.avp.addNode(FilterVideo({
+            "name": self._n(f"color_{label}"), "src": edge, "dst": output,
+            "graph": graph,
+            "hwaccel": self.hwaccel, "group": source.input_group,
+            "defer_preliminary_init": True,
+        }))
+        return output
+
     def _build_per_source_nodes(self) -> None:
         """Create one_to_many + per-slot filter_video nodes for every source."""
+        prepared_edges = self._prepare_source_edges()
         initial_scene = self._initial_scene_def()
         pgm_slot_bit = 0 if self._initial_pgm_slot == "A" else 1
 
@@ -460,7 +526,7 @@ class MixerGraphBuilder:
                 self.avp.addNode(OneToMany({
                     "type": "one_to_many",
                     "name": self._n(f"otm_{src.name}"),
-                    "src": src.pre_otm_edge,
+                    "src": prepared_edges[src.name],
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b")],
                     "outputs": outputs_init,
                     "timeline": self.timeline,
@@ -469,8 +535,10 @@ class MixerGraphBuilder:
                 slot_a_edge = self._e(f"{src.name}_a")
                 slot_b_edge = self._e(f"{src.name}_b")
             else:
-                slot_a_edge = src.pre_filter_edge_a
-                slot_b_edge = src.pre_filter_edge_b
+                slot_a_edge = prepared_edges[(src.name, "a")]
+                slot_b_edge = prepared_edges[(src.name, "b")]
+                src.pre_filter_edge_a = slot_a_edge
+                src.pre_filter_edge_b = slot_b_edge
 
             # Default scale: fit to canvas.  MixerOrchestrator rewrites the
             # graph string on every scene switch via node.param.set + auto_restart.
@@ -514,6 +582,7 @@ class MixerGraphBuilder:
                 "width": self.canvas_w,
                 "height": self.canvas_h,
                 "sw_format": self.working_format,
+                "color": self.color.transfer,
                 "fps": self._fps_str(),
                 **timing,
                 "scale": any(source.default_graph == "" for source in self._sources),
@@ -645,7 +714,7 @@ class MixerGraphBuilder:
             # Upload the clip at its own size and let the compositor scale it on
             # the GPU. Resizing to the canvas on a CPU thread cost two thirds of
             # this chain and made the compositor miss 60 Hz ticks during a wipe.
-            "graph": "format=rgba,hwupload",
+            "graph": (self.wipe_color.setparams + "," if self.wipe_color else "") + "format=rgba,hwupload",
             "hwaccel": self.hwaccel,
             "group": load_group,
         }))
@@ -676,7 +745,8 @@ class MixerGraphBuilder:
             "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
-            "width": W, "height": H, "sw_format": self.working_format, "fps": fps_str, "scale": True,
+            "width": W, "height": H, "sw_format": self.working_format,
+            "color": self.color.transfer, "fps": fps_str, "scale": True,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
             "active_inputs": 3,

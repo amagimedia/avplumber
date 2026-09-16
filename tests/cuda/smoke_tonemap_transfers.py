@@ -210,6 +210,34 @@ def check_invalid(ffmpeg):
     print("PASS invalid/conflicting options and full-range input rejected", flush=True)
 
 
+def check_auto(ffmpeg):
+    for source, target, depth in itertools.product(TRANSFERS, TRANSFERS, (8, 10)):
+        data = fixture(source, depth)
+        outdepth = 8 if target == "sdr" else 10
+        fmt = "nv12" if outdepth == 8 else "p010le"
+        graph = f"tonemap_cuda=transfer_in=auto:transfer_out={target}:format={fmt}:tonemap=none:desat=0"
+        result, log = run_filter(ffmpeg, data, source, depth, graph, outdepth)
+        assert_tags(log, target)
+        if source == target:
+            expected = pack(unpack(data, depth) * 2.0 ** (outdepth - depth), outdepth)
+        else:
+            expected = pack(convert_transfer_codes(unpack(data, depth), source, target, depth), outdepth)
+        error = np.max(abs(unpack(result, outdepth) - unpack(expected, outdepth)))
+        assert error <= 2, (source, target, depth, error)
+        if source == target and depth == outdepth:
+            assert result == data, "Auto identity changed pixel bytes"
+        print("PASS auto", source, target, depth, error, flush=True)
+    for missing in ("color_trc", "color_primaries", "colorspace", "range"):
+        graph = f"setparams={missing}=unknown,tonemap_cuda=transfer_in=auto:transfer_out=sdr"
+        run_filter(ffmpeg, fixture("sdr", 8), "sdr", 8, graph, 8, fail="source color setting")
+        print("PASS missing", missing, "rejected", flush=True)
+    graph = "setparams=color_primaries=bt709,tonemap_cuda=transfer_in=auto:transfer_out=sdr"
+    run_filter(ffmpeg, fixture("hlg", 10), "hlg", 10, graph, 8, fail="contradictory")
+    run_filter(ffmpeg, fixture("sdr", 8), "sdr", 8,
+               "tonemap_cuda=transfer_in=auto:transfer_out=sdr", 8,
+               fail="contradictory", full_range=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ffmpeg", default="ffmpeg")
@@ -219,6 +247,7 @@ def main():
     print("PASS independent reference checkpoints", flush=True)
     if not args.reference_only:
         check_directions(args.ffmpeg)
+        check_auto(args.ffmpeg)
         check_white_and_roundtrip(args.ffmpeg)
         check_downmapping(args.ffmpeg)
         check_legacy(args.ffmpeg)
