@@ -40,14 +40,15 @@ typedef enum {
     AVP_MEDIA_METADATA  = 5   /* ptr = opaque MetadataFrame*  (C++)  */
 } AvpMediaType;
 
-/* One media buffer crossing the boundary. Rust passes ONE reference in; the
- * receiver owns it until it either frees it or forwards it via avp_edge_push.
- * PTS lives on the AVFrame/AVPacket, in source time, and is never rewritten in
- * transit. A seek clears queues rather than tagging buffers with an epoch. */
+/* One media grain crossing the boundary (the FFI projection of native Grain).
+ * Rust passes ONE reference in; the receiver owns it until it either frees it
+ * or forwards it via avp_edge_push. PTS lives on the AVFrame/AVPacket, in
+ * source time, and is never rewritten in transit. A seek clears queues rather
+ * than tagging grains with an epoch. */
 typedef struct {
     AvpMediaType type;
     void*        ptr;     /* AVFrame* or AVPacket* for 1..3; opaque for 4..5 */
-} AvpBuffer;
+} AvpGrain;
 
 /* For opaque C++-owned media (EGL/Metadata), the C++ side registers how Rust may
  * move/own it without understanding it. AVFrame/AVPacket need no vtable (Rust
@@ -63,12 +64,12 @@ void avp_register_media_type(AvpCore*, AvpMediaType, const AvpMediaVtable*);
 
 /* -------------------------------------------------------------- edge events
  * In-band causal control on edges. Takes effect where/when it arrives;
- * nothing is applied retroactively to buffers already downstream. There is
+ * nothing is applied retroactively to grains already downstream. There is
  * no segment event and no epoch: rate/offset/pause live on the master clock
  * (avplumber_services_clock.h) and are applied at the output. FLUSH preempts
- * the pipe: it clears queued buffers on the way down. SPEC (stream format)
+ * the pipe: it clears queued grains on the way down. SPEC (stream format)
  * is causal and latched on the edge: a (re)connecting consumer sees the
- * current SPEC as the head item, before any buffer, so it does not walk
+ * current SPEC as the head item, before any grain, so it does not walk
  * upstream to recover format. DRAIN asks the codecs downstream for what they
  * are holding (a hardware decoder's pipeline delay) without ending anything. */
 typedef enum {
@@ -110,10 +111,10 @@ typedef struct {
     AvpRational  resume_at_tb;
 } AvpEdgeEvent;
 
-/* A dequeued item is either a buffer or an event (single ordered stream). */
+/* A dequeued item is either a grain or an event (single ordered stream). */
 typedef struct {
-    int          is_event;   /* 0 = buffer, 1 = event */
-    AvpBuffer    buffer;
+    int          is_event;   /* 0 = grain, 1 = event */
+    AvpGrain     grain;
     AvpEdgeEvent event;
 } AvpItem;
 
@@ -126,20 +127,20 @@ typedef enum {
     AVP_FLOW_ERROR        = 4
 } AvpFlow;
 
-/* Producer side. push transfers the buffer's ref into the edge only on
+/* Producer side. push transfers the grain's ref into the edge only on
  * PUSHED; on every other result the caller retains ownership. Events never
  * drop. */
-AvpFlow avp_edge_push(AvpEdge*, const AvpBuffer* buf);
+AvpFlow avp_edge_push(AvpEdge*, const AvpGrain* grain);
 void    avp_edge_push_event(AvpEdge*, const AvpEdgeEvent* ev);
 
 /* Consumer side. peek does not transfer ownership; pop advances. On peek of a
- * buffer, ptr is borrowed until pop. To keep it past pop, ref it (av_frame_ref /
+ * grain, ptr is borrowed until pop. To keep it past pop, ref it (av_frame_ref /
  * the media vtable retain). timeout_ms: <0 block, 0 poll, >0 bounded. */
 int  avp_edge_take(AvpEdge*, int timeout_ms, AvpItem* out);  /* 1 got, 0 none — ownership moves */
 typedef struct AvpPeek AvpPeek;
 AvpPeek* avp_edge_peek(AvpEdge*, int timeout_ms, AvpItem* out); /* NULL = none; *out borrowed */
 void avp_edge_peek_release(AvpPeek*);
-int  avp_edge_peek_consume(AvpPeek*, AvpBuffer* out /* nullable */);
+int  avp_edge_peek_consume(AvpPeek*, AvpGrain* out /* nullable */);
 void avp_edge_pop(AvpEdge*);
 int  avp_edge_occupied(AvpEdge*);
 
@@ -155,9 +156,17 @@ int  avp_edge_current_spec(AvpEdge*, AvpSpec* out);
 void avp_edge_notify_readable(AvpEdge*, AvpNode*);
 void avp_edge_notify_writable(AvpEdge*, AvpNode*);
 
-/* Bind a named edge to this node as source/sink of a given media type. Returns
- * the shared endpoint handle. capacity==0 uses the core's buffered default;
- * DirectEdge is selected only by explicit graph construction. */
+/* Bind a named edge to this node as source/sink of a given media type.
+ * capacity==0 uses the core's buffered default; DirectEdge is selected only by
+ * explicit graph construction.
+ *
+ * Returns a handle leased to this node's current run, not a shared endpoint:
+ * it stops accepting traffic once the node is rebuilt, so a helper thread that
+ * outlives its generation is fenced rather than left writing to a live edge.
+ * The handle stays valid (and inert) until the node is destroyed, so it is
+ * safe to keep. A bind from inside the factory is leased to the run being
+ * constructed and only carries traffic once that run is published: an
+ * abandoned construction's handles never accept anything. */
 AvpEdge* avp_node_bind_source(AvpNode*, const char* edge_name, AvpMediaType, size_t capacity);
 AvpEdge* avp_node_bind_sink  (AvpNode*, const char* edge_name, AvpMediaType, size_t capacity);
 
@@ -167,28 +176,31 @@ AvpEdge* avp_node_bind_sink  (AvpNode*, const char* edge_name, AvpMediaType, siz
  * process() for blocking nodes (own OS thread), poll() for cooperative nodes
  * (current-thread runtime per event loop / tick source). */
 typedef struct {
-    void    (*start)(AvpNode*);
-    void    (*stop)(AvpNode*);
-    void    (*destroy)(AvpNode*);     /* release the backing node object     */
+    void    (*start)(void* self);
+    void    (*stop)(void* self);
+    void    (*destroy)(void* self);   /* release the backing node object     */
 
     /* Blocking nodes: run on a dedicated OS thread; loop until EOF/ERROR.
-     * process() blocks internally on avp_edge_peek(timeout<0). NULL if non-blk. */
-    AvpFlow (*process)(AvpNode*);
+     * process() blocks internally on avp_edge_peek(timeout<0). NULL if non-blk.
+     * `self` is the pointer passed to avp_node_set_impl, not the AvpNode. */
+    AvpFlow (*process)(void* self);
 
     /* Non-blocking nodes: cooperative; called when scheduled/woken. Uses
      * avp_edge_peek(timeout=0) + notify_*. NULL if blocking. */
-    AvpFlow (*poll)(AvpNode*);
+    AvpFlow (*poll)(void* self);
 
     /* Capability discovery. Returns a const per-interface vtable, or NULL.
      * Query this node only; there is no upstream walk. */
-    const void* (*query_interface)(AvpNode*, uint32_t iface_id);
+    const void* (*query_interface)(void* self, uint32_t iface_id);
 
     /* Nonzero opts a poll node into Direct-edge input and promises poll()
      * cannot return AVP_FLOW_ERROR. Keep zero for fallible consumers. */
     int direct_consumer_is_infallible;
 } AvpNodeVtable;
 
-/* The core calls this to attach the C++/Rust object + vtable to the AvpNode. */
+/* The core calls this to attach the C++/Rust object + vtable to the AvpNode.
+ * avp_node_impl returns the published `self` only; a factory in progress
+ * does not change it. Vtable callbacks receive `self` as their argument. */
 void  avp_node_set_impl(AvpNode*, void* self, const AvpNodeVtable*);
 void* avp_node_impl(AvpNode*);
 const char* avp_node_name(AvpNode*);

@@ -81,17 +81,6 @@ pub trait Node: Send + Sync + 'static {
     /// is the teardown.
     fn interrupt(&self) {}
 
-    /// Applicable to FFI nodes only.
-    ///
-    /// Which group-run this node is on. The supervisor sets it just before
-    /// [`Executor::add_node`](crate::exec::Executor::add_node).
-    ///
-    /// A C node's `process`/`poll` then stamps that generation on `avp_edge_*`
-    /// so a restart cannot take or push on the previous run's edge. Native
-    /// nodes do not need it: they already hold the generation-fenced `Arc`s
-    /// from [`Self::bind_source`] / [`Self::bind_sink`]. The default is a no-op.
-    fn set_generation(&self, _generation: u64) {}
-
     // unused???
     /*fn on_spec(&self, spec: &Spec) -> Result<Spec, String> {
         Ok(spec.clone())

@@ -12,10 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
-use avplumber_f7k::graph::buffer::AvpMediaType;
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeHint, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::grain::{Grain, PacketExt};
+use avplumber_f7k::graph::media::AvpMediaType;
 use avplumber_f7k::graph::node::Polled;
 use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;

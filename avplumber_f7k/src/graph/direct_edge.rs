@@ -515,9 +515,9 @@ mod tests {
     use std::task::{Context, Poll as TaskPoll, RawWaker, RawWakerVTable, Waker};
 
     use super::*;
-    use crate::graph::buffer::{AvpMediaType, AvpRational};
     use crate::graph::buffered_edge::BufferedEdge;
     use crate::graph::error::NodeError;
+    use crate::graph::media::{AvpMediaType, AvpRational};
     use crate::graph::node::NodeKind;
     use crate::graph::spec::Spec;
 

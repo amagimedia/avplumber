@@ -1,11 +1,11 @@
-//! Native payload. Owned rsmpeg values internally; `AvpBuffer` lives in `abi/`.
+//! Native payload. Owned rsmpeg values internally; `AvpGrain` lives in `abi/`.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use crate::graph::buffer::{AvpMediaType, AvpMediaVtable, AvpRational};
 #[cfg(feature = "ffmpeg")]
-use crate::graph::buffer::AVP_NOPTS;
+use crate::graph::media::AVP_NOPTS;
+use crate::graph::media::{AvpMediaType, AvpMediaVtable, AvpRational};
 use crate::graph::timestamp::Ts;
 
 /// C++-owned media (EGL / Metadata). Drop/Clone go through the vtable.
@@ -69,7 +69,7 @@ impl Drop for OpaqueGrain {
 }
 
 /// A single timestamped packet or a frame.
-/// 
+///
 /// For consistency with FFmpeg, audio fragment which usually contains multiple samples is also called a "frame".
 pub enum Grain {
     #[cfg(feature = "ffmpeg")]

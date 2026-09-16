@@ -1,6 +1,6 @@
 //! Timestamps and conversion between time bases.
 
-use crate::graph::buffer::{AVP_NOPTS, AvpRational};
+use crate::graph::media::{AVP_NOPTS, AvpRational};
 use crate::graph::timebase::finer;
 
 #[derive(Clone, Copy, Debug)]

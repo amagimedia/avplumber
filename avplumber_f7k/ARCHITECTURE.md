@@ -47,7 +47,7 @@ avplumber_f7k/
 │   │   ├── pad.rs              pad declarations and media compatibility
 │   │   ├── error.rs            executor-visible node failures
 │   │   ├── capability.rs       capability/service IDs (C: generated avplumber_ids.h)
-│   │   ├── buffer.rs           native rationals, media kinds, OpaqueGrain vtable
+│   │   ├── media.rs            native rationals, media kinds, OpaqueGrain vtable
 │   │   └── mod.rs              Graph, Vertex, EdgeLink; not an execution engine
 │   ├── exec/
 │   │   ├── blocking.rs         one OS thread per Blocking body
@@ -96,7 +96,7 @@ avplumber_f7k/
 │   │   ├── io.rs               Io and EdgeSlot
 │   │   └── mod.rs              node-authoring helpers; convenience, never contracts
 │   └── abi/
-│       ├── types.rs            flat AvpSpec / AvpBuffer / EdgeCoupling
+│       ├── types.rs            flat AvpSpec / AvpGrain / EdgeCoupling
 │       ├── ffi_node.rs         C vtable wrapped as Node
 │       ├── graph_mgmt.rs       C graph/group construction adapter
 │       ├── edge_ops.rs         ownership transfer across the C boundary
@@ -424,9 +424,9 @@ and `avp_edge_peek_consume` hand the caller an owned reference; `avp_edge_peek`
 alone lends a view that lives until the peek is consumed or released.
 `avp_edge_push` takes the caller's reference only when it reports `PUSHED`: the
 edge is offered a retained clone, and on backpressure, drop, a closed edge or a
-stale lease the caller still owns its buffer and may retry it. A C `process` or
+stale lease the caller still owns its grain and may retry it. A C `process` or
 `poll` returning `AVP_FLOW_ERROR` reaches the supervisor as a `NodeError`, the
-same as a native node's `Err`. `AvpBuffer`, `AvpSpec`, `AvpRational`, and media
+same as a native node's `Err`. `AvpGrain`, `AvpSpec`, `AvpRational`, and media
 vtables are ABI projections, not an alternative internal model.
 
 `AvpSpec` is intentionally lossy. The native audio representation can retain a

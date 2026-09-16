@@ -7,7 +7,9 @@ use crate::AvpInterfaceId;
 use crate::AvpMediaType;
 use crate::PadDirection;
 use crate::abi::{AvpEdge, AvpNode, AvpNodeVtable, FfiNode};
-use crate::graph::{generation_reader, generation_writer};
+use crate::graph::{
+    generation_reader, generation_writer, pending_generation_reader, pending_generation_writer,
+};
 
 /// Attach the C++/Rust object + vtable to the AvpNode. For a C-vtable node this
 /// wraps `(self_ptr, vtable)` into a `VtableNode` stored in `node.node`.
@@ -35,12 +37,7 @@ pub extern "C" fn avp_node_set_impl(
     // SAFETY: the vtable is a C-side static (or &'static lifetime by contract).
     let vtable_ref: &'static AvpNodeVtable = unsafe { &*vtable };
     node.vtable = Some(vtable_ref);
-    let vt = FfiNode::new(
-        node.name.clone(),
-        node as *mut _ as *mut c_void,
-        self_ptr,
-        vtable_ref,
-    );
+    let vt = FfiNode::new(node.name.clone(), self_ptr, vtable_ref);
     let native: std::sync::Arc<dyn crate::Node> = std::sync::Arc::new(vt);
     let core = node.core;
     let name = node.name.clone();
@@ -56,19 +53,16 @@ pub extern "C" fn avp_node_set_impl(
     }
 }
 
-/// Returns the C++ object pointer set via `avp_node_set_impl`, or null for a
-/// pure-Rust node.
+/// Returns the published C++ object pointer set via `avp_node_set_impl`, or
+/// null for a pure-Rust node. In-progress factory state is not visible here;
+/// vtable callbacks receive that pointer as their argument instead of looking
+/// it up through the stable handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn avp_node_impl(node: *mut AvpNode) -> *mut c_void {
-    if let Some(self_ptr) = crate::abi::ffi_node::callback_impl(node.cast()) {
-        return self_ptr;
+    if node.is_null() {
+        return std::ptr::null_mut();
     }
-    let node = unsafe { &*node };
-    if crate::abi::ffi_node::is_factory_handle(node as *const _ as *mut c_void) {
-        node.pending_self_ptr
-    } else {
-        node.self_ptr
-    }
+    unsafe { (*node).self_ptr }
 }
 
 /// Borrowed name (valid while the AvpNode handle lives; caller must NOT free).
@@ -147,17 +141,25 @@ fn bind_endpoint(
         Err(_) => return std::ptr::null_mut(),
     };
     let c_node = node.vtable.is_some() || node.pending_vtable.is_some();
-    if c_node && (direction == PadDirection::Output || edge.is_direct()) {
-        let generation = crate::factory::build_generation()
-            .or_else(|| {
-                core.node(&node.name)
-                    .map(|instance| instance.active_generation)
-            })
-            .unwrap_or_else(|| edge.writer_generation())
-            .max(edge.writer_generation());
-        let lease_edge = match direction {
-            PadDirection::Input => generation_reader(edge, generation),
-            PadDirection::Output => generation_writer(edge, generation),
+    if c_node {
+        // A factory binds before its generation is published, so the lease it
+        // gets is resolved by whoever publishes it. Outside a factory the
+        // catalog already names the generation this node is running as.
+        let lease_edge = if node.building {
+            match direction {
+                PadDirection::Input => pending_generation_reader(edge),
+                PadDirection::Output => pending_generation_writer(edge),
+            }
+        } else {
+            let generation = core
+                .node(&node.name)
+                .map(|instance| instance.active_generation)
+                .unwrap_or_else(|| edge.writer_generation())
+                .max(edge.writer_generation());
+            match direction {
+                PadDirection::Input => generation_reader(edge, generation),
+                PadDirection::Output => generation_writer(edge, generation),
+            }
         };
         let mut lease = Box::new(AvpEdge {
             name,

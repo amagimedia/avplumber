@@ -1,7 +1,7 @@
 //! Time-base rationals: constants, comparison, parsing. Timestamp values live
 //! in [`super::timestamp`].
 
-use crate::graph::buffer::AvpRational;
+use crate::graph::media::AvpRational;
 
 pub const MICROSECONDS: AvpRational = AvpRational {
     num: 1,

@@ -389,15 +389,14 @@ impl Instance {
             .ok_or_else(|| {
                 CoreError::Operation(format!("unknown node type: {}", request.type_name))
             })?;
-        let mut built = crate::factory::with_build_generation(1, || {
-            factory.build(
+        let mut built = factory
+            .build(
                 self,
                 &request.name,
                 &params_json,
                 request.sync_group.as_deref(),
             )
-        })
-        .map_err(CoreError::Operation)?;
+            .map_err(CoreError::Operation)?;
         let self_bindings = std::mem::take(&mut built.bindings);
         let recipe = ConstructionRecipe {
             factory,
@@ -442,6 +441,9 @@ impl Instance {
             blueprint,
             active_generation: 1,
         };
+        // A C factory binds its edges before there is a generation to bind
+        // them to; this is the first one.
+        self.publish_c_leases(&native.name, native.active_generation);
 
         self.graph
             .lock()
@@ -541,8 +543,20 @@ impl Instance {
         result
     }
 
+    /// Publishes the leases a freshly created C node staged while building.
+    /// Its handle is still in `pending_node_handles`: `avp_create_node` moves
+    /// it to the stable map afterwards, and a node created through any other
+    /// entry point leaves it there, so this has to run for both.
+    fn publish_c_leases(&self, name: &str, generation: u64) {
+        if let Some(handle) = self.pending_node_handles.lock().unwrap().get_mut(name) {
+            handle.publish_leases(generation);
+        }
+    }
+
     /// Nulls the C state an abandoned generation staged on the stable handles.
-    /// Only meaningful after the abandoned nodes are gone.
+    /// Only meaningful after the abandoned nodes are gone. The staged leases
+    /// are kept, never published: C may still hold their addresses, and an
+    /// unpublished lease refuses traffic instead of dangling.
     fn clear_pending_c_state(&self, members: &[String]) {
         let mut handles = self.node_handles.lock().unwrap();
         for name in members {
@@ -575,31 +589,30 @@ impl Instance {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let replacements = crate::factory::with_build_generation(next_generation, || {
-            old.iter()
-                .map(|current| {
-                    let built = current
-                        .blueprint
-                        .build(self)
-                        .map_err(CoreError::Operation)?;
-                    let effective = resolve_effective_node(built, &current.blueprint.recipe);
-                    validate_replacement(current, &effective)?;
-                    Ok(NodeInstance {
-                        name: current.name.clone(),
-                        node: effective.node,
-                        pads: effective.pads,
-                        exec_ctx: effective.exec_ctx,
-                        restart: effective.restart,
-                        on_error: effective.on_error,
-                        sync_group: effective.sync_group,
-                        correction_group: effective.correction_group,
-                        service_hint: effective.service_hint,
-                        blueprint: current.blueprint.clone(),
-                        active_generation: next_generation,
-                    })
+        let replacements = old
+            .iter()
+            .map(|current| {
+                let built = current
+                    .blueprint
+                    .build(self)
+                    .map_err(CoreError::Operation)?;
+                let effective = resolve_effective_node(built, &current.blueprint.recipe);
+                validate_replacement(current, &effective)?;
+                Ok(NodeInstance {
+                    name: current.name.clone(),
+                    node: effective.node,
+                    pads: effective.pads,
+                    exec_ctx: effective.exec_ctx,
+                    restart: effective.restart,
+                    on_error: effective.on_error,
+                    sync_group: effective.sync_group,
+                    correction_group: effective.correction_group,
+                    service_hint: effective.service_hint,
+                    blueprint: current.blueprint.clone(),
+                    active_generation: next_generation,
                 })
-                .collect::<Result<Vec<_>, CoreError>>()
-        })?;
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
 
         let bindings = {
             let graph = self.graph.lock().unwrap();
@@ -695,10 +708,7 @@ impl Instance {
                             handle.pending_self_ptr = std::ptr::null_mut();
                             handle.vtable = Some(vtable);
                         }
-                        let leases = std::mem::take(&mut handle.pending_producer_leases);
-                        handle.producer_leases.extend(leases);
-                        let leases = std::mem::take(&mut handle.pending_direct_reader_leases);
-                        handle.direct_reader_leases.extend(leases);
+                        handle.publish_leases(next_generation);
                     }
                     nodes.insert(replacement.name.clone(), replacement);
                 }

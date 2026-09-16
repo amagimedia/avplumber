@@ -16,15 +16,15 @@ use avplumber_f7k::abi::{
     avp_stop_group, avp_string_free,
 };
 use avplumber_f7k::{
-    AvpBuffer, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpNodeVtable, AvpRational, Processed,
-    Edge, EdgeCoupling, EdgeRestart, GroupState, Node, NodeError, NodeKind, NodeOutcome, NodePhase,
-    NodePollContext, NodeRequest, RestartPolicy, Polled, register_factory,
+    AvpGrain, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpNodeVtable, AvpRational, Edge,
+    EdgeCoupling, EdgeRestart, GroupState, Node, NodeError, NodeKind, NodeOutcome, NodePhase,
+    NodePollContext, NodeRequest, Polled, Processed, RestartPolicy, register_factory,
 };
 
-/// One ABI buffer, freshly owned. With libav compiled in the pointer really is
+/// One ABI grain, freshly owned. With libav compiled in the pointer really is
 /// an `AVFrame`, which is why this is cfg-paired rather than a dangling address
 /// in both builds.
-fn abi_buffer() -> AvpBuffer {
+fn abi_grain() -> AvpGrain {
     #[cfg(feature = "ffmpeg")]
     {
         let mut frame = rsmpeg::avutil::AVFrame::new();
@@ -32,7 +32,7 @@ fn abi_buffer() -> AvpBuffer {
         frame.set_height(2);
         frame.set_format(rusty_ffmpeg::ffi::AV_PIX_FMT_GRAY8);
         frame.alloc_buffer().expect("2x2 gray8 abi frame");
-        AvpBuffer {
+        AvpGrain {
             media: AvpMediaType::VIDEO,
             ptr: frame.into_raw().as_ptr() as *mut c_void,
         }
@@ -40,7 +40,7 @@ fn abi_buffer() -> AvpBuffer {
     #[cfg(not(feature = "ffmpeg"))]
     {
         // `Media::Stub` carries the address as a timestamp and never reads it.
-        AvpBuffer {
+        AvpGrain {
             media: AvpMediaType::VIDEO,
             ptr: std::ptr::dangling_mut(),
         }
@@ -48,22 +48,22 @@ fn abi_buffer() -> AvpBuffer {
 }
 
 #[cfg(feature = "ffmpeg")]
-fn release_abi_buffer(buffer: AvpBuffer) {
-    let mut frame = buffer.ptr as *mut rusty_ffmpeg::ffi::AVFrame;
+fn release_abi_grain(grain: AvpGrain) {
+    let mut frame = grain.ptr as *mut rusty_ffmpeg::ffi::AVFrame;
     unsafe { rusty_ffmpeg::ffi::av_frame_free(&mut frame) };
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn release_abi_buffer(_buffer: AvpBuffer) {}
+fn release_abi_grain(_grain: AvpGrain) {}
 
-/// Pushes a fresh buffer and returns the raw `AvpFlow` code. [`avp_edge_push`]
+/// Pushes a fresh grain and returns the raw `AvpFlow` code. [`avp_edge_push`]
 /// takes the caller's reference only on `PUSHED`; every other outcome leaves the
-/// buffer with the caller, which is this helper, so it frees it.
-fn push_abi_buffer(edge: *mut AvpEdge) -> usize {
-    let buffer = abi_buffer();
-    let flow = avp_edge_push(edge, &buffer) as usize;
+/// grain with the caller, which is this helper, so it frees it.
+fn push_abi_grain(edge: *mut AvpEdge) -> usize {
+    let grain = abi_grain();
+    let flow = avp_edge_push(edge, &grain) as usize;
     if flow != 0 {
-        release_abi_buffer(buffer);
+        release_abi_grain(grain);
     }
     flow
 }
@@ -142,24 +142,24 @@ struct CState {
     generation: usize,
 }
 
-extern "C" fn process(handle: *mut c_void) -> i32 {
-    let state = avp_node_impl(handle.cast::<AvpNode>()).cast::<CState>();
+extern "C" fn process(self_ptr: *mut c_void) -> i32 {
+    let state = self_ptr.cast::<CState>();
     assert!(!state.is_null());
     let _ = unsafe { (*state).generation };
     std::thread::sleep(Duration::from_millis(1));
     0
 }
 
-extern "C" fn start(handle: *mut c_void) {
-    let state = avp_node_impl(handle.cast::<AvpNode>()).cast::<CState>();
+extern "C" fn start(self_ptr: *mut c_void) {
+    let state = self_ptr.cast::<CState>();
     let generation = unsafe { (*state).generation };
     if DESTROYS.load(Ordering::SeqCst) < generation.saturating_sub(1) {
         STARTED_BEFORE_OLD_DESTROY.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-extern "C" fn destroy(handle: *mut c_void) {
-    let state = avp_node_impl(handle.cast::<AvpNode>()).cast::<CState>();
+extern "C" fn destroy(self_ptr: *mut c_void) {
+    let state = self_ptr.cast::<CState>();
     assert!(!state.is_null());
     unsafe {
         drop(Box::from_raw(state));
@@ -179,7 +179,7 @@ static VTABLE: AvpNodeVtable = AvpNodeVtable {
 
 extern "C" fn push_process(_handle: *mut c_void) -> i32 {
     let edge = PUSH_EDGE.load(Ordering::SeqCst) as *mut AvpEdge;
-    PUSH_FLOW.store(push_abi_buffer(edge), Ordering::SeqCst);
+    PUSH_FLOW.store(push_abi_grain(edge), Ordering::SeqCst);
     0
 }
 
@@ -260,10 +260,6 @@ extern "C" fn factory(
     node: *mut AvpNode,
     params: *const c_char,
 ) -> *mut AvpNode {
-    assert!(
-        avp_node_impl(node).is_null(),
-        "factory entry must not expose stale pending C state"
-    );
     let first = FIRST_HANDLE.load(Ordering::SeqCst);
     if first == 0 {
         FIRST_HANDLE.store(node as usize, Ordering::SeqCst);
@@ -281,6 +277,18 @@ extern "C" fn factory(
         serde_json::json!({"token": 17})
     );
     let generation = FACTORY_CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    let published = avp_node_impl(node).cast::<CState>();
+    if generation == 1 {
+        assert!(
+            published.is_null(),
+            "first factory must run before a published C impl exists"
+        );
+    } else {
+        assert!(
+            !published.is_null(),
+            "a replacement factory must still see the published generation"
+        );
+    }
     let state = Box::into_raw(Box::new(CState { generation }));
     avp_node_set_impl(node, state.cast(), &VTABLE);
     node
@@ -296,11 +304,20 @@ extern "C" fn gated_factory(
     node: *mut AvpNode,
     _params: *const c_char,
 ) -> *mut AvpNode {
-    assert!(
-        avp_node_impl(node).is_null(),
-        "factory entry must not expose stale pending C state"
-    );
     let generation = FACTORY_CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    let published = avp_node_impl(node).cast::<CState>();
+    if generation == 1 {
+        assert!(
+            published.is_null(),
+            "first factory must run before a published C impl exists"
+        );
+    } else {
+        assert_eq!(
+            unsafe { (*published).generation },
+            1,
+            "a replacement factory must still see the published generation"
+        );
+    }
     if generation == 2 {
         GATE_ENTERED.store(true, Ordering::SeqCst);
         while !GATE_RESUME.load(Ordering::SeqCst) {
@@ -460,7 +477,6 @@ fn stale_c_callback_cannot_push_through_stable_edge_handle() {
     PUSH_EDGE.store(edge as usize, Ordering::SeqCst);
 
     let stale = unsafe { &*core }.node("producer").unwrap().node;
-    stale.set_generation(1);
     let logical = unsafe { &*core }.edge_link("egress").unwrap().edge;
     logical.restart(1, 2, EdgeRestart::Egress);
     stale.process().unwrap();
@@ -504,12 +520,12 @@ fn create_edge_handle_rejects_writes_after_producer_generation_changes() {
         std::ptr::null(),
     );
     let logical = unsafe { &*core }.edge_link("created").unwrap().edge;
-    assert_eq!(push_abi_buffer(edge), 0);
+    assert_eq!(push_abi_grain(edge), 0);
 
     logical.restart(1, 2, EdgeRestart::Egress);
 
     assert_eq!(
-        push_abi_buffer(edge),
+        push_abi_grain(edge),
         3,
         "the returned create-edge writer lease must be generation-fenced"
     );
@@ -553,10 +569,10 @@ fn stale_c_helper_thread_is_fenced_by_generation_lease() {
     let new_lease =
         avp_node_bind_sink(producer, c"helper-edge".as_ptr(), AvpMediaType::VIDEO, 4) as usize;
     assert_ne!(old_lease, new_lease);
-    let stale_flow = std::thread::spawn(move || push_abi_buffer(old_lease as *mut AvpEdge))
+    let stale_flow = std::thread::spawn(move || push_abi_grain(old_lease as *mut AvpEdge))
         .join()
         .unwrap();
-    let fresh_flow = std::thread::spawn(move || push_abi_buffer(new_lease as *mut AvpEdge))
+    let fresh_flow = std::thread::spawn(move || push_abi_grain(new_lease as *mut AvpEdge))
         .join()
         .unwrap();
 
@@ -725,7 +741,7 @@ struct TrackedOpaque {
 }
 
 impl TrackedOpaque {
-    fn allocate() -> (*mut Self, AvpBuffer) {
+    fn allocate() -> (*mut Self, AvpGrain) {
         let ptr = Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
             retains: AtomicUsize::new(0),
@@ -733,7 +749,7 @@ impl TrackedOpaque {
         }));
         (
             ptr,
-            AvpBuffer {
+            AvpGrain {
                 media: AvpMediaType::METADATA,
                 ptr: ptr.cast(),
             },
@@ -874,14 +890,14 @@ fn c_push_keeps_caller_reference_on_backpressure() {
     let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
     assert_eq!(avp_edge_take(edge, 0, item.as_mut_ptr()), 1);
     let item = unsafe { item.assume_init() };
-    assert_eq!(item.buffer.ptr, first.ptr);
-    tracked_release(item.buffer.ptr);
+    assert_eq!(item.grain.ptr, first.ptr);
+    tracked_release(item.grain.ptr);
     assert_eq!(unsafe { (*first_ptr).refs.load(Ordering::SeqCst) }, 0);
 
     assert_eq!(avp_edge_push(edge, &second) as usize, 0);
     let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
     assert_eq!(avp_edge_take(edge, 0, item.as_mut_ptr()), 1);
-    tracked_release(unsafe { item.assume_init() }.buffer.ptr);
+    tracked_release(unsafe { item.assume_init() }.grain.ptr);
     assert_eq!(unsafe { (*second_ptr).refs.load(Ordering::SeqCst) }, 0);
 
     destroy_opaque_test_edge(core, producer, consumer);
@@ -895,22 +911,22 @@ fn c_push_keeps_caller_reference_on_backpressure() {
 fn c_peek_borrows_without_leaking_an_extra_reference() {
     let _guard = TEST_LOCK.lock().unwrap();
     let (core, producer, consumer, edge) = opaque_test_edge();
-    let (tracked_ptr, buffer) = TrackedOpaque::allocate();
-    assert_eq!(avp_edge_push(edge, &buffer) as usize, 0);
+    let (tracked_ptr, grain) = TrackedOpaque::allocate();
+    assert_eq!(avp_edge_push(edge, &grain) as usize, 0);
 
     let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
     let peek = avp_edge_peek(edge, 0, item.as_mut_ptr());
     assert!(!peek.is_null());
-    assert_eq!(unsafe { item.assume_init() }.buffer.ptr, buffer.ptr);
+    assert_eq!(unsafe { item.assume_init() }.grain.ptr, grain.ptr);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 2);
     avp_edge_peek_release(peek);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
 
     let mut item = std::mem::MaybeUninit::<AvpItem>::uninit();
     let peek = avp_edge_peek(edge, 0, item.as_mut_ptr());
-    let mut consumed = AvpBuffer::null(AvpMediaType::METADATA);
+    let mut consumed = AvpGrain::null(AvpMediaType::METADATA);
     assert_eq!(avp_edge_peek_consume(peek, &mut consumed), 1);
-    assert_eq!(consumed.ptr, buffer.ptr);
+    assert_eq!(consumed.ptr, grain.ptr);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
     tracked_release(consumed.ptr);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 0);
@@ -965,12 +981,12 @@ fn direct_push_commits_ownership_only_after_the_consumer_accepts() {
         &coupling,
     );
     assert!(!edge.is_null());
-    let (tracked_ptr, buffer) = TrackedOpaque::allocate();
+    let (tracked_ptr, grain) = TrackedOpaque::allocate();
 
-    assert_eq!(avp_edge_push(edge, &buffer) as usize, 2);
+    assert_eq!(avp_edge_push(edge, &grain) as usize, 2);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 1);
     drain.store(true, Ordering::SeqCst);
-    assert_eq!(avp_edge_push(edge, &buffer) as usize, 0);
+    assert_eq!(avp_edge_push(edge, &grain) as usize, 0);
     assert_eq!(unsafe { (*tracked_ptr).refs.load(Ordering::SeqCst) }, 0);
 
     destroy_opaque_test_edge(core, producer, consumer);

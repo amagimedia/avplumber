@@ -12,9 +12,9 @@ use rusty_ffmpeg::ffi;
 use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
-use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::error::NodeError;
 use avplumber_f7k::graph::grain::Grain;
+use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;

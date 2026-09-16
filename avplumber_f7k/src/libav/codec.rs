@@ -10,7 +10,7 @@ use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecRef};
 use rsmpeg::avutil::AVFrame;
 use rusty_ffmpeg::ffi;
 
-use crate::graph::buffer::AvpRational;
+use crate::graph::media::AvpRational;
 use crate::graph::spec::{ChannelLayout, PacketSpec, Spec};
 use crate::libav::dict::Options;
 use crate::libav::error::av_error;

@@ -1,5 +1,5 @@
 //! Native scalar types shared with the C headers by layout, not by
-//! conversion. `AvpBuffer` / `AvpSpec` live in `abi/`.
+//! conversion. `AvpGrain` / `AvpSpec` live in `abi/`.
 
 use std::ffi::c_void;
 

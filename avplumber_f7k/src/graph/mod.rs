@@ -1,13 +1,13 @@
 //! Graph substrate: topology records and runtime edge handles. Does not run
 //! nodes; the supervisor does.
 
-pub mod buffer;
 pub mod buffered_edge;
 pub mod capability;
 pub mod direct_edge;
 pub mod edge;
 pub mod error;
 pub mod grain;
+pub mod media;
 pub mod node;
 pub mod pad;
 pub mod poll_ctx;
@@ -16,21 +16,22 @@ pub mod spec;
 pub mod timebase;
 pub mod timestamp;
 
-pub use buffer::{AVP_NOPTS, AvpMediaType, AvpMediaVtable, AvpRational};
 pub use buffered_edge::BufferedEdge;
 pub use capability::{AvpInterfaceId, AvpServiceId};
 pub use direct_edge::DirectEdge;
 pub use edge::{
     Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeKind, EdgeRestart, EdgeWaker, Push,
-    Wakeup, generation_reader, generation_writer,
+    Wakeup, generation_reader, generation_writer, pending_generation_reader,
+    pending_generation_writer,
 };
 pub use error::{NodeError, NodePhase};
 pub use grain::{Grain, OpaqueGrain};
-pub use timestamp::Ts;
-pub use node::{Processed, Node, NodeBody, NodeFuture, NodeKind, Polled};
+pub use media::{AVP_NOPTS, AvpMediaType, AvpMediaVtable, AvpRational};
+pub use node::{Node, NodeBody, NodeFuture, NodeKind, Polled, Processed};
 pub use pad::{In, NodePads, Out, PadDecl, check_pad_media};
 pub use poll_ctx::NodePollContext;
 pub use spec::{CatalogStream, ChannelLayout, MuxStream, PacketSpec, Spec, StreamSelection};
+pub use timestamp::Ts;
 
 use std::collections::HashMap;
 use std::sync::Arc;

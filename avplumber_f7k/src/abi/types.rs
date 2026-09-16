@@ -3,8 +3,8 @@
 
 use std::ffi::c_void;
 
-use crate::graph::buffer::{AvpMediaType, AvpRational};
 use crate::graph::edge::EdgeKind;
+use crate::graph::media::{AvpMediaType, AvpRational};
 use crate::graph::spec::{ChannelLayout, Spec};
 
 #[repr(C)]
@@ -142,14 +142,16 @@ impl AvpSpec {
     }
 }
 
+/// FFI projection of [`Grain`](crate::graph::Grain): a tagged raw pointer.
+/// Ownership is a calling convention, not `Drop`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AvpBuffer {
+pub struct AvpGrain {
     pub media: AvpMediaType,
     pub ptr: *mut c_void,
 }
 
-impl AvpBuffer {
+impl AvpGrain {
     pub fn null(media: AvpMediaType) -> Self {
         Self {
             media,
@@ -161,8 +163,8 @@ impl AvpBuffer {
     }
 }
 
-unsafe impl Send for AvpBuffer {}
-unsafe impl Sync for AvpBuffer {}
+unsafe impl Send for AvpGrain {}
+unsafe impl Sync for AvpGrain {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use avplumber_f7k::graph::AvpMediaType;
 use avplumber_f7k::{
     AsyncExecutor, AvpRational, BufferedEdge, Edge, EdgeEvent, EdgeItem, EdgeKind, Executor, Grain,
-    Node, NodeError, NodeKind, NodeOutcome, NodePads, NodePollContext, PadDecl, Push, SisoNode,
-    SisoPollAdapter, Spec, Polled, register_factory,
+    Node, NodeError, NodeKind, NodeOutcome, NodePads, NodePollContext, PadDecl, Polled, Push,
+    SisoNode, SisoPollAdapter, Spec, register_factory,
 };
 
 const TARGET: usize = 5;

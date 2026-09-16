@@ -18,7 +18,7 @@ use crate::graph::grain::Grain;
 use crate::graph::node::Polled;
 use crate::graph::pad::NodePads;
 use crate::graph::poll_ctx::NodePollContext;
-use crate::node_api::io::{flush_at_head, Io};
+use crate::node_api::io::{Io, flush_at_head};
 use crate::node_api::poll::PollNode;
 use crate::node_api::single_input::{InputHandler, Reaction, react};
 
@@ -214,15 +214,15 @@ impl<N: PollInput> PollNode for N {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::*;
     use crate::graph::BufferedEdge;
-    use crate::graph::buffer::AvpMediaType;
     use crate::graph::edge::{Edge, EdgeEvent, EdgeItem, Wakeup};
     use crate::graph::error::NodeError;
-    use crate::graph::grain::{test_media, Grain};
+    use crate::graph::grain::{Grain, test_media};
+    use crate::graph::media::AvpMediaType;
     use crate::graph::node::{Node, Polled};
     use crate::graph::pad::NodePads;
     use crate::graph::spec::Spec;

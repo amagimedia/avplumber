@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::graph::buffer::AvpMediaType;
 use crate::graph::edge::Edge;
+use crate::graph::media::AvpMediaType;
 
 pub struct In<T> {
     pub edge: Arc<dyn Edge>,

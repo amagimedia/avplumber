@@ -885,7 +885,6 @@ fn build_generation(
         let vertex = graph
             .vertex(name)
             .ok_or_else(|| format!("node {name} not in graph"))?;
-        vertex.node.set_generation(next_generation);
         exec.add_node(
             vertex.node.clone(),
             vertex.sources.values().cloned().collect(),

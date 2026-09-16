@@ -29,7 +29,7 @@ pub use registry::{
     avp_core_query_service, avp_register_media_type, avp_register_module_init,
     avp_register_node_factory, avp_shared_get, avp_shared_put,
 };
-pub use types::{AvpBuffer, AvpSpec, EdgeCoupling};
+pub use types::{AvpGrain, AvpSpec, EdgeCoupling};
 
 use std::sync::Arc;
 
@@ -74,6 +74,29 @@ pub struct AvpNode {
     pub(crate) service_hint: Option<String>,
 }
 
+impl AvpNode {
+    /// Tells the leases a finished construction staged which generation they
+    /// act as, and moves them to the live list. They refuse all traffic until
+    /// this runs, so an abandoned reconstruction leaves handles C may still
+    /// hold allocated and permanently inert.
+    pub(crate) fn publish_leases(&mut self, generation: u64) {
+        for lease in self
+            .pending_producer_leases
+            .iter()
+            .chain(&self.pending_direct_reader_leases)
+        {
+            lease.edge.resolve_lease_generation(generation);
+        }
+        self.producer_leases
+            .append(&mut self.pending_producer_leases);
+        self.direct_reader_leases
+            .append(&mut self.pending_direct_reader_leases);
+    }
+}
+
+/// A handle C code holds. `edge` is the generation lease the binding produced,
+/// not the logical edge, so every `avp_edge_*` call is fenced by construction
+/// and this layer never re-derives which generation applies.
 pub struct AvpEdge {
     pub(crate) name: String,
     pub(crate) edge: Arc<dyn Edge>,

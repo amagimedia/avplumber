@@ -1,7 +1,7 @@
 //! Native stream/container description. The flat `AvpSpec` is an ABI
 //! projection in `abi/types.rs`.
 
-use crate::graph::buffer::{AvpMediaType, AvpRational};
+use crate::graph::media::{AvpMediaType, AvpRational};
 
 /// Channel layout carried whole. `map` holds CUSTOM/AMBISONIC indices when
 /// `nb_channels` does not fit a bitmask.

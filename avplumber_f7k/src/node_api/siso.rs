@@ -24,9 +24,9 @@ use std::sync::{Arc, Mutex};
 use crate::graph::edge::{Edge, Push};
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::grain::Grain;
-use crate::graph::timestamp::Ts;
 use crate::graph::node::{Node, NodeFuture, NodeKind};
 use crate::graph::spec::Spec;
+use crate::graph::timestamp::Ts;
 use crate::node_api::blocking::{Blocking, BlockingIo};
 use crate::node_api::io::Io;
 use crate::node_api::poll::Polling;
@@ -305,10 +305,10 @@ mod tests {
 
     use super::*;
     use crate::graph::BufferedEdge;
-    use crate::graph::buffer::{AvpMediaType, AvpRational};
     use crate::graph::edge::{EdgeEvent, EdgeItem, Push, Wakeup};
     use crate::graph::error::NodePhase;
     use crate::graph::grain::Grain;
+    use crate::graph::media::{AvpMediaType, AvpRational};
     use crate::graph::node::Processed;
     use crate::graph::node::{NodeBody, Polled};
     use crate::graph::poll_ctx::NodePollContext;

@@ -9,12 +9,12 @@ use std::{ffi::c_void, os::raw::c_char};
 use avplumber_f7k::abi::{
     AvpCore, AvpNode, avp_core_create, avp_core_destroy, avp_create_edge, avp_create_group,
     avp_create_node, avp_destroy_edge, avp_destroy_group, avp_destroy_node, avp_group_add,
-    avp_lookup_node, avp_node_bind_sink, avp_node_bind_source, avp_node_impl, avp_node_set_impl,
+    avp_lookup_node, avp_node_bind_sink, avp_node_bind_source, avp_node_set_impl,
     avp_register_node_factory, avp_start_group, avp_stop_group,
 };
 use avplumber_f7k::graph::AvpMediaType;
 use avplumber_f7k::{
-    AvpNodeVtable, Processed, Edge, EdgeEvent, EdgeItem, Grain, Node, NodeError, NodeKind, Push,
+    AvpNodeVtable, Edge, EdgeEvent, EdgeItem, Grain, Node, NodeError, NodeKind, Processed, Push,
     register_factory,
 };
 
@@ -22,8 +22,8 @@ const NFRAMES: usize = 3;
 static C_FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
 static C_FACTORY_DESTROYS: AtomicUsize = AtomicUsize::new(0);
 
-extern "C" fn c_factory_process(handle: *mut c_void) -> i32 {
-    let counter = avp_node_impl(handle.cast::<AvpNode>()).cast::<AtomicUsize>();
+extern "C" fn c_factory_process(self_ptr: *mut c_void) -> i32 {
+    let counter = self_ptr.cast::<AtomicUsize>();
     unsafe { &*counter }.fetch_add(1, Ordering::Release);
     3
 }

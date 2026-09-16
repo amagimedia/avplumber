@@ -14,8 +14,8 @@ use std::collections::VecDeque;
 
 use rsmpeg::avcodec::AVCodecContext;
 
-use crate::graph::buffer::AvpMediaType;
 use crate::graph::grain::Grain;
+use crate::graph::media::AvpMediaType;
 use crate::libav::error::{av_error, code_of, is_eagain, is_eof};
 
 /// C++ `dec_errors_ > 200`: a few corrupt packets are normal, a stream of them

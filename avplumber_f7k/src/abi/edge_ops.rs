@@ -1,11 +1,11 @@
 //! Edge ops C ABI. take + peek guard over owned Grain.
 
-use crate::abi::convert::{clone_avp_buffer, media_as_avp, media_to_avp, release_avp_buffer};
-use crate::abi::{AvpBuffer, AvpSpec};
+use crate::abi::convert::{clone_avp_grain, grain_as_avp, grain_to_avp, release_avp_grain};
 use crate::abi::{AvpEdge, AvpNode};
+use crate::abi::{AvpGrain, AvpSpec};
 use crate::graph::edge::{EdgeEvent, EdgeItem, Push};
-use crate::graph::timestamp::Ts;
 use crate::graph::spec::Spec;
+use crate::graph::timestamp::Ts;
 use crate::graph::{AVP_NOPTS, AvpRational};
 
 #[repr(C)]
@@ -46,7 +46,7 @@ impl AvpEdgeEvent {
 #[derive(Clone, Copy)]
 pub struct AvpItem {
     pub is_event: i32,
-    pub buffer: AvpBuffer,
+    pub grain: AvpGrain,
     pub event: AvpEdgeEvent,
 }
 
@@ -93,12 +93,12 @@ fn owned_item_to_c(item: EdgeItem) -> AvpItem {
     match item {
         EdgeItem::Buffer(m) => AvpItem {
             is_event: 0,
-            buffer: media_to_avp(m),
+            grain: grain_to_avp(m),
             event: AvpEdgeEvent::plain(AvpEventType::Eof),
         },
         EdgeItem::Event(e) => AvpItem {
             is_event: 1,
-            buffer: AvpBuffer::null(crate::graph::AvpMediaType::VIDEO),
+            grain: AvpGrain::null(crate::graph::AvpMediaType::VIDEO),
             event: event_to_c(&e),
         },
     }
@@ -108,43 +108,43 @@ fn borrowed_item_to_c(item: &EdgeItem) -> AvpItem {
     match item {
         EdgeItem::Buffer(media) => AvpItem {
             is_event: 0,
-            buffer: media_as_avp(media),
+            grain: grain_as_avp(media),
             event: AvpEdgeEvent::plain(AvpEventType::Eof),
         },
         EdgeItem::Event(event) => AvpItem {
             is_event: 1,
-            buffer: AvpBuffer::null(crate::graph::AvpMediaType::VIDEO),
+            grain: AvpGrain::null(crate::graph::AvpMediaType::VIDEO),
             event: event_to_c(event),
         },
     }
 }
 
 pub struct AvpPeek {
+    /// The same lease the peek came from, so the matching consume pops what
+    /// that generation saw and nothing else.
     pub edge: std::sync::Arc<dyn crate::graph::Edge>,
     pub cloned: Option<EdgeItem>,
-    pub generation: Option<u64>,
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn avp_edge_push(edge: *mut AvpEdge, buf: *const AvpBuffer) -> AvpFlow {
-    if edge.is_null() || buf.is_null() {
+pub extern "C" fn avp_edge_push(edge: *mut AvpEdge, grain: *const AvpGrain) -> AvpFlow {
+    if edge.is_null() || grain.is_null() {
         return AvpFlow::Error;
     }
     let edge = unsafe { &*edge };
-    let buf = unsafe { *buf };
-    let opaque_vtable = edge.media_vtables.lock().unwrap().get(&buf.media).copied();
-    let Some(media) = clone_avp_buffer(buf, opaque_vtable) else {
+    let grain = unsafe { *grain };
+    let opaque_vtable = edge
+        .media_vtables
+        .lock()
+        .unwrap()
+        .get(&grain.media)
+        .copied();
+    let Some(media) = clone_avp_grain(grain, opaque_vtable) else {
         return AvpFlow::Error;
     };
-    let result = match crate::abi::ffi_node::callback_generation() {
-        Some(generation) => match edge.edge.offer_generation(generation, media) {
-            Ok(()) => Push::Accepted,
-            Err((status, _)) => status,
-        },
-        None => edge.edge.push(media),
-    };
+    let result = edge.edge.push(media);
     if result == Push::Accepted {
-        let released = release_avp_buffer(buf, opaque_vtable);
+        let released = release_avp_grain(grain, opaque_vtable);
         debug_assert!(released);
     }
     push_to_c(result)
@@ -166,22 +166,13 @@ pub extern "C" fn avp_edge_push_event(edge: *mut AvpEdge, ev: *const AvpEdgeEven
         },
         AvpEventType::Spec => EdgeEvent::Spec(ev_c.spec.to_native()),
     };
-    if let Some(generation) = crate::abi::ffi_node::callback_generation() {
-        edge.edge.push_event_generation(generation, ev);
-    } else {
-        edge.edge.push_event(ev);
-    }
+    edge.edge.push_event(ev);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn avp_edge_take(edge: *mut AvpEdge, timeout_ms: i32, out: *mut AvpItem) -> i32 {
     let edge = unsafe { &*edge };
-    let generation = crate::abi::ffi_node::callback_generation();
-    let item = match generation {
-        Some(generation) => edge.edge.take_generation(generation, timeout_ms),
-        None => edge.edge.take(timeout_ms),
-    };
-    match item {
+    match edge.edge.take(timeout_ms) {
         Some(item) => {
             unsafe {
                 *out = owned_item_to_c(item);
@@ -199,12 +190,7 @@ pub extern "C" fn avp_edge_peek(
     out: *mut AvpItem,
 ) -> *mut AvpPeek {
     let edge = unsafe { &*edge };
-    let generation = crate::abi::ffi_node::callback_generation();
-    let item = match generation {
-        Some(generation) => edge.edge.peek_clone_generation(generation, timeout_ms),
-        None => edge.edge.peek_clone(timeout_ms),
-    };
-    match item {
+    match edge.edge.peek_clone(timeout_ms) {
         Some(item) => {
             unsafe {
                 *out = borrowed_item_to_c(&item);
@@ -212,7 +198,6 @@ pub extern "C" fn avp_edge_peek(
             Box::into_raw(Box::new(AvpPeek {
                 edge: edge.edge.clone(),
                 cloned: Some(item),
-                generation,
             }))
         }
         None => std::ptr::null_mut(),
@@ -230,21 +215,17 @@ pub extern "C" fn avp_edge_peek_release(peek: *mut AvpPeek) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn avp_edge_peek_consume(peek: *mut AvpPeek, out: *mut AvpBuffer) -> i32 {
+pub extern "C" fn avp_edge_peek_consume(peek: *mut AvpPeek, out: *mut AvpGrain) -> i32 {
     if peek.is_null() {
         return 0;
     }
     let p = unsafe { Box::from_raw(peek) };
-    if let Some(generation) = p.generation {
-        p.edge.pop_generation(generation);
-    } else {
-        p.edge.pop();
-    }
+    p.edge.pop();
     if !out.is_null()
         && let Some(EdgeItem::Buffer(m)) = p.cloned
     {
         unsafe {
-            *out = media_to_avp(m);
+            *out = grain_to_avp(m);
         }
         return 1;
     }
@@ -253,12 +234,7 @@ pub extern "C" fn avp_edge_peek_consume(peek: *mut AvpPeek, out: *mut AvpBuffer)
 
 #[unsafe(no_mangle)]
 pub extern "C" fn avp_edge_pop(edge: *mut AvpEdge) {
-    let edge = unsafe { &*edge };
-    if let Some(generation) = crate::abi::ffi_node::callback_generation() {
-        edge.edge.pop_generation(generation);
-    } else {
-        edge.edge.pop();
-    }
+    unsafe { (*edge).edge.pop() };
 }
 
 #[unsafe(no_mangle)]

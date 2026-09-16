@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll as TaskPoll, Waker};
 use std::time::Duration;
@@ -572,6 +572,10 @@ pub trait Edge: Send + Sync {
     fn writer_generation(&self) -> u64 {
         0
     }
+    /// Assigns the generation a lease minted during construction acts as,
+    /// called by the transaction that publishes that generation. A no-op on a
+    /// real edge: only the lease decorators are unresolved to begin with.
+    fn resolve_lease_generation(&self, _generation: u64) {}
     fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
         let active = self.writer_generation();
         if active != 0 && generation != active {
@@ -622,12 +626,54 @@ pub trait Edge: Send + Sync {
     }
 }
 
+/// The generation a lease acts as. A lease bound while its node is still
+/// being constructed cannot know it yet, so it starts unresolved and the
+/// transaction that publishes the generation assigns it through
+/// [`Edge::resolve_lease_generation`]. An unresolved lease refuses everything:
+/// an abandoned reconstruction leaves its leases allocated, because C code may
+/// still hold the pointer, and permanently inert.
+struct LeaseGeneration(AtomicU64);
+
+/// No real generation, so it is free as the "not published" marker.
+const UNRESOLVED_GENERATION: u64 = 0;
+
+impl LeaseGeneration {
+    fn resolved(generation: u64) -> Self {
+        Self(AtomicU64::new(generation))
+    }
+    fn pending() -> Self {
+        Self(AtomicU64::new(UNRESOLVED_GENERATION))
+    }
+    fn get(&self) -> Option<u64> {
+        match self.0.load(Ordering::Acquire) {
+            UNRESOLVED_GENERATION => None,
+            generation => Some(generation),
+        }
+    }
+    fn resolve(&self, generation: u64) {
+        self.0.store(generation, Ordering::Release);
+    }
+}
+
 struct GenerationReader {
     edge: Arc<dyn Edge>,
-    generation: u64,
+    generation: LeaseGeneration,
 }
 
 pub fn generation_reader(edge: Arc<dyn Edge>, generation: u64) -> Arc<dyn Edge> {
+    reader_lease(edge, LeaseGeneration::resolved(generation))
+}
+
+/// A reader lease for a node still under construction. Reads nothing until
+/// [`Edge::resolve_lease_generation`] publishes it.
+pub fn pending_generation_reader(edge: Arc<dyn Edge>) -> Arc<dyn Edge> {
+    reader_lease(edge, LeaseGeneration::pending())
+}
+
+/// Only a Direct edge fences its reader: a buffered consumer reads whatever a
+/// previous generation left queued, which is what continuity across restart
+/// means. So there is nothing to wrap, resolved or not.
+fn reader_lease(edge: Arc<dyn Edge>, generation: LeaseGeneration) -> Arc<dyn Edge> {
     if edge.is_direct() {
         Arc::new(GenerationReader { edge, generation })
     } else {
@@ -654,23 +700,26 @@ impl Edge for GenerationReader {
         self.edge.has_hints()
     }
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
-        self.edge.take_generation(self.generation, timeout_ms)
+        self.edge.take_generation(self.generation.get()?, timeout_ms)
     }
     fn peek_clone(&self, timeout_ms: i32) -> Option<EdgeItem> {
-        self.edge.peek_clone_generation(self.generation, timeout_ms)
+        self.edge
+            .peek_clone_generation(self.generation.get()?, timeout_ms)
     }
     fn pop(&self) {
-        self.edge.pop_generation(self.generation);
+        if let Some(generation) = self.generation.get() {
+            self.edge.pop_generation(generation);
+        }
     }
     fn occupied(&self) -> usize {
-        if self.edge.writer_generation() == self.generation {
+        if self.generation.get() == Some(self.edge.writer_generation()) {
             self.edge.occupied()
         } else {
             0
         }
     }
     fn current_spec(&self) -> Option<Spec> {
-        if self.edge.writer_generation() == self.generation {
+        if self.generation.get() == Some(self.edge.writer_generation()) {
             self.edge.current_spec()
         } else {
             None
@@ -686,7 +735,7 @@ impl Edge for GenerationReader {
         self.edge.notify_writable(node);
     }
     fn is_closed(&self) -> bool {
-        self.edge.writer_generation() != self.generation || self.edge.is_closed()
+        self.generation.get() != Some(self.edge.writer_generation()) || self.edge.is_closed()
     }
     fn is_full(&self) -> bool {
         self.edge.is_full()
@@ -706,27 +755,30 @@ impl Edge for GenerationReader {
     fn writer_generation(&self) -> u64 {
         self.edge.writer_generation()
     }
+    fn resolve_lease_generation(&self, generation: u64) {
+        self.generation.resolve(generation);
+    }
     fn take_generation(&self, generation: u64, timeout_ms: i32) -> Option<EdgeItem> {
-        (generation == self.generation)
-            .then(|| self.edge.take_generation(self.generation, timeout_ms))
+        (Some(generation) == self.generation.get())
+            .then(|| self.edge.take_generation(generation, timeout_ms))
             .flatten()
     }
     fn peek_clone_generation(&self, generation: u64, timeout_ms: i32) -> Option<EdgeItem> {
-        (generation == self.generation)
-            .then(|| self.edge.peek_clone_generation(self.generation, timeout_ms))
+        (Some(generation) == self.generation.get())
+            .then(|| self.edge.peek_clone_generation(generation, timeout_ms))
             .flatten()
     }
     fn pop_generation(&self, generation: u64) {
-        if generation == self.generation {
-            self.edge.pop_generation(self.generation);
+        if Some(generation) == self.generation.get() {
+            self.edge.pop_generation(generation);
         }
     }
     fn try_take(&self) -> Option<EdgeItem> {
-        self.edge.try_take_generation(self.generation)
+        self.edge.try_take_generation(self.generation.get()?)
     }
     fn try_take_generation(&self, generation: u64) -> Option<EdgeItem> {
-        (generation == self.generation)
-            .then(|| self.edge.try_take_generation(self.generation))
+        (Some(generation) == self.generation.get())
+            .then(|| self.edge.try_take_generation(generation))
             .flatten()
     }
     fn interrupt(&self) {
@@ -745,19 +797,37 @@ impl Edge for GenerationReader {
 
 struct GenerationWriter {
     edge: Arc<dyn Edge>,
-    generation: u64,
+    generation: LeaseGeneration,
 }
 
 pub fn generation_writer(edge: Arc<dyn Edge>, generation: u64) -> Arc<dyn Edge> {
-    Arc::new(GenerationWriter { edge, generation })
+    Arc::new(GenerationWriter {
+        edge,
+        generation: LeaseGeneration::resolved(generation),
+    })
+}
+
+/// A writer lease for a node still under construction. Writes nothing until
+/// [`Edge::resolve_lease_generation`] publishes it, so an unpublished
+/// generation cannot put media on a live edge.
+pub fn pending_generation_writer(edge: Arc<dyn Edge>) -> Arc<dyn Edge> {
+    Arc::new(GenerationWriter {
+        edge,
+        generation: LeaseGeneration::pending(),
+    })
 }
 
 impl Edge for GenerationWriter {
     fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)> {
-        self.edge.offer_generation(self.generation, buf)
+        let Some(generation) = self.generation.get() else {
+            return Err((Push::Closed, buf));
+        };
+        self.edge.offer_generation(generation, buf)
     }
     fn push_event(&self, ev: EdgeEvent) {
-        self.edge.push_event_generation(self.generation, ev);
+        if let Some(generation) = self.generation.get() {
+            self.edge.push_event_generation(generation, ev);
+        }
     }
     /// Not fenced by generation: a hint is current state, and a rebuilt
     /// consumer re-posts it.
@@ -795,7 +865,7 @@ impl Edge for GenerationWriter {
         self.edge.notify_writable(node);
     }
     fn is_closed(&self) -> bool {
-        self.edge.is_closed() || self.edge.writer_generation() != self.generation
+        self.edge.is_closed() || self.generation.get() != Some(self.edge.writer_generation())
     }
     fn is_full(&self) -> bool {
         self.edge.is_full()
@@ -815,15 +885,18 @@ impl Edge for GenerationWriter {
     fn writer_generation(&self) -> u64 {
         self.edge.writer_generation()
     }
+    fn resolve_lease_generation(&self, generation: u64) {
+        self.generation.resolve(generation);
+    }
     fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
-        if generation != self.generation {
+        if Some(generation) != self.generation.get() {
             return Err((Push::Closed, buf));
         }
-        self.edge.offer_generation(self.generation, buf)
+        self.edge.offer_generation(generation, buf)
     }
     fn push_event_generation(&self, generation: u64, ev: EdgeEvent) {
-        if generation == self.generation {
-            self.edge.push_event_generation(self.generation, ev);
+        if Some(generation) == self.generation.get() {
+            self.edge.push_event_generation(generation, ev);
         }
     }
     fn fence_generation(&self, old: u64, new: u64) -> bool {

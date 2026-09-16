@@ -21,10 +21,10 @@ use std::sync::Arc;
 use crate::graph::edge::{Edge, EdgeEvent, EdgeItem};
 use crate::graph::error::NodeError;
 use crate::graph::grain::Grain;
-use crate::graph::timestamp::Ts;
 use crate::graph::node::Processed;
 use crate::graph::pad::NodePads;
 use crate::graph::spec::Spec;
+use crate::graph::timestamp::Ts;
 use crate::node_api::blocking::{BlockingIo, BlockingNode};
 
 /// What a node does with each kind of item on its input.
@@ -222,9 +222,9 @@ mod tests {
 
     use super::*;
     use crate::graph::BufferedEdge;
-    use crate::graph::buffer::{AvpMediaType, AvpRational};
     use crate::graph::error::NodePhase;
     use crate::graph::grain::test_media;
+    use crate::graph::media::{AvpMediaType, AvpRational};
     use crate::graph::node::Node;
     use crate::node_api::blocking::Blocking;
 
@@ -377,7 +377,11 @@ mod tests {
             Processed::Again,
             "eof starts the drain"
         );
-        assert_eq!(node.process().unwrap(), Processed::Done, "the drain finishes");
+        assert_eq!(
+            node.process().unwrap(),
+            Processed::Done,
+            "the drain finishes"
+        );
         node.stop();
 
         assert_eq!(

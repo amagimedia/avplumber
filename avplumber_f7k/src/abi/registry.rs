@@ -6,8 +6,9 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use crate::abi::{AvpCore, AvpNode};
+use crate::factory::BuiltNode;
 use crate::graph::AvpServiceId;
-use crate::graph::buffer::{AvpMediaType, AvpMediaVtable};
+use crate::graph::media::{AvpMediaType, AvpMediaVtable};
 /// C factory: `(AvpCore*, AvpNode* node, const char* json_params) -> AvpNode*`.
 /// Creates the impl, calls `avp_node_set_impl(node, ...)`, returns `node`.
 pub type AvpNodeFactoryFn =
@@ -30,7 +31,10 @@ pub extern "C" fn avp_register_node_factory(
     inst.factories
         .lock()
         .unwrap()
-        .register(&type_name, move |inst_name, params| {
+        // A C factory takes nothing from `BuildCtx`: it reaches the instance
+        // through the captured core pointer, and the edges it binds are leased
+        // against whatever generation later publishes them.
+        .register_built(&type_name, move |inst_name, params, _ctx| {
             let params_c = std::ffi::CString::new(params).map_err(|e| e.to_string())?;
             let core = core_ptr as *mut AvpCore;
             let existing = unsafe { &*core }
@@ -72,9 +76,7 @@ pub extern "C" fn avp_register_node_factory(
                 (*node_ptr).pending_direct_reader_leases.clear();
                 (*node_ptr).building = true;
             }
-            let ret = crate::abi::ffi_node::with_factory_handle(node_ptr.cast(), || {
-                c_fn(core, node_ptr, params_c.as_ptr())
-            });
+            let ret = c_fn(core, node_ptr, params_c.as_ptr());
             unsafe {
                 (*node_ptr).building = false;
             }
@@ -84,7 +86,6 @@ pub extern "C" fn avp_register_node_factory(
                 if let Some(vtable) = pending_vtable {
                     drop(crate::abi::FfiNode::new(
                         inst_name.to_string(),
-                        node_ptr.cast(),
                         pending_self_ptr,
                         vtable,
                     ));
@@ -105,7 +106,6 @@ pub extern "C" fn avp_register_node_factory(
             }
             let native: Arc<dyn crate::Node> = Arc::new(crate::abi::FfiNode::new(
                 inst_name.to_string(),
-                node_ptr.cast(),
                 pending_self_ptr,
                 pending_vtable.expect("checked above"),
             ));
@@ -114,12 +114,8 @@ pub extern "C" fn avp_register_node_factory(
                 handle.vtable = pending_vtable;
                 handle.pending_self_ptr = std::ptr::null_mut();
                 handle.pending_vtable = None;
-                handle
-                    .producer_leases
-                    .append(&mut handle.pending_producer_leases);
-                handle
-                    .direct_reader_leases
-                    .append(&mut handle.pending_direct_reader_leases);
+                // Leases stay staged: `create_node` publishes them once it has
+                // decided this construction is the live generation.
                 handle.node = native.clone();
                 unsafe { &*core }
                     .pending_node_handles
@@ -127,7 +123,7 @@ pub extern "C" fn avp_register_node_factory(
                     .unwrap()
                     .insert(inst_name.to_string(), handle);
             }
-            Ok(native)
+            Ok(BuiltNode::from_node(native))
         });
 }
 

@@ -1,7 +1,6 @@
 //! Node factory registry: type name → constructor, with JSON params erased
 //! through `NodeSpec` / `BuiltNode`.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,28 +10,6 @@ use serde_json::Value;
 use crate::Instance;
 use crate::exec::ExecCtxId;
 use crate::graph::{Node, NodeKind, NodePads};
-
-thread_local! {
-    static BUILD_GENERATION: Cell<Option<u64>> = const { Cell::new(None) };
-}
-
-pub(crate) fn with_build_generation<R>(generation: u64, f: impl FnOnce() -> R) -> R {
-    BUILD_GENERATION.with(|slot| {
-        let previous = slot.replace(Some(generation));
-        struct Restore<'a>(&'a Cell<Option<u64>>, Option<u64>);
-        impl Drop for Restore<'_> {
-            fn drop(&mut self) {
-                self.0.set(self.1);
-            }
-        }
-        let _restore = Restore(slot, previous);
-        f()
-    })
-}
-
-pub(crate) fn build_generation() -> Option<u64> {
-    BUILD_GENERATION.with(Cell::get)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartPolicy {
@@ -400,6 +377,16 @@ impl FactoryRegistry {
         F: Fn(&str, &str) -> Result<Arc<dyn Node>, String> + Send + Sync + 'static,
     {
         self.factories.insert(type_name.to_string(), Arc::new(f));
+    }
+
+    pub fn register_built<F>(&mut self, type_name: &str, f: F)
+    where
+        F: for<'a> Fn(&str, &str, &BuildCtx<'a>) -> Result<BuiltNode, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.built.insert(type_name.to_string(), Arc::new(f));
     }
 
     pub fn register_spec<S: NodeSpec + 'static>(&mut self) {

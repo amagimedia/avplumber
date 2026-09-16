@@ -12,7 +12,7 @@ use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::grain::Grain;
 use crate::graph::node::{Node, NodeKind, Processed};
 use crate::graph::pad::NodePads;
-use crate::node_api::io::{flush_at_head, Io};
+use crate::node_api::io::{Io, flush_at_head};
 
 pub use park::{PARK_TIMEOUT_MS, Park, Parked, Pushed, push_blocking};
 
@@ -232,10 +232,10 @@ mod tests {
 
     use super::*;
     use crate::graph::BufferedEdge;
-    use crate::graph::buffer::AvpMediaType;
     use crate::graph::edge::Push;
     use crate::graph::error::NodePhase;
     use crate::graph::grain::test_media;
+    use crate::graph::media::AvpMediaType;
 
     /// Fails on the third step, and counts the hooks.
     struct Counting {

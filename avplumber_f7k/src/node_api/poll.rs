@@ -143,9 +143,9 @@ mod tests {
 
     use super::*;
     use crate::graph::BufferedEdge;
-    use crate::graph::buffer::AvpMediaType;
     use crate::graph::edge::{EdgeItem, Wakeup};
     use crate::graph::error::NodePhase;
+    use crate::graph::media::AvpMediaType;
 
     /// Forwards buffers; fails on an event, unless it promised not to.
     struct Fwd {

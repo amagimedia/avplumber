@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
-pub use abi::{AvpBuffer, AvpNodeVtable, AvpSpec, EdgeCoupling, FfiNode, VtableNode};
+pub use abi::{AvpGrain, AvpNodeVtable, AvpSpec, EdgeCoupling, FfiNode, VtableNode};
 pub use core::{CoreError, EdgeInstance, NodeInstance, NodeRequest, PadDirection};
 pub use exec::{
     AsyncExecutor, BlockingExecutor, ExecCtxId, Executor, ExecutorState, Generation, NodeOutcome,
@@ -42,12 +42,12 @@ pub use factory::{
     RestartPolicy,
 };
 pub use graph::{
-    AVP_NOPTS, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpRational, AvpServiceId, Processed,
+    AVP_NOPTS, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpRational, AvpServiceId,
     BufferedEdge, CatalogStream, ChannelLayout, DirectEdge, Edge, EdgeEvent, EdgeHint,
-    EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Graph, Grain, MuxStream,
+    EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Grain, Graph, MuxStream,
     Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, PacketSpec, Pad,
-    PadDecl, Push, Spec, StreamSelection, Polled, Ts, Vertex, Wakeup, generation_reader,
-    generation_writer,
+    PadDecl, Polled, Processed, Push, Spec, StreamSelection, Ts, Vertex, Wakeup, generation_reader,
+    generation_writer, pending_generation_reader, pending_generation_writer,
 };
 pub use node_api::{
     Blocking, BlockingIo, BlockingNode, InputHandler, Io, PollInput, PollIo, PollNode, Polling,
