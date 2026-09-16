@@ -2,7 +2,7 @@ FROM nvidia/cuda:11.7.1-devel-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG AVPLUMBER_REVISION=workspace
-ARG FFMPEG_TAG=n7.1.5
+ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
 
 RUN apt-get update \
@@ -42,7 +42,7 @@ RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
     && git -C /tmp/ffmpeg config user.name "mixer-demo builder" \
     && git -C /tmp/ffmpeg config user.email "mixer-demo@local" \
-    && git -C /tmp/ffmpeg am /build/deps/ffmpeg/${FFMPEG_TAG#n}/*.patch
+    && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
 RUN cd /tmp/ffmpeg \
     && ./configure \

@@ -103,7 +103,7 @@ decoder.
 Browser sources arrive over DMA-BUF from the `dma-page` service and are
 imported straight into CUDA; they mix with video sources on the same canvas.
 
-For an SDR BT.709 video on a BT.2020 HLG canvas, the FFmpeg 8.1 patch series
+For an SDR BT.709 video on a BT.2020 HLG canvas, the FFmpeg 8.x patch series
 provides source conversion through `tonemap_cuda`. For a P210 working canvas:
 
 ```json
