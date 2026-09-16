@@ -78,7 +78,25 @@ def sdr8_planes(width, height, index=0):
     return tuple((plane << 2).astype("<u2") for plane in (y, u, v))
 
 
-FAMILIES = {"ramp": sample_planes, "hlg": hlg_planes, "sdr8": sdr8_planes}
+def gradient_planes(width, height, index=0):
+    """Visual 10-bit banding check: one static shallow dark luma ramp (codes
+    64..512 across the width) with neutral chroma. The top half is quantized
+    to 8-bit precision (codes forced to multiples of four); the bottom half
+    keeps true 10-bit codes. Viewed with a contrast stretch such as
+    lutyuv=y='clip((val-64)*4,0,1023)', the top must band about four times
+    wider than the bottom; identical halves mean an 8-bit bottleneck."""
+    frame_stride(width)
+    del index  # static by design; banding is easiest to judge on a still
+    ramp = np.rint(64 + np.arange(width, dtype=np.float64) * (512 - 64) / (width - 1))
+    y = np.repeat(ramp.astype("<u2")[None, :], height, axis=0).copy()
+    y[:height // 2] &= 0xFFFC
+    u = np.full((height, width // 2), 512, "<u2")
+    v = np.full((height, width // 2), 512, "<u2")
+    return y, u, v
+
+
+FAMILIES = {"ramp": sample_planes, "hlg": hlg_planes, "sdr8": sdr8_planes,
+            "gradient": gradient_planes}
 
 # Stream color contract per family, in avplumber/FFmpeg option spelling.
 COLOR = {
@@ -88,6 +106,8 @@ COLOR = {
              "colorspace": "bt709", "chroma_location": "left"},
     "hlg": {"color_range": "tv", "color_primaries": "bt2020", "color_trc": "arib-std-b67",
             "colorspace": "bt2020nc", "chroma_location": "left"},
+    "gradient": {"color_range": "tv", "color_primaries": "bt709", "color_trc": "bt709",
+                 "colorspace": "bt709", "chroma_location": "left"},
 }
 
 

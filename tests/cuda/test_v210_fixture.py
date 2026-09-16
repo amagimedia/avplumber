@@ -3,8 +3,8 @@ import struct
 import numpy as np
 import pytest
 
-from v210_fixture import (FAMILIES, frame_stride, hlg_planes, manifest, pack_v210,
-                          sample_planes, sdr8_planes, write_fixture)
+from v210_fixture import (FAMILIES, frame_stride, gradient_planes, hlg_planes, manifest,
+                          pack_v210, sample_planes, sdr8_planes, write_fixture)
 
 
 def test_known_v210_words():
@@ -60,6 +60,16 @@ def test_sdr8_promotion_is_shifted_8bit():
     for plane, hi in zip(sdr8_planes(48, 5, index=2), (940, 960, 960)):
         assert not np.any(plane & 3), "promoted samples must be multiples of four"
         assert plane.min() >= 64 and plane.max() <= hi
+
+
+def test_gradient_split_halves():
+    y, u, v = gradient_planes(96, 8)
+    assert not np.any(y[:4] & 3), "top half must hold 8-bit-precision codes"
+    assert np.any(y[4:] & 3), "bottom half must hold true 10-bit codes"
+    assert y.min() >= 64 and y.max() <= 512
+    np.testing.assert_array_equal(u, 512)
+    np.testing.assert_array_equal(v, 512)
+    np.testing.assert_array_equal(y, gradient_planes(96, 8, index=5)[0])
 
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))
