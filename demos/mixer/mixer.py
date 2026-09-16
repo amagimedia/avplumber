@@ -13,14 +13,14 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from avpmixer.color import Color, conversion_graph, rendition_color
+from avpmixer.color import TEN_BIT_FORMATS, conversion_graph, rendition_color
 from avpmixer import clipcache
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
 from avpmixer.inputs import build_input, build_v210_input
 from avpmixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
-                           JanusVideoConfig, RtcpFeedbackGroup, build_janus_output)
+                           JanusVideoConfig, RtcpFeedbackGroup, add_nodes, build_janus_output)
 
 try:
     from .layouts import (
@@ -447,128 +447,96 @@ def _define_scenes(mixer, input_count: int, routed: bool) -> None:
         mixer.add_scene(scene.name, sources, routes=routes)
 
 
-def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
-                         width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT,
-                         enc_format="nv12", color=None, prefix="program", profile="", preset="p3", bitrate=None) -> None:
-    if options.output is None:
-        raise ValueError("record output needs an output URL or path")
-    color = Color.parse(color or "sdr").tags
-    bitrate = bitrate or options.bitrate
-    if not profile:
-        profile = ("main10" if enc_format == "p010le" else "main") if "hevc" in options.codec else "high"
-    fps_edge = f"{prefix}_fps"
-    assumed_edge = f"{prefix}_video"
-    encoded_edge = f"{prefix}_encoded"
-    muxed_edge = f"{prefix}_muxed"
-    avp.addNode(api.ForceFPS({
-        "name": f"{prefix}_fps",
-        "src": mixer_edge,
-        "dst": fps_edge,
-        "fps": f"{options.fps}/{FPS_DEN}",
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.AssumeVideoFormat({
-        "name": f"{prefix}_format",
-        "src": fps_edge,
-        "dst": assumed_edge,
-        "width": width,
-        "height": height,
-        "pixel_format": "cuda",
-        "real_pixel_format": enc_format,
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.EncVideo({
-        "name": f"{prefix}_encoder",
-        "src": assumed_edge,
-        "dst": encoded_edge,
-        "codec": options.codec,
-        "hwaccel": HWACCEL,
-        "options": {
-            "b": bitrate,
-            "maxrate": bitrate,
-            "bufsize": bitrate,
-            "g": max(1, round(options.fps / FPS_DEN)) * 2,
-            "bf": 0,
-            "preset": preset,
-            "tune": "ll",
-            "profile": profile,
-            **color,
-        },
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.Mux({
-        "name": f"{prefix}_mux",
-        "src": [encoded_edge],
-        "dst": muxed_edge,
-        "ts_sort_wait": 0,
-        "group": OUTPUT_GROUP,
-    }))
-    avp.addNode(api.Output({
-        "name": f"{prefix}_output",
-        "src": muxed_edge,
-        "url": options.output,
-        "format": infer_output_format(options.output, options.output_format),
-        "auto_restart": "panic",
-        "group": OUTPUT_GROUP,
-    }))
+def _kbps(bitrate: str) -> int:
+    """``--bitrate`` in FFmpeg notation (``8M``, ``6000k`` or bit/s) as kbit/s."""
+    scale = {"k": 1, "K": 1, "M": 1000}.get(bitrate[-1])
+    return int(float(bitrate[:-1]) * scale) if scale else int(bitrate) // 1000
 
 
-def _default_codec(working_format: str) -> str:
-    """H.264 for an 8-bit program (universal WebRTC), HEVC for a 10-bit one
-    (Main10 carries the depth/HDR). Overridable per rendition."""
-    ten_bit = working_format not in ("nv12", "yuv420p", "yuv422p", "yuv444p")
-    return "hevc_nvenc" if ten_bit else "h264_nvenc"
+def _flag_renditions(options: GraphOptions, width: int, height: int) -> tuple:
+    """``--output`` / ``--janus-output`` as renditions: a ``program`` record file
+    at the CLI codec and bitrate, and a ``janus`` stream whose codec follows depth."""
+    record = mixer_config.Rendition("program", options.output or "", width, height, options.fps,
+                                    _kbps(options.bitrate), options.codec, preset="p3")
+    janus = mixer_config.Rendition("janus", "janus", width, height, options.fps, options.janus_video_bitrate_kbps)
+    return tuple(r for r, wanted in ((record, options.output), (janus, options.janus_output)) if wanted)
 
 
-def _encode_format(working_format: str, codec: str) -> str:
-    """Encoder input format for a program in *working_format*: keep 10-bit as
-    P010 for HEVC Main10; otherwise NV12 (H.264, or 8-bit HEVC)."""
-    ten_bit = working_format not in ("nv12", "yuv420p", "yuv422p", "yuv444p")
-    return "p010le" if (ten_bit and "hevc" in codec) else "nv12"
+def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, codec: str,
+                         enc_format: str, color: dict, output_format=None) -> None:
+    """``force_fps -> assume_format -> nvenc -> mux -> output``, nodes named ``<id>_*``."""
+    name = lambda suffix: f"{r.id}_{suffix}"  # noqa: E731
+    bitrate = f"{r.bitrate_kbps}k"
+    profile = r.profile or (("main10" if enc_format in TEN_BIT_FORMATS else "main") if "hevc" in codec else "high")
+    add_nodes(avp, [
+        api.ForceFPS({"name": name("fps"), "src": edge, "dst": name("fps"), "fps": f"{r.fps}/{FPS_DEN}"}),
+        api.AssumeVideoFormat({"name": name("format"), "src": name("fps"), "dst": name("video"),
+                               "width": r.width, "height": r.height, "pixel_format": "cuda",
+                               "real_pixel_format": enc_format}),
+        api.EncVideo({"name": name("encoder"), "src": name("video"), "dst": name("encoded"),
+                      "codec": codec, "hwaccel": HWACCEL,
+                      "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
+                                  "g": max(1, round(r.fps / FPS_DEN)) * 2, "bf": 0, "preset": r.preset,
+                                  "tune": "ll", "profile": profile, **color}}),
+        api.Mux({"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0}),
+        api.Output({"name": name("output"), "src": name("muxed"), "url": r.target,
+                    "format": infer_output_format(r.target, output_format), "auto_restart": "panic"}),
+    ], group=OUTPUT_GROUP)
 
 
-def _nv12_program_edge(avp, api, working_format: str, mixer_edge: str) -> str:
-    """The default output contract is SDR, including when the canvas is HDR."""
-    avp.addNode(api.FilterVideo({
-        "name": "program_to_nv12", "src": mixer_edge, "dst": "program_nv12",
-        "graph": conversion_graph("sdr", "nv12", source_format=working_format),
-        "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
-    }))
-    return "program_nv12"
+def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: str, *,
+                      canvas, working_format: str, color="sdr"):
+    """One encoder per rendition, all fed from the single composited program.
 
-
-def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str, *,
-                   width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT):
-    record_edge = mixer_edge
-    janus_edge = mixer_edge
-    if options.output and options.janus_output:
-        record_edge = "program_video_record"
-        janus_edge = "program_video_janus"
-        avp.addNode(api.Split({
-            "name": "split_program_video_output",
-            "src": mixer_edge,
-            "dst": [record_edge, janus_edge],
-            "group": OUTPUT_GROUP,
-            "on_error": "panic",
+    The compositor renders once at the canvas rate; a rendition converts,
+    re-times and rescales that picture for its own target, so extra renditions
+    cost an encode, not another composite.
+    """
+    edges = [mixer_edge]
+    if len(renditions) > 1:
+        edges = [f"program_rendition_{r.id}" for r in renditions]
+        avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
+                               "group": OUTPUT_GROUP, "on_error": "panic"}))
+    listeners = []
+    for r, edge in zip(renditions, edges):
+        codec = r.codec or ("hevc_nvenc" if working_format in TEN_BIT_FORMATS else "h264_nvenc")
+        target = rendition_color(color, codec, r.color or None, r.tonemap)
+        # 10-bit stays P010 for HEVC (Main10 carries depth and HDR); H.264 and 8-bit encode NV12.
+        ten_bit = target.transfer != "sdr" or (working_format in TEN_BIT_FORMATS and "hevc" in codec)
+        enc_format = "p010le" if ten_bit else "nv12"
+        scale = f"scale_cuda=w={r.width}:h={r.height}," if (r.width, r.height) != canvas else ""
+        scaled = f"program_scaled_{r.id}"
+        avp.addNode(api.FilterVideo({
+            "name": f"scale_{r.id}", "src": edge, "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            "graph": scale + conversion_graph(target, enc_format, source=color, source_format=working_format,
+                                              tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
+                                              desat=r.tonemap_desat),
         }))
+        if r.target != "janus":
+            _build_record_output(avp, api, scaled, r, codec=codec, enc_format=enc_format,
+                                 color=target.tags, output_format=options.output_format)
+            continue
+        listeners.append(build_janus_output(
+            avp, api, scaled,
+            JanusVideoConfig(
+                host=options.janus_host, video_port=r.port or options.janus_video_port,
+                payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
+                bitrate_kbps=r.bitrate_kbps, keyframe_min_interval_ms=options.keyframe_min_interval_ms,
+                rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port if not listeners else 0,
+            ),
+            fps=r.fps, fps_den=FPS_DEN, width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
+            codec=codec, profile=r.profile, preset=r.preset, enc_format=enc_format, color=target.tags,
+            prefix="janus" if not listeners else f"janus_{r.id}"))
+    return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
-    if options.output:
-        _build_record_output(avp, api, options, record_edge, width=width, height=height)
-    if not options.janus_output:
-        return None
 
-    return build_janus_output(
-        avp, api, janus_edge,
-        JanusVideoConfig(
-            host=options.janus_host, video_port=options.janus_video_port,
-            payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
-            bitrate_kbps=options.janus_video_bitrate_kbps,
-            keyframe_min_interval_ms=options.keyframe_min_interval_ms,
-            rtcp_bind=options.janus_rtcp_bind, rtcp_port=options.janus_rtcp_port,
-        ),
-        fps=options.fps, fps_den=FPS_DEN, width=width, height=height,
-        hwaccel=HWACCEL, group=OUTPUT_GROUP,
-    )
+def _application(avp, mixer, options: GraphOptions, input_edges, listener, **extra) -> MixerApplication:
+    return MixerApplication(
+        avp=avp, mixer=mixer, input_edges=tuple(input_edges),
+        input_groups=tuple(_input_group(index) for index in range(len(input_edges))),
+        rtcp_feedback_listener=listener, preheat_timeout_sec=options.preheat_timeout_sec,
+        wipe_file=options.wipe_file, dmabuf_rest=options.dmabuf_rest, wipe_cache_mb=options.wipe_cache_mb,
+        cut_latency_encoder=options.cut_latency_encoder, prewarm_cut_scenes=options.prewarm_cut_scenes, **extra)
 
 
 def build_application(options: GraphOptions, api=None) -> MixerApplication:
@@ -587,108 +555,19 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
                          options.preheat_timeout_sec)
 
     input_edges = [
-        _build_input(
-            avp,
-            api,
-            index,
-            url,
-            loop=options.loop_inputs,
-            fps=options.fps,
-            normalize=len(options.inputs) > 32,
-            options=options,
-        )
+        _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
+                     normalize=len(options.inputs) > 32, options=options)
         for index, url in enumerate(options.inputs)
     ]
-    mixer = _make_builder(avp, api, options, canvas=(CANVAS_WIDTH, CANVAS_HEIGHT),
-                          fps=options.fps, working_format=options.working_format)
-    routed_inputs = _register_sources(
-        avp, api, mixer, input_edges, fps=options.fps
-    )
+    canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)
+    mixer = _make_builder(avp, api, options, canvas=canvas, fps=options.fps, working_format=options.working_format)
+    routed_inputs = _register_sources(avp, api, mixer, input_edges, fps=options.fps)
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
-    mixer_edge = mixer.build()
-    rtcp_feedback_listener = _build_outputs(
-        avp, api, options, _nv12_program_edge(avp, api, options.working_format, mixer_edge))
-    return MixerApplication(
-        avp=avp,
-        mixer=mixer,
-        input_groups=tuple(_input_group(index) for index in range(len(input_edges))),
-        input_edges=tuple(input_edges),
-        routed_inputs=routed_inputs,
-        preheat_timeout_sec=options.preheat_timeout_sec,
-        rtcp_feedback_listener=rtcp_feedback_listener,
-        wipe_file=options.wipe_file,
-        browser_windows=tuple(options.dmabuf_inputs), dmabuf_rest=options.dmabuf_rest,
-        wipe_cache_mb=options.wipe_cache_mb,
-        cut_latency_encoder=options.cut_latency_encoder,
-        prewarm_cut_scenes=options.prewarm_cut_scenes,
-    )
-
-
-def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
-    """One encoder per rendition, all fed from the single composited program.
-
-    The compositor renders once at the canvas rate; a rendition re-times and
-    rescales that picture for its own target, so extra renditions cost an
-    encode, not another composite.
-    """
-    edges = [mixer_edge]
-    if len(cfg.renditions) > 1:
-        edges = [f"program_rendition_{r.id}" for r in cfg.renditions]
-        avp.addNode(api.Split({"name": "split_renditions", "src": mixer_edge, "dst": edges,
-                               "group": OUTPUT_GROUP, "on_error": "panic"}))
-    listeners = []
-    for rendition, edge in zip(cfg.renditions, edges):
-        resized = (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
-        codec = rendition.codec or _default_codec(cfg.working_format)
-        target_color = rendition_color(cfg.out_color, codec, rendition.color or None, rendition.tonemap)
-        enc_format = _encode_format(cfg.working_format, codec)
-        if target_color.transfer != "sdr":
-            enc_format = "p010le"
-        parts = []
-        if resized:
-            parts.append(f"scale_cuda=w={rendition.width}:h={rendition.height}")
-        parts.append(conversion_graph(target_color, enc_format, source=cfg.out_color,
-                                      source_format=cfg.working_format,
-                                      tonemap=rendition.tonemap or "clip",
-                                      hdr_peak=rendition.tonemap_peak * 100,
-                                      desat=rendition.tonemap_desat))
-        graph = ",".join(parts)
-        out_color = target_color.tags
-        scaled = edge
-        if graph:
-            scaled = f"program_scaled_{rendition.id}"
-            avp.addNode(api.FilterVideo({
-                "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
-                "graph": graph, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
-            }))
-        if rendition.target == "janus":
-            prefix = "janus" if not listeners else f"janus_{rendition.id}"
-            listener = build_janus_output(
-                avp, api, scaled,
-                JanusVideoConfig(
-                    host=options.janus_host,
-                    video_port=rendition.port or options.janus_video_port,
-                    payload_type=options.janus_video_pt, ssrc=options.janus_video_ssrc,
-                    bitrate_kbps=rendition.bitrate_kbps,
-                    keyframe_min_interval_ms=options.keyframe_min_interval_ms,
-                    rtcp_bind=options.janus_rtcp_bind,
-                    rtcp_port=options.janus_rtcp_port if not listeners else 0,
-                ),
-                fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
-                hwaccel=HWACCEL, group=OUTPUT_GROUP,
-                codec=codec, profile=rendition.profile, preset=rendition.preset,
-                enc_format=enc_format, color=out_color,
-                prefix=prefix,
-            )
-            listeners.append(listener)
-        else:
-            _build_record_output(avp, api, replace(options, output=rendition.target,
-                                                   codec=codec, fps=rendition.fps),
-                                 scaled, width=rendition.width, height=rendition.height,
-                                 enc_format=enc_format, color=out_color, prefix=f"record_{rendition.id}",
-                                 profile=rendition.profile, preset=rendition.preset, bitrate=f"{rendition.bitrate_kbps}k")
-    return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
+    listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
+                                 canvas=canvas, working_format=options.working_format)
+    return _application(avp, mixer, options, input_edges, listener, routed_inputs=routed_inputs,
+                        browser_windows=tuple(options.dmabuf_inputs))
 
 
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
@@ -702,8 +581,9 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
 
-    mixer = _make_builder(avp, api, options, canvas=(cfg.canvas_w, cfg.canvas_h),
-                          fps=cfg.fps, working_format=cfg.working_format, color=cfg.out_color, wipe_color=cfg.wipe_color or None)
+    canvas = (cfg.canvas_w, cfg.canvas_h)
+    mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
+                          color=cfg.out_color, wipe_color=cfg.wipe_color or None)
     aliases = cfg.alias_counts
     input_edges: list[str] = []
     for index, source in enumerate(cfg.sources):
@@ -713,17 +593,14 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
-            for node in nodes:
-                avp.addNode(node)
+            add_nodes(avp, nodes)
         elif source.kind == "v210":
-            # True 10-bit sources: packed v210 unpacked to the working format on
-            # the GPU, with their declared HLG/BT.2020 color contract.
+            # True 10-bit sources: packed v210 unpacked on the GPU, stamped with
+            # their declared (HLG/BT.2020) color contract.
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                working_format="p010le",
-                color={"color_trc": source.color_trc, "color_primaries": source.color_primaries,
-                       "colorspace": source.colorspace, "color_range": source.color_range})
+                working_format="p010le", color=source.color.tags)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
@@ -748,27 +625,10 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
-    program_edge = mixer.build()
-    if cfg.renditions:
-        # Renditions convert the program to each encoder's format themselves,
-        # keeping 10-bit (P010) for HEVC Main10 instead of forcing NV12.
-        rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, program_edge)
-    else:
-        rtcp_feedback_listener = _build_outputs(
-            avp, api, options, _nv12_program_edge(avp, api, cfg.working_format, program_edge),
-            width=cfg.canvas_w, height=cfg.canvas_h)
-    return MixerApplication(
-        avp=avp, mixer=mixer,
-        input_groups=tuple(_input_group(index) for index in range(len(cfg.sources))),
-        input_edges=tuple(input_edges), routed_inputs=False,
-        preheat_timeout_sec=options.preheat_timeout_sec,
-        rtcp_feedback_listener=rtcp_feedback_listener,
-        wipe_file=options.wipe_file, wipe_files=tuple(w.path for w in cfg.wipes),
-        browser_windows=tuple(s.id for s in browsers), dmabuf_rest=options.dmabuf_rest,
-        wipe_cache_mb=options.wipe_cache_mb,
-        cut_latency_encoder=options.cut_latency_encoder,
-        prewarm_cut_scenes=options.prewarm_cut_scenes,
-    )
+    listener = _build_renditions(avp, api, options, cfg.renditions or _flag_renditions(options, *canvas),
+                                 mixer.build(), canvas=canvas, working_format=cfg.working_format, color=cfg.out_color)
+    return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers))
 
 
 def parse_args(argv: list[str] | None = None) -> GraphOptions:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .color import TEN_BIT_FORMATS
+
 RTP_PACKET_SIZE = 1_200
 DEFAULT_KEYFRAME_MIN_INTERVAL_MS = 150
 
@@ -72,6 +74,14 @@ class RtcpFeedbackGroup:
             listener.stop()
 
 
+def add_nodes(avp, nodes, **defaults):
+    """Register *nodes*, filling in shared parameters (``group``) a node does not set itself."""
+    for node in nodes:
+        for key, value in defaults.items():
+            node.parameters.setdefault(key, value)
+        avp.addNode(node)
+
+
 def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps: int,
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
                        group: str = "output", codec: str = "", profile: str = "",
@@ -88,61 +98,42 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
     bitrate = f"{janus.bitrate_kbps}k"
-    ten_bit = enc_format in ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
+    ten_bit = enc_format in TEN_BIT_FORMATS
     if not codec:
         codec = "hevc_nvenc" if ten_bit else "h264_nvenc"   # HEVC only when the input is 10-bit
     if not profile:
         profile = ("main10" if ten_bit else "main") if "hevc" in codec else "baseline"
-    color_opts = {} if not color else {
-        "color_primaries": color.get("color_primaries", "bt709"),
-        "color_trc": color.get("color_trc", "bt709"),
-        "colorspace": color.get("colorspace", "bt709"),
-        "color_range": color.get("color_range", "tv"),
-    }
-    avp.addNode(api.ForceFPS({
-        "name": node_name("fps"), "src": src_edge, "dst": node_name("fps"), "fps": f"{fps}/{fps_den}",
-        "group": group,
-    }))
-    avp.addNode(api.ForceKeyFrame({
-        "name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
-        "interval_sec": "1/1", "auto_restart": "panic", "group": group,
-        "min_interval_ms": janus.keyframe_min_interval_ms,
-    }))
-    avp.addNode(api.AssumeVideoFormat({
-        "name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
-        "width": width, "height": height, "pixel_format": "cuda", "real_pixel_format": enc_format,
-        "auto_restart": "panic", "group": group,
-    }))
-    avp.addNode(api.EncVideo({
-        "name": node_name("encoder"), "src": node_name("video"), "dst": node_name("encoded"),
-        "codec": codec, "hwaccel": hwaccel,
-        "options": {
-            "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": max(1, round(fps / fps_den)), "bf": 0,
-            # p5..p7 are NVENC's quality presets; with tune=ull it stays a
-            # one-pass, no-lookahead, no-reordering encode, so the extra quality
-            # costs GPU time rather than latency. B-frames stay off: they need
-            # reordering, which WebRTC's jitter budget will not absorb.
-            "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
-            "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
-            "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
-            **color_opts,
-        },
-        "auto_restart": "panic", "group": group,
-    }))
-    avp.addNode(api.Bsf({
-        "name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),
-        "bsf": "dump_extra=freq=keyframe", "auto_restart": "panic", "group": group,
-    }))
-    avp.addNode(api.Mux({
-        "name": node_name("mux"), "src": [node_name("repeat_headers")], "dst": node_name("video_rtp_mux"),
-        "ts_sort_wait": 0, "auto_restart": "on", "on_error": "panic", "group": group,
-    }))
-    avp.addNode(api.Output({
-        "name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
-        "format": "rtp",
-        "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc},
-        "auto_restart": "on", "on_error": "panic", "group": group,
-    }))
+    add_nodes(avp, [
+        api.ForceFPS({"name": node_name("fps"), "src": src_edge, "dst": node_name("fps"),
+                      "fps": f"{fps}/{fps_den}"}),
+        api.ForceKeyFrame({"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
+                           "interval_sec": "1/1", "min_interval_ms": janus.keyframe_min_interval_ms}),
+        api.AssumeVideoFormat({"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
+                               "width": width, "height": height, "pixel_format": "cuda",
+                               "real_pixel_format": enc_format}),
+        api.EncVideo({
+            "name": node_name("encoder"), "src": node_name("video"), "dst": node_name("encoded"),
+            "codec": codec, "hwaccel": hwaccel,
+            "options": {
+                "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": max(1, round(fps / fps_den)), "bf": 0,
+                # p5..p7 are NVENC's quality presets; with tune=ull it stays a
+                # one-pass, no-lookahead, no-reordering encode, so the extra quality
+                # costs GPU time rather than latency. B-frames stay off: they need
+                # reordering, which WebRTC's jitter budget will not absorb.
+                "preset": preset, "profile": profile, "tune": "ull", "rc": "cbr",
+                "rc-lookahead": 0, "zerolatency": 1, "delay": 0, "forced-idr": 1,
+                "no-scenecut": 1, "strict_gop": 1, "aud": 1, "spatial-aq": 1, "temporal-aq": 0,
+                **(color or {}),
+            },
+        }),
+        api.Bsf({"name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),
+                 "bsf": "dump_extra=freq=keyframe"}),
+        api.Mux({"name": node_name("mux"), "src": [node_name("repeat_headers")], "dst": node_name("video_rtp_mux"),
+                 "ts_sort_wait": 0, "auto_restart": "on", "on_error": "panic"}),
+        api.Output({"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
+                    "format": "rtp", "auto_restart": "on", "on_error": "panic",
+                    "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc}}),
+    ], group=group, auto_restart="panic")
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,

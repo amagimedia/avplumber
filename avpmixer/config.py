@@ -12,7 +12,7 @@ import json
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -134,18 +134,8 @@ class MixerConfig:
     transition: str = DEFAULT_TRANSITION   # what a pick takes with in direct mode
     default_wipe: str = ""
     working_format: str = "nv12"   # canvas.working_format: compositor/transition sw_format
-    # Output color signalling for encoders (VUI). An HLG program declares
-    # BT.2020/arib-std-b67 here so the browser treats the stream as HDR.
-    out_color_trc: str = "bt709"
-    out_color_primaries: str = "bt709"
-    out_colorspace: str = "bt709"
-    out_color_range: str = "tv"
+    out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
-
-    @property
-    def out_color(self) -> Dict[str, str]:
-        return {"color_trc": self.out_color_trc, "color_primaries": self.out_color_primaries,
-                "colorspace": self.out_colorspace, "color_range": self.out_color_range}
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -190,6 +180,91 @@ def _rect(obj: Any, where: str) -> Rect:
     return r
 
 
+_SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",), "v210": ("path", "width", "height")}
+
+
+def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
+    sid, kind = str(s.get("id", "")), s.get("kind")
+    if not sid or "#" in sid:
+        raise ConfigError(f"{where}: id required (no '#')")
+    if kind not in _SOURCE_KEYS:
+        raise ConfigError(f"{where}: kind must be browser, video or v210")
+    if not all(k in s for k in _SOURCE_KEYS[kind]):
+        raise ConfigError(f"{where}: {kind} source needs {', '.join(_SOURCE_KEYS[kind])}")
+    source_filter = s.get("filter", "")
+    if not isinstance(source_filter, str):
+        raise ConfigError(f"{where}: filter must be a CUDA filter graph string")
+    filter_format = str(s.get("filter_output_format", ""))
+    if source_filter and filter_format not in WORKING_FORMATS:
+        raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
+    if source_filter and kind == "browser":
+        raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
+    try:
+        color = declared_color(s)
+        if kind != "video" and color is None:
+            raise ValueError("raw input has no color metadata; declare an explicit color setting")
+        if kind == "browser" and color != Color():
+            raise ValueError("browser input supports SDR only")
+    except ValueError as e:
+        raise ConfigError(f"{where}: {e}") from e
+    return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
+                  height=int(s.get("height", 0)), fps=int(s.get("fps", fps)) if kind == "browser" else 0,
+                  loop=bool(s.get("loop", True)), filter_graph=source_filter,
+                  filter_output_format=filter_format, **(color.tags if color else {}))
+
+
+def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int, fps: int) -> Rendition:
+    rid = str(r.get("id", ""))
+    if not rid:
+        raise ConfigError(f"{where}: id required")
+    base = Rendition(rid, width=canvas_w, height=canvas_h, fps=fps)
+    # Every other key coerces to its field's type; unknown keys are ignored.
+    rendition = replace(base, **{f.name: type(getattr(base, f.name))(r[f.name])
+                                 for f in fields(Rendition) if f.name in r and f.name != "id"})
+    if rendition.tonemap and rendition.tonemap not in OPERATORS:
+        raise ConfigError(f"{where}: unsupported tone-map operator")
+    if rendition.color:
+        try:
+            Color.parse(rendition.color)
+        except ValueError as e:
+            raise ConfigError(f"{where}: {e}") from e
+    if rendition.width <= 0 or rendition.height <= 0:
+        raise ConfigError(f"{where}: width and height must be positive")
+    if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
+        raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
+    if rendition.fps > fps:
+        raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
+                          "a rendition can only re-time the program downwards")
+    wanted = str(r.get("aspect", ""))
+    if wanted and wanted != rendition.aspect:
+        raise ConfigError(f"{where}: {rendition.width}x{rendition.height} is "
+                          f"{rendition.aspect}, not {wanted}")
+    return rendition
+
+
+def _parse_control(control: Any, wipes: List[Wipe]) -> Dict[str, Any]:
+    if not isinstance(control, dict):
+        raise ConfigError("control must be an object")
+    default_wipe = str(control.get("default_wipe", wipes[0].id if wipes else ""))
+    if default_wipe and not any(w.id == default_wipe for w in wipes):
+        raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
+    transition = str(control.get("transition", DEFAULT_TRANSITION))
+    if transition not in TRANSITIONS:
+        raise ConfigError(f"control.transition must be one of {TRANSITIONS}")
+    if transition == "wipe" and not wipes:
+        raise ConfigError("control.transition 'wipe' needs a wipe library")
+    fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
+    if fade_seconds <= 0:
+        raise ConfigError("control.fade_seconds must be positive")
+    return {"direct": bool(control.get("direct", True)), "fade_seconds": fade_seconds,
+            "transition": transition, "default_wipe": default_wipe}
+
+
+def _unique(items: List[Any], where: str, label: str = "id") -> None:
+    if any(x.id == items[-1].id for x in items[:-1]):
+        raise ConfigError(f"{where}: duplicate {label} '{items[-1].id}'")
+
+
 def parse(doc: Dict[str, Any]) -> MixerConfig:
     for key in ("canvas", "sources", "scenes"):
         if key not in doc:
@@ -207,109 +282,37 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     if working_format not in WORKING_FORMATS:
         raise ConfigError(f"canvas.working_format must be one of {WORKING_FORMATS}")
     try:
-        output_color = declared_color(canvas) or Color()
-        output_color.validate_format(working_format)
+        out_color = declared_color(canvas) or Color()
+        out_color.validate_format(working_format)
     except ValueError as e:
         raise ConfigError(f"canvas: {e}") from e
-    out_color = output_color.tags
 
     sources: List[Source] = []
     locations: Dict[Tuple[str, str], str] = {}
     for i, s in enumerate(doc["sources"]):
         where = f"sources[{i}]"
-        sid, kind = str(s.get("id", "")), s.get("kind")
-        if not sid or "#" in sid:
-            raise ConfigError(f"{where}: id required (no '#')")
-        if any(x.id == sid for x in sources):
-            raise ConfigError(f"{where}: duplicate id '{sid}'")
-        if kind == "browser":
-            if not all(k in s for k in ("url", "width", "height")):
-                raise ConfigError(f"{where}: browser source needs url, width, height")
-            src = Source(sid, kind, str(s["url"]), int(s["width"]), int(s["height"]),
-                         int(s.get("fps", fps)), bool(s.get("loop", True)))
-        elif kind == "video":
-            if "path" not in s:
-                raise ConfigError(f"{where}: video source needs path")
-            src = Source(sid, kind, str(s["path"]), int(s.get("width", 0)), int(s.get("height", 0)),
-                         0, bool(s.get("loop", True)))
-        elif kind == "v210":
-            if not all(k in s for k in ("path", "width", "height")):
-                raise ConfigError(f"{where}: v210 source needs path, width, height")
-            src = Source(sid, kind, str(s["path"]), int(s["width"]), int(s["height"]),
-                         0, bool(s.get("loop", True)))
-        else:
-            raise ConfigError(f"{where}: kind must be browser, video or v210")
-        source_filter = s.get("filter", "")
-        if not isinstance(source_filter, str):
-            raise ConfigError(f"{where}: filter must be a CUDA filter graph string")
-        try:
-            color = declared_color(s)
-            if kind in ("v210", "browser") and color is None:
-                raise ValueError("raw input has no color metadata; declare an explicit color setting")
-            if kind == "browser" and color != Color():
-                raise ValueError("browser input supports SDR only")
-        except ValueError as e:
-            raise ConfigError(f"{where}: {e}") from e
-        filter_format = str(s.get("filter_output_format", ""))
-        if source_filter and filter_format not in WORKING_FORMATS:
-            raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
-        if source_filter and kind == "browser":
-            raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
-        src = replace(src, filter_graph=source_filter, filter_output_format=filter_format,
-                      **(color.tags if color else {}))
-        key = (kind, src.location)
+        sources.append(_parse_source(s, where, fps))
+        _unique(sources, where)
+        key = (sources[-1].kind, sources[-1].location)
         if key in locations:
-            raise ConfigError(f"{where}: '{src.location}' already declared as '{locations[key]}'; "
+            raise ConfigError(f"{where}: '{key[1]}' already declared as '{locations[key]}'; "
                               "reference that id instead (one decode per unique source)")
-        locations[key] = sid
-        sources.append(src)
+        locations[key] = sources[-1].id
     if not sources:
         raise ConfigError("sources must not be empty")
 
     renditions: List[Rendition] = []
     for i, r in enumerate(doc.get("renditions", [])):
-        where = f"renditions[{i}]"
-        rid = str(r.get("id", ""))
-        if not rid:
-            raise ConfigError(f"{where}: id required")
-        if any(x.id == rid for x in renditions):
-            raise ConfigError(f"{where}: duplicate id '{rid}'")
-        rendition = Rendition(
-            rid, str(r.get("target", "janus")),
-            int(r.get("width", canvas_w)), int(r.get("height", canvas_h)),
-            int(r.get("fps", fps)), int(r.get("bitrate_kbps", 3000)),
-            str(r.get("codec", "")), str(r.get("profile", "")),
-            str(r.get("preset", "p7")), int(r.get("port", 0)),
-            str(r.get("tonemap", "")), float(r.get("tonemap_peak", 10.0)),
-            float(r.get("tonemap_desat", 0.0)), str(r.get("color", "")))
-        if rendition.tonemap and rendition.tonemap not in OPERATORS:
-            raise ConfigError(f"{where}: unsupported tone-map operator")
-        if rendition.color:
-            try:
-                Color.parse(rendition.color)
-            except ValueError as e:
-                raise ConfigError(f"{where}: {e}") from e
-        if rendition.width <= 0 or rendition.height <= 0:
-            raise ConfigError(f"{where}: width and height must be positive")
-        if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
-            raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
-        if rendition.fps > fps:
-            raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
-                              "a rendition can only re-time the program downwards")
-        wanted = str(r.get("aspect", ""))
-        if wanted and wanted != rendition.aspect:
-            raise ConfigError(f"{where}: {rendition.width}x{rendition.height} is "
-                              f"{rendition.aspect}, not {wanted}")
-        renditions.append(rendition)
+        renditions.append(_parse_rendition(r, f"renditions[{i}]", canvas_w, canvas_h, fps))
+        _unique(renditions, f"renditions[{i}]")
 
     wipes: List[Wipe] = []
     for i, w in enumerate(doc.get("wipes", [])):
         if "id" not in w or "path" not in w:
             raise ConfigError(f"wipes[{i}]: id and path required")
-        if any(x.id == w["id"] for x in wipes):
-            raise ConfigError(f"wipes[{i}]: duplicate id '{w['id']}'")
         wipes.append(Wipe(str(w["id"]), str(w["path"]), float(w.get("duration_seconds", 0)),
                           str(w.get("name", ""))))
+        _unique(wipes, f"wipes[{i}]")
     if "wipe_dir" in doc:
         # Every clip in the directory joins the library under its file name.
         # Entries declared above keep their id, name and duration.
@@ -322,8 +325,6 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         where = f"scenes[{i}]"
         if "id" not in sc or not isinstance(sc.get("items"), list) or not sc["items"]:
             raise ConfigError(f"{where}: id and a non-empty items list required")
-        if any(x.id == sc["id"] for x in scenes):
-            raise ConfigError(f"{where}: duplicate scene id '{sc['id']}'")
         items: List[Item] = []
         for j, it in enumerate(sc["items"]):
             iw = f"{where}.items[{j}]"
@@ -335,31 +336,16 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             crop = _rect(it["crop"], iw + ".crop") if "crop" in it else None
             items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop))
         scenes.append(Scene(str(sc["id"]), tuple(items)))
+        _unique(scenes, where, "scene id")
     if not scenes:
         raise ConfigError("scenes must not be empty")
 
     initial = str(doc.get("initial_scene", scenes[0].id))
     if not any(s.id == initial for s in scenes):
         raise ConfigError(f"initial_scene '{initial}' is not a scene")
-    control = doc.get("control", {})
-    if not isinstance(control, dict):
-        raise ConfigError("control must be an object")
-    default_wipe = str(control.get("default_wipe", wipes[0].id if wipes else ""))
-    if default_wipe and not any(w.id == default_wipe for w in wipes):
-        raise ConfigError(f"control.default_wipe '{default_wipe}' is not a wipe")
-    transition = str(control.get("transition", DEFAULT_TRANSITION))
-    if transition not in TRANSITIONS:
-        raise ConfigError(f"control.transition must be one of {TRANSITIONS}")
-    if transition == "wipe" and not wipes:
-        raise ConfigError("control.transition 'wipe' needs a wipe library")
-    fade_seconds = float(control.get("fade_seconds", DEFAULT_FADE_SECONDS))
-    if fade_seconds <= 0:
-        raise ConfigError("control.fade_seconds must be positive")
-    return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes),
-                       tuple(renditions), initial,
-                       bool(control.get("direct", True)), fade_seconds, transition, default_wipe,
-                       working_format, out_color["color_trc"], out_color["color_primaries"],
-                       out_color["colorspace"], out_color["color_range"], str(doc.get("wipe_color", "")))
+    return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
+                       initial_scene=initial, working_format=working_format, out_color=out_color,
+                       wipe_color=str(doc.get("wipe_color", "")), **_parse_control(doc.get("control", {}), wipes))
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

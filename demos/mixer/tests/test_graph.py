@@ -312,10 +312,9 @@ def test_record_and_janus_outputs_split_program_video():
     )
     nodes = {node.parameters["name"]: node.parameters for node in application.avp.nodes}
 
-    assert nodes["split_program_video_output"]["dst"] == [
-        "program_video_record",
-        "program_video_janus",
-    ]
+    # Both flags become renditions of the one program, like a config document's.
+    assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_janus"]
+    assert nodes["program_encoder"]["codec"] == "h264_nvenc" and nodes["program_encoder"]["options"]["b"] == "8000k"
 
 
 def test_output_target_is_required():
