@@ -100,6 +100,7 @@ class MixerGraphBuilder:
         defer_output: bool = False,
         keyframe_node: Optional[str] = None,
         cache_wipes_mb: Optional[float] = None,   # None keeps the decode-per-take chain
+        working_format: str = "nv12",   # compositor/transition sw_format, e.g. "p210le" for 10-bit 4:2:2
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -119,6 +120,7 @@ class MixerGraphBuilder:
         self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
+        self.working_format = working_format
         self._output_started = not defer_output
         self._transition_prewarm = TransitionPrewarm(avp, self.name, self.timeline)
 
@@ -499,7 +501,7 @@ class MixerGraphBuilder:
                 "hwaccel": self.hwaccel,
                 "width": self.canvas_w,
                 "height": self.canvas_h,
-                "sw_format": "nv12",
+                "sw_format": self.working_format,
                 "fps": self._fps_str(),
                 **timing,
                 "scale": any(source.default_graph == "" for source in self._sources),
@@ -662,7 +664,7 @@ class MixerGraphBuilder:
             "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
-            "width": W, "height": H, "sw_format": "nv12", "fps": fps_str, "scale": True,
+            "width": W, "height": H, "sw_format": self.working_format, "fps": fps_str, "scale": True,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
             "active_inputs": 3,

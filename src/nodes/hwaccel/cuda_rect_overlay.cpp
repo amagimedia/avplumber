@@ -185,30 +185,24 @@ static int numPlanes(AVPixelFormat fmt) {
     return np;
 }
 
+/// Bytes per stored logical sample on every plane of fmt: 1 for 8-bit, 2 for deeper storage.
+static int sampleBytes(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    return d && d->comp[0].depth + d->comp[0].shift > 8 ? 2 : 1;
+}
+
+/// Least-significant padding bits below each stored sample (6 for P210/P010, else 0).
+static int storageShift(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    return d ? d->comp[0].shift : 0;
+}
+
 /// Rectangle in luma/packed pixel units -> byte offset region for a given plane (for memcpy2D).
 static void lumaRectToPlaneRegion(AVPixelFormat fmt, int lx, int ly, int lw, int lh, int plane, int &bx,
                                  int &by, int &bw_bytes, int &bh) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
     if (!d) {
         bx = by = bw_bytes = bh = 0;
-        return;
-    }
-    if (fmt == AV_PIX_FMT_NV12) {
-        if (plane == 0) {
-            bx = lx;
-            by = ly;
-            bw_bytes = lw;
-            bh = lh;
-            return;
-        }
-        const int sx0 = lx >> d->log2_chroma_w;
-        const int sy0 = ly >> d->log2_chroma_h;
-        const int sx1 = AV_CEIL_RSHIFT(lx + lw, d->log2_chroma_w);
-        const int sy1 = AV_CEIL_RSHIFT(ly + lh, d->log2_chroma_h);
-        bx = sx0 * 2;
-        by = sy0;
-        bw_bytes = (sx1 - sx0) * 2;
-        bh = sy1 - sy0;
         return;
     }
     const int np = numPlanes(fmt);
@@ -222,7 +216,8 @@ static void lumaRectToPlaneRegion(AVPixelFormat fmt, int lx, int ly, int lw, int
         bh = lh;
         return;
     }
-    // Planar YUV (+ alpha): chroma on planes 1–2 follows log2_chroma_*; other planes match luma grid.
+    // Planar or semiplanar YUV (+ alpha): chroma on planes 1–2 follows log2_chroma_*, and the
+    // component step covers both sample size and UV interleave (NV12: 2, P210: 4, yuv444p10: 2).
     const int sx = (plane == 1 || plane == 2) ? d->log2_chroma_w : 0;
     const int sy = (plane == 1 || plane == 2) ? d->log2_chroma_h : 0;
     const int x0 = lx >> sx;
@@ -293,6 +288,7 @@ static bool isAlphaCompatible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
     if (sd->nb_components != cd->nb_components - 1) return false;
     if (sd->log2_chroma_w != cd->log2_chroma_w) return false;
     if (sd->log2_chroma_h != cd->log2_chroma_h) return false;
+    if (sd->comp[0].depth != cd->comp[0].depth || sd->comp[0].shift != cd->comp[0].shift) return false;
     if (numPlanes(src_fmt) != numPlanes(canvas_fmt) - 1) return false;
     return true;
 }
@@ -321,9 +317,15 @@ static int packedAlphaOffset(AVPixelFormat fmt) {
     return (a.depth == 8 && a.plane == 0) ? a.offset : -1;
 }
 
-static bool isRgbToNv12Convertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+// The fused RGB(A) path renders onto semiplanar YUV canvases (NV12, P210): two
+// planes, no alpha, interleaved Cb/Cr. Planar-chroma canvases reject packed RGB
+// sources instead of growing a third store path here. BT.709 SDR only.
+static bool isRgbToYuvConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
     int step, r, g, b;
-    return canvas_fmt == AV_PIX_FMT_NV12 && isPackedRgb8(src_fmt, step, r, g, b);
+    return cd && !(cd->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_ALPHA)) &&
+           cd->nb_components == 3 && numPlanes(canvas_fmt) == 2 &&
+           isPackedRgb8(src_fmt, step, r, g, b);
 }
 
 // Returns the plane index of the alpha component for planar formats, or -1 if there is none /
@@ -337,31 +339,40 @@ static int alphaPlaneIndex(AVPixelFormat fmt) {
     return max_plane > 0 ? max_plane : -1;
 }
 
-// Set a rectangular region of one plane to a constant byte value.
+// Set a rectangular region of one plane to a constant logical sample value.
+// Word-stored formats take the value below the storage shift (64, not 64 << 6)
+// and get a 16-bit memset; padding bits stay zero.
 static void fillPlaneRect(AVPixelFormat fmt, AVFrame *f, int plane,
-                           int lx, int ly, int lw, int lh, uint8_t value) {
+                           int lx, int ly, int lw, int lh, uint16_t value) {
     if (!f->data[plane] || f->linesize[plane] <= 0) return;
     int bx, by, bw, bh;
     lumaRectToPlaneRegion(fmt, lx, ly, lw, lh, plane, bx, by, bw, bh);
     if (bw <= 0 || bh <= 0) return;
     const size_t pitch = (size_t)f->linesize[plane];
-    CUdeviceptr base = (CUdeviceptr)(uintptr_t)f->data[plane];
-    CHECK_CU(cuMemsetD2D8(base + (CUdeviceptr)((size_t)by * pitch + (size_t)bx),
-                          (unsigned int)pitch, value, (size_t)bw, (size_t)bh));
+    CUdeviceptr base = (CUdeviceptr)(uintptr_t)f->data[plane] + (CUdeviceptr)((size_t)by * pitch + (size_t)bx);
+    if (sampleBytes(fmt) == 2)
+        CHECK_CU(cuMemsetD2D16(base, (unsigned int)pitch,
+                               (unsigned short)(value << storageShift(fmt)), (size_t)bw / 2, (size_t)bh));
+    else
+        CHECK_CU(cuMemsetD2D8(base, (unsigned int)pitch, (unsigned char)value, (size_t)bw, (size_t)bh));
 }
 
-static uint8_t blackLumaValue(const AVFrame *color_src) {
-    return color_src && color_src->color_range == AVCOL_RANGE_JPEG ? 0 : 16;
+static uint16_t blackLumaValue(AVPixelFormat fmt, const AVFrame *color_src) {
+    if (color_src && color_src->color_range == AVCOL_RANGE_JPEG)
+        return 0;
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
+    return (uint16_t)(16 << ((d ? d->comp[0].depth : 8) - 8));
 }
 
-static bool planeClearValue(AVPixelFormat fmt, const AVFrame *color_src, int plane, uint8_t &value) {
+static bool planeClearValue(AVPixelFormat fmt, const AVFrame *color_src, int plane, uint16_t &value) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(fmt);
     if (!d)
         return false;
+    const int depth = d->comp[0].depth;
 
     const int alpha_p = alphaPlaneIndex(fmt);
     if (plane == alpha_p) {
-        value = 255;
+        value = (uint16_t)((1 << depth) - 1);   // 10-bit opaque is 1023, not 255 << 2.
         return true;
     }
 
@@ -374,22 +385,18 @@ static bool planeClearValue(AVPixelFormat fmt, const AVFrame *color_src, int pla
         return true;
     }
 
-    if (fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_NV21) {
-        value = plane == 0 ? blackLumaValue(color_src) : 128;
-        return true;
-    }
-
     const int planes = numPlanes(fmt);
     if (planes == 1) {
         if (d->nb_components == 1) {
-            value = blackLumaValue(color_src);
+            value = blackLumaValue(fmt, color_src);
             return true;
         }
         // Packed YUV (e.g. yuyv422) requires a repeating Y/Cb/Y/Cr pattern.
         return false;
     }
 
-    value = (plane == 1 || plane == 2) ? 128 : blackLumaValue(color_src);
+    // Chroma sits on plane 1 (semiplanar NV12/NV21/P210) or planes 1-2 (planar).
+    value = (plane == 1 || plane == 2) ? (uint16_t)(1 << (depth - 1)) : blackLumaValue(fmt, color_src);
     return true;
 }
 
@@ -398,7 +405,7 @@ static bool fillFrameBlack(AVPixelFormat fmt, AVFrame *f, const AVFrame *color_s
     for (int p = 0; p < planes && p < AV_NUM_DATA_POINTERS; ++p) {
         if (!f->data[p])
             continue;
-        uint8_t value = 0;
+        uint16_t value = 0;
         if (!planeClearValue(fmt, color_src, p, value))
             return false;
         fillPlaneRect(fmt, f, p, 0, 0, f->width, f->height, value);
@@ -489,15 +496,15 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         const std::string image(avpl_rect_scale_ptx, avpl_rect_scale_ptx + avpl_rect_scale_ptx_len);
         if (CHECK_CU(cuModuleLoadDataEx(&scale_module_, image.c_str(), 0, nullptr, nullptr)) ||
             CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")) ||
-            CHECK_CU(cuModuleGetFunction(&rgb_kernel_, scale_module_, "rgb_to_nv12")) ||
-            CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_nv12")))
+            CHECK_CU(cuModuleGetFunction(&rgb_kernel_, scale_module_, "rgb_to_yuv")) ||
+            CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_yuv")))
             throw Error("cuda_rect_overlay: cannot load scaling kernel");
 #endif
     }
 
-    /// Draw a packed RGB source onto the NV12 canvas: one fused scale + colour
-    /// conversion pass, alpha-blended over what is already there when the layer
-    /// asks for it and the source carries alpha.
+    /// Draw a packed RGB source onto the semiplanar YUV canvas: one fused scale
+    /// + colour conversion pass, alpha-blended over what is already there when
+    /// the layer asks for it and the source carries alpha.
     void convertRgbLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer,
                          int step, int r_off, int g_off, int b_off, int a_off = -1) {
         ensureScaleKernel();
@@ -508,14 +515,20 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         int dx = layer.dst_x, dy = layer.dst_y;
         int dw = layer.dst_w > 0 ? layer.dst_w : layer.crop_w, dh = layer.dst_w > 0 ? layer.dst_h : layer.crop_h;
         int cw = canvas_w_, ch = canvas_h_;
+        const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(sw_fmt_);
+        int dst_sb = sampleBytes(sw_fmt_), dst_shift = storageShift(sw_fmt_);
+        int dst_scale = 1 << (cd->comp[0].depth - 8), sub_x = cd->log2_chroma_w, sub_y = cd->log2_chroma_h;
         CUdeviceptr source = (CUdeviceptr)src->data[0], luma = (CUdeviceptr)dst->data[0],
                     chroma = (CUdeviceptr)dst->data[1];
         int source_pitch = src->linesize[0], luma_pitch = dst->linesize[0], chroma_pitch = dst->linesize[1];
         void *opaque_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off,
-                               &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch};
+                               &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
+                               &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y};
         void *blend_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off, &a_off,
-                              &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch};
-        const int blocks_x = (dw + 1) / 2, blocks_y = (dh + 1) / 2;
+                              &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
+                              &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y};
+        const int bw = 1 << sub_x, bh = 1 << sub_y;
+        const int blocks_x = (dw + bw - 1) / bw, blocks_y = (dh + bh - 1) / bh;
         if (CHECK_CU(cuLaunchKernel(blend ? rgba_kernel_ : rgb_kernel_, (blocks_x + 31) / 32, (blocks_y + 7) / 8, 1,
                                     32, 8, 1, 0, stream, blend ? blend_args : opaque_args, nullptr)))
             throw Error("cuda_rect_overlay: RGB conversion launch failed");
@@ -523,27 +536,28 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
 
     void scaleLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer) {
         const auto *desc = av_pix_fmt_desc_get(sw_fmt_);
-        for (int c = 0; c < desc->nb_components; ++c)
-            if (desc->comp[c].depth != 8)
-                throw Error("cuda_rect_overlay: scaling currently requires 8-bit components");
+        int sample_bytes = sampleBytes(sw_fmt_), shift = storageShift(sw_fmt_);
         ensureScaleKernel();
         if (!scale_kernel_) throw Error("cuda_rect_overlay: scaling kernel unavailable");
         for (int p = 0; p < numPlanes(sw_fmt_); ++p) {
             if (!src->data[p]) continue; // Opaque input on an alpha canvas.
             int lanes = 1;
             for (int c = 0; c < desc->nb_components; ++c)
-                if (desc->comp[c].plane == p) lanes = std::max(lanes, desc->comp[c].step);
+                if (desc->comp[c].plane == p) lanes = std::max(lanes, desc->comp[c].step / sample_bytes);
             int sx, sy, sw, sh, dx, dy, dw, dh, cx, cy, cw, ch;
             lumaRectToPlaneRegion(sw_fmt_, layer.crop_x, layer.crop_y, layer.crop_w, layer.crop_h,
                                   p, sx, sy, sw, sh);
             lumaRectToPlaneRegion(sw_fmt_, layer.dst_x, layer.dst_y, layer.dst_w, layer.dst_h,
                                   p, dx, dy, dw, dh);
             lumaRectToPlaneRegion(sw_fmt_, 0, 0, canvas_w_, canvas_h_, p, cx, cy, cw, ch);
-            sx /= lanes; sw /= lanes; dx /= lanes; dw /= lanes; cw /= lanes;
+            // Region byte extents -> lane-group coordinates for the kernel.
+            const int group = lanes * sample_bytes;
+            sx /= group; sw /= group; dx /= group; dw /= group; cw /= group;
             CUdeviceptr source = (CUdeviceptr)src->data[p], destination = (CUdeviceptr)dst->data[p];
             int source_pitch = src->linesize[p], destination_pitch = dst->linesize[p];
             void *args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh,
-                            &destination, &destination_pitch, &dx, &dy, &dw, &dh, &cw, &ch, &lanes};
+                            &destination, &destination_pitch, &dx, &dy, &dw, &dh, &cw, &ch, &lanes,
+                            &sample_bytes, &shift};
             if (CHECK_CU(cuLaunchKernel(scale_kernel_, (dw + 31) / 32, (dh + 7) / 8, 1,
                                         32, 8, 1, 0, stream, args, nullptr)))
                 throw Error("cuda_rect_overlay: scaling launch failed");
@@ -589,7 +603,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         AVHWFramesContext *ctx = (AVHWFramesContext *)f.raw()->hw_frames_ctx->data;
         if (!ctx) return false;
         return ctx->sw_format == sw_fmt_ || isAlphaCompatible(ctx->sw_format, sw_fmt_) ||
-               isRgbToNv12Convertible(ctx->sw_format, sw_fmt_);
+               isRgbToYuvConvertible(ctx->sw_format, sw_fmt_);
     }
 
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f) {
@@ -721,7 +735,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 L.dst_x >= 0 && L.dst_y >= 0 && L.dst_x + L.dst_w <= canvas_w_ && L.dst_y + L.dst_h <= canvas_h_);
             const AVPixelFormat src_sw_fmt = frameSwFormat(*srcp);
             int rgb_step, r_off, g_off, b_off;
-            if (src_sw_fmt != sw_fmt_ && sw_fmt_ == AV_PIX_FMT_NV12 &&
+            if (src_sw_fmt != sw_fmt_ && isRgbToYuvConvertible(src_sw_fmt, sw_fmt_) &&
                 isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
                 convertRgbLayer(stream, srcp->raw(), outf.raw(), L, rgb_step, r_off, g_off, b_off,
                                 packedAlphaOffset(src_sw_fmt));
@@ -732,13 +746,15 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 throw Error("cuda_rect_overlay: GPU blit failed");
 
             // When a non-alpha source is drawn onto an alpha canvas, fill the destination
-            // alpha rect with 255 (fully opaque) so the output alpha is well-defined.
+            // alpha rect with the depth's opaque maximum so the output alpha is well-defined.
             if (src_sw_fmt != AV_PIX_FMT_NONE && src_sw_fmt != sw_fmt_) {
                 const int alpha_p = alphaPlaneIndex(sw_fmt_);
                 int x = L.dst_x, y = L.dst_y;
                 int w = sized ? L.dst_w : L.crop_w, h = sized ? L.dst_h : L.crop_h;
-                if (alpha_p >= 0 && clipRect(x, y, w, h, canvas_w_, canvas_h_))
-                    fillPlaneRect(sw_fmt_, outf.raw(), alpha_p, x, y, w, h, 255);
+                uint16_t opaque = 255;
+                if (alpha_p >= 0 && planeClearValue(sw_fmt_, nullptr, alpha_p, opaque) &&
+                    clipRect(x, y, w, h, canvas_w_, canvas_h_))
+                    fillPlaneRect(sw_fmt_, outf.raw(), alpha_p, x, y, w, h, opaque);
             }
         }
 

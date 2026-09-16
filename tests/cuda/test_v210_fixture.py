@@ -3,7 +3,8 @@ import struct
 import numpy as np
 import pytest
 
-from v210_fixture import frame_stride, pack_v210, sample_planes, write_fixture
+from v210_fixture import (FAMILIES, frame_stride, hlg_planes, manifest, pack_v210,
+                          sample_planes, sdr8_planes, write_fixture)
 
 
 def test_known_v210_words():
@@ -40,3 +41,32 @@ def test_simulated_frames_change(tmp_path):
     data = path.read_bytes()
     assert len(data) == 2 * stride * 7
     assert data[:stride * 7] != data[stride * 7:]
+
+
+def test_hlg_checkpoints_and_range():
+    y, u, v = hlg_planes(96, 8, index=3)
+    # BT.2100 transfer checkpoints: E = 0, 1/12, 1 -> Y' = 0, 0.5, ~1.0.
+    for i, code in enumerate((64, 502, 940)):
+        np.testing.assert_array_equal(y[:2, 12 * i:12 * (i + 1)], code)
+        np.testing.assert_array_equal(u[:2, 6 * i:6 * (i + 1)], 512)
+        np.testing.assert_array_equal(v[:2, 6 * i:6 * (i + 1)], 512)
+    assert y.min() >= 64 and y.max() <= 940
+    for c in (u, v):
+        assert c.min() >= 64 and c.max() <= 960
+    assert not np.array_equal(y, hlg_planes(96, 8, index=4)[0])
+
+
+def test_sdr8_promotion_is_shifted_8bit():
+    for plane, hi in zip(sdr8_planes(48, 5, index=2), (940, 960, 960)):
+        assert not np.any(plane & 3), "promoted samples must be multiples of four"
+        assert plane.min() >= 64 and plane.max() <= hi
+
+
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+def test_families_pack_and_manifest(tmp_path, family):
+    path = tmp_path / f"{family}.v210"
+    stride = write_fixture(path, 48, 4, 2, family=family, source=1)
+    assert path.stat().st_size == 2 * stride * 4
+    m = manifest(48, 4, 2, stride, family)
+    assert m["frame_bytes"] == stride * 4 and m["chroma_location"] == "left"
+    assert (m["color_trc"] == "arib-std-b67") == (family == "hlg")

@@ -561,6 +561,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
         cache_wipes_mb=options.wipe_cache_mb or None,
+        working_format=options.working_format,
     )
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
@@ -650,6 +651,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
         cache_wipes_mb=options.wipe_cache_mb or None,
+        working_format=options.working_format,
     )
     aliases = cfg.alias_counts
     input_edges: list[str] = []
@@ -730,6 +732,9 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     )
     parser.add_argument("--remote-control-port", type=int, default=7777)
     parser.add_argument("--codec", default="h264_nvenc")
+    parser.add_argument("--working-format", default="nv12",
+                        help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 "
+                             "(encoded outputs then need an explicit output conversion)")
     parser.add_argument("--bitrate", default="8M")
     parser.add_argument(
         "--fps",
