@@ -67,6 +67,11 @@ class Rendition:
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
     preset: str = "p5"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
+    # "" = HDR passthrough (keep the working format's depth/transfer). An operator
+    # name (hable/mobius/reinhard/...) tone-maps the HDR program to BT.709 SDR
+    # 8-bit via tonemap_cuda before encoding (e.g. an SDR H.264 delivery).
+    tonemap: str = ""
+    tonemap_peak: float = 10.0       # source peak in REFERENCE_WHITE units (HLG 1000 nits)
 
     @property
     def aspect(self) -> str:
@@ -243,7 +248,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             int(r.get("width", canvas_w)), int(r.get("height", canvas_h)),
             int(r.get("fps", fps)), int(r.get("bitrate_kbps", 3000)),
             str(r.get("codec", "hevc_nvenc")), str(r.get("profile", "")),
-            str(r.get("preset", "p5")), int(r.get("port", 0)))
+            str(r.get("preset", "p5")), int(r.get("port", 0)),
+            str(r.get("tonemap", "")), float(r.get("tonemap_peak", 10.0)))
         if rendition.width <= 0 or rendition.height <= 0:
             raise ConfigError(f"{where}: width and height must be positive")
         if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:

@@ -491,6 +491,12 @@ def _encode_format(working_format: str, codec: str) -> str:
     return "p010le" if (ten_bit and "hevc" in codec) else "nv12"
 
 
+# Map a canvas transfer tag to tonemap_cuda's input-transfer option.
+_TONEMAP_TRANSFER = {"arib-std-b67": "hlg", "smpte2084": "pq"}
+_SDR_COLOR = {"color_trc": "bt709", "color_primaries": "bt709",
+              "colorspace": "bt709", "color_range": "tv"}
+
+
 def _nv12_program_edge(avp, api, working_format: str, mixer_edge: str) -> str:
     """Encoded outputs stay 8-bit H.264 for now: one zero-copy GPU conversion
     feeds them NV12 while the program edge keeps the 10-bit working format for
@@ -628,16 +634,25 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                                "group": OUTPUT_GROUP, "on_error": "panic"}))
     listener = None
     for rendition, edge in zip(cfg.renditions, edges):
-        # One GPU pass converts the P210 program to this encoder's format
-        # (P010 for HEVC Main10 keeps 10-bit; NV12 for H.264/8-bit) and resizes.
-        enc_format = _encode_format(cfg.working_format, rendition.codec)
-        resize = (f"scale_cuda=w={rendition.width}:h={rendition.height}:format={enc_format}"
-                  if (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
-                  else f"scale_cuda=format={enc_format}")
+        resized = (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
+        wh = f"w={rendition.width}:h={rendition.height}:" if resized else ""
+        if rendition.tonemap:
+            # HDR program -> SDR: scale/convert to P010, then tonemap_cuda to
+            # BT.709 SDR NV12 (zero-copy) before an 8-bit encoder.
+            t = _TONEMAP_TRANSFER.get(cfg.out_color_trc, "hlg")
+            graph = (f"scale_cuda={wh}format=p010le,"
+                     f"tonemap_cuda=transfer={t}:tonemap={rendition.tonemap}:peak={rendition.tonemap_peak}")
+            enc_format, out_color = "nv12", _SDR_COLOR
+        else:
+            # HDR passthrough: convert to the encoder's format (P010 for Main10,
+            # NV12 for 8-bit) keeping the program's depth/transfer.
+            enc_format = _encode_format(cfg.working_format, rendition.codec)
+            graph = f"scale_cuda={wh}format={enc_format}"
+            out_color = cfg.out_color
         scaled = f"program_scaled_{rendition.id}"
         avp.addNode(api.FilterVideo({
             "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
-            "graph": resize, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            "graph": graph, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
         }))
         if rendition.target == "janus":
             listener = build_janus_output(
@@ -653,7 +668,7 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                 fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
                 hwaccel=HWACCEL, group=OUTPUT_GROUP,
                 codec=rendition.codec, profile=rendition.profile, preset=rendition.preset,
-                enc_format=enc_format, color=cfg.out_color,
+                enc_format=enc_format, color=out_color,
             )
         else:
             _build_record_output(avp, api, replace(options, output=rendition.target,
