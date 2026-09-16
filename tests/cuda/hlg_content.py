@@ -61,10 +61,43 @@ def frame_planes(width, height, index, frames, source):
     return y, cb, cr
 
 
-def write(path, width, height, frames, source):
+def comparison_planes(width, height, index, frames, source=0):
+    """A smooth, low-frequency gradient with no specular highlight and no hard
+    edges: dark-to-mid luminance plus a gentle hue drift, the range where 8-bit
+    quantisation bands most visibly. Same content at 10-bit vs 8-bit shows the
+    contouring difference directly. Seamless in phase."""
+    theta = TAU * index / frames
+    u = np.broadcast_to((np.arange(width, dtype=np.float64) / (width - 1))[None, :], (height, width))
+    v = np.broadcast_to((np.arange(height, dtype=np.float64) / (height - 1))[:, None], (height, width))
+    base = 0.5 + 0.5 * np.sin(TAU * (0.5 * u + 0.3 * v) + theta)   # smooth 0..1
+    lum = 0.02 + 0.45 * base                                        # dark->mid linear
+    a = TAU * (0.2 * u) + theta
+    r = np.clip(lum * (0.7 + 0.3 * np.sin(a)), 0, 1)
+    g = np.clip(lum * (0.7 + 0.3 * np.sin(a + TAU / 3)), 0, 1)
+    b = np.clip(lum * (0.7 + 0.3 * np.sin(a + 2 * TAU / 3)), 0, 1)
+    rp, gp, bp = hlg_oetf(r), hlg_oetf(g), hlg_oetf(b)
+    yp = 0.2627 * rp + 0.6780 * gp + 0.0593 * bp
+    y = np.rint(876 * yp + 64).astype("<u2")
+    cb = np.rint(896 * (bp - yp) / 1.8814 + 512).astype("<u2")[:, 0::2]
+    cr = np.rint(896 * (rp - yp) / 1.4746 + 512).astype("<u2")[:, 0::2]
+    return y, cb, cr
+
+
+def quantize8(planes):
+    """Drop to 8-bit precision inside the 10-bit container: round each code to
+    the nearest multiple of four. Same pattern, but it bands like 8-bit."""
+    return tuple(np.clip((np.rint(p / 4.0) * 4), 0, 1023).astype("<u2") for p in planes)
+
+
+def write(path, planes_fn, width, height, frames, source, eight_bit=False):
     with Path(path).open("wb") as stream:
         for i in range(frames):
-            stream.write(pack_v210(frame_planes(width, height, i, frames, source)))
+            planes = planes_fn(width, height, i, frames, source)
+            if eight_bit:
+                planes = quantize8(planes)
+            stream.write(pack_v210(planes))
+    print(f"wrote {path} ({frames} frames, seamless {frames/60:.1f}s loop"
+          f"{', 8-bit quantised' if eight_bit else ''})", flush=True)
 
 
 def main():
@@ -74,12 +107,20 @@ def main():
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--frames", type=int, default=300)
     p.add_argument("--sources", type=int, default=4)
+    p.add_argument("--pattern", choices=("motion", "comparison"), default="motion")
     args = p.parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
+    if args.pattern == "comparison":
+        # One smooth gradient, written at 10-bit and 8-bit for a side-by-side.
+        base = f"{args.width}x{args.height}_{args.frames}f"
+        write(args.outdir / f"hlgcompare10_{base}.v210", comparison_planes,
+              args.width, args.height, args.frames, 0, eight_bit=False)
+        write(args.outdir / f"hlgcompare8_{base}.v210", comparison_planes,
+              args.width, args.height, args.frames, 0, eight_bit=True)
+        return
     for s in range(args.sources):
         path = args.outdir / f"hlgmotion{s}_{args.width}x{args.height}_{args.frames}f.v210"
-        write(path, args.width, args.height, args.frames, s)
-        print(f"wrote {path} ({args.frames} frames, seamless {args.frames/60:.1f}s loop)", flush=True)
+        write(path, frame_planes, args.width, args.height, args.frames, s)
 
 
 if __name__ == "__main__":
