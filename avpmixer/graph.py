@@ -243,6 +243,9 @@ class MixerGraphBuilder:
         After build, it also emits ``mixer.scene`` so runtime policies can
         reuse generic scene names with different source-slot assignments.
         """
+        sources = {source: ({**spec, "graph": self._normalized_graph(spec["graph"])}
+                            if spec.get("graph") else dict(spec))
+                   for source, spec in sources.items()}
         unknown = [s for s in sources if s not in self._source_index]
         if unknown:
             raise ValueError(f"Scene '{name}' references unknown source(s): {unknown}")
@@ -255,6 +258,14 @@ class MixerGraphBuilder:
         if self._built:
             self.avp.executeCommandsFromString(self._scene_command(name, scene))
         return self
+
+    def _normalized_graph(self, graph: str) -> str:
+        """Per-source chains must emit the working format: NVDEC/browser-scaled
+        NV12 promotes explicitly (e.g. to P210) with one GPU conversion pass.
+        Chains already choosing a format, and passthrough sources, are kept."""
+        if not graph or self.working_format == "nv12" or "format=" in graph:
+            return graph
+        return f"{graph},scale_cuda=format={self.working_format}"
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
         """Declare which scene starts on PGM.
@@ -467,6 +478,7 @@ class MixerGraphBuilder:
                 f"scale_cuda=w={self.canvas_w}:h={self.canvas_h}:interp_algo=lanczos"
             )
             default_graph = fallback_graph if src.default_graph is None else src.default_graph
+            default_graph = self._normalized_graph(default_graph)
             if not default_graph:
                 continue
 

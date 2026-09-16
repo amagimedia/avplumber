@@ -482,21 +482,25 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
     }))
 
 
+def _nv12_program_edge(avp, api, options: GraphOptions, mixer_edge: str) -> str:
+    """Encoded outputs stay 8-bit H.264 for now: one zero-copy GPU conversion
+    feeds them NV12 while the program edge keeps the 10-bit working format for
+    raw taps and future Main10/MXL branches. Call once per application."""
+    if options.working_format == "nv12":
+        return mixer_edge
+    avp.addNode(api.FilterVideo({
+        "name": "program_to_nv12",
+        "src": mixer_edge,
+        "dst": "program_nv12",
+        "graph": "scale_cuda=format=nv12",
+        "hwaccel": HWACCEL,
+        "group": OUTPUT_GROUP,
+    }))
+    return "program_nv12"
+
+
 def _build_outputs(avp, api, options: GraphOptions, mixer_edge: str, *,
                    width: int = CANVAS_WIDTH, height: int = CANVAS_HEIGHT):
-    if options.working_format != "nv12":
-        # Encoded outputs stay 8-bit H.264 for now: one zero-copy GPU
-        # conversion feeds them NV12 while the program edge keeps the 10-bit
-        # working format for raw taps and future Main10/MXL branches.
-        avp.addNode(api.FilterVideo({
-            "name": "program_to_nv12",
-            "src": mixer_edge,
-            "dst": "program_nv12",
-            "graph": "scale_cuda=format=nv12",
-            "hwaccel": HWACCEL,
-            "group": OUTPUT_GROUP,
-        }))
-        mixer_edge = "program_nv12"
     record_edge = mixer_edge
     janus_edge = mixer_edge
     if options.output and options.janus_output:
@@ -583,7 +587,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     mixer_edge = mixer.build()
-    rtcp_feedback_listener = _build_outputs(avp, api, options, mixer_edge)
+    rtcp_feedback_listener = _build_outputs(
+        avp, api, options, _nv12_program_edge(avp, api, options, mixer_edge))
     return MixerApplication(
         avp=avp,
         mixer=mixer,
@@ -699,7 +704,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
     settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
-    mixer_edge = mixer.build()
+    mixer_edge = _nv12_program_edge(avp, api, options, mixer.build())
     if cfg.renditions:
         rtcp_feedback_listener = _build_renditions(avp, api, options, cfg, mixer_edge)
     else:
