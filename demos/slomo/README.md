@@ -71,8 +71,14 @@ undersized): **51%** — every source frame duplicated, hence judder.
   shim; it's not obvious.
 - Fp16 quality on Ada matches fp32 within noise; fp32 costs 2× memory
   for no benefit.
-- 1080p engine is fixed at 1088×1920 (padded to a multiple of 32).
-  Other resolutions need a re-export with the matching H/W.
+- The engine is fixed at one resolution, padded up to a multiple of
+  **64** (1080p → 1088×1920, 1440p → 1472×2560). Other resolutions need
+  a re-export with the matching H/W; `rife_vfi` reads the expected size
+  off the engine and falls back to passthrough on a mismatch.
+- A non-1080p source also needs explicit `width`/`height` on the
+  `fake_video_format` node — it defaults to 1920×1080 and `enc_video`
+  takes its size from there, so the output is silently mis-sized
+  otherwise. The examples below are all 1080p and don't show this.
 
 ## Compute cost
 

@@ -45,7 +45,13 @@ class RIFEExport(nn.Module):
 
 wrap = RIFEExport(model).eval().cuda()
 
-H, W = 1088, 1920
+# Export resolution. Must be multiples of 64: IFNet's coarsest pyramid level is
+# 1/16 and its blocks downsample by a further 4, so anything else makes the flow
+# come back at a different size than the image it warps (1440 -> 1472 mismatch).
+# 1088x1920 = 1080p padded; 1472x2560 = 1440p padded.
+H = int(os.environ.get("RIFE_H", 1088))
+W = int(os.environ.get("RIFE_W", 1920))
+assert H % 64 == 0 and W % 64 == 0, f"H and W must be multiples of 64, got {H}x{W}"
 img0 = torch.rand(1, 3, H, W, device="cuda", dtype=torch.float16)
 img1 = torch.rand(1, 3, H, W, device="cuda", dtype=torch.float16)
 ts = torch.tensor([[[[0.5]]]], device="cuda", dtype=torch.float16)
@@ -53,7 +59,7 @@ with torch.no_grad():
     out = wrap(img0, img1, ts)
 print("sanity forward ok:", out.shape, out.dtype)
 
-out_path = "/root/rife426/rife_v4.26_fp16.onnx"
+out_path = os.environ.get("RIFE_ONNX", "/root/rife426/rife_v4.26_fp16.onnx")
 for p in [out_path, out_path + ".data"]:
     try: os.remove(p)
     except FileNotFoundError: pass
