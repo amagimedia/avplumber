@@ -641,7 +641,8 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
             # BT.709 SDR NV12 (zero-copy) before an 8-bit encoder.
             t = _TONEMAP_TRANSFER.get(cfg.out_color_trc, "hlg")
             graph = (f"scale_cuda={wh}format=p010le,"
-                     f"tonemap_cuda=transfer={t}:tonemap={rendition.tonemap}:peak={rendition.tonemap_peak}")
+                     f"tonemap_cuda=transfer={t}:tonemap={rendition.tonemap}:peak={rendition.tonemap_peak}"
+                     f":desat={rendition.tonemap_desat}")
             enc_format, out_color = "nv12", _SDR_COLOR
         else:
             # HDR passthrough: convert to the encoder's format (P010 for Main10,
