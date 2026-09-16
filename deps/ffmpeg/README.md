@@ -22,9 +22,7 @@ This command creates a separate image; it does not replace a running container.
 avcpp and avplumber must be rebuilt against the selected FFmpeg libraries.
 Keep the current avcpp revision unless a verified compatibility issue requires
 a change. The mixer graph remains 8-bit NV12; this port does not add MXL or
-10-bit composition. AVPlumber's [v210 upload node](../../doc/v210_to_cuda.md)
-can feed raw 10-bit 4:2:2 into the 8.1 CUDA frame/scaling path, independently
-of the mixer and without another FFmpeg patch.
+10-bit composition.
 
 Each version's `base.env` pins the upstream commit, patched tree and patch count.
 Verify either series without changing the source checkout's branch:
