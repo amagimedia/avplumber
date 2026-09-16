@@ -33,15 +33,17 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeHint};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::grain::{Grain, PacketExt};
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{CatalogStream, PacketSpec, Spec, StreamSelection};
-use avplumber_f7k::graph::timebase::{MILLISECONDS, rescale};
+use avplumber_f7k::graph::timebase::MILLISECONDS;
+use avplumber_f7k::graph::timestamp::rescale;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::error::{av_error, code_of, is_eagain};
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, BlockingNode, Parked};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, BlockingNode, Parked};
 use avplumber_f7k::services::playback::{
     Playback, ReadPlan, Reposition, SeekIndex, SeekTo, SourceId,
 };
@@ -369,7 +371,7 @@ impl BlockingNode for StreamInput {
         }
     }
 
-    fn step(&self) -> Result<Blocked, NodeError> {
+    fn step(&self) -> Result<Processed, NodeError> {
         let out = self.io.output()?;
         let mut guard = self.state.lock().unwrap();
         let state = guard.as_mut().ok_or_else(|| {
@@ -378,17 +380,17 @@ impl BlockingNode for StreamInput {
         })?;
 
         if self.interrupt.should_end() {
-            return Ok(Blocked::Done);
+            return Ok(Processed::Done);
         }
 
         // EOF already announced, `stop_delay` running down.
         if let Some(finish_at) = state.finish_at_us {
             if now_us() >= finish_at {
                 log::info!("{}: stop_delay elapsed, finishing input", self.io.name);
-                return Ok(Blocked::Done);
+                return Ok(Processed::Done);
             }
             self.io.wait(10);
-            return Ok(Blocked::Again);
+            return Ok(Processed::Again);
         }
 
         self.serve_hints(state, &out)?;
@@ -414,12 +416,12 @@ impl BlockingNode for StreamInput {
                 let plan = seekable.playback.plan_tail(seekable.id, state.last_pos);
                 return Ok(self
                     .follow_plan(seekable, state, &out, plan)?
-                    .unwrap_or(Blocked::Again));
+                    .unwrap_or(Processed::Again));
             }
             Err(error) => {
                 if self.interrupt.should_end() {
                     log::info!("{}: read interrupted by stop", self.io.name);
-                    return Ok(Blocked::Done);
+                    return Ok(Processed::Done);
                 }
                 if self.interrupt.take_timed_out() {
                     return Err(self.io.error(
@@ -433,7 +435,7 @@ impl BlockingNode for StreamInput {
                 // Unlike C++, which throws on every non-EOF code: a device that
                 // has nothing right now is not a failure.
                 if code_of(&error).is_some_and(is_eagain) {
-                    return Ok(Blocked::Again);
+                    return Ok(Processed::Again);
                 }
                 return Err(self.io.error(
                     NodePhase::Process,
@@ -444,11 +446,11 @@ impl BlockingNode for StreamInput {
 
         if packet.is_corrupt() {
             log::warn!("{}: got incomplete packet, dropping", self.io.name);
-            return Ok(Blocked::Again);
+            return Ok(Processed::Again);
         }
         if !packet.ts().is_valid() && !packet.dts().is_valid() {
             log::warn!("{}: got packet without PTS & DTS, dropping", self.io.name);
-            return Ok(Blocked::Again);
+            return Ok(Processed::Again);
         }
 
         // libavformat leaves `pkt.time_base` unset; everything downstream reads
@@ -479,7 +481,7 @@ impl BlockingNode for StreamInput {
             state.last_pos = Some(packet.pos as u64);
         }
 
-        self.io.push_with(&out, Media::Packet(packet), || {
+        self.io.push_with(&out, Grain::Packet(packet), || {
             // The anti-deadlock rule: a producer with no room still answers the
             // question its consumer is parked on.
             self.serve_hints(state, &out)?;
@@ -505,7 +507,7 @@ impl StreamInput {
         state: &mut State,
         out: &Arc<dyn Edge>,
         plan: ReadPlan,
-    ) -> Result<Option<Blocked>, NodeError> {
+    ) -> Result<Option<Processed>, NodeError> {
         match plan {
             ReadPlan::Continue => Ok(None),
             ReadPlan::Idle => {
@@ -519,7 +521,7 @@ impl StreamInput {
                     out.push_event(EdgeEvent::Drain);
                 }
                 self.io.wait(50);
-                Ok(Some(Blocked::Again))
+                Ok(Some(Processed::Again))
             }
             ReadPlan::Reposition(Reposition { to, discontinuity }) => {
                 state.drained_here = false;
@@ -683,19 +685,19 @@ impl StreamInput {
         );
     }
 
-    fn on_eof(&self, state: &mut State, out: &Arc<dyn Edge>) -> Result<Blocked, NodeError> {
+    fn on_eof(&self, state: &mut State, out: &Arc<dyn Edge>) -> Result<Processed, NodeError> {
         log::info!("{}: end of input", self.io.name);
         if let Some(delay_ms) = self.params.stop_delay {
             // C++ sends the EOF marker here regardless of eof_mode.
             self.send_eof_once(state, out);
             state.finish_at_us = Some(now_us().saturating_add(delay_ms.saturating_mul(1000)));
             log::info!("{}: delaying finish by {delay_ms} ms", self.io.name);
-            return Ok(Blocked::Again);
+            return Ok(Processed::Again);
         }
         if self.eof_drain {
             self.send_eof_once(state, out);
         }
-        Ok(Blocked::Done)
+        Ok(Processed::Done)
     }
 
     fn send_eof_once(&self, state: &mut State, out: &Arc<dyn Edge>) {

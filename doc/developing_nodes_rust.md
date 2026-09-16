@@ -4,7 +4,7 @@ This is the Rust counterpart of [developing_nodes.md](developing_nodes.md). Read
 the [README](../README.md) first: it explains what a node, an edge, a group and
 a script are, and none of that is repeated here. The design behind the Rust core
 is in [specs/rust-refactor/](specs/rust-refactor/); you do not need it to write
-a node, but `rust_refactor_native_core.md` is where the *why* of `Spec`, `Media`
+a node, but `rust_refactor_native_core.md` is where the *why* of `Spec`, `Grain`
 and `NodeBody` lives.
 
 The guide is organised the way a node file is: where it lives, how it is
@@ -15,7 +15,8 @@ to extract, and what to leave alone.
 ## Two crates, one direction of dependency
 
 - `avplumber_f7k` is the framework: graph, edges, executors, supervisor, the
-  control protocol, the libav helpers and the node-authoring scaffold.
+  control protocol, the libav helpers and the node-authoring helpers in
+  `node_api`.
 - `avplumber_nodes` holds the media nodes, one node (or one family of nodes that
   share parameters, like `dec_video`/`dec_audio`) per file.
 
@@ -43,17 +44,18 @@ which is one of three things:
 
 | `NodeKind` | body | runs on | one step returns |
 |---|---|---|---|
-| `Blocking` | `FnMut() -> Result<Blocked, NodeError>` | its own OS thread | `Blocked::{Again, Done}` |
-| `Poll` | `FnMut(&mut NodePollContext) -> Result<Tick, NodeError>` | a shared event loop | `Tick::{Again, Idle, Done}` |
+| `Blocking` | `FnMut() -> Result<Processed, NodeError>` | its own OS thread | `Processed::{Again, Done}` |
+| `Poll` | `FnMut(&mut NodePollContext) -> Result<Polled, NodeError>` | a shared event loop | `Polled::{Again, Idle, Done}` |
 | `Async` | a future | the same event loop | when it completes |
 
 A node implements neither `Node` nor a body. It implements one of three smaller
-traits from `avplumber_f7k::scaffold`, and is registered behind the matching
+traits from `avplumber_f7k::node_api`, and is registered behind the matching
 newtype:
 
 | you write | you register | the wrapper supplies |
 |---|---|---|
 | `impl InputHandler` + `impl SingleInput` for `X` | `type Node = Blocking<X>` | everything the row below supplies, plus the whole read loop: which hook each item on the input calls, forwarding of the control events, pushing what a hook produced |
+| `impl InputHandler` + `impl PollInput` for `X` | `type Node = Polling<X>` | the Poll sibling of the row above: the same reactions, plus an output stash on `PollIo` |
 | `impl BlockingNode for X` | `type Node = Blocking<X>` | name, kind, pads, edge binding, park reset on start, park wake on interrupt, `process` |
 | `impl PollNode for X` | `type Node = Polling<X>` | name, kind, pads, edge binding, the Direct-edge opt-in, `poll` |
 
@@ -75,7 +77,7 @@ here it is composition, because a newtype can be given a `Node` impl without
 the node traits colliding.
 
 If you find yourself implementing `Node` directly for a media node, stop and
-check what the scaffold is missing. Implementing it by hand is legitimate for
+check what `node_api` is missing. Implementing it by hand is legitimate for
 test fixtures and for adapters (`FfiNode` wraps a C vtable that way), not for
 a node that reads or writes media.
 
@@ -94,7 +96,7 @@ a fallback.
 
 **Poll** is for a body that never waits: it takes what is there, pushes what it
 can, and when it cannot proceed it tells the `NodePollContext` what it is waiting
-for and returns `Tick::Idle`. Several such nodes share one event loop thread, so
+for and returns `Polled::Idle`. Several such nodes share one event loop thread, so
 a chain of them passes buffers without a context switch. `mux` and `demux` are
 poll nodes: they only move packets between edges and never touch libav.
 
@@ -108,7 +110,7 @@ does not make it is rejected. Make the promise only when `step` cannot return
 "unexpected item" arms that fail. A fallible poll node works everywhere else
 and is what most poll nodes are.
 
-The `Async` kind has an executor but no scaffold yet. `SisoAsyncAdapter` shows
+The `Async` kind has an executor but no `node_api` adapter yet. `SisoAsyncAdapter` shows
 what implementing `Node` for it looks like; use it only when `select!` over two
 inputs or an input plus a clock is genuinely what the node does.
 
@@ -165,9 +167,9 @@ impl InputHandler for NullSink {
         Ok(None)
     }
 
-    fn on_buffer(&self, _buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, _buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         self.counters.buffers.fetch_add(1, Ordering::Relaxed);
-        Ok(None)
+        Ok(Vec::new())
     }
 }
 
@@ -226,7 +228,7 @@ interior mutability, typically one `Mutex<State>` locked where it is used:
 let state = &mut *self.state.lock().unwrap();
 ```
 
-That line is the node's, not the scaffold's: every hook takes `&self`, and
+That line is the node's, not `node_api`'s: every hook takes `&self`, and
 what a node does inside is its own business. One `Mutex<State>` locked per hook
 is the common shape (the codec nodes), a handful of atomics is another
 (`null_sink`), several fields with their own locks a third. The framework
@@ -273,7 +275,7 @@ rather than reaching into the slots:
 |---|---|
 | `self.io.input()?` / `self.io.output()?` | the bound edge, or a `NodeError` — an unbound pad is a script mistake and fails the group |
 | `self.io.error(phase, msg)` | a `NodeError` carrying this node's name |
-| `self.io.push(&out, buffer)?` | blocking only: push, parking for room; `Blocked::Done` when interrupted or the edge closed |
+| `self.io.push(&out, buffer)?` | blocking only: push, parking for room; `Processed::Done` when interrupted or the edge closed |
 | `self.io.push_with(&out, buffer, \|\| ...)` | the same, running the closure on every wake while parked (see *hints* below) |
 | `self.io.is_interrupted()` | blocking only: a stop landed; return `Done` rather than block again |
 | `self.io.wait(ms)` | blocking only: an interruptible sleep, for "libav wants time, not data" |
@@ -294,7 +296,7 @@ slot on that side stays empty.
 
 ## The blocking body: reactions, not a loop
 
-A `SingleInput` never reads its edge. The scaffold's loop does, once per step:
+A `SingleInput` never reads its edge. The `SingleInput` loop does, once per step:
 
 1. return `Done` if a stop has landed;
 2. call `before_take`, and make its answer the step's result if it has one;
@@ -331,19 +333,19 @@ impl InputHandler for Encoder {
         // Open, or reopen if the format changed; answer with the codec parameters.
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         self.load(state, buffer);
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn on_flush(&self) {
         // flush_buffers, reset the pump, forget the timestamps.
     }
 
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
+    fn on_eof(&self) -> Result<Processed, NodeError> {
         // Start the drain; `before_take` finishes it.
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 
     fn on_closed(&self) {
@@ -356,7 +358,7 @@ impl SingleInput for Encoder {
     fn pads(&self) -> NodePads { NodePads::siso(self.media, AvpMediaType::PACKET) }
     fn start(&self) { /* reset counters; the open codec survives */ }
 
-    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+    fn before_take(&self) -> Result<Option<Processed>, NodeError> {
         // Emit what the pump holds; after the drain forward `Eof` and finish;
         // drive a codec that refused its last input, waiting if it stalled.
     }
@@ -368,9 +370,10 @@ The rules that follow from the loop:
 - **A hook returns what the loop forwards; it does not push.** `on_spec`
   returns the spec to publish (the encoder's codec parameters) or `None` when
   it is not known yet (the decoder reads it off the first frame). `on_buffer`
-  returns the buffer to push, or `None` for a consumer, or for a codec whose
-  output appears later. The one push a node writes itself is in `before_take`,
-  through `self.io.push`, because that is where a codec's output shows up.
+  returns the buffers to push: empty for a consumer, or for a codec whose
+  output appears later; one to forward; several when one input becomes many.
+  The one push a node writes itself is in `before_take`, through
+  `self.io.push`, because that is where a codec's output shows up.
 - **`before_take` is for output that is not a reaction to an input**: a codec's
   pending frames, the drain after `Eof`, a retry of an input the codec refused.
   `Some` makes it the step's result and skips the read.
@@ -403,7 +406,7 @@ implement `SisoNode` (`on_spec`, `process`, `on_flush`) and register
 ## The poll body
 
 ```rust
-fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
     let input = self.io.input()?;
     let out = self.io.output()?;
     let state = &mut *self.state.lock().unwrap();
@@ -415,21 +418,21 @@ fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
             Err((Push::Full, buffer)) => {
                 state.pending = Some(buffer);
                 ctx.wait_writable(out);
-                return Ok(Tick::Idle);
+                return Ok(Polled::Idle);
             }
-            Err((Push::Closed, _)) => return Ok(Tick::Done),
+            Err((Push::Closed, _)) => return Ok(Polled::Done),
         }
     }
     // 2. Then one item from the input, without waiting.
     let Some(item) = input.try_take() else {
         if input.is_closed() {
-            return Ok(Tick::Done);
+            return Ok(Polled::Done);
         }
         ctx.wait_readable(input);
-        return Ok(Tick::Idle);
+        return Ok(Polled::Idle);
     };
     // 3. Classify and emit, stashing on `Full` exactly as above.
-    Ok(Tick::Again)
+    Ok(Polled::Again)
 }
 ```
 
@@ -516,7 +519,7 @@ The rule in `AGENTS.md` is *no copy-paste between nodes*. In practice the
 question is always "where does the shared piece live", and there are four
 answers:
 
-1. **The scaffold** (`avplumber_f7k/src/scaffold/`): anything about being a
+1. **`node_api`** (`avplumber_f7k/src/node_api/`): anything about being a
    node — edges, parking, pushing, name, hooks. If two nodes have the same
    `impl` block modulo their own state, the block belongs here. This is how
    `Blocking`/`Polling` came to exist (five nodes had the same seven methods),
@@ -603,13 +606,13 @@ Three levels, each with an example to copy:
   start the group, wait for the outcome. This is the only test that proves the
   parameter names, the envelope keys and the pad binding all agree.
 
-The framework's `testing` feature exposes `graph::media::test_media`, a stub
+The framework's `testing` feature exposes `graph::grain::test_media`, a stub
 buffer carrying only a media type and a timestamp, so a unit test of a node
 that does not inspect pixels needs no FFmpeg at all. The nodes crate enables it
 as a dev-dependency.
 
 Run the tests in every feature configuration the change touches: the default
-build (no libav, `Media::Stub`), `--features async` (the poll executor and
+build (no libav, `Grain::Stub`), `--features async` (the poll executor and
 Direct-edge tests only exist there) and an `ffmpegN` selector matching the
 FFmpeg you link against. Several substrate suites are `cfg(not(feature =
 "ffmpeg"))` and only run in the default build.

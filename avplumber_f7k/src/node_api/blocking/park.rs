@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::graph::edge::{Edge, EdgeWaker, Push};
 use crate::graph::error::NodeError;
-use crate::graph::media::Media;
+use crate::graph::grain::Grain;
 
 /// A blocking node's own condvar: what it waits on when it cannot proceed, and
 /// what an edge wake or [`Node::interrupt`](crate::graph::node::Node::interrupt)
@@ -147,7 +147,7 @@ pub enum Parked {
 pub fn push_blocking(
     park: &Arc<Park>,
     edge: &Arc<dyn Edge>,
-    buffer: Media,
+    buffer: Grain,
     mut while_parked: impl FnMut() -> Result<Parked, NodeError>,
 ) -> Result<Pushed, NodeError> {
     let mut buffer = buffer;

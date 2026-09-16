@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::error::NodeError;
-use avplumber_f7k::graph::media::Media;
+use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
 use avplumber_f7k::{Instance, control};
 
 /// UTC of media time 0 in the history the player writes: 2026-08-10T12:00:00Z.
@@ -72,8 +72,8 @@ impl InputHandler for Capture {
         Ok(None)
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
-        if let Media::Video(frame) = &buffer {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
+        if let Grain::Video(frame) = &buffer {
             let hash = super::fnv1a(&super::frame_bytes(frame));
             log::debug!(
                 "{}: captured hash {hash:016x} at pts {}",
@@ -82,7 +82,7 @@ impl InputHandler for Capture {
             );
             self.seen.lock().unwrap().frames.push((hash, frame.pts));
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 }
 

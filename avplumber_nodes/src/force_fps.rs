@@ -2,13 +2,13 @@
 //! arrives early is dropped, a gap is filled by repeating the last frame on the
 //! grid. Port of C++ `src/nodes/force_fps.cpp`.
 //!
-//! No libav here: the node only restamps and clones `Media`, so it builds in
+//! No libav here: the node only restamps and clones `Grain`, so it builds in
 //! the default configuration and its unit tests run without FFmpeg. It also
 //! publishes the conformed rate and time base in the `Spec` it forwards, which
 //! is what the C++ `IFrameRateSource`/`ITimeBaseSource` interfaces told an
 //! encoder downstream.
 
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -16,15 +16,14 @@ use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::edge::{EdgeEvent, EdgeItem, Push};
-use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, Ts};
-use avplumber_f7k::graph::node::Tick;
+use avplumber_f7k::graph::error::NodeError;
+use avplumber_f7k::graph::grain::Grain;
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
-use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
-use avplumber_f7k::scaffold::{Io, PollNode, Polling, flush_at_head};
+use avplumber_f7k::node_api::{InputHandler, PollInput, PollIo, Polling};
 
 /// C++ prints its drop/duplicate statistics this often.
 const STATS_PERIOD_S: u64 = 10;
@@ -58,21 +57,12 @@ impl NodeSpec for ForceFpsSpec {
                 }
                 let delta = Ts {
                     val: 1,
-                    tb: AvpRational {
-                        num: fps.den,
-                        den: fps.num,
-                    },
+                    tb: fps.invert(),
                 }
                 .rescale(tb);
                 (tb, delta.val)
             }
-            None => (
-                AvpRational {
-                    num: fps.den,
-                    den: fps.num,
-                },
-                1,
-            ),
+            None => (fps.invert(), 1),
         };
         if frame_delta <= 0 {
             return Err(format!(
@@ -88,45 +78,77 @@ impl NodeSpec for ForceFpsSpec {
             fps.den
         );
         Ok(Polling(ForceFps {
-            io: Io::new(name, NodePhase::Poll),
+            io: PollIo::new(name),
             fps,
             timebase,
             frame_delta,
-            state: Mutex::new(State::default()),
+            epoch: Instant::now(),
+            last_stats_s: AtomicU64::new(u64::MAX),
+            dropped: AtomicU64::new(0),
+            duplicated: AtomicU64::new(0),
+            total_in: AtomicU64::new(0),
+            total_out: AtomicU64::new(0),
+            grid: Mutex::new(Grid::default()),
         }))
     }
 }
 
 #[derive(Default)]
-struct State {
+struct Grid {
     /// The last frame that went out, on the grid.
     last_ts: Option<i64>,
     /// Where the grid expects the next frame.
     next_ts: Option<i64>,
     /// The last frame seen, kept for duplication.
-    last_frame: Option<Media>,
+    last_frame: Option<Grain>,
     /// Whether `last_frame` was dropped rather than emitted; C++ `last_unused_`.
     last_unused: bool,
-    dropped: u64,
-    duplicated: u64,
-    total_in: u64,
-    total_out: u64,
-    last_stats: Option<Instant>,
-    /// Frames the output had no room for, oldest first.
-    pending: VecDeque<Media>,
 }
 
+/// Counts are atomics so `get_object("stats")` from the control thread does not
+/// take the grid lock. The grid itself is a mutex only because `Grain` is not
+/// atomic; a node that had nothing of the kind would not need one.
 pub struct ForceFps {
-    io: Io,
+    io: PollIo,
     fps: AvpRational,
     timebase: AvpRational,
     /// One frame period in `timebase` units.
     frame_delta: i64,
-    state: Mutex<State>,
+    epoch: Instant,
+    last_stats_s: AtomicU64,
+    dropped: AtomicU64,
+    duplicated: AtomicU64,
+    total_in: AtomicU64,
+    total_out: AtomicU64,
+    grid: Mutex<Grid>,
 }
 
-impl PollNode for ForceFps {
-    fn io(&self) -> &Io {
+impl InputHandler for ForceFps {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        Ok(Some(self.conformed_spec(spec)))
+    }
+
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
+        let produced = {
+            let mut grid = self.grid.lock().unwrap();
+            self.conform(&mut grid, buffer)
+        };
+        self.log_stats(false);
+        Ok(produced)
+    }
+
+    fn on_flush(&self) {
+        self.reset_grid();
+    }
+
+    fn on_eof(&self) -> Result<Processed, NodeError> {
+        self.log_stats(true);
+        Ok(Processed::Done)
+    }
+}
+
+impl PollInput for ForceFps {
+    fn io(&self) -> &PollIo {
         &self.io
     }
 
@@ -134,126 +156,33 @@ impl PollNode for ForceFps {
         NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
     }
 
-    /// Nothing in `step` can fail: the parameters were validated at build and
-    /// every item kind has an arm.
     fn direct_consumer_is_infallible(&self) -> bool {
         true
     }
 
     fn start(&self) {
-        *self.state.lock().unwrap() = State::default();
-    }
-
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
-        // Bound before start, so an empty slot only happens in a test that
-        // forgot to bind; idling is the infallible answer.
-        let (Some(input), Some(output)) = (self.io.input_slot.get(), self.io.output_slot.get())
-        else {
-            return Ok(Tick::Idle);
-        };
-        let mut state = self.state.lock().unwrap();
-
-        if !state.pending.is_empty() && flush_at_head(&input) {
-            // Produced before the flush now at the head: stale.
-            state.pending.clear();
-        }
-        if !self.drain_pending(&mut state, ctx, &output) {
-            ctx.wait_flush(input);
-            return Ok(Tick::Idle);
-        }
-
-        let Some(item) = input.try_take() else {
-            if input.is_closed() {
-                return Ok(Tick::Done);
-            }
-            log::trace!("{}: input empty, waiting", self.io.name);
-            ctx.wait_readable(input);
-            return Ok(Tick::Idle);
-        };
-        log::trace!("{}: took {item:?}", self.io.name);
-
-        match item {
-            EdgeItem::Event(EdgeEvent::Spec(spec)) => {
-                output.push_event(EdgeEvent::Spec(self.conformed_spec(spec)));
-                Ok(Tick::Again)
-            }
-            EdgeItem::Event(EdgeEvent::FlushStart) => {
-                self.reset_grid(&mut state);
-                state.pending.clear();
-                output.push_event(EdgeEvent::FlushStart);
-                Ok(Tick::Again)
-            }
-            EdgeItem::Event(event @ EdgeEvent::FlushStop { .. }) => {
-                output.push_event(event);
-                Ok(Tick::Again)
-            }
-            EdgeItem::Event(EdgeEvent::Drain) => {
-                // The grid holds frames on purpose; only codecs drain.
-                output.push_event(EdgeEvent::Drain);
-                Ok(Tick::Again)
-            }
-            EdgeItem::Event(EdgeEvent::Eof) => {
-                self.log_stats(&mut state, true);
-                output.push_event(EdgeEvent::Eof);
-                Ok(Tick::Done)
-            }
-            EdgeItem::Buffer(buffer) => {
-                let produced = self.conform(&mut state, buffer);
-                state.pending.extend(produced);
-                self.log_stats(&mut state, false);
-                if self.drain_pending(&mut state, ctx, &output) {
-                    Ok(Tick::Again)
-                } else {
-                    ctx.wait_flush(input);
-                    Ok(Tick::Idle)
-                }
-            }
-        }
+        self.reset_grid();
+        self.dropped.store(0, Ordering::Relaxed);
+        self.duplicated.store(0, Ordering::Relaxed);
+        self.total_in.store(0, Ordering::Relaxed);
+        self.total_out.store(0, Ordering::Relaxed);
+        self.last_stats_s.store(u64::MAX, Ordering::Relaxed);
     }
 
     fn get_object(&self, key: &str) -> Result<Value, String> {
         match key {
-            "stats" => {
-                let state = self.state.lock().unwrap();
-                Ok(serde_json::json!({
-                    "in": state.total_in,
-                    "out": state.total_out,
-                    "dropped": state.dropped,
-                    "duplicated": state.duplicated,
-                }))
-            }
+            "stats" => Ok(serde_json::json!({
+                "in": self.total_in.load(Ordering::Relaxed),
+                "out": self.total_out.load(Ordering::Relaxed),
+                "dropped": self.dropped.load(Ordering::Relaxed),
+                "duplicated": self.duplicated.load(Ordering::Relaxed),
+            })),
             other => Err(format!("{}: unknown object `{other}`", self.io.name)),
         }
     }
 }
 
 impl ForceFps {
-    /// Offers what is queued for the output, oldest first. `false` when the
-    /// output is full: the rest stays queued and the node waits on it.
-    fn drain_pending(
-        &self,
-        state: &mut State,
-        ctx: &mut NodePollContext,
-        output: &std::sync::Arc<dyn avplumber_f7k::graph::edge::Edge>,
-    ) -> bool {
-        while let Some(buffer) = state.pending.pop_front() {
-            match output.offer(buffer) {
-                Ok(()) | Err((Push::Dropped | Push::Accepted, _)) => {}
-                Err((Push::Full, buffer)) => {
-                    state.pending.push_front(buffer);
-                    ctx.wait_writable(output.clone());
-                    return false;
-                }
-                Err((Push::Closed, _)) => {
-                    log::info!("{}: output closed, discarding", self.io.name);
-                    state.pending.clear();
-                    return true;
-                }
-            }
-        }
-        true
-    }
-
     fn conformed_spec(&self, spec: Spec) -> Spec {
         match spec {
             Spec::Video {
@@ -276,39 +205,36 @@ impl ForceFps {
         }
     }
 
-    fn reset_grid(&self, state: &mut State) {
-        state.last_ts = None;
-        state.next_ts = None;
-        state.last_frame = None;
-        state.last_unused = false;
+    fn reset_grid(&self) {
+        *self.grid.lock().unwrap() = Grid::default();
     }
 
-    fn set_last(&self, state: &mut State, frame: Media, unused: bool) {
-        if state.last_unused {
+    fn set_last(&self, grid: &mut Grid, frame: Grain, unused: bool) {
+        if grid.last_unused {
             // The previous frame was never emitted and is now overwritten.
-            state.dropped += 1;
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        state.last_frame = Some(frame);
-        state.last_unused = unused;
+        grid.last_frame = Some(frame);
+        grid.last_unused = unused;
     }
 
     /// The C++ algorithm, frame by frame: duplicates for a gap, a drop for an
     /// early frame, a pass-through otherwise. A discontinuity (a jump of more
     /// than half a second past the grid, or backwards) restarts the grid
     /// without filling or dropping.
-    fn conform(&self, state: &mut State, mut buffer: Media) -> Vec<Media> {
+    fn conform(&self, grid: &mut Grid, mut buffer: Grain) -> Vec<Grain> {
         let mut out = Vec::new();
         let ts = buffer.ts();
         if !ts.is_valid() {
             // Nothing to place on a grid; let it through untouched.
-            state.total_in += 1;
-            state.total_out += 1;
+            self.total_in.fetch_add(1, Ordering::Relaxed);
+            self.total_out.fetch_add(1, Ordering::Relaxed);
             out.push(buffer);
             return out;
         }
         let in_ts = ts.rescale(self.timebase).val;
 
-        if let (Some(last), Some(mut next)) = (state.last_ts, state.next_ts) {
+        if let (Some(last), Some(mut next)) = (grid.last_ts, grid.next_ts) {
             let delta = in_ts - last;
             let delta_s = delta as f64 * self.timebase.num as f64 / self.timebase.den as f64;
             let frame_s =
@@ -322,25 +248,25 @@ impl ForceFps {
                     let gap_start = next;
                     let mut burst = 0u64;
                     while in_ts > next {
-                        if let Some(last_frame) = &state.last_frame {
+                        if let Some(last_frame) = &grid.last_frame {
                             let mut dup = last_frame.clone();
-                            if !state.last_unused {
+                            if !grid.last_unused {
                                 // Used more than once: captions must not repeat.
                                 strip_captions(&mut dup);
-                                state.duplicated += 1;
+                                self.duplicated.fetch_add(1, Ordering::Relaxed);
                             }
                             dup.set_ts(Ts {
                                 val: next,
                                 tb: self.timebase,
                             });
                             out.push(dup);
-                            state.last_unused = false;
-                            state.total_out += 1;
+                            grid.last_unused = false;
+                            self.total_out.fetch_add(1, Ordering::Relaxed);
                             burst += 1;
                         }
                         next += self.frame_delta;
                     }
-                    state.next_ts = Some(next);
+                    grid.next_ts = Some(next);
                     if burst > 1 {
                         log::info!(
                             "{}: filled a gap with {burst} duplicate(s); grid {gap_start} ..< \
@@ -352,8 +278,8 @@ impl ForceFps {
                 if in_ts < next {
                     // Too early: keep it as the last frame, in case a gap follows,
                     // and drop it.
-                    state.total_in += 1;
-                    self.set_last(state, buffer, true);
+                    self.total_in.fetch_add(1, Ordering::Relaxed);
+                    self.set_last(grid, buffer, true);
                     return out;
                 }
             }
@@ -363,42 +289,43 @@ impl ForceFps {
             val: in_ts,
             tb: self.timebase,
         });
-        self.set_last(state, buffer.clone(), false);
-        state.last_ts = Some(in_ts);
-        state.next_ts = Some(in_ts + self.frame_delta);
-        state.total_out += 1;
-        state.total_in += 1;
+        self.set_last(grid, buffer.clone(), false);
+        grid.last_ts = Some(in_ts);
+        grid.next_ts = Some(in_ts + self.frame_delta);
+        self.total_out.fetch_add(1, Ordering::Relaxed);
+        self.total_in.fetch_add(1, Ordering::Relaxed);
         out.push(buffer);
         out
     }
 
-    fn log_stats(&self, state: &mut State, force: bool) {
-        let now = Instant::now();
-        let due = match state.last_stats {
-            None => {
-                state.last_stats = Some(now);
-                false
-            }
-            Some(last) => now.duration_since(last).as_secs() >= STATS_PERIOD_S,
-        };
-        if (due || force) && (state.dropped > 0 || state.duplicated > 0) {
+    fn log_stats(&self, force: bool) {
+        let elapsed = self.epoch.elapsed().as_secs();
+        let last = self.last_stats_s.load(Ordering::Relaxed);
+        let first = last == u64::MAX;
+        if first {
+            self.last_stats_s.store(elapsed, Ordering::Relaxed);
+        }
+        let due = !first && elapsed.saturating_sub(last) >= STATS_PERIOD_S;
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        let duplicated = self.duplicated.load(Ordering::Relaxed);
+        if (due || force) && (dropped > 0 || duplicated > 0) {
             log::info!(
                 "{}: in {}, out {}, duplicated {}, dropped {}",
                 self.io.name,
-                state.total_in,
-                state.total_out,
-                state.duplicated,
-                state.dropped
+                self.total_in.load(Ordering::Relaxed),
+                self.total_out.load(Ordering::Relaxed),
+                duplicated,
+                dropped
             );
-            state.last_stats = Some(now);
+            self.last_stats_s.store(elapsed, Ordering::Relaxed);
         }
     }
 }
 
 /// A repeated frame must not repeat its closed captions.
 #[cfg(feature = "ffmpeg")]
-fn strip_captions(media: &mut Media) {
-    if let Media::Video(frame) = media {
+fn strip_captions(media: &mut Grain) {
+    if let Grain::Video(frame) = media {
         unsafe {
             rusty_ffmpeg::ffi::av_frame_remove_side_data(
                 frame.as_mut_ptr(),
@@ -409,7 +336,7 @@ fn strip_captions(media: &mut Media) {
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn strip_captions(_media: &mut Media) {}
+fn strip_captions(_media: &mut Grain) {}
 
 #[cfg(test)]
 mod tests {
@@ -419,9 +346,10 @@ mod tests {
     use super::*;
     use avplumber_f7k::Instance;
     use avplumber_f7k::graph::BufferedEdge;
-    use avplumber_f7k::graph::edge::{Edge, Wakeup};
-    use avplumber_f7k::graph::media::test_media;
-    use avplumber_f7k::graph::node::Node;
+    use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem, Wakeup};
+    use avplumber_f7k::graph::grain::test_media;
+    use avplumber_f7k::graph::node::{Node, Polled};
+    use avplumber_f7k::graph::poll_ctx::NodePollContext;
 
     struct Harness {
         node: Polling<ForceFps>,
@@ -460,14 +388,14 @@ mod tests {
             loop {
                 self.ctx.clear_park();
                 match self.node.poll(&mut self.ctx).expect("step") {
-                    Tick::Again => continue,
-                    Tick::Idle | Tick::Done => break,
+                    Polled::Again => continue,
+                    Polled::Idle | Polled::Done => break,
                 }
             }
         }
 
         /// Steps until the node idles, then returns the output's timestamps in
-        /// the node's time base. (`Media::Stub`, the libav-free test buffer,
+        /// the node's time base. (`Grain::Stub`, the libav-free test buffer,
         /// always reports 1/1000, so the value is read through a rescale; with
         /// FFmpeg the frame carries the node's base and the rescale is exact.)
         fn run(&mut self) -> Vec<i64> {

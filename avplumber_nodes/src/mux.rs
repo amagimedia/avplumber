@@ -40,16 +40,18 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, Ts};
-use avplumber_f7k::graph::node::Tick;
+use avplumber_f7k::graph::grain::Grain;
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Polled;
 use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::{MuxStream, PacketSpec, Spec};
-use avplumber_f7k::graph::timebase::{MILLISECONDS, tb_cmp, ts_cmp};
-use avplumber_f7k::scaffold::{Io, PollNode, Polling};
+use avplumber_f7k::graph::timebase::{MILLISECONDS, tb_cmp};
+use avplumber_f7k::graph::timestamp::ts_cmp;
+use avplumber_f7k::node_api::{Io, PollNode, Polling};
 
 #[cfg(feature = "ffmpeg")]
-use avplumber_f7k::graph::media::PacketExt;
+use avplumber_f7k::graph::grain::PacketExt;
 
 /// C++ `sync_wait_max_ms_`.
 const DEFAULT_TS_SORT_WAIT_MS: i64 = 2500;
@@ -200,7 +202,7 @@ struct Input {
     spec: Option<PacketSpec>,
     /// The packet taken but not yet muxed. C++ `peek`s the queue instead; owning
     /// the head means nothing is cloned.
-    head: Option<Media>,
+    head: Option<Grain>,
     at_eof: bool,
     /// Set every round: whether this input had nothing to offer.
     idle: bool,
@@ -244,7 +246,7 @@ impl Input {
 struct State {
     inputs: Vec<Input>,
     /// A packet already taken from an input whose output had no room.
-    pending: Option<Media>,
+    pending: Option<Grain>,
     /// Whether the [`Spec::Mux`] description has gone out.
     published: bool,
     /// The amount every stream is moved by, once the fixing turned severe.
@@ -327,7 +329,7 @@ impl PollNode for StreamMuxer {
         state.dropped_nopts = 0;
     }
 
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let out = self.io.output()?;
         let state = &mut *self.state.lock().unwrap();
 
@@ -345,8 +347,8 @@ impl PollNode for StreamMuxer {
         if let Some(buffer) = state.pending.take() {
             match self.emit(state, ctx, &out, buffer) {
                 Emitted::Ok => {}
-                Emitted::Parked => return Ok(Tick::Idle),
-                Emitted::Closed => return Ok(Tick::Done),
+                Emitted::Parked => return Ok(Polled::Idle),
+                Emitted::Closed => return Ok(Polled::Done),
             }
         }
 
@@ -379,7 +381,7 @@ impl PollNode for StreamMuxer {
             }
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
-            return Ok(Tick::Done);
+            return Ok(Polled::Done);
         }
 
         // Nothing may reach `output` before it knows which streams to create.
@@ -392,7 +394,7 @@ impl PollNode for StreamMuxer {
                             ctx.wait_readable(input.edge().clone());
                         }
                     }
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
             }
         }
@@ -453,7 +455,7 @@ impl PollNode for StreamMuxer {
 
         let Some((least_i, least_ts)) = least else {
             if nopts > 0 {
-                return Ok(Tick::Again);
+                return Ok(Polled::Again);
             }
             // Nothing to order: wait for whichever inputs can still deliver.
             for input in &state.inputs {
@@ -461,7 +463,7 @@ impl PollNode for StreamMuxer {
                     ctx.wait_readable(input.edge().clone());
                 }
             }
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         };
 
         let have_all = candidates == state.inputs.len();
@@ -475,12 +477,12 @@ impl PollNode for StreamMuxer {
             && self.sync_wait_max_ms > 0
             && self.grace(state, ctx, least_i, least_ts, candidates) == Grace::Park
         {
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         }
 
         let index = state.inputs[least_i].index;
         let Some(mut buffer) = state.inputs[least_i].head.take() else {
-            return Ok(Tick::Again);
+            return Ok(Polled::Again);
         };
         if self.params.fix_timestamps {
             self.fix(state, least_i, &mut buffer);
@@ -488,9 +490,9 @@ impl PollNode for StreamMuxer {
         }
         set_index(&mut buffer, index);
         match self.emit(state, ctx, &out, buffer) {
-            Emitted::Ok => Ok(Tick::Again),
-            Emitted::Parked => Ok(Tick::Idle),
-            Emitted::Closed => Ok(Tick::Done),
+            Emitted::Ok => Ok(Polled::Again),
+            Emitted::Parked => Ok(Polled::Idle),
+            Emitted::Closed => Ok(Polled::Done),
         }
     }
 }
@@ -706,7 +708,7 @@ impl StreamMuxer {
     /// In the packet's own time base (see the module docs), and skipped entirely
     /// for a packet without a DTS — there is nothing to force monotonic, and C++
     /// never got here because it dropped such packets outright.
-    fn fix(&self, state: &mut State, i: usize, buffer: &mut Media) {
+    fn fix(&self, state: &mut State, i: usize, buffer: &mut Grain) {
         let global_shift = state.global_shift;
         let input = &mut state.inputs[i];
         let mut pts = buffer.ts();
@@ -828,7 +830,7 @@ impl StreamMuxer {
         state: &mut State,
         ctx: &mut NodePollContext,
         out: &Arc<dyn Edge>,
-        buffer: Media,
+        buffer: Grain,
     ) -> Emitted {
         match out.offer(buffer) {
             Ok(()) => Emitted::Ok,
@@ -864,46 +866,46 @@ impl StreamMuxer {
 /// invalid. Deliberately not reproduced: a container that carries only PTS (a
 /// remux without a decoder in between) would lose every packet, and `output`
 /// rescales the two timestamps independently anyway.
-fn order_ts(buffer: &Media) -> Ts {
+fn order_ts(buffer: &Grain) -> Ts {
     let dts = dts_of(buffer);
     if dts.is_valid() { dts } else { buffer.ts() }
 }
 
 #[cfg(feature = "ffmpeg")]
-fn dts_of(buffer: &Media) -> Ts {
+fn dts_of(buffer: &Grain) -> Ts {
     match buffer {
-        Media::Packet(packet) => packet.dts(),
+        Grain::Packet(packet) => packet.dts(),
         other => other.ts(),
     }
 }
 
 /// Without libav there are no packets, so the ordering half of this node is what
-/// [`Media::Stub`] can exercise: it carries one timestamp, which stands in for
+/// [`Grain::Stub`] can exercise: it carries one timestamp, which stands in for
 /// both.
 #[cfg(not(feature = "ffmpeg"))]
-fn dts_of(buffer: &Media) -> Ts {
+fn dts_of(buffer: &Grain) -> Ts {
     buffer.ts()
 }
 
 #[cfg(feature = "ffmpeg")]
-fn set_stamps(buffer: &mut Media, pts: Ts, dts: Ts) {
-    if let Media::Packet(packet) = buffer {
+fn set_stamps(buffer: &mut Grain, pts: Ts, dts: Ts) {
+    if let Grain::Packet(packet) = buffer {
         packet.set_ts_dts(pts, dts);
     }
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn set_stamps(_buffer: &mut Media, _pts: Ts, _dts: Ts) {}
+fn set_stamps(_buffer: &mut Grain, _pts: Ts, _dts: Ts) {}
 
 #[cfg(feature = "ffmpeg")]
-fn set_index(buffer: &mut Media, index: i32) {
-    if let Media::Packet(packet) = buffer {
+fn set_index(buffer: &mut Grain, index: i32) {
+    if let Grain::Packet(packet) = buffer {
         packet.set_stream_index(index);
     }
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn set_index(_buffer: &mut Media, _index: i32) {}
+fn set_index(_buffer: &mut Grain, _index: i32) {}
 
 #[cfg(test)]
 mod tests {
@@ -912,7 +914,7 @@ mod tests {
     use avplumber_f7k::graph::buffer::AVP_NOPTS;
     use avplumber_f7k::graph::buffered_edge::BufferedEdge;
     use avplumber_f7k::graph::edge::Wakeup;
-    use avplumber_f7k::graph::media::test_media;
+    use avplumber_f7k::graph::grain::test_media;
     use avplumber_f7k::graph::node::Node;
     use std::sync::atomic::AtomicBool;
 
@@ -1005,7 +1007,7 @@ mod tests {
             self.inputs[input].push_event(EdgeEvent::Eof);
         }
 
-        fn step(&mut self) -> Tick {
+        fn step(&mut self) -> Polled {
             let tick = self.node.step(&mut self.ctx).expect("mux step");
             // What the executors do between polls; without it the park from one
             // step would leak into the next.
@@ -1017,7 +1019,7 @@ mod tests {
         /// fails the test instead of hanging it.
         fn run_until_done(&mut self, budget: usize) {
             for _ in 0..budget {
-                if self.step() == Tick::Done {
+                if self.step() == Polled::Done {
                     return;
                 }
             }
@@ -1080,7 +1082,7 @@ mod tests {
         mux.describe(0);
         mux.feed(0, &[0]);
 
-        assert_eq!(mux.step(), Tick::Idle);
+        assert_eq!(mux.step(), Polled::Idle);
         assert_eq!(
             mux.drain(),
             Vec::new(),
@@ -1088,7 +1090,7 @@ mod tests {
         );
 
         mux.describe(1);
-        assert_eq!(mux.step(), Tick::Again);
+        assert_eq!(mux.step(), Polled::Again);
         assert_eq!(mux.drain(), vec![Out::Mux(2), Out::Buffer(0)]);
     }
 
@@ -1106,7 +1108,7 @@ mod tests {
         // exactly the input `ts_sort_wait` exists for.
         mux.feed(0, &[0]);
 
-        assert_eq!(mux.step(), Tick::Idle);
+        assert_eq!(mux.step(), Polled::Idle);
         assert_eq!(
             mux.drain(),
             vec![Out::Mux(2)],
@@ -1114,7 +1116,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(GRACE_MS * 2));
-        assert_eq!(mux.step(), Tick::Again);
+        assert_eq!(mux.step(), Polled::Again);
         assert_eq!(
             mux.drain(),
             vec![Out::Buffer(0)],
@@ -1134,7 +1136,7 @@ mod tests {
     }
 
     /// `fix_timestamps` rewrites the packet, which only a real `AVPacket` can
-    /// carry — `Media::Stub` is immutable, so the default build sees the ordering
+    /// carry — `Grain::Stub` is immutable, so the default build sees the ordering
     /// half of this node and this case belongs to the libav one.
     #[cfg(feature = "ffmpeg")]
     #[test]
@@ -1195,7 +1197,7 @@ mod tests {
 
         // Every input is at EOF without a packet, so one step describes the
         // container and finishes.
-        assert_eq!(mux.step(), Tick::Done);
+        assert_eq!(mux.step(), Polled::Done);
         let Some(EdgeItem::Event(EdgeEvent::Spec(Spec::Mux { streams }))) = mux.out.try_take()
         else {
             panic!("mux must describe its container");

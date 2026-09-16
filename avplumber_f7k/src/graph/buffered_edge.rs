@@ -1,4 +1,4 @@
-//! Buffered edge: a bounded queue of owned `Media` plus control events.
+//! Buffered edge: a bounded queue of owned `Grain` plus control events.
 //!
 //! Default kind. Producer and consumer may run on different executors; the
 //! queue absorbs bursts. `capacity == 0` is 64. Capacity counts **buffers
@@ -16,7 +16,7 @@ use crate::graph::edge::{
     Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push,
     Wakeup,
 };
-use crate::graph::media::Media;
+use crate::graph::grain::Grain;
 use crate::graph::spec::Spec;
 
 pub struct BufferedEdge {
@@ -56,7 +56,7 @@ impl BufferedEdge {
 }
 
 impl Edge for BufferedEdge {
-    fn offer(&self, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)> {
         let mut g = self.inner.lock().unwrap();
         match g.try_push(buf) {
             Ok(()) => {
@@ -181,7 +181,7 @@ impl Edge for BufferedEdge {
         self.writer_generation.load(Ordering::Acquire)
     }
 
-    fn offer_generation(&self, generation: u64, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
         let recovery = buf.clone();
         let discarded = Arc::new(AtomicBool::new(false));
         let result = {

@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use crate::graph::AvpRational;
-use crate::graph::timebase::{self, MILLISECONDS};
+use crate::graph::timebase::MILLISECONDS;
+use crate::graph::timestamp;
 
 #[derive(Clone, Default)]
 struct Channel {
@@ -70,7 +71,7 @@ impl SharedTimeline for InMemoryTimeline {
             .unwrap_or_default()
     }
     fn get_opt(&self, channel: &str, key: &str, frame_pts: i64, tb: AvpRational) -> Option<String> {
-        let pts_ms = timebase::rescale(frame_pts, tb, MILLISECONDS);
+        let pts_ms = timestamp::rescale(frame_pts, tb, MILLISECONDS);
         let g = self.inner.lock().unwrap();
         let ch = g.get(channel)?;
         let map = ch.keys.get(key)?;

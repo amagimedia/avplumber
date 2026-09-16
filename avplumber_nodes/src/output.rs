@@ -41,14 +41,16 @@ use serde_json::Value;
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::grain::{Grain, PacketExt};
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{MuxStream, Spec};
-use avplumber_f7k::graph::timebase::{MILLISECONDS, rescale};
+use avplumber_f7k::graph::timebase::MILLISECONDS;
+use avplumber_f7k::graph::timestamp::rescale;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
 
 /// C++ `errors_ > 20`: a muxer that rejects one packet is usually still usable,
 /// one that rejects twenty in a row is not.
@@ -245,10 +247,10 @@ impl InputHandler for StreamOutput {
         Ok(None)
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         self.write(state, buffer)?;
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Deliberately nothing: there is nothing of ours to discard, and
@@ -256,14 +258,14 @@ impl InputHandler for StreamOutput {
     /// accepted for the file.
     fn on_flush(&self) {}
 
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
+    fn on_eof(&self) -> Result<Processed, NodeError> {
         log::info!(
             "{}: end of stream, finishing {}",
             self.io.name,
             self.params.url
         );
         // The trailer is `stop`'s job, which runs as soon as this returns.
-        Ok(Blocked::Done)
+        Ok(Processed::Done)
     }
 }
 
@@ -391,8 +393,8 @@ impl StreamOutput {
     }
 
     /// Rescales one packet into its stream's time base and hands it to the muxer.
-    fn write(&self, state: &mut State, buffer: Media) -> Result<(), NodeError> {
-        let Media::Packet(mut packet) = buffer else {
+    fn write(&self, state: &mut State, buffer: Grain) -> Result<(), NodeError> {
+        let Grain::Packet(mut packet) = buffer else {
             log::warn!("{}: dropping a buffer that is not a packet", self.io.name);
             return Ok(());
         };

@@ -3,7 +3,7 @@
 //! Everything these nodes are built out of lives in the framework crate:
 //! the libav-facing helpers in [`avplumber_f7k::libav`] (codec lookup,
 //! dictionaries, the send/receive pump), the node-authoring helpers in
-//! [`avplumber_f7k::scaffold`], and the contracts themselves in
+//! [`avplumber_f7k::node_api`], and the contracts themselves in
 //! [`avplumber_f7k::graph`]. The dependency runs one way only — the framework
 //! knows nothing about these nodes — so an embedder can write its own node set
 //! against the same helpers without going near this crate.

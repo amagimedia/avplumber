@@ -2,26 +2,26 @@ use std::ffi::c_void;
 
 use crate::abi::AvpBuffer;
 use crate::graph::buffer::{AvpMediaType, AvpMediaVtable};
-use crate::graph::media::{Media, OpaqueFrame};
+use crate::graph::grain::{Grain, OpaqueGrain};
 
-pub fn media_to_avp(m: Media) -> AvpBuffer {
+pub fn media_to_avp(m: Grain) -> AvpBuffer {
     match m {
         #[cfg(feature = "ffmpeg")]
-        Media::Packet(p) => AvpBuffer {
+        Grain::Packet(p) => AvpBuffer {
             media: AvpMediaType::PACKET,
             ptr: p.into_raw().as_ptr() as *mut c_void,
         },
         #[cfg(feature = "ffmpeg")]
-        Media::Video(f) => AvpBuffer {
+        Grain::Video(f) => AvpBuffer {
             media: AvpMediaType::VIDEO,
             ptr: f.into_raw().as_ptr() as *mut c_void,
         },
         #[cfg(feature = "ffmpeg")]
-        Media::Audio(f) => AvpBuffer {
+        Grain::Audio(f) => AvpBuffer {
             media: AvpMediaType::AUDIO,
             ptr: f.into_raw().as_ptr() as *mut c_void,
         },
-        Media::Opaque(o) => {
+        Grain::Opaque(o) => {
             let media = o.media();
             AvpBuffer {
                 media,
@@ -29,7 +29,7 @@ pub fn media_to_avp(m: Media) -> AvpBuffer {
             }
         }
         #[cfg(not(feature = "ffmpeg"))]
-        Media::Stub { kind, pts } => AvpBuffer {
+        Grain::Stub { kind, pts } => AvpBuffer {
             media: kind,
             ptr: pts as usize as *mut c_void,
         },
@@ -38,29 +38,29 @@ pub fn media_to_avp(m: Media) -> AvpBuffer {
 
 /// Project an owned Rust media value into a C buffer without transferring it.
 /// The returned pointer remains valid only while `media` remains alive.
-pub fn media_as_avp(media: &Media) -> AvpBuffer {
+pub fn media_as_avp(media: &Grain) -> AvpBuffer {
     match media {
         #[cfg(feature = "ffmpeg")]
-        Media::Packet(packet) => AvpBuffer {
+        Grain::Packet(packet) => AvpBuffer {
             media: AvpMediaType::PACKET,
             ptr: packet.as_ptr() as *mut c_void,
         },
         #[cfg(feature = "ffmpeg")]
-        Media::Video(frame) => AvpBuffer {
+        Grain::Video(frame) => AvpBuffer {
             media: AvpMediaType::VIDEO,
             ptr: frame.as_ptr() as *mut c_void,
         },
         #[cfg(feature = "ffmpeg")]
-        Media::Audio(frame) => AvpBuffer {
+        Grain::Audio(frame) => AvpBuffer {
             media: AvpMediaType::AUDIO,
             ptr: frame.as_ptr() as *mut c_void,
         },
-        Media::Opaque(frame) => AvpBuffer {
+        Grain::Opaque(frame) => AvpBuffer {
             media: frame.media(),
             ptr: frame.as_ptr(),
         },
         #[cfg(not(feature = "ffmpeg"))]
-        Media::Stub { kind, pts } => AvpBuffer {
+        Grain::Stub { kind, pts } => AvpBuffer {
             media: *kind,
             ptr: *pts as usize as *mut c_void,
         },
@@ -98,7 +98,7 @@ pub fn release_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>)
 
 /// Retain/clone a candidate for an edge push while leaving the caller's
 /// original reference untouched until the edge accepts the candidate.
-pub fn clone_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>) -> Option<Media> {
+pub fn clone_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>) -> Option<Grain> {
     if buf.is_null() {
         return None;
     }
@@ -106,7 +106,7 @@ pub fn clone_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>) -
         AvpMediaType::EGL | AvpMediaType::METADATA => {
             let vtable = opaque_vtable?;
             (vtable.retain)(buf.ptr);
-            OpaqueFrame::new(buf.ptr, vtable, buf.media).map(Media::Opaque)
+            OpaqueGrain::new(buf.ptr, vtable, buf.media).map(Grain::Opaque)
         }
         #[cfg(feature = "ffmpeg")]
         AvpMediaType::PACKET => {
@@ -114,7 +114,7 @@ pub fn clone_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>) -
                 rusty_ffmpeg::ffi::av_packet_clone(buf.ptr as *const rusty_ffmpeg::ffi::AVPacket)
             };
             let packet = std::ptr::NonNull::new(raw)?;
-            Some(Media::Packet(unsafe {
+            Some(Grain::Packet(unsafe {
                 rsmpeg::avcodec::AVPacket::from_raw(packet)
             }))
         }
@@ -126,13 +126,13 @@ pub fn clone_avp_buffer(buf: AvpBuffer, opaque_vtable: Option<AvpMediaVtable>) -
             let frame = std::ptr::NonNull::new(raw)?;
             let frame = unsafe { rsmpeg::avutil::AVFrame::from_raw(frame) };
             if buf.media == AvpMediaType::VIDEO {
-                Some(Media::Video(frame))
+                Some(Grain::Video(frame))
             } else {
-                Some(Media::Audio(frame))
+                Some(Grain::Audio(frame))
             }
         }
         #[cfg(not(feature = "ffmpeg"))]
-        _ => Some(Media::Stub {
+        _ => Some(Grain::Stub {
             kind: buf.media,
             pts: buf.ptr as usize as i64,
         }),

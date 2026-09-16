@@ -1,4 +1,4 @@
-//! Flat C structs. Native code uses `Spec` / `Media` / `EdgeKind`; these
+//! Flat C structs. Native code uses `Spec` / `Grain` / `EdgeKind`; these
 //! exist only to match `include/avplumber_core.h`.
 
 use std::ffi::c_void;

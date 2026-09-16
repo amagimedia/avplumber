@@ -6,8 +6,8 @@
 //! refused input is stashed here and the outputs queue up until the node has
 //! pushed them.
 //!
-//! One struct rather than a trait per direction: both directions move [`Media`]
-//! in and [`Media`] out, so the only real difference is which pair of libav
+//! One struct rather than a trait per direction: both directions move [`Grain`]
+//! in and [`Grain`] out, so the only real difference is which pair of libav
 //! calls to make.
 
 use std::collections::VecDeque;
@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use rsmpeg::avcodec::AVCodecContext;
 
 use crate::graph::buffer::AvpMediaType;
-use crate::graph::media::Media;
+use crate::graph::grain::Grain;
 use crate::libav::error::{av_error, code_of, is_eagain, is_eof};
 
 /// C++ `dec_errors_ > 200`: a few corrupt packets are normal, a stream of them
@@ -52,8 +52,8 @@ pub struct Pump {
     out_media: AvpMediaType,
     node: String,
     /// An input the codec refused with `EAGAIN`, to be offered again.
-    stash: Option<Media>,
-    ready: VecDeque<Media>,
+    stash: Option<Grain>,
+    ready: VecDeque<Grain>,
     errors: usize,
     /// The codec reported `AVERROR_EOF`: it will not produce anything more.
     drained: bool,
@@ -97,12 +97,12 @@ impl Pump {
 
     /// Hands the pump one input. Only call with [`Self::is_loaded`] false:
     /// the codec must accept the current input before the next one is read.
-    pub fn load(&mut self, input: Media) {
+    pub fn load(&mut self, input: Grain) {
         debug_assert!(self.stash.is_none(), "loaded a pump that still holds input");
         self.stash = Some(input);
     }
 
-    pub fn take_output(&mut self) -> Option<Media> {
+    pub fn take_output(&mut self) -> Option<Grain> {
         self.ready.pop_front()
     }
 
@@ -214,7 +214,7 @@ impl Pump {
         }
     }
 
-    fn receive_one(&mut self, ctx: &mut AVCodecContext) -> Result<Option<Media>, Refused> {
+    fn receive_one(&mut self, ctx: &mut AVCodecContext) -> Result<Option<Grain>, Refused> {
         if self.drained {
             return Ok(None);
         }
@@ -222,23 +222,23 @@ impl Pump {
             PumpKind::Decode => {
                 let frame = ctx.receive_frame().map_err(refused)?;
                 Ok(Some(match self.out_media {
-                    AvpMediaType::AUDIO => Media::Audio(frame),
-                    _ => Media::Video(frame),
+                    AvpMediaType::AUDIO => Grain::Audio(frame),
+                    _ => Grain::Video(frame),
                 }))
             }
             PumpKind::Encode => {
                 let packet = ctx.receive_packet().map_err(refused)?;
-                Ok(Some(Media::Packet(packet)))
+                Ok(Some(Grain::Packet(packet)))
             }
         }
     }
 
-    fn send(&self, ctx: &mut AVCodecContext, input: Option<&Media>) -> Result<(), Refused> {
+    fn send(&self, ctx: &mut AVCodecContext, input: Option<&Grain>) -> Result<(), Refused> {
         match self.kind {
             PumpKind::Decode => {
                 let packet = match input {
                     None => None,
-                    Some(Media::Packet(packet)) => Some(packet),
+                    Some(Grain::Packet(packet)) => Some(packet),
                     Some(other) => {
                         return Err(Refused::Failed(format!(
                             "expected a packet, got {:?}",
@@ -251,7 +251,7 @@ impl Pump {
             PumpKind::Encode => {
                 let frame = match input {
                     None => None,
-                    Some(Media::Video(frame) | Media::Audio(frame)) => Some(frame),
+                    Some(Grain::Video(frame) | Grain::Audio(frame)) => Some(frame),
                     Some(other) => {
                         return Err(Refused::Failed(format!(
                             "expected a frame, got {:?}",

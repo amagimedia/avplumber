@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use avplumber_f7k::graph::edge::Push;
-use avplumber_f7k::graph::{AvpMediaType, Media, Node};
+use avplumber_f7k::graph::{AvpMediaType, Grain, Node};
 use avplumber_f7k::{Instance, control, register_factory};
 
 struct Stub {

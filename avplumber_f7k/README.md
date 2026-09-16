@@ -16,7 +16,7 @@ the core.
 
 This crate currently exposes the node-independent substrate for review:
 
-- owned `Ts` / `Spec` / `Media`
+- owned `Ts` / `Spec` / `Grain`
 - `NodeBody::{Blocking, Poll, Async}` taken once at start
 - buffered/direct edges with readiness wakeups
 - blocking executor (one OS thread per node) and cooperative
@@ -33,5 +33,5 @@ This crate currently exposes the node-independent substrate for review:
 
 Parked until after this review: seek helper, pyplumber notes, C++
 `node_compat` shim, and the old Tier-R node sketches (`parked/`).
-`SisoNode` is in `src/scaffold.rs` as a one-in/one-out transform, with
+`SisoNode` is in `src/node_api/siso.rs` as a one-in/one-out transform, with
 blocking, poll, and async wrappers.

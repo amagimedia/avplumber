@@ -7,7 +7,7 @@ use avplumber_f7k::graph::NodeFuture;
 #[cfg(feature = "async")]
 use avplumber_f7k::{AsyncExecutor, ExecutorState, NodeKind};
 use avplumber_f7k::{
-    AvpMediaType, Blocked, BlockingExecutor, BuildCtx, Edge, EdgeKind, ExecCtxId, Executor, Graph,
+    AvpMediaType, Processed, BlockingExecutor, BuildCtx, Edge, EdgeKind, ExecCtxId, Executor, Graph,
     Group, GroupState, Instance, Node, NodeError, NodeOutcome, NodePads, NodePhase, NodeRequest,
     NodeSpec, PadDecl, RestartPolicy, Vertex, register_factory, register_spec,
 };
@@ -16,13 +16,13 @@ use avplumber_f7k::{
 /// rejected before anything looks inside it, so an empty packet does; the pair is
 /// cfg'd because `Media::Stub` exists only when libav is compiled out.
 #[cfg(feature = "ffmpeg")]
-fn any_buffer() -> avplumber_f7k::Media {
-    avplumber_f7k::Media::Packet(rsmpeg::avcodec::AVPacket::new())
+fn any_buffer() -> avplumber_f7k::Grain {
+    avplumber_f7k::Grain::Packet(rsmpeg::avcodec::AVPacket::new())
 }
 
 #[cfg(not(feature = "ffmpeg"))]
-fn any_buffer() -> avplumber_f7k::Media {
-    avplumber_f7k::Media::Stub {
+fn any_buffer() -> avplumber_f7k::Grain {
+    avplumber_f7k::Grain::Stub {
         kind: AvpMediaType::VIDEO,
         pts: 1,
     }
@@ -37,7 +37,7 @@ impl Node for FailingNode {
         &self.name
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         Err(NodeError::new(
             &self.name,
             NodePhase::Process,
@@ -55,9 +55,9 @@ impl Node for RunningNode {
         &self.name
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         std::thread::sleep(Duration::from_millis(1));
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 }
 
@@ -953,7 +953,7 @@ impl Node for RebuiltNode {
         &self.name
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         if self.fail {
             return Err(NodeError::new(
                 &self.name,
@@ -962,7 +962,7 @@ impl Node for RebuiltNode {
             ));
         }
         std::thread::sleep(Duration::from_millis(1));
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 }
 
@@ -1195,7 +1195,7 @@ impl Node for BoundNode {
         assert!(self.edge.set(edge).is_ok());
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         if self.fail {
             return Err(NodeError::new(
                 &self.name,
@@ -1204,7 +1204,7 @@ impl Node for BoundNode {
             ));
         }
         std::thread::sleep(Duration::from_millis(1));
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 }
 
@@ -1489,7 +1489,7 @@ impl Node for GatedNode {
         &self.name
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         if self.fail {
             return Err(NodeError::new(
                 &self.name,
@@ -1498,7 +1498,7 @@ impl Node for GatedNode {
             ));
         }
         std::thread::sleep(Duration::from_millis(1));
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 }
 

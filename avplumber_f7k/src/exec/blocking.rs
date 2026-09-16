@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::exec::{Executor, ExecutorState, Generation, NodeOutcome, OutcomeReporter};
-use crate::graph::{Blocked, Edge, Node, NodeBody};
+use crate::graph::{Processed, Edge, Node, NodeBody};
 
 pub struct BlockingExecutor {
     inner: Mutex<Inner>,
@@ -135,13 +135,13 @@ impl Executor for BlockingExecutor {
                                 };
                             }
                             match step() {
-                                Ok(Blocked::Done) => {
+                                Ok(Processed::Done) => {
                                     break NodeOutcome::Completed {
                                         name: name.clone(),
                                         generation,
                                     };
                                 }
-                                Ok(Blocked::Again) => {}
+                                Ok(Processed::Again) => {}
                                 Err(err) => {
                                     break NodeOutcome::Failed {
                                         name: name.clone(),

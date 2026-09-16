@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use avplumber_f7k::graph::routing::{MEDIA_TYPE_AUDIO, MEDIA_TYPE_VIDEO};
 use avplumber_nodes::null_sink;
 use avplumber_f7k::{
-    Blocked, CatalogStream, Edge, EdgeEvent, EdgeHint, EdgeItem, Instance, Media, Node, NodeBody,
+    Processed, CatalogStream, Edge, EdgeEvent, EdgeHint, EdgeItem, Instance, Grain, Node, NodeBody,
     NodeRequest, PadDirection, Spec, StreamSelection,
 };
 
@@ -44,8 +44,8 @@ fn drain_input(node: Arc<dyn Node>, edge: Arc<dyn Edge>) -> Drained {
         };
         let result = loop {
             match step() {
-                Ok(Blocked::Again) => {}
-                Ok(Blocked::Done) => break Ok(()),
+                Ok(Processed::Again) => {}
+                Ok(Processed::Done) => break Ok(()),
                 Err(error) => break Err(error),
             }
         };
@@ -58,7 +58,7 @@ fn drain_input(node: Arc<dyn Node>, edge: Arc<dyn Edge>) -> Drained {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline && !drained.saw_eof {
         match edge.take(200) {
-            Some(EdgeItem::Buffer(Media::Packet(packet))) => {
+            Some(EdgeItem::Buffer(Grain::Packet(packet))) => {
                 *drained.counts.entry(packet.stream_index).or_insert(0) += 1;
             }
             Some(EdgeItem::Buffer(other)) => panic!("input produced {:?}", other.media_type()),

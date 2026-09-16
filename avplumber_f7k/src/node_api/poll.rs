@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use crate::graph::edge::Edge;
 use crate::graph::error::NodeError;
-use crate::graph::node::{Node, NodeKind, Tick};
+use crate::graph::node::{Node, NodeKind, Polled};
 use crate::graph::pad::NodePads;
 use crate::graph::poll_ctx::NodePollContext;
-use crate::scaffold::io::Io;
+use crate::node_api::io::Io;
 
 /// A node that never blocks: it shares an event loop
 /// ([`AsyncExecutor`](crate::exec::AsyncExecutor)) with every other node of its
 /// clock domain, registers on the [`NodePollContext`] what it is waiting for,
-/// and returns [`Tick::Idle`]. The C++ non-blocking node shape.
+/// and returns [`Polled::Idle`]. The C++ non-blocking node shape.
 ///
 /// Keep an [`Io`] built with [`NodePhase::Poll`](crate::graph::error::NodePhase::Poll),
 /// hand it out through [`Self::io`], implement [`Self::step`]. Wrap the node in
@@ -31,7 +31,7 @@ pub trait PollNode: Send + Sync + 'static {
     /// to be called right back, `Done` to finish. `Err` fails the node like a
     /// blocking one — except on the fused Direct path, which is why
     /// [`Self::direct_consumer_is_infallible`] exists.
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError>;
+    fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError>;
 
     /// The opt-in to consuming from a [`DirectEdge`](crate::graph::DirectEdge),
     /// whose producer runs this node's `step` from inside its own `offer`. That
@@ -75,7 +75,7 @@ pub trait PollNode: Send + Sync + 'static {
     }
 }
 
-/// The [`Node`] a [`PollNode`] runs as. See [`Blocking`](crate::scaffold::Blocking)
+/// The [`Node`] a [`PollNode`] runs as. See [`Blocking`](crate::node_api::Blocking)
 /// for why this is a newtype.
 pub struct Polling<N>(pub N);
 
@@ -116,7 +116,7 @@ impl<N: PollNode> Node for Polling<N> {
         self.0.interrupt();
     }
 
-    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         self.0.step(ctx)
     }
 
@@ -166,16 +166,16 @@ mod tests {
             self.infallible
         }
 
-        fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
             let input = self.io.input()?;
             match input.try_take() {
                 None => {
                     ctx.wait_readable(input);
-                    Ok(Tick::Idle)
+                    Ok(Polled::Idle)
                 }
                 Some(EdgeItem::Buffer(buffer)) => {
                     let _ = self.io.output()?.offer(buffer);
-                    Ok(Tick::Again)
+                    Ok(Polled::Again)
                 }
                 Some(EdgeItem::Event(_)) => Err(self.io.error(NodePhase::Poll, "an event")),
             }
@@ -210,13 +210,13 @@ mod tests {
         node.bind_source("in", input.clone());
         node.bind_sink("out", output.clone());
         let mut ctx = ctx();
-        assert_eq!(node.poll(&mut ctx).unwrap(), Tick::Idle);
+        assert_eq!(node.poll(&mut ctx).unwrap(), Polled::Idle);
         assert!(
             input
-                .offer(crate::graph::media::test_media(AvpMediaType::VIDEO, 1))
+                .offer(crate::graph::grain::test_media(AvpMediaType::VIDEO, 1))
                 .is_ok()
         );
-        assert_eq!(node.poll(&mut ctx).unwrap(), Tick::Again);
+        assert_eq!(node.poll(&mut ctx).unwrap(), Polled::Again);
         assert_eq!(output.occupied(), 1);
     }
 

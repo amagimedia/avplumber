@@ -6,22 +6,22 @@
 //! Triggers coalesce: any number received between two frames force *one*
 //! keyframe, so a misbehaving controller cannot spike the bitrate.
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use rusty_ffmpeg::ffi;
 use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem, Push};
-use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::Media;
-use avplumber_f7k::graph::node::Tick;
+use avplumber_f7k::graph::error::NodeError;
+use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::pad::NodePads;
-use avplumber_f7k::graph::poll_ctx::NodePollContext;
+use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
-use avplumber_f7k::scaffold::{Io, PollNode, Polling, flush_at_head};
+use avplumber_f7k::node_api::{InputHandler, PollInput, PollIo, Polling};
+
+/// C++ `last_result_ = -(1L<<62)`: no frame has been classified yet.
+const NO_SLOT: i64 = -(1 << 62);
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ForceKeyframeSpec {
@@ -48,27 +48,19 @@ impl NodeSpec for ForceKeyframeSpec {
             None => None,
         };
         Ok(Polling(ForceKeyframe {
-            io: Io::new(name, NodePhase::Poll),
+            io: PollIo::new(name),
             interval,
             requested: AtomicU64::new(0),
             forced: AtomicU64::new(0),
             triggered_frames: AtomicU64::new(0),
             periodic_frames: AtomicU64::new(0),
-            state: Mutex::new(State::default()),
+            last_slot: AtomicI64::new(NO_SLOT),
         }))
     }
 }
 
-#[derive(Default)]
-struct State {
-    /// Which interval slot the last frame fell in; C++ `last_result_`.
-    last_slot: Option<i64>,
-    /// A frame the output had no room for.
-    pending: Option<Media>,
-}
-
 pub struct ForceKeyframe {
-    io: Io,
+    io: PollIo,
     interval: Option<AvpRational>,
     /// Bumped by every trigger; `forced` catches up by one frame, whatever the
     /// distance, which is the coalescing.
@@ -76,11 +68,30 @@ pub struct ForceKeyframe {
     forced: AtomicU64,
     triggered_frames: AtomicU64,
     periodic_frames: AtomicU64,
-    state: Mutex<State>,
+    /// Which interval slot the last frame fell in; C++ `last_result_`.
+    last_slot: AtomicI64,
 }
 
-impl PollNode for ForceKeyframe {
-    fn io(&self) -> &Io {
+impl InputHandler for ForceKeyframe {
+    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        Ok(Some(spec))
+    }
+
+    fn on_buffer(&self, mut buffer: Grain) -> Result<Vec<Grain>, NodeError> {
+        let triggered = self.take_trigger();
+        let periodic = self.periodic(&buffer);
+        mark(&mut buffer, triggered || periodic);
+        Ok(vec![buffer])
+    }
+
+    fn on_flush(&self) {
+        // The next frame after a discontinuity starts a new period.
+        self.last_slot.store(NO_SLOT, Ordering::Relaxed);
+    }
+}
+
+impl PollInput for ForceKeyframe {
+    fn io(&self) -> &PollIo {
         &self.io
     }
 
@@ -88,69 +99,14 @@ impl PollNode for ForceKeyframe {
         NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
     }
 
-    /// Nothing in `step` can fail, so it may sit behind a Direct edge, which is
+    /// Nothing here can fail, so it may sit behind a Direct edge, which is
     /// where the replay graph puts it: right after the pacing stage.
     fn direct_consumer_is_infallible(&self) -> bool {
         true
     }
 
     fn start(&self) {
-        *self.state.lock().unwrap() = State::default();
-    }
-
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
-        let (Some(input), Some(output)) = (self.io.input_slot.get(), self.io.output_slot.get())
-        else {
-            return Ok(Tick::Idle);
-        };
-        let mut state = self.state.lock().unwrap();
-        if state.pending.is_some() && flush_at_head(&input) {
-            // Produced before the flush now at the head: stale.
-            state.pending = None;
-        }
-        if let Some(held) = state.pending.take() {
-            if !self.emit(&mut state, ctx, &output, held) {
-                ctx.wait_flush(input);
-                return Ok(Tick::Idle);
-            }
-        }
-        let Some(item) = input.try_take() else {
-            if input.is_closed() {
-                return Ok(Tick::Done);
-            }
-            log::trace!("{}: input empty, waiting", self.io.name);
-            ctx.wait_readable(input);
-            return Ok(Tick::Idle);
-        };
-        log::trace!("{}: took {item:?}", self.io.name);
-        match item {
-            EdgeItem::Event(EdgeEvent::Eof) => {
-                output.push_event(EdgeEvent::Eof);
-                Ok(Tick::Done)
-            }
-            EdgeItem::Event(EdgeEvent::FlushStart) => {
-                // The next frame after a discontinuity starts a new period.
-                state.last_slot = None;
-                state.pending = None;
-                output.push_event(EdgeEvent::FlushStart);
-                Ok(Tick::Again)
-            }
-            EdgeItem::Event(event) => {
-                output.push_event(event);
-                Ok(Tick::Again)
-            }
-            EdgeItem::Buffer(mut buffer) => {
-                let triggered = self.take_trigger();
-                let periodic = self.periodic(&mut state, &buffer);
-                mark(&mut buffer, triggered || periodic);
-                if self.emit(&mut state, ctx, &output, buffer) {
-                    Ok(Tick::Again)
-                } else {
-                    ctx.wait_flush(input);
-                    Ok(Tick::Idle)
-                }
-            }
-        }
+        self.last_slot.store(NO_SLOT, Ordering::Relaxed);
     }
 
     fn set_object(&self, key: &str, value: &Value) -> Result<(), String> {
@@ -203,7 +159,7 @@ impl ForceKeyframe {
 
     /// The first frame in each interval slot, C++ `shouldForcePeriodic`. The
     /// slot index is `floor(pts / interval)` computed in integers.
-    fn periodic(&self, state: &mut State, buffer: &Media) -> bool {
+    fn periodic(&self, buffer: &Grain) -> bool {
         let Some(interval) = self.interval else {
             return false;
         };
@@ -214,42 +170,20 @@ impl ForceKeyframe {
         let slot = (ts.val as i128 * ts.tb.num as i128 * interval.den as i128)
             / (ts.tb.den as i128 * interval.num as i128);
         let slot = slot as i64;
-        if state.last_slot == Some(slot) {
+        if self.last_slot.load(Ordering::Relaxed) == slot {
             return false;
         }
-        state.last_slot = Some(slot);
+        self.last_slot.store(slot, Ordering::Relaxed);
         self.periodic_frames.fetch_add(1, Ordering::Relaxed);
         true
-    }
-
-    /// `false` when the output is full: the frame is held and the node waits.
-    fn emit(
-        &self,
-        state: &mut State,
-        ctx: &mut NodePollContext,
-        output: &std::sync::Arc<dyn Edge>,
-        buffer: Media,
-    ) -> bool {
-        match output.offer(buffer) {
-            Ok(()) | Err((Push::Dropped | Push::Accepted, _)) => true,
-            Err((Push::Full, buffer)) => {
-                state.pending = Some(buffer);
-                ctx.wait_writable(output.clone());
-                false
-            }
-            Err((Push::Closed, _)) => {
-                log::info!("{}: output closed, discarding", self.io.name);
-                true
-            }
-        }
     }
 }
 
 /// `pict_type` is what libx264 and nvenc read to force an I-frame; an explicit
 /// `NONE` on every other frame leaves the decision to the encoder, exactly as
 /// C++ did. The key flag goes with it so a downstream reader agrees.
-fn mark(buffer: &mut Media, force: bool) {
-    if let Media::Video(frame) = buffer {
+fn mark(buffer: &mut Grain, force: bool) {
+    if let Grain::Video(frame) = buffer {
         let raw = unsafe { rsmpeg::UnsafeDerefMut::deref_mut(frame) };
         if force {
             raw.pict_type = ffi::AV_PICTURE_TYPE_I;
@@ -268,9 +202,10 @@ mod tests {
     use super::*;
     use avplumber_f7k::Instance;
     use avplumber_f7k::graph::BufferedEdge;
-    use avplumber_f7k::graph::edge::Wakeup;
-    use avplumber_f7k::graph::media::test_media;
-    use avplumber_f7k::graph::node::Node;
+    use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeItem, Wakeup};
+    use avplumber_f7k::graph::grain::test_media;
+    use avplumber_f7k::graph::node::{Node, Polled};
+    use avplumber_f7k::graph::poll_ctx::NodePollContext;
 
     fn node(interval: Option<Value>) -> (Polling<ForceKeyframe>, Arc<dyn Edge>, Arc<dyn Edge>) {
         let instance = Instance::new();
@@ -302,13 +237,13 @@ mod tests {
         loop {
             ctx.clear_park();
             match node.poll(&mut ctx).expect("step") {
-                Tick::Again => continue,
+                Polled::Again => continue,
                 _ => break,
             }
         }
         let mut marks = Vec::new();
         while let Some(item) = output.try_take() {
-            if let EdgeItem::Buffer(Media::Video(frame)) = item {
+            if let EdgeItem::Buffer(Grain::Video(frame)) = item {
                 marks.push(frame.pict_type == ffi::AV_PICTURE_TYPE_I);
             }
         }

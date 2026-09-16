@@ -1,10 +1,10 @@
-//! Edge ops C ABI. take + peek guard over owned Media.
+//! Edge ops C ABI. take + peek guard over owned Grain.
 
 use crate::abi::convert::{clone_avp_buffer, media_as_avp, media_to_avp, release_avp_buffer};
 use crate::abi::{AvpBuffer, AvpSpec};
 use crate::abi::{AvpEdge, AvpNode};
 use crate::graph::edge::{EdgeEvent, EdgeItem, Push};
-use crate::graph::media::Ts;
+use crate::graph::timestamp::Ts;
 use crate::graph::spec::Spec;
 use crate::graph::{AVP_NOPTS, AvpRational};
 

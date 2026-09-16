@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::error::NodeError;
-use avplumber_f7k::graph::media::{Media, PacketExt};
+use avplumber_f7k::graph::grain::{Grain, PacketExt};
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
 use avplumber_f7k::{Instance, control};
 
 mod common;
@@ -74,15 +74,15 @@ impl InputHandler for PacketCapture {
         Ok(None)
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
-        if let Media::Packet(packet) = &buffer {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
+        if let Grain::Packet(packet) = &buffer {
             self.seen
                 .lock()
                 .unwrap()
                 .packets
                 .push((packet.pts, packet.is_key()));
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 }
 

@@ -28,8 +28,8 @@ impl AvpMediaType {
     }
 }
 
-/// Function table for C++-owned media (`Media::Opaque`). Same layout as the
-/// C header; native code holds it because OpaqueFrame calls it on Drop/Clone.
+/// Function table for C++-owned media (`Grain::Opaque`). Same layout as the
+/// C header; native code holds it because OpaqueGrain calls it on Drop/Clone.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AvpMediaVtable {

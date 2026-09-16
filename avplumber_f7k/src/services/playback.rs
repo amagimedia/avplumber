@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::graph::media::Ts;
+use crate::graph::timestamp::Ts;
 use crate::graph::timebase::MILLISECONDS;
 use crate::services::clock::{ClockService, SyncGroup};
 

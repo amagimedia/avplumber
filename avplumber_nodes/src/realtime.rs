@@ -8,7 +8,7 @@
 //! is O(1) and touches nothing in flight. This is the one node that rewrites
 //! PTS, the continuity exception the design reserves for the output stage.
 //!
-//! No libav: the node reads and restamps `Media`, so it builds without FFmpeg
+//! No libav: the node reads and restamps `Grain`, so it builds without FFmpeg
 //! and its unit tests run against a synthetic clock.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,13 +21,14 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AVP_NOPTS, AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{EdgeEvent, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, Ts};
-use avplumber_f7k::graph::node::Tick;
+use avplumber_f7k::graph::grain::Grain;
+use avplumber_f7k::graph::node::Polled;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::graph::timebase::{MICROSECONDS, MILLISECONDS, rational_from_json, rescale};
-use avplumber_f7k::scaffold::{Io, PollNode, Polling};
+use avplumber_f7k::graph::timebase::{MICROSECONDS, MILLISECONDS, rational_from_json};
+use avplumber_f7k::graph::timestamp::{rescale, Ts};
+use avplumber_f7k::node_api::{Io, PollNode, Polling};
 use avplumber_f7k::services::clock::{SyncGroup, instant_at};
 use avplumber_f7k::services::playback::Playback;
 
@@ -110,7 +111,7 @@ impl NodeSpec for RealtimeSpec {
 #[derive(Default)]
 struct State {
     /// A frame waiting for its time, or for the output, or for a resume.
-    held: Option<Media>,
+    held: Option<Grain>,
     /// Release the next frame even while paused: it is the one a seek landed
     /// on, and a paused viewer must see it.
     release_one: bool,
@@ -167,10 +168,10 @@ impl PollNode for Realtime {
         *self.state.lock().unwrap() = State::default();
     }
 
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let (Some(input), Some(output)) = (self.io.input_slot.get(), self.io.output_slot.get())
         else {
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         };
         let mut state = self.state.lock().unwrap();
 
@@ -188,16 +189,16 @@ impl PollNode for Realtime {
                 None => match input.try_take() {
                     None => {
                         if input.is_closed() {
-                            return Ok(Tick::Done);
+                            return Ok(Polled::Done);
                         }
                         ctx.wait_readable(input.clone());
-                        return Ok(Tick::Idle);
+                        return Ok(Polled::Idle);
                     }
                     Some(EdgeItem::Buffer(frame)) => frame,
                     Some(EdgeItem::Event(event)) => {
                         self.on_event(&mut state, &output, event);
                         if matches!(state.held, None) && input.is_closed() {
-                            return Ok(Tick::Done);
+                            return Ok(Polled::Done);
                         }
                         continue;
                     }
@@ -220,7 +221,7 @@ impl PollNode for Realtime {
                 state.held = Some(frame);
                 ctx.wait_flush(input.clone());
                 ctx.wait_deadline(Instant::now() + PAUSED_POLL);
-                return Ok(Tick::Idle);
+                return Ok(Polled::Idle);
             }
 
             let media = frame.ts();
@@ -236,13 +237,13 @@ impl PollNode for Realtime {
                     state.held = Some(frame);
                     ctx.wait_flush(input.clone());
                     ctx.wait_deadline(Instant::now() + PAUSED_POLL);
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
                 Due::Later(wall_us) => {
                     state.held = Some(frame);
                     ctx.wait_flush(input.clone());
                     ctx.wait_deadline(instant_at(wall_us));
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
                 Due::Late => {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -273,7 +274,7 @@ impl PollNode for Realtime {
                 state.held = Some(frame);
                 ctx.wait_flush(input.clone());
                 ctx.wait_writable(output.clone());
-                return Ok(Tick::Idle);
+                return Ok(Polled::Idle);
             }
             let mut frame = frame;
             frame.set_ts(self.output_stamp(&mut state));
@@ -285,18 +286,18 @@ impl PollNode for Realtime {
                     state.held = Some(frame);
                     ctx.wait_flush(input.clone());
                     ctx.wait_writable(output.clone());
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
                 Err((Push::Closed, _)) => {
                     log::info!("{}: output closed, finishing", self.io.name);
-                    return Ok(Tick::Done);
+                    return Ok(Polled::Done);
                 }
             }
             state.release_one = false;
             self.released.fetch_add(1, Ordering::Relaxed);
             self.playback
                 .report_release(media.rescale(MILLISECONDS).val);
-            return Ok(Tick::Again);
+            return Ok(Polled::Again);
         }
     }
 
@@ -436,7 +437,7 @@ mod tests {
     use avplumber_f7k::Instance;
     use avplumber_f7k::graph::BufferedEdge;
     use avplumber_f7k::graph::edge::{Edge, Wakeup};
-    use avplumber_f7k::graph::media::test_media;
+    use avplumber_f7k::graph::grain::test_media;
     use avplumber_f7k::graph::node::Node;
     use avplumber_f7k::services::clock::ClockSnapshot;
 
@@ -556,7 +557,7 @@ mod tests {
             loop {
                 self.ctx.clear_park();
                 match self.node.poll(&mut self.ctx).expect("step") {
-                    Tick::Again => continue,
+                    Polled::Again => continue,
                     _ => break,
                 }
             }

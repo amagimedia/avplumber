@@ -23,7 +23,7 @@ pub mod factory;
 pub mod graph;
 #[cfg(feature = "ffmpeg")]
 pub mod libav;
-pub mod scaffold;
+pub mod node_api;
 pub mod services;
 pub mod supervisor;
 
@@ -42,16 +42,16 @@ pub use factory::{
     RestartPolicy,
 };
 pub use graph::{
-    AVP_NOPTS, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpRational, AvpServiceId, Blocked,
+    AVP_NOPTS, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpRational, AvpServiceId, Processed,
     BufferedEdge, CatalogStream, ChannelLayout, DirectEdge, Edge, EdgeEvent, EdgeHint,
-    EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Graph, Media, MuxStream,
+    EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Graph, Grain, MuxStream,
     Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, PacketSpec, Pad,
-    PadDecl, Push, Spec, StreamSelection, Tick, Ts, Vertex, Wakeup, generation_reader,
+    PadDecl, Push, Spec, StreamSelection, Polled, Ts, Vertex, Wakeup, generation_reader,
     generation_writer,
 };
-pub use scaffold::{
-    Blocking, BlockingIo, BlockingNode, InputHandler, Io, PollNode, Polling, SingleInput,
-    SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter,
+pub use node_api::{
+    Blocking, BlockingIo, BlockingNode, InputHandler, Io, PollInput, PollIo, PollNode, Polling,
+    SingleInput, SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter,
 };
 pub use services::ServiceRegistry;
 pub use supervisor::{

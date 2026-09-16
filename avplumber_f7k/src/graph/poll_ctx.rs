@@ -1,4 +1,4 @@
-//! Readiness context for `NodeBody::Poll`. Register waiters, then return `Tick::Idle`.
+//! Readiness context for `NodeBody::Poll`. Register waiters, then return `Polled::Idle`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

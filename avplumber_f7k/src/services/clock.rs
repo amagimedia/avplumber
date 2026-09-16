@@ -8,7 +8,8 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use std::sync::OnceLock;
 
-use crate::graph::timebase::{self, MICROSECONDS};
+use crate::graph::timebase::MICROSECONDS;
+use crate::graph::timestamp;
 use crate::graph::{AVP_NOPTS, AvpRational};
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +60,7 @@ pub fn instant_at(wall_us: i64) -> Instant {
 }
 
 fn src_us(pts: i64, tb: AvpRational) -> i64 {
-    timebase::rescale(pts, tb, MICROSECONDS)
+    timestamp::rescale(pts, tb, MICROSECONDS)
 }
 
 fn rate_or_one(rate: f64) -> f64 {
@@ -162,7 +163,7 @@ impl SyncGroup for SnapshotClock {
         }
         let source_us =
             s.origin_src_us + ((now_us() - s.origin_wall_us) as f64 * rate_or_one(s.rate)) as i64;
-        Some(timebase::rescale(source_us, MICROSECONDS, tb))
+        Some(timestamp::rescale(source_us, MICROSECONDS, tb))
     }
 
     fn join_offset(&self, offset_us: i64) {
@@ -265,7 +266,7 @@ impl SyncGroup for SourceTimeClock {
         if s.paused {
             return src;
         }
-        timebase::rescale(src, tb, MICROSECONDS)
+        timestamp::rescale(src, tb, MICROSECONDS)
     }
     fn join_offset(&self, o: i64) {
         self.0.join_offset(o);

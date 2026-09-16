@@ -34,15 +34,16 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{FrameExt, Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::grain::{FrameExt, Grain, PacketExt};
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{PacketSpec, Spec};
-use avplumber_f7k::graph::timebase::ts_cmp;
+use avplumber_f7k::graph::timestamp::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
 use avplumber_f7k::services::hwaccel::HwDevice;
 
 /// The parameters both decoder types share; C++ has one template for both.
@@ -334,17 +335,17 @@ impl InputHandler for Decoder {
         Ok(None)
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         if state.ctx.is_none() {
             // Only reachable when a producer pushed packets before its spec;
             // there is nothing to decode them with yet.
             state.dropped_early += 1;
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        state.last_key = matches!(&buffer, Media::Packet(packet) if packet.is_key());
+        state.last_key = matches!(&buffer, Grain::Packet(packet) if packet.is_key());
         state.pump.load(buffer);
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn on_flush(&self) {
@@ -376,13 +377,13 @@ impl InputHandler for Decoder {
 
     /// The codec keeps producing after its last input, so this only starts the
     /// drain; [`SingleInput::before_take`] finishes when it is over.
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
+    fn on_eof(&self) -> Result<Processed, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         if let Some(ctx) = state.ctx.as_mut() {
             state.pump.flush(ctx);
         }
         state.eof = true;
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 
     /// The source has run out of packets for now, so whatever the codec is
@@ -436,13 +437,13 @@ impl SingleInput for Decoder {
 
     /// Decoded frames go downstream before anything new is taken in, and a
     /// codec that refused the packet we are holding is offered it again.
-    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+    fn before_take(&self) -> Result<Option<Processed>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         let out = self.io.output()?;
         if let Some(buffer) = state.pump.take_output() {
             let buffer = self.stamp(state, buffer);
             if self.below_resume_at(state, &buffer) {
-                return Ok(Some(Blocked::Again));
+                return Ok(Some(Processed::Again));
             }
             return self.emit(state, &out, buffer).map(Some);
         }
@@ -450,7 +451,7 @@ impl SingleInput for Decoder {
         if state.eof {
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
-            return Ok(Some(Blocked::Done));
+            return Ok(Some(Processed::Done));
         }
         // Drained after `Drain`: everything the codec held is out, so put it
         // back in a state that takes packets. libavcodec requires the flush
@@ -465,12 +466,12 @@ impl SingleInput for Decoder {
         }
         if state.pump.is_loaded() {
             return Ok(Some(match self.drive(state)? {
-                Progress::Moved => Blocked::Again,
+                Progress::Moved => Processed::Again,
                 // Neither direction moved, which for a decoder means the codec
                 // wants time rather than data. Park instead of spinning.
                 Progress::Stalled => {
                     self.io.wait(PARK_TIMEOUT_MS);
-                    Blocked::Again
+                    Processed::Again
                 }
             }));
         }
@@ -495,8 +496,8 @@ impl Decoder {
         &self,
         state: &mut State,
         out: &Arc<dyn Edge>,
-        buffer: Media,
-    ) -> Result<Blocked, NodeError> {
+        buffer: Grain,
+    ) -> Result<Processed, NodeError> {
         self.publish_spec(state, out, &buffer);
         // Parks for room, unless a flush has reached the input meanwhile: then
         // this frame is from before the discontinuity and is dropped.
@@ -509,7 +510,7 @@ impl Decoder {
     /// for is discarded. The first frame at or past it clears the cutoff; a
     /// frame without a timestamp is let through, since it cannot be placed on
     /// either side.
-    fn below_resume_at(&self, state: &mut State, buffer: &Media) -> bool {
+    fn below_resume_at(&self, state: &mut State, buffer: &Grain) -> bool {
         let Some(cutoff) = state.resume_at else {
             return false;
         };
@@ -539,9 +540,9 @@ impl Decoder {
     /// libavcodec 6 and 7/8 disagree about whether `frame.time_base` comes back
     /// filled, and everything downstream reads timestamps through it, so it is
     /// set here from `pkt_timebase` unconditionally.
-    fn stamp(&self, state: &mut State, buffer: Media) -> Media {
+    fn stamp(&self, state: &mut State, buffer: Grain) -> Grain {
         let mut buffer = buffer;
-        if let Media::Video(frame) | Media::Audio(frame) = &mut buffer {
+        if let Grain::Video(frame) | Grain::Audio(frame) = &mut buffer {
             let ts = Ts {
                 val: frame.pts,
                 tb: state.time_base,
@@ -568,10 +569,10 @@ impl Decoder {
 
     /// The decoded format, read from the frame rather than the context: that is
     /// what the consumer will actually receive.
-    fn publish_spec(&self, state: &mut State, out: &Arc<dyn Edge>, buffer: &Media) {
+    fn publish_spec(&self, state: &mut State, out: &Arc<dyn Edge>, buffer: &Grain) {
         let spec = match buffer {
-            Media::Video(frame) => codec::video_spec_of(frame, state.time_base, state.frame_rate),
-            Media::Audio(frame) => codec::audio_spec_of(frame, state.time_base),
+            Grain::Video(frame) => codec::video_spec_of(frame, state.time_base, state.frame_rate),
+            Grain::Audio(frame) => codec::audio_spec_of(frame, state.time_base),
             _ => return,
         };
         if let Some(published) = &state.output_spec {
@@ -699,7 +700,7 @@ fn fmt_tb(tb: AvpRational) -> String {
 mod tests {
     use super::*;
     use avplumber_f7k::graph::AVP_NOPTS;
-    use avplumber_f7k::graph::media::test_media;
+    use avplumber_f7k::graph::grain::test_media;
 
     fn build_decoder(params: serde_json::Value) -> Result<Decoder, String> {
         let instance = avplumber_f7k::Instance::new();

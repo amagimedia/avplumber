@@ -34,9 +34,10 @@ avplumber_f7k/
 │   ├── lib.rs                  composition root and crate-level exports
 │   ├── core.rs                 authoritative native construction/lifecycle API
 │   ├── graph/
-│   │   ├── media.rs            owned payloads and timestamp access
+│   │   ├── grain.rs            owned payloads (`Grain`) and timestamp access
+│   │   ├── timestamp.rs        `Ts` and the only timestamp rescaling implementation
 │   │   ├── spec.rs             native stream/container descriptions
-│   │   ├── timebase.rs         the only timestamp rescaling implementation
+│   │   ├── timebase.rs         time-base rationals, comparison, parsing
 │   │   ├── routing.rs          the `routing` key grammar over a catalog (libav-free)
 │   │   ├── edge.rs             event/flow contract and shared queue state
 │   │   ├── buffered_edge.rs    queued cross-domain transport
@@ -46,7 +47,7 @@ avplumber_f7k/
 │   │   ├── pad.rs              pad declarations and media compatibility
 │   │   ├── error.rs            executor-visible node failures
 │   │   ├── capability.rs       capability/service IDs (C: generated avplumber_ids.h)
-│   │   ├── buffer.rs           native rationals, media kinds, OpaqueFrame vtable
+│   │   ├── buffer.rs           native rationals, media kinds, OpaqueGrain vtable
 │   │   └── mod.rs              Graph, Vertex, EdgeLink; not an execution engine
 │   ├── exec/
 │   │   ├── blocking.rs         one OS thread per Blocking body
@@ -86,11 +87,13 @@ avplumber_f7k/
 │   ├── control/
 │   │   ├── mod.rs              script parser: graph, group, object and playback commands
 │   │   └── tcp.rs              the C++ wire format over TCP, one thread per connection
-│   ├── scaffold/
+│   ├── node_api/
 │   │   ├── siso.rs             SisoNode + blocking/poll/async one-in/one-out adapters
-│   │   ├── park.rs             a blocking body's wait-for-room condvar + push_blocking
-│   │   ├── body.rs             BlockingStep/PollStep: the fallible step of a node
-│   │   ├── edge_slot.rs        one rebindable edge, for single-in/single-out nodes
+│   │   ├── blocking/           BlockingNode, Blocking wrapper, Park, push_blocking
+│   │   ├── poll.rs             PollNode + Polling wrapper; Direct-edge opt-in
+│   │   ├── poll_input.rs       PollInput: InputHandler reactions for Poll
+│   │   ├── single_input.rs     SingleInput + InputHandler reactions for Blocking
+│   │   ├── io.rs               Io and EdgeSlot
 │   │   └── mod.rs              node-authoring helpers; convenience, never contracts
 │   └── abi/
 │       ├── types.rs            flat AvpSpec / AvpBuffer / EdgeCoupling
@@ -99,7 +102,7 @@ avplumber_f7k/
 │       ├── edge_ops.rs         ownership transfer across the C boundary
 │       ├── node.rs             C node implementation attachment
 │       ├── registry.rs         C factories, media vtables, shared objects
-│       ├── convert.rs          raw pointer ↔ owned Media conversion
+│       ├── convert.rs          raw pointer ↔ owned Grain conversion
 │       ├── control.rs          C wrapper over the Rust control parser
 │       └── mod.rs              opaque C handles and exported symbols
 ├── include/                    C ABI: handwritten API + generated avplumber_ids.h
@@ -411,8 +414,8 @@ flowchart TD
 
 The native data path owns values:
 
-- `Media` owns rsmpeg frames/packets when `ffmpeg` is enabled.
-- `OpaqueFrame` owns a foreign object through retain/release callbacks.
+- `Grain` owns rsmpeg frames/packets when `ffmpeg` is enabled.
+- `OpaqueGrain` owns a foreign object through retain/release callbacks.
 - `Spec` describes the format in force on an edge.
 - `Ts` carries value and timebase together; rescaling is explicit.
 
@@ -532,7 +535,7 @@ Poll is appropriate when one bounded step and explicit readiness are clearer
 than a future. Async is appropriate for waiting on several independent inputs
 or an input plus a clock.
 
-`Tick::Again` is fairness-limited before yielding. `Tick::Idle` must register
+`Polled::Again` is fairness-limited before yielding. `Polled::Idle` must register
 at least one wake condition; otherwise the task may park indefinitely. A
 deadline is a complete wake condition: the async executor installs a Tokio
 timer, so a deadline-only Poll body wakes without an edge event or external
@@ -565,9 +568,9 @@ reject it.
 
 `src/nodes/` is node logic only — one node per file, nothing copied between
 files. Shared work belongs to `src/libav/` (codec lookup, dictionaries, the
-send/receive pump), to `src/scaffold/` (the helpers nodes are *written* with:
-`Park`, `push_blocking`, `BlockingStep`/`PollStep`, `EdgeSlot`), to
-`graph/media.rs` (`PacketExt`/`FrameExt`) or to `graph/timebase.rs`, which is
+send/receive pump), to `src/node_api/` (the helpers nodes are *written* with:
+`Park`, `push_blocking`, `BlockingNode`/`PollNode`, `EdgeSlot`), to
+`graph/grain.rs` (`PacketExt`/`FrameExt`) or to `graph/timestamp.rs`, which is
 still the only rescaling implementation. `graph/routing.rs` holds the `routing`
 key grammar rather than `demux`, because it is a query over `CatalogStream` and
 its `AVMEDIA_TYPE_*` constants shadow that struct's encoding. Nodes that call
@@ -642,11 +645,10 @@ the push when a flush shows up at the head of the input it produced from. Both
 exist so a flush can pass through a pipeline that is backed up behind a paused
 output, which is exactly what a seek while paused looks like.
 
-Nodes implement the crate-private `BlockingStep` / `PollStep`
-(`scaffold/body.rs`) and hand the executor a fallible body through
-`blocking_body` / `poll_body`, so a `NodeError` propagates to the supervisor
+Nodes implement `BlockingNode` / `PollNode`
+(`node_api/`) and the wrappers hand the executor a fallible body, so a `NodeError` propagates to the supervisor
 instead of being logged and swallowed. A Blocking producer that finds its output
-edge full parks on the node's own `Park` (`scaffold/park.rs`, `push_blocking`)
+edge full parks on the node's own `Park` (`node_api/blocking/park.rs`, `push_blocking`)
 with a short timeout, and `Node::interrupt` — which both
 executors call from `stop()` — is what releases it; a libav call that could block
 for a whole timeout also honours it through `input`'s interrupt callback.

@@ -20,12 +20,12 @@ use std::sync::Arc;
 
 use crate::graph::edge::{Edge, EdgeEvent, EdgeItem};
 use crate::graph::error::NodeError;
-use crate::graph::media::{Media, Ts};
-use crate::graph::node::Blocked;
+use crate::graph::grain::Grain;
+use crate::graph::timestamp::Ts;
+use crate::graph::node::Processed;
 use crate::graph::pad::NodePads;
 use crate::graph::spec::Spec;
-use crate::scaffold::blocking::BlockingNode;
-use crate::scaffold::io::BlockingIo;
+use crate::node_api::blocking::{BlockingIo, BlockingNode};
 
 /// What a node does with each kind of item on its input.
 pub trait InputHandler: Send + Sync + 'static {
@@ -37,10 +37,10 @@ pub trait InputHandler: Send + Sync + 'static {
     /// decoded frame, a sink never publishes.
     fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError>;
 
-    /// One buffer. Whatever comes back is pushed to the output, parking for
-    /// room. `None` for a node that consumes the buffer, or that produces later:
-    /// a codec hands its output over in [`SingleInput::before_take`].
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError>;
+    /// One buffer. Return every output it produced: empty to consume it (a sink,
+    /// or a codec that emits later from [`SingleInput::before_take`]), one to
+    /// forward, several when one input becomes many (`force_fps` filling a gap).
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError>;
 
     /// The input is being flushed: discard whatever is buffered here. The
     /// `FlushStart` is forwarded once this returns. A node that buffers nothing
@@ -64,8 +64,8 @@ pub trait InputHandler: Send + Sync + 'static {
     /// node that has to drain first — a codec — returns `Again`, keeps stepping
     /// from [`SingleInput::before_take`], and forwards `Eof` itself when the
     /// drain is over.
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
-        Ok(Blocked::Done)
+    fn on_eof(&self) -> Result<Processed, NodeError> {
+        Ok(Processed::Done)
     }
 
     /// The input came back empty: the edge is closed, or a stop interrupted the
@@ -77,9 +77,9 @@ pub trait InputHandler: Send + Sync + 'static {
 pub enum Reaction {
     Again,
     Done,
-    /// The handler produced a buffer; the caller pushes it the way its body
-    /// pushes.
-    Produced(Media),
+    /// The handler produced one or more buffers; the caller pushes them the
+    /// way its body pushes.
+    Produced(Vec<Grain>),
 }
 
 /// Classifies one item and calls the matching hook, forwarding the control
@@ -103,8 +103,8 @@ pub fn react<H: InputHandler + ?Sized>(
             Ok(Reaction::Again)
         }
         EdgeItem::Buffer(buffer) => Ok(match handler.on_buffer(buffer)? {
-            Some(produced) => Reaction::Produced(produced),
-            None => Reaction::Again,
+            produced if produced.is_empty() => Reaction::Again,
+            produced => Reaction::Produced(produced),
         }),
         EdgeItem::Event(EdgeEvent::FlushStart) => {
             handler.on_flush();
@@ -122,8 +122,8 @@ pub fn react<H: InputHandler + ?Sized>(
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::Eof) => match handler.on_eof()? {
-            Blocked::Again => Ok(Reaction::Again),
-            Blocked::Done => {
+            Processed::Again => Ok(Reaction::Again),
+            Processed::Done => {
                 forward(EdgeEvent::Eof);
                 Ok(Reaction::Done)
             }
@@ -149,7 +149,7 @@ pub trait SingleInput: InputHandler {
     /// the read: emit what an earlier step produced, drive a codec that is
     /// still holding an input, finish once a drain is over. The default reads
     /// straight away.
-    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+    fn before_take(&self) -> Result<Option<Processed>, NodeError> {
         Ok(None)
     }
 
@@ -174,10 +174,10 @@ impl<N: SingleInput> BlockingNode for N {
         SingleInput::pads(self)
     }
 
-    fn step(&self) -> Result<Blocked, NodeError> {
+    fn step(&self) -> Result<Processed, NodeError> {
         let io = SingleInput::io(self);
         if io.is_interrupted() {
-            return Ok(Blocked::Done);
+            return Ok(Processed::Done);
         }
         let input = io.input()?;
         if let Some(blocked) = self.before_take()? {
@@ -185,12 +185,20 @@ impl<N: SingleInput> BlockingNode for N {
         }
         let Some(item) = input.take(-1) else {
             self.on_closed();
-            return Ok(Blocked::Done);
+            return Ok(Processed::Done);
         };
         match react(self, io.output_slot.get().as_ref(), item)? {
-            Reaction::Again => Ok(Blocked::Again),
-            Reaction::Done => Ok(Blocked::Done),
-            Reaction::Produced(buffer) => io.push_from(&input, &io.output()?, buffer),
+            Reaction::Again => Ok(Processed::Again),
+            Reaction::Done => Ok(Processed::Done),
+            Reaction::Produced(buffers) => {
+                let out = io.output()?;
+                for buffer in buffers {
+                    if io.push_from(&input, &out, buffer)? == Processed::Done {
+                        return Ok(Processed::Done);
+                    }
+                }
+                Ok(Processed::Again)
+            }
         }
     }
 
@@ -216,13 +224,13 @@ mod tests {
     use crate::graph::BufferedEdge;
     use crate::graph::buffer::{AvpMediaType, AvpRational};
     use crate::graph::error::NodePhase;
-    use crate::graph::media::test_media;
+    use crate::graph::grain::test_media;
     use crate::graph::node::Node;
-    use crate::scaffold::blocking::Blocking;
+    use crate::node_api::blocking::Blocking;
 
     /// Records what arrives, echoes buffers, publishes a spec of its own, and
     /// drains for one step after `Eof`. Its state is a mutex and an atomic,
-    /// which is the node's choice, not the scaffold's.
+    /// which is the node's choice, not the wrapper's.
     struct Echo {
         io: BlockingIo,
         seen: Mutex<Vec<&'static str>>,
@@ -255,12 +263,12 @@ mod tests {
             Ok(Some(spec()))
         }
 
-        fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+        fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
             self.saw("buffer");
             if buffer.ts().val < 0 {
                 return Err(self.io.error(NodePhase::Process, "negative pts"));
             }
-            Ok(Some(buffer))
+            Ok(vec![buffer])
         }
 
         fn on_flush(&self) {
@@ -273,10 +281,10 @@ mod tests {
                 .store(resume_at.map_or(i64::MIN, |ts| ts.val), Ordering::SeqCst);
         }
 
-        fn on_eof(&self) -> Result<Blocked, NodeError> {
+        fn on_eof(&self) -> Result<Processed, NodeError> {
             self.saw("eof");
             self.drain_steps.store(1, Ordering::SeqCst);
-            Ok(Blocked::Again)
+            Ok(Processed::Again)
         }
 
         fn on_closed(&self) {
@@ -289,11 +297,11 @@ mod tests {
             &self.io
         }
 
-        fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+        fn before_take(&self) -> Result<Option<Processed>, NodeError> {
             if self.drain_steps.swap(0, Ordering::SeqCst) == 1 {
                 self.saw("drained");
                 self.io.output()?.push_event(EdgeEvent::Eof);
-                return Ok(Some(Blocked::Done));
+                return Ok(Some(Processed::Done));
             }
             Ok(None)
         }
@@ -346,8 +354,8 @@ mod tests {
 
         input.push_event(EdgeEvent::Spec(spec()));
         input.push(test_media(AvpMediaType::VIDEO, 1));
-        assert_eq!(node.process().unwrap(), Blocked::Again, "the spec");
-        assert_eq!(node.process().unwrap(), Blocked::Again, "the buffer");
+        assert_eq!(node.process().unwrap(), Processed::Again, "the spec");
+        assert_eq!(node.process().unwrap(), Processed::Again, "the buffer");
         assert_eq!(
             events(&*output),
             vec!["spec", "buffer"],
@@ -362,14 +370,14 @@ mod tests {
             }),
         });
         input.push_event(EdgeEvent::Eof);
-        assert_eq!(node.process().unwrap(), Blocked::Again, "flush start");
-        assert_eq!(node.process().unwrap(), Blocked::Again, "flush stop");
+        assert_eq!(node.process().unwrap(), Processed::Again, "flush start");
+        assert_eq!(node.process().unwrap(), Processed::Again, "flush stop");
         assert_eq!(
             node.process().unwrap(),
-            Blocked::Again,
+            Processed::Again,
             "eof starts the drain"
         );
-        assert_eq!(node.process().unwrap(), Blocked::Done, "the drain finishes");
+        assert_eq!(node.process().unwrap(), Processed::Done, "the drain finishes");
         node.stop();
 
         assert_eq!(
@@ -410,7 +418,7 @@ mod tests {
     fn a_closed_input_finishes_through_on_closed() {
         let (node, input, _output) = echo();
         input.interrupt();
-        assert_eq!(node.process().unwrap(), Blocked::Done);
+        assert_eq!(node.process().unwrap(), Processed::Done);
         assert_eq!(*node.seen.lock().unwrap(), vec!["closed"]);
     }
 
@@ -423,8 +431,8 @@ mod tests {
             fn on_spec(&self, _: Spec) -> Result<Option<Spec>, NodeError> {
                 Ok(None)
             }
-            fn on_buffer(&self, _: Media) -> Result<Option<Media>, NodeError> {
-                Ok(None)
+            fn on_buffer(&self, _: Grain) -> Result<Vec<Grain>, NodeError> {
+                Ok(Vec::new())
             }
         }
         impl SingleInput for Sink {
@@ -439,7 +447,7 @@ mod tests {
         node.bind_source("in", input.clone());
         input.push(test_media(AvpMediaType::AUDIO, 0));
         input.push_event(EdgeEvent::Eof);
-        assert_eq!(node.process().unwrap(), Blocked::Again);
-        assert_eq!(node.process().unwrap(), Blocked::Done);
+        assert_eq!(node.process().unwrap(), Processed::Again);
+        assert_eq!(node.process().unwrap(), Processed::Done);
     }
 }

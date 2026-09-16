@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use avplumber_f7k::{
-    AvpMediaType, AvpRational, BufferedEdge, DirectEdge, Edge, EdgeEvent, EdgeItem, Media, Node,
-    NodeError, NodeKind, NodePollContext, Push, SisoNode, SisoPollAdapter, Spec, Tick, Wakeup,
+    AvpMediaType, AvpRational, BufferedEdge, DirectEdge, Edge, EdgeEvent, EdgeItem, Grain, Node,
+    NodeError, NodeKind, NodePollContext, Push, SisoNode, SisoPollAdapter, Spec, Polled, Wakeup,
 };
 
 fn stub(pts: i64) -> Media {

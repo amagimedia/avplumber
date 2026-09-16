@@ -16,8 +16,8 @@ use crate::graph::edge::{
     Edge, EdgeEvent, EdgeHint, EdgeHintCell, EdgeItem, EdgeQueue, EdgeRestart, EdgeWaker, Push,
     Wakeup,
 };
-use crate::graph::media::Media;
-use crate::graph::node::{Node, Tick};
+use crate::graph::grain::Grain;
+use crate::graph::node::{Node, Polled};
 use crate::graph::poll_ctx::NodePollContext;
 use crate::graph::spec::Spec;
 
@@ -40,7 +40,7 @@ pub struct DirectEdge {
 
 struct DirectState {
     events: EdgeQueue,
-    inflight: Option<Media>,
+    inflight: Option<Grain>,
     offering: bool,
     offer_serial: u64,
     active_offer: Option<u64>,
@@ -64,7 +64,7 @@ impl DirectState {
         self.active_cancel = None;
     }
 
-    fn take_inflight(&mut self) -> Option<Media> {
+    fn take_inflight(&mut self) -> Option<Grain> {
         let media = self.inflight.take()?;
         if let Some(status) = &self.active_status {
             status.store(OFFER_CONSUMED, Ordering::Release);
@@ -108,7 +108,7 @@ impl DirectEdge {
         self.tail.lock().unwrap().clone()
     }
 
-    fn offer_checked(&self, generation: Option<u64>, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer_checked(&self, generation: Option<u64>, buf: Grain) -> Result<(), (Push, Grain)> {
         let recovery = buf.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let status = Arc::new(AtomicU8::new(OFFER_PENDING));
@@ -150,8 +150,8 @@ impl DirectEdge {
                     break;
                 }
                 match consumer.poll(&mut ctx) {
-                    Ok(Tick::Again) => ctx.clear_park(),
-                    Ok(Tick::Idle | Tick::Done) => break,
+                    Ok(Polled::Again) => ctx.clear_park(),
+                    Ok(Polled::Idle | Polled::Done) => break,
                     // The consumer opted in as infallible when the edge was
                     // connected, so this is a bug in it. There is no executor
                     // here to report to; the buffer goes back to the producer as
@@ -239,7 +239,7 @@ impl Default for DirectEdge {
 }
 
 impl Edge for DirectEdge {
-    fn offer(&self, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)> {
         self.offer_checked(None, buf)
     }
 
@@ -362,7 +362,7 @@ impl Edge for DirectEdge {
         self.writer_generation.load(Ordering::Acquire)
     }
 
-    fn offer_generation(&self, generation: u64, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
         self.offer_checked(Some(generation), buf)
     }
 
@@ -550,33 +550,33 @@ mod tests {
         fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
             let _ = self.sink.set(edge);
         }
-        fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
             let Some(src) = self.src.get() else {
-                return Ok(Tick::Done);
+                return Ok(Polled::Done);
             };
             if let Some(sink) = self.sink.get() {
                 if sink.is_full() {
                     ctx.wait_writable(sink.clone());
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
             }
             match src.try_take() {
                 None => {
                     ctx.wait_readable(src.clone());
-                    Ok(Tick::Idle)
+                    Ok(Polled::Idle)
                 }
                 Some(EdgeItem::Buffer(buf)) => {
                     let Some(sink) = self.sink.get() else {
-                        return Ok(Tick::Again);
+                        return Ok(Polled::Again);
                     };
                     match sink.offer(buf) {
-                        Ok(()) => Ok(Tick::Again),
-                        Err((Push::Full, _)) => Ok(Tick::Idle),
-                        Err((Push::Closed | Push::Dropped, _)) => Ok(Tick::Done),
-                        Err((Push::Accepted, _)) => Ok(Tick::Again),
+                        Ok(()) => Ok(Polled::Again),
+                        Err((Push::Full, _)) => Ok(Polled::Idle),
+                        Err((Push::Closed | Push::Dropped, _)) => Ok(Polled::Done),
+                        Err((Push::Accepted, _)) => Ok(Polled::Again),
                     }
                 }
-                Some(EdgeItem::Event(_)) => Ok(Tick::Again),
+                Some(EdgeItem::Event(_)) => Ok(Polled::Again),
             }
         }
     }
@@ -596,16 +596,16 @@ mod tests {
         fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
             let _ = self.src.set(edge);
         }
-        fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+        fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
             if let Some(src) = self.src.get() {
                 ctx.wait_readable(src.clone());
             }
-            Ok(Tick::Idle)
+            Ok(Polled::Idle)
         }
     }
 
-    fn stub(pts: i64) -> Media {
-        crate::graph::media::test_media(AvpMediaType::VIDEO, pts)
+    fn stub(pts: i64) -> Grain {
+        crate::graph::grain::test_media(AvpMediaType::VIDEO, pts)
     }
 
     fn video_spec() -> Spec {

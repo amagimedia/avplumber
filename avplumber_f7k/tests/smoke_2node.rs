@@ -14,7 +14,7 @@ use avplumber_f7k::abi::{
 };
 use avplumber_f7k::graph::AvpMediaType;
 use avplumber_f7k::{
-    AvpNodeVtable, Blocked, Edge, EdgeEvent, EdgeItem, Media, Node, NodeError, NodeKind, Push,
+    AvpNodeVtable, Processed, Edge, EdgeEvent, EdgeItem, Grain, Node, NodeError, NodeKind, Push,
     register_factory,
 };
 
@@ -90,21 +90,21 @@ impl Node for StubSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.sink.set(edge);
     }
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         let sink = self.sink.get().expect("sink bound before process");
         let n = self.produced.load(Ordering::Acquire);
         if n >= NFRAMES {
             sink.push_event(EdgeEvent::Eof);
-            return Ok(Blocked::Done);
+            return Ok(Processed::Done);
         }
         let buf = make_media(n as i64);
         match sink.push(buf) {
             Push::Accepted => {
                 self.produced.store(n + 1, Ordering::Release);
-                Ok(Blocked::Again)
+                Ok(Processed::Again)
             }
-            Push::Full => Ok(Blocked::Again),
-            Push::Closed | Push::Dropped => Ok(Blocked::Done),
+            Push::Full => Ok(Processed::Again),
+            Push::Closed | Push::Dropped => Ok(Processed::Done),
         }
     }
 }
@@ -144,21 +144,21 @@ impl Node for StubSink {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.source.set(edge);
     }
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         let source = self.source.get().expect("source bound before process");
         match source.take(-1) {
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::Release);
-                Ok(Blocked::Again)
+                Ok(Processed::Again)
             }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Blocked::Done),
-            Some(_) => Ok(Blocked::Again),
-            None => Ok(Blocked::Done),
+            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Processed::Done),
+            Some(_) => Ok(Processed::Again),
+            None => Ok(Processed::Done),
         }
     }
 }
 
-fn make_media(pts: i64) -> Media {
+fn make_media(pts: i64) -> Grain {
     #[cfg(feature = "ffmpeg")]
     {
         use rusty_ffmpeg::ffi;
@@ -170,14 +170,14 @@ fn make_media(pts: i64) -> Media {
             (*frame).height = 64;
             assert_eq!(ffi::av_frame_get_buffer(frame, 0), 0);
             (*frame).pts = pts;
-            Media::Video(rsmpeg::avutil::AVFrame::from_raw(
+            Grain::Video(rsmpeg::avutil::AVFrame::from_raw(
                 std::ptr::NonNull::new(frame).unwrap(),
             ))
         }
     }
     #[cfg(not(feature = "ffmpeg"))]
     {
-        Media::Stub {
+        Grain::Stub {
             kind: AvpMediaType::VIDEO,
             pts,
         }

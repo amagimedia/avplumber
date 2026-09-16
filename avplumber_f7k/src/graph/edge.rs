@@ -1,4 +1,4 @@
-//! Edge dataflow: owned `Media`, control events, and `Push`.
+//! Edge dataflow: owned `Grain`, control events, and `Push`.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -8,7 +8,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll as TaskPoll, Waker};
 use std::time::Duration;
 
-use crate::graph::media::{Media, Ts};
+use crate::graph::grain::Grain;
+use crate::graph::timestamp::Ts;
 use crate::graph::spec::{Spec, StreamSelection};
 
 #[derive(Clone, Debug)]
@@ -42,7 +43,7 @@ pub enum EdgeEvent {
 
 #[derive(Clone)]
 pub enum EdgeItem {
-    Buffer(Media),
+    Buffer(Grain),
     Event(EdgeEvent),
 }
 
@@ -329,23 +330,23 @@ impl EdgeQueue {
             .count()
     }
 
-    pub fn try_push(&mut self, buf: Media) -> Result<(), (Push, Media)> {
+    pub fn try_push(&mut self, buf: Grain) -> Result<(), (Push, Grain)> {
         self.try_push_entry(buf, None)
     }
 
     pub fn try_push_tracked(
         &mut self,
-        buf: Media,
+        buf: Grain,
         discarded: Arc<AtomicBool>,
-    ) -> Result<(), (Push, Media)> {
+    ) -> Result<(), (Push, Grain)> {
         self.try_push_entry(buf, Some(discarded))
     }
 
     fn try_push_entry(
         &mut self,
-        buf: Media,
+        buf: Grain,
         discarded: Option<Arc<AtomicBool>>,
-    ) -> Result<(), (Push, Media)> {
+    ) -> Result<(), (Push, Grain)> {
         if self.closed {
             return Err((Push::Closed, buf));
         }
@@ -533,8 +534,8 @@ impl Future for EdgeReady<'_> {
 pub trait Edge: Send + Sync {
     /// Enqueue `buf`, or give it back. `push` drops the buffer on failure
     /// (C ABI). Cooperative nodes must use `offer`.
-    fn offer(&self, buf: Media) -> Result<(), (Push, Media)>;
-    fn push(&self, buf: Media) -> Push {
+    fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)>;
+    fn push(&self, buf: Grain) -> Push {
         match self.offer(buf) {
             Ok(()) => Push::Accepted,
             Err((status, _)) => status,
@@ -571,7 +572,7 @@ pub trait Edge: Send + Sync {
     fn writer_generation(&self) -> u64 {
         0
     }
-    fn offer_generation(&self, generation: u64, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
         let active = self.writer_generation();
         if active != 0 && generation != active {
             Err((Push::Closed, buf))
@@ -635,7 +636,7 @@ pub fn generation_reader(edge: Arc<dyn Edge>, generation: u64) -> Arc<dyn Edge> 
 }
 
 impl Edge for GenerationReader {
-    fn offer(&self, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)> {
         self.edge.offer(buf)
     }
     fn push_event(&self, ev: EdgeEvent) {
@@ -752,7 +753,7 @@ pub fn generation_writer(edge: Arc<dyn Edge>, generation: u64) -> Arc<dyn Edge> 
 }
 
 impl Edge for GenerationWriter {
-    fn offer(&self, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer(&self, buf: Grain) -> Result<(), (Push, Grain)> {
         self.edge.offer_generation(self.generation, buf)
     }
     fn push_event(&self, ev: EdgeEvent) {
@@ -814,7 +815,7 @@ impl Edge for GenerationWriter {
     fn writer_generation(&self) -> u64 {
         self.edge.writer_generation()
     }
-    fn offer_generation(&self, generation: u64, buf: Media) -> Result<(), (Push, Media)> {
+    fn offer_generation(&self, generation: u64, buf: Grain) -> Result<(), (Push, Grain)> {
         if generation != self.generation {
             return Err((Push::Closed, buf));
         }

@@ -20,13 +20,14 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::EdgeEvent;
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::grain::{Grain, PacketExt};
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{PacketSpec, Spec};
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::error::{av_error, is_eagain, is_eof};
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct BsfSpec {
@@ -223,15 +224,15 @@ impl InputHandler for BitstreamFilter {
         Ok(Some(out_spec))
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
-        let Media::Packet(mut packet) = buffer else {
+        let Grain::Packet(mut packet) = buffer else {
             log::warn!("{}: dropping a buffer that is not a packet", self.io.name);
-            return Ok(None);
+            return Ok(Vec::new());
         };
         if state.filter.is_none() {
             state.dropped_early += 1;
-            return Ok(None);
+            return Ok(Vec::new());
         }
         // The filter reads timestamps in its input base; packets say their own.
         let (pts, dts) = (packet.ts(), packet.dts());
@@ -243,7 +244,7 @@ impl InputHandler for BitstreamFilter {
         }
         self.run(state, Some(&mut packet))
             .map_err(|m| self.io.error(NodePhase::Process, m))?;
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn on_flush(&self) {
@@ -254,14 +255,14 @@ impl InputHandler for BitstreamFilter {
         state.ready.clear();
     }
 
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
+    fn on_eof(&self) -> Result<Processed, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         if state.filter.is_some() {
             self.run(state, None)
                 .map_err(|m| self.io.error(NodePhase::Process, m))?;
         }
         state.eof = true;
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 
     fn on_closed(&self) {
@@ -298,19 +299,19 @@ impl SingleInput for BitstreamFilter {
     }
 
     /// Filtered packets go out before anything new is taken in.
-    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+    fn before_take(&self) -> Result<Option<Processed>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         let out = self.io.output()?;
         if let Some(packet) = state.ready.pop_front() {
             let input = self.io.input()?;
             return self
                 .io
-                .push_from(&input, &out, Media::Packet(packet))
+                .push_from(&input, &out, Grain::Packet(packet))
                 .map(Some);
         }
         if state.eof {
             out.push_event(EdgeEvent::Eof);
-            return Ok(Some(Blocked::Done));
+            return Ok(Some(Processed::Done));
         }
         Ok(None)
     }

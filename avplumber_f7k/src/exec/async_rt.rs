@@ -17,7 +17,7 @@ use crate::graph::{Edge, Node, Wakeup};
 #[cfg(feature = "async")]
 use crate::exec::NodeOutcome;
 #[cfg(feature = "async")]
-use crate::graph::{NodeBody, NodePollContext, Tick};
+use crate::graph::{NodeBody, NodePollContext, Polled};
 
 #[cfg(feature = "async")]
 const AGAIN_BUDGET: u32 = 32;
@@ -270,7 +270,7 @@ async fn run_slot(
 
 #[cfg(feature = "async")]
 async fn run_poll(
-    mut step: Box<dyn FnMut(&mut NodePollContext) -> Result<Tick, crate::graph::NodeError> + Send>,
+    mut step: Box<dyn FnMut(&mut NodePollContext) -> Result<Polled, crate::graph::NodeError> + Send>,
     stop: Arc<AtomicBool>,
     tick: Arc<Wakeup>,
     name: String,
@@ -283,7 +283,7 @@ async fn run_poll(
             return NodeOutcome::Cancelled { name, generation };
         }
         match step(&mut ctx) {
-            Ok(Tick::Done) => {
+            Ok(Polled::Done) => {
                 return NodeOutcome::Completed { name, generation };
             }
             Err(err) => {
@@ -293,7 +293,7 @@ async fn run_poll(
                     err,
                 };
             }
-            Ok(Tick::Again) => {
+            Ok(Polled::Again) => {
                 ctx.clear_park();
                 again += 1;
                 if again >= AGAIN_BUDGET {
@@ -301,7 +301,7 @@ async fn run_poll(
                     tokio::task::yield_now().await;
                 }
             }
-            Ok(Tick::Idle) => {
+            Ok(Polled::Idle) => {
                 // A park that is ready at once is a step in disguise: it gets
                 // the same fairness budget, or one node could starve the loop.
                 let parked = IdlePark {

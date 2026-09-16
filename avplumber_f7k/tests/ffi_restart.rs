@@ -16,9 +16,9 @@ use avplumber_f7k::abi::{
     avp_stop_group, avp_string_free,
 };
 use avplumber_f7k::{
-    AvpBuffer, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpNodeVtable, AvpRational, Blocked,
+    AvpBuffer, AvpInterfaceId, AvpMediaType, AvpMediaVtable, AvpNodeVtable, AvpRational, Processed,
     Edge, EdgeCoupling, EdgeRestart, GroupState, Node, NodeError, NodeKind, NodeOutcome, NodePhase,
-    NodePollContext, NodeRequest, RestartPolicy, Tick, register_factory,
+    NodePollContext, NodeRequest, RestartPolicy, Polled, register_factory,
 };
 
 /// One ABI buffer, freshly owned. With libav compiled in the pointer really is
@@ -650,9 +650,9 @@ impl Node for NativeInterfaceNode {
         &self.name
     }
 
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         std::thread::sleep(Duration::from_millis(1));
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 
     fn query_interface(&self, _iface: AvpInterfaceId) -> Option<*const c_void> {
@@ -793,16 +793,16 @@ impl Node for DirectEndpoint {
         let _ = self.input.set(edge);
     }
 
-    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         if self.drain.load(Ordering::SeqCst)
             && self
                 .input
                 .get()
                 .is_some_and(|input| input.try_take().is_some())
         {
-            Ok(Tick::Again)
+            Ok(Polled::Again)
         } else {
-            Ok(Tick::Idle)
+            Ok(Polled::Idle)
         }
     }
 }

@@ -41,15 +41,16 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{FrameExt, Media, PacketExt, Ts};
-use avplumber_f7k::graph::node::Blocked;
+use avplumber_f7k::graph::grain::{FrameExt, Grain, PacketExt};
+use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::graph::timebase::ts_cmp;
+use avplumber_f7k::graph::timestamp::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
-use avplumber_f7k::scaffold::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
 use avplumber_f7k::services::hwaccel::HwDevice;
 
 /// The parameters both encoder types share; C++ has one template for both.
@@ -256,10 +257,10 @@ impl InputHandler for Encoder {
         Ok(Some(Spec::Packet(packet_spec)))
     }
 
-    fn on_buffer(&self, buffer: Media) -> Result<Option<Media>, NodeError> {
+    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         self.load(state, buffer);
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// A discontinuity drops what this node holds — the frame loaded into the
@@ -307,13 +308,13 @@ impl InputHandler for Encoder {
 
     /// The codec keeps producing after its last input, so this only starts the
     /// drain; [`SingleInput::before_take`] finishes when it is over.
-    fn on_eof(&self) -> Result<Blocked, NodeError> {
+    fn on_eof(&self) -> Result<Processed, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         if let Some(ctx) = state.ctx.as_mut() {
             state.pump.flush(ctx);
         }
         state.eof = true;
-        Ok(Blocked::Again)
+        Ok(Processed::Again)
     }
 
     fn on_closed(&self) {
@@ -358,7 +359,7 @@ impl SingleInput for Encoder {
 
     /// Encoded packets go downstream before anything new is taken in, and a
     /// codec that refused the frame we are holding is offered it again.
-    fn before_take(&self) -> Result<Option<Blocked>, NodeError> {
+    fn before_take(&self) -> Result<Option<Processed>, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         let out = self.io.output()?;
         if let Some(message) = state.pending_error.take() {
@@ -374,16 +375,16 @@ impl SingleInput for Encoder {
         if state.eof {
             self.log_drops(state);
             out.push_event(EdgeEvent::Eof);
-            return Ok(Some(Blocked::Done));
+            return Ok(Some(Processed::Done));
         }
         if state.pump.is_loaded() {
             return Ok(Some(match self.drive(state)? {
-                Progress::Moved => Blocked::Again,
+                Progress::Moved => Processed::Again,
                 // Neither direction moved, which for an encoder means it wants
                 // time rather than data. Park instead of spinning.
                 Progress::Stalled => {
                     self.io.wait(PARK_TIMEOUT_MS);
-                    Blocked::Again
+                    Processed::Again
                 }
             }));
         }
@@ -393,7 +394,7 @@ impl SingleInput for Encoder {
 
 impl Encoder {
     /// Hands one frame to the pump, or drops it like C++ does.
-    fn load(&self, state: &mut State, buffer: Media) {
+    fn load(&self, state: &mut State, buffer: Grain) {
         if state.ctx.is_none() {
             // Only reachable when a producer pushed frames before its spec;
             // there is nothing to encode them with yet.
@@ -418,7 +419,7 @@ impl Encoder {
         // libavcodec reads `frame.pts` in the *context's* time base and ignores
         // `frame.time_base`, so a frame stamped in another base is rescaled here
         // instead of being silently misread.
-        if let Media::Video(frame) | Media::Audio(frame) = &mut buffer
+        if let Grain::Video(frame) | Grain::Audio(frame) = &mut buffer
             && ts.is_valid()
             && ts.tb != time_base
         {
@@ -464,8 +465,8 @@ impl Encoder {
         &self,
         state: &mut State,
         out: &Arc<dyn Edge>,
-        buffer: Media,
-    ) -> Result<Blocked, NodeError> {
+        buffer: Grain,
+    ) -> Result<Processed, NodeError> {
         let buffer = self.stamp(state, buffer);
         self.io.push(out, buffer)
     }
@@ -473,10 +474,10 @@ impl Encoder {
     /// Every packet leaves with the encoder's time base written into it:
     /// libavcodec 6 and 7/8 disagree about whether `packet.time_base` comes back
     /// filled, and `mux`/`output` rescale through it.
-    fn stamp(&self, state: &mut State, buffer: Media) -> Media {
+    fn stamp(&self, state: &mut State, buffer: Grain) -> Grain {
         let mut buffer = buffer;
         let tb = state.time_base;
-        if let Media::Packet(packet) = &mut buffer {
+        if let Grain::Packet(packet) = &mut buffer {
             let mut pts = Ts {
                 val: packet.pts,
                 tb,

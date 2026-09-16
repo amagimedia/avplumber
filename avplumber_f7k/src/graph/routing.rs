@@ -10,7 +10,7 @@
 //!
 //! Free of libav, like `spec` itself and for the same reason: the grammar and
 //! the ordinal rules stay unit-tested in the default build. The node that uses
-//! it needs `Media::Packet` and so needs the `ffmpeg` feature.
+//! it needs `Grain::Packet` and so needs the `ffmpeg` feature.
 
 use crate::graph::spec::CatalogStream;
 

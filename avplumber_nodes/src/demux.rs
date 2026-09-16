@@ -15,13 +15,13 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::buffer::AvpMediaType;
 use avplumber_f7k::graph::edge::{Edge, EdgeEvent, EdgeHint, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
-use avplumber_f7k::graph::media::{Media, PacketExt};
-use avplumber_f7k::graph::node::Tick;
+use avplumber_f7k::graph::grain::{Grain, PacketExt};
+use avplumber_f7k::graph::node::Polled;
 use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::routing::{self, MEDIA_TYPE_VIDEO, RouteKey};
 use avplumber_f7k::graph::spec::{CatalogStream, Spec, StreamSelection};
-use avplumber_f7k::scaffold::{Io, PollNode, Polling, flush_at_head};
+use avplumber_f7k::node_api::{Io, PollNode, Polling, flush_at_head};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct DemuxSpec {
@@ -104,7 +104,7 @@ struct State {
     waiting_for_keyframe: bool,
     /// A packet taken from the input whose output had no room. Held here so a
     /// full output cannot lose it.
-    pending: Option<(Arc<dyn Edge>, Media)>,
+    pending: Option<(Arc<dyn Edge>, Grain)>,
     dropped_early: u64,
     dropped_unrouted: u64,
 }
@@ -162,7 +162,7 @@ impl PollNode for StreamDemuxer {
         }
     }
 
-    fn step(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let input = self.io.input()?;
         let mut state = self.state.lock().unwrap();
 
@@ -177,31 +177,31 @@ impl PollNode for StreamDemuxer {
                 Emitted::Ok => {}
                 Emitted::Parked => {
                     ctx.wait_flush(input.clone());
-                    return Ok(Tick::Idle);
+                    return Ok(Polled::Idle);
                 }
-                Emitted::Closed => return Ok(Tick::Done),
+                Emitted::Closed => return Ok(Polled::Done),
             }
         }
 
         let Some(item) = input.try_take() else {
             if input.is_closed() {
-                return Ok(Tick::Done);
+                return Ok(Polled::Done);
             }
             ctx.wait_readable(input);
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         };
 
         match item {
             EdgeItem::Event(EdgeEvent::Spec(spec)) => {
                 self.on_catalog(&mut state, &input, spec)?;
-                Ok(Tick::Again)
+                Ok(Polled::Again)
             }
             EdgeItem::Event(EdgeEvent::Eof) => {
                 for (_, edge) in &state.map {
                     edge.push_event(EdgeEvent::Eof);
                 }
                 self.log_drops(&state);
-                Ok(Tick::Done)
+                Ok(Polled::Done)
             }
             EdgeItem::Event(
                 event @ (EdgeEvent::FlushStart | EdgeEvent::FlushStop { .. } | EdgeEvent::Drain),
@@ -209,7 +209,7 @@ impl PollNode for StreamDemuxer {
                 for (_, edge) in &state.map {
                     edge.push_event(event.clone());
                 }
-                Ok(Tick::Again)
+                Ok(Polled::Again)
             }
             EdgeItem::Buffer(buffer) => self.route(&mut state, ctx, buffer),
         }
@@ -235,10 +235,10 @@ impl StreamDemuxer {
         &self,
         state: &mut State,
         ctx: &mut NodePollContext,
-        buffer: Media,
-    ) -> Result<Tick, NodeError> {
+        buffer: Grain,
+    ) -> Result<Polled, NodeError> {
         let index = match &buffer {
-            Media::Packet(packet) => packet.stream_index,
+            Grain::Packet(packet) => packet.stream_index,
             other => {
                 return Err(NodeError::new(
                     &self.io.name,
@@ -252,14 +252,14 @@ impl StreamDemuxer {
             // The catalog has not arrived (or answered a different filter) yet.
             // Only reachable when a producer published before draining our hint.
             state.dropped_early += 1;
-            return Ok(Tick::Again);
+            return Ok(Polled::Again);
         }
 
         let Some((_, edge)) = state.map.iter().find(|(routed, _)| *routed == index) else {
             // Upstream discarding is the mechanism; this catches the few packets
             // already in flight when the selection hint landed.
             state.dropped_unrouted += 1;
-            return Ok(Tick::Again);
+            return Ok(Polled::Again);
         };
         let edge = edge.clone();
 
@@ -267,7 +267,7 @@ impl StreamDemuxer {
             // C++ quirk kept deliberately: one shared flag, cleared by the first
             // keyframe on *any* routed video stream, and until then every routed
             // packet is dropped — audio included.
-            let is_key = matches!(&buffer, Media::Packet(packet) if packet.is_key());
+            let is_key = matches!(&buffer, Grain::Packet(packet) if packet.is_key());
             if is_key && state.video.contains(&index) {
                 log::debug!(
                     "{}: keyframe on stream {index}, forwarding now",
@@ -275,20 +275,20 @@ impl StreamDemuxer {
                 );
                 state.waiting_for_keyframe = false;
             } else {
-                return Ok(Tick::Again);
+                return Ok(Polled::Again);
             }
         }
 
         match self.emit(state, ctx, edge, buffer) {
-            Emitted::Ok => Ok(Tick::Again),
+            Emitted::Ok => Ok(Polled::Again),
             Emitted::Parked => {
                 // A flush behind this packet must be able to wake the node.
                 if let Some(input) = self.io.input_slot.get() {
                     ctx.wait_flush(input);
                 }
-                Ok(Tick::Idle)
+                Ok(Polled::Idle)
             }
-            Emitted::Closed => Ok(Tick::Done),
+            Emitted::Closed => Ok(Polled::Done),
         }
     }
 
@@ -297,7 +297,7 @@ impl StreamDemuxer {
         state: &mut State,
         ctx: &mut NodePollContext,
         edge: Arc<dyn Edge>,
-        buffer: Media,
+        buffer: Grain,
     ) -> Emitted {
         match edge.offer(buffer) {
             Ok(()) => Emitted::Ok,

@@ -3,85 +3,23 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use crate::graph::buffer::{AVP_NOPTS, AvpMediaType, AvpMediaVtable, AvpRational};
-use crate::graph::timebase::{finer, rescale, ts_cmp};
-
-#[derive(Clone, Copy, Debug)]
-pub struct Ts {
-    pub val: i64,
-    pub tb: AvpRational,
-}
-
-impl Ts {
-    pub fn invalid() -> Self {
-        Self {
-            val: AVP_NOPTS,
-            tb: AvpRational { num: 0, den: 0 },
-        }
-    }
-
-    pub fn is_valid(self) -> bool {
-        self.val != AVP_NOPTS
-    }
-
-    pub fn rescale(self, to: AvpRational) -> Ts {
-        if !self.is_valid() {
-            return Self {
-                val: AVP_NOPTS,
-                tb: to,
-            };
-        }
-        Ts {
-            val: rescale(self.val, self.tb, to),
-            tb: to,
-        }
-    }
-}
-
-/// Sum in the finer of the two time bases, like C++ `addTS`. An invalid operand
-/// makes the sum invalid: `NOPTS + shift` is not a timestamp.
-///
-/// To stay in one specific time base — a packet's own, say — rescale the other
-/// operand into it first, which makes this the `addTSSameTB` of C++.
-impl std::ops::Add for Ts {
-    type Output = Ts;
-
-    fn add(self, other: Ts) -> Ts {
-        if !self.is_valid() || !other.is_valid() {
-            return Ts::invalid();
-        }
-        let tb = finer(self.tb, other.tb);
-        Ts {
-            val: rescale(self.val, self.tb, tb) + rescale(other.val, other.tb, tb),
-            tb,
-        }
-    }
-}
-
-impl PartialEq for Ts {
-    fn eq(&self, other: &Self) -> bool {
-        match (self.is_valid(), other.is_valid()) {
-            (false, false) => true,
-            (true, true) => ts_cmp(self.val, self.tb, other.val, other.tb).is_eq(),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Ts {}
+use crate::graph::buffer::{AvpMediaType, AvpMediaVtable, AvpRational};
+#[cfg(feature = "ffmpeg")]
+use crate::graph::buffer::AVP_NOPTS;
+use crate::graph::timestamp::Ts;
 
 /// C++-owned media (EGL / Metadata). Drop/Clone go through the vtable.
-pub struct OpaqueFrame {
+pub struct OpaqueGrain {
     ptr: NonNull<c_void>,
     vtable: AvpMediaVtable,
     media: AvpMediaType,
     time_base: AvpRational,
 }
 
-unsafe impl Send for OpaqueFrame {}
-unsafe impl Sync for OpaqueFrame {}
+unsafe impl Send for OpaqueGrain {}
+unsafe impl Sync for OpaqueGrain {}
 
-impl OpaqueFrame {
+impl OpaqueGrain {
     pub fn new(ptr: *mut c_void, vtable: AvpMediaVtable, media: AvpMediaType) -> Option<Self> {
         let ptr = NonNull::new(ptr)?;
         let mut tb = AvpRational::default();
@@ -112,7 +50,7 @@ impl OpaqueFrame {
     }
 }
 
-impl Clone for OpaqueFrame {
+impl Clone for OpaqueGrain {
     fn clone(&self) -> Self {
         (self.vtable.retain)(self.ptr.as_ptr());
         Self {
@@ -124,20 +62,23 @@ impl Clone for OpaqueFrame {
     }
 }
 
-impl Drop for OpaqueFrame {
+impl Drop for OpaqueGrain {
     fn drop(&mut self) {
         (self.vtable.release)(self.ptr.as_ptr());
     }
 }
 
-pub enum Media {
+/// A single timestamped packet or a frame.
+/// 
+/// For consistency with FFmpeg, audio fragment which usually contains multiple samples is also called a "frame".
+pub enum Grain {
     #[cfg(feature = "ffmpeg")]
     Packet(rsmpeg::avcodec::AVPacket),
     #[cfg(feature = "ffmpeg")]
     Video(rsmpeg::avutil::AVFrame),
     #[cfg(feature = "ffmpeg")]
     Audio(rsmpeg::avutil::AVFrame),
-    Opaque(OpaqueFrame),
+    Opaque(OpaqueGrain),
     #[cfg(not(feature = "ffmpeg"))]
     Stub {
         kind: AvpMediaType,
@@ -145,27 +86,27 @@ pub enum Media {
     },
 }
 
-unsafe impl Send for Media {}
+unsafe impl Send for Grain {}
 
-impl Media {
+impl Grain {
     pub fn media_type(&self) -> AvpMediaType {
         match self {
             #[cfg(feature = "ffmpeg")]
-            Media::Packet(_) => AvpMediaType::PACKET,
+            Grain::Packet(_) => AvpMediaType::PACKET,
             #[cfg(feature = "ffmpeg")]
-            Media::Video(_) => AvpMediaType::VIDEO,
+            Grain::Video(_) => AvpMediaType::VIDEO,
             #[cfg(feature = "ffmpeg")]
-            Media::Audio(_) => AvpMediaType::AUDIO,
-            Media::Opaque(o) => o.media(),
+            Grain::Audio(_) => AvpMediaType::AUDIO,
+            Grain::Opaque(o) => o.media(),
             #[cfg(not(feature = "ffmpeg"))]
-            Media::Stub { kind, .. } => *kind,
+            Grain::Stub { kind, .. } => *kind,
         }
     }
 
     pub fn ts(&self) -> Ts {
         match self {
             #[cfg(feature = "ffmpeg")]
-            Media::Packet(p) => Ts {
+            Grain::Packet(p) => Ts {
                 val: p.pts,
                 tb: AvpRational {
                     num: p.time_base.num,
@@ -173,19 +114,19 @@ impl Media {
                 },
             },
             #[cfg(feature = "ffmpeg")]
-            Media::Video(f) | Media::Audio(f) => Ts {
+            Grain::Video(f) | Grain::Audio(f) => Ts {
                 val: f.pts,
                 tb: AvpRational {
                     num: f.time_base.num,
                     den: f.time_base.den,
                 },
             },
-            Media::Opaque(o) => Ts {
+            Grain::Opaque(o) => Ts {
                 val: o.pts(),
                 tb: o.time_base(),
             },
             #[cfg(not(feature = "ffmpeg"))]
-            Media::Stub { pts, .. } => Ts {
+            Grain::Stub { pts, .. } => Ts {
                 val: *pts,
                 tb: AvpRational { num: 1, den: 1000 },
             },
@@ -199,7 +140,7 @@ impl Media {
     pub fn set_ts(&mut self, ts: Ts) {
         match self {
             #[cfg(feature = "ffmpeg")]
-            Media::Packet(p) => {
+            Grain::Packet(p) => {
                 let dts = if p.dts != AVP_NOPTS && p.pts != AVP_NOPTS {
                     Ts {
                         val: ts.val - (p.pts - p.dts),
@@ -211,10 +152,10 @@ impl Media {
                 p.set_ts_dts(ts, dts);
             }
             #[cfg(feature = "ffmpeg")]
-            Media::Video(f) | Media::Audio(f) => f.set_ts(ts),
-            Media::Opaque(_) => {}
+            Grain::Video(f) | Grain::Audio(f) => f.set_ts(ts),
+            Grain::Opaque(_) => {}
             #[cfg(not(feature = "ffmpeg"))]
-            Media::Stub { pts, .. } => *pts = ts.rescale(AvpRational { num: 1, den: 1000 }).val,
+            Grain::Stub { pts, .. } => *pts = ts.rescale(AvpRational { num: 1, den: 1000 }).val,
         }
     }
 }
@@ -222,19 +163,19 @@ impl Media {
 /// A buffer carrying nothing but a timestamp, for unit tests.
 ///
 /// Cfg-paired so one test body works in either build — an empty libav frame or
-/// packet with the feature, [`Media::Stub`] without — and stamped in the same
+/// packet with the feature, [`Grain::Stub`] without — and stamped in the same
 /// `1/1000` `Stub` reports, so ordering and counting come out identical.
 ///
 /// Compiled for this crate's own tests, and for anyone who asks with the
 /// `testing` feature — which is how the node crates' unit tests reach it,
 /// through a dev-dependency, so a release build still carries none of it.
 #[cfg(all(any(test, feature = "testing"), not(feature = "ffmpeg")))]
-pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
-    Media::Stub { kind, pts }
+pub fn test_media(kind: AvpMediaType, pts: i64) -> Grain {
+    Grain::Stub { kind, pts }
 }
 
 #[cfg(all(any(test, feature = "testing"), feature = "ffmpeg"))]
-pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
+pub fn test_media(kind: AvpMediaType, pts: i64) -> Grain {
     use crate::graph::spec::ChannelLayout;
     use rusty_ffmpeg::ffi;
 
@@ -254,7 +195,7 @@ pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
                 unsafe { ffi::av_new_packet(rsmpeg::UnsafeDerefMut::deref_mut(&mut packet), 1) };
             assert!(ret >= 0, "one-byte test packet: av_new_packet failed");
             packet.set_ts_dts(ts, ts);
-            Media::Packet(packet)
+            Grain::Packet(packet)
         }
         AvpMediaType::VIDEO => {
             let mut frame = rsmpeg::avutil::AVFrame::new();
@@ -263,7 +204,7 @@ pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
             frame.set_format(ffi::AV_PIX_FMT_GRAY8);
             frame.alloc_buffer().expect("2x2 gray8 test frame");
             frame.set_ts(ts);
-            Media::Video(frame)
+            Grain::Video(frame)
         }
         AvpMediaType::AUDIO => {
             let mut frame = rsmpeg::avutil::AVFrame::new();
@@ -279,24 +220,24 @@ pub fn test_media(kind: AvpMediaType, pts: i64) -> Media {
                 .expect("mono layout");
             frame.alloc_buffer().expect("one-sample mono test frame");
             frame.set_ts(ts);
-            Media::Audio(frame)
+            Grain::Audio(frame)
         }
         other => panic!("{other:?} has no libav buffer to stand in for it"),
     }
 }
 
-impl Clone for Media {
+impl Clone for Grain {
     fn clone(&self) -> Self {
         match self {
             #[cfg(feature = "ffmpeg")]
-            Media::Packet(p) => Media::Packet(clone_packet(p)),
+            Grain::Packet(p) => Grain::Packet(clone_packet(p)),
             #[cfg(feature = "ffmpeg")]
-            Media::Video(f) => Media::Video(f.clone()),
+            Grain::Video(f) => Grain::Video(f.clone()),
             #[cfg(feature = "ffmpeg")]
-            Media::Audio(f) => Media::Audio(f.clone()),
-            Media::Opaque(o) => Media::Opaque(o.clone()),
+            Grain::Audio(f) => Grain::Audio(f.clone()),
+            Grain::Opaque(o) => Grain::Opaque(o.clone()),
             #[cfg(not(feature = "ffmpeg"))]
-            Media::Stub { kind, pts } => Media::Stub {
+            Grain::Stub { kind, pts } => Grain::Stub {
                 kind: *kind,
                 pts: *pts,
             },

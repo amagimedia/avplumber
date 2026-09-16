@@ -11,13 +11,12 @@ use crate::graph::edge::Edge;
 use crate::graph::error::NodeError;
 use crate::graph::pad::NodePads;
 use crate::graph::poll_ctx::NodePollContext;
-use crate::graph::spec::Spec;
 
 /// Result of one [`Node::process`] (blocking body). There is no Idle: the
 /// body waits inside `take(-1)` instead of yielding. Failure is the `Err` side
 /// of the `Result` the method returns, not a variant here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Blocked {
+pub enum Processed {
     Again,
     Done,
 }
@@ -26,7 +25,7 @@ pub enum Blocked {
 /// `processWhenSignalled` / `sleepAndProcess` then return; Again is
 /// `yieldAndProcess`. Failure is the `Err` side of the `Result`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tick {
+pub enum Polled {
     Again,
     Idle,
     Done,
@@ -48,8 +47,8 @@ impl NodeKind {
 pub type NodeFuture = Pin<Box<dyn Future<Output = Result<(), NodeError>> + Send>>;
 
 pub enum NodeBody {
-    Blocking(Box<dyn FnMut() -> Result<Blocked, NodeError> + Send>),
-    Poll(Box<dyn FnMut(&mut NodePollContext) -> Result<Tick, NodeError> + Send>),
+    Blocking(Box<dyn FnMut() -> Result<Processed, NodeError> + Send>),
+    Poll(Box<dyn FnMut(&mut NodePollContext) -> Result<Polled, NodeError> + Send>),
     Async(NodeFuture),
 }
 
@@ -81,15 +80,27 @@ pub trait Node: Send + Sync + 'static {
     /// a blocking read. [`Self::stop`] keeps its meaning; this is a request, that
     /// is the teardown.
     fn interrupt(&self) {}
+
+    /// Applicable to FFI nodes only.
+    ///
+    /// Which group-run this node is on. The supervisor sets it just before
+    /// [`Executor::add_node`](crate::exec::Executor::add_node).
+    ///
+    /// A C node's `process`/`poll` then stamps that generation on `avp_edge_*`
+    /// so a restart cannot take or push on the previous run's edge. Native
+    /// nodes do not need it: they already hold the generation-fenced `Arc`s
+    /// from [`Self::bind_source`] / [`Self::bind_sink`]. The default is a no-op.
     fn set_generation(&self, _generation: u64) {}
-    fn on_spec(&self, spec: &Spec) -> Result<Spec, String> {
+
+    // unused???
+    /*fn on_spec(&self, spec: &Spec) -> Result<Spec, String> {
         Ok(spec.clone())
-    }
+    }*/
 
     /// One step of a blocking body. `Err` fails the node: the executor reports
     /// it and the supervisor restarts the group, per its policy.
-    fn process(&self) -> Result<Blocked, NodeError> {
-        Ok(Blocked::Done)
+    fn process(&self) -> Result<Processed, NodeError> {
+        Ok(Processed::Done)
     }
     /// One step of a cooperative body; `Err` fails the node the same way.
     ///
@@ -98,14 +109,29 @@ pub trait Node: Send + Sync + 'static {
     /// is no executor to report to. That is what
     /// [`Self::direct_consumer_is_infallible`] promises never happens; an `Err`
     /// there is logged and ends the fused run, nothing more.
-    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
-        Ok(Tick::Done)
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
+        Ok(Polled::Done)
     }
 
+    /// The whole body of a [`NodeKind::Async`] node, taken once by
+    /// [`Self::take_body`]. Completing the future finishes the node; `Err`
+    /// fails it the same way as [`Self::process`]. Locals survive `.await`,
+    /// which is why this exists instead of a stepped `process`/`poll`.
+    ///
+    /// The default future returns `Ok` immediately. The executor runs it on
+    /// the shared event loop, not on its own thread.
     fn run_async(self: Arc<Self>) -> NodeFuture {
         Box::pin(async { Ok(()) })
     }
 
+    /// Applicable to FFI callers only.
+    /// 
+    /// Capability vtable for this node only, C `avp_node_query_interface`.
+    /// No graph walk: the caller already holds the node. `None` (the default)
+    /// means this node does not implement `iface`.
+    ///
+    /// Native-to-native code uses the trait methods. The pointer is for the C
+    /// ABI: a per-interface vtable, valid for the lifetime of this `Node`.
     fn query_interface(&self, _iface: AvpInterfaceId) -> Option<*const c_void> {
         None
     }
@@ -123,7 +149,22 @@ pub trait Node: Send + Sync + 'static {
     fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
         Err(format!("{} has no object `{key}` to get", self.name()))
     }
+
+    /// Connect an input pad (consumer side). `name` is the pad; `edge` is
+    /// the handle this node should use this run — a Direct hop is
+    /// generation-fenced, a Buffered edge is the logical `Arc`.
+    ///
+    /// Called from the control thread: at `connect`, on a live rebind, and
+    /// again when a reconstruction re-establishes the links. The last binding
+    /// is the live one. Must not take a lock the body holds across a blocking
+    /// call (same rule as [`Self::set_object`]). The default drops the edge;
+    /// a node that reads must keep it.
     fn bind_source(&self, _name: &str, _edge: Arc<dyn Edge>) {}
+
+    /// Connect an output pad (producer side). Same threading and rebind rules
+    /// as [`Self::bind_source`]. The default drops the edge; a node that
+    /// writes must keep it. The `edge` is already a
+    /// [`generation_writer`](crate::graph::generation_writer) for this run.
     fn bind_sink(&self, _name: &str, _edge: Arc<dyn Edge>) {}
 
     /// The body the executor drives, taken once at start. The default calls

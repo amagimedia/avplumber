@@ -4,8 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::graph::AvpRational;
-use crate::graph::media::Ts;
-use crate::graph::timebase::{self, ts_cmp};
+use crate::graph::timestamp::{self, ts_cmp, Ts};
 use crate::services::clock::SyncGroup;
 
 #[derive(Clone, Debug)]
@@ -87,7 +86,7 @@ impl CorrectionGroup {
         let mut g = self.inner.lock().unwrap();
         if g.output_tb.num == 0 {
             g.output_tb = tb;
-        } else if timebase::rescale(1, tb, g.output_tb) > 1 {
+        } else if timestamp::rescale(1, tb, g.output_tb) > 1 {
             g.output_tb = tb;
         }
         g.generation += 1;

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::graph::capability::AvpInterfaceId;
 use crate::graph::error::{NodeError, NodePhase};
-use crate::graph::node::{Blocked, Node, NodeKind, Tick};
+use crate::graph::node::{Processed, Node, NodeKind, Polled};
 use crate::graph::poll_ctx::NodePollContext;
 
 #[repr(C)]
@@ -57,10 +57,10 @@ impl FfiNode {
         )
     }
 
-    fn flow_blocked(&self, code: i32) -> Result<Blocked, NodeError> {
+    fn flow_blocked(&self, code: i32) -> Result<Processed, NodeError> {
         match code {
-            0..=2 => Ok(Blocked::Again),
-            3 => Ok(Blocked::Done),
+            0..=2 => Ok(Processed::Again),
+            3 => Ok(Processed::Done),
             4 => Err(NodeError::new(
                 &self.name,
                 NodePhase::Process,
@@ -73,11 +73,11 @@ impl FfiNode {
             )),
         }
     }
-    fn flow_tick(&self, code: i32) -> Result<Tick, NodeError> {
+    fn flow_tick(&self, code: i32) -> Result<Polled, NodeError> {
         match code {
-            0 | 1 => Ok(Tick::Again),
-            2 => Ok(Tick::Idle),
-            3 => Ok(Tick::Done),
+            0 | 1 => Ok(Polled::Again),
+            2 => Ok(Polled::Idle),
+            3 => Ok(Polled::Done),
             4 => Err(NodeError::new(
                 &self.name,
                 NodePhase::Poll,
@@ -190,16 +190,16 @@ impl Node for FfiNode {
     /// A C vtable is one of the two kinds at a time (`kind` picks by which
     /// entry point it defines). `AVP_FLOW_ERROR` becomes a `NodeError` here, so
     /// a C node fails its group the way a native `Err` does.
-    fn process(&self) -> Result<Blocked, NodeError> {
+    fn process(&self) -> Result<Processed, NodeError> {
         match self.vtable.process {
             Some(f) => self.flow_blocked(self.call(|| f(self.handle))),
-            None => Ok(Blocked::Done),
+            None => Ok(Processed::Done),
         }
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         match self.vtable.poll {
             Some(f) => self.flow_tick(self.call(|| f(self.handle))),
-            None => Ok(Tick::Done),
+            None => Ok(Polled::Done),
         }
     }
     fn query_interface(&self, iface: AvpInterfaceId) -> Option<*const c_void> {

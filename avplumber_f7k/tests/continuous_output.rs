@@ -10,8 +10,8 @@ use avplumber_f7k::services::clock::SyncGroup;
 use avplumber_f7k::services::correction::CorrectionGroup;
 use avplumber_f7k::{
     AvpMediaType, AvpRational, BuildCtx, Edge, EdgeEvent, EdgeItem, EdgeKind, GroupState, Instance,
-    Media, Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, NodeRequest,
-    NodeSpec, PadDecl, Push, RestartPolicy, Tick, Ts, register_factory, register_spec,
+    Grain, Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, NodeRequest,
+    NodeSpec, PadDecl, Push, RestartPolicy, Polled, Ts, register_factory, register_spec,
 };
 
 const STEP: i64 = 20;

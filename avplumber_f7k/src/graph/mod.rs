@@ -7,13 +7,14 @@ pub mod capability;
 pub mod direct_edge;
 pub mod edge;
 pub mod error;
-pub mod media;
+pub mod grain;
 pub mod node;
 pub mod pad;
 pub mod poll_ctx;
 pub mod routing;
 pub mod spec;
 pub mod timebase;
+pub mod timestamp;
 
 pub use buffer::{AVP_NOPTS, AvpMediaType, AvpMediaVtable, AvpRational};
 pub use buffered_edge::BufferedEdge;
@@ -24,8 +25,9 @@ pub use edge::{
     Wakeup, generation_reader, generation_writer,
 };
 pub use error::{NodeError, NodePhase};
-pub use media::{Media, OpaqueFrame, Ts};
-pub use node::{Blocked, Node, NodeBody, NodeFuture, NodeKind, Tick};
+pub use grain::{Grain, OpaqueGrain};
+pub use timestamp::Ts;
+pub use node::{Processed, Node, NodeBody, NodeFuture, NodeKind, Polled};
 pub use pad::{In, NodePads, Out, PadDecl, check_pad_media};
 pub use poll_ctx::NodePollContext;
 pub use spec::{CatalogStream, ChannelLayout, MuxStream, PacketSpec, Spec, StreamSelection};
