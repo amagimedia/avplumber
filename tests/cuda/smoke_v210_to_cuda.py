@@ -2,7 +2,8 @@
 
 Run on an NVIDIA host with the FFmpeg 8.1 avplumber Python module and NumPy.
 The download is solely the test's verification boundary. No MXL service or
-NVDEC/NVENC is used. Each run also compares against FFmpeg's CPU v210 decoder.
+NVDEC/NVENC is used. Each run also compares against FFmpeg's CPU v210 decoder,
+and the HLG fixture family's transfer checkpoints are asserted up front.
 """
 
 import argparse
@@ -13,19 +14,21 @@ import time
 
 import numpy as np
 
-from v210_fixture import frame_stride, sample_planes, write_fixture
+from _harness import drain, finish, frame_planes, make_avp, start, v210_chain
+from v210_fixture import frame_stride, hlg_planes, sample_planes, write_fixture
+
+BT709 = {"color_range": "tv", "colorspace": "bt709", "color_primaries": "bt709",
+         "color_trc": "bt709", "chroma_location": "left"}
 
 
-def frame_planes(frame, fmt):
-    if fmt == "p210le":
-        y, uv = [np.frombuffer(data, dtype="<u2").reshape(frame.height, pitch // 2)
-                 for data, pitch in zip(frame.data[:2], frame.linesize[:2])]
-        y, uv = y[:, :frame.width], uv[:, :frame.width]
-        assert not np.any(y & 63) and not np.any(uv & 63), "P210 low bits must be zero"
-        return y >> 6, uv[:, 0::2] >> 6, uv[:, 1::2] >> 6
-    return tuple(np.frombuffer(data, dtype="<u2").reshape(frame.height, pitch // 2)[:, :width]
-                 for data, pitch, width in zip(frame.data[:3], frame.linesize[:3],
-                                                [frame.width, frame.width // 2, frame.width // 2]))
+def check_hlg_fixture():
+    """BT.2100 checkpoints E = 0, 1/12, 1 -> Y 64, 502, 940 with neutral chroma."""
+    y, u, v = hlg_planes(96, 8, index=3)
+    for i, code in enumerate((64, 502, 940)):
+        np.testing.assert_array_equal(y[:2, 12 * i:12 * (i + 1)], code)
+        np.testing.assert_array_equal(u[:2, 6 * i:6 * (i + 1)], 512)
+        np.testing.assert_array_equal(v[:2, 6 * i:6 * (i + 1)], 512)
+    assert y.min() >= 64 and y.max() <= 940
 
 
 def cpu_reference(ffmpeg, path, width, height, frames):
@@ -46,46 +49,21 @@ def cpu_reference(ffmpeg, path, width, height, frames):
 
 
 def run_graph(path, width, height, frames, stride, fmt, scale, timeout):
-    from pyplumber import AVPlumber
-    from pyplumber.node import Demux, FilterVideo, Input, V210ToCuda
+    from pyplumber.node import FilterVideo
 
-    avp = AVPlumber()
-    errors = []
-    avp.on_exception = lambda *error: errors.append(tuple(map(str, error)))
-    avp.edges.planCapacity("*", 3)
-    avp.executeCommandsFromString('hwaccel.init {"name":"v210_gpu","type":"cuda"}')
-    # The gray rawvideo demuxer only frames the bytes into stride*height packets;
-    # declaring its byte width this way permits nonstandard v210 row strides.
-    nodes = [
-        Input({"name": "input", "url": str(path), "format": "rawvideo", "dst": "packets",
-               "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}", "framerate": "60"}}),
-        Demux({"name": "demux", "src": "packets", "routing": {"v:0": "packed"}}),
-        V210ToCuda({"name": "unpack", "src": "packed", "dst": "cuda", "hwaccel": "v210_gpu",
-                    "width": width, "height": height, "stride": stride, "fps": "60/1",
-                    "timebase": "1/90000", "format": fmt, "sample_aspect_ratio": "4/3",
-                    "color_range": "tv", "colorspace": "bt709", "color_primaries": "bt709",
-                    "color_trc": "bt709", "chroma_location": "left"}),
-        FilterVideo({"name": "verify", "src": "cuda", "dst": "result", "hwaccel": "v210_gpu",
-                     "graph": (f"scale_cuda=w={width * 2}:h={height * 2}:interp_algo=nearest,"
-                               if scale else "") + f"hwdownload,format={fmt}"}),
-    ]
+    avp, errors = make_avp("v210_gpu")
+    nodes = []
+    src = v210_chain(nodes, "t", path, width=width, height=height, stride=stride, fmt=fmt,
+                     hwaccel="v210_gpu", color=BT709, sample_aspect_ratio="4/3")
+    nodes.append(FilterVideo({
+        "name": "verify", "src": src, "dst": "result", "hwaccel": "v210_gpu",
+        "graph": (f"scale_cuda=w={width * 2}:h={height * 2}:interp_algo=nearest,"
+                  if scale else "") + f"hwdownload,format={fmt}"}))
     try:
-        for node in nodes:
-            node.parameters.update({"group": "test", "auto_restart": "off"})
-            avp.addNode(node)
-        del node
-        result = avp.getEdge("result", "VideoFrame")
-        avp.group("test").startNodes()
+        result = start(avp, nodes, "test", "result")
         deadline = time.monotonic() + timeout
-        index = 0
-        eof = False
-        while time.monotonic() < deadline and not errors:
-            frame = result.tryGet(100)
-            if frame is None:
-                continue
-            if frame.pts.timestamp == -(1 << 63):
-                eof = True
-                break
+        state = {}
+        for index, frame in enumerate(drain(result, errors, timeout, state=state)):
             assert index < frames, "extra frame"
             expected = sample_planes(width, height, index)
             if scale:
@@ -95,15 +73,14 @@ def run_graph(path, width, height, frames, stride, fmt, scale, timeout):
             assert frame.pts.timestamp == index * 1500, "PTS rescale differs"
             assert (frame.pts.timebase.num, frame.pts.timebase.den) == (1, 90000)
             assert (frame.sampleAspectRatio.num, frame.sampleAspectRatio.den) == (4, 3)
-            index += 1
         assert not errors, errors
-        assert eof and index == frames, f"EOF/count mismatch: eof={eof}, frames={index}/{frames}"
-        while any(avp.node(name).isWorking for name in ("input", "demux", "unpack", "verify")):
+        assert state["eof"] and state["count"] == frames, \
+            f"EOF/count mismatch: eof={state['eof']}, frames={state['count']}/{frames}"
+        while any(avp.node(n).isWorking for n in ("in_t", "demux_t", "unpack_t", "verify")):
             assert time.monotonic() < deadline, "EOF workers did not finish"
             time.sleep(0.01)
     finally:
-        nodes.clear()
-        avp.shutdown()
+        finish(avp, nodes)
 
 
 def main():
@@ -116,6 +93,7 @@ def main():
     parser.add_argument("--scale", action="store_true", help="also exercise nearest 2x CUDA scaling")
     parser.add_argument("--timeout", type=float, default=60)
     args = parser.parse_args()
+    check_hlg_fixture()
     with tempfile.TemporaryDirectory(prefix="avp-v210-") as root:
         path = Path(root) / "frames.v210"
         stride = write_fixture(path, args.width, args.height, args.frames, args.stride)

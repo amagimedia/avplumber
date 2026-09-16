@@ -12,12 +12,11 @@ FFmpeg 8.1 avplumber module; the download is solely the verification boundary.
 import argparse
 from pathlib import Path
 import tempfile
-import time
 
 import numpy as np
 
-from smoke_v210_to_cuda import frame_planes
-from v210_fixture import COLOR, FAMILIES, write_fixture
+from _harness import drain, finish, frame_planes, make_avp, start, v210_chain
+from v210_fixture import COLOR, FAMILIES, frame_stride, write_fixture
 
 W, H, FRAMES = 384, 216, 6
 # Tail-guard frames: EOF through the dual-input transition drops a variable
@@ -99,19 +98,6 @@ def blend(a_planes, b_planes, mode, coef):
     return out
 
 
-def v210_chain(nodes, tag, path, stride, family, fmt, hwaccel):
-    from pyplumber.node import Demux, Input, V210ToCuda
-    nodes += [
-        Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
-               "options": {"pixel_format": "gray", "video_size": f"{stride}x{H}", "framerate": "60"}}),
-        Demux({"name": f"demux_{tag}", "src": f"pkt_{tag}", "routing": {"v:0": f"packed_{tag}"}}),
-        V210ToCuda({"name": f"unpack_{tag}", "src": f"packed_{tag}", "dst": f"gpu_{tag}",
-                    "hwaccel": hwaccel, "width": W, "height": H, "stride": stride, "fps": "60/1",
-                    "timebase": "1/90000", "format": fmt, **COLOR[family]}),
-    ]
-    return f"gpu_{tag}"
-
-
 def upload_chain(nodes, tag, path, hwaccel):
     from pyplumber.node import DecVideo, Demux, FilterVideo, Input
     nodes += [
@@ -126,14 +112,9 @@ def upload_chain(nodes, tag, path, hwaccel):
 
 
 def run(root, family, fmt, mode, coef, timeout, n=2):
-    from pyplumber import AVPlumber
     from pyplumber.node import CudaRectOverlay, FilterVideo
 
-    avp = AVPlumber()
-    errors = []
-    avp.on_exception = lambda *error: errors.append(tuple(map(str, error)))
-    avp.edges.planCapacity("*", 3)
-    avp.executeCommandsFromString('hwaccel.init {"name":"mix_gpu","type":"cuda"}')
+    avp, errors = make_avp("mix_gpu")
     nodes = []
     chains = [(f"a{s}", s) for s in range(n)] + [("b0", 0)]
     if family == "444":
@@ -145,7 +126,6 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
             paths.append(path)
         edges = [upload_chain(nodes, tag, paths[src], "mix_gpu") for tag, src in chains]
     else:
-        from v210_fixture import frame_stride
         stride = frame_stride(W)
         paths = []
         for source in range(n):
@@ -153,8 +133,8 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
             if not path.exists():
                 write_fixture(path, W, H, GEN_FRAMES, family=family, source=source)
             paths.append(path)
-        edges = [v210_chain(nodes, tag, paths[src], stride, family, fmt, "mix_gpu")
-                 for tag, src in chains]
+        edges = [v210_chain(nodes, tag, paths[src], width=W, height=H, stride=stride, fmt=fmt,
+                            hwaccel="mix_gpu", color=COLOR[family]) for tag, src in chains]
     full = {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H}
     cols, tw, th = grid(n)
     layers_a = [{"dst_x": (s % cols) * tw, "dst_y": (s // cols) * th, "dst_w": tw, "dst_h": th}
@@ -174,38 +154,18 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
                      "graph": f"hwdownload,format={fmt}"}),
     ]
     try:
-        for node in nodes:
-            node.parameters.update({"group": "test", "auto_restart": "off"})
-            avp.addNode(node)
-        del node
-        result = avp.getEdge("result", "VideoFrame")
-        avp.group("test").startNodes()
-        deadline = time.monotonic() + timeout
-        index = 0
-        while time.monotonic() < deadline and not errors and index < FRAMES:
-            frame = result.tryGet(100)
-            if frame is None:
-                continue
-            assert frame.pts.timestamp != -(1 << 63), f"early EOF after {index} frames"
+        result = start(avp, nodes, "test", "result")
+        state = {}
+        for index, frame in enumerate(drain(result, errors, timeout, FRAMES, state)):
             reference = blend(scene_a(family, index, n),
                               source_planes(family, index, 0), mode, coef)
-            for plane, (actual, expected) in enumerate(zip(planes_of(frame, fmt), reference)):
+            for plane, (actual, expected) in enumerate(zip(frame_planes(frame, fmt), reference)):
                 np.testing.assert_array_equal(actual, expected,
                                               err_msg=f"frame {index} plane {plane}")
-            index += 1
         assert not errors, errors
-        assert index == FRAMES, f"scored frames {index}/{FRAMES}"
+        assert state["count"] == FRAMES, f"scored frames {state['count']}/{FRAMES}"
     finally:
-        nodes.clear()
-        avp.shutdown()
-
-
-def planes_of(frame, fmt):
-    if fmt == "p210le":
-        return frame_planes(frame, fmt)
-    y, u, v = [np.frombuffer(data, dtype="<u2").reshape(frame.height, pitch // 2)[:, :frame.width]
-               for data, pitch in zip(frame.data[:3], frame.linesize[:3])]
-    return y, u, v
+        finish(avp, nodes)
 
 
 def main():

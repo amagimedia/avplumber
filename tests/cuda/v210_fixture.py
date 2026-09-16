@@ -5,8 +5,6 @@ alignment. Requires NumPy. Output has no header; consumers need its dimensions,
 frame rate and stride supplied separately.
 """
 
-import argparse
-import json
 from pathlib import Path
 
 import numpy as np
@@ -78,36 +76,16 @@ def sdr8_planes(width, height, index=0):
     return tuple((plane << 2).astype("<u2") for plane in (y, u, v))
 
 
-def gradient_planes(width, height, index=0):
-    """Visual 10-bit banding check: one static shallow dark luma ramp (codes
-    64..512 across the width) with neutral chroma. The top half is quantized
-    to 8-bit precision (codes forced to multiples of four); the bottom half
-    keeps true 10-bit codes. Viewed with a contrast stretch such as
-    lutyuv=y='clip((val-64)*4,0,1023)', the top must band about four times
-    wider than the bottom; identical halves mean an 8-bit bottleneck."""
-    frame_stride(width)
-    del index  # static by design; banding is easiest to judge on a still
-    ramp = np.rint(64 + np.arange(width, dtype=np.float64) * (512 - 64) / (width - 1))
-    y = np.repeat(ramp.astype("<u2")[None, :], height, axis=0).copy()
-    y[:height // 2] &= 0xFFFC
-    u = np.full((height, width // 2), 512, "<u2")
-    v = np.full((height, width // 2), 512, "<u2")
-    return y, u, v
-
-
-FAMILIES = {"ramp": sample_planes, "hlg": hlg_planes, "sdr8": sdr8_planes,
-            "gradient": gradient_planes}
+FAMILIES = {"ramp": sample_planes, "hlg": hlg_planes, "sdr8": sdr8_planes}
 
 # Stream color contract per family, in avplumber/FFmpeg option spelling.
+_BT709 = {"color_range": "tv", "color_primaries": "bt709", "color_trc": "bt709",
+          "colorspace": "bt709", "chroma_location": "left"}
 COLOR = {
-    "ramp": {"color_range": "tv", "color_primaries": "bt709", "color_trc": "bt709",
-             "colorspace": "bt709", "chroma_location": "left"},
-    "sdr8": {"color_range": "tv", "color_primaries": "bt709", "color_trc": "bt709",
-             "colorspace": "bt709", "chroma_location": "left"},
+    "ramp": _BT709,
+    "sdr8": _BT709,
     "hlg": {"color_range": "tv", "color_primaries": "bt2020", "color_trc": "arib-std-b67",
             "colorspace": "bt2020nc", "chroma_location": "left"},
-    "gradient": {"color_range": "tv", "color_primaries": "bt709", "color_trc": "bt709",
-                 "colorspace": "bt709", "chroma_location": "left"},
 }
 
 
@@ -140,29 +118,3 @@ def write_fixture(path, width, height, frames, stride=None, family="ramp", sourc
         for index in range(frames):
             stream.write(pack_v210(planes(width, height, index + source * 1000), stride))
     return stride
-
-
-def manifest(width, height, frames, stride, family, fps="60/1"):
-    return {"family": family, "width": width, "height": height, "frames": frames,
-            "stride": stride, "frame_bytes": stride * height, "fps": fps,
-            "sample_aspect_ratio": "1/1", **COLOR[family]}
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--width", type=int, default=1920)
-    parser.add_argument("--height", type=int, default=1080)
-    parser.add_argument("--frames", type=int, default=60)
-    parser.add_argument("--stride", type=int)
-    parser.add_argument("--family", choices=sorted(FAMILIES), default="ramp")
-    parser.add_argument("--source", type=int, default=0, help="source id offsetting the patterns")
-    parser.add_argument("--manifest", type=Path, help="write the color/timing manifest JSON here")
-    args = parser.parse_args()
-    stride = write_fixture(args.output, args.width, args.height, args.frames, args.stride,
-                           args.family, args.source)
-    if args.manifest:
-        args.manifest.write_text(json.dumps(
-            manifest(args.width, args.height, args.frames, stride, args.family), indent=1))
-    print(f"{args.family}: {args.width}x{args.height}, {args.frames} frames, stride={stride}, "
-          f"frame_bytes={stride * args.height}; interpret at 60 fps for a 1080p60 test")
