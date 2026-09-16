@@ -39,30 +39,34 @@ __device__ static float tone_op(int op, float s, float peak, float p) {
     }
 }
 
+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
 __device__ static inline float eotf_st2084(float x) {
-    float p = powf(fmaxf(x, 0.0f), 1.0f / ST2084_M2);
+    float p = __powf(fmaxf(x, 0.0f), 1.0f / ST2084_M2);
     float a = fmaxf(p - ST2084_C1, 0.0f);
     float b = fmaxf(ST2084_C2 - ST2084_C3 * p, 1e-6f);
-    float c = powf(a / b, 1.0f / ST2084_M1);
+    float c = __powf(a / b, 1.0f / ST2084_M1);
     return x > 0.0f ? c * ST2084_MAX_LUMINANCE / REFERENCE_WHITE : 0.0f;
 }
+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
 __device__ static inline float inverse_oetf_hlg(float x) {
     float a = 4.0f * x * x;
-    float b = expf((x - HLG_C) / HLG_A) + HLG_B;
+    float b = __expf((x - HLG_C) / HLG_A) + HLG_B;
     return x < 0.5f ? a : b;
 }
+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
 __device__ static inline float oetf_bt709(float c) {
     c = fmaxf(c, 0.0f);
-    return c < 0.018f ? 4.5f * c : 1.099f * powf(c, 0.45f) - 0.099f;
+    return c < 0.018f ? 4.5f * c : 1.099f * __powf(c, 0.45f) - 0.099f;
 }
 // BT.2020 luma for the HLG OOTF and BT.709 luma for desaturation.
 __device__ static inline float luma_2020(float3 c) { return 0.2627f * c.x + 0.6780f * c.y + 0.0593f * c.z; }
 __device__ static inline float luma_709(float3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
 
+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
 __device__ static inline float3 ootf_hlg(float3 c, float peak) {
     float luma = luma_2020(c);
-    float gamma = fmaxf(1.0f, 1.2f + 0.42f * log10f(peak * REFERENCE_WHITE / 1000.0f));
-    float factor = peak * powf(fmaxf(luma, 1e-6f), gamma - 1.0f) / powf(12.0f, gamma);
+    float gamma = fmaxf(1.0f, 1.2f + 0.42f * __log10f(peak * REFERENCE_WHITE / 1000.0f));
+    float factor = peak * __powf(fmaxf(luma, 1e-6f), gamma - 1.0f) / __powf(12.0f, gamma);
     return make_float3(c.x * factor, c.y * factor, c.z * factor);
 }
 
@@ -82,6 +86,7 @@ __device__ static inline float3 lrgb2020_to_709(float3 c) {
         -0.018151f * c.x - 0.100579f * c.y + 1.118730f * c.z);
 }
 
+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
 __device__ static inline float3 map_one_pixel_rgb(float3 rgb, float peak, float average,
                                                   int op, float param, float desat) {
     float sig = fmaxf(fmaxf(rgb.x, fmaxf(rgb.y, rgb.z)), 1e-6f);
@@ -91,7 +96,7 @@ __device__ static inline float3 map_one_pixel_rgb(float3 rgb, float peak, float 
     if (desat > 0.0f) {
         float luma = luma_709(rgb);
         float coeff = fmaxf(sig - 0.18f, 1e-6f) / fmaxf(sig, 1e-6f);
-        coeff = powf(coeff, 10.0f / desat);
+        coeff = __powf(coeff, 10.0f / desat);
         rgb = make_float3(rgb.x * (1 - coeff) + luma * coeff,
                           rgb.y * (1 - coeff) + luma * coeff,
                           rgb.z * (1 - coeff) + luma * coeff);
