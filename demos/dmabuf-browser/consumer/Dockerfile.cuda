@@ -16,7 +16,7 @@ ARG UBUNTU_VERSION=22.04
 FROM nvidia/cuda:${CUDA_IMAGE_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG FFMPEG_TAG=n7.1.5
+ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
 ARG CUDA_NVCC_FLAGS="-gencode arch=compute_70,code=compute_70 -O2"
 
@@ -56,7 +56,7 @@ RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
     && git -C /tmp/ffmpeg config user.name "dmabuf-browser-demo builder" \
     && git -C /tmp/ffmpeg config user.email "dmabuf-browser-demo@local" \
-    && git -C /tmp/ffmpeg am /build/deps/ffmpeg/${FFMPEG_TAG#n}/*.patch
+    && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
 RUN cd /tmp/ffmpeg \
     && ./configure \
