@@ -61,26 +61,29 @@ def frame_planes(width, height, index, frames, source):
     return y, cb, cr
 
 
+CMP_LO, CMP_HI = 440, 568   # narrow 128-code luma window before the stretch
+
+
 def comparison_planes(width, height, index, frames, source=0):
-    """A smooth, low-frequency gradient with no specular highlight and no hard
-    edges: dark-to-mid luminance plus a gentle hue drift, the range where 8-bit
-    quantisation bands most visibly. Same content at 10-bit vs 8-bit shows the
-    contouring difference directly. Seamless in phase."""
-    theta = TAU * index / frames
+    """A shallow neutral-grey luma ramp in a narrow code window (CMP_LO..CMP_HI),
+    panning slowly. On its own the ramp is nearly flat; the 8-bit vs 10-bit
+    difference lives in the low bits and is exposed by stretch_luma()."""
     u = np.broadcast_to((np.arange(width, dtype=np.float64) / (width - 1))[None, :], (height, width))
-    v = np.broadcast_to((np.arange(height, dtype=np.float64) / (height - 1))[:, None], (height, width))
-    base = 0.5 + 0.5 * np.sin(TAU * (0.5 * u + 0.3 * v) + theta)   # smooth 0..1
-    lum = 0.02 + 0.45 * base                                        # dark->mid linear
-    a = TAU * (0.2 * u) + theta
-    r = np.clip(lum * (0.7 + 0.3 * np.sin(a)), 0, 1)
-    g = np.clip(lum * (0.7 + 0.3 * np.sin(a + TAU / 3)), 0, 1)
-    b = np.clip(lum * (0.7 + 0.3 * np.sin(a + 2 * TAU / 3)), 0, 1)
-    rp, gp, bp = hlg_oetf(r), hlg_oetf(g), hlg_oetf(b)
-    yp = 0.2627 * rp + 0.6780 * gp + 0.0593 * bp
-    y = np.rint(876 * yp + 64).astype("<u2")
-    cb = np.rint(896 * (bp - yp) / 1.8814 + 512).astype("<u2")[:, 0::2]
-    cr = np.rint(896 * (rp - yp) / 1.4746 + 512).astype("<u2")[:, 0::2]
+    t = (u + index / frames) % 1.0                     # panning, seamless
+    y = np.rint(CMP_LO + t * (CMP_HI - CMP_LO)).astype("<u2")
+    cb = np.full((height, width // 2), 512, "<u2")
+    cr = np.full((height, width // 2), 512, "<u2")
     return y, cb, cr
+
+
+def stretch_luma(planes):
+    """Map the narrow CMP_LO..CMP_HI window onto 64..940. Applied AFTER any 8-bit
+    quantisation, it amplifies the 8-bit half's coarse steps into wide, obvious
+    bands while the 10-bit half stays fine -- so the difference survives even an
+    8-bit transport and display."""
+    y, cb, cr = planes
+    scaled = (y.astype(np.float64) - CMP_LO) * (940 - 64) / (CMP_HI - CMP_LO) + 64
+    return np.clip(np.rint(scaled), 0, 1023).astype("<u2"), cb, cr
 
 
 def quantize8(planes):
@@ -111,12 +114,18 @@ def main():
     args = p.parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
     if args.pattern == "comparison":
-        # One smooth gradient, written at 10-bit and 8-bit for a side-by-side.
+        # One shallow ramp, written 10-bit and 8-bit, each stretched after the
+        # quantisation so the bit-depth difference is visible on any display.
         base = f"{args.width}x{args.height}_{args.frames}f"
-        write(args.outdir / f"hlgcompare10_{base}.v210", comparison_planes,
-              args.width, args.height, args.frames, 0, eight_bit=False)
-        write(args.outdir / f"hlgcompare8_{base}.v210", comparison_planes,
-              args.width, args.height, args.frames, 0, eight_bit=True)
+        for name, eight in (("hlgcompare10", False), ("hlgcompare8", True)):
+            path = args.outdir / f"{name}_{base}.v210"
+            with path.open("wb") as stream:
+                for i in range(args.frames):
+                    planes = comparison_planes(args.width, args.height, i, args.frames)
+                    if eight:
+                        planes = quantize8(planes)
+                    stream.write(pack_v210(stretch_luma(planes)))
+            print(f"wrote {path} ({'8-bit' if eight else '10-bit'}, stretched)", flush=True)
         return
     for s in range(args.sources):
         path = args.outdir / f"hlgmotion{s}_{args.width}x{args.height}_{args.frames}f.v210"
