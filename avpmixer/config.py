@@ -63,9 +63,9 @@ class Rendition:
     height: int = 0
     fps: int = 0                     # 0 keeps the canvas rate
     bitrate_kbps: int = 3000
-    codec: str = "hevc_nvenc"        # WebRTC HEVC: 2x efficiency, carries 10-bit/HDR
+    codec: str = ""                  # "" auto-selects: HEVC for a 10-bit program, else H.264
     profile: str = ""                # "" lets the encoder pick main/main10/baseline
-    preset: str = "p5"               # NVENC quality preset
+    preset: str = "p7"               # NVENC quality preset
     port: int = 0                    # janus target: 0 keeps the configured port
     # "" = HDR passthrough (keep the working format's depth/transfer). An operator
     # name (hable/mobius/reinhard/...) tone-maps the HDR program to BT.709 SDR
@@ -248,8 +248,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             rid, str(r.get("target", "janus")),
             int(r.get("width", canvas_w)), int(r.get("height", canvas_h)),
             int(r.get("fps", fps)), int(r.get("bitrate_kbps", 3000)),
-            str(r.get("codec", "hevc_nvenc")), str(r.get("profile", "")),
-            str(r.get("preset", "p5")), int(r.get("port", 0)),
+            str(r.get("codec", "")), str(r.get("profile", "")),
+            str(r.get("preset", "p7")), int(r.get("port", 0)),
             str(r.get("tonemap", "")), float(r.get("tonemap_peak", 10.0)),
             float(r.get("tonemap_desat", 0.0)))
         if rendition.width <= 0 or rendition.height <= 0:

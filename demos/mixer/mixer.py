@@ -334,6 +334,28 @@ def _input_group(index: int) -> str:
     return f"input_{index}"
 
 
+def _init_avp(avp_options, api):
+    """AVPlumber instance + control server + CUDA hwaccel — shared by both the
+    --input and --config build paths."""
+    avp = api.AVPlumber()
+    if avp_options.remote_control_port:
+        avp.enableControlServer(avp_options.remote_control_port)
+    avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    avp.edges.planCapacity("*", 4)
+    return avp
+
+
+def _make_builder(avp, api, options, *, canvas, fps, working_format):
+    """The mixer builder, configured identically for both build paths (canvas,
+    rate and working_format are the only per-path differences)."""
+    return api.MixerGraphBuilder(
+        avp, name=MIXER_NAME, canvas=canvas, fps=(fps, FPS_DEN),
+        latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
+        defer_initial_routes=True, defer_output=True,
+        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
+        cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format)
+
+
 def _build_input(
     avp, api, index: int, url: str, *, loop: bool, fps: int, normalize: bool,
     options: "GraphOptions | None" = None,
@@ -484,6 +506,13 @@ def _build_record_output(avp, api, options: GraphOptions, mixer_edge: str, *,
     }))
 
 
+def _default_codec(working_format: str) -> str:
+    """H.264 for an 8-bit program (universal WebRTC), HEVC for a 10-bit one
+    (Main10 carries the depth/HDR). Overridable per rendition."""
+    ten_bit = working_format not in ("nv12", "yuv420p", "yuv422p", "yuv444p")
+    return "hevc_nvenc" if ten_bit else "h264_nvenc"
+
+
 def _encode_format(working_format: str, codec: str) -> str:
     """Encoder input format for a program in *working_format*: keep 10-bit as
     P010 for HEVC Main10; otherwise NV12 (H.264, or 8-bit HEVC)."""
@@ -553,12 +582,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     api = api or load_avp_api()
     if options.config:
         return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(options.config)), api)
-    avp = api.AVPlumber()
-    if options.remote_control_port:
-        avp.enableControlServer(options.remote_control_port)
-    avp.executeCommandsFromString(
-        f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}'
-    )
+    avp = _init_avp(options, api)
     dmabuf_ids = options.dmabuf_inputs
     if dmabuf_ids:
         if options.dmabuf_open:
@@ -567,7 +591,6 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
                                  width, height, options.fps)
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
-    avp.edges.planCapacity("*", 4)
 
     input_edges = [
         _build_input(
@@ -582,20 +605,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         )
         for index, url in enumerate(options.inputs)
     ]
-    mixer = api.MixerGraphBuilder(
-        avp,
-        name=MIXER_NAME,
-        canvas=(CANVAS_WIDTH, CANVAS_HEIGHT),
-        fps=(options.fps, FPS_DEN),
-        latency_ms=options.mixer_latency_ms,
-        hwaccel=HWACCEL,
-        enable_wipe=True,
-        defer_initial_routes=True,
-        defer_output=True,
-        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
-        cache_wipes_mb=options.wipe_cache_mb or None,
-        working_format=options.working_format,
-    )
+    mixer = _make_builder(avp, api, options, canvas=(CANVAS_WIDTH, CANVAS_HEIGHT),
+                          fps=options.fps, working_format=options.working_format)
     routed_inputs = _register_sources(
         avp, api, mixer, input_edges, fps=options.fps
     )
@@ -635,10 +646,11 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
     listener = None
     for rendition, edge in zip(cfg.renditions, edges):
         resized = (rendition.width, rendition.height) != (cfg.canvas_w, cfg.canvas_h)
-        wh = f"w={rendition.width}:h={rendition.height}:" if resized else ""
+        codec = rendition.codec or _default_codec(cfg.working_format)
         if rendition.tonemap:
             # HDR program -> SDR: scale/convert to P010, then tonemap_cuda to
-            # BT.709 SDR NV12 (zero-copy) before an 8-bit encoder.
+            # BT.709 SDR NV12 (zero-copy) before an 8-bit encoder. Always a node.
+            wh = f"w={rendition.width}:h={rendition.height}:" if resized else ""
             t = _TONEMAP_TRANSFER.get(cfg.out_color_trc, "hlg")
             graph = (f"scale_cuda={wh}format=p010le,"
                      f"tonemap_cuda=transfer={t}:tonemap={rendition.tonemap}:peak={rendition.tonemap_peak}"
@@ -647,14 +659,19 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
         else:
             # HDR passthrough: convert to the encoder's format (P010 for Main10,
             # NV12 for 8-bit) keeping the program's depth/transfer.
-            enc_format = _encode_format(cfg.working_format, rendition.codec)
-            graph = f"scale_cuda={wh}format={enc_format}"
+            enc_format = _encode_format(cfg.working_format, codec)
+            parts = ([f"w={rendition.width}", f"h={rendition.height}"] if resized else [])
+            if enc_format != cfg.working_format:
+                parts.append(f"format={enc_format}")
+            graph = "scale_cuda=" + ":".join(parts) if parts else ""   # skip a no-op pass
             out_color = cfg.out_color
-        scaled = f"program_scaled_{rendition.id}"
-        avp.addNode(api.FilterVideo({
-            "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
-            "graph": graph, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
-        }))
+        scaled = edge
+        if graph:
+            scaled = f"program_scaled_{rendition.id}"
+            avp.addNode(api.FilterVideo({
+                "name": f"scale_{rendition.id}", "src": edge, "dst": scaled,
+                "graph": graph, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
+            }))
         if rendition.target == "janus":
             listener = build_janus_output(
                 avp, api, scaled,
@@ -668,7 +685,7 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
                 ),
                 fps=rendition.fps, fps_den=FPS_DEN, width=rendition.width, height=rendition.height,
                 hwaccel=HWACCEL, group=OUTPUT_GROUP,
-                codec=rendition.codec, profile=rendition.profile, preset=rendition.preset,
+                codec=codec, profile=rendition.profile, preset=rendition.preset,
                 enc_format=enc_format, color=out_color,
             )
         else:
@@ -681,26 +698,16 @@ def _build_renditions(avp, api, options: GraphOptions, cfg, mixer_edge: str):
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
     """Sources, wipes and scenes from a JSON document; one chain per source."""
     options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
-    avp = api.AVPlumber()
-    if options.remote_control_port:
-        avp.enableControlServer(options.remote_control_port)
-    avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
+    avp = _init_avp(options, api)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
                                             "height": s.height, "fps": s.fps or cfg.fps} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
-    avp.edges.planCapacity("*", 4)
 
-    mixer = api.MixerGraphBuilder(
-        avp, name=MIXER_NAME, canvas=(cfg.canvas_w, cfg.canvas_h), fps=(cfg.fps, FPS_DEN),
-        latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
-        defer_initial_routes=True, defer_output=True,
-        keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
-        cache_wipes_mb=options.wipe_cache_mb or None,
-        working_format=cfg.working_format,
-    )
+    mixer = _make_builder(avp, api, options, canvas=(cfg.canvas_w, cfg.canvas_h),
+                          fps=cfg.fps, working_format=cfg.working_format)
     aliases = cfg.alias_counts
     input_edges: list[str] = []
     for index, source in enumerate(cfg.sources):

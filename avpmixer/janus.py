@@ -52,8 +52,8 @@ KEYFRAME_COMMAND = f"node.object.set {JANUS_KEYFRAME_NODE} trigger true"
 
 def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps: int,
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
-                       group: str = "output", codec: str = "hevc_nvenc", profile: str = "",
-                       preset: str = "p5", enc_format: str = "nv12", color=None,
+                       group: str = "output", codec: str = "", profile: str = "",
+                       preset: str = "p7", enc_format: str = "nv12", color=None,
                        prefix: str = "janus"):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
@@ -65,6 +65,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     """
     bitrate = f"{janus.bitrate_kbps}k"
     ten_bit = enc_format in ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
+    if not codec:
+        codec = "hevc_nvenc" if ten_bit else "h264_nvenc"   # HEVC only when the input is 10-bit
     if not profile:
         profile = ("main10" if ten_bit else "main") if "hevc" in codec else "baseline"
     color_opts = {} if not color else {
