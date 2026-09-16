@@ -60,7 +60,7 @@ def run(op, timeout):
                     continue
                 if f.pts.timestamp == -(1 << 63):
                     break
-                assert f.realPixelFormatName == "nv12" or f.width == W, "expected NV12 SDR out"
+                assert f.width == W and f.height == H, "unexpected output size"
                 y = np.frombuffer(f.data[0], np.uint8).reshape(H, f.linesize[0])[:, :W]
                 assert 8 <= int(y.min()) <= 40, f"black should map near 16, got min {y.min()}"
                 assert int(y.max()) >= 120, f"bright HLG should stay bright, got max {y.max()}"
