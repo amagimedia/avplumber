@@ -8,14 +8,17 @@
 // class that nvof_fruc could not fix.
 //
 // Inputs are CUDA/NV12 hardware frames. The node keeps two fp16 RGB tensors
-// (planar, padded to a multiple of 32) as its rolling 2-frame window, runs
+// (planar, padded to a multiple of 64) as its rolling 2-frame window, runs
 // the RIFE engine to produce the interpolated fp16 RGB tensor, then converts
 // back to CUDA/NV12 into a fresh AVFrame buffer. The output pool matches the
 // input frame ctx (BT.709 limited-range NV12), matching what NVENC expects.
 //
-// Engine: pre-built with build_trt.py, fixed at H=1088, W=1920. Non-1080p
-// sources aren't handled yet (would need dynamic shape profiles + variable
-// padding). Colorspace assumed BT.709 limited range for now.
+// Engine: pre-built with build_trt.py at one fixed resolution (the profile has
+// min==opt==max), so the padded input must match the engine exactly. We read
+// that resolution off the engine rather than assuming 1080p, so an engine
+// re-exported for another size (e.g. 1472x2560 for 1440p) works unchanged.
+// Genuinely variable input would need dynamic shape profiles.
+// Colorspace assumed BT.709 limited range for now.
 
 #include "../../node_common.hpp"
 #include "../../../hwaccel.hpp"
@@ -74,7 +77,7 @@ private:
 	AVCUDADeviceContext* cuda_dev_ctx_ = nullptr;
 	AVBufferRef* hw_frames_ctx_ = nullptr;
 	int width_ = 0, height_ = 0;    // input resolution
-	int padded_w_ = 0, padded_h_ = 0;  // engine input resolution (multiple of 32)
+	int padded_w_ = 0, padded_h_ = 0;  // engine input resolution (multiple of 64)
 
 	// TRT
 	RifeTRTLogger logger_;
@@ -115,7 +118,11 @@ private:
 		return ctx->sw_format;
 	}
 
-	static int round_up_32(int x) { return ((x + 31) / 32) * 32; }
+	// IFNet's coarsest pyramid level is 1/16 and its blocks downsample by a
+	// further 4, so the tensor must be a multiple of 64 or the flow comes back
+	// at a different size than the image it warps (1440 -> 1472 mismatch).
+	// 1080p is unaffected: 1088 is already 64*17.
+	static int round_up_64(int x) { return ((x + 63) / 64) * 64; }
 
 	// ---------------------------------------------------------------
 	// Init / teardown
@@ -350,21 +357,36 @@ public:
 
 		const int w = in.width();
 		const int h = in.height();
-		const int Hp = round_up_32(h);
-		const int Wp = round_up_32(w);
-		if (Hp != 1088 || Wp != 1920) {
-			logstream << "rife_vfi: engine is fixed at 1088x1920 (input " << w << "x" << h
-			          << " padded to " << Wp << "x" << Hp << "); passthrough";
-			passthrough();
-			return;
-		}
+		const int Hp = round_up_64(h);
+		const int Wp = round_up_64(w);
 
 		// Push CUDA context before ANY module/engine/memory calls so all
 		// resources live in the same context we later launch kernels in.
 		// Without this cuLaunchKernel fails with INVALID_HANDLE because the
 		// function belongs to a different context than the current one.
 		if (CHECK_CU_RIFE(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx))) { passthrough(); return; }
-		bool init_ok = load_engine() && load_kernels() && ensure_hw_frames_ctx(w, h);
+
+		// The engine's profile is fixed at one resolution, so the padded input
+		// has to match it exactly. Ask the engine instead of hardcoding 1080p.
+		if (!load_engine()) {
+			CUcontext dummy; CHECK_CU_RIFE(cuCtxPopCurrent(&dummy));
+			passthrough();
+			return;
+		}
+		{
+			const nvinfer1::Dims eng = engine_->getTensorShape("img0");
+			if (eng.nbDims != 4 || eng.d[2] != Hp || eng.d[3] != Wp) {
+				logstream << "rife_vfi: engine expects " << (eng.nbDims == 4 ? eng.d[3] : -1)
+				          << "x" << (eng.nbDims == 4 ? eng.d[2] : -1)
+				          << " but input is " << w << "x" << h
+				          << " (padded to " << Wp << "x" << Hp
+				          << "); re-export the engine for this resolution; passthrough";
+				CUcontext dummy; CHECK_CU_RIFE(cuCtxPopCurrent(&dummy));
+				passthrough();
+				return;
+			}
+		}
+		bool init_ok = load_kernels() && ensure_hw_frames_ctx(w, h);
 		padded_h_ = Hp;
 		padded_w_ = Wp;
 		init_ok = init_ok && ensure_device_buffers() && ensure_trt_shapes();
