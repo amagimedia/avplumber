@@ -58,16 +58,24 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
             "team": pause_team, "group": group, **sync, **(pause_params or {}),
         }))
         realtime_src = edge("paused")
+    return _pace(avp, api, tag, realtime_src, fps=fps, fps_den=fps_den, group=group,
+                 sync_team=sync_team, realtime_params=realtime_params)
+
+
+def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
+          sync_team: Optional[str] = None, realtime_params: Optional[dict] = None) -> str:
+    """``realtime(set_pts) -> force_fps`` tail shared by every source chain:
+    rebase onto the host clock, then fix the rate. Returns ``input_<tag>_fps``."""
     avp.addNode(api.Realtime({
-        "name": f"realtime_{tag}", "src": realtime_src, "dst": edge("realtime"),
+        "name": f"realtime_{tag}", "src": src, "dst": f"input_{tag}_realtime",
         "set_pts": True, "group": group,
         **({} if sync_team is None else {"team": sync_team}), **(realtime_params or {}),
     }))
     avp.addNode(api.ForceFPS({
-        "name": f"fps_{tag}", "src": edge("realtime"), "dst": edge("fps"),
+        "name": f"fps_{tag}", "src": f"input_{tag}_realtime", "dst": f"input_{tag}_fps",
         "fps": f"{fps}/{fps_den}", "group": group,
     }))
-    return edge("fps")
+    return f"input_{tag}_fps"
 
 
 def v210_row_stride(width: int) -> int:
@@ -103,12 +111,4 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "format": working_format,
         "group": group, **restart, **(color or {}),
     }))
-    avp.addNode(api.Realtime({
-        "name": f"realtime_{tag}", "src": edge("cuda"), "dst": edge("realtime"),
-        "set_pts": True, "group": group,
-    }))
-    avp.addNode(api.ForceFPS({
-        "name": f"fps_{tag}", "src": edge("realtime"), "dst": edge("fps"),
-        "fps": f"{fps}/{fps_den}", "group": group,
-    }))
-    return edge("fps")
+    return _pace(avp, api, tag, edge("cuda"), fps=fps, fps_den=fps_den, group=group)
