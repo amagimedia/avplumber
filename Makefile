@@ -162,6 +162,8 @@ $(eval $(call ptx_kernel,$(SRCDIR)/nodes/neural_net/preprocess/mask_assemble.cu,
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/v210_to_cuda.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_unpack.cu,avpl_v210_unpack_ptx,objs/src/nodes/hwaccel/v210_to_cuda.o))
 override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_overlay.o))
 NODES_SRC += $(SRCDIR)/nodes/scene_cut/luma_diff.cpp

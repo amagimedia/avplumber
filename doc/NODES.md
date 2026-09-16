@@ -700,6 +700,16 @@ The renderer needs to:
 6. if the read time resolution was greater than resolution of the waveform to be displayed, compute maximum or RMS of waveform values that correspond to the same “pixel” on the resulting image
 
 
+### `v210_to_cuda`
+
+Upload one packed v210 frame per `av::Packet` and unpack on CUDA into 10-bit
+4:2:2 P210 or planar YUV. Requires `HAVE_CUDA=1 HAVE_NVCC=1` and FFmpeg 8.1
+CUDA format support; no MXL service or hardware video decoder is involved.
+
+1 input: `av::Packet`; 1 output: `av::VideoFrame` (`cuda`).
+
+See [parameters, byte simulator and pixel tests](v210_to_cuda.md).
+
 ### `ipc_cuda_source`
 
 Get video frames from CUDA IPC memory. Frame pointer and parameters are read from named pipe. See `src/nodes/cuda/ipc_cuda_source.cpp` for structure.
