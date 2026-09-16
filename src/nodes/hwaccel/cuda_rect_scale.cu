@@ -46,6 +46,40 @@ extern "C" __global__ void scale_plane(
     }
 }
 
+// Cross-depth plane scaler: read an 8-bit (or narrower) source plane, bilinear
+// scale it into the destination region and store at the canvas depth, scaling
+// logical codes by `mul` (4 for 8->10-bit SDR promotion, 16->64 / 235->940).
+// Separate src/dst sample bytes and shifts let one body cover NV12->P210 luma
+// and interleaved chroma; the chroma footprint difference (4:2:0 -> 4:2:2) is
+// just the src/dst region sizes, so the same bilinear handles the resample.
+extern "C" __global__ void convert_scale_plane(
+    const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
+    int src_bytes, int src_shift,
+    unsigned char *dst, int dst_pitch, int dx, int dy, int dw, int dh,
+    int canvas_w, int canvas_h, int lanes, int dst_bytes, int dst_shift, float mul) {
+    const int ox = blockIdx.x * blockDim.x + threadIdx.x;
+    const int oy = blockIdx.y * blockDim.y + threadIdx.y;
+    const int x = dx + ox, y = dy + oy;
+    if (ox >= dw || oy >= dh || x < 0 || y < 0 || x >= canvas_w || y >= canvas_h) return;
+    const float fx = (ox + 0.5f) * sw / dw - 0.5f;
+    const float fy = (oy + 0.5f) * sh / dh - 0.5f;
+    const int ix = int(floorf(fx)), iy = int(floorf(fy));
+    const float tx = fx - ix, ty = fy - iy;
+    const int x0 = sx + max(0, min(ix, sw - 1));
+    const int x1 = sx + max(0, min(ix + 1, sw - 1));
+    const int y0 = sy + max(0, min(iy, sh - 1));
+    const int y1 = sy + max(0, min(iy + 1, sh - 1));
+    for (int c = 0; c < lanes; ++c) {
+        const float a = load_sample(src + y0 * src_pitch + (x0 * lanes + c) * src_bytes, src_bytes, src_shift);
+        const float b = load_sample(src + y0 * src_pitch + (x1 * lanes + c) * src_bytes, src_bytes, src_shift);
+        const float d = load_sample(src + y1 * src_pitch + (x0 * lanes + c) * src_bytes, src_bytes, src_shift);
+        const float e = load_sample(src + y1 * src_pitch + (x1 * lanes + c) * src_bytes, src_bytes, src_shift);
+        const float top = a + tx * (b - a), bottom = d + tx * (e - d);
+        store_sample(dst + y * dst_pitch + (x * lanes + c) * dst_bytes, dst_bytes, dst_shift,
+                     (top + ty * (bottom - top)) * mul);
+    }
+}
+
 // Packed 8-bit RGB source (any channel order, 3 or 4 bytes per pixel) onto a
 // semiplanar YUV canvas in one pass: each thread produces one chroma-footprint
 // block of luma (2x2 for NV12, 2x1 for P210, 1x1 for 444) and its interleaved

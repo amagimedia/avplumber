@@ -328,6 +328,21 @@ static bool isRgbToYuvConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fm
            isPackedRgb8(src_fmt, step, r, g, b);
 }
 
+// A lower-depth semiplanar YUV source (e.g. NV12 from NVDEC) drawn onto a deeper
+// semiplanar canvas (P210): the fused scaler promotes its codes by 2^(dbits-sbits)
+// (NV12->P210 is <<2, 16->64 / 235->940) and resamples the chroma footprint,
+// so an 8-bit clip mixes onto a 10-bit program with no separate convert node.
+// SDR only, like the RGB path; the source keeps its own subsampling.
+static bool isYuvPromoteConvertible(AVPixelFormat src_fmt, AVPixelFormat canvas_fmt) {
+    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(src_fmt);
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_fmt);
+    if (!sd || !cd || src_fmt == canvas_fmt) return false;
+    if ((sd->flags | cd->flags) & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_ALPHA)) return false;
+    if (sd->nb_components != 3 || cd->nb_components != 3) return false;
+    if (numPlanes(src_fmt) != 2 || numPlanes(canvas_fmt) != 2) return false;   // semiplanar UV
+    return sd->comp[0].depth <= cd->comp[0].depth;
+}
+
 // Returns the plane index of the alpha component for planar formats, or -1 if there is none /
 // the format is packed (all components on plane 0).
 static int alphaPlaneIndex(AVPixelFormat fmt) {
@@ -438,6 +453,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     AVCUDADeviceContext *cuda_dev_ = nullptr;
     CUmodule scale_module_ = nullptr;
     CUfunction scale_kernel_ = nullptr;
+    CUfunction convert_kernel_ = nullptr;
     CUfunction rgb_kernel_ = nullptr;
     CUfunction rgba_kernel_ = nullptr;
     std::string last_ops_desc_;
@@ -496,6 +512,7 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         const std::string image(avpl_rect_scale_ptx, avpl_rect_scale_ptx + avpl_rect_scale_ptx_len);
         if (CHECK_CU(cuModuleLoadDataEx(&scale_module_, image.c_str(), 0, nullptr, nullptr)) ||
             CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")) ||
+            CHECK_CU(cuModuleGetFunction(&convert_kernel_, scale_module_, "convert_scale_plane")) ||
             CHECK_CU(cuModuleGetFunction(&rgb_kernel_, scale_module_, "rgb_to_yuv")) ||
             CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_yuv")))
             throw Error("cuda_rect_overlay: cannot load scaling kernel");
@@ -564,6 +581,44 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         }
     }
 
+    // Draw a lower-depth semiplanar source onto the deeper canvas: bilinear
+    // scale each plane from the source's geometry to the canvas geometry while
+    // promoting codes by 2^(dst_depth-src_depth). Reads the source's own plane
+    // layout, writes the canvas layout, so NV12(4:2:0)->P210(4:2:2) works.
+    void convertLayer(CUstream stream, AVPixelFormat src_fmt, const AVFrame *src, AVFrame *dst,
+                      const LayerSpec &layer) {
+        ensureScaleKernel();
+        if (!convert_kernel_) throw Error("cuda_rect_overlay: convert kernel unavailable");
+        const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(src_fmt);
+        const AVPixFmtDescriptor *dd = av_pix_fmt_desc_get(sw_fmt_);
+        int src_bytes = sampleBytes(src_fmt), src_shift = storageShift(src_fmt);
+        int dst_bytes = sampleBytes(sw_fmt_), dst_shift = storageShift(sw_fmt_);
+        float mul = float(1 << (dd->comp[0].depth - sd->comp[0].depth));
+        int dstw = layer.dst_w > 0 ? layer.dst_w : layer.crop_w;
+        int dsth = layer.dst_w > 0 ? layer.dst_h : layer.crop_h;
+        for (int p = 0; p < numPlanes(sw_fmt_); ++p) {
+            if (!src->data[p]) continue;
+            int lanes = 1;
+            for (int c = 0; c < dd->nb_components; ++c)
+                if (dd->comp[c].plane == p) lanes = std::max(lanes, dd->comp[c].step / dst_bytes);
+            int sx, sy, sw, sh, dx, dy, dw, dh, cx, cy, cw, ch;
+            lumaRectToPlaneRegion(src_fmt, layer.crop_x, layer.crop_y, layer.crop_w, layer.crop_h,
+                                  p, sx, sy, sw, sh);
+            lumaRectToPlaneRegion(sw_fmt_, layer.dst_x, layer.dst_y, dstw, dsth, p, dx, dy, dw, dh);
+            lumaRectToPlaneRegion(sw_fmt_, 0, 0, canvas_w_, canvas_h_, p, cx, cy, cw, ch);
+            sx /= lanes * src_bytes; sw /= lanes * src_bytes;
+            dx /= lanes * dst_bytes; dw /= lanes * dst_bytes; cw /= lanes * dst_bytes;
+            CUdeviceptr source = (CUdeviceptr)src->data[p], destination = (CUdeviceptr)dst->data[p];
+            int source_pitch = src->linesize[p], destination_pitch = dst->linesize[p];
+            void *args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &src_bytes, &src_shift,
+                            &destination, &destination_pitch, &dx, &dy, &dw, &dh, &cw, &ch, &lanes,
+                            &dst_bytes, &dst_shift, &mul};
+            if (CHECK_CU(cuLaunchKernel(convert_kernel_, (dw + 31) / 32, (dh + 7) / 8, 1,
+                                        32, 8, 1, 0, stream, args, nullptr)))
+                throw Error("cuda_rect_overlay: convert launch failed");
+        }
+    }
+
     std::vector<LayerSpec> mergeLayersForTick(const av::VideoFrame *metadata_source) {
         std::vector<LayerSpec> layers;
         {
@@ -603,7 +658,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         AVHWFramesContext *ctx = (AVHWFramesContext *)f.raw()->hw_frames_ctx->data;
         if (!ctx) return false;
         return ctx->sw_format == sw_fmt_ || isAlphaCompatible(ctx->sw_format, sw_fmt_) ||
-               isRgbToYuvConvertible(ctx->sw_format, sw_fmt_);
+               isRgbToYuvConvertible(ctx->sw_format, sw_fmt_) ||
+               isYuvPromoteConvertible(ctx->sw_format, sw_fmt_);
     }
 
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f) {
@@ -739,6 +795,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                 isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
                 convertRgbLayer(stream, srcp->raw(), outf.raw(), L, rgb_step, r_off, g_off, b_off,
                                 packedAlphaOffset(src_sw_fmt));
+            } else if (src_sw_fmt != sw_fmt_ && isYuvPromoteConvertible(src_sw_fmt, sw_fmt_)) {
+                convertLayer(stream, src_sw_fmt, srcp->raw(), outf.raw(), L);
             } else if (!full_copy) {
                 scaleLayer(stream, srcp->raw(), outf.raw(), L);
             } else if (!blitLayerPlanes(stream, sw_fmt_, srcp->raw(), outf.raw(), L.crop_x, L.crop_y, L.crop_w,

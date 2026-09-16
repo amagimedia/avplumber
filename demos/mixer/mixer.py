@@ -17,7 +17,7 @@ from avpmixer import clipcache
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
-from avpmixer.inputs import build_input
+from avpmixer.inputs import build_input, build_v210_input
 from avpmixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
                            JanusVideoConfig, build_janus_output)
 
@@ -683,6 +683,15 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
             for node in nodes:
                 avp.addNode(node)
+        elif source.kind == "v210":
+            # True 10-bit sources: packed v210 unpacked to the working format on
+            # the GPU, with their declared HLG/BT.2020 color contract.
+            edge = build_v210_input(
+                avp, api, str(index), source.location, width=source.width, height=source.height,
+                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
+                working_format=cfg.working_format,
+                color={"color_trc": source.color_trc, "color_primaries": source.color_primaries,
+                       "colorspace": source.colorspace, "color_range": source.color_range})
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)

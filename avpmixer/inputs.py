@@ -68,3 +68,47 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         "fps": f"{fps}/{fps_den}", "group": group,
     }))
     return edge("fps")
+
+
+def v210_row_stride(width: int) -> int:
+    """Standard v210 row stride: ceil(width/48) * 128 bytes."""
+    return ((width + 47) // 48) * 128
+
+
+def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
+                     fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
+                     working_format: str = "p210le", color: Optional[dict] = None) -> str:
+    """Headerless packed v210 file -> GPU unpack -> paced output edge.
+
+    ``input_rec -> demux -> v210_to_cuda -> realtime(set_pts) -> force_fps``.
+    The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
+    the HDR sources) is supplied here and stamped on the CUDA frames.
+    """
+    edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
+    restart = {} if loop else {"auto_restart": "group"}
+    stride = v210_row_stride(width)
+    avp.addNode(api.InputRec({
+        "name": f"input_{tag}", "url": path, "dst": edge("packets"), "loop": loop,
+        "format": "rawvideo", "initial_timeout": 20, "timeout": 3_942_000_000, "group": group,
+        "options": {"pixel_format": "gray", "video_size": f"{stride}x{height}",
+                    "framerate": f"{fps}/{fps_den}"},
+    }))
+    avp.addNode(api.Demux({
+        "name": f"demux_{tag}", "src": edge("packets"), "routing": {"v:0": edge("packed")},
+        "wait_for_keyframe": False, "group": group, **restart,
+    }))
+    avp.addNode(api.V210ToCuda({
+        "name": f"unpack_{tag}", "src": edge("packed"), "dst": edge("cuda"),
+        "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
+        "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "format": working_format,
+        "group": group, **restart, **(color or {}),
+    }))
+    avp.addNode(api.Realtime({
+        "name": f"realtime_{tag}", "src": edge("cuda"), "dst": edge("realtime"),
+        "set_pts": True, "group": group,
+    }))
+    avp.addNode(api.ForceFPS({
+        "name": f"fps_{tag}", "src": edge("realtime"), "dst": edge("fps"),
+        "fps": f"{fps}/{fps_den}", "group": group,
+    }))
+    return edge("fps")

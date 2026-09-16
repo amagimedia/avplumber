@@ -39,12 +39,18 @@ class Rect:
 @dataclass(frozen=True)
 class Source:
     id: str
-    kind: str                      # "browser" | "video"
-    location: str                  # url (browser) or path (video)
+    kind: str                      # "browser" | "video" | "v210"
+    location: str                  # url (browser) or path (video/v210 raw file)
     width: int = 0
     height: int = 0
     fps: int = 0                   # browser paint rate; 0 = canvas fps
     loop: bool = True
+    # v210 raw sources declare their color contract; the packed bytes carry no
+    # metadata, so HLG/BT.2020 must travel as configuration.
+    color_trc: str = "bt709"
+    color_primaries: str = "bt709"
+    colorspace: str = "bt709"
+    color_range: str = "tv"
 
 
 @dataclass(frozen=True)
@@ -192,8 +198,15 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
                 raise ConfigError(f"{where}: video source needs path")
             src = Source(sid, kind, str(s["path"]), int(s.get("width", 0)), int(s.get("height", 0)),
                          0, bool(s.get("loop", True)))
+        elif kind == "v210":
+            if not all(k in s for k in ("path", "width", "height")):
+                raise ConfigError(f"{where}: v210 source needs path, width, height")
+            src = Source(sid, kind, str(s["path"]), int(s["width"]), int(s["height"]),
+                         0, bool(s.get("loop", True)),
+                         str(s.get("color_trc", "bt709")), str(s.get("color_primaries", "bt709")),
+                         str(s.get("colorspace", "bt709")), str(s.get("color_range", "tv")))
         else:
-            raise ConfigError(f"{where}: kind must be browser or video")
+            raise ConfigError(f"{where}: kind must be browser, video or v210")
         key = (kind, src.location)
         if key in locations:
             raise ConfigError(f"{where}: '{src.location}' already declared as '{locations[key]}'; "
