@@ -19,12 +19,11 @@ from _harness import drain, finish, frame_planes, make_avp, start, v210_chain
 from v210_fixture import COLOR, FAMILIES, frame_stride, write_fixture
 
 W, H, FRAMES = 384, 216, 6
-# Tail-guard frames: EOF through the dual-input transition drops a variable
-# number of in-flight trailing frames (recorded as a follow-up finding; the
-# single-input flush drains correctly). The margin exceeds the bounded queue
-# depths, the scored FRAMES are compared exactly, and the run stops there
-# instead of racing the flush.
-GEN_FRAMES = FRAMES + 8
+# Tail-guard frames: EOF through the dual-input transition has been seen to drop
+# in-flight trailing frames. With the default margin the scored FRAMES are
+# compared exactly and the run stops before the flush; ``--tail-margin 0``
+# drains to EOF instead and reports how many frames the flush delivered.
+TAIL_MARGIN = 8
 TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5))
 
 
@@ -47,9 +46,9 @@ def source_planes(family, index, source):
     return tuple(p.astype(np.int64) for p in FAMILIES[family](W, H, index + source * 1000))
 
 
-def write_upload_fixture(path, source, family):
+def write_upload_fixture(path, source, family, frames):
     with Path(path).open("wb") as stream:
-        for index in range(GEN_FRAMES):
+        for index in range(frames):
             planes = source_planes(family, index, source)
             if family == "420":
                 y, u, v = planes
@@ -121,27 +120,28 @@ def upload_chain(nodes, tag, path, hwaccel, fmt):
     return f"gpu_{tag}"
 
 
-def run(root, family, fmt, mode, coef, timeout, n=2):
+def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN):
     from pyplumber.node import CudaRectOverlay, FilterVideo
 
+    gen_frames = FRAMES + margin
     avp, errors = make_avp("mix_gpu")
     nodes = []
     chains = [(f"a{s}", s) for s in range(n)] + [("b0", 0)]
     if family in ("420", "444"):
         paths = []
         for source in range(n):
-            path = Path(root) / f"src{source}.{fmt}"
+            path = Path(root) / f"src{source}_{gen_frames}.{fmt}"
             if not path.exists():
-                write_upload_fixture(path, source, family)
+                write_upload_fixture(path, source, family, gen_frames)
             paths.append(path)
         edges = [upload_chain(nodes, tag, paths[src], "mix_gpu", fmt) for tag, src in chains]
     else:
         stride = frame_stride(W)
         paths = []
         for source in range(n):
-            path = Path(root) / f"{family}_{source}.v210"
+            path = Path(root) / f"{family}_{source}_{gen_frames}.v210"
             if not path.exists():
-                write_fixture(path, W, H, GEN_FRAMES, family=family, source=source)
+                write_fixture(path, W, H, gen_frames, family=family, source=source)
             paths.append(path)
         edges = [v210_chain(nodes, tag, paths[src], width=W, height=H, stride=stride, fmt=fmt,
                             hwaccel="mix_gpu", color=COLOR[family]) for tag, src in chains]
@@ -166,13 +166,18 @@ def run(root, family, fmt, mode, coef, timeout, n=2):
     try:
         result = start(avp, nodes, "test", "result")
         state = {}
-        for index, frame in enumerate(drain(result, errors, timeout, FRAMES, state)):
+        limit = FRAMES if margin else None   # margin 0: read through to EOF and report the flush
+        for index, frame in enumerate(drain(result, errors, timeout, limit, state)):
+            if index >= FRAMES:
+                continue
             reference = blend(scene_a(family, index, n),
                               source_planes(family, index, 0), mode, coef)
             for plane, (actual, expected) in enumerate(zip(frame_planes(frame, fmt), reference)):
                 np.testing.assert_array_equal(actual, expected,
                                               err_msg=f"frame {index} plane {plane}")
         assert not errors, errors
+        if not margin:
+            print(f"  flush: eof={state['eof']} delivered {state['count']}/{gen_frames} frames", flush=True)
         assert state["count"] == FRAMES, f"scored frames {state['count']}/{FRAMES}"
     finally:
         finish(avp, nodes)
@@ -182,12 +187,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
+    parser.add_argument("--tail-margin", type=int, default=TAIL_MARGIN,
+                        help="extra generated frames after the scored ones; 0 drains to EOF")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-mix10-") as root:
         for family in args.families:
             fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
             for mode, coef in TRANSITIONS:
-                run(root, family, fmt, mode, coef, args.timeout)
+                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
         # 16 simultaneous full-resolution sources drawn as a 4x4 grid.
         for family in args.families:

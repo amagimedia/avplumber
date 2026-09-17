@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from avpmixer import config as mixer_config
 from avpmixer.color import Color
 from mixer import GraphOptions, build_application, infer_output_format, parse_args
 
@@ -781,6 +782,30 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
     assert nodes["janus_format"]["real_pixel_format"] == "p010le"
     assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12" in nodes["scale_sdr"]["graph"]
+
+
+def test_cli_inputs_declare_browser_rgb_and_optional_file_color(tmp_path):
+    (tmp_path / "page_00.sock").touch()
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("camera.mp4", "dmabuf://page_00"), output="program.ts",
+                                   dmabuf_socket_dir=str(tmp_path), input_color="hlg"), api=fake_api())
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert sources["source_0"]["color"] == "hlg" and not sources["source_0"]["packed_rgb"]
+    assert sources["source_1"]["color"] == "sdr" and sources["source_1"]["packed_rgb"]
+    FakeMixer.instances.clear()
+    build_application(GraphOptions(inputs=("camera.mp4",), output="program.ts"), api=fake_api())
+    assert dict(FakeMixer.instances[-1].sources)["source_0"]["color"] is None   # frame tags decide
+    with pytest.raises(ValueError, match="input-color"):
+        GraphOptions(inputs=("a.mp4",), output="o.ts", input_color="rec2020").validate()
+
+
+@pytest.mark.parametrize("fmt", ["yuv420p", "yuv444p10le", "yuv422p10le"])
+def test_planar_working_formats_are_rejected_up_front(fmt):
+    # The compositor cannot promote 8-bit sources or draw the RGBA wipe onto planar canvases.
+    with pytest.raises(ValueError, match="working-format"):
+        GraphOptions(inputs=("a.mp4",), output="o.ts", working_format=fmt).validate()
+    with pytest.raises(mixer_config.ConfigError, match="working_format"):
+        mixer_config.parse({**CONFIG, "canvas": {**CONFIG["canvas"], "working_format": fmt}})
 
 
 def test_fractional_janus_rate_uses_one_second_gop():

@@ -1,16 +1,16 @@
-From e87f9c9ce09e6ebc34750b114e1ba5169615ecd7 Mon Sep 17 00:00:00 2001
+From fa265dd492f86279de77fa6d9b46a8d0a6955f1d Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Wed, 16 Sep 2026 22:12:39 +0200
 Subject: [PATCH] avfilter/tonemap_cuda: resolve strict frame color metadata
  and preserve identity buffers
 
 ---
- libavfilter/vf_tonemap_cuda.c  | 69 +++++++++++++++++++++++++++++++---
- libavfilter/vf_tonemap_cuda.cu | 12 ++++++
- 2 files changed, 76 insertions(+), 5 deletions(-)
+ libavfilter/vf_tonemap_cuda.c  | 81 +++++++++++++++++++++++++++++++---
+ libavfilter/vf_tonemap_cuda.cu | 12 +++++
+ 2 files changed, 88 insertions(+), 5 deletions(-)
 
 diff --git a/libavfilter/vf_tonemap_cuda.c b/libavfilter/vf_tonemap_cuda.c
-index 2d7eea2996..575cab732c 100644
+index 2d7eea2..bd06b71 100644
 --- a/libavfilter/vf_tonemap_cuda.c
 +++ b/libavfilter/vf_tonemap_cuda.c
 @@ -59,6 +59,7 @@ enum TonemapTransfer {
@@ -21,16 +21,17 @@ index 2d7eea2996..575cab732c 100644
  };
  
  /* Maps the public TonemapAlgorithm enum onto the operator codes understood by
-@@ -94,6 +95,8 @@ typedef struct TonemapCUDAContext {
+@@ -94,6 +95,9 @@ typedef struct TonemapCUDAContext {
      int    transfer_out;
      int    legacy;
      int    passthrough;
 +    int    current_transfer;
++    int    warned_untagged;
 +    int    output_format;
      int    input_depth;
      int    output_depth;
      double sdr_white;
-@@ -108,7 +111,7 @@ static av_cold int tonemap_cuda_init(AVFilterContext *ctx)
+@@ -108,7 +112,7 @@ static av_cold int tonemap_cuda_init(AVFilterContext *ctx)
      TonemapCUDAContext *s = ctx->priv;
  
      s->legacy = s->transfer_in < 0 && s->transfer_out < 0;
@@ -39,7 +40,7 @@ index 2d7eea2996..575cab732c 100644
          av_log(ctx, AV_LOG_ERROR,
                 "Set both transfer_in and transfer_out, without legacy transfer/t\n");
          return AVERROR(EINVAL);
-@@ -250,7 +253,16 @@ static av_cold int tonemap_cuda_config_output(AVFilterLink *outlink)
+@@ -250,7 +254,16 @@ static av_cold int tonemap_cuda_config_output(AVFilterLink *outlink)
      }
      s->input_depth = in_frames_ctx->sw_format == AV_PIX_FMT_P010 ? 10 : 8;
      s->output_depth = s->transfer_out == TONEMAP_TRANSFER_SDR ? 8 : 10;
@@ -57,7 +58,7 @@ index 2d7eea2996..575cab732c 100644
  
      /* Resolve the per-operator default tone mapping parameter. */
      if (isnan(s->param)) {
-@@ -307,7 +319,7 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
+@@ -307,7 +320,7 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
      int cw = width  / 2;
      int ch = height / 2;
  
@@ -66,7 +67,7 @@ index 2d7eea2996..575cab732c 100644
      int   transfer_out = s->transfer_out;
      int   legacy = s->legacy;
      int   input_depth = s->input_depth;
-@@ -363,6 +375,34 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
+@@ -363,6 +376,45 @@ static int tonemap_cuda_conv(AVFilterContext *ctx, AVFrame *out, AVFrame *in)
      return 0;
  }
  
@@ -82,16 +83,27 @@ index 2d7eea2996..575cab732c 100644
 +    case AVCOL_TRC_BT709: transfer = TONEMAP_TRANSFER_SDR; break;
 +    case AVCOL_TRC_ARIB_STD_B67: transfer = TONEMAP_TRANSFER_HLG; break;
 +    case AVCOL_TRC_SMPTE2084: transfer = TONEMAP_TRANSFER_PQ; break;
++    case AVCOL_TRC_UNSPECIFIED:
++        /* Untagged decodes (most MP4/TS files) are SDR BT.709 in practice, and
++         * that is what every player assumes. HDR content has to be tagged or
++         * declared explicitly. */
++        if (!s->warned_untagged) {
++            av_log(ctx, AV_LOG_WARNING, "Input carries no color_trc; assuming limited-range BT.709 SDR\n");
++            s->warned_untagged = 1;
++        }
++        transfer = TONEMAP_TRANSFER_SDR;
++        break;
 +    default:
-+        av_log(ctx, AV_LOG_ERROR, "Missing or unsupported input color_trc (%d); declare an explicit source color setting\n", in->color_trc);
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input color_trc (%d); declare an explicit source color setting\n", in->color_trc);
 +        return AVERROR(EINVAL);
 +    }
 +    hdr = transfer != TONEMAP_TRANSFER_SDR;
-+    if (in->color_primaries != (hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709) ||
-+        in->colorspace != (hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709) ||
-+        in->color_range != AVCOL_RANGE_MPEG) {
++    /* Unspecified companions follow the transfer; only explicit contradictions fail. */
++    if ((in->color_primaries != AVCOL_PRI_UNSPECIFIED && in->color_primaries != (hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709)) ||
++        (in->colorspace != AVCOL_SPC_UNSPECIFIED && in->colorspace != (hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709)) ||
++        (in->color_range != AVCOL_RANGE_UNSPECIFIED && in->color_range != AVCOL_RANGE_MPEG)) {
 +        av_log(ctx, AV_LOG_ERROR,
-+               "Missing, unsupported or contradictory input color metadata (trc=%d primaries=%d matrix=%d range=%d); declare a supported source color setting\n",
++               "Unsupported or contradictory input color metadata (trc=%d primaries=%d matrix=%d range=%d); declare a supported source color setting\n",
 +               in->color_trc, in->color_primaries, in->colorspace, in->color_range);
 +        return AVERROR(EINVAL);
 +    }
@@ -101,7 +113,7 @@ index 2d7eea2996..575cab732c 100644
  static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
  {
      AVFilterContext *ctx = link->dst;
-@@ -374,8 +414,25 @@ static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
+@@ -374,8 +426,25 @@ static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
      CUcontext dummy;
      int ret = 0;
  
@@ -128,7 +140,7 @@ index 2d7eea2996..575cab732c 100644
  
      if (!s->legacy && in->color_range == AVCOL_RANGE_JPEG) {
          av_log(ctx, AV_LOG_ERROR, "Full-range input is unsupported; convert to limited range first\n");
-@@ -420,11 +477,13 @@ static const AVOption tonemap_cuda_options[] = {
+@@ -420,11 +489,13 @@ static const AVOption tonemap_cuda_options[] = {
          { "mobius",   0, 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_MOBIUS },   0, 0, FLAGS, .unit = "tonemap" },
      { "transfer", "legacy HDR input transfer (default HLG)", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },
      { "t",        "legacy HDR input transfer (default HLG)", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },
@@ -144,7 +156,7 @@ index 2d7eea2996..575cab732c 100644
      { "hdr_peak", "HLG display peak / HDR tone mapping peak in nits (explicit mode)", OFFSET(hdr_peak), AV_OPT_TYPE_DOUBLE, { .dbl = 1000.0 }, 100, 10000, FLAGS },
      { "peak",  "legacy signal peak in units of 100 nits", OFFSET(peak), AV_OPT_TYPE_DOUBLE, { .dbl = 10.0 }, 0.001, DBL_MAX, FLAGS },
 diff --git a/libavfilter/vf_tonemap_cuda.cu b/libavfilter/vf_tonemap_cuda.cu
-index 0bddb7c671..7d911264b8 100644
+index 0bddb7c..7d91126 100644
 --- a/libavfilter/vf_tonemap_cuda.cu
 +++ b/libavfilter/vf_tonemap_cuda.cu
 @@ -288,6 +288,18 @@ extern "C" __global__ void Tonemap_Cuda(

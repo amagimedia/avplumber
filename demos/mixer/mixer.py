@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from avpmixer.color import TEN_BIT_FORMATS, conversion_graph, rendition_color
+from avpmixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, conversion_graph, rendition_color
 from avpmixer import clipcache
 from avpmixer import config as mixer_config
 from avpmixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
@@ -66,6 +66,7 @@ class GraphOptions:
     fps: int = DEFAULT_FPS
     mixer_latency_ms: float | None = None
     loop_inputs: bool = False
+    input_color: str = ""          # declared contract for every --input (sdr/hlg/pq); "" = frame tags
     janus_output: bool = False
     janus_host: str = JANUS_DEFAULT_HOST
     janus_video_port: int = JANUS_DEFAULT_VIDEO_PORT
@@ -101,6 +102,10 @@ class GraphOptions:
             raise ValueError("at least one input is required")
         if not self.output and not self.janus_output:
             raise ValueError("--output or --janus-output is required")
+        if self.working_format not in mixer_config.WORKING_FORMATS:
+            raise ValueError(f"--working-format must be one of {mixer_config.WORKING_FORMATS}")
+        if self.input_color and self.input_color not in TRANSFER_TAGS:
+            raise ValueError("--input-color must be sdr, hlg or pq")
         if not self.codec.endswith("_nvenc"):
             raise ValueError("--codec must be an NVENC encoder for zero-copy output")
         if not 1 <= self.fps <= 240:
@@ -400,13 +405,14 @@ def _build_input(
     return normalized_edge
 
 
-def _register_sources(avp, api, mixer, input_edges: list[str], *, fps: int) -> bool:
+def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
     # Compositor masks have 32 bits. Larger catalogues retain a small router
     # selecting the 16 visible positions, without per-layout filter branches.
     if len(input_edges) <= 32:
-        for index, edge in enumerate(input_edges):
-            mixer.add_source(f"source_{index}", pre_otm_edge=edge,
-                             input_group=_input_group(index), default_graph="")
+        for index, (edge, url) in enumerate(zip(input_edges, urls)):
+            browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
+            mixer.add_source(f"source_{index}", pre_otm_edge=edge, input_group=_input_group(index),
+                             default_graph="", packed_rgb=browser, color="sdr" if browser else color or None)
         return False
     labels = [f"slot_{i}_{slot}" for i in range(16) for slot in ("a", "b")]
     edges = [f"route_{label}" for label in labels]
@@ -561,7 +567,8 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     ]
     canvas = (CANVAS_WIDTH, CANVAS_HEIGHT)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=options.fps, working_format=options.working_format)
-    routed_inputs = _register_sources(avp, api, mixer, input_edges, fps=options.fps)
+    routed_inputs = _register_sources(avp, api, mixer, input_edges, options.inputs, fps=options.fps,
+                                      color=options.input_color)
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
@@ -649,6 +656,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--codec", default="h264_nvenc")
     add("--bitrate", default="8M")
     add("--fps", type=int, default=DEFAULT_FPS, help=f"Mixer and output frame rate (default: {DEFAULT_FPS})")
+    add("--input-color", default="", choices=("", "sdr", "hlg", "pq"),
+        help="color contract declared for every --input file (default: trust the decoded frame tags)")
     add("--working-format", default="nv12",
         help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 on the canvas "
              "(renditions subsample to P010/NV12 for NVENC automatically)")

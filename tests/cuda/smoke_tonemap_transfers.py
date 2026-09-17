@@ -227,10 +227,21 @@ def check_auto(ffmpeg):
         if source == target and depth == outdepth:
             assert result == data, "Auto identity changed pixel bytes"
         print("PASS auto", source, target, depth, error, flush=True)
-    for missing in ("color_trc", "color_primaries", "colorspace", "range"):
-        graph = f"setparams={missing}=unknown,tonemap_cuda=transfer_in=auto:transfer_out=sdr"
-        run_filter(ffmpeg, fixture("sdr", 8), "sdr", 8, graph, 8, fail="source color setting")
-        print("PASS missing", missing, "rejected", flush=True)
+    # Untagged decodes (most files) are SDR BT.709: identity, output tagged, warning logged.
+    untagged = "setparams=color_trc=unknown:color_primaries=unknown:colorspace=unknown:range=unknown,"
+    data = fixture("sdr", 8)
+    result, log = run_filter(ffmpeg, data, "sdr", 8, untagged + "tonemap_cuda=transfer_in=auto:transfer_out=sdr", 8)
+    assert result == data and "assuming limited-range BT.709 SDR" in log, log
+    assert_tags(log, "sdr")
+    print("PASS untagged input assumed SDR", flush=True)
+    # A transfer with unspecified companions follows the transfer; a tagged companion that
+    # contradicts the (assumed or declared) transfer still fails.
+    partial = "setparams=color_primaries=unknown:colorspace=unknown,tonemap_cuda=transfer_in=auto:transfer_out=hlg"
+    _, log = run_filter(ffmpeg, fixture("hlg", 10), "hlg", 10, partial, 10)
+    assert_tags(log, "hlg")
+    graph = "setparams=color_trc=unknown,tonemap_cuda=transfer_in=auto:transfer_out=sdr"
+    run_filter(ffmpeg, fixture("hlg", 10), "hlg", 10, graph, 8, fail="contradictory")
+    print("PASS partial tags follow the transfer; BT.2020 without a transfer rejected", flush=True)
     graph = "setparams=color_primaries=bt709,tonemap_cuda=transfer_in=auto:transfer_out=sdr"
     run_filter(ffmpeg, fixture("hlg", 10), "hlg", 10, graph, 8, fail="contradictory")
     run_filter(ffmpeg, fixture("sdr", 8), "sdr", 8,

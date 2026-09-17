@@ -16,15 +16,15 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .color import Color, declared_color, OPERATORS
+from .color import Color, declared_color, OPERATORS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
-# Compositor/transition working formats. NV12 is the 8-bit default; the rest are
-# the qualified 10-bit and planar 4:2:0/4:2:2/4:4:4 layouts. Encoded outputs
-# convert to NV12 (8-bit H.264) unless a rendition asks otherwise.
-WORKING_FORMATS = ("nv12", "p010le", "p210le", "yuv420p", "yuv422p", "yuv444p",
-                   "yuv420p10le", "yuv422p10le", "yuv444p10le")
+# Compositor/transition working formats: the semiplanar family only. NV12 is the
+# 8-bit default; P010/P210 are 10-bit 4:2:0/4:2:2. Planar layouts are excluded on
+# purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
+# onto them, so they only fail later.
+WORKING_FORMATS = ("nv12", "p010le", "p210le")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
@@ -195,7 +195,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     if not isinstance(source_filter, str):
         raise ConfigError(f"{where}: filter must be a CUDA filter graph string")
     filter_format = str(s.get("filter_output_format", ""))
-    if source_filter and filter_format not in WORKING_FORMATS:
+    if filter_format and filter_format not in YUV_FORMATS or source_filter and not filter_format:
         raise ConfigError(f"{where}: custom filter requires filter_output_format (CUDA YUV storage)")
     if source_filter and kind == "browser":
         raise ConfigError(f"{where}: browser source filters are unsupported; preserve packed RGB alpha")
