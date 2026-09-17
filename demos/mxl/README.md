@@ -12,22 +12,33 @@ Two graphs run in one process:
   mux → `output(format="mxl", url="/dev/shm/mxl")` (the MXL FFmpeg
   muxer takes a plain filesystem path).
 * **reader** — `input(format="mxl", url="mxl:///dev/shm/mxl?id=<uuid>")`
-  → demux → decode v210 → rescale to yuv420p → encode as mpeg4 → mux
-  → fragmented mp4.
+  → demux → v210 unpack → encode → fragmented mp4. The unpack step has
+  two implementations, picked by `--gpu-unpack` (default `auto`):
+  * **GPU** (a CUDA device is present) — `v210_to_cuda` copies each
+    grain once into pinned memory and unpacks it to a CUDA `p210le`
+    frame with a PTX kernel, then `scale_cuda` and `h264_nvenc` finish
+    the file on the GPU. No CPU codec, no swscale.
+  * **CPU** (no device) — the libavcodec `v210` decoder plus swscale to
+    yuv420p and `mpeg4`.
+
+Grains are taken **zero-copy** by default: the demuxer's `zero_copy=1`
+points each AVPacket straight at the MXL ring buffer in `/dev/shm`
+instead of copying it out. See "Zero-copy grains" below.
 
 Verified end-to-end on Docker Desktop (aarch64) producing 28k mpeg4
 packets of the testsrc pattern in a 10-second run — that run was on the
-earlier FFmpeg 7.1.5 build of this patch stack; the 8.1 series has not
-been re-run yet.
+earlier FFmpeg 7.1.5 build of this patch stack with the CPU reader and
+copied grains. Neither the 8.1 series nor the GPU/zero-copy paths have
+been run yet.
 
 ## Requirements
 
 * Linux x86_64 (MXL SDK is Linux-only — no macOS support).
 * Docker with enough tmpfs at `/dev/shm` (default is fine for the demo).
 * NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-  are optional for the MXL demo itself (CUDA init fails silently at
-  runtime without them), but the shared mixer image is built with
-  CUDA support and other demos need it.
+  are optional: with them (`--gpus all`) the reader unpacks on the GPU
+  and encodes with NVENC; without them it falls back to the CPU v210
+  decoder. Other demos in the shared image do require CUDA.
 * The FFmpeg 8.x series applied to `n8.1` (or `n8.0`).
   `deps/ffmpeg/verify.sh n8.1 <ffmpeg-repo>` confirms the tree hash; the
   MXL patch (`8/0011-...`) is generated from `cbcrc/FFmpeg` branch
@@ -75,10 +86,12 @@ The demo needs a shared `/dev/shm/mxl` domain directory with an
 
 ```sh
 mkdir -p /dev/shm/mxl
-echo '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' \
+# 1 s of history. The 100 ms the MXL samples use is only ~2 grains at
+# 25 fps, which leaves zero-copy readers no slack at all.
+echo '{"urn:x-mxl:option:history_duration/v1.0": 1000000000}' \
   > /dev/shm/mxl/options.json
 
-docker run --rm --ipc=host \
+docker run --rm --ipc=host --gpus all \
     --entrypoint python3 \
     -v /dev/shm/mxl:/dev/shm/mxl \
     -v "$PWD/demos/mxl/test-media:/media" \
@@ -86,8 +99,12 @@ docker run --rm --ipc=host \
     avplumber-mixer:local /build/demos/mxl/mxl_demo.py
 ```
 
-Add `--gpus all` if you're on an NVIDIA host and want CUDA
-initialization to succeed (the MXL demo itself doesn't need it).
+Drop `--gpus all` to force the CPU reader path (`--gpu-unpack` prints
+which one it picked). The flow geometry defaults to the built-in
+testsrc's 320×240p25; pass `--width/--height/--fps` (or `AVP_WIDTH`,
+`AVP_HEIGHT`, `AVP_FPS`) to change it — the writer rescales to match,
+because packed v210 carries no dimensions and the reader derives the
+row stride from `--width`.
 
 Defaults to publishing an `lavfi testsrc` pattern; override with
 `-e AVP_INPUT=/media/your-file.mp4` for a real file (played back
@@ -105,22 +122,49 @@ Split writer and reader across two containers by passing
 
 MXL flows carry uncompressed frames. The muxer registered by
 `8/0011-*.patch` insists on `v210` (10-bit 4:2:2 packed) for video —
-`rawvideo` is rejected at header write. The reader re-encodes to
-`mpeg4` (rather than H.264) because the NVIDIA-off image does not
-link `libx264`.
+`rawvideo` is rejected at header write. The GPU reader path encodes
+H.264 with NVENC; the CPU fallback uses `mpeg4` (rather than H.264)
+because the image does not link `libx264`.
+
+The GPU path converts to 8-bit nv12 before NVENC even though the flow
+is 10-bit 4:2:2, because NVENC only accepts 4:2:2 10-bit on
+Blackwell-class hardware. Change `scale_cuda=format=nv12` to `p010le`
+plus `hevc_nvenc`/`main10` to keep 10 bits through the encoder.
+
+## Zero-copy grains
+
+`zero_copy=1` (default; `--no-zero-copy` opts out) makes the demuxer
+wrap the grain payload in an `AVBufferRef` pointing into the shared
+memory ring rather than `memcpy`-ing it into a fresh packet. The
+release callback in the patch is a no-op — **nothing holds a reference
+on the grain** — so the bytes are valid only until the writer laps that
+slot in the ring. Two things keep that safe here:
+
+* `queue.plan_capacity r_vpkt 1` bounds the packet queue to a single
+  in-flight grain, so a packet cannot sit and age behind others.
+* `history_duration` in `options.json` sizes the ring; 1 s (25 grains at
+  25 fps) gives a large margin over that one queued packet.
+
+A reader that stalls for longer than the ring depth will silently see
+overwritten pixels rather than an error, which is why the FFmpeg option
+is marked experimental. `--no-zero-copy` trades one memcpy per frame
+for immunity.
+
+Note that zero-copy removes the shm→packet copy only. `v210_to_cuda`
+still stages each grain through pinned host memory on its way to the
+GPU; making that leg copy-free would mean `cudaHostRegister`-ing the MXL
+ring, which is a change to the node in `src/`.
 
 ## Known gaps
 
-* The demo runs the reader at wall-clock max (~2800 fps into mpeg4
-  at 320×240) because we didn't wire in a realtime pacer on the
-  reader side. Adding a `RealtimeVideoFrame` node between decode and
-  encode would cap the reader to the source frame rate.
-* Both sides still go through swscale and the CPU `v210` codec. The
-  demuxer hands out one packed frame per grain, which is exactly what
-  the `v210_to_cuda` node consumes, so the read path can become
-  `input(mxl) -> demux -> v210_to_cuda` with a single pinned upload and
-  no CPU colour conversion. Nothing packs CUDA frames back to v210 yet,
-  so the write path keeps the CPU encoder.
+* The demo runs the reader at wall-clock max because we didn't wire in
+  a realtime pacer on the reader side. Adding a `RealtimeVideoFrame`
+  node before the encoder would cap it to the flow frame rate. Running
+  uncapped is harmless in itself — `blocking=1` parks the reader on the
+  writer's head — it just spends CPU on `blocking` waits.
+* The write path still goes through swscale and the CPU `v210` encoder,
+  because nothing packs CUDA frames back to v210 yet. The read path no
+  longer does (with `--gpu-unpack`).
 
 ## References
 
