@@ -11,10 +11,7 @@ import subprocess
 
 import numpy as np
 
-from tonemap_reference import (
-    convert_transfer_codes, display_light, encode_display_light, rgb_to_codes,
-    tonemap_codes,
-)
+from tonemap_reference import convert_transfer_codes, display_light, encode_display_light, rgb_to_codes
 
 W, H = 98, 66  # Exercise CUDA pitch padding and partial thread blocks.
 TRANSFERS = ("sdr", "hlg", "pq")
@@ -162,26 +159,6 @@ def check_white_and_roundtrip(ffmpeg):
     print("PASS reference-white mapping at 100/203 nits and 1000/2000-nit HLG peaks", flush=True)
 
 
-def check_legacy(ffmpeg):
-    for source, op in itertools.product(("hlg", "pq"),
-                                       ("none", "linear", "gamma", "clip", "reinhard", "hable", "mobius")):
-        data = fixture(source, 10)
-        codes = unpack(data, 10)
-        y, u, v = tonemap_codes(codes[..., 0], codes[..., 1], codes[..., 2], source, 10,
-                                "direct" if op == "none" else op, desat=0)
-        expected = np.stack((y, u, v), axis=-1)
-        result, log = run_filter(ffmpeg, data, source, 10,
-                                f"tonemap_cuda=transfer={source}:tonemap={op}:desat=0", 8)
-        error = np.max(abs(unpack(result, 8) - unpack(pack(expected, 8), 8)))
-        assert error <= 2, (source, op, error)
-        assert_tags(log, "sdr")
-    data = fixture("hlg", 10)
-    default, _ = run_filter(ffmpeg, data, "hlg", 10, "tonemap_cuda", 8)
-    alias, _ = run_filter(ffmpeg, data, "hlg", 10, "tonemap_cuda=t=hlg", 8)
-    assert default == alias
-    print("PASS legacy HLG/PQ: all seven operators, default and t alias", flush=True)
-
-
 def check_downmapping(ffmpeg):
     for source, op in itertools.product(("hlg", "pq"),
                                        ("linear", "gamma", "clip", "reinhard", "hable", "mobius")):
@@ -199,9 +176,8 @@ def check_invalid(ffmpeg):
     data = fixture("sdr", 8)
     cases = [
         ("transfer_in=sdr", "Set both transfer_in"),
-        ("transfer_in=sdr:transfer_out=hlg:transfer=pq", "without legacy transfer/t"),
+        ("transfer_in=sdr:transfer_out=auto", "Set both transfer_in"),
         ("transfer_in=sdr:transfer_out=hlg:sdr_white=2000:hdr_peak=1000", "sdr_white must not exceed"),
-        ("transfer=hlg", "legacy mode needs P010"),
     ]
     for options, message in cases:
         run_filter(ffmpeg, data, "sdr", 8, "tonemap_cuda=" + options, 10, fail=message)
@@ -261,7 +237,6 @@ def main():
         check_auto(args.ffmpeg)
         check_white_and_roundtrip(args.ffmpeg)
         check_downmapping(args.ffmpeg)
-        check_legacy(args.ffmpeg)
         check_invalid(args.ffmpeg)
 
 

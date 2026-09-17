@@ -1,23 +1,24 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Jan Pietek <jan.pietek@gmail.com>
-Date: Tue, 16 Sep 2026 12:00:00 +0200
-Subject: [PATCH] avfilter/transition_cuda: 10-bit and 422/444 support
+From 9182da7189636d07c12b4ab89f8aa07d5f85c638 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Thu, 17 Sep 2026 13:16:00 +0200
+Subject: [PATCH 8/9] avfilter/transition_cuda: 10-bit and 4:2:2/4:4:4 layouts
+ in a word-sample path
 
-Add a word-sample kernel for 16-bit-stored planes (P210 with storage
-shift 6, planar 10-bit with shift 0). Logical samples blend with the
-same float arithmetic as the byte kernel but store round-to-nearest;
-interleaved Cb/Cr passes lanes=2 so a wipe boundary moves per chroma
-pixel and cannot split one pixel's U from its V. The legacy 8-bit
-NV12/YUV420P paths are untouched and stay byte-exact. Also accept
-8-bit planar 422/444 through the existing byte kernel. Word formats
-require identical main/overlay layouts; no new alpha formats.
+Add YUV420P10/422P10/444P10, P010 and P210 (plus 8-bit YUV422P/YUV444P)
+to transition_cuda. Formats above 8 bits run a 16-bit word kernel whose
+lanes group interleaved Cb/Cr so a wipe boundary moves per chroma pixel.
+Both inputs must arrive in the identical layout and depth; no alpha-
+carrying CUDA formats exist for these yet.
+---
+ libavfilter/vf_transition_cuda.c  | 106 ++++++++++++++++++++++++++++++
+ libavfilter/vf_transition_cuda.cu |  41 ++++++++++++
+ 2 files changed, 147 insertions(+)
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
-index 0c055a7..9b6397f 100644
+index 0c055a7..77132f8 100644
 --- a/libavfilter/vf_transition_cuda.c
 +++ b/libavfilter/vf_transition_cuda.c
-@@ -50,6 +50,12 @@
+@@ -50,6 +50,13 @@
  static const enum AVPixelFormat supported_main_formats[] = {
      AV_PIX_FMT_NV12,
      AV_PIX_FMT_YUV420P,
@@ -26,11 +27,12 @@ index 0c055a7..9b6397f 100644
 +    AV_PIX_FMT_YUV420P10,
 +    AV_PIX_FMT_YUV422P10,
 +    AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
 +    AV_PIX_FMT_P210,
      AV_PIX_FMT_NONE,
  };
  
-@@ -57,6 +63,12 @@ static const enum AVPixelFormat supported_overlay_formats[] = {
+@@ -57,6 +64,13 @@ static const enum AVPixelFormat supported_overlay_formats[] = {
      AV_PIX_FMT_NV12,
      AV_PIX_FMT_YUV420P,
      AV_PIX_FMT_YUVA420P,
@@ -39,11 +41,12 @@ index 0c055a7..9b6397f 100644
 +    AV_PIX_FMT_YUV420P10,
 +    AV_PIX_FMT_YUV422P10,
 +    AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_P010,
 +    AV_PIX_FMT_P210,
      AV_PIX_FMT_NONE,
  };
  
-@@ -114,6 +126,7 @@ typedef struct TransitionCUDAContext {
+@@ -114,6 +128,7 @@ typedef struct TransitionCUDAContext {
      CUcontext cu_ctx;
      CUmodule cu_module;
      CUfunction cu_func;
@@ -51,7 +54,7 @@ index 0c055a7..9b6397f 100644
      CUstream cu_stream;
  
      FFFrameSync fs;
-@@ -184,6 +197,15 @@ static int formats_match(const enum AVPixelFormat format_main, const enum AVPixe
+@@ -184,6 +199,16 @@ static int formats_match(const enum AVPixelFormat format_main, const enum AVPixe
      case AV_PIX_FMT_YUV420P:
          return format_overlay == AV_PIX_FMT_YUV420P ||
                 format_overlay == AV_PIX_FMT_YUVA420P;
@@ -60,6 +63,7 @@ index 0c055a7..9b6397f 100644
 +    case AV_PIX_FMT_YUV420P10:
 +    case AV_PIX_FMT_YUV422P10:
 +    case AV_PIX_FMT_YUV444P10:
++    case AV_PIX_FMT_P010:
 +    case AV_PIX_FMT_P210:
 +        /* No alpha-carrying CUDA frame formats exist for these yet: both
 +         * inputs must arrive in the identical layout and depth. */
@@ -67,7 +71,7 @@ index 0c055a7..9b6397f 100644
      default:
          return 0;
      }
-@@ -222,6 +244,40 @@ static int transition_cuda_call_kernel(
+@@ -222,6 +247,40 @@ static int transition_cuda_call_kernel(
          0, ctx->cu_stream, kernel_args, NULL));
  }
  
@@ -108,11 +112,11 @@ index 0c055a7..9b6397f 100644
  /**
   * Perform blend overlay picture over main picture
   */
-@@ -285,6 +341,33 @@ static int transition_cuda_blend(FFFrameSync *fs)
+@@ -285,6 +344,33 @@ static int transition_cuda_blend(FFFrameSync *fs)
                 ctx->alpha_coef);
      }
  
-+    // Word-stored formats (P210, planar 10-bit) arrive as identical
++    // Word-stored formats (P010/P210, planar 10-bit) arrive as identical
 +    // main/overlay layouts with no alpha plane; every plane blends through
 +    // the sample kernel with its own geometry.
 +
@@ -142,7 +146,7 @@ index 0c055a7..9b6397f 100644
      // overlay first plane
  
      transition_cuda_call_kernel(ctx,
-@@ -325,6 +408,20 @@ static int transition_cuda_blend(FFFrameSync *fs)
+@@ -325,6 +411,20 @@ static int transition_cuda_blend(FFFrameSync *fs)
              input_overlay->data[3], input_overlay->linesize[3], 2, 2,
              ctx->alpha_coef, ctx->transition_mode);
          break;
@@ -163,7 +167,7 @@ index 0c055a7..9b6397f 100644
      default:
          av_log(ctx, AV_LOG_ERROR, "Passed unsupported overlay pixel format\n");
          av_frame_free(&input_main);
-@@ -504,6 +601,12 @@ static int transition_cuda_config_output(AVFilterLink *outlink)
+@@ -504,6 +604,12 @@ static int transition_cuda_config_output(AVFilterLink *outlink)
          return err;
      }
  
@@ -226,3 +230,6 @@ index c688e66..86a2eaf 100644
 +}
 +
  }
+-- 
+2.55.0
+

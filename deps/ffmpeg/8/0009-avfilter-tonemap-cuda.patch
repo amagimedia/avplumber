@@ -1,25 +1,36 @@
-From b88db95d408a0f7605a2d69b1c51d073b412b632 Mon Sep 17 00:00:00 2001
-From: x <x@y>
-Date: Wed, 16 Sep 2026 14:57:39 +0200
-Subject: [PATCH] avfilter/tonemap_cuda: HLG/PQ HDR to SDR (CUDA port of
- tonemap_opencl)
+From 550c76492522f58c3c7ea1decd17c9e513274449 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Thu, 17 Sep 2026 13:16:00 +0200
+Subject: [PATCH 9/9] avfilter: add tonemap_cuda, SDR/HLG/PQ conversion on CUDA
+ NV12/P010 frames
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+A CUDA filter converting limited-range BT.709 SDR and BT.2020 HLG/PQ in
+both directions (transfer_in=auto|sdr|hlg|pq, transfer_out=sdr|hlg|pq):
+display-light conversion with sdr_white (default 203 nits) and hdr_peak
+(default 1000 nits); HDR->SDR tone mapping with the tonemap_opencl
+operators (clip, reinhard, hable, mobius, gamma, linear), `param` knee and
+`desat`; `format=nv12|p010le` selects the output storage. transfer_in=auto
+resolves the contract from every frame's tags, treats untagged frames as
+BT.709 SDR and rejects contradictory tags; identity frames are forwarded
+without a device copy, stamped with the resolved contract. Colour-
+dependent side data is dropped on conversion. The math is ported from
+libavfilter/opencl/tonemap.cl and colorspace_common.cl.
 ---
  configure                      |   1 +
+ doc/filters.texi               |  58 ++++
  libavfilter/Makefile           |   2 +
  libavfilter/allfilters.c       |   1 +
- libavfilter/vf_tonemap_cuda.c  | 404 +++++++++++++++++++++++++++++++++
- libavfilter/vf_tonemap_cuda.cu | 216 ++++++++++++++++++
- 5 files changed, 624 insertions(+)
+ libavfilter/vf_tonemap_cuda.c  | 529 +++++++++++++++++++++++++++++++++
+ libavfilter/vf_tonemap_cuda.cu | 285 ++++++++++++++++++
+ 6 files changed, 876 insertions(+)
  create mode 100644 libavfilter/vf_tonemap_cuda.c
  create mode 100644 libavfilter/vf_tonemap_cuda.cu
 
 diff --git a/configure b/configure
-index 1759694..ac66e35 100755
+index f086594..82cdbd2 100755
 --- a/configure
 +++ b/configure
-@@ -3522,6 +3522,7 @@ scale_cuda_filter_deps="ffnvcodec"
+@@ -3526,6 +3526,7 @@ scale_cuda_filter_deps="ffnvcodec"
  scale_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
  thumbnail_cuda_filter_deps="ffnvcodec"
  thumbnail_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
@@ -27,11 +38,80 @@ index 1759694..ac66e35 100755
  transpose_npp_filter_deps="ffnvcodec libnpp"
  overlay_cuda_filter_deps="ffnvcodec"
  overlay_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 5ae2fc5..8e4e6b1 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27409,6 +27409,64 @@ scale_cuda=passthrough=0
+ @end example
+ @end itemize
+ 
++@subsection tonemap_cuda
++
++Convert limited-range CUDA NV12/P010 frames between SDR BT.709, HLG BT.2020
++and PQ BT.2020. Width and height must be even. HDR output uses P010; SDR
++output uses NV12. Equal input and output transfers forward the original
++frames and metadata without allocating or converting pixels.
++
++@table @option
++@item transfer_in
++@item transfer_out
++Set both options to @code{sdr}, @code{hlg} or @code{pq}. The choice includes
++the gamut: BT.709 for SDR, BT.2020 non-constant-luminance YCbCr for HDR.
++Explicit choices also define the interpretation of untagged input. Full-range
++input must first be converted to limited range (e.g. with colorspace_cuda).
++
++SDR uses the BT.1886 display response with ideal black (gamma 2.4). SDR-to-HDR
++conversion follows display-light mapping: decode SDR, convert primaries,
++scale reference white, then encode PQ or the inverse HLG EOTF. It preserves
++the SDR appearance without expanding highlights. HLG/PQ conversion preserves
++display luminance, clipping values outside the destination signal range.
++
++@item sdr_white
++SDR reference white in cd/m2. Default 203. Range 1 to 10000; must not exceed
++@option{hdr_peak}. This sets SDR's brightness inside an HDR programme.
++
++@item hdr_peak
++HLG nominal display peak and HDR-to-SDR tone-mapping input peak in cd/m2.
++Default 1000, range 100 to 10000. PQ values always represent absolute light;
++this option does not rescale PQ. For HLG, the system gamma is derived from
++this peak, with a minimum gamma of 1.0.
++
++@item tonemap
++HDR-to-SDR operator: @code{none}, @code{linear}, @code{gamma}, @code{clip},
++@code{reinhard}, @code{hable} (default) or @code{mobius}. Used only when
++converting HDR to SDR. @code{none:desat=0} preserves display light up to SDR
++white, then clips. @option{param} overrides the operator parameter; @option{desat}
++controls highlight desaturation (default 0.5; 0 disables it).
++
++@end table
++
++Converted frames carry the output color tags; obsolete mastering, content
++light and dynamic HDR metadata is removed. Pass-through preserves all metadata.
++
++For an SDR source entering an HLG P210 mixer, use this GPU-only source chain:
++@example
++tonemap_cuda=transfer_in=sdr:transfer_out=hlg:sdr_white=203:hdr_peak=1000,scale_cuda=format=p210le
++@end example
++
++To convert HLG to PQ without tone mapping:
++@example
++tonemap_cuda=transfer_in=hlg:transfer_out=pq:hdr_peak=1000
++@end example
++
++To produce SDR from PQ using the Hable operator:
++@example
++tonemap_cuda=transfer_in=pq:transfer_out=sdr:tonemap=hable:sdr_white=203:hdr_peak=1000
++@end example
++
+ @subsection thumbnail_cuda
+ 
+ Select the most representative frame in a given sequence of consecutive frames using CUDA.
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index a530cfa..2d8c23c 100644
+index 2fae985..586d43e 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -541,6 +541,8 @@ OBJS-$(CONFIG_TMEDIAN_FILTER)                += vf_xmedian.o framesync.o
+@@ -547,6 +547,8 @@ OBJS-$(CONFIG_TMEDIAN_FILTER)                += vf_xmedian.o framesync.o
  OBJS-$(CONFIG_TMIDEQUALIZER_FILTER)          += vf_tmidequalizer.o
  OBJS-$(CONFIG_TMIX_FILTER)                   += vf_mix.o framesync.o
  OBJS-$(CONFIG_TONEMAP_FILTER)                += vf_tonemap.o
@@ -41,10 +121,10 @@ index a530cfa..2d8c23c 100644
                                                  opencl/tonemap.o opencl/colorspace_common.o
  OBJS-$(CONFIG_TONEMAP_VAAPI_FILTER)          += vf_tonemap_vaapi.o vaapi_vpp.o
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index e26859e..a670d9a 100644
+index 01c75b2..64b5cd7 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
-@@ -509,6 +509,7 @@ extern const FFFilter ff_vf_tmedian;
+@@ -512,6 +512,7 @@ extern const FFFilter ff_vf_tmedian;
  extern const FFFilter ff_vf_tmidequalizer;
  extern const FFFilter ff_vf_tmix;
  extern const FFFilter ff_vf_tonemap;
@@ -54,10 +134,10 @@ index e26859e..a670d9a 100644
  extern const FFFilter ff_vf_tpad;
 diff --git a/libavfilter/vf_tonemap_cuda.c b/libavfilter/vf_tonemap_cuda.c
 new file mode 100644
-index 0000000..527cb0e
+index 0000000..3591127
 --- /dev/null
 +++ b/libavfilter/vf_tonemap_cuda.c
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,529 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -78,9 +158,7 @@ index 0000000..527cb0e
 +
 +/**
 + * @file
-+ * HDR to SDR tone mapping using CUDA hardware acceleration. This is a CUDA port
-+ * of vf_tonemap_opencl restricted to BT.2020 HLG/PQ P010 input and BT.709 SDR
-+ * NV12 output (both 10-bit and 8-bit 4:2:0, so no chroma resampling).
++ * SDR BT.709 / HDR BT.2020 HLG and PQ conversion on CUDA 4:2:0 frames.
 + */
 +
 +#include <float.h>
@@ -119,6 +197,8 @@ index 0000000..527cb0e
 +enum TonemapTransfer {
 +    TONEMAP_TRANSFER_HLG,
 +    TONEMAP_TRANSFER_PQ,
++    TONEMAP_TRANSFER_SDR,
++    TONEMAP_TRANSFER_AUTO,
 +};
 +
 +/* Maps the public TonemapAlgorithm enum onto the operator codes understood by
@@ -148,9 +228,17 @@ index 0000000..527cb0e
 +
 +    /* enum TonemapAlgorithm */
 +    int    tonemap;
-+    /* enum TonemapTransfer (input transfer characteristic) */
-+    int    transfer;
-+    double peak;
++    /* enum TonemapTransfer */
++    int    transfer_in;
++    int    transfer_out;
++    int    passthrough;
++    int    current_transfer;
++    int    warned_untagged;
++    int    output_format;
++    int    input_depth;
++    int    output_depth;
++    double sdr_white;
++    double hdr_peak;
 +    double param;
 +    double desat;
 +} TonemapCUDAContext;
@@ -158,6 +246,11 @@ index 0000000..527cb0e
 +static av_cold int tonemap_cuda_init(AVFilterContext *ctx)
 +{
 +    TonemapCUDAContext *s = ctx->priv;
++
++    if (s->transfer_in < 0 || s->transfer_out < 0 || s->transfer_out == TONEMAP_TRANSFER_AUTO) {
++        av_log(ctx, AV_LOG_ERROR, "Set both transfer_in and transfer_out (transfer_out cannot be auto)\n");
++        return AVERROR(EINVAL);
++    }
 +
 +    s->own_frame = av_frame_alloc();
 +    if (!s->own_frame)
@@ -203,7 +296,7 @@ index 0000000..527cb0e
 +    out_ctx = (AVHWFramesContext*)out_ref->data;
 +
 +    out_ctx->format    = AV_PIX_FMT_CUDA;
-+    out_ctx->sw_format = AV_PIX_FMT_NV12;
++    out_ctx->sw_format = s->output_depth == 10 ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
 +    out_ctx->width     = FFALIGN(width, 32);
 +    out_ctx->height    = FFALIGN(height, 32);
 +
@@ -274,12 +367,31 @@ index 0000000..527cb0e
 +
 +    in_frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
 +
-+    if (in_frames_ctx->sw_format != AV_PIX_FMT_P010) {
-+        av_log(ctx, AV_LOG_ERROR,
-+               "Unsupported input format: %s, only p010 is supported\n",
++    if (in_frames_ctx->sw_format != AV_PIX_FMT_P010 && in_frames_ctx->sw_format != AV_PIX_FMT_NV12) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s (NV12 or P010 required)\n",
 +               av_get_pix_fmt_name(in_frames_ctx->sw_format));
 +        return AVERROR(ENOSYS);
 +    }
++    if ((inlink->w & 1) || (inlink->h & 1)) {
++        av_log(ctx, AV_LOG_ERROR, "CUDA 4:2:0 conversion requires even dimensions\n");
++        return AVERROR(EINVAL);
++    }
++    if (s->sdr_white > s->hdr_peak) {
++        av_log(ctx, AV_LOG_ERROR, "sdr_white must not exceed hdr_peak\n");
++        return AVERROR(EINVAL);
++    }
++    s->input_depth = in_frames_ctx->sw_format == AV_PIX_FMT_P010 ? 10 : 8;
++    s->output_depth = s->transfer_out == TONEMAP_TRANSFER_SDR ? 8 : 10;
++    if (s->output_format != AV_PIX_FMT_NONE) {
++        if ((s->output_format != AV_PIX_FMT_NV12 && s->output_format != AV_PIX_FMT_P010) ||
++            (s->transfer_out != TONEMAP_TRANSFER_SDR && s->output_format != AV_PIX_FMT_P010)) {
++            av_log(ctx, AV_LOG_ERROR, "format must be nv12 or p010le; HDR requires p010le\n");
++            return AVERROR(EINVAL);
++        }
++        s->output_depth = s->output_format == AV_PIX_FMT_P010 ? 10 : 8;
++    }
++    s->passthrough = s->transfer_in == s->transfer_out &&
++                     (s->output_format == AV_PIX_FMT_NONE || s->input_depth == s->output_depth);
 +
 +    /* Resolve the per-operator default tone mapping parameter. */
 +    if (isnan(s->param)) {
@@ -303,6 +415,11 @@ index 0000000..527cb0e
 +    outlink->w = inlink->w;
 +    outlink->h = inlink->h;
 +    outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
++
++    if (s->passthrough) {
++        outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++        return outl->hw_frames_ctx ? 0 : AVERROR(ENOMEM);
++    }
 +
 +    ret = init_hwframe_ctx(s, in_frames_ctx->device_ref, inlink->w, inlink->h);
 +    if (ret < 0)
@@ -331,9 +448,13 @@ index 0000000..527cb0e
 +    int cw = width  / 2;
 +    int ch = height / 2;
 +
-+    int   transfer = s->transfer;
++    int   transfer = s->current_transfer;
++    int   transfer_out = s->transfer_out;
++    int   input_depth = s->input_depth;
++    int   output_depth = s->output_depth;
++    float sdr_white = s->sdr_white;
++    float hdr_peak = s->hdr_peak;
 +    int   op       = tonemap_op_map[s->tonemap];
-+    float peak     = s->peak;
 +    float param    = s->param;
 +    float desat    = s->desat;
 +
@@ -343,7 +464,8 @@ index 0000000..527cb0e
 +        &s->own_frame->data[0], &s->own_frame->linesize[0],
 +        &s->own_frame->data[1], &s->own_frame->linesize[1],
 +        &width, &height,
-+        &transfer, &peak, &op, &param, &desat
++        &transfer, &op, &param, &desat,
++        &transfer_out, &input_depth, &output_depth, &sdr_white, &hdr_peak
 +    };
 +
 +    ret = CHECK_CU(cu->cuLaunchKernel(s->cu_func,
@@ -367,13 +489,56 @@ index 0000000..527cb0e
 +    if (ret < 0)
 +        return ret;
 +
-+    /* The output frame is now BT.709 SDR limited-range NV12. */
-+    out->color_trc       = AVCOL_TRC_BT709;
-+    out->color_primaries = AVCOL_PRI_BT709;
-+    out->colorspace      = AVCOL_SPC_BT709;
++    out->color_trc = s->transfer_out == TONEMAP_TRANSFER_SDR ? AVCOL_TRC_BT709 :
++                    s->transfer_out == TONEMAP_TRANSFER_HLG ? AVCOL_TRC_ARIB_STD_B67 :
++                                                            AVCOL_TRC_SMPTE2084;
++    out->color_primaries = s->transfer_out == TONEMAP_TRANSFER_SDR ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
++    out->colorspace      = s->transfer_out == TONEMAP_TRANSFER_SDR ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL;
 +    out->color_range     = AVCOL_RANGE_MPEG;
++    /* Source mastering / dynamic HDR metadata no longer describes these pixels. */
++    av_frame_side_data_remove_by_props(&out->side_data, &out->nb_side_data,
++                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
 +
 +    return 0;
++}
++
++/* Resolve every frame: live streams may change color without changing format.
++ * Never infer a transfer, matrix, primaries or range from the pixel depth. */
++static int resolve_transfer(AVFilterContext *ctx, const AVFrame *in)
++{
++    TonemapCUDAContext *s = ctx->priv;
++    int transfer, hdr;
++    if (s->transfer_in != TONEMAP_TRANSFER_AUTO)
++        return s->transfer_in;
++    switch (in->color_trc) {
++    case AVCOL_TRC_BT709: transfer = TONEMAP_TRANSFER_SDR; break;
++    case AVCOL_TRC_ARIB_STD_B67: transfer = TONEMAP_TRANSFER_HLG; break;
++    case AVCOL_TRC_SMPTE2084: transfer = TONEMAP_TRANSFER_PQ; break;
++    case AVCOL_TRC_UNSPECIFIED:
++        /* Untagged decodes (most MP4/TS files) are SDR BT.709 in practice, and
++         * that is what every player assumes. HDR content has to be tagged or
++         * declared explicitly. */
++        if (!s->warned_untagged) {
++            av_log(ctx, AV_LOG_WARNING, "Input carries no color_trc; assuming limited-range BT.709 SDR\n");
++            s->warned_untagged = 1;
++        }
++        transfer = TONEMAP_TRANSFER_SDR;
++        break;
++    default:
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input color_trc (%d); declare an explicit source color setting\n", in->color_trc);
++        return AVERROR(EINVAL);
++    }
++    hdr = transfer != TONEMAP_TRANSFER_SDR;
++    /* Unspecified companions follow the transfer; only explicit contradictions fail. */
++    if ((in->color_primaries != AVCOL_PRI_UNSPECIFIED && in->color_primaries != (hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709)) ||
++        (in->colorspace != AVCOL_SPC_UNSPECIFIED && in->colorspace != (hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709)) ||
++        (in->color_range != AVCOL_RANGE_UNSPECIFIED && in->color_range != AVCOL_RANGE_MPEG)) {
++        av_log(ctx, AV_LOG_ERROR,
++               "Unsupported or contradictory input color metadata (trc=%d primaries=%d matrix=%d range=%d); declare a supported source color setting\n",
++               in->color_trc, in->color_primaries, in->colorspace, in->color_range);
++        return AVERROR(EINVAL);
++    }
++    return transfer;
 +}
 +
 +static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
@@ -386,6 +551,42 @@ index 0000000..527cb0e
 +    AVFrame *out = NULL;
 +    CUcontext dummy;
 +    int ret = 0;
++
++    ret = resolve_transfer(ctx, in);
++    if (ret < 0)
++        goto fail;
++    s->current_transfer = ret;
++    if (s->passthrough || (s->current_transfer == s->transfer_out && s->input_depth == s->output_depth)) {
++        // Identity frames leave with the resolved contract stamped: an assumed
++        // (untagged) SDR input must not stay untagged for the encoder VUI or a
++        // compositor colour check downstream.
++        {
++            int hdr = s->current_transfer != TONEMAP_TRANSFER_SDR;
++            in->color_trc       = s->current_transfer == TONEMAP_TRANSFER_SDR ? AVCOL_TRC_BT709 :
++                                  s->current_transfer == TONEMAP_TRANSFER_HLG ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
++            in->color_primaries = hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
++            in->colorspace      = hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
++            in->color_range     = AVCOL_RANGE_MPEG;
++        }
++        // Auto mode has a stable output pool even when frame transfers change.
++        // CUDA buffers remain owned by in->buf; only the compatible pool tag
++        // changes, so identity frames still require no device copy.
++        if (s->frames_ctx) {
++            av_buffer_unref(&in->hw_frames_ctx);
++            in->hw_frames_ctx = av_buffer_ref(s->frames_ctx);
++            if (!in->hw_frames_ctx) {
++                ret = AVERROR(ENOMEM);
++                goto fail;
++            }
++        }
++        return ff_filter_frame(outlink, in);
++    }
++
++    if (in->color_range == AVCOL_RANGE_JPEG) {
++        av_log(ctx, AV_LOG_ERROR, "Full-range input is unsupported; convert to limited range first\n");
++        ret = AVERROR(EINVAL);
++        goto fail;
++    }
 +
 +    out = av_frame_alloc();
 +    if (!out) {
@@ -422,11 +623,15 @@ index 0000000..527cb0e
 +        { "reinhard", 0, 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_REINHARD }, 0, 0, FLAGS, .unit = "tonemap" },
 +        { "hable",    0, 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_HABLE },    0, 0, FLAGS, .unit = "tonemap" },
 +        { "mobius",   0, 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_MOBIUS },   0, 0, FLAGS, .unit = "tonemap" },
-+    { "transfer", "set input transfer characteristic", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = TONEMAP_TRANSFER_HLG }, TONEMAP_TRANSFER_HLG, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },
-+    { "t",        "set input transfer characteristic", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = TONEMAP_TRANSFER_HLG }, TONEMAP_TRANSFER_HLG, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },
++    { "transfer_in", "input: auto (strict frame metadata), sdr, hlg or pq", OFFSET(transfer_in), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_AUTO, FLAGS, .unit = "transfer" },
++    { "transfer_out", "output: sdr (NV12), hlg or pq (P010); same transfer passes through", OFFSET(transfer_out), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_SDR, FLAGS, .unit = "transfer" },
++        { "auto", "Require supported color metadata on every input frame", 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_TRANSFER_AUTO }, 0, 0, FLAGS, .unit = "transfer" },
 +        { "hlg", "ARIB STD-B67 (Hybrid Log-Gamma)", 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_TRANSFER_HLG }, 0, 0, FLAGS, .unit = "transfer" },
 +        { "pq",  "SMPTE ST 2084 (Perceptual Quantizer)", 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_TRANSFER_PQ }, 0, 0, FLAGS, .unit = "transfer" },
-+    { "peak",  "signal peak override in units of reference white", OFFSET(peak),  AV_OPT_TYPE_DOUBLE, { .dbl = 10.0 }, 0,       DBL_MAX, FLAGS },
++        { "sdr", "BT.709 gamut with BT.1886 display response", 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_TRANSFER_SDR }, 0, 0, FLAGS, .unit = "transfer" },
++    { "format", "Explicit output storage (nv12 or p010le)", OFFSET(output_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, -1, INT_MAX, FLAGS },
++    { "sdr_white", "SDR reference white in nits", OFFSET(sdr_white), AV_OPT_TYPE_DOUBLE, { .dbl = 203.0 }, 1, 10000, FLAGS },
++    { "hdr_peak", "HLG display peak / HDR tone mapping peak in nits", OFFSET(hdr_peak), AV_OPT_TYPE_DOUBLE, { .dbl = 1000.0 }, 100, 10000, FLAGS },
 +    { "param", "tonemap parameter",                                OFFSET(param), AV_OPT_TYPE_DOUBLE, { .dbl = NAN },  DBL_MIN, DBL_MAX, FLAGS },
 +    { "desat", "desaturation parameter",                           OFFSET(desat), AV_OPT_TYPE_DOUBLE, { .dbl = 0.5 },  0,       DBL_MAX, FLAGS },
 +    { NULL }
@@ -452,7 +657,7 @@ index 0000000..527cb0e
 +
 +const FFFilter ff_vf_tonemap_cuda = {
 +    .p.name         = "tonemap_cuda",
-+    .p.description  = NULL_IF_CONFIG_SMALL("Perform HDR to SDR conversion with tonemapping using CUDA"),
++    .p.description  = NULL_IF_CONFIG_SMALL("Convert SDR, HLG and PQ with tonemapping using CUDA"),
 +    .p.priv_class   = &tonemap_cuda_class,
 +    .priv_size      = sizeof(TonemapCUDAContext),
 +    .init           = tonemap_cuda_init,
@@ -464,10 +669,10 @@ index 0000000..527cb0e
 +};
 diff --git a/libavfilter/vf_tonemap_cuda.cu b/libavfilter/vf_tonemap_cuda.cu
 new file mode 100644
-index 0000000..8a4b9e6
+index 0000000..59c2206
 --- /dev/null
 +++ b/libavfilter/vf_tonemap_cuda.cu
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,285 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -488,11 +693,8 @@ index 0000000..8a4b9e6
 +
 +/*
 + * CUDA HDR->SDR tone mapper, ported from FFmpeg libavfilter/opencl/tonemap.cl
-+ * and colorspace_common.cl. It maps BT.2020 HLG or PQ 10-bit P010 frames to
-+ * BT.709 SDR 8-bit NV12 frames using a static signal peak (no per-frame peak
-+ * detection). The device functions below mirror the OpenCL kernel restricted
-+ * to the P010->NV12 4:2:0 layout: one work item processes a 2x2 luma block and
-+ * the single chroma sample it shares.
++ * and colorspace_common.cl, with display-light SDR/HLG/PQ conversion on
++ * limited-range NV12/P010 and SDR BT.1886 with an ideal black display.
 + */
 +
 +#define REFERENCE_WHITE 100.0f
@@ -550,11 +752,6 @@ index 0000000..8a4b9e6
 +    float b = __expf((x - HLG_C) / HLG_A) + HLG_B;
 +    return x < 0.5f ? a : b;
 +}
-+// fast-math intrinsics: ~precision for speed on the SM-bound tonemap path
-+__device__ static inline float oetf_bt709(float c) {
-+    c = fmaxf(c, 0.0f);
-+    return c < 0.018f ? 4.5f * c : 1.099f * __powf(c, 0.45f) - 0.099f;
-+}
 +// BT.2020 luma for the HLG OOTF and BT.709 luma for desaturation.
 +__device__ static inline float luma_2020(float3 c) { return 0.2627f * c.x + 0.6780f * c.y + 0.0593f * c.z; }
 +__device__ static inline float luma_709(float3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
@@ -565,14 +762,6 @@ index 0000000..8a4b9e6
 +    float gamma = fmaxf(1.0f, 1.2f + 0.42f * __log10f(peak * REFERENCE_WHITE / 1000.0f));
 +    float factor = peak * __powf(fmaxf(luma, 1e-6f), gamma - 1.0f) / __powf(12.0f, gamma);
 +    return make_float3(c.x * factor, c.y * factor, c.z * factor);
-+}
-+
-+// BT.2020 limited-range 10-bit YCbCr code -> non-linear RGB in [0,1].
-+__device__ static inline float3 yuv2rgb_2020(float y10, float cb10, float cr10) {
-+    float y = (y10 / 1023.0f * 255.0f - 16.0f) / 219.0f;
-+    float u = (cb10 / 1023.0f * 255.0f - 128.0f) / 224.0f;
-+    float v = (cr10 / 1023.0f * 255.0f - 128.0f) / 224.0f;
-+    return make_float3(y + 1.4746f * v, y - 0.16455f * u - 0.57135f * v, y + 1.8814f * u);
 +}
 +
 +// Linear BT.2020 -> linear BT.709 primaries.
@@ -605,23 +794,6 @@ index 0000000..8a4b9e6
 +    return make_float3(rgb.x * g, rgb.y * g, rgb.z * g);
 +}
 +
-+// transfer: 0 = HLG, 1 = PQ. Returns BT.709 SDR non-linear RGB in [0,1].
-+__device__ static inline float3 tonemap_rgb(float3 src, int transfer, float peak,
-+                                            int op, float param, float desat) {
-+    float3 lin;
-+    if (transfer == 1) {
-+        lin = make_float3(eotf_st2084(src.x), eotf_st2084(src.y), eotf_st2084(src.z));
-+    } else {
-+        lin = make_float3(inverse_oetf_hlg(src.x), inverse_oetf_hlg(src.y), inverse_oetf_hlg(src.z));
-+        lin = ootf_hlg(lin, peak);
-+    }
-+    lin = lrgb2020_to_709(lin);
-+    lin = map_one_pixel_rgb(lin, peak, SDR_AVG, op, param, desat);
-+    return make_float3(oetf_bt709(fmaxf(lin.x, 0.0f)),
-+                       oetf_bt709(fmaxf(lin.y, 0.0f)),
-+                       oetf_bt709(fmaxf(lin.z, 0.0f)));
-+}
-+
 +// BT.709 non-linear RGB in [0,1] -> limited-range YCbCr (normalized, before
 +// 8-bit quantization).
 +__device__ static inline float3 rgb2yuv_709(float3 c) {
@@ -631,19 +803,121 @@ index 0000000..8a4b9e6
 +    return make_float3(y, u, v);
 +}
 +
-+__device__ static inline unsigned char quant8(float v) {
-+    return (unsigned char)fminf(fmaxf(rintf(v), 0.0f), 255.0f);
++__device__ static inline float3 mul_rgb(float3 c, float scale) {
++    return make_float3(c.x * scale, c.y * scale, c.z * scale);
 +}
 +
-+// One work item maps a 2x2 luma block plus the shared chroma sample from P010
-+// (BT.2020 HLG/PQ) to NV12 (BT.709 SDR). Linesizes are given in bytes.
++// Display-light mapping: SDR BT.1886 (ideal black), PQ ST 2084, HLG BT.2100.
++// Linear RGB is in units of 100 nits.
++__device__ static inline float3 to_display_light(float3 c, int transfer,
++                                                float sdr_white, float hdr_peak) {
++    c = make_float3(fmaxf(c.x, 0.0f), fmaxf(c.y, 0.0f), fmaxf(c.z, 0.0f));
++    if (transfer == 2)
++        return mul_rgb(make_float3(__powf(c.x, 2.4f), __powf(c.y, 2.4f), __powf(c.z, 2.4f)),
++                       sdr_white / REFERENCE_WHITE);
++    if (transfer == 1)
++        return make_float3(eotf_st2084(c.x), eotf_st2084(c.y), eotf_st2084(c.z));
++    return ootf_hlg(make_float3(inverse_oetf_hlg(c.x), inverse_oetf_hlg(c.y),
++                               inverse_oetf_hlg(c.z)), hdr_peak / REFERENCE_WHITE);
++}
++
++__device__ static inline float oetf_pq(float c) {
++    float p = __powf(fmaxf(c, 0.0f) * REFERENCE_WHITE / ST2084_MAX_LUMINANCE, ST2084_M1);
++    return __powf((ST2084_C1 + ST2084_C2 * p) / (1.0f + ST2084_C3 * p), ST2084_M2);
++}
++
++// Inverse of inverse_oetf_hlg: scene RGB here is normalized to [0,12].
++__device__ static inline float oetf_hlg(float c) {
++    c = fmaxf(c, 0.0f);
++    return c <= 1.0f ? 0.5f * sqrtf(c) : HLG_A * __logf(c - HLG_B) + HLG_C;
++}
++
++__device__ static inline float3 from_display_light(float3 c, int transfer,
++                                                  float sdr_white, float hdr_peak) {
++    c = make_float3(fmaxf(c.x, 0.0f), fmaxf(c.y, 0.0f), fmaxf(c.z, 0.0f));
++    if (transfer == 2) {
++        c = mul_rgb(c, REFERENCE_WHITE / sdr_white);
++        return make_float3(__powf(c.x, 1.0f / 2.4f), __powf(c.y, 1.0f / 2.4f),
++                           __powf(c.z, 1.0f / 2.4f));
++    }
++    if (transfer == 1)
++        return make_float3(oetf_pq(c.x), oetf_pq(c.y), oetf_pq(c.z));
++    float gamma = fmaxf(1.0f, 1.2f + 0.42f * __log10f(hdr_peak / 1000.0f));
++    float luma = luma_2020(c);
++    if (luma <= 0.0f)
++        return make_float3(0.0f, 0.0f, 0.0f);
++    // BT.2100 inverse OOTF, preserving chromaticity in display light.
++    float scene_luma = 12.0f * __powf(luma * REFERENCE_WHITE / hdr_peak, 1.0f / gamma);
++    c = mul_rgb(c, scene_luma / luma);
++    return make_float3(oetf_hlg(c.x), oetf_hlg(c.y), oetf_hlg(c.z));
++}
++
++__device__ static inline float3 lrgb709_to_2020(float3 c) {
++    return make_float3(0.627404f * c.x + 0.329283f * c.y + 0.043313f * c.z,
++                       0.069097f * c.x + 0.919540f * c.y + 0.011362f * c.z,
++                       0.016391f * c.x + 0.088013f * c.y + 0.895595f * c.z);
++}
++
++__device__ static inline float3 convert_rgb(float3 c, int transfer_in, int transfer_out,
++                                           float sdr_white, float hdr_peak,
++                                           int op, float param, float desat) {
++    c = to_display_light(c, transfer_in, sdr_white, hdr_peak);
++    if (transfer_in == 2 && transfer_out != 2)
++        c = lrgb709_to_2020(c);
++    else if (transfer_in != 2 && transfer_out == 2) {
++        c = lrgb2020_to_709(c);
++        // Only HDR->SDR compresses highlights. SDR embedding and HLG/PQ
++        // conversion preserve display luminance, without inventing highlights.
++        c = mul_rgb(c, REFERENCE_WHITE / sdr_white);
++        c = map_one_pixel_rgb(c, hdr_peak / sdr_white, SDR_AVG, op, param, desat);
++        c = mul_rgb(c, sdr_white / REFERENCE_WHITE);
++    }
++    c = from_display_light(c, transfer_out, sdr_white, hdr_peak);
++    // Clip outside the target signal range before forming YCbCr.
++    return make_float3(fminf(c.x, 1.0f), fminf(c.y, 1.0f), fminf(c.z, 1.0f));
++}
++
++__device__ static inline float3 yuv_to_rgb(float y, float u, float v, int depth, int transfer) {
++    float scale = depth == 10 ? 4.0f : 1.0f;
++    y = (y / scale - 16.0f) / 219.0f;
++    u = (u / scale - 128.0f) / 224.0f;
++    v = (v / scale - 128.0f) / 224.0f;
++    if (transfer == 2)
++        return make_float3(y + 1.5748f * v, y - 0.187324f * u - 0.468124f * v, y + 1.8556f * u);
++    return make_float3(y + 1.4746f * v, y - 0.164553f * u - 0.571353f * v, y + 1.8814f * u);
++}
++
++__device__ static inline float3 rgb_to_yuv(float3 c, int transfer) {
++    if (transfer == 2)
++        return rgb2yuv_709(c);
++    float y = luma_2020(c);
++    return make_float3(y, (c.z - y) / 1.8814f, (c.x - y) / 1.4746f);
++}
++
++__device__ static inline float read_code(const unsigned char *p, int pitch, int x, int y, int depth) {
++    const unsigned char *row = p + y * pitch;
++    return depth == 10 ? ((const unsigned short *)row)[x] >> 6 : row[x];
++}
++
++__device__ static inline void write_code(unsigned char *p, int pitch, int x, int y, int depth, float code) {
++    unsigned char *row = p + y * pitch;
++    if (depth == 10)
++        ((unsigned short *)row)[x] = (unsigned short)fminf(fmaxf(rintf(code * 4.0f), 0.0f), 1023.0f) << 6;
++    else
++        row[x] = (unsigned char)fminf(fmaxf(rintf(code), 0.0f), 255.0f);
++}
++
++// A thread handles one 2x2 luma block and its shared chroma sample.
++// NV12/P010 have identical chroma geometry; all pitches are in bytes.
 +extern "C" __global__ void Tonemap_Cuda(
-+    unsigned short *src_y, int src_y_linesize,
-+    unsigned short *src_uv, int src_uv_linesize,
++    unsigned char *src_y, int src_y_linesize,
++    unsigned char *src_uv, int src_uv_linesize,
 +    unsigned char *dst_y, int dst_y_linesize,
 +    unsigned char *dst_uv, int dst_uv_linesize,
 +    int width, int height,
-+    int transfer, float peak, int op, float param, float desat)
++    int transfer, int op, float param, float desat,
++    int transfer_out, int input_depth, int output_depth,
++    float sdr_white, float hdr_peak)
 +{
 +    int xi = blockIdx.x * blockDim.x + threadIdx.x;
 +    int yi = blockIdx.y * blockDim.y + threadIdx.y;
@@ -656,33 +930,33 @@ index 0000000..8a4b9e6
 +    int x = 2 * xi;
 +    int y = 2 * yi;
 +
-+    // P010 stores the 10-bit code in the high bits, so shift right by 6.
-+    int syl = src_y_linesize >> 1;
-+    int suvl = src_uv_linesize >> 1;
-+
-+    float y0 = (float)(src_y[(y    ) * syl + x    ] >> 6);
-+    float y1 = (float)(src_y[(y    ) * syl + x + 1] >> 6);
-+    float y2 = (float)(src_y[(y + 1) * syl + x    ] >> 6);
-+    float y3 = (float)(src_y[(y + 1) * syl + x + 1] >> 6);
-+
-+    float cb = (float)(src_uv[yi * suvl + 2 * xi    ] >> 6);
-+    float cr = (float)(src_uv[yi * suvl + 2 * xi + 1] >> 6);
-+
-+    float3 s0 = rgb2yuv_709(tonemap_rgb(yuv2rgb_2020(y0, cb, cr), transfer, peak, op, param, desat));
-+    float3 s1 = rgb2yuv_709(tonemap_rgb(yuv2rgb_2020(y1, cb, cr), transfer, peak, op, param, desat));
-+    float3 s2 = rgb2yuv_709(tonemap_rgb(yuv2rgb_2020(y2, cb, cr), transfer, peak, op, param, desat));
-+    float3 s3 = rgb2yuv_709(tonemap_rgb(yuv2rgb_2020(y3, cb, cr), transfer, peak, op, param, desat));
-+
-+    dst_y[(y    ) * dst_y_linesize + x    ] = quant8(219.0f * s0.x + 16.0f);
-+    dst_y[(y    ) * dst_y_linesize + x + 1] = quant8(219.0f * s1.x + 16.0f);
-+    dst_y[(y + 1) * dst_y_linesize + x    ] = quant8(219.0f * s2.x + 16.0f);
-+    dst_y[(y + 1) * dst_y_linesize + x + 1] = quant8(219.0f * s3.x + 16.0f);
-+
-+    // Average the four chroma samples (matches the default get_chroma_sample).
-+    float u = 0.25f * (s0.y + s1.y + s2.y + s3.y);
-+    float v = 0.25f * (s0.z + s1.z + s2.z + s3.z);
-+    dst_uv[yi * dst_uv_linesize + 2 * xi    ] = quant8(224.0f * u + 128.0f);
-+    dst_uv[yi * dst_uv_linesize + 2 * xi + 1] = quant8(224.0f * v + 128.0f);
++    float cb = read_code(src_uv, src_uv_linesize, x, yi, input_depth);
++    float cr = read_code(src_uv, src_uv_linesize, x + 1, yi, input_depth);
++    if (transfer == transfer_out) {
++        // Depth-only conversion preserves code values, including foot/headroom.
++        float scale = input_depth == 10 ? 0.25f : 1.0f;
++        for (int i = 0; i < 4; ++i) {
++            int px = x + (i & 1), py = y + (i >> 1);
++            write_code(dst_y, dst_y_linesize, px, py, output_depth,
++                       read_code(src_y, src_y_linesize, px, py, input_depth) * scale);
++        }
++        write_code(dst_uv, dst_uv_linesize, x, yi, output_depth, cb * scale);
++        write_code(dst_uv, dst_uv_linesize, x + 1, yi, output_depth, cr * scale);
++        return;
++    }
++    float u = 0.0f, v = 0.0f;
++    for (int i = 0; i < 4; ++i) {
++        int px = x + (i & 1), py = y + (i >> 1);
++        float code = read_code(src_y, src_y_linesize, px, py, input_depth);
++        float3 c = rgb_to_yuv(convert_rgb(yuv_to_rgb(code, cb, cr, input_depth, transfer),
++                                          transfer, transfer_out, sdr_white, hdr_peak, op, param, desat),
++                              transfer_out);
++        write_code(dst_y, dst_y_linesize, px, py, output_depth, 219.0f * c.x + 16.0f);
++        u += c.y;
++        v += c.z;
++    }
++    write_code(dst_uv, dst_uv_linesize, x, yi, output_depth, 224.0f * (u * 0.25f) + 128.0f);
++    write_code(dst_uv, dst_uv_linesize, x + 1, yi, output_depth, 224.0f * (v * 0.25f) + 128.0f);
 +}
 -- 
 2.55.0
