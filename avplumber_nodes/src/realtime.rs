@@ -21,9 +21,8 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::edge::{EdgeEvent, EdgeItem, Push};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::grain::Grain;
-use avplumber_f7k::graph::media::{AVP_NOPTS, AvpMediaType, AvpRational};
+use avplumber_f7k::graph::media::{AVP_NOPTS, AvpRational};
 use avplumber_f7k::graph::node::Polled;
-use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::{MICROSECONDS, MILLISECONDS, rational_from_json};
@@ -154,9 +153,9 @@ impl PollNode for Realtime {
         &self.io
     }
 
-    fn pads(&self) -> NodePads {
-        NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
-    }
+    // Deliberately no `pads()`: C++ `DECLNODE_ATD(realtime, RealTimeSpeed)`
+    // accepts video, audio and packets, and a vertex that declares no pads
+    // makes `core::pad_media` skip the media-type check entirely.
 
     /// Nothing in `step` can fail, so the node may end a Direct chain and its
     /// consumer may be Direct too.
@@ -348,7 +347,7 @@ impl Realtime {
         }
     }
 
-    /// Frames leave in this node's time base, so the description does too.
+    /// Buffers leave in this node's time base, so the description does too.
     fn restamped_spec(&self, spec: Spec) -> Spec {
         match spec {
             Spec::Video {
@@ -368,6 +367,21 @@ impl Realtime {
                 sar,
                 time_base: self.timebase,
             },
+            Spec::Audio {
+                sample_rate,
+                sample_fmt,
+                layout,
+                ..
+            } => Spec::Audio {
+                sample_rate,
+                sample_fmt,
+                layout,
+                time_base: self.timebase,
+            },
+            Spec::Packet(mut packet) => {
+                packet.time_base = self.timebase;
+                Spec::Packet(packet)
+            }
             other => other,
         }
     }
@@ -434,12 +448,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicI64};
 
     use super::*;
-    use avplumber_f7k::Instance;
     use avplumber_f7k::graph::BufferedEdge;
     use avplumber_f7k::graph::edge::{Edge, Wakeup};
     use avplumber_f7k::graph::grain::test_media;
+    use avplumber_f7k::graph::media::AvpMediaType;
     use avplumber_f7k::graph::node::Node;
+    use avplumber_f7k::graph::pad::NodePads;
+    use avplumber_f7k::graph::spec::{ChannelLayout, PacketSpec};
     use avplumber_f7k::services::clock::ClockSnapshot;
+    use avplumber_f7k::{
+        EdgeKind, Instance, NodeRequest, NodeSpec, register_factory, register_spec,
+    };
 
     /// A clock whose "now" the test moves by hand. Same arithmetic as the real
     /// one, in microseconds, without the process clock.
@@ -699,6 +718,16 @@ mod tests {
     }
 
     #[test]
+    fn pads_do_not_pin_a_media_type() {
+        let h = harness(serde_json::json!({}));
+        assert_eq!(
+            h.node.pads(),
+            NodePads::default(),
+            "C++ DECLNODE_ATD: one node, any media; empty pads skip the connect check"
+        );
+    }
+
+    #[test]
     fn a_video_spec_leaves_in_the_output_time_base() {
         let mut h = harness(serde_json::json!({"tick_period": "1/50"}));
         h.input.push_event(EdgeEvent::Spec(Spec::Video {
@@ -717,5 +746,80 @@ mod tests {
             panic!("the spec is forwarded");
         };
         assert_eq!(time_base, AvpRational { num: 1, den: 50 });
+    }
+
+    #[test]
+    fn an_audio_spec_leaves_in_the_output_time_base() {
+        let mut h = harness(serde_json::json!({"tick_period": "1/50"}));
+        h.input.push_event(EdgeEvent::Spec(Spec::Audio {
+            sample_rate: 48000,
+            sample_fmt: 1,
+            layout: ChannelLayout::default(),
+            time_base: AvpRational { num: 1, den: 48000 },
+        }));
+        h.step_until_idle();
+        let Some(EdgeItem::Event(EdgeEvent::Spec(Spec::Audio { time_base, .. }))) =
+            h.output.try_take()
+        else {
+            panic!("the spec is forwarded");
+        };
+        assert_eq!(time_base, AvpRational { num: 1, den: 50 });
+    }
+
+    #[test]
+    fn a_packet_spec_leaves_in_the_output_time_base() {
+        let mut h = harness(serde_json::json!({"tick_period": "1/50"}));
+        h.input
+            .push_event(EdgeEvent::Spec(Spec::Packet(PacketSpec::new(
+                AvpRational { num: 1, den: 90000 },
+            ))));
+        h.step_until_idle();
+        let Some(EdgeItem::Event(EdgeEvent::Spec(Spec::Packet(packet)))) = h.output.try_take()
+        else {
+            panic!("the spec is forwarded");
+        };
+        assert_eq!(packet.time_base, AvpRational { num: 1, den: 50 });
+    }
+
+    /// Audio (and packet) neighbours must connect: C++ `DECLNODE_ATD` did not
+    /// specialise a video-only `realtime`.
+    #[test]
+    fn audio_neighbours_can_connect() {
+        struct AudioEnd {
+            name: String,
+            source: bool,
+        }
+        impl Node for AudioEnd {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn pads(&self) -> NodePads {
+                if self.source {
+                    NodePads::output(AvpMediaType::AUDIO)
+                } else {
+                    NodePads::input(AvpMediaType::AUDIO)
+                }
+            }
+        }
+
+        let inst = Instance::new();
+        register_spec::<RealtimeSpec>(&inst);
+        register_factory(&inst, "audio_end", |name, _| {
+            Ok(Arc::new(AudioEnd {
+                source: name == "src",
+                name: name.into(),
+            }))
+        });
+        inst.create_node(NodeRequest::new("audio_end", "src", serde_json::json!({})))
+            .unwrap();
+        let mut rt = NodeRequest::new(RealtimeSpec::TYPE_NAME, "rt", serde_json::json!({}));
+        rt.sync_group = Some("g".into());
+        inst.create_node(rt).unwrap();
+        inst.create_node(NodeRequest::new("audio_end", "snk", serde_json::json!({})))
+            .unwrap();
+        inst.connect_edge("a", "src", "out", "rt", "in", EdgeKind::default())
+            .expect("audio into realtime");
+        inst.connect_edge("b", "rt", "out", "snk", "in", EdgeKind::default())
+            .expect("realtime into audio");
     }
 }

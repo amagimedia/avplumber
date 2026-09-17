@@ -4,6 +4,7 @@
 //! Buffer-level helpers stay where they already are: `PacketExt`/`FrameExt` in
 //! `graph/grain.rs`, rational math in `graph/timebase.rs`.
 
+pub mod bsf;
 pub mod codec;
 pub mod dict;
 pub mod error;

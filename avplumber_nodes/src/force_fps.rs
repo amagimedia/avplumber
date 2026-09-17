@@ -18,12 +18,11 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::error::NodeError;
 use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
 use avplumber_f7k::graph::timestamp::Ts;
-use avplumber_f7k::node_api::{InputHandler, PollInput, PollIo, Polling};
+use avplumber_f7k::node_api::{EofAction, InputHandler, PollInput, PollIo, Polling};
 
 /// C++ prints its drop/duplicate statistics this often.
 const STATS_PERIOD_S: u64 = 10;
@@ -141,9 +140,9 @@ impl InputHandler for ForceFps {
         self.reset_grid();
     }
 
-    fn on_eof(&self) -> Result<Processed, NodeError> {
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
         self.log_stats(true);
-        Ok(Processed::Done)
+        Ok(EofAction::Done)
     }
 }
 

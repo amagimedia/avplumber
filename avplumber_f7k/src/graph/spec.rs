@@ -278,4 +278,66 @@ impl Spec {
             Spec::Mux { .. } => "mux",
         }
     }
+
+    /// Whether two specs describe the same format, so a re-delivered `Spec` is a
+    /// no-op instead of rebuilding processing state. Time base is part of it.
+    ///
+    /// Packet streams compare `codec_id` / extra data / rates, not a pointer
+    /// identity of `codecpar`. Catalogs never compare equal: a new catalog is
+    /// a new answer to a hint.
+    pub fn same_as(&self, other: &Spec) -> bool {
+        match (self, other) {
+            (
+                Spec::Video {
+                    width: aw,
+                    height: ah,
+                    pix_fmt: af,
+                    sw_pix_fmt: asw,
+                    frame_rate: ar,
+                    sar: asar,
+                    time_base: atb,
+                },
+                Spec::Video {
+                    width: bw,
+                    height: bh,
+                    pix_fmt: bf,
+                    sw_pix_fmt: bsw,
+                    frame_rate: br,
+                    sar: bsar,
+                    time_base: btb,
+                },
+            ) => (aw, ah, af, asw, ar, asar, atb) == (bw, bh, bf, bsw, br, bsar, btb),
+            (
+                Spec::Audio {
+                    sample_rate: ar,
+                    sample_fmt: af,
+                    layout: al,
+                    time_base: atb,
+                },
+                Spec::Audio {
+                    sample_rate: br,
+                    sample_fmt: bf,
+                    layout: bl,
+                    time_base: btb,
+                },
+            ) => (ar, af, al, atb) == (br, bf, bl, btb),
+            (Spec::Packet(a), Spec::Packet(b)) => same_packet_spec(a, b),
+            (Spec::Mux { streams: a }, Spec::Mux { streams: b }) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(a, b)| {
+                        same_packet_spec(&a.spec, &b.spec)
+                            && a.id == b.id
+                            && a.metadata == b.metadata
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+fn same_packet_spec(a: &PacketSpec, b: &PacketSpec) -> bool {
+    a.codec_id == b.codec_id
+        && a.time_base == b.time_base
+        && a.frame_rate == b.frame_rate
+        && a.extra_data == b.extra_data
 }

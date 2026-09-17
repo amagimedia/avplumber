@@ -185,7 +185,7 @@ wiring a new path.
 | `NodeEnvelope` | factory | Framework keys stripped from JSON (`type`, `name`, `group`, `src`, `dst`, `event_loop`, …) before remaining keys become `NodeSpec`. | Parsing only | No. |
 | `AvpNode` | C ABI | Stable opaque handle around the native `Arc`. Same pointer across restart; impl pointer inside is swapped. | `Instance.node_handles` | No. C `process`/`poll` go through `FfiNode` which **is** a `Node`. |
 
-`SisoNode` is a one-in/one-out **transform helper**, not a graph vertex. Adapters (`SisoAdapter` / `SisoPollAdapter` / `SisoAsyncAdapter`) implement `Node`. Each hands the executor a fallible body, so an `Err` from `on_spec` or `process` reaches the supervisor; `SisoAdapter` parks on a `Park` through `push_blocking` when its output is full and honours `Node::interrupt`, `SisoPollAdapter` stashes the produced buffer and waits writable. Only a `SisoNode` that returns `true` from `direct_consumer_is_infallible` may sit behind a Direct edge.
+`SisoNode` is a one-in/one-out **transform helper**, not a graph vertex. Adapters (`SisoAdapter` / `SisoPollAdapter` / `SisoAsyncAdapter`) implement `Node`. `process` returns zero or more grains; `on_eof` drains; an identical re-delivered spec is skipped. Each adapter hands the executor a fallible body, so an `Err` from `on_spec` or `process` reaches the supervisor; `SisoAdapter` parks on a `Park` through `push_blocking` when its output is full and honours `Node::interrupt`, `SisoPollAdapter` stashes produced buffers and waits writable. Only a `SisoNode` that returns `true` from `direct_consumer_is_infallible` may sit behind a Direct edge.
 
 ### `NodeSpec` vs `NodeBlueprint`
 

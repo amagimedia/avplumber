@@ -43,7 +43,9 @@ use avplumber_f7k::graph::timestamp::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
-use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, PARK_TIMEOUT_MS, SingleInput};
+use avplumber_f7k::node_api::{
+    Blocking, BlockingIo, EofAction, InputHandler, PARK_TIMEOUT_MS, SingleInput,
+};
 use avplumber_f7k::services::hwaccel::HwDevice;
 
 /// The parameters both decoder types share; C++ has one template for both.
@@ -377,13 +379,13 @@ impl InputHandler for Decoder {
 
     /// The codec keeps producing after its last input, so this only starts the
     /// drain; [`SingleInput::before_take`] finishes when it is over.
-    fn on_eof(&self) -> Result<Processed, NodeError> {
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
         let state = &mut *self.state.lock().unwrap();
         if let Some(ctx) = state.ctx.as_mut() {
             state.pump.flush(ctx);
         }
         state.eof = true;
-        Ok(Processed::Again)
+        Ok(EofAction::Again)
     }
 
     /// The source has run out of packets for now, so whatever the codec is

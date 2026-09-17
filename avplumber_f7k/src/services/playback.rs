@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::graph::timestamp::Ts;
 use crate::graph::timebase::MILLISECONDS;
+use crate::graph::timestamp::Ts;
 use crate::services::clock::{ClockService, SyncGroup};
 
 /// [`Playback::released`] before any frame was released.

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::graph::AvpRational;
-use crate::graph::timestamp::{self, ts_cmp, Ts};
+use crate::graph::timestamp::{self, Ts, ts_cmp};
 use crate::services::clock::SyncGroup;
 
 #[derive(Clone, Debug)]

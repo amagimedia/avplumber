@@ -114,7 +114,7 @@ pub trait Node: Send + Sync + 'static {
     }
 
     /// Applicable to FFI callers only.
-    /// 
+    ///
     /// Capability vtable for this node only, C `avp_node_query_interface`.
     /// No graph walk: the caller already holds the node. `None` (the default)
     /// means this node does not implement `iface`.

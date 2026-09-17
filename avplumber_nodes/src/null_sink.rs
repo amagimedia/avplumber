@@ -10,9 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::error::NodeError;
 use avplumber_f7k::graph::grain::Grain;
-use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, EofAction, InputHandler, SingleInput};
 
 /// What one `null_sink` instance has seen, cumulative across restarts.
 ///
@@ -99,9 +98,9 @@ impl InputHandler for NullSink {
         Ok(Vec::new())
     }
 
-    fn on_eof(&self) -> Result<Processed, NodeError> {
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
         self.counters.eof.store(true, Ordering::Release);
-        Ok(Processed::Done)
+        Ok(EofAction::Done)
     }
 }
 

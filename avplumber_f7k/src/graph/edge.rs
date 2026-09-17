@@ -9,8 +9,8 @@ use std::task::{Context, Poll as TaskPoll, Waker};
 use std::time::Duration;
 
 use crate::graph::grain::Grain;
-use crate::graph::timestamp::Ts;
 use crate::graph::spec::{Spec, StreamSelection};
+use crate::graph::timestamp::Ts;
 
 #[derive(Clone, Debug)]
 pub enum EdgeEvent {
@@ -700,7 +700,8 @@ impl Edge for GenerationReader {
         self.edge.has_hints()
     }
     fn take(&self, timeout_ms: i32) -> Option<EdgeItem> {
-        self.edge.take_generation(self.generation.get()?, timeout_ms)
+        self.edge
+            .take_generation(self.generation.get()?, timeout_ms)
     }
     fn peek_clone(&self, timeout_ms: i32) -> Option<EdgeItem> {
         self.edge

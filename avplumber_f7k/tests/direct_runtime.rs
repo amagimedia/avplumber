@@ -33,8 +33,8 @@ impl SisoNode for Ident {
     fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
         Ok(((), spec.clone()))
     }
-    fn process(&self, _inner: &mut (), buf: Media) -> Result<Option<Media>, String> {
-        Ok(Some(buf))
+    fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+        Ok(vec![buf])
     }
 }
 
@@ -64,30 +64,30 @@ impl Node for PollSource {
     fn bind_sink(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.sink.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let Some(out) = self.sink.get() else {
-            return Ok(Tick::Done);
+            return Ok(Polled::Done);
         };
         if !self.spec_sent.swap(true, Ordering::AcqRel) {
             out.push_event(EdgeEvent::Spec(video_spec()));
-            return Ok(Tick::Again);
+            return Ok(Polled::Again);
         }
         let n = self.produced.load(Ordering::Acquire);
         if n >= TARGET {
             out.push_event(EdgeEvent::Eof);
-            return Ok(Tick::Done);
+            return Ok(Polled::Done);
         }
         match out.offer(make_media(n as i64)) {
             Ok(()) => {
                 self.produced.fetch_add(1, Ordering::Release);
-                Ok(Tick::Again)
+                Ok(Polled::Again)
             }
             Err((Push::Full, _)) => {
                 ctx.wait_writable(out.clone());
-                Ok(Tick::Idle)
+                Ok(Polled::Idle)
             }
-            Err((Push::Closed | Push::Dropped, _)) => Ok(Tick::Done),
-            Err((Push::Accepted, _)) => Ok(Tick::Again),
+            Err((Push::Closed | Push::Dropped, _)) => Ok(Polled::Done),
+            Err((Push::Accepted, _)) => Ok(Polled::Again),
         }
     }
 }
@@ -119,26 +119,26 @@ impl Node for HoldSink {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.source.set(edge);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         if self.hold.load(Ordering::Acquire) {
             ctx.wait_readable(self.release.clone());
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         }
         let Some(input) = self.source.get() else {
-            return Ok(Tick::Done);
+            return Ok(Polled::Done);
         };
         match input.try_take() {
-            None if input.is_closed() => Ok(Tick::Done),
+            None if input.is_closed() => Ok(Polled::Done),
             None => {
                 ctx.wait_readable(input.clone());
-                Ok(Tick::Idle)
+                Ok(Polled::Idle)
             }
             Some(EdgeItem::Buffer(_)) => {
                 self.received.fetch_add(1, Ordering::Release);
-                Ok(Tick::Again)
+                Ok(Polled::Again)
             }
-            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Tick::Done),
-            Some(_) => Ok(Tick::Again),
+            Some(EdgeItem::Event(EdgeEvent::Eof)) => Ok(Polled::Done),
+            Some(_) => Ok(Polled::Again),
         }
     }
 }
@@ -155,7 +155,7 @@ fn video_spec() -> Spec {
     }
 }
 
-fn make_media(pts: i64) -> Media {
+fn make_media(pts: i64) -> Grain {
     #[cfg(feature = "ffmpeg")]
     {
         use rusty_ffmpeg::ffi;
@@ -167,14 +167,14 @@ fn make_media(pts: i64) -> Media {
             (*frame).height = 8;
             assert_eq!(ffi::av_frame_get_buffer(frame, 0), 0);
             (*frame).pts = pts;
-            Media::Video(rsmpeg::avutil::AVFrame::from_raw(
+            Grain::Video(rsmpeg::avutil::AVFrame::from_raw(
                 std::ptr::NonNull::new(frame).unwrap(),
             ))
         }
     }
     #[cfg(not(feature = "ffmpeg"))]
     {
-        Media::Stub {
+        Grain::Stub {
             kind: AvpMediaType::VIDEO,
             pts,
         }
@@ -204,13 +204,13 @@ impl Node for DeadlineNode {
         NodeKind::Poll
     }
 
-    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
         if poll == 3 {
-            Ok(Tick::Done)
+            Ok(Polled::Done)
         } else {
             ctx.wait_deadline(Instant::now() + Duration::from_millis(20));
-            Ok(Tick::Idle)
+            Ok(Polled::Idle)
         }
     }
 }
@@ -266,7 +266,7 @@ impl Node for CancelDeadlineNode {
     fn start(&self) {
         self.run.fetch_add(1, Ordering::SeqCst);
     }
-    fn poll(&self, ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let run = self.run.load(Ordering::SeqCst);
         if run == 1 {
             self.first_polls.fetch_add(1, Ordering::SeqCst);
@@ -280,7 +280,7 @@ impl Node for CancelDeadlineNode {
             };
             ctx.wait_deadline(Instant::now() + delay);
         }
-        Ok(Tick::Idle)
+        Ok(Polled::Idle)
     }
 }
 

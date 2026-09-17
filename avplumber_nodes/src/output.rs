@@ -42,7 +42,6 @@ use avplumber_f7k::factory::{BuildCtx, NodeSpec};
 use avplumber_f7k::graph::error::{NodeError, NodePhase};
 use avplumber_f7k::graph::grain::{Grain, PacketExt};
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
-use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{MuxStream, Spec};
 use avplumber_f7k::graph::timebase::MILLISECONDS;
@@ -50,7 +49,7 @@ use avplumber_f7k::graph::timestamp::Ts;
 use avplumber_f7k::graph::timestamp::rescale;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
-use avplumber_f7k::node_api::{Blocking, BlockingIo, InputHandler, SingleInput};
+use avplumber_f7k::node_api::{Blocking, BlockingIo, EofAction, InputHandler, SingleInput};
 
 /// C++ `errors_ > 20`: a muxer that rejects one packet is usually still usable,
 /// one that rejects twenty in a row is not.
@@ -258,14 +257,14 @@ impl InputHandler for StreamOutput {
     /// accepted for the file.
     fn on_flush(&self) {}
 
-    fn on_eof(&self) -> Result<Processed, NodeError> {
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
         log::info!(
             "{}: end of stream, finishing {}",
             self.io.name,
             self.params.url
         );
         // The trailer is `stop`'s job, which runs as soon as this returns.
-        Ok(Processed::Done)
+        Ok(EofAction::Done)
     }
 }
 

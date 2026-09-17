@@ -10,9 +10,10 @@
 
 use std::collections::VecDeque;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::graph::edge::{Edge, Push};
+use crate::graph::edge::{Edge, EdgeEvent, Push};
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::grain::Grain;
 use crate::graph::node::Polled;
@@ -41,6 +42,9 @@ pub enum DrainPending {
 pub struct PollIo {
     io: Io,
     pending: Mutex<VecDeque<Grain>>,
+    /// Set when [`Reaction::ProducedThenEof`](crate::node_api::single_input::Reaction::ProducedThenEof)
+    /// stashed the last buffers: after they drain, push `Eof` and finish.
+    eof_after_pending: AtomicBool,
 }
 
 impl PollIo {
@@ -48,11 +52,13 @@ impl PollIo {
         Self {
             io: Io::new(name, NodePhase::Poll),
             pending: Mutex::new(VecDeque::new()),
+            eof_after_pending: AtomicBool::new(false),
         }
     }
 
     pub fn clear_pending(&self) {
         self.pending.lock().unwrap().clear();
+        self.eof_after_pending.store(false, Ordering::Release);
     }
 
     pub fn extend_pending(&self, buffers: impl IntoIterator<Item = Grain>) {
@@ -96,6 +102,25 @@ impl PollIo {
             }
         }
         DrainPending::Drained
+    }
+
+    pub fn request_eof_after_pending(&self) {
+        self.eof_after_pending.store(true, Ordering::Release);
+    }
+
+    fn take_eof_after_pending(&self) -> bool {
+        self.eof_after_pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// After the stash is empty: if a drain-at-eof asked to finish, forward
+    /// `Eof` and say the node is done.
+    fn finish_if_eof(&self, output: &Arc<dyn Edge>) -> Option<Polled> {
+        if self.take_eof_after_pending() {
+            output.push_event(EdgeEvent::Eof);
+            Some(Polled::Done)
+        } else {
+            None
+        }
     }
 }
 
@@ -181,7 +206,11 @@ impl<N: PollInput> PollNode for N {
         match io.drain_pending(ctx, &input, &output) {
             DrainPending::Parked => return Ok(Polled::Idle),
             DrainPending::Closed => return Ok(Polled::Done),
-            DrainPending::Drained => {}
+            DrainPending::Drained => {
+                if let Some(done) = io.finish_if_eof(&output) {
+                    return Ok(done);
+                }
+            }
         }
         if output.is_full() && !output.is_closed() {
             ctx.wait_writable(output);
@@ -206,6 +235,15 @@ impl<N: PollInput> PollNode for N {
                     DrainPending::Parked => Polled::Idle,
                     DrainPending::Closed => Polled::Done,
                     DrainPending::Drained => Polled::Again,
+                })
+            }
+            Reaction::ProducedThenEof(buffers) => {
+                io.extend_pending(buffers);
+                io.request_eof_after_pending();
+                Ok(match io.drain_pending(ctx, &input, &output) {
+                    DrainPending::Parked => Polled::Idle,
+                    DrainPending::Closed => Polled::Done,
+                    DrainPending::Drained => io.finish_if_eof(&output).unwrap_or(Polled::Done),
                 })
             }
         }

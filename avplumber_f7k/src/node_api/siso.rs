@@ -21,109 +21,213 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::graph::edge::{Edge, Push};
+use crate::graph::edge::{Edge, EdgeEvent, Push};
 use crate::graph::error::{NodeError, NodePhase};
 use crate::graph::grain::Grain;
 use crate::graph::node::{Node, NodeFuture, NodeKind};
+use crate::graph::pad::NodePads;
 use crate::graph::spec::Spec;
 use crate::graph::timestamp::Ts;
 use crate::node_api::blocking::{Blocking, BlockingIo};
 use crate::node_api::io::Io;
 use crate::node_api::poll::Polling;
 use crate::node_api::poll_input::{PollInput, PollIo};
-use crate::node_api::single_input::{InputHandler, Reaction, SingleInput, react};
+use crate::node_api::single_input::{EofAction, InputHandler, Reaction, SingleInput, react};
 
 /// Per-buffer transform whose codec/size/layout state is rebuilt from `Spec`.
 ///
 /// Single input, single output — the C++ `NodeSISO` case. Not a container
-/// node (`AVFormatContext` / mux / demux).
+/// node (`AVFormatContext` / mux / demux), and not a codec that parks on
+/// `EAGAIN` (those stay on [`SingleInput`](crate::node_api::SingleInput)).
 ///
-/// Most filters, rescalers, resamplers, and bitstream filters cannot process
-/// a buffer until the stream `Spec` is known, and must rebuild that state
-/// when it changes mid-stream. `Inner` is that state: `on_spec` constructs
-/// it, `process` uses it. There is no `Inner` until the first `Spec` arrives
-/// (the edge always delivers a latched `Spec` before buffers).
+/// `Inner` is processing state: `on_spec` constructs it, `process` / `on_eof`
+/// use it. There is no `Inner` until the first `Spec` arrives; buffers before
+/// that are dropped and counted. An identical re-delivery is a no-op in the
+/// adapter (`Spec::same_as`); a changed spec replaces `Inner`.
 ///
 /// Three `on_spec` shapes, same hook:
-/// - identity: return the incoming `Spec` and a dummy `Inner` (firewall);
-/// - query: read the format, configure `Inner`, forward the same `Spec`
-///   (encoder);
-/// - transform: return a *new* `Spec` describing the output
-///   (rescale, resample, filters). Downstream readers see the transformed
+/// - identity: return the incoming `Spec` and a dummy `Inner`;
+/// - query: read the format, configure `Inner`, forward the same `Spec`;
+/// - transform: return a *new* `Spec` describing the output (rescale,
+///   resample, bitstream filter). Downstream readers see the transformed
 ///   format on their adjacent edge, not the original.
 ///
-/// `process` returning `Ok(None)` drops the buffer without producing output.
-/// Wrap in a schedule-specific adapter to get a `Node`.
+/// `process` returns every grain this input produced: empty to drop, one to
+/// forward, several when one input becomes many. `on_eof` is the same for
+/// whatever was still inside `Inner`. Wrap in a schedule-specific adapter to
+/// get a `Node`.
 pub trait SisoNode: Send + Sync + 'static {
     type Inner: Send;
 
     fn name(&self) -> &str;
+
+    /// For the media-type check at connect. Declaring none skips the check.
+    fn pads(&self) -> NodePads {
+        NodePads::default()
+    }
+
     /// Opts `SisoPollAdapter` into Direct input. Return `true` only when
-    /// `on_spec` and `process` are guaranteed not to return `Err`.
+    /// `on_spec`, `process` and `on_eof` are guaranteed not to return `Err`.
     fn direct_consumer_is_infallible(&self) -> bool {
         false
     }
+
     fn on_spec(&self, spec: &Spec) -> Result<(Self::Inner, Spec), String>;
-    fn process(&self, inner: &mut Self::Inner, buf: Grain) -> Result<Option<Grain>, String>;
-    fn on_flush(&self, _inner: &mut Self::Inner) {}
+
+    fn process(&self, inner: &mut Self::Inner, buf: Grain) -> Result<Vec<Grain>, String>;
+
+    fn flush(&self, _inner: &mut Self::Inner) {}
+
     /// See [`InputHandler::on_flush_stop`].
-    fn on_flush_stop(&self, _inner: &mut Self::Inner, _resume_at: Option<Ts>) {}
+    fn flush_stop(&self, _inner: &mut Self::Inner, _resume_at: Option<Ts>) {}
+
+    /// Drain anything still inside `Inner`. Default: nothing. The adapter
+    /// pushes the result, then forwards `Eof` and finishes.
+    fn on_eof(&self, _inner: &mut Self::Inner) -> Result<Vec<Grain>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Start of a run, with `Inner` already installed when the spec survived
+    /// from the previous run. Flush codec buffers here; do not drop `Inner`.
+    fn start(&self, _inner: &mut Self::Inner) {}
+}
+
+struct SisoState<I> {
+    inner: Option<I>,
+    input_spec: Option<Spec>,
+    dropped_early: u64,
+}
+
+impl<I> Default for SisoState<I> {
+    fn default() -> Self {
+        Self {
+            inner: None,
+            input_spec: None,
+            dropped_early: 0,
+        }
+    }
 }
 
 /// The [`InputHandler`] every adapter drives: the `Inner` and the
 /// [`SisoNode`] hooks behind the generic ones.
 struct SisoCore<F: SisoNode> {
     f: F,
-    inner: Mutex<Option<F::Inner>>,
+    state: Mutex<SisoState<F::Inner>>,
 }
 
 impl<F: SisoNode> SisoCore<F> {
     fn new(f: F) -> Self {
         Self {
             f,
-            inner: Mutex::new(None),
+            state: Mutex::new(SisoState::default()),
         }
     }
 
     fn error(&self, phase: NodePhase, message: impl Into<String>) -> NodeError {
         NodeError::new(self.f.name(), phase, message)
     }
+
+    fn start_run(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.dropped_early = 0;
+        if let Some(inner) = state.inner.as_mut() {
+            self.f.start(inner);
+        }
+    }
 }
 
 impl<F: SisoNode> InputHandler for SisoCore<F> {
     fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(known) = &state.input_spec {
+            if known.same_as(&spec) {
+                log::debug!("{}: input spec re-delivered unchanged", self.f.name());
+                return Ok(None);
+            }
+            log::info!("{}: input format changed, rebuilding", self.f.name());
+        }
         let (inner, out_spec) = self
             .f
             .on_spec(&spec)
             .map_err(|message| self.error(NodePhase::Spec, message))?;
-        *self.inner.lock().unwrap() = Some(inner);
+        state.inner = Some(inner);
+        state.input_spec = Some(spec);
         Ok(Some(out_spec))
     }
 
     fn on_buffer(&self, buf: Grain) -> Result<Vec<Grain>, NodeError> {
-        let mut guard = self.inner.lock().unwrap();
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| self.error(NodePhase::Process, "buffer received before initial Spec"))?;
-        Ok(self
-            .f
+        let mut state = self.state.lock().unwrap();
+        let Some(inner) = state.inner.as_mut() else {
+            state.dropped_early += 1;
+            return Ok(Vec::new());
+        };
+        self.f
             .process(inner, buf)
-            .map_err(|message| self.error(NodePhase::Process, message))?
-            .into_iter()
-            .collect())
+            .map_err(|message| self.error(NodePhase::Process, message))
     }
 
     fn on_flush(&self) {
-        if let Some(inner) = self.inner.lock().unwrap().as_mut() {
-            self.f.on_flush(inner);
+        if let Some(inner) = self.state.lock().unwrap().inner.as_mut() {
+            self.f.flush(inner);
         }
     }
 
     fn on_flush_stop(&self, resume_at: Option<Ts>) {
-        if let Some(inner) = self.inner.lock().unwrap().as_mut() {
-            self.f.on_flush_stop(inner, resume_at);
+        if let Some(inner) = self.state.lock().unwrap().inner.as_mut() {
+            self.f.flush_stop(inner, resume_at);
         }
     }
+
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(inner) = state.inner.as_mut() else {
+            return Ok(EofAction::Done);
+        };
+        let produced = self
+            .f
+            .on_eof(inner)
+            .map_err(|message| self.error(NodePhase::Process, message))?;
+        if produced.is_empty() {
+            Ok(EofAction::Done)
+        } else {
+            Ok(EofAction::Emit(produced))
+        }
+    }
+
+    fn on_closed(&self) {
+        let n = self.state.lock().unwrap().dropped_early;
+        if n > 0 {
+            log::info!(
+                "{}: dropped {n} buffer(s) that arrived before the input spec",
+                self.f.name()
+            );
+        }
+    }
+}
+
+macro_rules! impl_siso_input_handler {
+    ($ty:ident) => {
+        impl<F: SisoNode> InputHandler for $ty<F> {
+            fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
+                self.core.on_spec(spec)
+            }
+            fn on_buffer(&self, buf: Grain) -> Result<Vec<Grain>, NodeError> {
+                self.core.on_buffer(buf)
+            }
+            fn on_flush(&self) {
+                self.core.on_flush()
+            }
+            fn on_flush_stop(&self, resume_at: Option<Ts>) {
+                self.core.on_flush_stop(resume_at)
+            }
+            fn on_eof(&self) -> Result<EofAction, NodeError> {
+                self.core.on_eof()
+            }
+            fn on_closed(&self) {
+                self.core.on_closed()
+            }
+        }
+    };
 }
 
 /// The blocking body: a [`SingleInput`] over [`SisoCore`], so the loop is the
@@ -145,27 +249,19 @@ impl<F: SisoNode> Blocking<SisoBlocking<F>> {
     }
 }
 
-impl<F: SisoNode> InputHandler for SisoBlocking<F> {
-    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
-        self.core.on_spec(spec)
-    }
-
-    fn on_buffer(&self, buf: Grain) -> Result<Vec<Grain>, NodeError> {
-        self.core.on_buffer(buf)
-    }
-
-    fn on_flush(&self) {
-        self.core.on_flush()
-    }
-
-    fn on_flush_stop(&self, resume_at: Option<Ts>) {
-        self.core.on_flush_stop(resume_at)
-    }
-}
+impl_siso_input_handler!(SisoBlocking);
 
 impl<F: SisoNode> SingleInput for SisoBlocking<F> {
     fn io(&self) -> &BlockingIo {
         &self.io
+    }
+
+    fn pads(&self) -> NodePads {
+        self.core.f.pads()
+    }
+
+    fn start(&self) {
+        self.core.start_run();
     }
 }
 
@@ -194,31 +290,23 @@ impl<F: SisoNode> Polling<SisoPolling<F>> {
     }
 }
 
-impl<F: SisoNode> InputHandler for SisoPolling<F> {
-    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
-        self.core.on_spec(spec)
-    }
-
-    fn on_buffer(&self, buf: Grain) -> Result<Vec<Grain>, NodeError> {
-        self.core.on_buffer(buf)
-    }
-
-    fn on_flush(&self) {
-        self.core.on_flush()
-    }
-
-    fn on_flush_stop(&self, resume_at: Option<Ts>) {
-        self.core.on_flush_stop(resume_at)
-    }
-}
+impl_siso_input_handler!(SisoPolling);
 
 impl<F: SisoNode> PollInput for SisoPolling<F> {
     fn io(&self) -> &PollIo {
         &self.io
     }
 
+    fn pads(&self) -> NodePads {
+        self.core.f.pads()
+    }
+
     fn direct_consumer_is_infallible(&self) -> bool {
         self.core.f.direct_consumer_is_infallible()
+    }
+
+    fn start(&self) {
+        self.core.start_run();
     }
 }
 
@@ -247,6 +335,14 @@ impl<F: SisoNode> Node for SisoAsyncAdapter<F> {
         NodeKind::Async
     }
 
+    fn pads(&self) -> NodePads {
+        self.core.f.pads()
+    }
+
+    fn start(&self) {
+        self.core.start_run();
+    }
+
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         self.io.input_slot.bind(edge);
     }
@@ -272,25 +368,29 @@ impl<F: SisoNode> Node for SisoAsyncAdapter<F> {
                     }
                     continue;
                 };
-                match react(&self.core, Some(&out), item)? {
-                    Reaction::Again => {}
+                let (buffers, then_eof) = match react(&self.core, Some(&out), item)? {
+                    Reaction::Again => continue,
                     Reaction::Done => return Ok(()),
-                    Reaction::Produced(buffers) => {
-                        for mut buf in buffers {
-                            loop {
-                                match out.offer(buf) {
-                                    Ok(()) => break,
-                                    Err((Push::Dropped, _)) => break,
-                                    Err((Push::Closed, _)) => return Ok(()),
-                                    Err((Push::Full, back)) => {
-                                        buf = back;
-                                        out.wait_writable().await;
-                                    }
-                                    Err((Push::Accepted, _)) => break,
-                                }
+                    Reaction::Produced(buffers) => (buffers, false),
+                    Reaction::ProducedThenEof(buffers) => (buffers, true),
+                };
+                for mut buf in buffers {
+                    loop {
+                        match out.offer(buf) {
+                            Ok(()) => break,
+                            Err((Push::Dropped, _)) => break,
+                            Err((Push::Closed, _)) => return Ok(()),
+                            Err((Push::Full, back)) => {
+                                buf = back;
+                                out.wait_writable().await;
                             }
+                            Err((Push::Accepted, _)) => break,
                         }
                     }
+                }
+                if then_eof {
+                    out.push_event(EdgeEvent::Eof);
+                    return Ok(());
                 }
             }
         })
@@ -299,7 +399,7 @@ impl<F: SisoNode> Node for SisoAsyncAdapter<F> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll as TaskPoll, Waker};
     use std::time::Duration;
 
@@ -326,8 +426,27 @@ mod tests {
         fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
             Ok(((), spec.clone()))
         }
-        fn process(&self, _inner: &mut (), buf: Grain) -> Result<Option<Grain>, String> {
-            Ok(Some(buf))
+        fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+            Ok(vec![buf])
+        }
+    }
+
+    struct CountingSpec {
+        name: &'static str,
+        specs: Arc<AtomicUsize>,
+    }
+
+    impl SisoNode for CountingSpec {
+        type Inner = ();
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
+            self.specs.fetch_add(1, Ordering::SeqCst);
+            Ok(((), spec.clone()))
+        }
+        fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+            Ok(vec![buf])
         }
     }
 
@@ -346,7 +465,7 @@ mod tests {
             Err("unsupported input format".into())
         }
 
-        fn process(&self, _inner: &mut (), _buf: Grain) -> Result<Option<Grain>, String> {
+        fn process(&self, _inner: &mut (), _buf: Grain) -> Result<Vec<Grain>, String> {
             unreachable!("a failed Spec must not install processing state")
         }
     }
@@ -364,14 +483,56 @@ mod tests {
             Ok(((), spec.clone()))
         }
 
-        fn process(&self, _inner: &mut (), _buf: Grain) -> Result<Option<Grain>, String> {
+        fn process(&self, _inner: &mut (), _buf: Grain) -> Result<Vec<Grain>, String> {
             Err("decoder rejected buffer".into())
         }
     }
 
+    struct Dup;
+
+    impl SisoNode for Dup {
+        type Inner = ();
+        fn name(&self) -> &str {
+            "dup"
+        }
+        fn pads(&self) -> NodePads {
+            NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
+        }
+        fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
+            Ok(((), spec.clone()))
+        }
+        fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+            Ok(vec![buf.clone(), buf])
+        }
+    }
+
+    /// Holds each buffer until the next one (or EOF) so a 1:1 delay still
+    /// drains the last grain from `on_eof`.
+    struct Delay;
+
+    impl SisoNode for Delay {
+        type Inner = Option<Grain>;
+        fn name(&self) -> &str {
+            "delay"
+        }
+        fn on_spec(&self, spec: &Spec) -> Result<(Option<Grain>, Spec), String> {
+            Ok((None, spec.clone()))
+        }
+        fn process(&self, inner: &mut Option<Grain>, buf: Grain) -> Result<Vec<Grain>, String> {
+            Ok(inner.replace(buf).into_iter().collect())
+        }
+        fn on_eof(&self, inner: &mut Option<Grain>) -> Result<Vec<Grain>, String> {
+            Ok(inner.take().into_iter().collect())
+        }
+    }
+
     fn video_spec() -> Spec {
+        video_spec_width(8)
+    }
+
+    fn video_spec_width(width: i32) -> Spec {
         Spec::Video {
-            width: 8,
+            width,
             height: 8,
             pix_fmt: 0,
             sw_pix_fmt: -1,
@@ -405,6 +566,21 @@ mod tests {
             }
         }
         pts
+    }
+
+    fn drain_kinds(edge: &dyn Edge) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        while let Some(item) = edge.try_take() {
+            out.push(match item {
+                EdgeItem::Buffer(_) => "buffer",
+                EdgeItem::Event(EdgeEvent::Spec(_)) => "spec",
+                EdgeItem::Event(EdgeEvent::FlushStart) => "flush-start",
+                EdgeItem::Event(EdgeEvent::FlushStop { .. }) => "flush-stop",
+                EdgeItem::Event(EdgeEvent::Drain) => "drain",
+                EdgeItem::Event(EdgeEvent::Eof) => "eof",
+            });
+        }
+        out
     }
 
     fn pump_until_idle(node: &impl Node, ctx: &mut NodePollContext) {
@@ -459,6 +635,118 @@ mod tests {
         let _ = output.try_take();
         assert_eq!(node.poll(&mut ctx).unwrap(), Polled::Again);
         assert_eq!(take_bufs(&*output), vec![9]);
+    }
+
+    /// Production change that would make this fail: `SisoCore::on_spec` always
+    /// constructing a new `Inner` and republishing, even when the input format
+    /// is the one already installed.
+    #[test]
+    fn an_unchanged_spec_is_not_rebuilt_or_republished() {
+        let specs = Arc::new(AtomicUsize::new(0));
+        let node = SisoPollAdapter::new(CountingSpec {
+            name: "c",
+            specs: specs.clone(),
+        });
+        let (input, output) = bind_pair(&node);
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        let mut ctx = poll_ctx();
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(specs.load(Ordering::SeqCst), 1);
+        assert_eq!(drain_kinds(&*output), vec!["spec"]);
+
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(
+            specs.load(Ordering::SeqCst),
+            1,
+            "on_spec must not run for an identical re-delivery"
+        );
+        assert!(
+            drain_kinds(&*output).is_empty(),
+            "an unchanged spec must not be republished"
+        );
+    }
+
+    #[test]
+    fn one_buffer_can_become_several() {
+        let node = SisoPollAdapter::new(Dup);
+        let (input, output) = bind_pair(&node);
+        assert_eq!(
+            node.pads(),
+            NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
+        );
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        assert_eq!(input.push(stub(4)), Push::Accepted);
+        let mut ctx = poll_ctx();
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(take_bufs(&*output), vec![4, 4]);
+    }
+
+    #[test]
+    fn on_eof_emits_held_buffers_then_forwards_eof() {
+        let node = SisoAdapter::new(Delay);
+        let (input, output) = bind_pair(&node);
+        node.start();
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        assert_eq!(input.push(stub(1)), Push::Accepted);
+        assert_eq!(input.push(stub(2)), Push::Accepted);
+        input.push_event(EdgeEvent::Eof);
+
+        assert_eq!(node.process().unwrap(), Processed::Again, "spec");
+        assert_eq!(node.process().unwrap(), Processed::Again, "holds 1");
+        assert_eq!(
+            node.process().unwrap(),
+            Processed::Again,
+            "emits 1, holds 2"
+        );
+        assert_eq!(node.process().unwrap(), Processed::Done, "emits 2 then eof");
+        let mut pts = Vec::new();
+        let mut kinds = Vec::new();
+        while let Some(item) = output.try_take() {
+            match item {
+                EdgeItem::Buffer(buf) => {
+                    kinds.push("buffer");
+                    pts.push(buf.ts().val);
+                }
+                EdgeItem::Event(EdgeEvent::Spec(_)) => kinds.push("spec"),
+                EdgeItem::Event(EdgeEvent::Eof) => kinds.push("eof"),
+                EdgeItem::Event(_) => kinds.push("other"),
+            }
+        }
+        assert_eq!(kinds, vec!["spec", "buffer", "buffer", "eof"]);
+        assert_eq!(pts, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_buffer_before_the_spec_is_dropped_not_an_error() {
+        let node = SisoPollAdapter::new(Identity { name: "early" });
+        let (input, output) = bind_pair(&node);
+        assert_eq!(input.push(stub(1)), Push::Accepted);
+        let mut ctx = poll_ctx();
+        pump_until_idle(&node, &mut ctx);
+        assert!(take_bufs(&*output).is_empty());
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        assert_eq!(input.push(stub(2)), Push::Accepted);
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(take_bufs(&*output), vec![2]);
+    }
+
+    #[test]
+    fn a_changed_spec_rebuilds() {
+        let specs = Arc::new(AtomicUsize::new(0));
+        let node = SisoPollAdapter::new(CountingSpec {
+            name: "c",
+            specs: specs.clone(),
+        });
+        let (input, output) = bind_pair(&node);
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        let mut ctx = poll_ctx();
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(drain_kinds(&*output), vec!["spec"]);
+        input.push_event(EdgeEvent::Spec(video_spec_width(16)));
+        pump_until_idle(&node, &mut ctx);
+        assert_eq!(specs.load(Ordering::SeqCst), 2);
+        assert_eq!(drain_kinds(&*output), vec!["spec"]);
     }
 
     fn poll_future_ready<T>(fut: impl std::future::Future<Output = T>) -> T {

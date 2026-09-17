@@ -210,61 +210,9 @@ pub fn audio_spec_of(frame: &AVFrame, time_base: AvpRational) -> Spec {
 }
 
 /// Whether two specs describe the same format, so a re-delivered `Spec` is a
-/// no-op instead of a codec reopen. Time base is part of it: an encoder's
-/// `time_base` comes straight from here.
+/// no-op instead of a codec reopen. Thin wrapper over [`Spec::same_as`].
 pub fn same_spec(a: &Spec, b: &Spec) -> bool {
-    match (a, b) {
-        (
-            Spec::Video {
-                width: aw,
-                height: ah,
-                pix_fmt: af,
-                sw_pix_fmt: asw,
-                frame_rate: ar,
-                sar: asar,
-                time_base: atb,
-            },
-            Spec::Video {
-                width: bw,
-                height: bh,
-                pix_fmt: bf,
-                sw_pix_fmt: bsw,
-                frame_rate: br,
-                sar: bsar,
-                time_base: btb,
-            },
-        ) => (aw, ah, af, asw, ar, asar, atb) == (bw, bh, bf, bsw, br, bsar, btb),
-        (
-            Spec::Audio {
-                sample_rate: ar,
-                sample_fmt: af,
-                layout: al,
-                time_base: atb,
-            },
-            Spec::Audio {
-                sample_rate: br,
-                sample_fmt: bf,
-                layout: bl,
-                time_base: btb,
-            },
-        ) => (ar, af, al, atb) == (br, bf, bl, btb),
-        (Spec::Packet(a), Spec::Packet(b)) => same_packet_spec(a, b),
-        (Spec::Mux { streams: a }, Spec::Mux { streams: b }) => {
-            a.len() == b.len()
-                && a.iter().zip(b).all(|(a, b)| {
-                    same_packet_spec(&a.spec, &b.spec) && a.id == b.id && a.metadata == b.metadata
-                })
-        }
-        _ => false,
-    }
-}
-
-/// One stream's codec parameters, shared by the two variants that carry them.
-fn same_packet_spec(a: &PacketSpec, b: &PacketSpec) -> bool {
-    a.codec_id == b.codec_id
-        && a.time_base == b.time_base
-        && a.frame_rate == b.frame_rate
-        && a.extra_data == b.extra_data
+    a.same_as(b)
 }
 
 /// The encoder's side of the same contract: a `Spec::Video`/`Spec::Audio` fills

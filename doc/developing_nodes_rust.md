@@ -283,8 +283,9 @@ rather than reaching into the slots:
 `pads` declares what the node connects to. Use the constructors:
 `NodePads::input(media)` for a sink, `NodePads::output(media)` for a source,
 `NodePads::siso(in, out)` for a transform. A node that declares no pads skips
-the media-type check at connect; `null_sink` does that on purpose because it
-accepts everything, and its comment says so. Everything else declares pads.
+the media-type check at connect; `null_sink` and `realtime` do that on purpose
+because they accept everything, and their comments say so. Everything else
+declares pads.
 
 The names `in`/`out` are conventions, not requirements: a script's `src`/`dst`
 binds to the single declared pad on that side whatever it is called. Names only
@@ -343,9 +344,9 @@ impl InputHandler for Encoder {
         // flush_buffers, reset the pump, forget the timestamps.
     }
 
-    fn on_eof(&self) -> Result<Processed, NodeError> {
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
         // Start the drain; `before_take` finishes it.
-        Ok(Processed::Again)
+        Ok(EofAction::Again)
     }
 
     fn on_closed(&self) {
@@ -377,9 +378,13 @@ The rules that follow from the loop:
 - **`before_take` is for output that is not a reaction to an input**: a codec's
   pending frames, the drain after `Eof`, a retry of an input the codec refused.
   `Some` makes it the step's result and skips the read.
-- **`on_eof` chooses between finishing and draining.** `Done`, the default,
-  forwards `Eof` and finishes. A codec returns `Again`; its `before_take`
-  forwards `Eof` itself once the pump is empty, then returns `Some(Done)`.
+- **`on_eof` chooses between finishing and draining.** [`EofAction::Done`], the
+  default, forwards `Eof` and finishes. A codec returns [`EofAction::Again`];
+  its `before_take` forwards `Eof` itself once the pump is empty, then returns
+  `Some(Done)`. A transform that can drain in this call returns
+  [`EofAction::Emit`]: the adapter pushes those buffers, then `Eof`, then
+  finishes. `SisoNode::on_eof` is that case; the adapter maps the `Vec` to
+  `Emit`.
 - **Codec `EAGAIN` is not an error.** `libav::pump::Pump` implements the
   send/receive/EAGAIN protocol for both directions, stashes the refused input,
   queues the outputs, and reports `Progress::Stalled` when nothing moved, which
@@ -400,8 +405,34 @@ libav; `self.io.wait(ms)` for an interruptible sleep.
 
 For a node that is a pure per-buffer transform with state rebuilt from `Spec`
 (a filter, a rescaler, a bitstream filter), do not write even the hooks:
-implement `SisoNode` (`on_spec`, `process`, `on_flush`) and register
-`SisoAdapter<Yours>`, which is a `SingleInput` over it.
+implement `SisoNode` (`on_spec`, `process`, `flush`, `on_eof`) and register
+`SisoAdapter<Yours>` (blocking) or `SisoPollAdapter<Yours>` (cooperative).
+`process` returns every grain that input produced — empty, one, or several —
+and `on_eof` drains whatever is still inside `Inner`. The adapter owns the
+mutex, skips an unchanged re-delivered spec, drops buffers that arrive before
+the first spec, and pushes `Eof` after the drain. encode/decode stay on
+`SingleInput` because they park on codec `EAGAIN`.
+
+```rust
+impl SisoNode for BitstreamFilter {
+    type Inner = FilterState;
+
+    fn name(&self) -> &str { &self.name }
+    fn pads(&self) -> NodePads {
+        NodePads::siso(AvpMediaType::PACKET, AvpMediaType::PACKET)
+    }
+    fn on_spec(&self, spec: &Spec) -> Result<(FilterState, Spec), String> {
+        // Open on the input packet spec; return the filter's output spec.
+    }
+    fn process(&self, inner: &mut FilterState, buf: Grain) -> Result<Vec<Grain>, String> {
+        // Send one packet, return every packet the filter gives back.
+    }
+    fn on_eof(&self, inner: &mut FilterState) -> Result<Vec<Grain>, String> {
+        // Send null, return the rest.
+    }
+    fn flush(&self, inner: &mut FilterState) { /* flush the filter */ }
+}
+```
 
 ## The poll body
 
@@ -470,9 +501,11 @@ restarts. So:
   `mux` publishes `Spec::Mux`, the whole container description.
 - **A consumer configures itself from the spec it receives.** The decoder
   opens on `Spec::Packet`; `output` creates the container from `Spec::Mux`.
-- **A re-delivered spec is compared, not obeyed.** `libav::codec::same_spec`
-  says whether the new one differs. Equal: nothing to do, and say so at debug
-  level. Different: reopen, and say so at info level. The decoder is the model.
+- **A re-delivered spec is compared, not obeyed.** [`Spec::same_as`] says whether
+  the new one differs (`libav::codec::same_spec` is the same test). Equal:
+  nothing to do, and say so at debug level. Different: reopen, and say so at
+  info level. `SisoAdapter` does this comparison itself; the decoder is the
+  model for nodes that still write `on_spec` by hand.
 - **A buffer that arrives before its spec is dropped and counted**, never
   processed with guessed parameters. The count is logged once, at finish
   (`log_drops`).
@@ -533,6 +566,7 @@ answers:
      `video_spec_of`, `audio_spec_of`, `packet_spec_of`, `same_spec`,
      `parse_pix_fmt`/`parse_sample_fmt` (the `?`-prefixed "preferred, not
      required" syntax), `codec_name`, `pix_fmt_name`.
+   - `bsf::Context`: `av_bsf_list_parse_str`, send/receive, owned drop.
    - `dict::Options`: a JSON object to an `AVDictionary`, and back, with
      `warn_leftovers` for what libav did not consume. Never build a dictionary
      by hand in a node.
@@ -564,8 +598,8 @@ before writing a fourth copy:
 | which hook an input item calls, forwarding of control events | every single-input node | `react`, through `SingleInput` and the Siso adapters |
 | "output first, then codec, then input" step order | decode, encode | `before_take` of both; a shared codec-node layer over `Pump` is the next extraction if a third codec node appears |
 | pending buffer stashed on `Full` | demux, mux | `SisoPollAdapter` for the single-output case |
-| "input spec re-delivered unchanged" | decode, encode, output | `same_spec` plus the same three-line `if` |
-| drop counters logged at finish | every node | `log_drops` per node |
+| "input spec re-delivered unchanged" | decode, encode, output | `Spec::same_as`; `SisoCore` does it for transforms |
+| drop counters logged at finish | every node | `log_drops` per node; `SisoCore` logs early buffers |
 | two type names over one parameter struct | decode, encode | `#[serde(transparent)]` newtypes |
 
 ## Cleanliness, in one list

@@ -76,7 +76,7 @@ impl NodePads {
         }
     }
 
-    /// `in` and `out`: a transform.
+    /// `in` and `out`: a single-input, single-output, processing node.
     pub fn siso(input: AvpMediaType, output: AvpMediaType) -> Self {
         Self {
             sources: vec![PadDecl::new("in", input)],

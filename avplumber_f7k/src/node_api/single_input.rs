@@ -60,17 +60,29 @@ pub trait InputHandler: Send + Sync + 'static {
     /// produces goes out the usual way, from `before_take`.
     fn on_drain(&self) {}
 
-    /// The input ended. `Done` finishes the node, after `Eof` is forwarded. A
-    /// node that has to drain first — a codec — returns `Again`, keeps stepping
-    /// from [`SingleInput::before_take`], and forwards `Eof` itself when the
-    /// drain is over.
-    fn on_eof(&self) -> Result<Processed, NodeError> {
-        Ok(Processed::Done)
+    /// The input ended. [`EofAction::Done`] finishes the node after `Eof` is
+    /// forwarded. A codec that has to drain over several steps returns
+    /// [`EofAction::Again`] and emits from [`SingleInput::before_take`]. A
+    /// transform that can drain in this call returns [`EofAction::Emit`]: those
+    /// buffers go out, then `Eof`, then the node finishes.
+    fn on_eof(&self) -> Result<EofAction, NodeError> {
+        Ok(EofAction::Done)
     }
 
     /// The input came back empty: the edge is closed, or a stop interrupted the
     /// wait. The node is finished; this is the place for a final log line.
     fn on_closed(&self) {}
+}
+
+/// What [`InputHandler::on_eof`] decided.
+pub enum EofAction {
+    /// Forward `Eof` and finish.
+    Done,
+    /// Do not forward yet; later steps (typically [`SingleInput::before_take`])
+    /// will emit remaining output and the `Eof` themselves.
+    Again,
+    /// Push these, then forward `Eof` and finish.
+    Emit(Vec<Grain>),
 }
 
 /// What [`react`] made of one item.
@@ -80,6 +92,8 @@ pub enum Reaction {
     /// The handler produced one or more buffers; the caller pushes them the
     /// way its body pushes.
     Produced(Vec<Grain>),
+    /// Push these, then forward `Eof` and finish. [`EofAction::Emit`].
+    ProducedThenEof(Vec<Grain>),
 }
 
 /// Classifies one item and calls the matching hook, forwarding the control
@@ -122,11 +136,16 @@ pub fn react<H: InputHandler + ?Sized>(
             Ok(Reaction::Again)
         }
         EdgeItem::Event(EdgeEvent::Eof) => match handler.on_eof()? {
-            Processed::Again => Ok(Reaction::Again),
-            Processed::Done => {
+            EofAction::Again => Ok(Reaction::Again),
+            EofAction::Done => {
                 forward(EdgeEvent::Eof);
                 Ok(Reaction::Done)
             }
+            EofAction::Emit(buffers) if buffers.is_empty() => {
+                forward(EdgeEvent::Eof);
+                Ok(Reaction::Done)
+            }
+            EofAction::Emit(buffers) => Ok(Reaction::ProducedThenEof(buffers)),
         },
     }
 }
@@ -165,6 +184,26 @@ pub trait SingleInput: InputHandler {
     fn interrupt(&self) {}
 }
 
+fn push_all(
+    io: &BlockingIo,
+    input: &Arc<dyn Edge>,
+    buffers: Vec<Grain>,
+    then_eof: bool,
+) -> Result<Processed, NodeError> {
+    let out = io.output()?;
+    for buffer in buffers {
+        if io.push_from(input, &out, buffer)? == Processed::Done {
+            return Ok(Processed::Done);
+        }
+    }
+    if then_eof {
+        out.push_event(EdgeEvent::Eof);
+        Ok(Processed::Done)
+    } else {
+        Ok(Processed::Again)
+    }
+}
+
 impl<N: SingleInput> BlockingNode for N {
     fn io(&self) -> &BlockingIo {
         SingleInput::io(self)
@@ -190,15 +229,8 @@ impl<N: SingleInput> BlockingNode for N {
         match react(self, io.output_slot.get().as_ref(), item)? {
             Reaction::Again => Ok(Processed::Again),
             Reaction::Done => Ok(Processed::Done),
-            Reaction::Produced(buffers) => {
-                let out = io.output()?;
-                for buffer in buffers {
-                    if io.push_from(&input, &out, buffer)? == Processed::Done {
-                        return Ok(Processed::Done);
-                    }
-                }
-                Ok(Processed::Again)
-            }
+            Reaction::Produced(buffers) => push_all(io, &input, buffers, false),
+            Reaction::ProducedThenEof(buffers) => push_all(io, &input, buffers, true),
         }
     }
 
@@ -281,10 +313,10 @@ mod tests {
                 .store(resume_at.map_or(i64::MIN, |ts| ts.val), Ordering::SeqCst);
         }
 
-        fn on_eof(&self) -> Result<Processed, NodeError> {
+        fn on_eof(&self) -> Result<EofAction, NodeError> {
             self.saw("eof");
             self.drain_steps.store(1, Ordering::SeqCst);
-            Ok(Processed::Again)
+            Ok(EofAction::Again)
         }
 
         fn on_closed(&self) {

@@ -21,7 +21,7 @@
 //!   keeps;
 //! - [`siso`] — the linear single-input / single-output transform (C++
 //!   `NodeSISO`): [`SisoNode`] plus one wrapper per executor kind, built on the
-//!   above.
+//!   above. `process` is 1:N; `on_eof` drains; an unchanged spec is skipped.
 //!
 //! Choosing between the node traits: a body that calls libav, or blocks on
 //! `take(-1)`, is blocking — a [`SingleInput`] if it has one input, a
@@ -50,5 +50,5 @@ pub use blocking::{
 pub use io::{EdgeSlot, Io, flush_at_head};
 pub use poll::{PollNode, Polling};
 pub use poll_input::{DrainPending, PollInput, PollIo};
-pub use single_input::{InputHandler, Reaction, SingleInput, react};
+pub use single_input::{EofAction, InputHandler, Reaction, SingleInput, react};
 pub use siso::{SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter};

@@ -1297,6 +1297,98 @@ fn reconstruction_rebinds_fresh_nodes_to_existing_buffered_edges() {
     inst.stop_group("g").unwrap();
 }
 
+/// A hop that declares no pads (accepts every media type). Reconstruction must
+/// still rebind the edges that landed on it: empty pads skip the media check,
+/// they do not mean the vertex has no connections.
+struct UntypedHop {
+    name: String,
+}
+
+impl Node for UntypedHop {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn process(&self) -> Result<Processed, NodeError> {
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(Processed::Again)
+    }
+}
+
+#[test]
+fn reconstruction_rebinds_a_node_that_declared_no_pads() {
+    let inst = Instance::new();
+    register_factory(&inst, "bound_source", |name, _| {
+        Ok(Arc::new(BoundNode {
+            name: name.into(),
+            source: true,
+            fail: false,
+            binds: Arc::new(AtomicUsize::new(0)),
+            observed_edges: Arc::new(Mutex::new(Vec::new())),
+            edge: OnceLock::new(),
+        }))
+    });
+    register_factory(&inst, "untyped_hop", |name, _| {
+        Ok(Arc::new(UntypedHop { name: name.into() }))
+    });
+    register_factory(&inst, "bound_sink", |name, _| {
+        Ok(Arc::new(BoundNode {
+            name: name.into(),
+            source: false,
+            fail: false,
+            binds: Arc::new(AtomicUsize::new(0)),
+            observed_edges: Arc::new(Mutex::new(Vec::new())),
+            edge: OnceLock::new(),
+        }))
+    });
+    inst.create_node(NodeRequest::new(
+        "bound_source",
+        "source",
+        serde_json::json!({}),
+    ))
+    .unwrap();
+    inst.create_node(NodeRequest::new(
+        "untyped_hop",
+        "hop",
+        serde_json::json!({}),
+    ))
+    .unwrap();
+    inst.create_node(NodeRequest::new(
+        "bound_sink",
+        "sink",
+        serde_json::json!({}),
+    ))
+    .unwrap();
+    inst.connect_edge(
+        "up",
+        "source",
+        "out",
+        "hop",
+        "in",
+        EdgeKind::Buffered { capacity: 2 },
+    )
+    .unwrap();
+    inst.connect_edge(
+        "down",
+        "hop",
+        "out",
+        "sink",
+        "in",
+        EdgeKind::Buffered { capacity: 2 },
+    )
+    .unwrap();
+    inst.create_group("g").unwrap();
+    inst.add_group_member("g", "source").unwrap();
+    inst.add_group_member("g", "hop").unwrap();
+    inst.add_group_member("g", "sink").unwrap();
+
+    inst.start_group("g").unwrap();
+    inst.stop_group("g").unwrap();
+    inst.start_group("g")
+        .expect("empty pads still reconstruct with bound edges");
+    inst.stop_group("g").unwrap();
+}
+
 #[test]
 fn idle_binding_after_stop_is_rebound_to_the_next_fresh_generation() {
     let inst = Instance::new();

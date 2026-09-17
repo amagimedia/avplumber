@@ -270,7 +270,9 @@ async fn run_slot(
 
 #[cfg(feature = "async")]
 async fn run_poll(
-    mut step: Box<dyn FnMut(&mut NodePollContext) -> Result<Polled, crate::graph::NodeError> + Send>,
+    mut step: Box<
+        dyn FnMut(&mut NodePollContext) -> Result<Polled, crate::graph::NodeError> + Send,
+    >,
     stop: Arc<AtomicBool>,
     tick: Arc<Wakeup>,
     name: String,

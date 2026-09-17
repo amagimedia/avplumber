@@ -308,11 +308,14 @@ fn validate_vertex_topology(vertex: &Vertex, blueprint: &NodeBlueprint) -> Resul
             blueprint.name
         )));
     }
-    if vertex
-        .sources
-        .keys()
-        .any(|pad| !source_media.contains_key(pad))
-        || vertex.sinks.keys().any(|pad| !sink_media.contains_key(pad))
+    // An empty declaration skips the media-type check (`pad_media`); bound
+    // pads on that side are then unnamed on purpose, not undeclared.
+    if (!source_media.is_empty()
+        && vertex
+            .sources
+            .keys()
+            .any(|pad| !source_media.contains_key(pad)))
+        || (!sink_media.is_empty() && vertex.sinks.keys().any(|pad| !sink_media.contains_key(pad)))
     {
         return Err(CoreError::Invalid(format!(
             "node `{}` has an edge bound to an undeclared pad",

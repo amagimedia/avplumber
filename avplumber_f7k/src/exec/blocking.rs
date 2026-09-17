@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::exec::{Executor, ExecutorState, Generation, NodeOutcome, OutcomeReporter};
-use crate::graph::{Processed, Edge, Node, NodeBody};
+use crate::graph::{Edge, Node, NodeBody, Processed};
 
 pub struct BlockingExecutor {
     inner: Mutex<Inner>,

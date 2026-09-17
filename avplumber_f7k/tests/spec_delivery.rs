@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use avplumber_f7k::{
     AvpMediaType, AvpRational, BufferedEdge, DirectEdge, Edge, EdgeEvent, EdgeItem, Grain, Node,
-    NodeError, NodeKind, NodePollContext, Push, SisoNode, SisoPollAdapter, Spec, Polled, Wakeup,
+    NodeError, NodeKind, NodePollContext, Polled, Push, SisoNode, SisoPollAdapter, Spec, Wakeup,
 };
 
-fn stub(pts: i64) -> Media {
-    Media::Stub {
+fn stub(pts: i64) -> Grain {
+    Grain::Stub {
         kind: AvpMediaType::VIDEO,
         pts,
     }
@@ -81,8 +81,8 @@ impl SisoNode for Forward {
     fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
         Ok(((), spec.clone()))
     }
-    fn process(&self, _inner: &mut (), buf: Media) -> Result<Option<Media>, String> {
-        Ok(Some(buf))
+    fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+        Ok(vec![buf])
     }
 }
 
@@ -93,8 +93,8 @@ fn pump(node: &dyn Node) {
     for _ in 0..64 {
         let mut ctx = NodePollContext::new(cancel.clone(), tick.clone());
         match node.poll(&mut ctx).unwrap() {
-            Tick::Again => continue,
-            Tick::Idle | Tick::Done => break,
+            Polled::Again => continue,
+            Polled::Idle | Polled::Done => break,
         }
     }
 }
@@ -175,12 +175,12 @@ impl Node for PeekPopConsumer {
     fn bind_source(&self, _pad: &str, edge: Arc<dyn Edge>) {
         let _ = self.input.set(edge);
     }
-    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Tick, NodeError> {
+    fn poll(&self, _ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
         let Some(input) = self.input.get() else {
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         };
         let Some(item) = input.peek_clone(0) else {
-            return Ok(Tick::Idle);
+            return Ok(Polled::Idle);
         };
         self.seen.lock().unwrap().push(match item {
             EdgeItem::Buffer(_) => "buffer",
@@ -188,7 +188,7 @@ impl Node for PeekPopConsumer {
             EdgeItem::Event(_) => "event",
         });
         input.pop();
-        Ok(Tick::Again)
+        Ok(Polled::Again)
     }
 }
 
