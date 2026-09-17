@@ -1,16 +1,16 @@
-From fa265dd492f86279de77fa6d9b46a8d0a6955f1d Mon Sep 17 00:00:00 2001
+From 95e6e5f40cf7b9a1edb6ab28a351a8e645c21c1c Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Wed, 16 Sep 2026 22:12:39 +0200
 Subject: [PATCH] avfilter/tonemap_cuda: resolve strict frame color metadata
  and preserve identity buffers
 
 ---
- libavfilter/vf_tonemap_cuda.c  | 81 +++++++++++++++++++++++++++++++---
+ libavfilter/vf_tonemap_cuda.c  | 92 ++++++++++++++++++++++++++++++++--
  libavfilter/vf_tonemap_cuda.cu | 12 +++++
- 2 files changed, 88 insertions(+), 5 deletions(-)
+ 2 files changed, 99 insertions(+), 5 deletions(-)
 
 diff --git a/libavfilter/vf_tonemap_cuda.c b/libavfilter/vf_tonemap_cuda.c
-index 2d7eea2..bd06b71 100644
+index 2d7eea2..f112191 100644
 --- a/libavfilter/vf_tonemap_cuda.c
 +++ b/libavfilter/vf_tonemap_cuda.c
 @@ -59,6 +59,7 @@ enum TonemapTransfer {
@@ -113,7 +113,7 @@ index 2d7eea2..bd06b71 100644
  static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
  {
      AVFilterContext *ctx = link->dst;
-@@ -374,8 +426,25 @@ static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
+@@ -374,8 +426,36 @@ static int tonemap_cuda_filter_frame(AVFilterLink *link, AVFrame *in)
      CUcontext dummy;
      int ret = 0;
  
@@ -124,6 +124,17 @@ index 2d7eea2..bd06b71 100644
 +    s->current_transfer = ret;
 +    if (s->passthrough || (!s->legacy && s->current_transfer == s->transfer_out &&
 +                           s->input_depth == s->output_depth)) {
++        // Identity frames leave with the resolved contract stamped: an assumed
++        // (untagged) SDR input must not stay untagged for the encoder VUI or a
++        // compositor colour check downstream.
++        if (!s->legacy) {
++            int hdr = s->current_transfer != TONEMAP_TRANSFER_SDR;
++            in->color_trc       = s->current_transfer == TONEMAP_TRANSFER_SDR ? AVCOL_TRC_BT709 :
++                                  s->current_transfer == TONEMAP_TRANSFER_HLG ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
++            in->color_primaries = hdr ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
++            in->colorspace      = hdr ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
++            in->color_range     = AVCOL_RANGE_MPEG;
++        }
 +        // Auto mode has a stable output pool even when frame transfers change.
 +        // CUDA buffers remain owned by in->buf; only the compatible pool tag
 +        // changes, so identity frames still require no device copy.
@@ -140,7 +151,7 @@ index 2d7eea2..bd06b71 100644
  
      if (!s->legacy && in->color_range == AVCOL_RANGE_JPEG) {
          av_log(ctx, AV_LOG_ERROR, "Full-range input is unsupported; convert to limited range first\n");
-@@ -420,11 +489,13 @@ static const AVOption tonemap_cuda_options[] = {
+@@ -420,11 +500,13 @@ static const AVOption tonemap_cuda_options[] = {
          { "mobius",   0, 0, AV_OPT_TYPE_CONST, { .i64 = TONEMAP_MOBIUS },   0, 0, FLAGS, .unit = "tonemap" },
      { "transfer", "legacy HDR input transfer (default HLG)", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },
      { "t",        "legacy HDR input transfer (default HLG)", OFFSET(transfer), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, TONEMAP_TRANSFER_PQ, FLAGS, .unit = "transfer" },

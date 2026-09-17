@@ -19,11 +19,10 @@ from _harness import drain, finish, frame_planes, make_avp, start, v210_chain
 from v210_fixture import COLOR, FAMILIES, frame_stride, write_fixture
 
 W, H, FRAMES = 384, 216, 6
-# Tail-guard frames: EOF through the dual-input transition has been seen to drop
-# in-flight trailing frames. With the default margin the scored FRAMES are
-# compared exactly and the run stops before the flush; ``--tail-margin 0``
-# drains to EOF instead and reports how many frames the flush delivered.
-TAIL_MARGIN = 8
+# By default every run drains to EOF and requires the dual-input transition to
+# flush all generated frames (an earlier build dropped in-flight tail frames).
+# ``--tail-margin N`` generates N extra frames and stops after the scored ones.
+TAIL_MARGIN = 0
 TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5))
 
 
@@ -176,9 +175,8 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN):
                 np.testing.assert_array_equal(actual, expected,
                                               err_msg=f"frame {index} plane {plane}")
         assert not errors, errors
-        if not margin:
-            print(f"  flush: eof={state['eof']} delivered {state['count']}/{gen_frames} frames", flush=True)
-        assert state["count"] == FRAMES, f"scored frames {state['count']}/{FRAMES}"
+        expected = gen_frames if not margin else FRAMES
+        assert state["count"] == expected, f"delivered {state['count']}/{expected} frames (eof={state['eof']})"
     finally:
         finish(avp, nodes)
 
@@ -188,7 +186,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
     parser.add_argument("--tail-margin", type=int, default=TAIL_MARGIN,
-                        help="extra generated frames after the scored ones; 0 drains to EOF")
+                        help="extra generated frames after the scored ones (default 0: drain to EOF)")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="avp-mix10-") as root:
         for family in args.families:
