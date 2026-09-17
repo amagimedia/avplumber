@@ -50,9 +50,9 @@ and the filter changes) is base-independent.
 10. **libmxl demuxer and muxer** — [MXL](https://github.com/dmf-mxl/mxl)
     shared-memory flows: demuxer, muxer, URI parser, JSON/diagnostic helpers,
     FATE coverage and `--enable-libmxl` glue. Squashed from `cbcrc/FFmpeg`
-    branch `dmf-mxl/8.1` (pinned at `9eddb90`), which forks from the same
-    n8.1 commit `8/bases.env` pins. Consumed by `demos/mixer/Dockerfile` for
-    `demos/mxl`; the MXL SDK itself is pinned in that Dockerfile.
+    branch `dmf-mxl/8.1`, pinned at `9eddb90`. Built into the shared demo
+    image by `demos/mixer/Dockerfile` (which also pins the MXL SDK) and
+    exercised by `demos/mxl`.
 
 ### Regenerating `8/0010-avformat-libmxl-demuxer-muxer.patch`
 
