@@ -85,8 +85,8 @@ def v210_row_stride(width: int) -> int:
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
-                     working_format: str = "p210le", color: Optional[dict] = None) -> str:
-    """Headerless packed v210 file -> GPU unpack -> paced output edge.
+                     color: Optional[dict] = None) -> str:
+    """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
 
     ``input_rec -> demux -> v210_to_cuda -> realtime(set_pts) -> force_fps``.
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
@@ -108,7 +108,7 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     avp.addNode(api.V210ToCuda({
         "name": f"unpack_{tag}", "src": edge("packed"), "dst": edge("cuda"),
         "hwaccel": hwaccel, "width": width, "height": height, "stride": stride,
-        "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "format": working_format,
+        "fps": f"{fps}/{fps_den}", "timebase": "1/90000", "format": "p210le",
         "group": group, **restart, **(color or {}),
     }))
     return _pace(avp, api, tag, edge("cuda"), fps=fps, fps_den=fps_den, group=group)

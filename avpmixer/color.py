@@ -88,10 +88,15 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
         raise ValueError(f"unsupported tone-map operator {tonemap!r}")
     if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0):
         raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100 and desat >= 0")
+    if source_format and source_format not in YUV_FORMATS:
+        raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
+    if source is not None and Color.parse(source) == target:
+        # Same contract: stamp it and only change storage, so 4:2:2 (P210) content
+        # never round-trips through the 4:2:0-only tone mapper.
+        parts = [target.setparams]
+        return ",".join(parts if source_format == pixel_format else parts + [f"scale_cuda=format={pixel_format}"])
     parts = [Color.parse(source).setparams] if source is not None else []
     if source_format and source_format not in ("nv12", "p010le"):
-        if source_format not in YUV_FORMATS:
-            raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
         # Preserve precision before a potential HDR conversion, regardless of target depth.
         parts.append("scale_cuda=format=p010le")
     intermediate = "p010le" if pixel_format in TEN_BIT_FORMATS else "nv12"

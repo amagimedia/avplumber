@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from avpmixer.color import Color
 from mixer import GraphOptions, build_application, infer_output_format, parse_args
 
 
@@ -155,6 +156,7 @@ def fake_api():
         "realtime",
         "repeat_last_frame",
         "split",
+        "v210_to_cuda",
     )
     api = {
         "AVPlumber": FakeAvp,
@@ -182,6 +184,7 @@ def fake_api():
             "realtime": "Realtime",
             "repeat_last_frame": "RepeatLastFrame",
             "split": "Split",
+            "v210_to_cuda": "V210ToCuda",
         }[name]: node_type(name)
         for name in names
     })
@@ -699,8 +702,7 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
     nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
 
     assert nodes["split_renditions"]["dst"] == ["program_rendition_program", "program_rendition_square"]
-    assert "scale_cuda" not in nodes["scale_program"]["graph"]
-    assert "transfer_in=auto:transfer_out=sdr" in nodes["scale_program"]["graph"]
+    assert nodes["scale_program"]["graph"] == Color().setparams   # SDR canvas to SDR output: tags only
     assert nodes["scale_square"]["graph"].startswith("scale_cuda=w=1080:h=1080,")
     assert nodes["janus_encoder"]["options"]["preset"] == "p7"
     assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
@@ -752,6 +754,33 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
         "node.object.set janus_sdr_force_keyframe trigger true"]
     feedback.stop()
     assert not any(listener.started for listener in feedback.listeners)
+
+
+def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
+    """NVDEC only yields 4:2:0; generated v210 content is the 4:2:2 path. It must
+    reach the P210 canvas untouched and be subsampled once, at the encoder."""
+    doc = {**CONFIG, "wipes": [], "initial_scene": "full",
+           "sources": [{"id": "gen", "kind": "v210", "path": "/media/gen.v210", "width": 1920,
+                        "height": 1080, "color": "hlg"}, CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [
+               {"source": "gen", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}},
+               {"source": "cam", "dst": {"x": 0, "y": 0, "w": 960, "h": 540}}]}],
+           "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p210le", "color": "hlg"},
+           "renditions": [{"id": "hdr", "target": "janus"},
+                          {"id": "sdr", "target": "/rec/sdr.mp4", "codec": "h264_nvenc", "tonemap": "hable"}]}
+    path = tmp_path / "gen.json"
+    path.write_text(json.dumps(doc))
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert nodes["unpack_0"]["format"] == "p210le" and nodes["unpack_0"]["color_trc"] == "arib-std-b67"
+    assert sources["gen"]["pixel_format"] == "p210le" and sources["gen"]["color"] == Color("hlg")
+    assert sources["cam"]["pixel_format"] is None and sources["cam"]["color"] is None   # NVDEC, tags from the frames
+    # HDR out: one chroma subsample to P010 for NVENC, no tone-map pass.
+    assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
+    assert nodes["janus_format"]["real_pixel_format"] == "p010le"
+    assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12" in nodes["scale_sdr"]["graph"]
 
 
 def test_fractional_janus_rate_uses_one_second_gop():

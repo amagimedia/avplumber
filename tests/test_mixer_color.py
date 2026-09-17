@@ -12,13 +12,18 @@ from avpmixer.config import ConfigError, parse
 
 
 @pytest.mark.parametrize("source,target", list(itertools.product(("sdr", "hlg", "pq"), repeat=2)))
-def test_all_transfer_pairs_require_frame_validation(source, target):
+def test_declared_sources_convert_only_when_the_contract_differs(source, target):
     fmt = "nv12" if target == "sdr" else "p010le"
     graph = conversion_graph(target, fmt, source=source)
     assert graph.startswith(Color(source).setparams + ",")
-    assert f"transfer_in=auto:transfer_out={target}:format={fmt}" in graph
-    assert ":tonemap=clip:sdr_white=203:hdr_peak=1000:desat=0" in graph
-    assert "scale_cuda" not in graph
+    if source == target:
+        # Identity: stamp the tags, no tone-map pass (it would force 4:2:0).
+        assert graph == Color(source).setparams + f",scale_cuda=format={fmt}"
+        assert conversion_graph(target, "p210le", source=source, source_format="p210le") == Color(source).setparams
+    else:
+        assert f"transfer_in=auto:transfer_out={target}:format={fmt}" in graph
+        assert ":tonemap=clip:sdr_white=203:hdr_peak=1000:desat=0" in graph
+        assert "scale_cuda" not in graph
 
 
 def test_untagged_source_is_never_inferred_from_storage():

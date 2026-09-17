@@ -595,12 +595,13 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
             add_nodes(avp, nodes)
         elif source.kind == "v210":
-            # True 10-bit sources: packed v210 unpacked on the GPU, stamped with
-            # their declared (HLG/BT.2020) color contract.
+            # True 10-bit 4:2:2 sources: packed v210 unpacked to P210 on the GPU
+            # and stamped with their declared color contract. NVDEC only yields
+            # 4:2:0, so this is the one path that keeps 4:2:2 through the canvas.
             edge = build_v210_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
-                working_format="p010le", color=source.color.tags)
+                color=source.color.tags)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
@@ -619,7 +620,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                              input_group=group, default_graph="",
                              color=None if source.filter_graph else source.color,
                              packed_rgb=source.kind == "browser",
-                             pixel_format=source.filter_output_format or None)
+                             pixel_format=source.filter_output_format or
+                             ("p210le" if source.kind == "v210" else None))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
@@ -648,8 +650,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--bitrate", default="8M")
     add("--fps", type=int, default=DEFAULT_FPS, help=f"Mixer and output frame rate (default: {DEFAULT_FPS})")
     add("--working-format", default="nv12",
-        help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 "
-             "(encoded outputs then need an explicit output conversion)")
+        help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 on the canvas "
+             "(renditions subsample to P010/NV12 for NVENC automatically)")
     add("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
     add("--loop-inputs", action="store_true")
     add("--remote-control-port", type=int, default=7777)
