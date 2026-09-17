@@ -16,7 +16,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .color import Color, declared_color, OPERATORS, YUV_FORMATS
+from .color import Color, declared_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe")
@@ -82,6 +82,10 @@ class Rendition:
     tonemap_peak: float = 10.0       # source peak in REFERENCE_WHITE units (HLG 1000 nits)
     tonemap_desat: float = 0.0       # 0 keeps saturation; FFmpeg's 0.5 default washes colours out
     tonemap_param: float = 0.0       # operator knee in reference-white units; 1.0 = SDR range untouched
+    # HDR10 static metadata for PQ outputs (HLG needs none). 0 derives MaxCLL from
+    # tonemap_peak and MaxFALL as 40% of it, the usual 1000/400 pair.
+    max_cll: int = 0
+    max_fall: int = 0
 
     color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
 
@@ -235,6 +239,8 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
         raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
     if rendition.tonemap_peak < 2.03 or rendition.tonemap_desat < 0 or rendition.tonemap_param < 0:
         raise ConfigError(f"{where}: tonemap_peak >= 2.03 (203 nits), tonemap_desat >= 0 and tonemap_param >= 0")
+    if rendition.max_cll < 0 or rendition.max_fall < 0 or rendition.max_fall > max(rendition.max_cll, rendition.tonemap_peak * 100):
+        raise ConfigError(f"{where}: max_cll and max_fall must be non-negative nits, max_fall no higher than MaxCLL")
     if rendition.tonemap == "mobius" and rendition.tonemap_param >= 1:
         # The Möbius shoulder maps [knee, peak] onto [knee, 1]; at knee 1.0 it degenerates to clip.
         raise ConfigError(f"{where}: mobius tonemap_param must be below 1.0 (0.9 keeps 90% of SDR white linear)")
@@ -349,9 +355,12 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     initial = str(doc.get("initial_scene", scenes[0].id))
     if not any(s.id == initial for s in scenes):
         raise ConfigError(f"initial_scene '{initial}' is not a scene")
+    wipe_color = str(doc.get("wipe_color", ""))
+    if wipe_color and wipe_color not in TRANSFER_TAGS:
+        raise ConfigError("wipe_color must be sdr, hlg or pq")
     return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        initial_scene=initial, working_format=working_format, out_color=out_color,
-                       wipe_color=str(doc.get("wipe_color", "")), **_parse_control(doc.get("control", {}), wipes))
+                       wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

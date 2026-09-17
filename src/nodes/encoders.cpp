@@ -1,8 +1,12 @@
 #include "node_common.hpp"
 #include <unordered_set>
+#include <cmath>
 #include <avcpp/codeccontext.h>
 #include <avcpp/avutils.h>
 #include "../hwaccel.hpp"
+extern "C" {
+#include <libavutil/mastering_display_metadata.h>
+}
 #include "../mixer/CutLatencyProbe.hpp"
 
 template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable, public avp::mixer::CutLatencyObserver {
@@ -15,6 +19,38 @@ protected:
     av::Dictionary options_;
     int enc_flags_ = 0;
     bool timestamps_passthrough_ = false;
+    Parameters hdr_metadata_;   // optional HDR10 static metadata (mastering display + content light level)
+    // nvenc emits the HDR10 SEIs only when this side data is present on the codec
+    // context before open (it also serves as the per-frame fallback).
+    void attachHdrMetadata() {
+        if (!hdr_metadata_.is_object()) return;
+        AVCodecContext *ctx = enc_.raw();
+        auto q = [](double v, int den) { return av_make_q((int)std::lround(v * den), den); };
+        AVFrameSideData *sd = av_frame_side_data_new(&ctx->decoded_side_data, &ctx->nb_decoded_side_data,
+                                                     AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                                                     sizeof(AVMasteringDisplayMetadata), 0);
+        if (!sd) throw Error("encoder: cannot allocate mastering display metadata");
+        auto *mdm = reinterpret_cast<AVMasteringDisplayMetadata*>(sd->data);
+        // BT.2020 primaries and D65 white, the only mastering primaries the mixer produces.
+        const double prim[3][2] = {{0.708, 0.292}, {0.170, 0.797}, {0.131, 0.046}};
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 2; j++)
+                mdm->display_primaries[i][j] = q(prim[i][j], 50000);
+        mdm->white_point[0] = q(0.3127, 50000);
+        mdm->white_point[1] = q(0.3290, 50000);
+        mdm->max_luminance = q(hdr_metadata_.value("max_luminance", 1000.0), 10000);
+        mdm->min_luminance = q(hdr_metadata_.value("min_luminance", 0.0001), 10000);
+        mdm->has_primaries = 1;
+        mdm->has_luminance = 1;
+        sd = av_frame_side_data_new(&ctx->decoded_side_data, &ctx->nb_decoded_side_data,
+                                    AV_FRAME_DATA_CONTENT_LIGHT_LEVEL, sizeof(AVContentLightMetadata), 0);
+        if (!sd) throw Error("encoder: cannot allocate content light level metadata");
+        auto *cll = reinterpret_cast<AVContentLightMetadata*>(sd->data);
+        cll->MaxCLL = hdr_metadata_.value("max_cll", 1000);
+        cll->MaxFALL = hdr_metadata_.value("max_fall", 400);
+        logstream << "encoder: HDR10 static metadata max_luminance=" << av_q2d(mdm->max_luminance)
+                  << " MaxCLL=" << cll->MaxCLL << " MaxFALL=" << cll->MaxFALL;
+    }
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     void emitPacket(const av::Packet& pkt) {
@@ -81,6 +117,7 @@ public:
             }
             
             enc_.setTimeBase(getTimeBase());
+            attachHdrMetadata();
             
             // make copy of options because otherwise enc_.open will remove all consumed ones
             av::Dictionary options(options_);
@@ -198,6 +235,11 @@ public:
         }
         if (params.count("timestamps_passthrough") > 0) {
             r->timestamps_passthrough_ = params["timestamps_passthrough"];
+        }
+        if (params.count("hdr_metadata") > 0) {
+            if (!params["hdr_metadata"].is_object())
+                throw Error("hdr_metadata must be an object (max_luminance, min_luminance, max_cll, max_fall)");
+            r->hdr_metadata_ = params["hdr_metadata"];
         }
         return r;
     }

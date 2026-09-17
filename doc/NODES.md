@@ -477,6 +477,10 @@ Encodes video or audio frames.
 -   `hwaccel` (string, name of instance-shared object) - optional
     (mandatory for some encoders), name of hwaccel previously created
     with `hwaccel.init`
+-   `hdr_metadata` (object, `enc_video` only) - HDR10 static metadata attached to the
+    codec context before open: `max_luminance` / `min_luminance` (nits, mastering display
+    with BT.2020 primaries and D65 white), `max_cll` / `max_fall` (nits). `hevc_nvenc` and
+    `av1_nvenc` emit the corresponding SEIs from it. Use with PQ output; HLG needs none.
 -   `timestamps_passthrough` (bool) - default `false`, intended for codecs
     that don't buffer data (otherwise bad things like repeated
     timestamps may happen), replace PTS & DTS in outgoing packet with

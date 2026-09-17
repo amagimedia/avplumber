@@ -86,7 +86,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
-                       prefix: str = "janus"):
+                       hdr_metadata=None, prefix: str = "janus"):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -114,6 +114,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         api.EncVideo({
             "name": node_name("encoder"), "src": node_name("video"), "dst": node_name("encoded"),
             "codec": codec, "hwaccel": hwaccel,
+            **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
             "options": {
                 "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": max(1, round(fps / fps_den)), "bf": 0,
                 # p5..p7 are NVENC's quality presets; with tune=ull it stays a

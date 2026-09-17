@@ -689,6 +689,7 @@ RENDITION_CONFIG = {**CONFIG, "canvas": {"width": 1080, "height": 1920, "fps": 3
 def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
     import json as _json
     from avpmixer import dmabuf_inputs
+    from avpmixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
     doc = {**RENDITION_CONFIG,
@@ -797,6 +798,51 @@ def test_cli_inputs_declare_browser_rgb_and_optional_file_color(tmp_path):
     assert dict(FakeMixer.instances[-1].sources)["source_0"]["color"] is None   # frame tags decide
     with pytest.raises(ValueError, match="input-color"):
         GraphOptions(inputs=("a.mp4",), output="o.ts", input_color="rec2020").validate()
+
+
+def test_pq_renditions_carry_hdr10_static_metadata(tmp_path):
+    doc = {**CONFIG, "sources": CONFIG["sources"][:1], "scenes": CONFIG["scenes"][:1], "wipes": [],
+           "initial_scene": "full",
+           "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "p010le", "color": "hlg"},
+           "renditions": [
+               {"id": "pq", "target": "janus", "codec": "hevc_nvenc", "color": "pq", "max_fall": 300},
+               {"id": "hlg", "target": "/rec/hlg.ts", "codec": "hevc_nvenc"},
+               {"id": "pqfile", "target": "/rec/pq.ts", "codec": "hevc_nvenc", "color": "pq", "tonemap_peak": 40}]}
+    path = tmp_path / "pq.json"
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    assert nodes["janus_encoder"]["hdr_metadata"] == {"max_luminance": 1000, "min_luminance": 0.0001,
+                                                      "max_cll": 1000, "max_fall": 300}
+    assert nodes["janus_encoder"]["options"]["color_trc"] == "smpte2084"
+    assert "hdr_metadata" not in nodes["hlg_encoder"]            # HLG signals nothing static
+    assert nodes["pqfile_encoder"]["hdr_metadata"]["max_luminance"] == 4000
+    assert nodes["pqfile_encoder"]["hdr_metadata"]["max_fall"] == 1600
+    with pytest.raises(mixer_config.ConfigError, match="max_fall"):
+        mixer_config.parse({**doc, "renditions": [{"id": "x", "codec": "hevc_nvenc", "color": "pq", "max_fall": 5000}]})
+    with pytest.raises(mixer_config.ConfigError, match="wipe_color"):
+        mixer_config.parse({**CONFIG, "wipe_color": "rec2020"})
+
+
+def test_hdr_example_config_parses_and_builds(tmp_path, monkeypatch):
+    """The shipped HDR example must stay valid: P210 HLG canvas, v210 + video + browser sources,
+    HLG Janus, mobius SDR Janus and a PQ archive with HDR10 metadata."""
+    path = Path(__file__).resolve().parents[1] / "config.example.hdr.json"
+    cfg = mixer_config.parse(json.loads(path.read_text()))
+    assert cfg.working_format == "p210le" and cfg.out_color == Color("hlg")
+    assert [r.id for r in cfg.renditions] == ["hdr", "sdr", "archive"]
+    (tmp_path / "page.sock").touch()
+    from avpmixer import dmabuf_inputs
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    FakeMixer.instances.clear()
+    app = build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
+                            api=fake_api())
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+    assert nodes["unpack_0"]["format"] == "p210le"
+    assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
+    assert ":tonemap=mobius:" in nodes["scale_sdr"]["graph"] and ":param=0.9" in nodes["scale_sdr"]["graph"]
+    assert nodes["archive_encoder"]["hdr_metadata"]["max_cll"] == 1000
+    assert nodes["archive_encoder"]["options"]["color_trc"] == "smpte2084"
 
 
 def test_mobius_knee_must_leave_shoulder_room():

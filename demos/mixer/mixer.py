@@ -468,8 +468,17 @@ def _flag_renditions(options: GraphOptions, width: int, height: int) -> tuple:
     return tuple(r for r, wanted in ((record, options.output), (janus, options.janus_output)) if wanted)
 
 
+def _hdr_metadata(r: "mixer_config.Rendition", target) -> dict | None:
+    """HDR10 static metadata for a PQ output; nvenc emits the SEIs from it. HLG carries none."""
+    if target.transfer != "pq":
+        return None
+    peak = round(r.tonemap_peak * 100)
+    return {"max_luminance": peak, "min_luminance": 0.0001,
+            "max_cll": r.max_cll or peak, "max_fall": r.max_fall or round((r.max_cll or peak) * 0.4)}
+
+
 def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, codec: str,
-                         enc_format: str, color: dict, output_format=None) -> None:
+                         enc_format: str, color: dict, output_format=None, hdr_metadata=None) -> None:
     """``force_fps -> assume_format -> nvenc -> mux -> output``, nodes named ``<id>_*``."""
     name = lambda suffix: f"{r.id}_{suffix}"  # noqa: E731
     bitrate = f"{r.bitrate_kbps}k"
@@ -481,6 +490,7 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
                                "real_pixel_format": enc_format}),
         api.EncVideo({"name": name("encoder"), "src": name("video"), "dst": name("encoded"),
                       "codec": codec, "hwaccel": HWACCEL,
+                      **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
                       "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
                                   "g": max(1, round(r.fps / FPS_DEN)) * 2, "bf": 0, "preset": r.preset,
                                   "tune": "ll", "profile": profile, **color}}),
@@ -520,7 +530,8 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: s
         }))
         if r.target != "janus":
             _build_record_output(avp, api, scaled, r, codec=codec, enc_format=enc_format,
-                                 color=target.tags, output_format=options.output_format)
+                                 color=target.tags, output_format=options.output_format,
+                                 hdr_metadata=_hdr_metadata(r, target))
             continue
         listeners.append(build_janus_output(
             avp, api, scaled,
@@ -532,7 +543,7 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: s
             ),
             fps=r.fps, fps_den=FPS_DEN, width=r.width, height=r.height, hwaccel=HWACCEL, group=OUTPUT_GROUP,
             codec=codec, profile=r.profile, preset=r.preset, enc_format=enc_format, color=target.tags,
-            prefix="janus" if not listeners else f"janus_{r.id}"))
+            hdr_metadata=_hdr_metadata(r, target), prefix="janus" if not listeners else f"janus_{r.id}"))
     return RtcpFeedbackGroup(listeners) if len(listeners) > 1 else next(iter(listeners), None)
 
 

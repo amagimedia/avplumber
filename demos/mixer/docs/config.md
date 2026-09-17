@@ -41,6 +41,8 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 | --- | --- | --- |
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
+| `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 content (`v210` sources) native, renditions subsample once for NVENC |
+| `color` | `sdr` | canvas colour contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
 
 The canvas rate is the single biggest load knob. Halving it from 60 to 30 on
 the sixteen-source demo took the T4 from ~33% to ~17% GPU.
@@ -67,6 +69,8 @@ output costs an encode, not another composite.
 | `tonemap` | `clip` when conversion is needed | Explicit operator requests SDR; 203-nit reference white, selectable highlight compression |
 | `tonemap_peak` | `10` | HDR display peak in units of 100 nits |
 | `tonemap_desat` | `0` | highlight desaturation; zero preserves saturation |
+| `color` | canvas | output contract: `sdr`, `hlg` or `pq`. H.264 and any `tonemap` imply `sdr`; HEVC defaults to the canvas contract |
+| `max_cll`, `max_fall` | derived | HDR10 static metadata for **PQ** outputs, in nits: MaxCLL defaults to `tonemap_peak` × 100, MaxFALL to 40% of it; the mastering display is BT.2020/D65 at that peak. HLG carries none |
 | `tonemap_param` | no | operator knee in reference-white units (mobius/reinhard). mobius `0.9` keeps everything up to 90% of SDR white untouched and folds brighter HDR highlights into the top 10% of the SDR range; must be below 1.0 (1.0 is a plain clip). `0` keeps the filter default (0.3) |
 
 With no `renditions` the demo builds its usual single output from the command
@@ -118,8 +122,10 @@ decoder.
 | field | applies to | meaning |
 | --- | --- | --- |
 | `id` | both | referenced from scenes; no `#` |
-| `kind` | both | `"video"` or `"browser"` |
-| `path` | video | file or stream |
+| `kind` | all | `"video"`, `"browser"` or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
+| `path` | video, v210 | file or stream |
+| `width`, `height` | v210 | required: the packed bytes carry no header |
+| `color` | browser, v210 | required colour contract (`sdr`, `hlg`, `pq`); browser pages must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
 | `width`, `height` | video | optional; probed with ffprobe/ffmpeg when a `cover` item needs them |
