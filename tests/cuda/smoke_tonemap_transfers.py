@@ -176,7 +176,7 @@ def check_invalid(ffmpeg):
     data = fixture("sdr", 8)
     cases = [
         ("transfer_in=sdr", "Set both transfer_in"),
-        ("transfer_in=sdr:transfer_out=auto", "Set both transfer_in"),
+        ("transfer_out=hlg", "Set both transfer_in"),
         ("transfer_in=sdr:transfer_out=hlg:sdr_white=2000:hdr_peak=1000", "sdr_white must not exceed"),
     ]
     for options, message in cases:

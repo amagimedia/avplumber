@@ -68,9 +68,10 @@ def side_data(ffmpeg, path):
 
 
 def stats(ffmpeg, path, seconds=1.0):
-    out = subprocess.run([ffmpeg, "-hide_banner", "-ss", "1", "-t", f"{seconds}", "-i", str(path),
+    run = subprocess.run([ffmpeg, "-hide_banner", "-ss", "1", "-t", f"{seconds}", "-i", str(path),
                           "-vf", f"{CROP},signalstats,metadata=print:file=-", "-f", "null", "-"],
-                         capture_output=True, text=True).stderr
+                         capture_output=True, text=True)
+    out = run.stdout + run.stderr          # metadata=print:file=- writes to stdout
     y = [float(v) for v in re.findall(r"signalstats\.YAVG=([0-9.]+)", out)]
     s = [float(v) for v in re.findall(r"signalstats\.SATAVG=([0-9.]+)", out)]
     assert y and s, out[-1500:]

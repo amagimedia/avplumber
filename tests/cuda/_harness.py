@@ -78,6 +78,14 @@ def drain(edge, errors, timeout, limit=None, state=None):
         state.update(eof=eof, count=count)
 
 
-def finish(avp, nodes):
+def finish(avp, nodes, timeout=10):
+    """Tear the instance down. avplumber's finite-graph shutdown can hang in the
+    stop/start race of a group being torn down; a smoke must not stall on it,
+    so the instance is abandoned (leaked) after *timeout* seconds."""
+    import threading
     nodes.clear()
-    avp.shutdown()
+    worker = threading.Thread(target=avp.shutdown, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        print(f"WARNING: avp.shutdown() hung for {timeout}s; leaking the instance", flush=True)
