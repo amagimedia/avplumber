@@ -7,8 +7,7 @@ Run B: HLG P210 canvas, the same SDR bars fullscreen + static HLG bars as a PIP 
 
 Asserts codec, profile, pixel format and VUI on every leg, the HDR10 mastering
 display / MaxCLL SEIs on the PQ leg, and that the SDR round trip through the HLG
-canvas (SDR -> HLG -> SDR) reproduces run A within a few codes of luma and
-saturation over the region without the PIP. Needs the CUDA avplumber module and
+canvas (SDR -> HLG -> SDR) reproduces run A's bar colours within a few codes. Needs the CUDA avplumber module and
 the custom ffmpeg (hevc/h264 software decoders for probing).
 """
 
@@ -23,12 +22,16 @@ import sys
 import tempfile
 import time
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from v210_fixture import write_fixture  # noqa: E402
+from v210_fixture import pack_v210, write_fixture  # noqa: E402
 
 W, H, FPS = 1280, 720, 60
+BAR = W // 8                              # eight vertical colour bars
 PIP = {"x": 760, "y": 40, "w": 480, "h": 270}
-CROP = f"crop={W // 2}:{H}:0:0"          # left half: never covered by the PIP
+PIP_BOTTOM = PIP["y"] + PIP["h"] + 40     # bar centres are sampled below the HLG insert
+TOLERANCE = 8                             # codes, per channel, at a bar centre
 
 
 def run_mixer(repo, cfg_path, outputs, seconds, timeout):
@@ -67,15 +70,34 @@ def side_data(ffmpeg, path):
     return "\n".join(l for l in out.splitlines() if "side data" in l.lower() or "MaxCLL" in l)
 
 
-def stats(ffmpeg, path, seconds=1.0):
-    run = subprocess.run([ffmpeg, "-hide_banner", "-ss", "1", "-t", f"{seconds}", "-i", str(path),
-                          "-vf", f"{CROP},signalstats,metadata=print:file=-", "-f", "null", "-"],
-                         capture_output=True, text=True)
-    out = run.stdout + run.stderr          # metadata=print:file=- writes to stdout
-    y = [float(v) for v in re.findall(r"signalstats\.YAVG=([0-9.]+)", out)]
-    s = [float(v) for v in re.findall(r"signalstats\.SATAVG=([0-9.]+)", out)]
-    assert y and s, out[-1500:]
-    return sum(y) / len(y), sum(s) / len(s)
+def bar_centres(ffmpeg, path):
+    """Mean (Y, U, V) of the centre of each colour bar, sampled below the PIP so the
+    HLG insert never contributes; edges are excluded because every chroma resample
+    on the HLG path blurs them a little, which is expected and not a colour error."""
+    centres = []
+    for i in range(8):
+        crop = f"crop={BAR // 4}:{H - PIP_BOTTOM}:{i * BAR + BAR // 2 - BAR // 8}:{PIP_BOTTOM}"
+        run = subprocess.run([ffmpeg, "-hide_banner", "-ss", "1", "-i", str(path), "-frames:v", "1",
+                              "-vf", f"{crop},signalstats,metadata=print:file=-", "-f", "null", "-"],
+                             capture_output=True, text=True)
+        out = run.stdout + run.stderr          # metadata=print:file=- writes to stdout
+        found = [float(re.search(rf"signalstats\.{k}AVG=([0-9.]+)", out).group(1)) for k in "YUV"]
+        centres.append(found)
+    return centres
+
+
+def write_bars(path, width, height, frames):
+    """Flat 75% BT.709 colour bars as limited-range 10-bit v210: flat regions survive
+    the chroma resampling of the HLG round trip, unlike the pixel-frequency fixtures."""
+    rgb = np.array([(1, 1, 1), (1, 1, 0), (0, 1, 1), (0, 1, 0), (1, 0, 1), (1, 0, 0), (0, 0, 1), (0, 0, 0)],
+                   dtype=np.float64) * 0.75
+    cols = np.repeat(rgb, width // 8, axis=0)[:width]
+    r, g, b = (np.tile(cols[:, i], (height, 1)) for i in range(3))
+    yp = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    y = np.rint(64 + 876 * yp).astype("<u2")
+    u = np.rint(896 * (b - yp) / 1.8556 + 512).astype("<u2")[:, 0::2]
+    v = np.rint(896 * (r - yp) / 1.5748 + 512).astype("<u2")[:, 0::2]
+    Path(path).write_bytes(pack_v210((y, u, v)) * frames)
 
 
 def config(root, canvas, renditions):
@@ -98,16 +120,17 @@ def main():
     p.add_argument("--repo", default=str(Path(__file__).resolve().parents[2]))
     p.add_argument("--seconds", type=float, default=4)
     p.add_argument("--timeout", type=float, default=120)
+    p.add_argument("--sdr-tonemap", default="mobius", help="operator for the SDR rendition off the HLG canvas")
+    p.add_argument("--knee", type=float, default=0.9, help="tonemap_param for that rendition (0 = filter default)")
+    p.add_argument("--keep", help="directory to copy the recordings into for inspection")
     args = p.parse_args()
     repo = Path(args.repo)
     with tempfile.TemporaryDirectory(prefix="avp-qual-") as tmp:
         root = Path(tmp)
-        # Static content: one pattern repeated, so the two runs compare without frame alignment.
-        write_fixture(root / "sdr.v210", W, H, 1, family="sdr8")
+        # Static content: one frame repeated, so the two runs compare without frame alignment.
+        write_bars(root / "sdr.v210", W, H, 120)
         write_fixture(root / "hlg.v210", W, H, 1, family="hlg")
-        for name in ("sdr", "hlg"):
-            data = (root / f"{name}.v210").read_bytes()
-            (root / f"{name}.v210").write_bytes(data * 120)
+        (root / "hlg.v210").write_bytes((root / "hlg.v210").read_bytes() * 120)
 
         ref = root / "ref.ts"
         cfg_a = root / "a.json"
@@ -124,8 +147,8 @@ def main():
             {"id": "hlg", "target": str(legs["hlg"]), "codec": "hevc_nvenc", "bitrate_kbps": 8000},
             {"id": "pq", "target": str(legs["pq"]), "codec": "hevc_nvenc", "color": "pq", "max_fall": 400,
              "bitrate_kbps": 8000},
-            {"id": "sdr", "target": str(legs["sdr"]), "codec": "h264_nvenc", "tonemap": "mobius",
-             "tonemap_param": 0.9, "bitrate_kbps": 6000}])))
+            {"id": "sdr", "target": str(legs["sdr"]), "codec": "h264_nvenc", "tonemap": args.sdr_tonemap,
+             "tonemap_param": args.knee, "bitrate_kbps": 6000}])))
         run_mixer(repo, cfg_b, list(legs.values()), args.seconds, args.timeout)
 
         line = probe(args.ffmpeg, legs["hlg"])
@@ -139,12 +162,18 @@ def main():
         line = probe(args.ffmpeg, legs["sdr"])
         assert "h264" in line and "yuv420p(tv, bt709" in line, line
 
-        y_ref, s_ref = stats(args.ffmpeg, ref)
-        y_out, s_out = stats(args.ffmpeg, legs["sdr"])
-        assert abs(y_out - y_ref) <= 3 and abs(s_out - s_ref) <= 3, \
-            f"SDR round trip drifted: luma {y_ref:.1f} -> {y_out:.1f}, saturation {s_ref:.1f} -> {s_out:.1f}"
-        print(f"PASS SDR -> HLG canvas -> SDR round trip: luma {y_ref:.1f}->{y_out:.1f} "
-              f"saturation {s_ref:.1f}->{s_out:.1f}", flush=True)
+        if args.keep:
+            import shutil
+            Path(args.keep).mkdir(parents=True, exist_ok=True)
+            for f in (ref, *legs.values()):
+                shutil.copy(f, Path(args.keep) / f.name)
+        ref_bars, out_bars = bar_centres(args.ffmpeg, ref), bar_centres(args.ffmpeg, legs["sdr"])
+        worst = max(abs(a - b) for r, o in zip(ref_bars, out_bars) for a, b in zip(r, o))
+        detail = "; ".join(f"{'/'.join(f'{v:.0f}' for v in r)} -> {'/'.join(f'{v:.0f}' for v in o)}"
+                           for r, o in zip(ref_bars, out_bars))
+        assert worst <= TOLERANCE, f"SDR round trip drifted by {worst:.1f} codes: {detail}"
+        print(f"PASS SDR -> HLG canvas -> SDR round trip ({args.sdr_tonemap}): every bar centre within "
+              f"{worst:.1f} codes", flush=True)
 
 
 if __name__ == "__main__":
