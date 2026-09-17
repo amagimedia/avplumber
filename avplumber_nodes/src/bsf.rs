@@ -58,7 +58,7 @@ pub struct FilterState {
 }
 
 impl SisoNode for BitstreamFilter {
-    type Inner = FilterState;
+    type InputState = FilterState;
 
     fn name(&self) -> &str {
         &self.name

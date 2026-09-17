@@ -54,6 +54,7 @@ newtype:
 
 | you write | you register | the wrapper supplies |
 |---|---|---|
+| `impl SisoNode` for `X` | `SisoAdapter<X>` or `SisoPollAdapter<X>` | spec skip, `InputState` mutex, read loop / poll stash; `force_fps`, `force_keyframe`, `bsf` |
 | `impl InputHandler` + `impl SingleInput` for `X` | `type Node = Blocking<X>` | everything the row below supplies, plus the whole read loop: which hook each item on the input calls, forwarding of the control events, pushing what a hook produced |
 | `impl InputHandler` + `impl PollInput` for `X` | `type Node = Polling<X>` | the Poll sibling of the row above: the same reactions, plus an output stash on `PollIo` |
 | `impl BlockingNode for X` | `type Node = Blocking<X>` | name, kind, pads, edge binding, park reset on start, park wake on interrupt, `process` |
@@ -408,14 +409,21 @@ For a node that is a pure per-buffer transform with state rebuilt from `Spec`
 implement `SisoNode` (`on_spec`, `process`, `flush`, `on_eof`) and register
 `SisoAdapter<Yours>` (blocking) or `SisoPollAdapter<Yours>` (cooperative).
 `process` returns every grain that input produced — empty, one, or several —
-and `on_eof` drains whatever is still inside `Inner`. The adapter owns the
+and `on_eof` drains whatever is still inside `InputState`. The adapter owns the
 mutex, skips an unchanged re-delivered spec, drops buffers that arrive before
-the first spec, and pushes `Eof` after the drain. encode/decode stay on
-`SingleInput` because they park on codec `EAGAIN`.
+the first spec, and pushes `Eof` after the drain. `force_fps` is the 1:N case:
+one input frame can yield several on the output grid. `force_keyframe` and
+`bsf` are the same trait. encode/decode stay on `SingleInput` because they
+park on codec `EAGAIN`.
+
+Control knobs (`node.object.set` / `get`) are `NodeObjects`, not `SisoNode`
+or `InputHandler`. Implement it on the author type and return `Some(self)`
+from `objects()`. Rust cannot see `impl NodeObjects` from a generic wrapper,
+so that one-line hook is required; nodes with no keys omit both.
 
 ```rust
 impl SisoNode for BitstreamFilter {
-    type Inner = FilterState;
+    type InputState = FilterState;
 
     fn name(&self) -> &str { &self.name }
     fn pads(&self) -> NodePads {

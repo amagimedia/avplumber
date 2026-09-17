@@ -73,7 +73,7 @@ fn a_pushed_spec_is_delivered_exactly_once() {
 struct Forward;
 
 impl SisoNode for Forward {
-    type Inner = ();
+    type InputState = ();
 
     fn name(&self) -> &str {
         "forward"
@@ -81,7 +81,7 @@ impl SisoNode for Forward {
     fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
         Ok(((), spec.clone()))
     }
-    fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+    fn process(&self, _input_state: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
         Ok(vec![buf])
     }
 }

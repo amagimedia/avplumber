@@ -50,8 +50,9 @@ pub use graph::{
     generation_writer, pending_generation_reader, pending_generation_writer,
 };
 pub use node_api::{
-    Blocking, BlockingIo, BlockingNode, EofAction, InputHandler, Io, PollInput, PollIo, PollNode,
-    Polling, SingleInput, SisoAdapter, SisoAsyncAdapter, SisoNode, SisoPollAdapter,
+    Blocking, BlockingIo, BlockingNode, EofAction, InputHandler, Io, NodeObjects, PollInput,
+    PollIo, PollNode, Polling, SingleInput, SisoAdapter, SisoAsyncAdapter, SisoNode,
+    SisoPollAdapter,
 };
 pub use services::ServiceRegistry;
 pub use supervisor::{

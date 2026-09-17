@@ -12,13 +12,12 @@ use rusty_ffmpeg::ffi;
 use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
-use avplumber_f7k::graph::error::NodeError;
 use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
-use avplumber_f7k::node_api::{InputHandler, PollInput, PollIo, Polling};
+use avplumber_f7k::node_api::{NodeObjects, SisoNode, SisoPollAdapter};
 
 /// C++ `last_result_ = -(1L<<62)`: no frame has been classified yet.
 const NO_SLOT: i64 = -(1 << 62);
@@ -33,7 +32,7 @@ pub struct ForceKeyframeSpec {
 
 impl NodeSpec for ForceKeyframeSpec {
     const TYPE_NAME: &'static str = "force_keyframe";
-    type Node = Polling<ForceKeyframe>;
+    type Node = SisoPollAdapter<ForceKeyframe>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         let interval = match &self.interval_sec {
@@ -47,8 +46,8 @@ impl NodeSpec for ForceKeyframeSpec {
             }
             None => None,
         };
-        Ok(Polling(ForceKeyframe {
-            io: PollIo::new(name),
+        Ok(SisoPollAdapter::new(ForceKeyframe {
+            name: name.to_string(),
             interval,
             requested: AtomicU64::new(0),
             forced: AtomicU64::new(0),
@@ -60,7 +59,7 @@ impl NodeSpec for ForceKeyframeSpec {
 }
 
 pub struct ForceKeyframe {
-    io: PollIo,
+    name: String,
     interval: Option<AvpRational>,
     /// Bumped by every trigger; `forced` catches up by one frame, whatever the
     /// distance, which is the coalescing.
@@ -72,27 +71,11 @@ pub struct ForceKeyframe {
     last_slot: AtomicI64,
 }
 
-impl InputHandler for ForceKeyframe {
-    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
-        Ok(Some(spec))
-    }
+impl SisoNode for ForceKeyframe {
+    type InputState = ();
 
-    fn on_buffer(&self, mut buffer: Grain) -> Result<Vec<Grain>, NodeError> {
-        let triggered = self.take_trigger();
-        let periodic = self.periodic(&buffer);
-        mark(&mut buffer, triggered || periodic);
-        Ok(vec![buffer])
-    }
-
-    fn on_flush(&self) {
-        // The next frame after a discontinuity starts a new period.
-        self.last_slot.store(NO_SLOT, Ordering::Relaxed);
-    }
-}
-
-impl PollInput for ForceKeyframe {
-    fn io(&self) -> &PollIo {
-        &self.io
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn pads(&self) -> NodePads {
@@ -105,10 +88,32 @@ impl PollInput for ForceKeyframe {
         true
     }
 
-    fn start(&self) {
+    fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
+        Ok(((), spec.clone()))
+    }
+
+    fn process(&self, _input_state: &mut (), mut buffer: Grain) -> Result<Vec<Grain>, String> {
+        let triggered = self.take_trigger();
+        let periodic = self.periodic(&buffer);
+        mark(&mut buffer, triggered || periodic);
+        Ok(vec![buffer])
+    }
+
+    fn flush(&self, _input_state: &mut ()) {
+        // The next frame after a discontinuity starts a new period.
         self.last_slot.store(NO_SLOT, Ordering::Relaxed);
     }
 
+    fn start(&self, _input_state: &mut ()) {
+        self.last_slot.store(NO_SLOT, Ordering::Relaxed);
+    }
+
+    fn objects(&self) -> Option<&dyn NodeObjects> {
+        Some(self)
+    }
+}
+
+impl NodeObjects for ForceKeyframe {
     fn set_object(&self, key: &str, value: &Value) -> Result<(), String> {
         match key {
             "trigger" | "force" | "request" => {
@@ -123,7 +128,7 @@ impl PollInput for ForceKeyframe {
                 }
                 Ok(())
             }
-            other => Err(format!("{}: unknown object key `{other}`", self.io.name)),
+            other => Err(format!("{}: unknown object key `{other}`", self.name)),
         }
     }
 
@@ -140,7 +145,7 @@ impl PollInput for ForceKeyframe {
                 "periodic_frames": self.periodic_frames.load(Ordering::Relaxed),
                 "interval_enabled": self.interval.is_some(),
             })),
-            other => Err(format!("{}: unknown object key `{other}`", self.io.name)),
+            other => Err(format!("{}: unknown object key `{other}`", self.name)),
         }
     }
 }
@@ -207,7 +212,9 @@ mod tests {
     use avplumber_f7k::graph::node::{Node, Polled};
     use avplumber_f7k::graph::poll_ctx::NodePollContext;
 
-    fn node(interval: Option<Value>) -> (Polling<ForceKeyframe>, Arc<dyn Edge>, Arc<dyn Edge>) {
+    fn node(
+        interval: Option<Value>,
+    ) -> (SisoPollAdapter<ForceKeyframe>, Arc<dyn Edge>, Arc<dyn Edge>) {
         let instance = Instance::new();
         let params = serde_json::json!({});
         let ctx = BuildCtx {
@@ -226,12 +233,21 @@ mod tests {
         node.bind_source("in", input.clone());
         node.bind_sink("out", output.clone());
         node.start();
+        input.push_event(EdgeEvent::Spec(Spec::Video {
+            width: 2,
+            height: 2,
+            pix_fmt: 0,
+            sw_pix_fmt: -1,
+            frame_rate: AvpRational { num: 1, den: 1 },
+            sar: AvpRational { num: 1, den: 1 },
+            time_base: AvpRational { num: 1, den: 1000 },
+        }));
         (node, input, output)
     }
 
     /// Runs the node over what is queued and returns, per output frame, whether
     /// it was marked as a keyframe.
-    fn run(node: &Polling<ForceKeyframe>, output: &Arc<dyn Edge>) -> Vec<bool> {
+    fn run(node: &SisoPollAdapter<ForceKeyframe>, output: &Arc<dyn Edge>) -> Vec<bool> {
         let mut ctx =
             NodePollContext::new(Arc::new(AtomicBool::new(false)), Arc::new(Wakeup::new()));
         loop {

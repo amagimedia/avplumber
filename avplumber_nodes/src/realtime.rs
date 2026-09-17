@@ -27,7 +27,7 @@ use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::{MICROSECONDS, MILLISECONDS, rational_from_json};
 use avplumber_f7k::graph::timestamp::{Ts, rescale};
-use avplumber_f7k::node_api::{Io, PollNode, Polling};
+use avplumber_f7k::node_api::{Io, NodeObjects, PollNode, Polling};
 use avplumber_f7k::services::clock::{SyncGroup, instant_at};
 use avplumber_f7k::services::playback::Playback;
 
@@ -300,6 +300,12 @@ impl PollNode for Realtime {
         }
     }
 
+    fn objects(&self) -> Option<&dyn NodeObjects> {
+        Some(self)
+    }
+}
+
+impl NodeObjects for Realtime {
     fn get_object(&self, key: &str) -> Result<Value, String> {
         match key {
             "info" => {

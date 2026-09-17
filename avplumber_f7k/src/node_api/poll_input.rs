@@ -154,12 +154,9 @@ pub trait PollInput: InputHandler {
 
     fn interrupt(&self) {}
 
-    fn set_object(&self, key: &str, _value: &serde_json::Value) -> Result<(), String> {
-        Err(format!("{} has no object `{key}` to set", self.io().name))
-    }
-
-    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
-        Err(format!("{} has no object `{key}` to get", self.io().name))
+    /// [`NodeObjects`](crate::node_api::NodeObjects) for this body, if any.
+    fn objects(&self) -> Option<&dyn crate::node_api::NodeObjects> {
+        None
     }
 }
 
@@ -189,12 +186,8 @@ impl<N: PollInput> PollNode for N {
         PollInput::interrupt(self);
     }
 
-    fn set_object(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
-        PollInput::set_object(self, key, value)
-    }
-
-    fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
-        PollInput::get_object(self, key)
+    fn objects(&self) -> Option<&dyn crate::node_api::NodeObjects> {
+        PollInput::objects(self)
     }
 
     fn step(&self, ctx: &mut NodePollContext) -> Result<Polled, NodeError> {
@@ -294,6 +287,12 @@ mod tests {
             NodePads::siso(AvpMediaType::VIDEO, AvpMediaType::VIDEO)
         }
 
+        fn objects(&self) -> Option<&dyn crate::node_api::NodeObjects> {
+            Some(self)
+        }
+    }
+
+    impl crate::node_api::NodeObjects for Dup {
         fn get_object(&self, key: &str) -> Result<serde_json::Value, String> {
             match key {
                 "emitted" => Ok(serde_json::json!(self.emitted.load(Ordering::Relaxed))),

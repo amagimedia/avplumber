@@ -129,6 +129,9 @@ pub trait Node: Send + Sync + 'static {
     /// `IInputsObjects::setObject`. Called from the control thread while the
     /// body runs, so an implementation must not take a lock the body holds
     /// across a blocking call. The default node has none.
+    ///
+    /// Authoring types with keys implement [`crate::node_api::NodeObjects`]
+    /// and expose it from the body's `objects()` hook; wrappers dispatch here.
     fn set_object(&self, key: &str, _value: &serde_json::Value) -> Result<(), String> {
         Err(format!("{} has no object `{key}` to set", self.name()))
     }

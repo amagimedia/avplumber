@@ -23,7 +23,7 @@ struct Ident {
 }
 
 impl SisoNode for Ident {
-    type Inner = ();
+    type InputState = ();
     fn name(&self) -> &str {
         &self.name
     }
@@ -33,7 +33,7 @@ impl SisoNode for Ident {
     fn on_spec(&self, spec: &Spec) -> Result<((), Spec), String> {
         Ok(((), spec.clone()))
     }
-    fn process(&self, _inner: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
+    fn process(&self, _input_state: &mut (), buf: Grain) -> Result<Vec<Grain>, String> {
         Ok(vec![buf])
     }
 }

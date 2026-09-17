@@ -8,21 +8,19 @@
 //! is what the C++ `IFrameRateSource`/`ITimeBaseSource` interfaces told an
 //! encoder downstream.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
 
 use avplumber_f7k::factory::{BuildCtx, NodeSpec};
-use avplumber_f7k::graph::error::NodeError;
 use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
 use avplumber_f7k::graph::timestamp::Ts;
-use avplumber_f7k::node_api::{EofAction, InputHandler, PollInput, PollIo, Polling};
+use avplumber_f7k::node_api::{NodeObjects, SisoNode, SisoPollAdapter};
 
 /// C++ prints its drop/duplicate statistics this often.
 const STATS_PERIOD_S: u64 = 10;
@@ -38,7 +36,7 @@ pub struct ForceFpsSpec {
 
 impl NodeSpec for ForceFpsSpec {
     const TYPE_NAME: &'static str = "force_fps";
-    type Node = Polling<ForceFps>;
+    type Node = SisoPollAdapter<ForceFps>;
 
     fn build(self, name: &str, _ctx: &BuildCtx<'_>) -> Result<Self::Node, String> {
         let fps = rational_from_json(&self.fps).map_err(|e| format!("fps: {e}"))?;
@@ -76,8 +74,8 @@ impl NodeSpec for ForceFpsSpec {
             fps.num,
             fps.den
         );
-        Ok(Polling(ForceFps {
-            io: PollIo::new(name),
+        Ok(SisoPollAdapter::new(ForceFps {
+            name: name.to_string(),
             fps,
             timebase,
             frame_delta,
@@ -87,13 +85,13 @@ impl NodeSpec for ForceFpsSpec {
             duplicated: AtomicU64::new(0),
             total_in: AtomicU64::new(0),
             total_out: AtomicU64::new(0),
-            grid: Mutex::new(Grid::default()),
         }))
     }
 }
 
+/// Associated type of [`SisoNode`]: must be `pub` because [`ForceFps`] is.
 #[derive(Default)]
-struct Grid {
+pub struct Grid {
     /// The last frame that went out, on the grid.
     last_ts: Option<i64>,
     /// Where the grid expects the next frame.
@@ -105,10 +103,9 @@ struct Grid {
 }
 
 /// Counts are atomics so `get_object("stats")` from the control thread does not
-/// take the grid lock. The grid itself is a mutex only because `Grain` is not
-/// atomic; a node that had nothing of the kind would not need one.
+/// wait on the adapter's `InputState` lock.
 pub struct ForceFps {
-    io: PollIo,
+    name: String,
     fps: AvpRational,
     timebase: AvpRational,
     /// One frame period in `timebase` units.
@@ -119,36 +116,13 @@ pub struct ForceFps {
     duplicated: AtomicU64,
     total_in: AtomicU64,
     total_out: AtomicU64,
-    grid: Mutex<Grid>,
 }
 
-impl InputHandler for ForceFps {
-    fn on_spec(&self, spec: Spec) -> Result<Option<Spec>, NodeError> {
-        Ok(Some(self.conformed_spec(spec)))
-    }
+impl SisoNode for ForceFps {
+    type InputState = Grid;
 
-    fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
-        let produced = {
-            let mut grid = self.grid.lock().unwrap();
-            self.conform(&mut grid, buffer)
-        };
-        self.log_stats(false);
-        Ok(produced)
-    }
-
-    fn on_flush(&self) {
-        self.reset_grid();
-    }
-
-    fn on_eof(&self) -> Result<EofAction, NodeError> {
-        self.log_stats(true);
-        Ok(EofAction::Done)
-    }
-}
-
-impl PollInput for ForceFps {
-    fn io(&self) -> &PollIo {
-        &self.io
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn pads(&self) -> NodePads {
@@ -159,8 +133,27 @@ impl PollInput for ForceFps {
         true
     }
 
-    fn start(&self) {
-        self.reset_grid();
+    fn on_spec(&self, spec: &Spec) -> Result<(Grid, Spec), String> {
+        Ok((Grid::default(), self.conformed_spec(spec)))
+    }
+
+    fn process(&self, grid: &mut Grid, buffer: Grain) -> Result<Vec<Grain>, String> {
+        let produced = self.conform(grid, buffer);
+        self.log_stats(false);
+        Ok(produced)
+    }
+
+    fn flush(&self, grid: &mut Grid) {
+        *grid = Grid::default();
+    }
+
+    fn on_eof(&self, _grid: &mut Grid) -> Result<Vec<Grain>, String> {
+        self.log_stats(true);
+        Ok(Vec::new())
+    }
+
+    fn start(&self, grid: &mut Grid) {
+        *grid = Grid::default();
         self.dropped.store(0, Ordering::Relaxed);
         self.duplicated.store(0, Ordering::Relaxed);
         self.total_in.store(0, Ordering::Relaxed);
@@ -168,6 +161,12 @@ impl PollInput for ForceFps {
         self.last_stats_s.store(u64::MAX, Ordering::Relaxed);
     }
 
+    fn objects(&self) -> Option<&dyn NodeObjects> {
+        Some(self)
+    }
+}
+
+impl NodeObjects for ForceFps {
     fn get_object(&self, key: &str) -> Result<Value, String> {
         match key {
             "stats" => Ok(serde_json::json!({
@@ -176,13 +175,13 @@ impl PollInput for ForceFps {
                 "dropped": self.dropped.load(Ordering::Relaxed),
                 "duplicated": self.duplicated.load(Ordering::Relaxed),
             })),
-            other => Err(format!("{}: unknown object `{other}`", self.io.name)),
+            other => Err(format!("{}: unknown object `{other}`", self.name)),
         }
     }
 }
 
 impl ForceFps {
-    fn conformed_spec(&self, spec: Spec) -> Spec {
+    fn conformed_spec(&self, spec: &Spec) -> Spec {
         match spec {
             Spec::Video {
                 width,
@@ -192,20 +191,16 @@ impl ForceFps {
                 sar,
                 ..
             } => Spec::Video {
-                width,
-                height,
-                pix_fmt,
-                sw_pix_fmt,
+                width: *width,
+                height: *height,
+                pix_fmt: *pix_fmt,
+                sw_pix_fmt: *sw_pix_fmt,
                 frame_rate: self.fps,
-                sar,
+                sar: *sar,
                 time_base: self.timebase,
             },
-            other => other,
+            other => other.clone(),
         }
-    }
-
-    fn reset_grid(&self) {
-        *self.grid.lock().unwrap() = Grid::default();
     }
 
     fn set_last(&self, grid: &mut Grid, frame: Grain, unused: bool) {
@@ -240,7 +235,7 @@ impl ForceFps {
                 self.frame_delta as f64 * self.timebase.num as f64 / self.timebase.den as f64;
             let discontinuity = delta_s > frame_s + 0.5 || delta < 0;
             if discontinuity {
-                log::info!("{}: discontinuity {last} -> {in_ts}", self.io.name);
+                log::info!("{}: discontinuity {last} -> {in_ts}", self.name);
             }
             if delta != self.frame_delta && !discontinuity {
                 if in_ts > next {
@@ -270,7 +265,7 @@ impl ForceFps {
                         log::info!(
                             "{}: filled a gap with {burst} duplicate(s); grid {gap_start} ..< \
                              {in_ts}",
-                            self.io.name
+                            self.name
                         );
                     }
                 }
@@ -310,7 +305,7 @@ impl ForceFps {
         if (due || force) && (dropped > 0 || duplicated > 0) {
             log::info!(
                 "{}: in {}, out {}, duplicated {}, dropped {}",
-                self.io.name,
+                self.name,
                 self.total_in.load(Ordering::Relaxed),
                 self.total_out.load(Ordering::Relaxed),
                 duplicated,
@@ -351,10 +346,22 @@ mod tests {
     use avplumber_f7k::graph::poll_ctx::NodePollContext;
 
     struct Harness {
-        node: Polling<ForceFps>,
+        node: SisoPollAdapter<ForceFps>,
         input: Arc<dyn Edge>,
         output: Arc<dyn Edge>,
         ctx: NodePollContext,
+    }
+
+    fn video_spec() -> Spec {
+        Spec::Video {
+            width: 4,
+            height: 4,
+            pix_fmt: 0,
+            sw_pix_fmt: -1,
+            frame_rate: AvpRational { num: 1, den: 1 },
+            sar: AvpRational { num: 1, den: 1 },
+            time_base: AvpRational { num: 1, den: 1000 },
+        }
     }
 
     fn harness(fps: Value, timebase: Option<Value>, out_capacity: usize) -> Harness {
@@ -374,12 +381,16 @@ mod tests {
         node.bind_source("in", input.clone());
         node.bind_sink("out", output.clone());
         node.start();
-        Harness {
+        input.push_event(EdgeEvent::Spec(video_spec()));
+        let mut h = Harness {
             node,
             input,
             output,
             ctx: NodePollContext::new(Arc::new(AtomicBool::new(false)), Arc::new(Wakeup::new())),
-        }
+        };
+        h.step_until_idle();
+        while h.output.try_take().is_some() {}
+        h
     }
 
     impl Harness {
@@ -402,7 +413,7 @@ mod tests {
             let mut out = Vec::new();
             while let Some(item) = self.output.try_take() {
                 if let EdgeItem::Buffer(media) = item {
-                    out.push(media.ts().rescale(self.node.timebase).val);
+                    out.push(media.ts().rescale(self.node.inner().timebase).val);
                 }
             }
             out
@@ -483,7 +494,9 @@ mod tests {
         let mut frames = Vec::new();
         while let Some(item) = h.output.try_take() {
             match item {
-                EdgeItem::Buffer(media) => frames.push(media.ts().rescale(h.node.timebase).val),
+                EdgeItem::Buffer(media) => {
+                    frames.push(media.ts().rescale(h.node.inner().timebase).val)
+                }
                 EdgeItem::Event(EdgeEvent::FlushStart) => events.push("start"),
                 EdgeItem::Event(EdgeEvent::FlushStop { .. }) => events.push("stop"),
                 EdgeItem::Event(_) => events.push("other"),
@@ -520,7 +533,7 @@ mod tests {
         };
         assert_eq!(frame_rate, AvpRational { num: 30, den: 1 });
         assert_eq!(time_base, AvpRational { num: 1, den: 90000 });
-        assert_eq!(h.node.frame_delta, 3000);
+        assert_eq!(h.node.inner().frame_delta, 3000);
     }
 
     #[test]

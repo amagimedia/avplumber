@@ -182,6 +182,11 @@ pub trait SingleInput: InputHandler {
     /// [`BlockingNode::interrupt`]: any thread, any time, must not block — so
     /// it must not take a lock the body may be holding.
     fn interrupt(&self) {}
+
+    /// [`NodeObjects`](crate::node_api::NodeObjects) for this body, if any.
+    fn objects(&self) -> Option<&dyn crate::node_api::NodeObjects> {
+        None
+    }
 }
 
 fn push_all(
@@ -244,6 +249,10 @@ impl<N: SingleInput> BlockingNode for N {
 
     fn interrupt(&self) {
         SingleInput::interrupt(self);
+    }
+
+    fn objects(&self) -> Option<&dyn crate::node_api::NodeObjects> {
+        SingleInput::objects(self)
     }
 }
 
