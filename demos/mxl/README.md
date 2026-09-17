@@ -25,11 +25,14 @@ Grains are taken **zero-copy** by default: the demuxer's `zero_copy=1`
 points each AVPacket straight at the MXL ring buffer in `/dev/shm`
 instead of copying it out. See "Zero-copy grains" below.
 
-Verified end-to-end on Docker Desktop (aarch64) producing 28k mpeg4
-packets of the testsrc pattern in a 10-second run — that run was on the
-earlier FFmpeg 7.1.5 build of this patch stack with the CPU reader and
-copied grains. Neither the 8.1 series nor the GPU/zero-copy paths have
-been run yet.
+Verified end-to-end on an x86_64 Fedora host with an RTX 4000 Ada
+(driver 615.71, Docker + NVIDIA Container Toolkit), on the FFmpeg 8.1
+build of this patch stack (`n8.1-12-g93aafbb`, mxl demuxer and muxer
+registered). Runs covered: GPU zero-copy, GPU with `--no-zero-copy` and
+`--gpu-unpack off`, against both an `lavfi testsrc` and a looped file,
+at 320×240p25 and 640×480p25. All of them ran without node failures,
+started at PTS 0, reported 25.0 fps (25.06 on the NVENC path) in the
+container header, and decoded back to the source pattern.
 
 ## Requirements
 
@@ -110,9 +113,14 @@ Defaults to publishing an `lavfi testsrc` pattern; override with
 `-e AVP_INPUT=/media/your-file.mp4` for a real file (played back
 looped and realtime-paced through `InputRec`).
 
-Runs both graphs in one process. Ctrl-C to stop — the fragmented mp4
-stays playable even on interrupt because `movflags=frag_keyframe+
-empty_moov+default_base_moof` is set on the reader-side output.
+Runs both graphs in one process. Stop it with `docker kill` (see Known
+gaps — Ctrl-C hangs in teardown). The output stays playable anyway:
+the reader-side output sets `movflags=frag_keyframe+empty_moov+
+default_base_moof` *and* `flush_packets=1`. The second one is what
+makes the promise real — without it the muxer's 256 KiB avio buffer is
+written out only when it fills, so a low-bitrate run that is killed
+rather than closed leaves a 28-byte file containing just the `ftyp`
+box.
 
 Split writer and reader across two containers by passing
 `--writer-only` / `--reader-only` and sharing the flow UUID via
@@ -126,10 +134,41 @@ MXL flows carry uncompressed frames. The muxer registered by
 H.264 with NVENC; the CPU fallback uses `mpeg4` (rather than H.264)
 because the image does not link `libx264`.
 
+NVENC is given `g=<fps>` — one keyframe per second instead of its
+default 250-frame GOP — because `frag_keyframe` cuts a fragment per
+keyframe, and that is what makes the growing file playable a second in
+rather than ten.
+
 The GPU path converts to 8-bit nv12 before NVENC even though the flow
 is 10-bit 4:2:2, because NVENC only accepts 4:2:2 10-bit on
 Blackwell-class hardware. Change `scale_cuda=format=nv12` to `p010le`
 plus `hevc_nvenc`/`main10` to keep 10 bits through the encoder.
+
+## Timing and grain indices
+
+MXL is a wall-clock transport, and the muxer ignores PTS entirely: it
+takes its own grain index from `mxlGetCurrentIndex` at header write and
+increments it once per packet. So the *writer* must be paced, or grain
+N lands in shared memory long before wall-clock N/fps. An unpaced lavfi
+source published ~2300 grains/s here, which ran the flow seconds into
+the future and collapsed the ring's usable history to milliseconds —
+every reader was then "too late". Hence `realtime(set_pts=1)` followed
+by `force_fps` between the writer's decoder and the v210 encoder.
+
+Three demuxer options matter on the reader:
+
+* `grain_index_init=head` — start at the newest grain. `tail` hangs
+  even plain `ffmpeg` on this build.
+* `on_too_late=reset` — `avformat_open_input`'s probe already reads a
+  grain, so the index is chosen when the node is *created*, several
+  seconds before the group starts (CUDA and NVENC init sit in between).
+  By then it is behind the ring tail. Without `reset` the demuxer
+  returns `EAGAIN`, which `input.cpp` treats as fatal, and the node
+  fails with "Resource temporarily unavailable".
+* `reset_on_drop=1` — resetting the index leaves a hole where the
+  skipped grains would have been (a 5.8 s leading PTS gap, and a
+  container frame rate of 19.4 fps instead of 25). This rebases the
+  timestamps after the reset.
 
 ## Zero-copy grains
 
@@ -157,11 +196,25 @@ ring, which is a change to the node in `src/`.
 
 ## Known gaps
 
-* The demo runs the reader at wall-clock max because we didn't wire in
-  a realtime pacer on the reader side. Adding a `RealtimeVideoFrame`
-  node before the encoder would cap it to the flow frame rate. Running
+* The reader is not paced: it runs at wall-clock max. Adding a
+  `realtime` node (as the writer has) before the encoder would cap it
+  to the flow frame rate. Running
   uncapped is harmless in itself — `blocking=1` parks the reader on the
   writer's head — it just spends CPU on `blocking` waits.
+* **Ctrl-C does not shut the demo down.** SIGINT leaves the process
+  stuck in teardown: every node thread is alive in a timed poll and the
+  main thread waits in `futex_do_wait`. This reproduces on the GPU and
+  CPU reader paths alike and predates this demo's reader wiring, so it
+  looks like a framework-level stop-ordering issue rather than anything
+  MXL-specific. Use `docker kill` / SIGKILL meanwhile.
+* Restarting the reader group has the same shape of problem: it parks at
+  "Stopping node r_unpack ...". `auto_restart` is therefore `off` on
+  every reader node except `r_input`.
+* With a looped file source, each 5 s wraparound logs `EventLoop
+  negative time to wait, resyncing` on the writer and a couple of
+  dropped frames in `force_fps`, and the reader sees a burst of "too
+  early" waits. Output is unaffected, but a live flow would rather have
+  a seamless looper.
 * The write path still goes through swscale and the CPU `v210` encoder,
   because nothing packs CUDA frames back to v210 yet. The read path no
   longer does (with `--gpu-unpack`).
