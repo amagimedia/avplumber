@@ -12,7 +12,8 @@ TRANSFER_TAGS = {"sdr": "bt709", "hlg": "arib-std-b67", "pq": "smpte2084"}
 OPERATORS = ("none", "linear", "gamma", "clip", "reinhard", "hable", "mobius")
 COLOR_KEYS = ("color_trc", "color_primaries", "colorspace", "color_range")
 TEN_BIT_FORMATS = ("p010le", "p210le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
-YUV_FORMATS = ("nv12", "yuv420p", "yuv422p", "yuv444p", *TEN_BIT_FORMATS)
+SEMIPLANAR_FORMATS = ("nv12", "nv16", "p010le", "p210le")   # what tonemap_cuda reads and writes
+YUV_FORMATS = ("nv12", "nv16", "yuv420p", "yuv422p", "yuv444p", *TEN_BIT_FORMATS)
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,7 @@ class Color:
                                       for k, v in self.tags.items())
 
     def validate_format(self, pixel_format):
-        if pixel_format not in YUV_FORMATS:
+        if pixel_format not in SEMIPLANAR_FORMATS:
             raise ValueError(f"unsupported canvas/output pixel format {pixel_format!r}")
         if self.transfer != "sdr" and pixel_format not in TEN_BIT_FORMATS:
             raise ValueError("HLG/PQ canvas and outputs require a 10-bit pixel format")
@@ -96,18 +97,16 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
         parts = [target.setparams]
         return ",".join(parts if source_format == pixel_format else parts + [f"scale_cuda=format={pixel_format}"])
     parts = [Color.parse(source).setparams] if source is not None else []
-    if source_format and source_format not in ("nv12", "p010le"):
-        # Preserve precision before a potential HDR conversion, regardless of target depth.
-        parts.append("scale_cuda=format=p010le")
-    intermediate = "p010le" if pixel_format in TEN_BIT_FORMATS else "nv12"
+    if source_format and source_format not in SEMIPLANAR_FORMATS:
+        # tonemap_cuda works on semiplanar storage; planar sources are re-laid out at 10 bits.
+        parts.append("scale_cuda=format=p210le" if "422" in source_format else "scale_cuda=format=p010le")
+    # tonemap_cuda converts colour and storage in one pass, 4:2:0 or 4:2:2 in and out.
     # param is the operator knee in reference-white units (mobius/reinhard; 0 keeps the
     # filter default 0.3). mobius at 0.9 keeps 0..90% of SDR white linear and folds
     # everything brighter into the top 10% of the SDR range; 1.0 would be a plain clip.
-    parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}:format={intermediate}"
+    parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}:format={pixel_format}"
                  f":tonemap={tonemap}:sdr_white={sdr_white:g}:hdr_peak={hdr_peak:g}:desat={desat:g}"
                  + (f":param={param:g}" if param else ""))
-    if pixel_format != intermediate:
-        parts.append(f"scale_cuda=format={pixel_format}")
     return ",".join(parts)
 
 

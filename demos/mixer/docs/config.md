@@ -41,7 +41,7 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 | --- | --- | --- |
 | `width`, `height` | — | the program raster the compositor draws into |
 | `fps` | `30` | **how often the compositor renders**, and the clock the whole mixer runs on: inputs are re-timed to it and browser pages are asked to paint at it |
-| `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 content (`v210` sources) native, renditions subsample once for NVENC |
+| `working_format` | `nv12` | compositor and transition pixel storage: `nv12` (8-bit 4:2:0), `p010le` (10-bit 4:2:0) or `p210le` (10-bit 4:2:2). 8-bit sources are promoted onto a 10-bit canvas; `p210le` keeps 4:2:2 through colour conversion and compositing, and renditions subsample to 4:2:0 once, inside the tone mapper, for NVENC |
 | `color` | `sdr` | canvas colour contract: `sdr` (BT.709), `hlg` or `pq` (BT.2020). HLG/PQ need a 10-bit `working_format`. Every source is converted to it on the GPU; renditions convert from it |
 
 The canvas rate is the single biggest load knob. Halving it from 60 to 30 on

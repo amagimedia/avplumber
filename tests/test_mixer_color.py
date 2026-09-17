@@ -49,11 +49,14 @@ def test_unsupported_contracts_fail_instead_of_retagging(tags):
         Color.parse(tags)
 
 
-def test_chroma_conversion_preserves_depth_before_tone_mapping():
-    graph = conversion_graph("sdr", "nv12", source_format="p210le")
-    assert graph.startswith("scale_cuda=format=p010le,tonemap_cuda=")
-    assert "hwdownload" not in graph and "hwupload" not in graph
-    assert conversion_graph("hlg", "p210le").endswith(",scale_cuda=format=p210le")
+def test_tonemap_converts_storage_in_the_same_pass():
+    # 4:2:2 stays inside tonemap_cuda: P210 in, NV12/P210 out, no scale_cuda round trip.
+    assert conversion_graph("sdr", "nv12", source_format="p210le") == \
+        "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12:tonemap=clip:sdr_white=203:hdr_peak=1000:desat=0"
+    assert conversion_graph("hlg", "p210le").endswith(":format=p210le:tonemap=clip:sdr_white=203:hdr_peak=1000:desat=0")
+    assert "scale_cuda" not in conversion_graph("hlg", "p210le", source="sdr", source_format="nv12")
+    # Planar CUDA storage is re-laid out once before the tone mapper.
+    assert conversion_graph("sdr", "nv12", source_format="yuv422p10le").startswith("scale_cuda=format=p210le,tonemap_cuda=")
     with pytest.raises(ValueError, match="10-bit"):
         conversion_graph("hlg", "nv12")
     with pytest.raises(ValueError, match="source pixel format"):

@@ -782,7 +782,7 @@ def test_v210_sources_keep_422_through_a_p210_canvas(tmp_path):
     # HDR out: one chroma subsample to P010 for NVENC, no tone-map pass.
     assert nodes["scale_hdr"]["graph"] == Color("hlg").setparams + ",scale_cuda=format=p010le"
     assert nodes["janus_format"]["real_pixel_format"] == "p010le"
-    assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12" in nodes["scale_sdr"]["graph"]
+    assert nodes["scale_sdr"]["graph"].startswith(Color("hlg").setparams + ",tonemap_cuda=transfer_in=auto:transfer_out=sdr:format=nv12")
 
 
 def test_cli_inputs_declare_browser_rgb_and_optional_file_color(tmp_path):
