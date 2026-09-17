@@ -19,8 +19,9 @@ from _harness import drain, finish, frame_planes, make_avp, start, v210_chain
 from v210_fixture import COLOR, FAMILIES, frame_stride, write_fixture
 
 W, H, FRAMES = 384, 216, 6
-# By default every run drains to EOF and requires the dual-input transition to
-# flush all generated frames (an earlier build dropped in-flight tail frames).
+# Every run drains to EOF and requires the dual-input transition to flush all
+# generated frames: the filter node used to finish on an EOF marker that arrived
+# while it was waiting for input, dropping the other scene's queued tail.
 # ``--tail-margin N`` generates N extra frames and stops after the scored ones.
 TAIL_MARGIN = 0
 TRANSITIONS = (("fade", 0.0), ("fade", 0.25), ("fade", 1.0), ("wipe_left", 0.5))
@@ -119,11 +120,11 @@ def upload_chain(nodes, tag, path, hwaccel, fmt):
     return f"gpu_{tag}"
 
 
-def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN):
+def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacity=3):
     from pyplumber.node import CudaRectOverlay, FilterVideo
 
     gen_frames = FRAMES + margin
-    avp, errors = make_avp("mix_gpu")
+    avp, errors = make_avp("mix_gpu", capacity)
     nodes = []
     chains = [(f"a{s}", s) for s in range(n)] + [("b0", 0)]
     if family in ("420", "444"):
@@ -182,24 +183,31 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN):
 
 
 def main():
+    global FRAMES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--families", nargs="+", default=["sdr8", "hlg", "420", "444"])
     parser.add_argument("--tail-margin", type=int, default=TAIL_MARGIN,
                         help="extra generated frames after the scored ones (default 0: drain to EOF)")
+    parser.add_argument("--frames", type=int, default=FRAMES)
+    parser.add_argument("--grid", type=int, default=16, help="sources in the grid run (0 skips it)")
+    parser.add_argument("--capacity", type=int, default=3, help="edge queue capacity")
+    parser.add_argument("--no-pairs", action="store_true", help="skip the two-source transition runs")
     args = parser.parse_args()
+    FRAMES = args.frames
     with tempfile.TemporaryDirectory(prefix="avp-mix10-") as root:
-        for family in args.families:
+        for family in args.families if not args.no_pairs else ():
             fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
             for mode, coef in TRANSITIONS:
-                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin)
+                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
-        # 16 simultaneous full-resolution sources drawn as a 4x4 grid.
-        for family in args.families:
+        # Many simultaneous full-resolution sources drawn as a grid (16 = 4x4).
+        for family in args.families if args.grid else ():
             if family in ("420", "444"):
-                continue  # 17 CPU upload chains add nothing over the v210 grid
-            run(root, family, "p210le", "fade", 0.25, args.timeout, n=16)
-            print(f"PASS {family}/p210le 4x4 grid of 16, fade alpha=0.25", flush=True)
+                continue  # CPU upload chains add nothing over the v210 grid
+            run(root, family, "p210le", "fade", 0.25, args.timeout, n=args.grid,
+                margin=args.tail_margin, capacity=args.capacity)
+            print(f"PASS {family}/p210le grid of {args.grid}, fade alpha=0.25", flush=True)
 
 
 if __name__ == "__main__":
