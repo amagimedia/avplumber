@@ -32,10 +32,12 @@ from pyplumber.node import (
     Demux,
     DecVideo,
     EncVideo,
+    ForceFPS,
     Input,
     InputRec,
     Mux,
     Output,
+    Realtime,
 )
 from avpmixer.inputs import v210_row_stride
 
@@ -149,6 +151,12 @@ def _fps_ratio(fps: str) -> str:
     return fps if "/" in fps else f"{fps}/1"
 
 
+def _fps_rounded(fps: str) -> int:
+    """Nearest whole frame rate, for options that want one (GOP length)."""
+    num, _, den = _fps_ratio(fps).partition("/")
+    return max(1, round(float(num) / float(den)))
+
+
 def _writer_url(domain: str) -> str:
     """MXL muxer wants a plain filesystem path (AVFMT_NOFILE)."""
     return domain
@@ -201,10 +209,32 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "name": "w_dec",
         "auto_restart": "off",
     }))
+    # MXL is a realtime transport: grain N is expected in shared memory
+    # at wall-clock N/fps. Nothing upstream paces a lavfi source, and an
+    # unpaced writer publishes thousands of grains per second, which
+    # shrinks the ring's history to milliseconds and makes every reader
+    # "too late". realtime(set_pts) rebases onto the host clock and
+    # force_fps pins the cadence the flow advertises.
+    avp.addNode(Realtime({
+        "src": "w_vframe",
+        "dst": "w_vrt",
+        "group": "w_in",
+        "name": "w_realtime",
+        "set_pts": True,
+        "auto_restart": "off",
+    }))
+    avp.addNode(ForceFPS({
+        "src": "w_vrt",
+        "dst": "w_vpaced",
+        "group": "w_in",
+        "name": "w_fps",
+        "fps": _fps_ratio(args.fps),
+        "auto_restart": "off",
+    }))
     # v210 requires 10-bit 4:2:2 planar. Convert explicitly so the
     # encoder's metadata chain is unambiguous.
     avp.addNode(RescaleVideo({
-        "src": "w_vframe",
+        "src": "w_vpaced",
         "dst": "w_vscaled",
         "group": "w_in",
         "name": "w_scale",
@@ -287,6 +317,16 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "options": {
             "blocking": "1",
             "grain_index_init": "head",
+            # avformat_open_input's probe already reads a grain, so the
+            # index is picked when the node is *created* — seconds before
+            # the group starts, since CUDA and NVENC init sit in between.
+            # By then it is behind the ring tail; "reset" re-derives it
+            # from grain_index_init on the next read instead of failing.
+            "on_too_late": "reset",
+            # ...which leaves a hole in the timestamps where the skipped
+            # grains would have been. Rebase PTS to zero after it so the
+            # output file does not start with a multi-second gap.
+            "reset_on_drop": "1",
             "zero_copy": "1" if args.zero_copy else "0",
         },
     }))
@@ -311,7 +351,14 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "format": "mp4",
         # Fragmented MP4 so the file stays playable even if the demo
         # is interrupted before the mp4 trailer is written.
-        "options": {"movflags": "frag_keyframe+empty_moov+default_base_moof"},
+        # flush_packets is what actually makes that true: without it the
+        # muxer's 256 KiB avio buffer is only written out when it fills,
+        # so a low-bitrate run killed after 25 s leaves a 28-byte file
+        # holding nothing but the ftyp box.
+        "options": {
+            "movflags": "frag_keyframe+empty_moov+default_base_moof",
+            "flush_packets": "1",
+        },
         "group": "r_in",
         "auto_restart": "off",
     }))
@@ -375,7 +422,11 @@ def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -
         "name": "r_enc",
         "codec": "h264_nvenc",
         "hwaccel": _HWACCEL,
-        "options": {"preset": "p4", "profile": "high", "bf": 0},
+        # One keyframe per second: movflags=frag_keyframe cuts a fragment
+        # per keyframe, so the output file becomes playable a second in
+        # instead of after NVENC's default 250-frame GOP.
+        "options": {"preset": "p4", "profile": "high", "bf": 0,
+                    "g": _fps_rounded(args.fps)},
         "auto_restart": "off",
     }))
 
