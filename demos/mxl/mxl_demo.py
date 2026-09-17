@@ -3,8 +3,12 @@
 
 Builds two avplumber graphs in one process:
 
-* writer: file -> demux -> decode -> rawvideo encode -> mxl mux -> mxl:// URL
-* reader: mxl:// URL -> demux -> decode -> re-encode -> file
+* writer: file -> demux -> decode -> v210 encode -> mxl mux -> mxl:// URL
+* reader: mxl:// URL -> demux -> v210 unpack -> re-encode -> file
+
+The reader unpacks on the GPU (`v210_to_cuda` + NVENC) when a CUDA
+device is present and falls back to the CPU v210 decoder otherwise, and
+takes grains zero-copy out of the shared-memory ring by default.
 
 The two graphs share a `/dev/shm/mxl` domain and a set of flow UUIDs so
 the reader picks up what the writer publishes. The point is to exercise
@@ -33,6 +37,10 @@ from pyplumber.node import (
     Mux,
     Output,
 )
+from avpmixer.inputs import v210_row_stride
+
+# Name of the CUDA device the GPU reader path initializes and shares.
+_HWACCEL = "@gpu"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -78,7 +86,67 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the reader side (publish only).",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--width",
+        type=int,
+        default=int(os.environ.get("AVP_WIDTH", 320)),
+        help="Flow width. The writer rescales to it; v210 requires it to be even.",
+    )
+    p.add_argument(
+        "--height",
+        type=int,
+        default=int(os.environ.get("AVP_HEIGHT", 240)),
+        help="Flow height. The writer rescales to it.",
+    )
+    p.add_argument(
+        "--fps",
+        default=os.environ.get("AVP_FPS", "25"),
+        help="Flow frame rate, '25' or '30000/1001'. Must match the source.",
+    )
+    p.add_argument(
+        "--gpu-unpack",
+        choices=("auto", "on", "off"),
+        default=os.environ.get("AVP_GPU_UNPACK", "auto"),
+        help=(
+            "Read the flow straight onto the GPU: v210_to_cuda unpacks each "
+            "grain into CUDA P210 frames and NVENC encodes the output. "
+            "'auto' (default) uses it when a CUDA device is present, else "
+            "falls back to the CPU v210 decoder and mpeg4."
+        ),
+    )
+    p.add_argument(
+        "--no-zero-copy",
+        dest="zero_copy",
+        action="store_false",
+        default=os.environ.get("AVP_MXL_ZERO_COPY", "1") != "0",
+        help=(
+            "Copy each grain out of shared memory instead of pointing the "
+            "AVPacket at it. Zero-copy is the default; disable it if the "
+            "reader can fall behind the writer's ring buffer."
+        ),
+    )
+    args = p.parse_args()
+    if args.gpu_unpack == "auto":
+        args.gpu_unpack = _cuda_present()
+        print(f"gpu unpack: {'on' if args.gpu_unpack else 'off'} (auto-detected)")
+    else:
+        args.gpu_unpack = args.gpu_unpack == "on"
+    return args
+
+
+def _cuda_present() -> bool:
+    """True if this container/host has an NVIDIA device node.
+
+    Cheaper and more reliable than probing the driver: the NVIDIA
+    Container Toolkit maps /dev/nvidiactl in, and its absence is exactly
+    the case where v210_to_cuda cannot run.
+    """
+    return os.path.exists("/dev/nvidiactl")
+
+
+def _fps_ratio(fps: str) -> str:
+    """Accept '25' as well as '30000/1001'."""
+    return fps if "/" in fps else f"{fps}/1"
 
 
 def _writer_url(domain: str) -> str:
@@ -141,14 +209,19 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "group": "w_in",
         "name": "w_scale",
         "dst_pixel_format": "yuv422p10le",
+        # Force the declared geometry: the reader derives the v210 row
+        # stride from --width, and packed v210 carries no dimensions, so
+        # a source of another size would silently break the contract.
+        "dst_width": args.width,
+        "dst_height": args.height,
         "auto_restart": "off",
     }))
     avp.addNode(AssumeVideoFormat({
         "src": "w_vscaled",
         "dst": "w_vscaled_assumed",
         "group": "w_in",
-        "width": 320,
-        "height": 240,
+        "width": args.width,
+        "height": args.height,
         "pixel_format": "yuv422p10le",
         "real_pixel_format": "yuv422p10le",
         "auto_restart": "off",
@@ -182,8 +255,21 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
 
 
 def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
-    """mxl:// -> demux -> decode -> rescale -> mpeg4 encode -> file."""
+    """mxl:// -> demux -> v210 unpack -> encode -> file.
+
+    With `--gpu-unpack` the packed grains go straight to the GPU
+    (`v210_to_cuda`) and NVENC writes the file; otherwise the CPU v210
+    decoder plus swscale feed the mpeg4 encoder.
+    """
     from pyplumber.node import RescaleVideo, AssumeVideoFormat
+
+    if args.zero_copy:
+        # Zero-copy hands out AVPackets pointing straight into the MXL
+        # ring buffer in /dev/shm, with no refcount held on the grain: the
+        # bytes stay valid only until the writer laps that slot. Keep the
+        # packet queue at one frame so nothing ages while it waits. See
+        # also the history_duration note in README.md.
+        avp.executeCommandsFromString("queue.plan_capacity r_vpkt 1")
 
     # `blocking=1` makes the demuxer wait up to one frame period for
     # the next grain instead of returning EAGAIN immediately, so the
@@ -201,6 +287,7 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "options": {
             "blocking": "1",
             "grain_index_init": "head",
+            "zero_copy": "1" if args.zero_copy else "0",
         },
     }))
     avp.addNode(Demux({
@@ -209,6 +296,93 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "group": "r_in",
         "auto_restart": "off",
     }))
+    if args.gpu_unpack:
+        _build_gpu_reader_tail(avp, args)
+    else:
+        _build_cpu_reader_tail(avp, args, RescaleVideo, AssumeVideoFormat)
+    avp.addNode(Mux({
+        "src": ["r_venc"],
+        "dst": "r_mux",
+        "group": "r_in",
+    }))
+    avp.addNode(Output({
+        "src": "r_mux",
+        "url": args.output,
+        "format": "mp4",
+        # Fragmented MP4 so the file stays playable even if the demo
+        # is interrupted before the mp4 trailer is written.
+        "options": {"movflags": "frag_keyframe+empty_moov+default_base_moof"},
+        "group": "r_in",
+        "auto_restart": "off",
+    }))
+
+
+def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
+    """r_vpkt -> v210_to_cuda -> scale_cuda -> NVENC -> r_venc.
+
+    One packed frame per grain is exactly `v210_to_cuda`'s input
+    contract, so the whole CPU v210 decoder and swscale drop out: the
+    grain is copied once into pinned memory, unpacked to CUDA P210 by
+    the PTX kernel, and never touches host memory again. NVENC also
+    sidesteps the CPU path's mpeg4 fallback (the image has no libx264).
+    """
+    from pyplumber.node import AssumeVideoFormat, FilterVideo, V210ToCuda
+
+    avp.addNode(V210ToCuda({
+        "src": "r_vpkt",
+        "dst": "r_vcuda",
+        "group": "r_in",
+        "name": "r_unpack",
+        "hwaccel": _HWACCEL,
+        "width": args.width,
+        "height": args.height,
+        "stride": v210_row_stride(args.width),
+        "fps": _fps_ratio(args.fps),
+        "timebase": "1/90000",
+        "format": "p210le",
+        # Packed v210 carries no metadata at all, so the node stamps it.
+        "colorspace": "bt709",
+        "color_primaries": "bt709",
+        "color_trc": "bt709",
+        "color_range": "tv",
+        "auto_restart": "off",
+    }))
+    # NVENC only takes 4:2:2 10-bit on Blackwell-class hardware, so
+    # convert on the GPU to 8-bit 4:2:0 for the demo's output file.
+    avp.addNode(FilterVideo({
+        "src": "r_vcuda",
+        "dst": "r_vnv12",
+        "group": "r_in",
+        "name": "r_filter",
+        "graph": "scale_cuda=format=nv12",
+        "hwaccel": _HWACCEL,
+        "auto_restart": "off",
+    }))
+    avp.addNode(AssumeVideoFormat({
+        "src": "r_vnv12",
+        "dst": "r_vassumed",
+        "group": "r_in",
+        "width": args.width,
+        "height": args.height,
+        "pixel_format": "cuda",
+        "real_pixel_format": "nv12",
+        "auto_restart": "off",
+    }))
+    avp.addNode(EncVideo({
+        "src": "r_vassumed",
+        "dst": "r_venc",
+        "group": "r_in",
+        "name": "r_enc",
+        "codec": "h264_nvenc",
+        "hwaccel": _HWACCEL,
+        "options": {"preset": "p4", "profile": "high", "bf": 0},
+        "auto_restart": "off",
+    }))
+
+
+def _build_cpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
+                           RescaleVideo, AssumeVideoFormat) -> None:
+    """r_vpkt -> CPU v210 decode -> swscale -> mpeg4 -> r_venc."""
     avp.addNode(DecVideo({
         "src": "r_vpkt",
         "dst": "r_vframe",
@@ -229,8 +403,8 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "src": "r_vscaled",
         "dst": "r_vscaled_assumed",
         "group": "r_in",
-        "width": 320,
-        "height": 240,
+        "width": args.width,
+        "height": args.height,
         "pixel_format": "yuv420p",
         "real_pixel_format": "yuv420p",
         "auto_restart": "off",
@@ -241,21 +415,6 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "group": "r_in",
         "name": "r_enc",
         "codec": "mpeg4",
-        "auto_restart": "off",
-    }))
-    avp.addNode(Mux({
-        "src": ["r_venc"],
-        "dst": "r_mux",
-        "group": "r_in",
-    }))
-    avp.addNode(Output({
-        "src": "r_mux",
-        "url": args.output,
-        "format": "mp4",
-        # Fragmented MP4 so the file stays playable even if the demo
-        # is interrupted before the mp4 trailer is written.
-        "options": {"movflags": "frag_keyframe+empty_moov+default_base_moof"},
-        "group": "r_in",
         "auto_restart": "off",
     }))
 
@@ -274,6 +433,10 @@ def main() -> int:
     if not args.reader_only:
         _build_writer(avp, args)
     if not args.writer_only:
+        if args.gpu_unpack:
+            avp.executeCommandsFromString(
+                'hwaccel.init { "name": "%s", "type": "cuda" }' % _HWACCEL
+            )
         _build_reader(avp, args)
 
     if not args.reader_only:
