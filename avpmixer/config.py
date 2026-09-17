@@ -81,6 +81,7 @@ class Rendition:
     tonemap: str = ""
     tonemap_peak: float = 10.0       # source peak in REFERENCE_WHITE units (HLG 1000 nits)
     tonemap_desat: float = 0.0       # 0 keeps saturation; FFmpeg's 0.5 default washes colours out
+    tonemap_param: float = 0.0       # operator knee in reference-white units; 1.0 = SDR range untouched
 
     color: str = ""                # empty: inherit canvas, except H.264/tonemap imply SDR
 
@@ -232,6 +233,11 @@ def _parse_rendition(r: Dict[str, Any], where: str, canvas_w: int, canvas_h: int
         raise ConfigError(f"{where}: width and height must be positive")
     if rendition.fps <= 0 or rendition.bitrate_kbps <= 0:
         raise ConfigError(f"{where}: fps and bitrate_kbps must be positive")
+    if rendition.tonemap_peak < 2.03 or rendition.tonemap_desat < 0 or rendition.tonemap_param < 0:
+        raise ConfigError(f"{where}: tonemap_peak >= 2.03 (203 nits), tonemap_desat >= 0 and tonemap_param >= 0")
+    if rendition.tonemap == "mobius" and rendition.tonemap_param >= 1:
+        # The Möbius shoulder maps [knee, peak] onto [knee, 1]; at knee 1.0 it degenerates to clip.
+        raise ConfigError(f"{where}: mobius tonemap_param must be below 1.0 (0.9 keeps 90% of SDR white linear)")
     if rendition.fps > fps:
         raise ConfigError(f"{where}: fps {rendition.fps} exceeds the canvas rate {fps}; "
                           "a rendition can only re-time the program downwards")

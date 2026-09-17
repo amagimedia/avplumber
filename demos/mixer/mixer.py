@@ -516,7 +516,7 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: s
             "name": f"scale_{r.id}", "src": edge, "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
             "graph": scale + conversion_graph(target, enc_format, source=color, source_format=working_format,
                                               tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
-                                              desat=r.tonemap_desat),
+                                              desat=r.tonemap_desat, param=r.tonemap_param),
         }))
         if r.target != "janus":
             _build_record_output(avp, api, scaled, r, codec=codec, enc_format=enc_format,

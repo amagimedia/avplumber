@@ -731,7 +731,7 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
            "renditions": [
                {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10"},
                {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc",
-                "profile": "baseline", "tonemap": "hable"}]}
+                "profile": "baseline", "tonemap": "mobius", "tonemap_param": 0.9}]}
     path = tmp_path / "dual.json"
     path.write_text(json.dumps(doc))
     app = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
@@ -742,7 +742,7 @@ def test_hdr_and_sdr_janus_renditions_have_independent_feedback(tmp_path):
     assert nodes["janus_sdr_encoder"]["options"]["color_trc"] == "bt709"
     assert nodes["janus_sdr_format"]["real_pixel_format"] == "nv12"
     assert "tonemap_cuda=transfer_in=auto:transfer_out=sdr" in nodes["scale_sdr"]["graph"]
-    assert ":sdr_white=203:hdr_peak=1000" in nodes["scale_sdr"]["graph"]
+    assert ":tonemap=mobius:sdr_white=203:hdr_peak=1000:desat=0:param=0.9" in nodes["scale_sdr"]["graph"]
     assert ":5006?" in nodes["janus_rtp_output"]["url"]
     assert ":5004?" in nodes["janus_sdr_rtp_output"]["url"]
     feedback = app.rtcp_feedback_listener
@@ -797,6 +797,12 @@ def test_cli_inputs_declare_browser_rgb_and_optional_file_color(tmp_path):
     assert dict(FakeMixer.instances[-1].sources)["source_0"]["color"] is None   # frame tags decide
     with pytest.raises(ValueError, match="input-color"):
         GraphOptions(inputs=("a.mp4",), output="o.ts", input_color="rec2020").validate()
+
+
+def test_mobius_knee_must_leave_shoulder_room():
+    doc = {**CONFIG, "renditions": [{"id": "sdr", "codec": "h264_nvenc", "tonemap": "mobius", "tonemap_param": 1.0}]}
+    with pytest.raises(mixer_config.ConfigError, match="below 1.0"):
+        mixer_config.parse(doc)
 
 
 @pytest.mark.parametrize("fmt", ["yuv420p", "yuv444p10le", "yuv422p10le"])

@@ -67,6 +67,7 @@ output costs an encode, not another composite.
 | `tonemap` | `clip` when conversion is needed | Explicit operator requests SDR; 203-nit reference white, selectable highlight compression |
 | `tonemap_peak` | `10` | HDR display peak in units of 100 nits |
 | `tonemap_desat` | `0` | highlight desaturation; zero preserves saturation |
+| `tonemap_param` | no | operator knee in reference-white units (mobius/reinhard). mobius `0.9` keeps everything up to 90% of SDR white untouched and folds brighter HDR highlights into the top 10% of the SDR range; must be below 1.0 (1.0 is a plain clip). `0` keeps the filter default (0.3) |
 
 With no `renditions` the demo builds its usual single output from the command
 line flags.

@@ -75,7 +75,7 @@ def declared_color(obj):
 
 
 def conversion_graph(target, pixel_format, *, source=None, source_format=None,
-                     tonemap="clip", sdr_white=203.0, hdr_peak=1000.0, desat=0.0):
+                     tonemap="clip", sdr_white=203.0, hdr_peak=1000.0, desat=0.0, param=0.0):
     """Validate and normalize CUDA YUV frames, keeping identity frames zero-copy.
 
     NVDEC emits NV12/P010. Callers with other CUDA storage must declare it so
@@ -86,8 +86,8 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
     target.validate_format(pixel_format)
     if tonemap not in OPERATORS:
         raise ValueError(f"unsupported tone-map operator {tonemap!r}")
-    if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0):
-        raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100 and desat >= 0")
+    if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat, param)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0 and param >= 0):
+        raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100, desat >= 0 and param >= 0")
     if source_format and source_format not in YUV_FORMATS:
         raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
     if source is not None and Color.parse(source) == target:
@@ -100,8 +100,12 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
         # Preserve precision before a potential HDR conversion, regardless of target depth.
         parts.append("scale_cuda=format=p010le")
     intermediate = "p010le" if pixel_format in TEN_BIT_FORMATS else "nv12"
+    # param is the operator knee in reference-white units (mobius/reinhard; 0 keeps the
+    # filter default 0.3). mobius at 0.9 keeps 0..90% of SDR white linear and folds
+    # everything brighter into the top 10% of the SDR range; 1.0 would be a plain clip.
     parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}:format={intermediate}"
-                 f":tonemap={tonemap}:sdr_white={sdr_white:g}:hdr_peak={hdr_peak:g}:desat={desat:g}")
+                 f":tonemap={tonemap}:sdr_white={sdr_white:g}:hdr_peak={hdr_peak:g}:desat={desat:g}"
+                 + (f":param={param:g}" if param else ""))
     if pixel_format != intermediate:
         parts.append(f"scale_cuda=format={pixel_format}")
     return ",".join(parts)
