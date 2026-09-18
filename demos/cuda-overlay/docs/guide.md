@@ -5,7 +5,8 @@
 One 1080p base and 15 transparent, labeled overlays composed on the GPU by
 `overlay_many_cuda`.
 
-Build the repository's FFmpeg patch stack on public FFmpeg `n7.1.5`, run the
+Build the repository's shared FFmpeg 8.x patch stack on public FFmpeg `n8.1`
+(or select `n8.0` with `FFMPEG_TAG`), run the
 patched `overlay_many_cuda` through a purpose-built PyPlumber graph, and compare
 every output plane against an independent CPU reference.
 

@@ -152,9 +152,9 @@ private:
         }
 
         const std::string in_args = buildSourceArgsString();
-        int ret = avfilter_graph_create_filter(&buffersrc_ctx_, buffersrc, "in", in_args.c_str(), nullptr, filter_graph_);
-        if (ret < 0) {
-            throw Error("crop_metadata_cuda: couldn't create buffer source");
+        buffersrc_ctx_ = avfilter_graph_alloc_filter(filter_graph_, buffersrc, "in");
+        if (!buffersrc_ctx_) {
+            throw Error("crop_metadata_cuda: couldn't allocate buffer source");
         }
 
         AVBufferSrcParameters *src_params = av_buffersrc_parameters_alloc();
@@ -162,11 +162,22 @@ private:
             throw Error("crop_metadata_cuda: av_buffersrc_parameters_alloc failed");
         }
         src_params->hw_frames_ctx = av_buffer_ref(initial_hw_frames_ctx_);
-        ret = av_buffersrc_parameters_set(buffersrc_ctx_, src_params);
+        if (!src_params->hw_frames_ctx) {
+            av_freep(&src_params);
+            throw Error("crop_metadata_cuda: couldn't reference buffer source CUDA frames");
+        }
+        int ret = av_buffersrc_parameters_set(buffersrc_ctx_, src_params);
         av_buffer_unref(&src_params->hw_frames_ctx);
         av_freep(&src_params);
         if (ret < 0) {
             throw Error("crop_metadata_cuda: av_buffersrc_parameters_set failed");
+        }
+
+        // FFmpeg 8.1 validates CUDA sources during init, so the frames context
+        // must be attached before initializing, not just before graph config.
+        ret = avfilter_init_str(buffersrc_ctx_, in_args.c_str());
+        if (ret < 0) {
+            throw Error("crop_metadata_cuda: couldn't initialize buffer source: " + av::error2string(ret));
         }
 
         std::stringstream crop_args;

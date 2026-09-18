@@ -1,35 +1,27 @@
-From 127f4c991739e9af8cdc5ac1315511c5e1bd85ef Mon Sep 17 00:00:00 2001
-From: Teodor Wozniak <teodor.wozniak@amagi.com>
-Date: Wed, 12 Aug 2026 15:53:23 +0000
-Subject: [PATCH 1/7] swscale/aarch64: add fast ARGB to YUVA420P conversion
+From e65731e98a015ad5b8888367a7929f91fbcba4c9 Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@amagi.com>
+Date: Tue, 15 Sep 2026 09:35:57 +0200
+Subject: [PATCH 1/7] swscale/aarch64: port ARGB to YUVA420P fast paths to 8.1
 
-Add an unscaled NEON conversion path for ARGB input to YUVA420P output.
-
-Original-commit: 3708bfab707a6eeb151829fd5c92807470c0f6d8
 ---
- libswscale/aarch64/input.S                 |  36 ++++
+ libswscale/aarch64/input.S                 |  32 ++++
  libswscale/aarch64/swscale.c               |   6 +
  libswscale/aarch64/swscale_unscaled.c      | 125 +++++++++++++
  libswscale/aarch64/swscale_unscaled_neon.S | 200 +++++++++++++++++++++
- 4 files changed, 367 insertions(+)
+ 4 files changed, 363 insertions(+)
 
 diff --git a/libswscale/aarch64/input.S b/libswscale/aarch64/input.S
-index 5cb1871..bab2700 100644
+index c1c0adffc8..a671a2ed60 100644
 --- a/libswscale/aarch64/input.S
 +++ b/libswscale/aarch64/input.S
-@@ -313,3 +313,39 @@ rgbToUV_neon bgr24, rgb24, element=3
- rgbToUV_neon bgra32, rgba32, element=4
+@@ -314,6 +314,38 @@ rgbToUV_neon bgra32, rgba32, element=4
  
  rgbToUV_neon abgr32, argb32, element=4, alpha_first=1
-+
-+// void ff_argb32ToA_neon(uint8_t *dst, const uint8_t *src, const uint8_t *unused1,
-+//                        const uint8_t *unused2, int width, uint32_t *unused, void *opq)
-+// dst stores one int16_t per pixel with the same scaling as abgrToA_c:
-+// dst = (A << 6) | (A >> 2)
+ 
++// dst = (A << 6) | (A >> 2), as in abgrToA_c.
 +function ff_argb32ToA_neon, export=1
 +        cmp             w4, #0
 +        b.le            3f
-+
 +        cmp             w4, #16
 +        b.lt            2f
 +1:
@@ -57,20 +49,24 @@ index 5cb1871..bab2700 100644
 +3:
 +        ret
 +endfunc
++
+ #if HAVE_DOTPROD
+ ENABLE_DOTPROD
+ 
 diff --git a/libswscale/aarch64/swscale.c b/libswscale/aarch64/swscale.c
-index eb90728..a2abfe5 100644
+index 4f86364f4b..3844db23bd 100644
 --- a/libswscale/aarch64/swscale.c
 +++ b/libswscale/aarch64/swscale.c
-@@ -217,6 +217,8 @@ NEON_INPUT(bgr24);
+@@ -291,6 +291,8 @@ NEON_INPUT(bgr24);
  NEON_INPUT(bgra32);
  NEON_INPUT(rgb24);
  NEON_INPUT(rgba32);
 +void ff_argb32ToA_neon(uint8_t *dst, const uint8_t *src, const uint8_t *,
-+                       const uint8_t *, int w, uint32_t *coeffs, void *opq);
++                      const uint8_t *, int w, uint32_t *coeffs, void *opq);
+ NEON_INPUT_DOTPROD(bgra32);
+ NEON_INPUT_DOTPROD(rgba32);
  
- void ff_lumRangeFromJpeg_neon(int16_t *dst, int width);
- void ff_chrRangeFromJpeg_neon(int16_t *dstU, int16_t *dstV, int width);
-@@ -256,6 +258,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsContext *c)
+@@ -382,6 +384,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsInternal *c)
                  c->chrToYV12 = ff_abgr32ToUV_half_neon;
              else
                  c->chrToYV12 = ff_abgr32ToUV_neon;
@@ -79,7 +75,7 @@ index eb90728..a2abfe5 100644
              break;
  
          case AV_PIX_FMT_ARGB:
-@@ -264,6 +268,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsContext *c)
+@@ -390,6 +394,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsInternal *c)
                  c->chrToYV12 = ff_argb32ToUV_half_neon;
              else
                  c->chrToYV12 = ff_argb32ToUV_neon;
@@ -89,7 +85,7 @@ index eb90728..a2abfe5 100644
          case AV_PIX_FMT_BGR24:
              c->lumToYV12 = ff_bgr24ToY_neon;
 diff --git a/libswscale/aarch64/swscale_unscaled.c b/libswscale/aarch64/swscale_unscaled.c
-index 9dfccc0..9626dd3 100644
+index ba24775210..75c3991ec0 100644
 --- a/libswscale/aarch64/swscale_unscaled.c
 +++ b/libswscale/aarch64/swscale_unscaled.c
 @@ -21,6 +21,13 @@
@@ -106,7 +102,7 @@ index 9dfccc0..9626dd3 100644
  #define YUV_TO_RGB_TABLE                                                                    \
          c->yuv2rgb_v2r_coeff,                                                               \
          c->yuv2rgb_u2g_coeff,                                                               \
-@@ -164,6 +171,115 @@ static int nv24_to_yuv420p_neon_wrapper(SwsContext *c, const uint8_t *src[],
+@@ -205,6 +212,115 @@ static int nv24_to_yuv420p_neon_wrapper(SwsInternal *c, const uint8_t *const src
      return srcSliceH;
  }
  
@@ -188,11 +184,11 @@ index 9dfccc0..9626dd3 100644
 +    }
 +}
 +
-+static int argb_to_yuva420p_neon_wrapper(SwsContext *c, const uint8_t *src[],
-+                                         int srcStride[], int srcSliceY, int srcSliceH,
-+                                         uint8_t *dst[], int dstStride[])
++static int argb_to_yuva420p_neon_wrapper(SwsInternal *c, const uint8_t *const src[],
++                                         const int srcStride[], int srcSliceY, int srcSliceH,
++                                         uint8_t *const dst[], const int dstStride[])
 +{
-+    const int width_aligned = c->srcW & ~15;
++    const int width_aligned = c->opts.src_w & ~15;
 +    const uint8_t *src_ptr = src[0];
 +    uint8_t *ydst = dst[0] + srcSliceY * dstStride[0];
 +    uint8_t *udst = dst[1] + (srcSliceY >> 1) * dstStride[1];
@@ -201,9 +197,9 @@ index 9dfccc0..9626dd3 100644
 +
 +    /* Keep strict gating in wrapper too, so odd slice boundaries or non-16 widths
 +     * never hit the assembly fast path. */
-+    if ((srcSliceY & 1) || (srcSliceH & 1) || (c->srcW & 15)) {
++    if ((srcSliceY & 1) || (srcSliceH & 1) || (c->opts.src_w & 15)) {
 +        argb_to_yuva420p_c(src_ptr, ydst, udst, vdst, adst,
-+                           c->srcW, srcSliceH, dstStride[0], dstStride[1],
++                           c->opts.src_w, srcSliceH, dstStride[0], dstStride[1],
 +                           srcStride[0], dstStride[3], c->input_rgb2yuv_table);
 +        return srcSliceH;
 +    }
@@ -222,24 +218,24 @@ index 9dfccc0..9626dd3 100644
  #define DECLARE_FF_NVX_TO_ALL_RGBX_FUNCS(nvx)                                               \
  DECLARE_FF_NVX_TO_RGBX_FUNCS(nvx, argb)                                                     \
  DECLARE_FF_NVX_TO_RGBX_FUNCS(nvx, rgba)                                                     \
-@@ -207,6 +323,15 @@ static void get_unscaled_swscale_neon(SwsContext *c) {
-         (c->srcFormat == AV_PIX_FMT_NV24 || c->srcFormat == AV_PIX_FMT_NV42) &&
-         !(c->srcH & 1) && !(c->srcW & 15) && !accurate_rnd)
+@@ -259,6 +375,15 @@ static void get_unscaled_swscale_neon(SwsInternal *c) {
+         (c->opts.src_format == AV_PIX_FMT_NV24 || c->opts.src_format == AV_PIX_FMT_NV42) &&
+         !(c->opts.src_h & 1) && !(c->opts.src_w & 15) && !accurate_rnd)
          c->convert_unscaled = nv24_to_yuv420p_neon_wrapper;
 +
-+    if (c->srcFormat == AV_PIX_FMT_ARGB &&
-+        c->dstFormat == AV_PIX_FMT_YUVA420P &&
-+        !(c->srcH & 1) &&
-+        !(c->srcW & 15) &&
-+        !(c->srcW & 1) && !accurate_rnd) {
++    if (c->opts.src_format == AV_PIX_FMT_ARGB &&
++        c->opts.dst_format == AV_PIX_FMT_YUVA420P &&
++        !(c->opts.src_h & 1) &&
++        !(c->opts.src_w & 15) &&
++        !(c->opts.src_w & 1) && !accurate_rnd) {
 +        c->convert_unscaled = argb_to_yuva420p_neon_wrapper;
 +        c->dst_slice_align = 2;
 +    }
  }
  
- void ff_get_unscaled_swscale_aarch64(SwsContext *c)
+ void ff_get_unscaled_swscale_aarch64(SwsInternal *c)
 diff --git a/libswscale/aarch64/swscale_unscaled_neon.S b/libswscale/aarch64/swscale_unscaled_neon.S
-index a074b18..0c961ad 100644
+index a074b187e5..0c961ad4af 100644
 --- a/libswscale/aarch64/swscale_unscaled_neon.S
 +++ b/libswscale/aarch64/swscale_unscaled_neon.S
 @@ -20,6 +20,206 @@
