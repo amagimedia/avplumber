@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from avpmixer import MixerGraphBuilder
+from pyplumber.mixer import MixerGraphBuilder
 from pyplumber import AVPlumber
 from pyplumber.node import DecVideo, Demux, FilterVideo, ForceFPS, InputRec, Realtime, SourceSwitcher
 from frame_codes import read_code

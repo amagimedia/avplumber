@@ -31,10 +31,10 @@ public:
              const av::Rational fps, const av::Rational timebase, std::string label):
             NodeSISO<T, T>(std::move(source), std::move(sink)), fps_(fps), label_(std::move(label)), timebase_(timebase) {
         if (timebase_.getDenominator()==0 || timebase_.getNumerator()==0) {
-            timebase_ = av::Rational(fps_.getDenominator(), fps_.getNumerator());
+            timebase_ = av_inv_q(fps_.getValue());
             frame_delta_ = av::Timestamp(1, timebase_);
         } else {
-            frame_delta_ = rescaleTS(av::Timestamp(1, {fps_.getDenominator(), fps_.getNumerator()}), timebase_);
+            frame_delta_ = rescaleTS(av::Timestamp(1, av_inv_q(fps_.getValue())), timebase_);
         }
         logstream << "Set timebase " << timebase_ << ", frame rate " << fps_ << ", frame delta " << frame_delta_;
     }

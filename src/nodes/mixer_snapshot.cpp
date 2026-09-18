@@ -1,8 +1,8 @@
 #include "node_common.hpp"
-#include <cstdlib>
-#include "../mixer/OutputSnapshot.hpp"
-#include "../mixer/FrameRate.hpp"
-#include "../mixer/MonotonicClock.hpp"
+#include "../mixer/primitives/CutLatencyProbe.hpp"
+#include "../mixer/primitives/OutputSnapshot.hpp"
+#include "../mixer/primitives/TickGrid.hpp"
+#include "../mixer/primitives/MonotonicClock.hpp"
 
 // The output instance records committed pictures; the two slot instances can
 // substitute that same retained frame without a GPU copy or another compositor.
@@ -11,17 +11,17 @@ class MixerSnapshot : public NodeSISO<av::VideoFrame, av::VideoFrame>,
     std::shared_ptr<avp::mixer::OutputSnapshot> state_;
     int slot_;
     av::Rational fps_;
-    avp::mixer::FrameRate rate_;
+    avp::mixer::TickGrid rate_;
     int64_t latency_ns_;
     av::Timestamp last_pts_ = NOTS;
-    static constexpr const char* marker = "avp.mixer.snapshot";
+    static constexpr const char* kMarker = "avp.mixer.snapshot";
 
 public:
     MixerSnapshot(std::unique_ptr<SourceType>&& source, std::unique_ptr<SinkType>&& sink,
                   std::shared_ptr<avp::mixer::OutputSnapshot> state, int slot,
                   av::Rational fps, int64_t latency_ns)
         : NodeSISO(std::move(source), std::move(sink)), state_(std::move(state)),
-          slot_(slot), fps_(fps), rate_(fps.getNumerator(), fps.getDenominator()),
+          slot_(slot), fps_(fps), rate_(fps),
           latency_ns_(latency_ns) {
         if (slot_ == -1) {
             std::lock_guard<std::mutex> lock(state_->mutex);
@@ -35,7 +35,7 @@ public:
         }
     }
     av::Rational frameRate() override { return fps_; }
-    av::Rational timeBase() override { return {fps_.getDenominator(), fps_.getNumerator()}; }
+    av::Rational timeBase() override { return av_inv_q(fps_.getValue()); }
 
     void process() override {
         // A short input wait also wakes a newly requested hold on an idle slot.
@@ -45,8 +45,8 @@ public:
         bool replace = slot_ == -1 ? frames.holding() : frames.replaces(slot_);
         bool release = false;
         if (slot_ == -1 && replace && input && input->isValid() && input->pts().isValid()) {
-            const auto* tag = av_dict_get(input->raw()->metadata, marker, nullptr, 0);
-            uint64_t generation = tag ? std::strtoull(tag->value, nullptr, 10) : 0;
+            const auto* tag = av_dict_get(input->raw()->metadata, kMarker, nullptr, 0);
+            const uint64_t generation = tag ? avp::mixer::parseFrameToken(tag->value) : 0;
             release = frames.canRelease(input->pts().timestamp({1, 1000000000}), generation);
             if (release) replace = false;
         }
@@ -62,7 +62,7 @@ public:
             output.setTimeBase(timeBase());
             output.setPts(pts);
             if (slot_ != -1)
-                av_dict_set(&output.raw()->metadata, marker, std::to_string(frames.generation()).c_str(), 0);
+                av_dict_set(&output.raw()->metadata, kMarker, std::to_string(frames.generation()).c_str(), 0);
         } else {
             if (!input) return;
             output = *input;

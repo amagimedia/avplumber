@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 
-from avpmixer import MixerGraphBuilder
+from pyplumber.mixer import MixerGraphBuilder
 from pyplumber import AVPlumber
 from pyplumber.node import AssumeVideoFormat, DecVideo, Demux, EncVideo, ForceFPS, InputRec, Realtime
 

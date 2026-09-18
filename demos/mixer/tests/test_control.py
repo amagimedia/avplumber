@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from avpmixer.control import (AvpConnection, mixer_command, parse_mixer_status,
+from pyplumber.mixer.control import (AvpConnection, mixer_command, parse_mixer_status,
                               parse_scene_list)
 
 

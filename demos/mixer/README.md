@@ -147,6 +147,36 @@ Sixteen generated clips with visible frame IDs (needs NumPy and FFmpeg):
 python3 demos/mixer/tests/frame_codes.py media --sources 16 --width 1920 --height 1080 --fps 60 --seconds 30
 ```
 
+Eight colorful SDR patterns (bars, mandelbrot, life, ...) as NVENC clips:
+
+```sh
+python3 demos/mixer/tests/sdr_patterns.py media/patterns --fps 60 --seconds 20
+```
+
+## An HDR show
+
+`make_config.py` also writes HDR shows: an HLG (or PQ) 10-bit canvas, sources
+tagged with their color, HEVC Main10 on the program mountpoint and a
+tone-mapped H.264 rendition for SDR viewers on a second one. A 16-source
+1080p60 example, mixing an NVDEC HDR movie, HLG patterns, an SDR clip, browser
+pages and the patterns above:
+
+```sh
+python3 demos/mixer/make_config.py --canvas 1920x1080 --fps 60 --color hlg --working-format p210le \
+  --sdr-port 5004 --bitrate-kbps 8000 --preset p5 \
+  hdr_movie=/media/hdr-movie.mp4 hlg_clip=/media/hlg-clip.mp4:hlg \
+  hdr_pattern0=/fixtures/hlg0.v210@1920x1080:hlg hdr_pattern1=/fixtures/hlg1.v210@1920x1080:hlg \
+  bunny=/media/bunny.mp4:sdr \
+  web_a=https://example.org/a@1920x1080 web_b=https://example.org/b@1920x1080 web_c=https://example.org/c@1920x1080 \
+  $(for p in testsrc2 bars rgbtest mandelbrot gradients life sierpinski cellauto; do echo sdr_$p=/media/patterns/$p.mp4:sdr; done) \
+  > hdr16.json
+```
+
+Untagged clips (`hdr_movie` here) are typed by their decoded frames, so a PQ
+movie lands on the HLG canvas through `tonemap_cuda`; the `grid_16_page_0`
+scene shows all sixteen. Browser sources need the `dma-page` service and the
+DMA-BUF container flags from [docs/guide.md](docs/guide.md#docker).
+
 ## Under the hood
 
 Janus output limits forced keyframes to one per 150 ms by default (9 frames at
@@ -159,9 +189,12 @@ next eligible frame. Periodic keyframes share the same limit.
 
 Two compositor slots draw every scene; a transition filter blends them and the
 wipe is one more layer in the same kernel, so nothing round-trips through the
-CPU. Browser frames are converted from RGB to the NV12 canvas inside the draw
-pass. The program is composited once and each rendition re-times and rescales
+CPU. Browser frames are converted from RGB to the NV12, P010 or P210 canvas inside the
+draw pass. The program is composited once and each rendition re-times and rescales
 it, so a second output costs an encode, not another composite.
+
+Limits: 32 sources per show, no runtime source changes, 16 boxes in the built-in layouts;
+see [docs/config.md](docs/config.md#known-limitations).
 
 Output files, Janus settings, layouts and tests: [docs/guide.md](docs/guide.md).
 Measured samples and conditions: [runtime-load-1080p.json](docs/runtime-load-1080p.json),

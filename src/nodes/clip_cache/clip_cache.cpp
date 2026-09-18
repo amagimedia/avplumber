@@ -1,6 +1,6 @@
 #include "../node_common.hpp"
 #include "ClipCache.hpp"
-#include "../../mixer/MonotonicClock.hpp"
+#include "../../mixer/primitives/MonotonicClock.hpp"
 
 extern "C" {
 #include <libavutil/imgutils.h>

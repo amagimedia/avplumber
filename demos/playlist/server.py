@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import List
 
-from avpmixer.janus import JanusVideoConfig
+from pyplumber.mixer.janus import JanusVideoConfig
 from control import VERBS, apply_verb, now_ms, status_json
 from engine import PlaylistConfig, PlaylistEngine, load_avp_api
 from playlist import Clip, ElementMode, PlaylistController, PlaylistMode, Transition

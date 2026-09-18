@@ -598,7 +598,13 @@ PYBIND11_MODULE(_avplumber, m) {
             });
         }, py::arg("callback"))
         .def("setReady", &AVPlumber::setReady)
-        .def("shutdown", &AVPlumber::shutdown)
+        .def("shutdown", [](AVPlumber &avp) {
+            // Keep Python callbacks alive until the GIL is reacquired, while
+            // allowing worker process/doStop hooks to run during the joins.
+            auto manager = avp.manager();
+            py::gil_scoped_release release;
+            avp.shutdown();
+        })
         .def("mainLoop", &AVPlumber::mainLoop)
         .def("stopMainLoop", &AVPlumber::stopMainLoop)
         .def("heartbeat", &AVPlumber::heartbeat)
@@ -693,11 +699,15 @@ PYBIND11_MODULE(_avplumber, m) {
         })
         .def_property_readonly("parameters", &NodeWrapper::parameters)
         .def("getObject", &NodeWrapper::getObject)
-        .def("start", &NodeWrapper::start)
-        .def("stop", &NodeWrapper::stop)
-        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false)
-        .def("stopAndWait", &NodeWrapper::stopAndWait)
-        .def("join", &NodeWrapper::join)
+        // These block on node threads (which may need the GIL for Python nodes
+        // or callbacks); release it like NodeGroup.startNodes/stopNodes do, so a
+        // slow stop cannot freeze the interpreter.
+        .def("start", &NodeWrapper::start, py::call_guard<py::gil_scoped_release>())
+        .def("stop", &NodeWrapper::stop, py::call_guard<py::gil_scoped_release>())
+        .def("interrupt", &NodeWrapper::interrupt, py::arg("optional") = false,
+             py::call_guard<py::gil_scoped_release>())
+        .def("stopAndWait", &NodeWrapper::stopAndWait, py::call_guard<py::gil_scoped_release>())
+        .def("join", &NodeWrapper::join, py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("isWorking", [](NodeWrapper &nw) { return nw.isWorking(); })
     ;
 
