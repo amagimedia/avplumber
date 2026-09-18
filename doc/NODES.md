@@ -284,6 +284,13 @@ when real metadata aren't available yet.
 
 1 input, 1 output: `av::VideoFrame` or `av::AudioSamples`
 
+Shared parameter (also supported by `fake_video_format` / `fake_audio_metadata`):
+
+- `ignore_eof` (bool, default `false`) - discard upstream EOF markers and keep
+  processing subsequent frames. Enable only at a live reconnect boundary before
+  a sentinel. The default forwards EOF and finishes; explicit shutdown and errors
+  are unaffected.
+
 Parameters for video:
 -   `width` (int) - default 1920
 -   `height` (int) - default 1080

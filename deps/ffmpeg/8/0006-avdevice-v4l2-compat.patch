@@ -1,4 +1,4 @@
-From c89a55032f642c8c6afd7df0c52febe16a3c23d0 Mon Sep 17 00:00:00 2001
+From 74c71ce7e961dd4d99bbcbd14fc084e7a4d7a0c0 Mon Sep 17 00:00:00 2001
 From: Jan Pietek <jan.pietek@gmail.com>
 Date: Wed, 12 Aug 2026 15:54:13 +0000
 Subject: [PATCH 6/7] avdevice/v4l2: retain source timestamps
@@ -11,7 +11,7 @@ Original-commit: 961ec93cbc352178ae5572c8d7f03f508edc3147
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/libavdevice/v4l2.c b/libavdevice/v4l2.c
-index 0ae6872..644752f 100644
+index c38ecbb378..11203f8fec 100644
 --- a/libavdevice/v4l2.c
 +++ b/libavdevice/v4l2.c
 @@ -584,7 +584,7 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)

@@ -33,9 +33,11 @@ def _command_text(command: list[str]) -> str:
     return output if output else f"exit {result.returncode}"
 
 
-def _patch_identity() -> dict[str, str]:
+def _patch_identity(ffmpeg_tag: str = "n8.1") -> dict[str, str]:
+    if ffmpeg_tag not in ("n8.0", "n8.1"):
+        raise ValueError(f"unsupported FFmpeg tag: {ffmpeg_tag}")
     identities: dict[str, str] = {}
-    for path in sorted((REPO_DIR / "deps" / "ffmpeg-patches").glob("*.patch")):
+    for path in sorted((REPO_DIR / "deps" / "ffmpeg" / "8").glob("*.patch")):
         identities[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return identities
 
@@ -78,6 +80,8 @@ def main() -> int:
     parser.add_argument("--height", type=_positive_dimension, default=HEIGHT)
     args = parser.parse_args()
 
+    ffmpeg_tag = os.environ.get("FFMPEG_TAG", "n8.1")
+
     started_at = dt.datetime.now(dt.timezone.utc)
     run_id = started_at.strftime("run-%Y%m%dT%H%M%SZ")
     run_dir = args.artifacts / run_id
@@ -93,7 +97,7 @@ def main() -> int:
         "run_id": run_id,
         "started_at": started_at.isoformat(),
         "status": "running",
-        "ffmpeg_tag": "n7.1.5",
+        "ffmpeg_tag": ffmpeg_tag,
         "cuda_toolkit_minimum": "11.7",
         "dimensions": {"width": args.width, "height": args.height},
         "requested_overlay_counts": args.counts,
@@ -110,7 +114,7 @@ def main() -> int:
                 ]
             ),
             "repository_commit": os.environ.get("AVPLUMBER_REVISION", "workspace"),
-            "patches_sha256": _patch_identity(),
+            "patches_sha256": _patch_identity(ffmpeg_tag),
         },
         "cases": [],
     }

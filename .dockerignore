@@ -8,6 +8,8 @@ tmp/
 .vscode/
 .rsync-backup-*/
 ffmpeg/
+!deps/ffmpeg/
+!deps/ffmpeg/**
 *.log
 *.csv
 *.ts

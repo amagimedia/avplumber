@@ -2,7 +2,7 @@ FROM nvidia/cuda:11.7.1-devel-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG AVPLUMBER_REVISION=workspace
-ARG FFMPEG_TAG=n7.1.5
+ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
 
 RUN apt-get update \
@@ -35,13 +35,13 @@ RUN git clone --quiet --branch "${NV_CODEC_HEADERS_TAG}" --depth 1 \
     && make -C /tmp/nv-codec-headers install PREFIX=/usr/local \
     && rm -rf /tmp/nv-codec-headers
 
-COPY deps/ffmpeg-patches /build/deps/ffmpeg-patches
+COPY deps/ffmpeg /build/deps/ffmpeg
 
 RUN git clone --quiet --branch "${FFMPEG_TAG}" --depth 1 \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
     && git -C /tmp/ffmpeg config user.name "cuda-overlay-demo builder" \
     && git -C /tmp/ffmpeg config user.email "cuda-overlay-demo@local" \
-    && git -C /tmp/ffmpeg am /build/deps/ffmpeg-patches/*.patch
+    && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
 RUN cd /tmp/ffmpeg \
     && ./configure \
@@ -117,6 +117,7 @@ COPY demos/cuda-overlay /build/demos/cuda-overlay
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
 ENV AVPLUMBER_REVISION=${AVPLUMBER_REVISION}
+ENV FFMPEG_TAG=${FFMPEG_TAG}
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV PYPLUMBER_PATH=/build
