@@ -1,4 +1,4 @@
-#include "mixer/CutLatency.hpp"
+#include "mixer/primitives/CutLatency.hpp"
 #include "CommandTiming.hpp"
 #include <cassert>
 #include <cmath>

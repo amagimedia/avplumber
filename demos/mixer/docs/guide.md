@@ -147,7 +147,7 @@ connection fails or is lost, it shows the error in the connection bar; use
 
 ## Janus output
 
-`--janus-output` publishes the video-only Program as H.264 RTP. It may be used
+`--janus-output` publishes the video-only Program over RTP: H.264 from an 8-bit canvas, HEVC Main10 from a 10-bit one. It may be used
 alone or together with `--output`:
 
 ```sh

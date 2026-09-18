@@ -22,7 +22,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from avpmixer.control import AvpConnection, mixer_command
+from pyplumber.mixer.control import AvpConnection, mixer_command
 
 PAGE = Path(__file__).with_name("webui") / "index.html"
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")

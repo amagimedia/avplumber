@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from avpmixer.control import AvpConnection
+from pyplumber.mixer.control import AvpConnection
 from playlist import (Clip, ElementMode, PlaylistController, PlaylistMode, Transition,
                       TransportState, now_ms)
 

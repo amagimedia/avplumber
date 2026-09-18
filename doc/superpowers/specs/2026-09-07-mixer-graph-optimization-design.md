@@ -6,7 +6,7 @@ Approved scope: reduce actual graph/code complexity and CPU/GPU consumption agai
 
 Real inputs fan out to the two permanent CUDA compositors. Each scene specifies per-source crop and destination rectangles. The compositor scales directly into the fixed output canvas, using each selected frame's dimensions and pitch. Equal-size copies retain the existing copy path. Dimension changes do not rebuild the graph; old queued frames retain their own references. Pixel formats remain explicitly validated.
 
-Python graph construction stays in `avpmixer`; scene generation stays in the demo. C++ owns runtime routing, shared playout, preview readiness, Cut/Fade/media-Wipe and exact-picture interruption. Explicit FFmpeg preprocessing remains supported for existing callers. No framework graph-management or streaming decoder changes.
+Python graph construction stays in `pyplumber.mixer`; scene generation stays in the demo. C++ owns runtime routing, shared playout, preview readiness, Cut/Fade/media-Wipe and exact-picture interruption. Explicit FFmpeg preprocessing remains supported for existing callers. No framework graph-management or streaming decoder changes.
 
 The first comparison retains input normalization and all FPS/timing stages. This isolates replacement of 62 geometry filters and their router with 16 input fanouts. Earlier estimates that also removed normalization are not the count for this first stage. Removing normalization requires a separate before/after validation within the same PR. All FPS stages remain.
 

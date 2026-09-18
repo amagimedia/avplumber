@@ -29,8 +29,14 @@
 #include "PTSCorrectorCommon.hpp"
 #include "rest_client.hpp"
 #include "SharedTimeline.hpp"
-#include "mixer/MixerState.hpp"
-#include "mixer/mixer_orchestrator.hpp"
+#include "mixer/primitives/MixerState.hpp"
+#include "mixer/orchestrator/MixerOrchestrator.hpp"
+using avp::mixer::MixerOrchestrator;
+using avp::mixer::MixerState;
+using avp::mixer::SceneControl;
+using avp::mixer::SceneDefinition;
+using avp::mixer::SourceLayout;
+using avp::mixer::TransitionScheduler;
 #include "CommandTiming.hpp"
 #include <libavformat/avformat.h>
 #ifdef EMBED_IN_OBS
@@ -344,6 +350,7 @@ public:
             detached_threads_.clear();
         }
         if (manager_) {
+            InstanceSharedObjectsDestructors::callInstanceDestructors(&manager_->instanceData());
             if (manager_.use_count() <= 1) {
                 logstream << "Destroying NodeManager";
             } else {
@@ -815,7 +822,7 @@ public:
         auto mixerOrchestrator = [this](const std::string& mixer_name) {
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             auto tl = InstanceSharedObjects<SharedTimeline>::get(manager_->instanceData(), state->timeline_name);
-            auto scheduler = InstanceSharedObjects<MixerTransitionScheduler>::get(manager_->instanceData(), mixer_name);
+            auto scheduler = InstanceSharedObjects<TransitionScheduler>::get(manager_->instanceData(), mixer_name);
             return MixerOrchestrator(manager_->shared_from_this(), state, tl, scheduler);
         };
 

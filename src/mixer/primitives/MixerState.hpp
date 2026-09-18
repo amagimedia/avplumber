@@ -1,0 +1,141 @@
+#pragma once
+#include "../../instance_shared.hpp"
+#include "../../util.hpp"
+#include <cstdint>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <string>
+#include <vector>
+#include <atomic>
+#include "CutLatencyProbe.hpp"
+
+namespace avp::mixer {
+
+struct SourceLayout {
+    std::string crop_scale_graph; // e.g., "crop=1920:1080:0:0,scale_cuda=640:360"
+    /// Layer fields for cuda_rect_overlay (dst_x, dst_y, …) — not including `graph`.
+    Parameters layer;
+};
+
+struct SceneControl {
+    std::string node_name;
+    std::string key;
+    Parameters value;
+};
+
+struct SceneDefinition {
+    std::string name;
+    /// Logical source name -> crop/scale graph + per-source layer (see mixer.source input_index).
+    std::unordered_map<std::string, SourceLayout> sources;
+    /// Logical routed source name -> router input index selected by this scene.
+    std::unordered_map<std::string, int> routes;
+    std::vector<SceneControl> controls;
+    int width = 1920;
+    int height = 1080;
+
+};
+
+struct MixerState : public InstanceShared<MixerState> {
+    std::mutex mutex;
+
+    struct SourceInfo {
+        std::string otm_node_name;          // "otm_cam1"
+        int input_index;                    // index within compositor src array
+        std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
+        bool routed = false;
+        std::string router_node_name;
+        std::string route_output_label_a;
+        std::string route_output_label_b;
+        int route_output_a = -1;
+        int route_output_b = -1;
+    };
+    std::unordered_map<std::string, SourceInfo> sources;
+
+    std::unordered_map<std::string, SceneDefinition> scenes;
+    std::unordered_set<std::string> prewarm_cut_scenes;
+    uint32_t prewarm_source_mask = 0;
+    uint32_t sourceOutputMask(const SourceInfo& source, uint32_t requested) const {
+        return (prewarm_source_mask & (1u << source.input_index)) ? requested | 3u : requested;
+    }
+    std::unordered_map<std::string, int> router_output_counts;
+    std::unordered_map<std::string, std::vector<int>> router_routes;
+
+    bool pgm_is_slot_a = true;
+    std::string pgm_scene_name;
+    std::string pvw_scene_name;
+
+    int fps_num = 30, fps_den = 1;
+    int64_t switch_margin_ms = 100;
+
+    enum class TransitionMode { Idle, Cut, Crossfade, Wipe };
+    std::atomic<TransitionMode> transition_mode{TransitionMode::Idle};
+    std::atomic<uint64_t> transition_generation{0};
+    std::string transition_scene_name;
+
+    struct SlotNodes {
+        std::string compositor_name;   // "comp_a" / "comp_b"
+        std::string norm_ts_name;      // "norm_a" / "norm_b"
+        std::string post_otm_name;     // "otm_scene_a" / "otm_scene_b"
+    };
+    SlotNodes slot_a, slot_b;
+    std::string source_switcher_name;  // "out_sel"
+    /// Optional force_keyframe node triggered when a transition reaches the output,
+    /// so a WebRTC receiver can decode the new picture immediately instead of
+    /// waiting for the next periodic keyframe.
+    std::string keyframe_node_name;
+    std::shared_ptr<avp::mixer::CutLatencyProbe> cut_latency;
+    std::string timeline_name;         // "mixer_tl"
+    std::string hwaccel_name;          // "@gpu"
+
+    // Static nodes for wipe output path (otm splits mixer_out, selector chooses direct vs overlay)
+    std::string wipe_otm_name;         // "otm_final"
+    std::string wipe_base_fps_name;    // "wipe_base_fps"
+    std::string wipe_selector_name;    // "wipe_sel"
+
+    // Pre-created wipe subgraph: group is started at wipe begin, stopped at wipe end
+    std::string wipe_group_name;       // "mixer_wipe"
+    std::string wipe_input_node_name;  // "wipe_input" (input_rec whose url is set per wipe)
+    /// Edge feeding the overlay's wipe input (e.g. "wipe_rt_fps_out"). Polled at
+    /// wipe end to ensure the tail of the wipe has been consumed by the overlay
+    /// before `wipe_selector` flips back to the direct path; otherwise the last
+    /// ~pipeline-latency worth of wipe frames is cut off at the selector.
+    std::string wipe_tail_edge;
+
+    // Edges to flush before each wipe starts and after each wipe stops.
+    // Prevents frames from a previous wipe run from bleeding into the next one.
+    std::vector<std::string> wipe_flush_edges;
+
+    // Optional post-mixer HTML/DMA overlay path.  The native mixer.overlay
+    // command uses these static graph nodes to arm the hidden branch, wait for
+    // a monotonic candidate frame, and then switch the final selector.
+    std::string overlay_source_otm_name;  // e.g. "otm_html_overlay_src"
+    std::string overlay_otm_name;         // e.g. "otm_html_overlay"
+    std::string overlay_selector_name;    // e.g. "overlay_sel"
+    int64_t overlay_ready_timeout_ms = 1000;
+    int64_t overlay_ready_poll_ms = 5;
+    bool overlay_enabled = false;
+    std::atomic<uint64_t> overlay_generation{0};
+
+    const SlotNodes& pgmSlot() const { return pgm_is_slot_a ? slot_a : slot_b; }
+    const SlotNodes& pvwSlot() const { return pgm_is_slot_a ? slot_b : slot_a; }
+
+    int pgmSourceSwitcherIndex() const { return pgm_is_slot_a ? 0 : 1; }
+    int pvwSourceSwitcherIndex() const { return pgm_is_slot_a ? 1 : 0; }
+    static constexpr int transSourceSwitcherIndex() { return 2; }
+
+    uint32_t pgmOutputBit() const { return pgm_is_slot_a ? 1u : 2u; }
+    uint32_t pvwOutputBit() const { return pgm_is_slot_a ? 2u : 1u; }
+
+    uint32_t computeActiveInputsMask(const SceneDefinition& scene) const {
+        uint32_t mask = 0;
+        for (const auto& [src_name, layout] : scene.sources) {
+            auto it = sources.find(src_name);
+            if (it != sources.end())
+                mask |= (1u << it->second.input_index);
+        }
+        return mask;
+    }
+};
+
+}  // namespace avp::mixer

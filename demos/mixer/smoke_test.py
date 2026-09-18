@@ -7,9 +7,9 @@ import asyncio
 import json
 import time
 
-from avpmixer.control import AvpConnection
+from pyplumber.mixer.control import AvpConnection
 
-from avpmixer.control import mixer_command, parse_mixer_status, parse_scene_list
+from pyplumber.mixer.control import mixer_command, parse_mixer_status, parse_scene_list
 
 
 async def _command(

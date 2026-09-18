@@ -136,7 +136,7 @@ worker with a monotonic timer. The native form is preferred for jitter.
 
 The Janus output is the mixer's `_build_janus_output` (force_fps, keyframe on
 PLI, assume format, NVENC, `dump_extra`, RTP mux, RTCP listener). Move it and
-`_build_input` from `demos/mixer/mixer.py` into `avpmixer` so both demos import
+`_build_input` from `demos/mixer/mixer.py` into `pyplumber.mixer` so both demos import
 one implementation instead of carrying copies.
 
 ### Code layout
@@ -145,7 +145,7 @@ one implementation instead of carrying copies.
 | --- | --- |
 | `demos/playlist/playlist.py` | Keep policy and controller. Drop `plan_item_nodes`/`plan_switch_nodes`; add transition type and duration to `Clip`; add `scheduled_end_ms` to status. |
 | `demos/playlist/playlist_app.py` | Rewrite backend on `MixerGraphBuilder`. Slot pool, parking, native scheduling, orchestrator completion events. |
-| `avpmixer/inputs.py`, `avpmixer/janus.py` | Extracted from the mixer demo, shared. |
+| `pyplumber/mixer/inputs.py`, `pyplumber/mixer/janus.py` | Extracted from the mixer demo, shared. |
 | `src/...` pause team | Optional `resume <team> at <ts>`. |
 | `demos/playlist/player.py` | TUI gains transition selector per item and a countdown to the scheduled cut; poll loop stays for status only. |
 | `demos/playlist/tests/` | Controller tests unchanged. Backend tests against a fake builder recording `preview`/`cut`/`fade` calls and their `start_pts_ms`. |
@@ -188,7 +188,7 @@ Done locally, 74 unit tests green, not yet run on the NVIDIA host:
 
 - `src/PauseControlTeam.hpp`, `src/avplumber.cpp`: `resume <team> at <ms>`;
   an explicit pause cancels a scheduled resume.
-- `avpmixer/inputs.py`, `avpmixer/janus.py`, `avpmixer/control.py`: shared
+- `pyplumber/mixer/inputs.py`, `pyplumber/mixer/janus.py`, `pyplumber/mixer/control.py`: shared
   decode chain, RTP output and TCP client (the mixer demo keeps its own copies).
 - `demos/playlist/playlist.py` policy with wallclock scheduling;
   `engine.py` mixer-backed backend; `control.py` JSON protocol;

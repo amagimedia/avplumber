@@ -18,10 +18,10 @@ def native_boundary(monkeypatch):
     before = set(sys.modules)
     monkeypatch.setitem(sys.modules, "_avplumber", SimpleNamespace(AVPlumber=object))
     nodes = importlib.import_module("pyplumber.node")
-    builder = importlib.import_module("avpmixer").MixerGraphBuilder
+    builder = importlib.import_module("pyplumber.mixer").MixerGraphBuilder
     yield nodes, builder
     for name in set(sys.modules) - before:
-        if name == "avpmixer" or name.startswith(("avpmixer.", "pyplumber")):
+        if name == "pyplumber.mixer" or name.startswith(("pyplumber.mixer.", "pyplumber")):
             sys.modules.pop(name, None)
 
 
@@ -189,7 +189,7 @@ def test_media_wipe_path_is_registered_without_starting_an_empty_clip(native_bou
     config = json.loads(init.split(" ", 2)[2])
     assert config["wipe_group"] == "mixer_wipe"
     # With clips cached, the take arms the cache node and the decode chain sits
-    # in a group a take never starts (see avpmixer.clipcache).
+    # in a group a take never starts (see pyplumber.mixer.clipcache).
     assert config["wipe_input_node"] == "mixer_wipe_cache"
     assert engine.nodes["mixer_wipe_cache"]["group"] == "mixer_wipe"
     assert engine.nodes["mixer_wipe_input"]["group"] == "mixer_wipe_load"
@@ -258,5 +258,5 @@ def test_existing_explicit_filter_sources_still_create_slot_filters(native_bound
     mixer.set_initial_scene("program")
     mixer.build()
     for slot in ("a", "b"):
-        assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph
+        assert engine.nodes[f"mixer_cs_camera_{slot}"]["graph"] == graph + ",scale_cuda=format=nv12"
         assert engine.nodes[f"mixer_comp_{slot}"]["src"] == [f"mixer_camera_scaled_{slot}"]
