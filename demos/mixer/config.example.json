@@ -21,6 +21,7 @@
     {
       "id": "page0",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page0",
       "width": 1920,
       "height": 1080
@@ -28,6 +29,7 @@
     {
       "id": "page1",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page1",
       "width": 1920,
       "height": 1080
@@ -35,6 +37,7 @@
     {
       "id": "page2",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page2",
       "width": 1920,
       "height": 1080
@@ -42,6 +45,7 @@
     {
       "id": "page3",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page3",
       "width": 1920,
       "height": 1080
@@ -49,6 +53,7 @@
     {
       "id": "page4",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page4",
       "width": 1920,
       "height": 1080
@@ -56,6 +61,7 @@
     {
       "id": "page5",
       "kind": "browser",
+      "color": "sdr",
       "url": "https://<host>/page5",
       "width": 1920,
       "height": 1080

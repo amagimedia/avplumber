@@ -1,7 +1,7 @@
-#include "hwaccel/CompositorGeometry.hpp"
+#include "mixer/primitives/compositor_geometry.hpp"
 #include <cassert>
 #include <limits>
-using namespace avp::compositor;
+using namespace avp::mixer;
 int main() {
     const Rect tile{540, 240, 540, 240};
     auto wide = place(1920, 1080, {}, tile, true, 2, 2);
@@ -30,7 +30,8 @@ int main() {
     assert(direct->destination.w == 426 && direct->destination.h == 240);
     assert(direct->destination.x == wide->destination.x);
     auto portrait_canvas = placeInCanvas(720, 1280, {}, {0, 0, 1080, 1920}, 1920, 1080, 2, 2);
-    assert(portrait_canvas->destination.w == 340 && portrait_canvas->destination.h == 606);
+    // av_rescale rounds 607.5 to 608 where integer division truncated to 606.
+    assert(portrait_canvas->destination.w == 342 && portrait_canvas->destination.h == 608);
     assert(portrait_canvas->destination.x == 368 && portrait_canvas->destination.y == 656);
     assert(!placeInCanvas(640, 360, {}, tile, 0, 1080, 2, 2));
     for (int w = 2; w < 2048; w += 17) {

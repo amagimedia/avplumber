@@ -3,7 +3,7 @@
 #include "../../hwaccel.hpp"
 #include "../../hwaccel/EglImageFrame.hpp"
 #include "../../mixer/Playout.hpp"
-#include "../../mixer/MonotonicClock.hpp"
+#include "../../mixer/primitives/MonotonicClock.hpp"
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
 
 extern "C" {
@@ -669,8 +669,7 @@ public:
 		if (params.contains("latency_ms"))
 			latency_ms = params.at("latency_ms").get<double>();
 		node->playout_ = std::make_unique<avp::mixer::Playout<EglImageFrame>>(
-			source_names.size(), avp::mixer::FrameRate(
-				node->frame_rate_.getNumerator(), node->frame_rate_.getDenominator()), latency_ms);
+			source_names.size(), avp::mixer::TickGrid(node->frame_rate_), latency_ms);
 		logstream << "egl_image_cuda_overlay: latency_ms=" << node->playout_->latencyNs() / 1000000.0;
 
 		const double ttl_seconds = params.value("cache_ttl", 3.0);

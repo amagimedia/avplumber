@@ -18,6 +18,10 @@
 ## Code & logic style
 * No copy-paste between nodes or within a file; extract shared base classes, utilities, or helper functions/lambdas.
 * C++/Python project: prefer C++ idioms (RAII, exceptions) over C patterns, but don't over-apply OOP.
+* Reuse libav* and avcpp before writing a helper: `av::Rational`/`av_inv_q`/`av_rescale*` for rates and timestamps,
+  `av::Timestamp` comparisons, `av_pix_fmt_*`/`av_image_*` for pixel-format geometry, `av_color_*_from_name` for colour
+  tags, `av_frame_*`/`av_*_metadata_alloc*` for frames and side data. A local reimplementation needs a comment saying
+  what libav lacks (e.g. the mixer's `TickGrid` rounding rule).
 
 ## Framework changes
 * Don't modify framework source (graph management, control protocol, main, sentinel) unless explicitly asked or the change is necessary, generally useful, and future-proof.

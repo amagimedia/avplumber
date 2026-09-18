@@ -598,8 +598,9 @@ public:
     virtual ~FilterNode() {
         freeFilterGraph();
     }
-    virtual void process() {
-        // Check for EOF markers on all inputs before normal processing
+    // Pop EOF markers sitting at the head of any input and close that buffersrc.
+    // Returns true once every input has reached EOF.
+    bool consumeEofMarkers() {
         for (int i = 0; i < (int)this->source_edges_.size(); i++) {
             if (input_eof_[i]) continue;
             T* p = this->source_edges_[i]->peek();
@@ -615,7 +616,10 @@ public:
                 }
             }
         }
-        if (allInputsEof()) {
+        return allInputsEof();
+    }
+    virtual void process() {
+        if (consumeEofMarkers()) {
             drainAndFinish();
             return;
         }
@@ -625,6 +629,16 @@ public:
         if (source_index >= 0) {
             std::shared_ptr<Edge<T>> edge = this->source_edges_[source_index];
             frmin = edge->peek();
+            if (frmin && isEofMarker(*frmin)) {
+                // The marker arrived while findSourceWithData() was waiting, after the
+                // check above. Treating it as an invalid frame used to finish the node
+                // immediately and drop every frame still queued on the other inputs
+                // (a multi-input transition lost its tail whenever one scene ended first).
+                if (consumeEofMarkers()) {
+                    drainAndFinish();
+                }
+                return;
+            }
             if (frmin && (!frmin->isNull()) && frmin->isComplete() && frmin->timeBase().getNumerator() && frmin->timeBase().getDenominator()) {
                 Port &source_port = sources_[source_index];
                 if (!source_port.checkFrame(*frmin, edge)) {

@@ -3,7 +3,7 @@ FROM nvidia/cuda:11.7.1-devel-ubuntu22.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG AVPLUMBER_REVISION=workspace
 ARG FFMPEG_TAG=n8.1
-ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
+ARG NV_CODEC_HEADERS_TAG=n13.0.19.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -86,7 +86,6 @@ COPY deps /build/deps
 COPY Makefile generate_node_list /build/
 COPY src /build/src
 COPY pyplumber /build/pyplumber
-COPY avpmixer /build/avpmixer
 
 RUN git init --quiet /build \
     && git -C /build config user.name "mixer-demo builder" \

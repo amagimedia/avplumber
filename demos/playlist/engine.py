@@ -2,7 +2,7 @@
 """Mixer-backed playlist engine.
 
 Every playlist element owns one of sixteen fixed mixer sources.  Its decode
-chain (``avpmixer.inputs.build_input`` with a pause node and a realtime sync
+chain (``pyplumber.mixer.inputs.build_input`` with a pause node and a realtime sync
 team, the replay demo's wiring) lives in group ``pl_item_<slot>`` and feeds
 scene ``item_<slot>``, a fullscreen layout on the native two-slot mixer.
 
@@ -29,8 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from avpmixer.inputs import build_input
-from avpmixer.janus import JanusVideoConfig, build_janus_output
+from pyplumber.mixer.inputs import build_input
+from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
 from playlist import SLOT_CAPACITY, BackendEvent, Clip, Transition, now_ms
 
 MIXER = "mixer"
@@ -104,7 +104,7 @@ def load_avp_api():
                                 ForceKeyFrame, InputRec, Mux, Output, Pause, Realtime, SpeedVideo,
                                 Split)
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
-    from avpmixer import MixerGraphBuilder
+    from pyplumber.mixer import MixerGraphBuilder
     from types import SimpleNamespace
     return SimpleNamespace(
         AVPlumber=AVPlumber, MixerGraphBuilder=MixerGraphBuilder,

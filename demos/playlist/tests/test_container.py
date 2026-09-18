@@ -22,7 +22,7 @@ def test_runtime_uses_configurable_avplumber_base_and_packaged_dependencies():
     assert "FROM ${AVP_BASE_IMAGE} AS runtime" in source
     assert "COPY --from=python-dependencies /opt/playlist-python" in source
     assert "ENV PYTHONPATH=/opt/playlist-python:${PYTHONPATH}" in source
-    assert 'find_spec("pyplumber")' in source and 'find_spec("avpmixer")' in source
+    assert 'find_spec("pyplumber")' in source and 'find_spec("pyplumber.mixer")' in source
     assert "import pyplumber" not in source
     assert 'ENTRYPOINT ["python3", "server.py"]' in source
     for module in ("server.py", "player.py", "playlist.py", "engine.py", "control.py"):

@@ -35,9 +35,9 @@ same 16-box.
 ## Code changes (small)
 
 1. Put an api-parameterised `dmabuf_cuda_input_nodes` plus `rest_request`,
-   `open_browser_windows` and `wait_for_sockets` in `avpmixer/dmabuf_inputs.py`.
+   `open_browser_windows` and `wait_for_sockets` in `pyplumber/mixer/dmabuf_inputs.py`.
    The DMA-BUF demo keeps its own copy of the chain builder: its runtime image
-   has no `avpmixer` on the path, and re-pointing it would change that demo's
+   has no `pyplumber.mixer` on the path, and re-pointing it would change that demo's
    image or compose files, which this change must not do.
 2. `demos/mixer/mixer.py`: the scheme dispatch in `_build_input`, the four
    options in `parse_args`/`GraphOptions`, and window opening in
@@ -46,7 +46,7 @@ same 16-box.
    check for a browser source too.
 3. `demos/dmabuf-browser/compose.mixer.yaml`: an override that runs the mixer
    demo in the existing consumer image (it is the one built with DRM/EGL and
-   NVIDIA), mounting `avpmixer/` and `demos/mixer/` read-only, sharing the
+   NVIDIA), mounting `pyplumber/mixer/` and `demos/mixer/` read-only, sharing the
    `dma-browser-sockets` volume, exposing the control port 7777 for the TUI.
    The base `compose.yaml` and `compose.scaling.yaml` are unchanged.
 4. Tests: a fake-API graph test in `demos/mixer/tests` asserting that a

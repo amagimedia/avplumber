@@ -17,7 +17,7 @@ FROM nvidia/cuda:${CUDA_IMAGE_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG FFMPEG_TAG=n8.1
-ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
+ARG NV_CODEC_HEADERS_TAG=n13.0.19.0   # SDK 13: HEVC/AV1 HDR10 mastering-display and MaxCLL SEIs (driver >= 570)
 ARG CUDA_NVCC_FLAGS="-gencode arch=compute_70,code=compute_70 -O2"
 
 RUN apt-get update \

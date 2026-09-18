@@ -14,9 +14,9 @@ from textual.message import Message
 from textual.scrollbar import ScrollBarRender
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
-from avpmixer.control import AvpConnection
+from pyplumber.mixer.control import AvpConnection
 
-from avpmixer.control import mixer_command, parse_mixer_status, parse_scene_list
+from pyplumber.mixer.control import mixer_command, parse_mixer_status, parse_scene_list
 
 
 class SceneScrollBarRender(ScrollBarRender):

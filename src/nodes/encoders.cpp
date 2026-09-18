@@ -3,7 +3,8 @@
 #include <avcpp/codeccontext.h>
 #include <avcpp/avutils.h>
 #include "../hwaccel.hpp"
-#include "../mixer/CutLatencyProbe.hpp"
+#include "../hdr_metadata.hpp"
+#include "../mixer/primitives/CutLatencyProbe.hpp"
 
 template<typename Child, typename EncoderContext, typename InputFrame> class Encoder: public NodeSISO<InputFrame, av::Packet>, public IEncoder, public ReportsFinishByFlag, public IFlushable, public avp::mixer::CutLatencyObserver {
 protected:
@@ -15,6 +16,7 @@ protected:
     av::Dictionary options_;
     int enc_flags_ = 0;
     bool timestamps_passthrough_ = false;
+    Parameters hdr_metadata_;   // optional static HDR side data, serialised verbatim (see hdr_metadata.hpp)
     av::Timestamp prev_ts_ = NOTS;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     void emitPacket(const av::Packet& pkt) {
@@ -81,6 +83,7 @@ public:
             }
             
             enc_.setTimeBase(getTimeBase());
+            if (hdr_metadata_.is_object()) attachHdrMetadata(enc_.raw(), hdr_metadata_);
             
             // make copy of options because otherwise enc_.open will remove all consumed ones
             av::Dictionary options(options_);
@@ -198,6 +201,13 @@ public:
         }
         if (params.count("timestamps_passthrough") > 0) {
             r->timestamps_passthrough_ = params["timestamps_passthrough"];
+        }
+        if (params.count("hdr_metadata") > 0) {
+            if constexpr (!std::is_same_v<InputFrame, av::VideoFrame>)
+                throw Error("hdr_metadata applies to enc_video only");
+            if (!params["hdr_metadata"].is_object())
+                throw Error("hdr_metadata must be an object (primaries, white_point, max_luminance, min_luminance, max_cll, max_fall)");
+            r->hdr_metadata_ = params["hdr_metadata"];
         }
         return r;
     }

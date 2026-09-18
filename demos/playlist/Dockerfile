@@ -29,7 +29,7 @@ COPY server.py player.py playlist.py engine.py control.py regression.py requirem
 COPY test-media/generate.sh ./test-media/generate.sh
 COPY --from=fixtures /fixtures/*.mp4 ./test-media/
 
-RUN python3 -c 'from importlib.util import find_spec; from pathlib import Path; import textual; from server import FIXTURE_NAMES; root = Path("test-media"); paths = [root / name for name in FIXTURE_NAMES]; assert find_spec("pyplumber") is not None; assert find_spec("avpmixer") is not None; assert len(paths) == 5 and all(path.is_file() for path in paths), paths'
+RUN python3 -c 'from importlib.util import find_spec; from pathlib import Path; import textual; from server import FIXTURE_NAMES; root = Path("test-media"); paths = [root / name for name in FIXTURE_NAMES]; assert find_spec("pyplumber") is not None; assert find_spec("pyplumber.mixer") is not None; assert len(paths) == 5 and all(path.is_file() for path in paths), paths'
 
 # Backend by default; run `player.py` in a second container or on the host to attach the TUI.
 ENTRYPOINT ["python3", "server.py"]

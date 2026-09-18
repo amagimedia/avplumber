@@ -301,7 +301,12 @@ public:
         flushing_ = true;
     }
     void stopFlushing() {
+        // A seek flush ends with the same producer and consumer still attached, so
+        // the stop requests raised by flushAndSeek_start() must be cleared here;
+        // they stay latched only across a real stop (see waitDo / setNodePointer).
         flushing_ = false;
+        finish_producer_ = false;
+        finish_consumer_ = false;
     }
     bool isFlushed() {
         return flushed_;
@@ -424,8 +429,8 @@ protected:
             signal_event.signal();
             return true;
         } else {
-            logstream << "resetting flag";
-            alt_finish = false; // reset flag
+            // Stop remains latched through final process/flush calls. A newly
+            // connected producer or consumer resets it in setNodePointer().
             return false;
         }
     }
@@ -630,7 +635,7 @@ public:
         maybeFlush();
         T* r = queue_.peek();
         if (timeout_ms==0) return r;
-        if (r != nullptr) return r;
+        if (r != nullptr || finish_consumer_) return r;
         AVTS remaining = timeout_ms;
         bool wait_inf = timeout_ms < 0;
         AVTS wait_till;

@@ -39,6 +39,14 @@ and the filter changes) is base-independent.
 6. **V4L2 source timestamps.**
 7. **NDI v5 registration** — registers the optional integration only; no SDK
    or device implementation is supplied, and NDI stays disabled in demo builds.
+8. **10-bit CUDA transitions** — YUV420P10/422P10/444P10, P010 and P210 (plus
+   8-bit 4:2:2/4:4:4) in a word-sample `transition_cuda` kernel.
+9. **`tonemap_cuda`** — SDR BT.709 / HLG / PQ conversion on CUDA semiplanar
+   frames (NV12/P010 4:2:0, NV16/P210 4:2:2, resampled in the same pass) in
+   both directions: display-light conversion with configurable SDR
+   white and HDR peak, HDR-to-SDR operators with a knee parameter, automatic
+   per-frame contract resolution (untagged frames are BT.709 SDR), zero-copy
+   identity frames and fixed NV12/P010 output storage.
 
 ## FFmpeg 8 notes
 

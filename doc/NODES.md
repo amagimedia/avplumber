@@ -477,6 +477,13 @@ Encodes video or audio frames.
 -   `hwaccel` (string, name of instance-shared object) - optional
     (mandatory for some encoders), name of hwaccel previously created
     with `hwaccel.init`
+-   `hdr_metadata` (object, `enc_video` only; `enc_audio` rejects it) - static HDR metadata serialised
+    verbatim as side data before the encoder opens: `primaries` (three `[x, y]`
+    pairs), `white_point` (`[x, y]`), `max_luminance` / `min_luminance` and
+    `max_cll` / `max_fall` in nits. `hevc_nvenc` and `av1_nvenc` emit the HDR10
+    SEIs from it when FFmpeg is built against nv-codec-headers 13 (driver >= 570);
+    older headers silently emit none. The mixer fills it for PQ renditions
+    (BT.2020 / D65) from `pyplumber.mixer.color.hdr_metadata`.
 -   `timestamps_passthrough` (bool) - default `false`, intended for codecs
     that don't buffer data (otherwise bad things like repeated
     timestamps may happen), replace PTS & DTS in outgoing packet with
@@ -776,6 +783,19 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+
+### `v210_to_cuda`
+
+Unpacks headerless packed 10-bit 4:2:2 (`v210`) packets straight into CUDA frames, one packet per frame, so generated HDR test content and SDI-style feeds reach the GPU mixer without a CPU decode.
+
+1 input: `av::Packet` (`stride * height` bytes each), 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`)
+
+Parameters:
+-   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `width`, `height` (int, required) - even width; the packed bytes carry no header
+-   `stride` (int) - row pitch in bytes, default the 128-byte aligned v210 pitch
+-   `sw_format` (string) - CUDA storage, `p210le` (default) or `yuv422p10le`
+-   `color_trc`, `color_primaries`, `colorspace`, `color_range`, `chroma_location` (string) - tags stamped on every output frame (libavutil names, e.g. `arib-std-b67`, `bt2020`, `bt2020nc`, `tv`)
 
 ### `cuda_infer_yolo`
 

@@ -1,5 +1,5 @@
 #include "node_common.hpp"
-#include "../mixer/MonotonicClock.hpp"
+#include "../mixer/primitives/MonotonicClock.hpp"
 
 extern "C" {
 #include <libavutil/mathematics.h>
@@ -62,7 +62,7 @@ public:
         auto r = NodeSISO<av::VideoFrame, av::VideoFrame>::createCommon<RepeatLastFrame>(edges, params);
         if (params.count("fps")) {
             r->fps_ = parseRatio(params["fps"]);
-            r->period_ns_ = int64_t(1000000000.0 * r->fps_.getDenominator() / r->fps_.getNumerator());
+            r->period_ns_ = av_rescale_q(1, av_inv_q(r->fps_.getValue()), {1, 1000000000});
         }
         return r;
     }

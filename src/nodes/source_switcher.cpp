@@ -1,6 +1,6 @@
 #include "node_common.hpp"
 #include "../SharedTimeline.hpp"
-#include "../mixer/CutLatencyProbe.hpp"
+#include "../mixer/primitives/CutLatencyProbe.hpp"
 
 template <typename T>
 class MixerSourceSwitcher : public NodeMultiInput<T>, public NodeSingleOutput<T>,
@@ -123,10 +123,11 @@ public:
         auto activeFor = [&](int input_index, T* data) {
             if (timeline_reference && input_index == timeline_reference_input_)
                 return reference_active;
-            av::Timestamp pts = data->pts();
-            if (pts.isNoPts())
-                pts = data->pts();
-            return this->template tlGet<int>("active", pts, active_input_.load(std::memory_order_relaxed));
+            const av::Timestamp pts = data->pts();
+            const int current = active_input_.load(std::memory_order_relaxed);
+            // Without a PTS the frame has no place on the timeline; keep the current selection.
+            if (pts.isNoPts()) return current;
+            return this->template tlGet<int>("active", pts, current);
         };
 
         int output_count = 0;

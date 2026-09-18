@@ -26,7 +26,7 @@ services:
       MIXER_WIPE_FILE: ${MIXER_WIPE_FILE:-}   # alpha clip inside the container to warm the wipe up with
     volumes:
       - dma-browser-sockets:/tmp/dma-page
-      - ../../avpmixer:/opt/avplumber/avpmixer:ro,z
+      - ../../pyplumber/mixer:/opt/avplumber/pyplumber/mixer:ro,z
       - ../mixer:/opt/avplumber/demos/mixer:ro,z
     command:
       - sh

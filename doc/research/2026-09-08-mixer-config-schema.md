@@ -141,8 +141,8 @@ of the engine.
 
 | Document | Engine today | Gap |
 | --- | --- | --- |
-| `sources[]` video | `avpmixer.inputs.build_input` (NVDEC chain) | none |
-| `sources[]` browser | `avpmixer.dmabuf_inputs` (window open, DMA-BUF import) | none |
+| `sources[]` video | `pyplumber.mixer.inputs.build_input` (NVDEC chain) | none |
+| `sources[]` browser | `pyplumber.mixer.dmabuf_inputs` (window open, DMA-BUF import) | none |
 | duplicate `url`/`path` | — | loader rejects; alias support (one chain, two ids) is a second `one_to_many` output, ~10 lines |
 | `item.dst`, `crop`, `fit: stretch\|contain` | `cuda_rect_overlay` layer: `dst_*`, `crop`, `fit` | none |
 | `fit: cover` | loader computes the crop from the aspect; clip sizes probed with ffprobe | none |

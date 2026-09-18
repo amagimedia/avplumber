@@ -8,16 +8,20 @@ import pytest
 
 @pytest.fixture(scope="module")
 def playout_binary(tmp_path_factory):
-    tmp_path = tmp_path_factory.mktemp("mixer-playout")
     compiler = shutil.which('g++') or shutil.which('clang++')
     if not compiler:
         pytest.skip('no C++ compiler available')
     root = pathlib.Path(__file__).resolve().parents[1]
-    binary = tmp_path / 'mixer_playout'
+    # TickGrid takes an av::Rational, whose constructor lives in avcpp's rational.cpp.
+    probe = subprocess.run(['pkg-config', '--cflags', '--libs', 'libavutil'], capture_output=True, text=True)
+    if probe.returncode != 0:
+        pytest.skip('libavutil development files not found')
+    binary = tmp_path_factory.mktemp("mixer-playout") / 'mixer_playout'
     subprocess.run([
         compiler, '-std=c++17', '-O0', '-g', '-Wall', '-Wextra',
-        '-I', str(root / 'src'), str(root / 'tests/cpp/test_mixer_playout.cpp'),
-        '-o', str(binary),
+        '-I', str(root / 'src'), '-I', str(root / 'deps/avcpp/src'), '-I', str(root / 'deps/include'),
+        str(root / 'tests/cpp/test_mixer_playout.cpp'), str(root / 'deps/avcpp/src/rational.cpp'),
+        '-o', str(binary), *probe.stdout.split(),
     ], check=True, capture_output=True, text=True)
     return binary
 

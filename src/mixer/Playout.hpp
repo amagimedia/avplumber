@@ -1,7 +1,7 @@
 #pragma once
 
-#include "FrameRate.hpp"
-#include "Cadence.hpp"
+#include "primitives/TickGrid.hpp"
+#include "primitives/Cadence.hpp"
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -31,7 +31,7 @@ public:
     };
 
 private:
-    static constexpr size_t queue_capacity = 8;
+    static constexpr size_t kQueueCapacity = 8;
     struct Entry { int64_t index; Frame frame; };
     struct Input {
         std::deque<Entry> queue;
@@ -45,7 +45,7 @@ private:
         bool prewarm = false;
         Stats stats;
     };
-    FrameRate rate_;
+    TickGrid rate_;
     TimestampMode timestamp_mode_;
     int64_t latency_ns_;
     std::vector<Input> inputs_;
@@ -57,7 +57,7 @@ private:
     uint64_t missed_deadlines_ = 0;
 
 public:
-    Playout(size_t inputs, FrameRate rate, std::optional<double> latency_ms = {},
+    Playout(size_t inputs, TickGrid rate, std::optional<double> latency_ms = {},
             TimestampMode timestamp_mode = TimestampMode::Cadence)
         : rate_(rate), timestamp_mode_(timestamp_mode), latency_ns_(rate.time(2)),
           inputs_(inputs), consume_(inputs) {
@@ -70,7 +70,7 @@ public:
         }
         // Reserve two queue entries for phase alignment and an arriving frame;
         // larger delays would silently evict frames before their deadlines.
-        if (latency_ns_ > rate_.time(queue_capacity - 2))
+        if (latency_ns_ > rate_.time(kQueueCapacity - 2))
             throw std::invalid_argument("mixer latency_ms exceeds the six-frame buffer budget");
     }
 
@@ -115,7 +115,7 @@ public:
             slot = *index_;
             ++state.stats.phase_corrections;
         }
-        if (state.queue.size() == queue_capacity) {
+        if (state.queue.size() == kQueueCapacity) {
             state.queue.pop_front();
             ++state.stats.overflow;
             ++state.stats.discarded;

@@ -5,8 +5,13 @@
         cam=/media/cam.mp4 page=https://example.org/page@1920x1080 > mixer.json
 
 Each positional argument is ``id=path`` for a clip or ``id=url@WxH`` for a
-browser page. The scenes are the same fullscreen and 2/4/8/16-box pages the
-demo builds without a config, written out as plain data.
+browser page. A ``:sdr``, ``:hlg`` or ``:pq`` suffix declares the clip's color
+(``id=/m/clip.mp4:hlg``); raw v210 takes its size too (``id=/m/bars.v210@1920x1080:hlg``).
+``--color hlg`` (or ``pq``) with ``--working-format p210le`` makes an HDR show:
+the program rendition becomes HEVC Main10 and ``--sdr-port`` adds a tone-mapped
+H.264 rendition, so one show feeds an HDR and an SDR mountpoint at once.
+The scenes are the same fullscreen and 2/4/8/16-box pages the demo builds
+without a config, written out as plain data.
 """
 
 from __future__ import annotations
@@ -19,18 +24,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import layouts  # noqa: E402
-from avpmixer import config as mixer_config  # noqa: E402
+from pyplumber.mixer import config as mixer_config  # noqa: E402
+
+
+COLORS = ("sdr", "hlg", "pq")
 
 
 def source_spec(arg: str) -> dict:
     sid, _, rest = arg.partition("=")
     if not sid or not rest:
-        raise SystemExit(f"expected id=path or id=url@WxH, got {arg!r}")
+        raise SystemExit(f"expected id=path[:color] or id=url@WxH, got {arg!r}")
     if "://" in rest and "@" in rest.rsplit("/", 1)[-1]:
         url, size = rest.rsplit("@", 1)
         w, h = (int(v) for v in size.lower().split("x"))
-        return {"id": sid, "kind": "browser", "url": url, "width": w, "height": h}
-    return {"id": sid, "kind": "video", "path": rest}
+        return {"id": sid, "kind": "browser", "url": url, "width": w, "height": h, "color": "sdr"}
+    color = None
+    if rest.rsplit(":", 1)[-1] in COLORS:
+        rest, color = rest.rsplit(":", 1)
+    spec = {"id": sid, "kind": "video", "path": rest}
+    if "@" in rest.rsplit("/", 1)[-1]:
+        path, size = rest.rsplit("@", 1)
+        if not path.lower().endswith(".v210"):
+            raise SystemExit(f"only .v210 clips take a size, got {arg!r}")
+        if color is None:
+            raise SystemExit(f"v210 clips need a :sdr/:hlg/:pq color, got {arg!r}")
+        w, h = (int(v) for v in size.lower().split("x"))
+        spec = {"id": sid, "kind": "v210", "path": path, "width": w, "height": h}
+    if color:
+        spec["color"] = color
+    return spec
 
 
 def main(argv=None) -> None:
@@ -50,7 +72,16 @@ def main(argv=None) -> None:
                         help="program rendition rate; 0 keeps the canvas rate")
     parser.add_argument("--profile", default="baseline", help="NVENC profile of the program rendition")
     parser.add_argument("--preset", default="p7", help="NVENC preset of the program rendition")
+    parser.add_argument("--color", choices=COLORS, help="canvas color; hlg/pq need a 10-bit --working-format")
+    parser.add_argument("--working-format", choices=mixer_config.WORKING_FORMATS, help="canvas storage")
+    parser.add_argument("--sdr-port", type=int, metavar="PORT",
+                        help="add a tone-mapped H.264 rendition on this RTP port (HDR canvas only)")
+    parser.add_argument("--sdr-tonemap", default="mobius", choices=mixer_config.OPERATORS)
+    parser.add_argument("--sdr-knee", type=float, default=0.9, help="tonemap_param of the SDR rendition")
     args = parser.parse_args(argv)
+    hdr = args.color in ("hlg", "pq")
+    if args.sdr_port and not hdr:
+        raise SystemExit("--sdr-port needs an HDR canvas (--color hlg or pq)")
     width, height = (int(v) for v in args.canvas.lower().split("x"))
     # One source per unique clip or page: repeated locations become references
     # to the first declaration, so a page shown eight times is one window.
@@ -77,13 +108,21 @@ def main(argv=None) -> None:
                  for p in scene.placements]
         scenes.append({"id": scene.name, "items": items})
     rendition_fps = args.rendition_fps or args.fps
+    program = {"id": "program", "target": "janus", "width": width, "height": height,
+               "aspect": mixer_config.Rendition("program", width=width, height=height).aspect,
+               "fps": rendition_fps, "bitrate_kbps": args.bitrate_kbps,
+               "profile": "main10" if hdr else args.profile, "preset": args.preset,
+               **({"codec": "hevc_nvenc"} if hdr else {})}
+    renditions = [program]
+    if args.sdr_port:
+        renditions.append({**program, "id": "sdr", "port": args.sdr_port, "codec": "h264_nvenc",
+                           "profile": args.profile, "tonemap": args.sdr_tonemap, "tonemap_param": args.sdr_knee})
+    canvas = {"width": width, "height": height, "fps": args.fps,
+              **({"working_format": args.working_format} if args.working_format else {}),
+              **({"color": args.color} if args.color else {})}
     doc = {
-        "canvas": {"width": width, "height": height, "fps": args.fps},
-        "renditions": [{"id": "program", "target": "janus",
-                        "width": width, "height": height,
-                        "aspect": mixer_config.Rendition("program", width=width, height=height).aspect,
-                        "fps": rendition_fps, "bitrate_kbps": args.bitrate_kbps,
-                        "profile": args.profile, "preset": args.preset}],
+        "canvas": canvas,
+        "renditions": renditions,
         "sources": sources,
         "wipes": [{"id": Path(p).stem, "path": p} for p in args.wipe],
         "control": {"direct": True, "fade_seconds": args.fade_seconds,
