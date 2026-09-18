@@ -76,7 +76,6 @@ one no longer matches, and `patch_count` must match the file count.
 Cherry-pick conflicts stop the container with instructions; re-run it with
 `--entrypoint bash` and finish by hand (`git cherry-pick --continue`, then
 `/usr/local/bin/mkpatch-finish`).
->>>>>>> fcd616d (Add the MXL demuxer/muxer patch to the FFmpeg 8.x series)
 
 ## FFmpeg 8 notes
 

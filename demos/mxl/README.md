@@ -39,7 +39,7 @@ pattern.
   are optional here (`--gpus all` selects the GPU reader path), though
   the other demos in the shared image do need CUDA.
 * The FFmpeg 8.x series applied to `n8.1` (or `n8.0`). The MXL patch
-  `8/0011-*` is generated from `cbcrc/FFmpeg` branch `dmf-mxl/8.1` —
+  `8/0010-*` is generated from `cbcrc/FFmpeg` branch `dmf-mxl/8.1` —
   see [`deps/ffmpeg/README.md`](../../deps/ffmpeg/README.md).
 
 ## Build
@@ -177,5 +177,5 @@ mean `cudaHostRegister`-ing the MXL ring, i.e. a change to the node in
 ## References
 
 * MXL SDK: <https://github.com/dmf-mxl/mxl>
-* MXL FFmpeg fork (source for patch 0011, branch `dmf-mxl/8.1`): <https://github.com/cbcrc/FFmpeg>
+* MXL FFmpeg fork (source for patch 0010, branch `dmf-mxl/8.1`): <https://github.com/cbcrc/FFmpeg>
 * Reference build guidance: <https://github.com/cbcrc/guidance-for-building-ffmpeg-with-mxl>
