@@ -39,7 +39,7 @@ from pyplumber.node import (
     Output,
     Realtime,
 )
-from avpmixer.inputs import v210_row_stride
+from pyplumber.mixer.inputs import v210_row_stride
 
 # Name of the CUDA device the GPU reader path initializes and shares.
 _HWACCEL = "@gpu"
