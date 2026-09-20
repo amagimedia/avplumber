@@ -1,6 +1,6 @@
-From 7b03b2fa7bd85259cd3c0c7392e69a2d04a5597f Mon Sep 17 00:00:00 2001
+From 3e74ea3f9d721d2cc1013c99a95235e49176d4d7 Mon Sep 17 00:00:00 2001
 From: avplumber mxl builder <avplumber-mxl@local>
-Date: Wed, 16 Sep 2026 19:47:16 +0000
+Date: Sun, 20 Sep 2026 15:04:43 +0000
 Subject: [PATCH] avformat/mxl: add libmxl demuxer and muxer
 
 Adds the MXL demuxer, muxer, URI parser, JSON/diagnostic helpers
@@ -8,13 +8,15 @@ and --enable-libmxl configure glue.
 
 Cherry-picked from https://github.com/cbcrc/FFmpeg (branch
 dmf-mxl/8.1) and squashed onto n8.1 on top of the avplumber
-series 0001-0010, with the configure hunks re-anchored so the
+series 0001-0009, with the configure hunks re-anchored so the
 patch applies to both n8.0 and n8.1.
 
 Original commits:
-  * ec72cbaefc ffmpeg 8.1 port
-  * 196ba57d71 Apply FFmpeg 8 MXL integration to FFmpeg 8.1
+  * b099cc6224 avformat/mxldec: keep pts monotonic across a reset_on_drop reset
+  * ff4066273e ffmpeg 8.1 port
+  * 8eda88cfc1 Apply FFmpeg 8 MXL integration to FFmpeg 8.1
 
+Co-authored-by: avplumber mxl builder <avplumber-mxl@local>
 Co-authored-by: jpt <jim.trainor@jptrainor.com>
 Co-authored-by: jpt <james.p.trainor@cbc.ca>
 ---
@@ -37,7 +39,7 @@ Co-authored-by: jpt <james.p.trainor@cbc.ca>
  libavformat/mxl_status.h        |   59 +
  libavformat/mxl_uri.c           |  304 +++++
  libavformat/mxl_uri.h           |  118 ++
- libavformat/mxldec.c            | 1974 +++++++++++++++++++++++++++++++
+ libavformat/mxldec.c            | 1990 +++++++++++++++++++++++++++++++
  libavformat/mxlenc.c            |  893 ++++++++++++++
  libavformat/tests/mxl_diag.c    | 1471 +++++++++++++++++++++++
  libavformat/tests/mxl_json.c    | 1076 +++++++++++++++++
@@ -58,7 +60,7 @@ Co-authored-by: jpt <james.p.trainor@cbc.ca>
  tests/ref/fate/mxl-uri          | 1176 ++++++++++++++++++
  tests/ref/fate/mxl-video-encdec |   14 +
  tests/ref/fate/mxl-video-probe  |   10 +
- 40 files changed, 13693 insertions(+)
+ 40 files changed, 13709 insertions(+)
  create mode 100644 libavformat/jsmn.c
  create mode 100644 libavformat/jsmn.h
  create mode 100644 libavformat/mxl_common.h
@@ -3248,10 +3250,10 @@ index 0000000000..ce0e67131a
 +#endif /* AVFORMAT_MXL_URI_H */
 diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
 new file mode 100644
-index 0000000000..404f0577fd
+index 0000000000..655ccb5152
 --- /dev/null
 +++ b/libavformat/mxldec.c
-@@ -0,0 +1,1974 @@
+@@ -0,0 +1,1990 @@
 +/*
 + * MXL demuxer for Media eXchange Layer flows
 + *
@@ -4532,8 +4534,18 @@ index 0000000000..404f0577fd
 +        }
 +
 +        if (p->reset_on_drop) {
-+            // presentation timestamp is mxl_start_grain_index relative
-+            stream_ctx->flow.video.mxl_start_grain_index = stream_ctx->flow.video.mxl_grain_index;
++            // Presentation timestamps are mxl_start_grain_index relative.
++            // Rebase so the next packet continues one past the last one
++            // delivered: rebasing onto the resumed grain itself would send
++            // the pts back to 0 mid-stream and trip the monotonic check
++            // below. last_pts is 0 until the first grain is delivered, so
++            // the start-of-stream origin is unchanged.
++            uint64_t resume_pts = stream_ctx->flow.video.last_pts ?
++                stream_ctx->flow.video.last_pts + 1 : 0;
++            stream_ctx->flow.video.mxl_start_grain_index =
++                stream_ctx->flow.video.mxl_grain_index >= resume_pts ?
++                stream_ctx->flow.video.mxl_grain_index - resume_pts :
++                stream_ctx->flow.video.mxl_grain_index;
 +        }
 +    }
 +
@@ -4903,8 +4915,14 @@ index 0000000000..404f0577fd
 +        }
 +
 +        if (p->reset_on_drop) {
-+            // presentation timestamp is mxl_start_grain_index relative
-+            stream_ctx->flow.audio.mxl_start_sample_index = stream_ctx->flow.audio.mxl_sample_index;
++            // Same as the video path: keep the pts monotonic across a
++            // mid-stream reset instead of restarting it at 0.
++            uint64_t resume_pts = stream_ctx->flow.audio.last_pts ?
++                stream_ctx->flow.audio.last_pts + 1 : 0;
++            stream_ctx->flow.audio.mxl_start_sample_index =
++                stream_ctx->flow.audio.mxl_sample_index >= resume_pts ?
++                stream_ctx->flow.audio.mxl_sample_index - resume_pts :
++                stream_ctx->flow.audio.mxl_sample_index;
 +        }
 +    }
 +

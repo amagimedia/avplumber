@@ -29,6 +29,7 @@ RUN apt-get update \
 
 COPY mkpatch-0013-mxl.sh /usr/local/bin/mkpatch-0013-mxl
 COPY mkpatch-finish.sh   /usr/local/bin/mkpatch-finish
+COPY mkpatch-fixups      /fixups
 RUN chmod +x /usr/local/bin/mkpatch-0013-mxl /usr/local/bin/mkpatch-finish
 
 ENTRYPOINT ["/usr/local/bin/mkpatch-0013-mxl"]

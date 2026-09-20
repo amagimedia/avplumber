@@ -24,6 +24,7 @@ MXL_REMOTE_REF="${MXL_REMOTE_REF:-dmf-mxl/8.1}"
 MXL_PIN="${MXL_PIN:-9eddb90ac0cf6063aaacc4fc2775f19d873500eb}"
 OUT_DIR="${OUT_DIR:-/out}"
 PATCH_DIR="${PATCH_DIR:-/patches}"
+FIXUP_DIR="${FIXUP_DIR:-/fixups}"
 WORK_DIR="${WORK_DIR:-/tmp/ffmpeg-mxl-build}"
 
 log() { printf '[mkpatch] %s\n' "$*"; }
@@ -142,5 +143,17 @@ while [ "$rc" -ne 0 ]; do
     rc=$?
 done
 set -e
+
+log "applying our fixes on top of the fork"
+# Changes of ours that the fork has not taken yet. They are squashed into
+# the same patch, so each one needs its own file here to stay reviewable —
+# and dropping one is how we retire it once the fork carries the fix.
+shopt -s nullglob
+FIXUPS=("$FIXUP_DIR"/*.patch)
+if [ "${#FIXUPS[@]}" -eq 0 ]; then
+    log "  none in $FIXUP_DIR"
+else
+    git am --whitespace=nowarn "${FIXUPS[@]}"
+fi
 
 exec bash /usr/local/bin/mkpatch-finish "$BASE_AFTER_STACK"
