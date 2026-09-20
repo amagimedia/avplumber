@@ -110,26 +110,24 @@ the `ftyp` box.
 (4 vCPU of an EPYC 9474F, RTX 4000 Ada), 60 s per case after a 10 s
 warmup, via `--bench-seconds`:
 
-| case | writer | reader | CPU | NVENC |
-|---|---|---|---|---|
-| GPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.36 cores | 5% |
-| GPU unpack, `--no-zero-copy` | 59.94 fps | 59.94 fps | 0.38 cores | 5% |
-| CPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.70 cores | — |
-| `--writer-pace off`, GPU, zero-copy | 327 fps | 327 fps | 1.52 cores | 26% |
-| `--writer-pace off`, GPU, `--no-zero-copy` | 328 fps | 328 fps | 1.62 cores | 27% |
-| `--writer-pace off`, `--writer-only` | 351 fps | — | 1.23 cores | — |
+| case | writer | reader | CPU | SM | NVENC |
+|---|---|---|---|---|---|
+| GPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.27 cores | 2% | 5% |
+| GPU unpack, `--no-zero-copy` | 59.94 fps | 59.94 fps | 0.28 cores | 2% | 5% |
+| CPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.51 cores | — | — |
+| `--writer-pace off`, GPU, zero-copy | 507 fps | 507 fps | 1.71 cores | 16% | 42% |
+| `--writer-pace off`, GPU, `--no-zero-copy` | 483 fps | 483 fps | 1.80 cores | 15% | 40% |
+| `--writer-pace off`, CPU unpack | 419 fps | 192 fps | 3.05 cores | — | — |
+| `--writer-pace off`, `--writer-only` | 567 fps | — | 1.33 cores | — | — |
 
-Realtime 1080p59.94 is not demanding: a tenth of one core per side, and
-the GPU is idle at 2% SM. The ceiling is the writer — swscale to
-yuv422p10le plus the CPU `v210` encoder reach ~350 fps (1.9 GB/s into
-`/dev/shm`) on their own, and attaching the GPU reader costs ~7% of that
-for ~0.3 extra cores. Zero-copy is worth ~0.1 cores at 327 fps
-(~0.02 at 59.94): real but small next to the unpack itself, which the GPU
-path removes (0.70 → 0.36 cores).
-
-`--writer-pace off --gpu-unpack off` aborts after a few seconds — the
-CPU reader falls behind, resets, and trips the demuxer assert described
-under [Timing and grain indices](#timing-and-grain-indices).
+Realtime 1080p59.94 is not demanding: about a tenth of a core per side
+and an idle GPU. The writer — swscale to yuv422p10le plus the CPU `v210`
+encoder — reaches 567 fps (3.0 GB/s into `/dev/shm`) on its own, and the
+GPU reader keeps up with it, so unpaced both sides settle at 507 fps on
+1.7 of the 4 vCPU. Zero-copy buys 5% throughput at that rate for less
+CPU; the unpack itself matters more, halving realtime CPU (0.51 → 0.27
+cores) and, unpaced, capping the CPU reader at 192 fps against the
+writer's 419 while saturating all four cores.
 
 ## Codec choices
 
@@ -169,12 +167,12 @@ Reader-side demuxer options:
 * `reset_on_drop=1` — rebases timestamps after such a reset, which
   otherwise leaves a hole where the skipped grains would have been (a
   5.8 s leading PTS gap, and 19.4 fps in the container instead of 25).
-  It is only safe for the reset at startup: the rebase sets
-  `mxl_start_grain_index` to the current grain, so a *mid-stream* reset
-  drives the derived PTS back to 0 and trips the monotonic-PTS
-  `av_assert0` at `mxldec.c:1393`, aborting the process. Reproducible in
-  seconds with `--writer-pace off --gpu-unpack off`, where the reader
-  cannot keep up with the flood.
+  The fork rebased onto the resumed grain, which is right at startup but
+  sends the PTS back to 0 on a *mid-stream* reset, tripping the
+  monotonic-PTS `av_assert0` a few lines below — reproducible in seconds
+  with `--writer-pace off --gpu-unpack off`, where the reader cannot keep
+  up with the flood. Patch `0010` now continues from the last delivered
+  PTS instead (see `deps/ffmpeg/mkpatch-fixups/`).
 
 ## Zero-copy grains
 
