@@ -117,6 +117,33 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--writer-pace",
+        choices=("on", "off"),
+        default=os.environ.get("AVP_WRITER_PACE", "on"),
+        help=(
+            "Pace the writer to --fps with realtime + force_fps (default). "
+            "'off' publishes grains as fast as the source produces them, "
+            "which is only useful for throughput measurements: it runs the "
+            "flow into the future and starves readers of history."
+        ),
+    )
+    p.add_argument(
+        "--bench-seconds",
+        type=int,
+        default=int(os.environ.get("AVP_BENCH_SECONDS", 0)),
+        help=(
+            "Instead of running until killed, sample throughput on the "
+            "writer and reader edges once a second for N seconds, print a "
+            "summary and exit. Skips teardown, which hangs (see README)."
+        ),
+    )
+    p.add_argument(
+        "--bench-warmup",
+        type=int,
+        default=int(os.environ.get("AVP_BENCH_WARMUP", 5)),
+        help="Seconds of --bench-seconds to exclude from the summary.",
+    )
+    p.add_argument(
         "--no-zero-copy",
         dest="zero_copy",
         action="store_false",
@@ -215,26 +242,30 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
     # shrinks the ring's history to milliseconds and makes every reader
     # "too late". realtime(set_pts) rebases onto the host clock and
     # force_fps pins the cadence the flow advertises.
-    avp.addNode(Realtime({
-        "src": "w_vframe",
-        "dst": "w_vrt",
-        "group": "w_in",
-        "name": "w_realtime",
-        "set_pts": True,
-        "auto_restart": "off",
-    }))
-    avp.addNode(ForceFPS({
-        "src": "w_vrt",
-        "dst": "w_vpaced",
-        "group": "w_in",
-        "name": "w_fps",
-        "fps": _fps_ratio(args.fps),
-        "auto_restart": "off",
-    }))
+    if args.writer_pace == "on":
+        paced_src = "w_vpaced"
+        avp.addNode(Realtime({
+            "src": "w_vframe",
+            "dst": "w_vrt",
+            "group": "w_in",
+            "name": "w_realtime",
+            "set_pts": True,
+            "auto_restart": "off",
+        }))
+        avp.addNode(ForceFPS({
+            "src": "w_vrt",
+            "dst": "w_vpaced",
+            "group": "w_in",
+            "name": "w_fps",
+            "fps": _fps_ratio(args.fps),
+            "auto_restart": "off",
+        }))
+    else:
+        paced_src = "w_vframe"
     # v210 requires 10-bit 4:2:2 planar. Convert explicitly so the
     # encoder's metadata chain is unambiguous.
     avp.addNode(RescaleVideo({
-        "src": "w_vpaced",
+        "src": paced_src,
         "dst": "w_vscaled",
         "group": "w_in",
         "name": "w_scale",
@@ -470,6 +501,82 @@ def _build_cpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
     }))
 
 
+def _edge_counter(avp: pyplumber.AVPlumber, name: str):
+    """Total-enqueued reader for an edge, or None if it does not exist.
+
+    Edges materialize with their producing node, so this is called after
+    the groups have started.
+    """
+    try:
+        edge = avp.getEdge(name, "packet")
+    except Exception as exc:                    # edge missing: node failed
+        print(f"bench: no edge {name}: {exc}")
+        return None
+    return lambda: edge.enqueued_total
+
+
+def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
+    """Sample per-second throughput on the writer and reader edges.
+
+    `enqueued_total` on an edge is a plain counter, so polling it once a
+    second costs nothing on the media path — unlike a wiretap callback,
+    which would take the GIL per packet.
+    """
+    target = _fps_rounded(args.fps)
+    counters = [(n, c) for n, c in (
+        ("writer", None if args.reader_only else _edge_counter(avp, "w_venc")),
+        ("reader", None if args.writer_only else _edge_counter(avp, "r_venc")),
+    ) if c is not None]
+    if not counters:
+        print("bench: nothing to measure", file=sys.stderr)
+        return 1
+
+    print("bench: elapsed_s," + ",".join(f"{n}_fps" for n, _ in counters), flush=True)
+    samples: dict[str, list[float]] = {n: [] for n, _ in counters}
+    start = time.monotonic()
+    prev_t = start
+    prev = {n: c() for n, c in counters}
+    while (elapsed := time.monotonic() - start) < args.bench_seconds:
+        time.sleep(1.0)
+        avp.heartbeat()
+        now = time.monotonic()
+        dt = now - prev_t
+        row = []
+        for name, counter in counters:
+            total = counter()
+            fps = (total - prev[name]) / dt
+            prev[name] = total
+            row.append(fps)
+            # Skip the warmup and, beyond it, the leading zeros: the
+            # reader only starts producing once CUDA, NVENC and the MXL
+            # attach are done, and that startup is not a stall.
+            if now - start > args.bench_warmup and (fps > 0 or samples[name]):
+                samples[name].append(fps)
+        prev_t = now
+        print(f"bench: {now - start:6.1f}," +
+              ",".join(f"{fps:8.2f}" for fps in row), flush=True)
+
+    print(f"bench: target {target} fps, "
+          f"{args.width}x{args.height}, "
+          f"pace {args.writer_pace}, "
+          f"gpu_unpack {'on' if args.gpu_unpack else 'off'}, "
+          f"zero_copy {'on' if args.zero_copy else 'off'}")
+    for name, counter in counters:
+        got = samples[name]
+        if not got:
+            continue
+        mean = sum(got) / len(got)
+        print(f"bench: {name}: mean {mean:.2f} fps "
+              f"(min {min(got):.2f}, max {max(got):.2f}) "
+              f"over {len(got)} s, "
+              f"{mean / target * 100:.1f}% of target, "
+              f"{counter()} frames total")
+    # Teardown hangs (see README); the mp4 is flushed per packet, so the
+    # output is complete without it.
+    sys.stdout.flush()
+    os._exit(0)
+
+
 def main() -> int:
     args = _parse_args()
     if args.reader_only and args.writer_only:
@@ -498,6 +605,9 @@ def main() -> int:
         if not args.reader_only:
             time.sleep(1.0)
         avp.group("r_in").startNodes()
+
+    if args.bench_seconds:
+        return _bench(avp, args)
 
     try:
         while True:
