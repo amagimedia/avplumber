@@ -90,6 +90,12 @@ testsrc (looped and realtime-paced through `InputRec`).
 `--writer-only` / `--reader-only` plus a shared `AVP_MXL_VIDEO_ID` split
 the two halves across containers.
 
+`--bench-seconds N` samples `enqueued_total` on the writer and reader
+encoder edges once a second, prints per-second fps plus a summary, and
+exits without teardown. `--writer-pace off` drops `realtime` +
+`force_fps` so the writer publishes as fast as it can — throughput
+measurement only, since it starves readers of history.
+
 Stop the demo with `docker kill` — Ctrl-C hangs in teardown (see
 [Known gaps](#known-gaps)). The output stays playable regardless: the
 reader's output sets `movflags=frag_keyframe+empty_moov+default_base_moof`
@@ -97,6 +103,33 @@ reader's output sets `movflags=frag_keyframe+empty_moov+default_base_moof`
 without it the muxer's 256 KiB avio buffer is written only when it
 fills, so a killed low-bitrate run leaves a 28-byte file holding just
 the `ftyp` box.
+
+## Measured throughput
+
+1920×1080p59.94 `smptehdbars`, 1 s of ring history, on the host above
+(4 vCPU of an EPYC 9474F, RTX 4000 Ada), 60 s per case after a 10 s
+warmup, via `--bench-seconds`:
+
+| case | writer | reader | CPU | NVENC |
+|---|---|---|---|---|
+| GPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.36 cores | 5% |
+| GPU unpack, `--no-zero-copy` | 59.94 fps | 59.94 fps | 0.38 cores | 5% |
+| CPU unpack, zero-copy | 59.94 fps | 59.94 fps | 0.70 cores | — |
+| `--writer-pace off`, GPU, zero-copy | 327 fps | 327 fps | 1.52 cores | 26% |
+| `--writer-pace off`, GPU, `--no-zero-copy` | 328 fps | 328 fps | 1.62 cores | 27% |
+| `--writer-pace off`, `--writer-only` | 351 fps | — | 1.23 cores | — |
+
+Realtime 1080p59.94 is not demanding: a tenth of one core per side, and
+the GPU is idle at 2% SM. The ceiling is the writer — swscale to
+yuv422p10le plus the CPU `v210` encoder reach ~350 fps (1.9 GB/s into
+`/dev/shm`) on their own, and attaching the GPU reader costs ~7% of that
+for ~0.3 extra cores. Zero-copy is worth ~0.1 cores at 327 fps
+(~0.02 at 59.94): real but small next to the unpack itself, which the GPU
+path removes (0.70 → 0.36 cores).
+
+`--writer-pace off --gpu-unpack off` aborts after a few seconds — the
+CPU reader falls behind, resets, and trips the demuxer assert described
+under [Timing and grain indices](#timing-and-grain-indices).
 
 ## Codec choices
 
@@ -136,6 +169,12 @@ Reader-side demuxer options:
 * `reset_on_drop=1` — rebases timestamps after such a reset, which
   otherwise leaves a hole where the skipped grains would have been (a
   5.8 s leading PTS gap, and 19.4 fps in the container instead of 25).
+  It is only safe for the reset at startup: the rebase sets
+  `mxl_start_grain_index` to the current grain, so a *mid-stream* reset
+  drives the derived PTS back to 0 and trips the monotonic-PTS
+  `av_assert0` at `mxldec.c:1393`, aborting the process. Reproducible in
+  seconds with `--writer-pace off --gpu-unpack off`, where the reader
+  cannot keep up with the flood.
 
 ## Zero-copy grains
 
