@@ -1,0 +1,64 @@
+From 47d1860adaf7824c23ce850128276776ca452b58 Mon Sep 17 00:00:00 2001
+From: avplumber mxl builder <avplumber-mxl@local>
+Date: Sun, 20 Sep 2026 15:03:30 +0000
+Subject: [PATCH] avformat/mxldec: keep pts monotonic across a reset_on_drop
+ reset
+
+reset_on_drop rebases the pts origin onto the grain the reader resumes
+at. At startup that is what we want; mid-stream it drives the derived
+pts back to 0 and trips the monotonic-pts av_assert0 a few lines down,
+aborting the process. Any reader that falls behind the ring and hits
+on_too_late=reset therefore dies instead of resynchronising.
+
+Rebase to the grain minus the next expected pts, so the first packet
+after a reset continues one past the last one delivered while still
+collapsing the gap the reset leaves behind.
+---
+ libavformat/mxldec.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
+index 404f0577fd..655ccb5152 100644
+--- a/libavformat/mxldec.c
++++ b/libavformat/mxldec.c
+@@ -1278,8 +1278,18 @@ static int read_video_packet(AVFormatContext *s, AVStream *st, AVPacket *pkt,
+         }
+ 
+         if (p->reset_on_drop) {
+-            // presentation timestamp is mxl_start_grain_index relative
+-            stream_ctx->flow.video.mxl_start_grain_index = stream_ctx->flow.video.mxl_grain_index;
++            // Presentation timestamps are mxl_start_grain_index relative.
++            // Rebase so the next packet continues one past the last one
++            // delivered: rebasing onto the resumed grain itself would send
++            // the pts back to 0 mid-stream and trip the monotonic check
++            // below. last_pts is 0 until the first grain is delivered, so
++            // the start-of-stream origin is unchanged.
++            uint64_t resume_pts = stream_ctx->flow.video.last_pts ?
++                stream_ctx->flow.video.last_pts + 1 : 0;
++            stream_ctx->flow.video.mxl_start_grain_index =
++                stream_ctx->flow.video.mxl_grain_index >= resume_pts ?
++                stream_ctx->flow.video.mxl_grain_index - resume_pts :
++                stream_ctx->flow.video.mxl_grain_index;
+         }
+     }
+ 
+@@ -1649,8 +1659,14 @@ static int read_audio_packet(AVFormatContext *s, AVStream *st, AVPacket *pkt,
+         }
+ 
+         if (p->reset_on_drop) {
+-            // presentation timestamp is mxl_start_grain_index relative
+-            stream_ctx->flow.audio.mxl_start_sample_index = stream_ctx->flow.audio.mxl_sample_index;
++            // Same as the video path: keep the pts monotonic across a
++            // mid-stream reset instead of restarting it at 0.
++            uint64_t resume_pts = stream_ctx->flow.audio.last_pts ?
++                stream_ctx->flow.audio.last_pts + 1 : 0;
++            stream_ctx->flow.audio.mxl_start_sample_index =
++                stream_ctx->flow.audio.mxl_sample_index >= resume_pts ?
++                stream_ctx->flow.audio.mxl_sample_index - resume_pts :
++                stream_ctx->flow.audio.mxl_sample_index;
+         }
+     }
+ 
+-- 
+2.43.0
+

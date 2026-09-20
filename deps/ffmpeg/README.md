@@ -54,9 +54,11 @@ and the filter changes) is base-independent.
 11. **libmxl demuxer and muxer** — [MXL](https://github.com/dmf-mxl/mxl)
     shared-memory flows: demuxer, muxer, URI parser, JSON/diagnostic helpers,
     FATE coverage and `--enable-libmxl` glue. Squashed from `cbcrc/FFmpeg`
-    branch `dmf-mxl/8.1`, pinned at `9eddb90`. Built into the shared demo
-    image by `demos/mixer/Dockerfile` (which also pins the MXL SDK) and
-    exercised by `demos/mxl`.
+    branch `dmf-mxl/8.1`, pinned at `9eddb90`, plus our fixes from
+    `mkpatch-fixups/` (currently one: monotonic PTS across a
+    `reset_on_drop` reset, which otherwise aborts the process mid-stream).
+    Built into the shared demo image by `demos/mixer/Dockerfile` (which
+    also pins the MXL SDK) and exercised by `demos/mxl`.
 
 ### Regenerating `8/0011-avformat-libmxl-demuxer-muxer.patch`
 
@@ -71,6 +73,10 @@ docker run --rm \
     -v "$PWD/deps/ffmpeg/8:/patches:ro" \
     avplumber-mxl-mkpatch:local
 ```
+
+Everything in `mkpatch-fixups/` is `git am`-ed after the cherry-picks, so our
+own fixes end up inside the squashed patch with their commit messages listed
+as provenance. Retire one by deleting its file and regenerating.
 
 Set `MXL_REMOTE_REF`/`MXL_PIN` (and `FFMPEG_TAG`) to move to a newer fork
 branch, e.g. `dmf-mxl/9.0` for a future base. Afterwards refresh
