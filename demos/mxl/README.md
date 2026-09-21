@@ -21,6 +21,11 @@ Two graphs run in one process:
   * **CPU** (no CUDA device) — libavcodec `v210` decoder, swscale to
     yuv420p, `mpeg4`.
 
+  The two ends are independent: `--reader-encoder` picks the encoder
+  whatever the unpack was, and `--gpu-scale` moves the conversion between
+  them onto the GPU on either leg — see
+  [Conversion on the GPU](#conversion-on-the-gpu).
+
 Grains are taken zero-copy by default — see [below](#zero-copy-grains).
 
 Verified end-to-end on x86_64 Fedora with an RTX 4000 Ada (driver
@@ -104,11 +109,20 @@ no profiler, and nothing on the media path.
 
 `--reader-tail` shortens the reader for such measurements: `demux` drops
 each grain as it leaves the demuxer, `unpack` drops the unpacked frame,
-and the default `encode` writes `--output`. The output encoder is the
-most expensive node of the CPU reader by a factor of two, so with the
-full tail a measurement of "the MXL reader" is mostly a measurement of
-mpeg4. `--sws-flags` picks the swscale algorithm for the writer's and the
-CPU reader's `rescale_video` nodes (`fast_bilinear`, `neighbor`, ...).
+`scale` drops it after the conversion to the encoder's format, and the
+default `encode` writes `--output`. The output encoder is the most
+expensive node of the CPU reader by a factor of two, so with the full
+tail a measurement of "the MXL reader" is mostly a measurement of mpeg4.
+
+The conversion itself can be moved or redirected. `--sws-flags` picks the
+swscale algorithm for the writer's and the CPU reader's `rescale_video`
+nodes (`fast_bilinear`, `neighbor`, ...). `--gpu-scale
+{writer,reader,both}` replaces those nodes with
+`hwupload,scale_cuda,hwdownload`, and `--cuda-interp` is its
+`--sws-flags`. `--reader-encoder {mpeg4,nvenc}` decouples the output
+encoder from `--gpu-unpack`, so either unpack can feed either encoder —
+which is what makes the upload and the download visible one at a time.
+See [Conversion on the GPU](#conversion-on-the-gpu).
 
 Stop the demo with `docker kill` — Ctrl-C hangs in teardown (see
 [Known gaps](#known-gaps)). The output stays playable regardless: the
@@ -134,6 +148,7 @@ warmup, via `--bench-seconds`:
 | `--writer-pace off`, CPU unpack | 419 fps | 192 fps | 3.05 cores | — | — |
 | `--writer-pace off`, `--writer-only` | 567 fps | — | 1.33 cores | — | — |
 | `--writer-pace off`, `--writer-only`, `--sws-flags fast_bilinear` | 707 fps | — | 1.41 cores | — | — |
+| `--writer-pace off`, `--writer-only`, `--gpu-scale writer` | 855 fps | — | 1.21 cores | 7% | — |
 
 Realtime 1080p59.94 is not demanding: about a tenth of a core per side
 and an idle GPU. The writer — swscale to yuv422p10le plus the CPU `v210`
@@ -201,6 +216,81 @@ now hands a frame straight through when it already has the requested
 geometry and format, instead of paying swscale a full-frame copy — worth
 1.0 ms/frame at 1080p 10-bit 4:2:2, which is what a writer fed by a
 source that is already 10-bit 4:2:2 would otherwise burn for nothing.
+
+## Conversion on the GPU
+
+The writer's conversion is its largest cost and the reader's is second
+only to the output encoder, so `--gpu-scale` hands them to `scale_cuda`.
+What that saves depends entirely on how many times the frame has to cross
+PCIe, which is why
+`--reader-encoder` exists: naming the encoder independently of
+`--gpu-unpack` puts the same conversion in front of an upload, a download,
+both, or neither. 1080p59.94, paced, 30 s windows, host CPU of the
+conversion node alone (`--reader-tail scale` where it is the reader's) —
+the swscale rows repeat the previous section's measurement on the longer
+window and land within 5% of it:
+
+| conversion | host↔device per frame | ms/frame |
+|---|---|---|
+| swscale, writer 4:2:0 → 4:2:2 10-bit, area | — | 1.64 |
+| swscale, same with `--sws-flags fast_bilinear` | — | 1.20 |
+| swscale, reader 4:2:2 10-bit → 4:2:0, area | — | 1.73 |
+| `scale_cuda`, either leg, host frames both sides | 11.4 MB | 0.61 |
+| `scale_cuda`, reader, GPU unpack → mpeg4 | 3.1 MB down | 0.22 |
+| `scale_cuda`, reader, GPU unpack → NVENC | none | 0.04 |
+
+The line through those four GPU rows is 0.04 ms of fixed overhead plus
+every transferred byte at about 19 GB/s — one host copy, near memcpy
+speed. That is the price of unpinned frames: the driver stages each
+transfer through its own pinned buffer, and the CPU pays for that copy
+even though the DMA itself is free. The conversion adds nothing
+measurable on top, which is what the 0.04 ms row says. With both legs
+converting, `nvidia-smi dmon` reports 7% SM and 680 MB/s of PCIe traffic
+in each direction — 11.4 MB per frame at 59.94 fps, i.e. exactly the two
+transfers and nothing else. The all-GPU reader instead shows 289 MB/s in
+(the v210 grains), 33 MB/s out (the H.264 stream), 2% SM and 6% NVENC.
+
+So the GPU wins a conversion it can be handed without a round trip, and
+wins less than it looks like on one where it pays both transfers: 0.61
+against swscale's 1.2–1.7 ms/frame is a real saving, but a third of it
+comes back elsewhere — with `--gpu-scale both` the mpeg4 encoder slows
+from 3.66 to
+4.16 ms/frame, its frames now arriving cold from a DMA rather than warm
+from swscale. Paced 1080p59.94 round trips, total process CPU:
+
+| round trip | cores |
+|---|---|
+| all CPU | 0.50 |
+| CPU unpack, `--gpu-scale both` | 0.41 |
+| GPU unpack → mpeg4 (one download) | 0.41 |
+| GPU unpack → NVENC (no transfer) | 0.17 |
+
+Unpaced, the same three shapes move the caps: all-CPU runs at 420 fps
+writer / 200 fps reader on 3.14 cores, `--gpu-scale both` at 619 / 161 on
+2.25 (the freed writer outruns the reader and takes memory bandwidth with
+it), and GPU unpack into mpeg4 at 460 / 249 on 2.62 — the CPU reader
+reaching its encoder ceiling instead of its swscale one.
+
+Where the GPU is simply better is a conversion that also resizes, because
+there the CPU cost does not come from moving bytes. Publishing a 1080p
+source into a 720p flow, unpaced `--writer-only`:
+
+| writer conversion | peak | ms/frame |
+|---|---|---|
+| swscale default (area) | 955 fps | 1.04 |
+| `--sws-flags lanczos` | 314 fps | 3.18 |
+| `--gpu-scale writer --cuda-interp lanczos` | 1435 fps | 0.36 |
+
+A lanczos resize on the GPU costs a third of what an area resize costs on
+the CPU, and its transfers are smaller than the 1080p case's because the
+downloaded frame is 720p.
+
+The pixels agree. Reading the same published flow back through the CPU
+reader with the writer converting each way, the two output files differ
+by PSNR y 90.3 dB, u 49.4, v 53.4 (average 55.7) and SSIM 0.9996: the
+luma is untouched by either path at this geometry, and the chroma
+difference is the two upsamplers' kernels rather than an error.
+`smptehdbars` is static, so that comparison needed no frame alignment.
 
 ## Codec choices
 
@@ -284,8 +374,12 @@ mean `cudaHostRegister`-ing the MXL ring, i.e. a change to the node in
   time to wait, resyncing` on the writer, drops a couple of frames in
   `force_fps`, and gives the reader a burst of "too early" waits. Output
   is unaffected, but a live flow would want a seamless looper.
-* The write path still goes through swscale and the CPU `v210` encoder;
-  nothing packs CUDA frames back to v210 yet.
+* The write path always ends in the CPU `v210` encoder; nothing packs CUDA
+  frames back to v210 yet. `--gpu-scale writer` therefore has to download
+  every converted frame, which is 0.44 of its 0.61 ms/frame. A
+  `cuda_to_v210` node — the mirror of `v210_to_cuda`, packing straight
+  into a grain-sized buffer — would remove that download and the 0.3 ms
+  encoder with it, leaving a writer that spends almost nothing per frame.
 
 ## References
 
