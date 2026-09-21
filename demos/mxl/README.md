@@ -146,7 +146,9 @@ the `ftyp` box.
 
 1920×1080p59.94 `smptehdbars`, 1 s of ring history, on the host above
 (4 vCPU of an EPYC 9474F, RTX 4000 Ada), 60 s per case after a 10 s
-warmup, via `--bench-seconds`:
+warmup, via `--bench-seconds`. [`bench/`](bench/) holds the harness
+behind every table here, one case group per table — this one is
+`bench/cases.sh throughput`:
 
 | case | writer | reader | CPU | SM | NVENC |
 |---|---|---|---|---|---|
@@ -306,10 +308,11 @@ the CPU, and its transfers are smaller than the 1080p case's because the
 downloaded frame is 720p.
 
 The pixels agree. Reading the same published flow back through the CPU
-reader with the writer converting each way, the two output files differ
-by PSNR y 90.3 dB, u 49.4, v 53.4 (average 55.7) and SSIM 0.9996: the
-luma is untouched by either path at this geometry, and the chroma
-difference is the two upsamplers' kernels rather than an error.
+reader with the writer converting each way (`bench/pixel_compare.sh
+psnr`), the two output files differ by PSNR y 90.3 dB, u 49.4, v 53.4
+(average 55.7) and SSIM 0.9996: the luma is untouched by either path at
+this geometry, and the chroma difference is the two upsamplers' kernels
+rather than an error.
 `smptehdbars` is static, so that comparison needed no frame alignment.
 
 ## Packing on the GPU
@@ -350,10 +353,11 @@ muxer's copy into the grain the writer's limit, the first time in this
 demo that MXL itself is what caps anything.
 
 The grains are bit-exact. Dumped with `ffmpeg -c copy` from otherwise
-identical runs, the kernel's v210 is byte-for-byte what the libavcodec
-encoder produces at 1920×1080, 1280×720 and 1918×1080 — the last two
-exercising rows that end in a partial 6-pixel block, all three the row
-padding to a 128-byte multiple. Round trips still come out decodable:
+identical runs (`bench/pack_bitexact.sh`), the kernel's v210 is
+byte-for-byte what the libavcodec encoder produces at 1920×1080,
+1280×720 and 1918×1080 — the last two exercising rows that end in a
+partial 6-pixel block, all three the row padding to a 128-byte
+multiple. Round trips still come out decodable:
 paced 30 s runs with the CPU reader (0.38 cores) and with the GPU reader
 (0.09, against 0.17 for the same reader behind a CPU-packed writer) each
 wrote 1800 frames at 60000/1001.
