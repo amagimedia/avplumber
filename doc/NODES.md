@@ -905,7 +905,8 @@ Parameters:
 ### `egl_image_cuda_overlay`
 
 Scale and compose multiple cached `EglImageFrame` inputs directly into one
-pitched CUDA RGB0 frame. Each stable input image is registered once with
+pitched CUDA RGB0 frame (or RGBA with `output_alpha`). Each stable input image
+is registered once with
 `cuGraphicsEGLRegisterImage`; its `CUeglFrame` and CUDA texture object are then
 kept for that physical allocation. CUDA EGL image resources do not require
 per-frame map/unmap. Every output tick samples the cached texture objects with
@@ -917,7 +918,8 @@ each input, so a stalled input repeats its last image without blocking other
 inputs or the program output. The frame lifetime holders are released only
 after a CUDA event confirms that the sampling kernels have completed.
 
-N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 software format
+N inputs: `EglImageFrame`, 1 output: CUDA `av::VideoFrame` with RGB0 or RGBA
+software format
 
 Parameters:
 - `src` (array of edge names, required) - input EGL image edges
@@ -926,9 +928,20 @@ Parameters:
 - `width`, `height` (integers, required) - output canvas dimensions
 - `layers` (array, required, one per input) - objects containing `dst_x`, `dst_y`, `dst_w`, and `dst_h`
 - `fps` (ratio string, optional, default `"60/1"`) - independent compositor output rate
+- `output_alpha` (boolean, optional, default `false`) - advertise RGBA output,
+  clear uncovered pixels to transparent black, and copy each layer's source
+  alpha when its EGL format exposes one (otherwise opaque). The default keeps
+  the existing opaque RGB0 output for encoder compatibility. Layers overwrite
+  earlier rectangles; this option preserves alpha for downstream composition,
+  it does not add source-over blending between overlapping layers.
 - `cache_ttl` (float seconds, optional, default `3.0`) - idle interop-slot lifetime
 - `max_cache_entries` (integer, optional, default `440`) - maximum registered slots
 - `debug_log_every_n` (integer, optional, default `0`) - periodically log aggregate compositor counters
+
+`tests/cuda/test_egl_overlay_alpha.cu` checks the production kernels on an
+NVIDIA GPU, including opaque compatibility, alpha lane layouts, transparent
+uncovered pixels, bilinear alpha sampling, and pitched output. It does not
+replace an end-to-end DMA-BUF/browser interop test.
 
 ### `jittergen`
 
