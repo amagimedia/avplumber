@@ -48,7 +48,7 @@ pattern. `--gpu-scale` and `--writer-pack gpu` were checked separately at
   are optional here (`--gpus all` selects the GPU reader path), though
   the other demos in the shared image do need CUDA.
 * The FFmpeg 8.x series applied to `n8.1` (or `n8.0`). The MXL patch
-  `8/0010-*` is generated from `cbcrc/FFmpeg` branch `dmf-mxl/8.1` —
+  `8/0011-*` is generated from `cbcrc/FFmpeg` branch `dmf-mxl/8.1` —
   see [`deps/ffmpeg/README.md`](../../deps/ffmpeg/README.md).
 
 ## Build
@@ -400,7 +400,7 @@ Reader-side demuxer options:
   sends the PTS back to 0 on a *mid-stream* reset, tripping the
   monotonic-PTS `av_assert0` a few lines below — reproducible in seconds
   with `--writer-pace off --gpu-unpack off`, where the reader cannot keep
-  up with the flood. Patch `0010` now continues from the last delivered
+  up with the flood. Patch `0011` now continues from the last delivered
   PTS instead (see `deps/ffmpeg/mkpatch-fixups/`).
 
 ## Zero-copy grains
@@ -449,11 +449,11 @@ mean `cudaHostRegister`-ing the MXL ring, i.e. a change to the node in
   opened grain, 0.34 ms/frame and the unpaced writer's actual cap. Getting
   rid of it means having the muxer hand out the grain's address before the
   packet is built, so the pack could DMA into the ring itself; that is a
-  change to FFmpeg patch `0010`, and it mirrors the `cudaHostRegister`
+  change to FFmpeg patch `0011`, and it mirrors the `cudaHostRegister`
   note under [Zero-copy grains](#zero-copy-grains) on the read side.
 
 ## References
 
 * MXL SDK: <https://github.com/dmf-mxl/mxl>
-* MXL FFmpeg fork (source for patch 0010, branch `dmf-mxl/8.1`): <https://github.com/cbcrc/FFmpeg>
+* MXL FFmpeg fork (source for patch 0011, branch `dmf-mxl/8.1`): <https://github.com/cbcrc/FFmpeg>
 * Reference build guidance: <https://github.com/cbcrc/guidance-for-building-ffmpeg-with-mxl>
