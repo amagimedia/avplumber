@@ -50,6 +50,16 @@ The preview footer supports [cut-to-encoded-output measurements](../doc/mixer_cu
 beside WebRTC RTT. Enable the optional native probe and supply a deployment-local
 `metrics.json`; the viewer never changes the mixer itself.
 
+Playback FPS, receiver buffer residence and the browser's freeze counter are
+shown separately from cut latency and network RTT. Unsupported counters display
+`—`. The preview also keeps up to 300 diagnostic samples per connection in
+memory, available at `/receiver-stats`, to correlate a visible stall with
+packet loss, decode time or presentation gaps. It stores counters only, for at
+most 16 connections, and removes a connection five minutes after its last report.
+Hidden-tab and paused-video intervals are marked and excluded from the local
+presentation-gap detector. A new connection or decoder counter reset starts a
+new measurement period; compare counters within that period.
+
 ## RTP burst headroom
 
 A detailed mixer grid can produce much larger keyframes than a fullscreen

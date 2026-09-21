@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
+  .replace(/^\s*import .*;$/m, "");
 const elements = new Map();
 const timers = new Map();
 let timerId = 0;
 const context = createContext({
+  createReceiverMonitor: () => ({ update() {}, stop() {} }),
   URL,
   location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {

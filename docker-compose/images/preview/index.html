@@ -87,6 +87,15 @@
     .error {
       color: var(--danger);
     }
+
+    select {
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font: inherit;
+    }
   </style>
 </head>
 <body>
@@ -109,12 +118,22 @@
         <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
           <span>WebRTC RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
         </span>
+        <span class="metric" title="Video frames decoded per second during the latest sample.">
+          <span>Playback</span><span id="receiver-fps" class="metric-value">—</span>
+        </span>
+        <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
+          <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
+        </span>
+        <span class="metric" title="Browser-reported freezes since this connection started; a dash means the browser does not expose this counter.">
+          <span>Freezes</span><span id="receiver-freezes" class="metric-value">—</span>
+        </span>
       </span>
     </footer>
   </main>
 
   <script type="module" src="cut-latency.mjs?v=combined"></script>
-  <script>
+  <script type="module">
+    import { createReceiverMonitor } from "./receiver-stats.mjs";
     const codecSelect = document.getElementById("codec");
     const selectedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
     codecSelect.value = selectedCodec;
@@ -140,6 +159,7 @@
     let stopping = false;
     let rttTimer = null;
     let rttGeneration = 0;
+    let receiverMonitor = null;
 
     function selectedRttMs(report) {
       // Only the selected connection is relevant; a nominated/checking pair
@@ -164,21 +184,27 @@
       rttGeneration += 1;
       window.clearTimeout(rttTimer);
       rttTimer = null;
+      receiverMonitor?.stop();
+      receiverMonitor = null;
       renderRtt(null);
     }
 
     function startRttMeter(connection) {
       stopRttMeter();
       const generation = rttGeneration;
+      receiverMonitor = createReceiverMonitor(preview);
       async function sample() {
         let ms = null;
+        let report = null;
         try {
           if (connection.connectionState === "connected") {
-            ms = selectedRttMs(await connection.getStats());
+            report = await connection.getStats();
+            ms = selectedRttMs(report);
           }
         } catch (_) { /* Stats failures must not interrupt playback. */ }
         if (generation !== rttGeneration || peer !== connection) return;
         renderRtt(connection.connectionState === "connected" ? ms : null);
+        if (report) receiverMonitor.update(report, ms);
         rttTimer = window.setTimeout(sample, 1000);
       }
       sample();
