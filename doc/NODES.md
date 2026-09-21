@@ -364,7 +364,14 @@ FPS** (see `force_fps` node)
 -   `dst_height` (int)
 -   `dst_pixel_format` (string)
 -   `flags` (list of strings) - list of possible flags:
-    <https://www.ffmpeg.org/doxygen/3.2/swscale_8h_source.html#l00057>
+    <https://www.ffmpeg.org/doxygen/3.2/swscale_8h_source.html#l00057>.
+    One of them must be a scaling algorithm (`SWS_LANCZOS`,
+    `SWS_FAST_BILINEAR`, ...), because swscale rejects modifier flags on
+    their own. Unset lets avcpp choose: bicubic when upscaling, area
+    otherwise.
+
+Frames that already have the requested dimensions and pixel format are
+passed through untouched, saving swscale's full-frame copy.
 
 ### `resample_audio`
 
