@@ -143,6 +143,18 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--writer-pack",
+        choices=("auto", "cpu", "gpu"),
+        default=os.environ.get("AVP_WRITER_PACK", "auto"),
+        help=(
+            "Where the writer packs v210. 'gpu' uses cuda_to_v210, which "
+            "packs the CUDA frame with a kernel and DMAs it into the buffer "
+            "the muxer reads, replacing both the hwdownload and the CPU v210 "
+            "encoder; it needs the conversion on the GPU too. 'auto' (default) "
+            "picks it whenever --gpu-scale covers the writer."
+        ),
+    )
+    p.add_argument(
         "--cuda-interp",
         choices=("nearest", "bilinear", "bicubic", "lanczos"),
         default=os.environ.get("AVP_CUDA_INTERP"),
@@ -213,6 +225,13 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     args = p.parse_args()
+    if args.writer_pack == "auto":
+        args.writer_pack = "gpu" if args.gpu_scale in ("writer", "both") else "cpu"
+    elif args.writer_pack == "gpu" and args.gpu_scale not in ("writer", "both"):
+        # Converting on the CPU and then uploading just to pack would pay a
+        # transfer in each direction to save a 0.3 ms encoder. Say so.
+        p.error("--writer-pack gpu needs the writer's frames on the GPU: "
+                "add --gpu-scale writer")
     if args.gpu_unpack == "auto":
         args.gpu_unpack = _cuda_present()
         print(f"gpu unpack: {'on' if args.gpu_unpack else 'off'} (auto-detected)")
@@ -280,7 +299,8 @@ def _cuda_convert_graph(args: argparse.Namespace, dst_format: str, *,
 
 def _needs_cuda(args: argparse.Namespace) -> bool:
     """Whether any node of the chosen graph wants the CUDA device."""
-    if not args.reader_only and args.gpu_scale in ("writer", "both"):
+    if not args.reader_only and (args.gpu_scale in ("writer", "both")
+                                 or args.writer_pack == "gpu"):
         return True
     if args.writer_only:
         return False
@@ -315,7 +335,12 @@ def _reader_url(domain: str, video_id: str) -> str:
 
 
 def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
-    """source -> demux -> decode -> rescale -> v210 encode -> mxl output."""
+    """source -> demux -> decode -> rescale -> v210 pack -> mxl output.
+
+    The pack is the CPU `v210` encoder by default, or `cuda_to_v210` with
+    `--writer-pack gpu`, which packs the converted frame where it already
+    is and hands the muxer the bytes without a download.
+    """
     from pyplumber.node import RescaleVideo, AssumeVideoFormat
 
     if args.input.startswith("lavfi:"):
@@ -399,8 +424,11 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
             "dst": "w_vscaled",
             "group": "w_in",
             "name": "w_scale",
+            # With --writer-pack gpu the frame stays on the GPU: cuda_to_v210
+            # packs it there, so the download the CPU encoder needs is gone.
             "graph": _cuda_convert_graph(args, "yuv422p10le",
-                                         upload=True, download=True,
+                                         upload=True,
+                                         download=args.writer_pack != "gpu",
                                          width=args.width, height=args.height),
             "hwaccel": _HWACCEL,
             "auto_restart": "off",
@@ -419,25 +447,45 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         if flags := _sws_flags(args.sws_flags):
             scale_params["flags"] = flags
         avp.addNode(RescaleVideo(scale_params))
-    avp.addNode(AssumeVideoFormat({
-        "src": "w_vscaled",
-        "dst": "w_vscaled_assumed",
-        "group": "w_in",
-        "name": "w_assume",
-        "width": args.width,
-        "height": args.height,
-        "pixel_format": "yuv422p10le",
-        "real_pixel_format": "yuv422p10le",
-        "auto_restart": "off",
-    }))
-    avp.addNode(EncVideo({
-        "src": "w_vscaled_assumed",
-        "dst": "w_venc",
-        "group": "w_in",
-        "name": "w_enc",
-        "codec": "v210",
-        "auto_restart": "off",
-    }))
+    if args.writer_pack == "gpu":
+        from pyplumber.node import CudaToV210
+
+        # cuda_to_v210 is the muxer's encoder: it packs the CUDA frame with a
+        # kernel and DMAs the v210 bytes into the buffer the muxer copies into
+        # the grain, so the writer pays neither a download nor a CPU encoder.
+        # It reads the flow's geometry and rate from the graph above, but the
+        # demo knows them, and passing them keeps the contract explicit.
+        avp.addNode(CudaToV210({
+            "src": "w_vscaled",
+            "dst": "w_venc",
+            "group": "w_in",
+            "name": "w_pack",
+            "width": args.width,
+            "height": args.height,
+            "fps": _fps_ratio(args.fps),
+            "timebase": _fps_period(args.fps),
+            "auto_restart": "off",
+        }))
+    else:
+        avp.addNode(AssumeVideoFormat({
+            "src": "w_vscaled",
+            "dst": "w_vscaled_assumed",
+            "group": "w_in",
+            "name": "w_assume",
+            "width": args.width,
+            "height": args.height,
+            "pixel_format": "yuv422p10le",
+            "real_pixel_format": "yuv422p10le",
+            "auto_restart": "off",
+        }))
+        avp.addNode(EncVideo({
+            "src": "w_vscaled_assumed",
+            "dst": "w_venc",
+            "group": "w_in",
+            "name": "w_enc",
+            "codec": "v210",
+            "auto_restart": "off",
+        }))
     avp.addNode(Mux({
         "src": ["w_venc"],
         "dst": "w_mux",
@@ -846,6 +894,7 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
           f"reader_tail {args.reader_tail}, "
           f"reader_encoder {args.reader_encoder}, "
           f"gpu_scale {args.gpu_scale}, "
+          f"writer_pack {args.writer_pack}, "
           f"cuda_interp {args.cuda_interp or 'default'}, "
           f"sws_flags {args.sws_flags or 'default'}")
     for name, _, counter in counters:

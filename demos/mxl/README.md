@@ -10,7 +10,9 @@ Two graphs run in one process:
 * **writer** — `lavfi testsrc` → decode → `realtime` + `force_fps` →
   rescale to yuv422p10le → `v210` encode (10-bit 4:2:2 uncompressed, per
   SMPTE ST 2110) → mux → `output(format="mxl", url="/dev/shm/mxl")`. The
-  MXL muxer takes a plain filesystem path.
+  MXL muxer takes a plain filesystem path. `--writer-pack gpu` converts
+  *and* packs on the GPU instead, with `cuda_to_v210` in place of the
+  encoder — see [Packing on the GPU](#packing-on-the-gpu).
 * **reader** — `input(format="mxl", url="mxl:///dev/shm/mxl?id=<uuid>")`
   → demux → v210 unpack → encode → fragmented mp4. `--gpu-unpack`
   (default `auto`) picks the unpack:
@@ -34,7 +36,9 @@ Verified end-to-end on x86_64 Fedora with an RTX 4000 Ada (driver
 `--no-zero-copy`, `--gpu-unpack off`, from both `lavfi testsrc` and a
 looped file, at 320×240p25 and 640×480p25. All started at PTS 0,
 reported 25.0 fps (25.06 on NVENC) and decoded back to the source
-pattern.
+pattern. `--gpu-scale` and `--writer-pack gpu` were checked separately at
+1920×1080p59.94 — see [Conversion on the GPU](#conversion-on-the-gpu) and
+[Packing on the GPU](#packing-on-the-gpu).
 
 ## Requirements
 
@@ -124,6 +128,12 @@ encoder from `--gpu-unpack`, so either unpack can feed either encoder —
 which is what makes the upload and the download visible one at a time.
 See [Conversion on the GPU](#conversion-on-the-gpu).
 
+`--writer-pack {auto,cpu,gpu}` (or `AVP_WRITER_PACK`) picks the writer's
+v210 pack the same way. `gpu` drops the `hwdownload` and the CPU `v210`
+encoder for a single `cuda_to_v210` node, so it requires the conversion
+on the GPU as well (`--gpu-scale writer` or `both`); `auto` turns it on
+exactly when that holds. See [Packing on the GPU](#packing-on-the-gpu).
+
 Stop the demo with `docker kill` — Ctrl-C hangs in teardown (see
 [Known gaps](#known-gaps)). The output stays playable regardless: the
 reader's output sets `movflags=frag_keyframe+empty_moov+default_base_moof`
@@ -148,7 +158,9 @@ warmup, via `--bench-seconds`:
 | `--writer-pace off`, CPU unpack | 419 fps | 192 fps | 3.05 cores | — | — |
 | `--writer-pace off`, `--writer-only` | 567 fps | — | 1.33 cores | — | — |
 | `--writer-pace off`, `--writer-only`, `--sws-flags fast_bilinear` | 707 fps | — | 1.41 cores | — | — |
-| `--writer-pace off`, `--writer-only`, `--gpu-scale writer` | 855 fps | — | 1.21 cores | 7% | — |
+| `--writer-pace off`, `--writer-only`, `--gpu-scale writer` | 855 fps | — | 1.21 cores | 51% | — |
+| `--writer-pace off`, `--writer-only`, `--gpu-scale writer --writer-pack gpu` | 1583 fps | — | 1.32 cores | 82% | — |
+| `--writer-pace off`, `--gpu-scale writer --writer-pack gpu`, GPU unpack | 526 fps | 526 fps | 0.81 cores | 43% | 48% |
 
 Realtime 1080p59.94 is not demanding: about a tenth of a core per side
 and an idle GPU. The writer — swscale to yuv422p10le plus the CPU `v210`
@@ -159,6 +171,13 @@ CPU. The GPU reader halves realtime CPU (0.51 → 0.27 cores) and, unpaced,
 lets the reader follow the writer instead of capping at 192 fps against
 its 419 while saturating all four cores — but that is the output encoder
 talking, not the unpack; see below.
+
+The last two rows are what this host gets to once neither end packs or
+unpacks on the CPU: a writer alone at 1583 fps, and a round trip that
+edges past the CPU-packed one (507 fps) on less than half its CPU. That
+round trip saturates nothing measurable — 0.81 of four cores, 43% SM, 48%
+NVENC — and lands where it landed before the pack moved, so its 526 fps is
+a limit in the reader rather than a resource the writer is short of.
 
 ## Where the CPU goes
 
@@ -264,6 +283,7 @@ from swscale. Paced 1080p59.94 round trips, total process CPU:
 | CPU unpack, `--gpu-scale both` | 0.41 |
 | GPU unpack → mpeg4 (one download) | 0.41 |
 | GPU unpack → NVENC (no transfer) | 0.17 |
+| the same plus `--writer-pack gpu` (no transfer either way) | 0.09 |
 
 Unpaced, the same three shapes move the caps: all-CPU runs at 420 fps
 writer / 200 fps reader on 3.14 cores, `--gpu-scale both` at 619 / 161 on
@@ -291,6 +311,52 @@ by PSNR y 90.3 dB, u 49.4, v 53.4 (average 55.7) and SSIM 0.9996: the
 luma is untouched by either path at this geometry, and the chroma
 difference is the two upsamplers' kernels rather than an error.
 `smptehdbars` is static, so that comparison needed no frame alignment.
+
+## Packing on the GPU
+
+`--writer-pack gpu` removes the writer's last two CPU costs at once. The
+new `cuda_to_v210` node packs the converted CUDA frame with a kernel and
+DMAs the v210 bytes into a pinned buffer the muxer hands straight to the
+grain, so both the `hwdownload` that ended `--gpu-scale writer` and the
+libavcodec `v210` encoder behind it disappear. It *is* the encoder as far
+as the muxer is concerned — it answers `IEncoder`, so no `enc_video`
+belongs between it and `output`. Paced 1080p59.94, `--writer-only`, 30 s
+windows, host CPU per frame — the CPU-pack column re-measures the two
+sections above on that window and agrees with them within 0.04 ms:
+
+| node | work | CPU pack | GPU pack |
+|---|---|---|---|
+| `w_scale` | `hwupload`, `scale_cuda`, and the `hwdownload` only the CPU pack needs | 0.62 | 0.21 |
+| `w_enc` → `w_pack` | the v210 pack | 0.29 | 0.04 |
+| `w_output` | MXL muxer: `memcpy` into the grain | 0.23 | 0.34 |
+| whole process | every thread, `--writer-only` | 0.09 cores | 0.05 cores |
+
+Two of those lines are the point. The conversion node loses exactly its
+download — 0.62 → 0.21 ms/frame, and what is left is the 3.1 MB upload at
+the 19 GB/s of the section above plus the fixed 0.04. And the pack itself
+costs that fixed overhead alone: the 5.5 MB leaves the GPU by DMA into
+pinned memory, so unlike `hwdownload` the CPU pays nothing per byte.
+
+The third line is the same catch the mpeg4 encoder hit above, from the
+other side: the muxer's `memcpy` gets more expensive (0.23 → 0.34
+ms/frame) because it now reads bytes no CPU has touched. Even so the
+writer falls from 1.15 to 0.59 ms/frame of host CPU, and the paced
+writer process from 0.09 to 0.05 cores.
+
+Unpaced the writer's peak nearly doubles, 855 → 1583 fps on the same
+1.2–1.3 cores, and the GPU goes from 51% to 82% SM. `w_output` is then
+0.42 ms/frame — 8.8 GB/s of `memcpy` into `/dev/shm` — which makes the
+muxer's copy into the grain the writer's limit, the first time in this
+demo that MXL itself is what caps anything.
+
+The grains are bit-exact. Dumped with `ffmpeg -c copy` from otherwise
+identical runs, the kernel's v210 is byte-for-byte what the libavcodec
+encoder produces at 1920×1080, 1280×720 and 1918×1080 — the last two
+exercising rows that end in a partial 6-pixel block, all three the row
+padding to a 128-byte multiple. Round trips still come out decodable:
+paced 30 s runs with the CPU reader (0.38 cores) and with the GPU reader
+(0.09, against 0.17 for the same reader behind a CPU-packed writer) each
+wrote 1800 frames at 60000/1001.
 
 ## Codec choices
 
@@ -374,12 +440,17 @@ mean `cudaHostRegister`-ing the MXL ring, i.e. a change to the node in
   time to wait, resyncing` on the writer, drops a couple of frames in
   `force_fps`, and gives the reader a burst of "too early" waits. Output
   is unaffected, but a live flow would want a seamless looper.
-* The write path always ends in the CPU `v210` encoder; nothing packs CUDA
-  frames back to v210 yet. `--gpu-scale writer` therefore has to download
-  every converted frame, which is 0.44 of its 0.61 ms/frame. A
-  `cuda_to_v210` node — the mirror of `v210_to_cuda`, packing straight
-  into a grain-sized buffer — would remove that download and the 0.3 ms
-  encoder with it, leaving a writer that spends almost nothing per frame.
+* `--writer-pack gpu` only helps a writer whose frames are already on the
+  GPU, which is why it insists on `--gpu-scale`. A writer fed 10-bit 4:2:2
+  frames that need no conversion still ends in the libavcodec encoder:
+  uploading purely in order to pack would trade a 3.1 MB transfer for the
+  0.29 ms/frame the CPU encoder costs, which is close to a wash.
+* One copy is left on the write path — the muxer's `memcpy` into the
+  opened grain, 0.34 ms/frame and the unpaced writer's actual cap. Getting
+  rid of it means having the muxer hand out the grain's address before the
+  packet is built, so the pack could DMA into the ring itself; that is a
+  change to FFmpeg patch `0010`, and it mirrors the `cudaHostRegister`
+  note under [Zero-copy grains](#zero-copy-grains) on the read side.
 
 ## References
 
