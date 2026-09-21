@@ -1,0 +1,42 @@
+{
+  "source_count": 16,
+  "scene_count": 32,
+  "seed": 7,
+  "canvas": {
+    "width": 1080, "height": 1920, "fps": 60,
+    "working_format": "p210le", "color": "hlg"
+  },
+  "generation": {"width": 1920, "height": 1080, "seconds": 5, "sdr_encoder": "h264_nvenc", "hdr_encoder": "hevc_nvenc"},
+  "alpha_background": "sdr420_001",
+  "inputs": [
+    {"id": "sdr420", "kind": "generated", "color": "sdr", "chroma": "420", "weight": 1},
+    {"id": "hlg420", "kind": "generated", "color": "hlg", "chroma": "420", "weight": 1},
+    {"id": "hlg422", "kind": "generated", "color": "hlg", "chroma": "422", "weight": 1},
+    {"id": "sdr422", "kind": "generated", "color": "sdr", "chroma": "422", "weight": 1},
+    {
+      "id": "bunny", "kind": "download", "color": "sdr", "weight": 1,
+      "url": "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4",
+      "attribution": "(c) copyright 2008, Blender Foundation / www.bigbuckbunny.org",
+      "license": "https://creativecommons.org/licenses/by/3.0/"
+    },
+    {"id": "browser", "kind": "browser", "pattern": "alpha", "width": 1920, "height": 1080, "weight": 1}
+  ],
+  "layouts": {
+    "fullscreen": 2,
+    "grid_2": 2,
+    "grid_4": 2,
+    "grid_8": 2,
+    "grid_16": 4,
+    "grid_32": 0,
+    "grid_64": 0,
+    "pip": 6,
+    "random": 6,
+    "alpha_overlay": 8
+  },
+  "renditions": [
+    {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc", "profile": "baseline",
+     "bitrate_kbps": 6000, "preset": "p5", "tonemap": "mobius", "tonemap_param": 0.9},
+    {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10",
+     "bitrate_kbps": 8000, "preset": "p5"}
+  ]
+}

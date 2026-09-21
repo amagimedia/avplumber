@@ -502,6 +502,72 @@ def test_config_rejects_duplicate_locations_and_bad_references():
     assert mc.scene_layers(probed, probed.scenes[0])["cam"]["crop"] == {"x": 0, "y": 0, "w": 640, "h": 360}
 
 
+@pytest.mark.parametrize("flags", [(False, False), (True, False), (False, True), (True, True)])
+def test_independent_sources_require_explicit_opt_in_on_each_declaration(flags):
+    sources = [{**CONFIG["sources"][0], "id": sid, "independent": independent}
+               for sid, independent in zip(("cam", "cam2"), flags)]
+    doc = {**CONFIG, "sources": sources, "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}
+    if all(flags):
+        assert len(mixer_config.parse(doc).sources) == 2
+    else:
+        with pytest.raises(mixer_config.ConfigError, match="already declared"):
+            mixer_config.parse(doc)
+
+
+def test_independent_sources_build_separate_decoders(tmp_path):
+    sources = [{**CONFIG["sources"][0], "id": sid, "independent": True} for sid in ("cam", "cam2")]
+    doc = {**CONFIG, "sources": sources, "scenes": CONFIG["scenes"][:1], "initial_scene": "full"}
+    path = tmp_path / "mixer.json"
+    path.write_text(json.dumps(doc))
+    application = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    assert {n for n in nodes if n and n.startswith("decode_")} == {"decode_0", "decode_1"}
+    sources = dict(FakeMixer.instances[-1].sources)
+    assert sources["cam"]["pre_otm_edge"] != sources["cam2"]["pre_otm_edge"]
+
+
+def test_recipe_builds_all_independent_input_chains_and_renditions(tmp_path):
+    pytest.importorskip("numpy")
+    from prepare_demo import plan
+    recipe = json.loads((Path(__file__).resolve().parents[1] / "demo.example.json").read_text())
+    doc, _, _ = plan(recipe, tmp_path)
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    application = build_application(GraphOptions(config=str(path), janus_output=True), api=fake_api())
+    nodes = {node.parameters.get("name"): node.parameters for node in application.avp.nodes}
+    assert len([n for n in nodes if n and n.startswith("decode_")]) == 12
+    assert len([n for n in nodes if n and n.startswith("unpack_")]) == 4
+    mixer = FakeMixer.instances[-1]
+    assert len(mixer.sources) == 16 and len(mixer.scenes) == 24
+    assert len({params["pre_otm_edge"] for _, params in mixer.sources}) == 16
+    assert nodes["janus_encoder"]["options"]["profile"] == "baseline"
+    assert nodes["janus_hdr_encoder"]["options"]["profile"] == "main10"
+
+
+@pytest.mark.parametrize("value", [0.5, "true", 1, None])
+def test_scene_blend_rejects_non_boolean_values(value):
+    scene = {"id": "blend", "items": [{**CONFIG["scenes"][0]["items"][0], "blend": value}]}
+    with pytest.raises(mixer_config.ConfigError, match="blend must be a boolean"):
+        mixer_config.parse({**CONFIG, "scenes": [scene], "initial_scene": "blend"})
+
+
+@pytest.mark.parametrize("blend", [False, True])
+def test_browser_alpha_preservation_follows_scene_blending(tmp_path, monkeypatch, blend):
+    from pyplumber.mixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args, **kwargs: {"windows": []})
+    scene = {"id": "overlay", "items": [CONFIG["scenes"][0]["items"][0],
+             {**CONFIG["scenes"][1]["items"][0], "blend": blend}]}
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "scenes": [scene], "initial_scene": "overlay"}))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4", dmabuf_socket_dir=str(tmp_path)),
+                            api=fake_api())
+    nodes = {n.parameters.get("name"): n.parameters for n in app.avp.nodes}
+    assert nodes["input_1_to_cuda"]["drop_alpha"] is not blend
+    layer = FakeMixer.instances[-1].scenes["overlay"]["sources"]["page"]
+    assert layer.get("blend", False) is blend
+
+
 @pytest.mark.parametrize("source_filter", ["", "tonemap_cuda=transfer_in=sdr:transfer_out=hlg,scale_cuda=format=p210le"])
 def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypatch, source_filter):
     import json as _json
@@ -549,6 +615,9 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
+        "source_count": 2,
+        "canvas": {"width": 1920, "height": 1080, "fps": 60},
+        "source_counts": {"video": 1, "browser": 1, "v210": 0},
         "direct": False, "fade_seconds": 0.8, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
@@ -614,6 +683,27 @@ def test_janus_rejects_invalid_keyframe_limit(minimum):
     from pyplumber.mixer.janus import JanusVideoConfig
     with pytest.raises(ValueError, match="keyframe_min_interval_ms"):
         JanusVideoConfig(keyframe_min_interval_ms=minimum)
+
+
+@pytest.mark.parametrize("bitrate,pacing", [(3000, "9000000"), (8000, "24000000")])
+def test_janus_paces_rtp_without_reducing_encoding_quality(bitrate, pacing):
+    from urllib.parse import parse_qs, urlsplit
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(bitrate_kbps=bitrate),
+                       fps=30, width=1080, height=1920)
+    nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
+    output = nodes["janus_rtp_output"]
+    url = urlsplit(output["url"])
+    assert output["format"] == "rtp" and url.scheme == "udp"
+    assert output["options"]["rtpflags"] == "skip_rtcp"
+    assert url.port == 5004
+    query = parse_qs(url.query)
+    assert query["bitrate"] == [pacing]
+    assert query["pkt_size"] == ["1200"]
+    assert query["burst_bits"] == ["38400"]
+    assert nodes["janus_encoder"]["options"]["b"] == f"{bitrate}k"
+    assert nodes["janus_encoder"]["options"]["bufsize"] == f"{bitrate}k"
 
 
 @pytest.mark.parametrize("configured", [False, True])
@@ -881,7 +971,7 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
     import io
     import contextlib
     args = ["--canvas", "1920x1080", "--fps", "60", "--color", "hlg", "--working-format", "p210le",
-            "--sdr-port", "5004", "movie=/m/hdr.mp4", "clip=/m/hlg.mp4:hlg", "pat=/f/p.v210@1920x1080:hlg",
+            "--program-port", "5006", "--sdr-port", "5004", "movie=/m/hdr.mp4", "clip=/m/hlg.mp4:hlg", "pat=/f/p.v210@1920x1080:hlg",
             "bunny=/m/bunny.mp4:sdr", "page=https://example.org/a@1920x1080"]
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -892,6 +982,7 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
     assert doc["canvas"]["color"] == "hlg"
     program, sdr = doc["renditions"]
     assert (program["codec"], program["profile"]) == ("hevc_nvenc", "main10") and "tonemap" not in program
+    assert program["port"] == 5006
     assert (sdr["codec"], sdr["port"], sdr["tonemap"], sdr["tonemap_param"]) == ("h264_nvenc", 5004, "mobius", 0.9)
     kinds = {s["id"]: (s["kind"], s.get("color")) for s in doc["sources"]}
     assert kinds == {"movie": ("video", None), "clip": ("video", "hlg"), "pat": ("v210", "hlg"),
@@ -901,6 +992,17 @@ def test_generated_hdr_show_has_hdr_and_sdr_renditions():
         make_config.source_spec("raw=/f/p.v210@1920x1080")
     with pytest.raises(SystemExit, match="--sdr-port needs"):
         make_config.main(["--sdr-port", "5004", "clip=/m/c.mp4"])
+    with pytest.raises(SystemExit, match="distinct RTP ports"):
+        make_config.generate(["--color", "hlg", "--working-format", "p210le",
+                              "--sdr-port", "5004", "clip=/m/c.mp4"])
+
+
+def test_generated_ten_bit_sdr_show_uses_hevc_profile():
+    from make_config import generate
+    doc = generate(["--working-format", "p210le", "clip=/media/clip.mp4:sdr"])
+    rendition = doc["renditions"][0]
+    assert (rendition["codec"], rendition["profile"]) == ("hevc_nvenc", "main10")
+    assert mixer_config.parse(doc).out_color == Color("sdr")
 
 
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):
@@ -926,11 +1028,15 @@ def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path
     assert FakeMixer.instances[-1].parameters["latency_ms"] == 20.0
 
 
-def test_more_than_32_sources_is_rejected_at_load():
-    sources = [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 16, "height": 16} for i in range(33)]
-    doc = {**CONFIG, "sources": sources, "scenes": [{"id": "s", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 16, "h": 16}}]}]}
-    with pytest.raises(mixer_config.ConfigError, match="32 sources"):
-        mixer_config.parse(doc)
+@pytest.mark.parametrize("count", [33, 45, 64, 65])
+def test_source_mask_capacity(count):
+    sources = [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 16, "height": 16} for i in range(count)]
+    doc = {**CONFIG, "initial_scene": "s", "sources": sources, "scenes": [{"id": "s", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 16, "h": 16}}]}]}
+    if count > 64:
+        with pytest.raises(mixer_config.ConfigError, match="64 sources"):
+            mixer_config.parse(doc)
+    else:
+        assert len(mixer_config.parse(doc).sources) == count
 
 
 def test_mobius_knee_must_leave_shoulder_room():

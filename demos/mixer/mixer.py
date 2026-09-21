@@ -410,8 +410,8 @@ def _build_input(
 
 
 def _register_sources(avp, api, mixer, input_edges: list[str], urls, *, fps: int, color: str = "") -> bool:
-    # Compositor masks have 32 bits. Larger catalogues retain a small router
-    # selecting the 16 visible positions, without per-layout filter branches.
+    # Keep the legacy --input routing threshold: larger catalogues use a small
+    # router selecting the 16 visible positions, without per-layout branches.
     if len(input_edges) <= 32:
         for index, (edge, url) in enumerate(zip(input_edges, urls)):
             browser = is_dmabuf_url(url)   # packed RGB, always SDR; decoded files follow --input-color
@@ -605,6 +605,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
     aliases = cfg.alias_counts
+    blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     input_edges: list[str] = []
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
@@ -612,7 +613,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
             nodes, edge = dmabuf_cuda_input_nodes(
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
-                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True)
+                cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
+                preserve_alpha=source.id in blended_sources)
             for node in nodes:
                 avp.addNode(node)
         elif source.kind == "v210":

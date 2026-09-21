@@ -8,11 +8,12 @@ const elements = new Map();
 const timers = new Map();
 let timerId = 0;
 const context = createContext({
-  location: { origin: "http://127.0.0.1" },
+  URL,
+  location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {
     readyState: "loading",
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { dataset: {}, setAttribute() {} });
+      if (!elements.has(id)) elements.set(id, { dataset: {}, setAttribute() {}, addEventListener() {} });
       return elements.get(id);
     },
   },
@@ -23,6 +24,17 @@ const context = createContext({
   },
 });
 runInContext(script, context);
+assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
+assert.equal(elements.get("codec").value, "h265");
+for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
+  const other = createContext({
+    URL, location: { origin: "http://127.0.0.1", href: `http://127.0.0.1/${suffix}` },
+    document: context.document, window: context.window,
+  });
+  runInContext(script, other);
+  assert.equal(runInContext("MOUNTPOINT_ID", other), 1);
+  assert.equal(elements.get("codec").value, "h264");
+}
 
 function report(seconds, state = "succeeded") {
   return new Map([

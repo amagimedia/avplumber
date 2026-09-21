@@ -199,7 +199,7 @@ extern "C" __global__ void rgba_over_yuv(
     unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
     int dx, int dy, int dw, int dh, int canvas_w, int canvas_h,
     int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y,
-    int transfer = 2, float white = 203.f, float peak = 1000.f) {
+    int transfer = 2, float white = 203.f, float peak = 1000.f, int premultiplied = 0) {
     const int bw = 1 << sub_x, bh = 1 << sub_y;
     const int ox = (blockIdx.x * blockDim.x + threadIdx.x) * bw;
     const int oy = (blockIdx.y * blockDim.y + threadIdx.y) * bh;
@@ -224,6 +224,11 @@ extern "C" __global__ void rgba_over_yuv(
             const float a10 = src[y1 * src_pitch + x0 * step + a_off], a11 = src[y1 * src_pitch + x1 * step + a_off];
             const float a = ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
 
+            // Unassociate before the nonlinear transfer conversion. Interpolating
+            // the premultiplied samples first also preserves transparent edges.
+            if (premultiplied)
+                for (int c = 0; c < 3; ++c)
+                    rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
             convert_graphic_rgb(rgb, transfer, white, peak);
             const float luma = graphic_luma(rgb, transfer) * dst_scale;
             unsigned char *py = dst_y + (y + j) * y_pitch + (x + i) * dst_sb;

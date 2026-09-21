@@ -290,8 +290,11 @@ export class ManagedWindow implements IManagedWindow {
 
   private async loadUrl(url: string): Promise<void> {
     if (!this.win) return;
-    const sep = url.includes('?') ? '&' : '?';
-    const urlToLoad = `${url}${sep}_cb=${Date.now().toString()}`;
+    const target = new URL(url);
+    if (target.protocol === 'http:' || target.protocol === 'https:') {
+      target.searchParams.set('_cb', Date.now().toString());
+    }
+    const urlToLoad = target.href;
     const extraHeaders = 'pragma: no-cache\ncache-control: no-cache, no-store, must-revalidate';
     try {
       await this.win.loadURL(urlToLoad, { extraHeaders });

@@ -1,0 +1,22 @@
+{
+  "source_count": 3,
+  "scene_count": 4,
+  "seed": 7,
+  "canvas": {
+    "width": 1280, "height": 720, "fps": 30,
+    "working_format": "p210le", "color": "hlg"
+  },
+  "generation": {"seconds": 2},
+  "inputs": [
+    {"id": "sdr", "kind": "generated", "color": "sdr", "chroma": "420", "pattern": "testsrc2", "weight": 1},
+    {"id": "hlg", "kind": "generated", "color": "hlg", "chroma": "422", "weight": 1},
+    {"id": "overlay", "kind": "browser", "pattern": "alpha", "weight": 1}
+  ],
+  "layouts": {"fullscreen": 2, "alpha_overlay": 2},
+  "renditions": [
+    {"id": "sdr", "target": "janus", "port": 5004, "codec": "h264_nvenc", "profile": "baseline",
+     "bitrate_kbps": 6000, "preset": "p5", "tonemap": "mobius", "tonemap_param": 0.9},
+    {"id": "hdr", "target": "janus", "port": 5006, "codec": "hevc_nvenc", "profile": "main10",
+     "bitrate_kbps": 8000, "preset": "p5"}
+  ]
+}

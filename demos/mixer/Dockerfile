@@ -117,6 +117,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        python3 -c 'import pyplumber'
 
 COPY demos/mixer /build/demos/mixer
+COPY tests/cuda/v210_fixture.py /build/tests/cuda/v210_fixture.py
 
 RUN python3 -m pip install --no-cache-dir -r /build/demos/mixer/requirements.txt
 

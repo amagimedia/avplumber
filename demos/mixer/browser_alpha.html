@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Mixer alpha test</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  body { color: white; font: 2.5vw system-ui, sans-serif; }
+  header { position: absolute; top: 5%; left: 5%; padding: .4em .7em; background: #172536cc; }
+  #patches { position: absolute; left: 5%; top: 30%; width: 90%; height: 40%; display: flex; gap: 2%; }
+  .column { flex: 1; position: relative; }
+  .swatch { height: 80%; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
+  .label { position: absolute; top: 85%; width: 100%; text-align: center; text-shadow: 0 1px 3px black; }
+  #marker { position: absolute; bottom: 8%; width: 8%; height: 6%; background: #ffffff80; animation: slide 4s linear infinite alternate; }
+  @keyframes slide { from { left: 5%; } to { left: 87%; } }
+</style>
+<header>Browser alpha over video</header>
+<div id="patches"></div>
+<div id="marker"></div>
+<script>
+  for (const alpha of [0, 0.25, 0.5, 0.75, 1]) {
+    const column = document.createElement('div');
+    column.className = 'column';
+    const swatch = document.createElement('div');
+    swatch.className = 'swatch';
+    swatch.style.opacity = alpha;
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = `${alpha * 100}%`;
+    column.append(swatch, label);
+    document.querySelector('#patches').append(column);
+  }
+</script>
+</html>

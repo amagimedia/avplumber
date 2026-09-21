@@ -171,13 +171,18 @@ void CudaRectDraw::convertRgbLayer(CUstream stream, const AVFrame *src, AVFrame 
                 chroma = (CUdeviceptr)dst->data[1];
     int source_pitch = src->linesize[0], luma_pitch = dst->linesize[0], chroma_pitch = dst->linesize[1];
     int transfer = kernelTransfer(canvas_.transfer);
+    int premultiplied = 0;
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+    premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
+#endif
     float sdr_white = canvas_.sdr_white, hdr_peak = canvas_.hdr_peak;
     void *opaque_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off,
                            &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
                            &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y, &transfer, &sdr_white, &hdr_peak};
     void *blend_args[] = {&source, &source_pitch, &sx, &sy, &sw, &sh, &step, &r_off, &g_off, &b_off, &a_off,
                           &luma, &luma_pitch, &chroma, &chroma_pitch, &dx, &dy, &dw, &dh, &cw, &ch,
-                          &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y, &transfer, &sdr_white, &hdr_peak};
+                          &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y, &transfer, &sdr_white, &hdr_peak,
+                          &premultiplied};
     const int bw = 1 << sub_x, bh = 1 << sub_y;
     const int blocks_x = (dw + bw - 1) / bw, blocks_y = (dh + bh - 1) / bh;
     if (AVP_CHECK_CU(cuLaunchKernel(blend ? rgba_kernel_ : rgb_kernel_, (blocks_x + 31) / 32, (blocks_y + 7) / 8, 1,

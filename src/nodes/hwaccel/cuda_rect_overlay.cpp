@@ -75,8 +75,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::vector<bool> input_eof_;
     std::vector<av::VideoFrame> held_;
     std::vector<bool> held_valid_;
-    std::atomic<uint32_t> active_inputs_{~0u};
-    std::atomic<uint32_t> prewarm_inputs_{0};
+    std::atomic<uint64_t> active_inputs_{~uint64_t{0}};
+    std::atomic<uint64_t> prewarm_inputs_{0};
 
     // An explicit fps opts live, monotonic-PTS inputs into shared playout.
     // Unclocked callers retain the established timestamp-driven behavior.
@@ -86,8 +86,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     std::atomic<int64_t> input_valid_from_ns_{0};
     std::atomic<bool> preserve_warm_input_{false};
     uint64_t applied_generation_ = 0;
-    uint32_t applied_active_mask_ = 0;
-    uint32_t applied_prewarm_mask_ = 0;
+    uint64_t applied_active_mask_ = 0;
+    uint64_t applied_prewarm_mask_ = 0;
 
     // Bound how long we will wait for every active layer to produce a fresh
     // post-activation frame before emitting with whatever we have. <=0 disables
@@ -233,20 +233,20 @@ public:
 
     void processClocked() {
         const int64_t now = avp::mixer::monotonicNs();
-        uint32_t active = active_inputs_.load(std::memory_order_acquire);
-        const uint32_t prewarm = prewarm_inputs_.load(std::memory_order_acquire);
+        uint64_t active = active_inputs_.load(std::memory_order_acquire);
+        const uint64_t prewarm = prewarm_inputs_.load(std::memory_order_acquire);
         if (hasTimeline()) {
             const auto deadline = playout_->nextDeadline();
             const int64_t content_time = std::max(now - playout_->latencyNs(),
                 deadline ? *deadline - playout_->latencyNs() : now);
             const auto value = tlGetRaw("active_inputs", av::Timestamp(content_time, {1, 1000000000}));
-            if (value) active = parseBitmask(*value);
+            if (value) active = parseBitmask<uint64_t>(*value);
         }
         const auto generation = input_generation_.load(std::memory_order_acquire);
         if (generation != applied_generation_ || active != applied_active_mask_ || prewarm != applied_prewarm_mask_) {
             for (size_t i = 0; i < source_edges_.size(); ++i) {
-                playout_->setPrewarm(i, (prewarm & (1u << i)) != 0);
-                playout_->setActive(i, (active & (1u << i)) != 0);
+                playout_->setPrewarm(i, (prewarm & (uint64_t{1} << i)) != 0);
+                playout_->setActive(i, (active & (uint64_t{1} << i)) != 0);
                 if (generation != applied_generation_) {
                     const auto from = input_valid_from_ns_.load(std::memory_order_acquire);
                     playout_->resetInput(i, from ? std::optional<int64_t>(from) : std::nullopt,
@@ -265,7 +265,7 @@ public:
             return;
         }
         for (size_t i = 0; i < source_edges_.size(); ++i) {
-            if (!((active | prewarm) & (1u << i))) continue;
+            if (!((active | prewarm) & (uint64_t{1} << i))) continue;
             // Bound ingestion as well as storage; an unpaced producer must not
             // monopolize the output thread before it reaches its deadline.
             for (size_t received = 0; received < 8; ++received) {
@@ -305,7 +305,7 @@ public:
         const av::VideoFrame *metadata = nullptr;
         for (size_t i = 0; i < decision->frames.size(); ++i) {
             const auto &frame = decision->frames[i];
-            const bool visible = (active & (1u << i)) != 0;
+            const bool visible = (active & (uint64_t{1} << i)) != 0;
             sources.push_back(visible && frame ? &*frame : nullptr);
             if (visible && frame) metadata = &*frame;
         }
@@ -318,7 +318,7 @@ public:
             stats << "cuda_rect_overlay: frames=" << frame_counter_
                   << " missed_deadlines=" << playout_->missedDeadlines();
             for (size_t i = 0; i < sources.size(); ++i) {
-                if (!(active & (1u << i))) continue;
+                if (!(active & (uint64_t{1} << i))) continue;
                 stats << " input" << i << "_reuse=" << playout_->stats(i).repeats
                       << " input" << i << "_discarded=" << playout_->stats(i).discarded;
             }
@@ -339,18 +339,18 @@ public:
             return;
 
         // Read active_inputs bitmask: get a representative PTS from any peeked frame
-        uint32_t active_mask = active_inputs_.load(std::memory_order_relaxed);
+        uint64_t active_mask = active_inputs_.load(std::memory_order_relaxed);
         if (hasTimeline()) {
             for (size_t i = 0; i < n; ++i) {
                 auto* p = this->source_edges_[i]->peek();
                 if (p && !isEofMarker(*p) && frameUsable(*p)) {
                     auto opt = tlGetRaw("active_inputs", p->pts());
-                    if (opt) active_mask = parseBitmask(*opt);
+                    if (opt) active_mask = parseBitmask<uint64_t>(*opt);
                     break;
                 }
             }
         }
-        auto isActive = [active_mask](size_t i) { return (active_mask & (1u << i)) != 0; };
+        auto isActive = [active_mask](size_t i) { return (active_mask & (uint64_t{1} << i)) != 0; };
 
         // "All active inputs exhausted" == EOF only if there is at least one active
         // input. With active_mask == 0 the compositor is idle (e.g. unused PVW slot):
@@ -578,7 +578,7 @@ public:
 
     void setObject(const std::string key, const Parameters& value) override {
         if (key == "active_inputs") {
-            const uint32_t new_mask = parseBitmask(value);
+            const uint64_t new_mask = parseBitmask<uint64_t>(value);
             active_inputs_.store(new_mask, std::memory_order_relaxed);
             if (!playout_) {
                 sent_eof_ = false;
@@ -591,7 +591,7 @@ public:
             }
         } else if (key == "prewarm_inputs") {
             if (!playout_) throw Error("cuda_rect_overlay: prewarm_inputs requires clocked playout");
-            prewarm_inputs_.store(parseBitmask(value), std::memory_order_release);
+            prewarm_inputs_.store(parseBitmask<uint64_t>(value), std::memory_order_release);
             for (auto &edge : source_edges_) edge->producedEvent().signal();
         } else if (key == "warm_reset") {
             if (!playout_) throw Error("cuda_rect_overlay: warm_reset requires clocked playout");
@@ -630,6 +630,8 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     auto src_names = jsonToStringList(params["src"]);
     if (src_names.empty())
         throw Error("cuda_rect_overlay: at least one input required in src");
+    if (src_names.size() > 64)
+        throw Error("cuda_rect_overlay: at most 64 inputs supported");
     std::vector<LayerSpec> layers = avp::mixer::parseLayersParam(params);
     if (layers.size() != src_names.size())
         throw Error("cuda_rect_overlay: layers array length must match src count");
@@ -675,7 +677,7 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     out_edge->setProducer(node);
     node->initTimeline(nci);
     if (params.count("active_inputs"))
-        node->active_inputs_.store(parseBitmask(params["active_inputs"]), std::memory_order_relaxed);
+        node->active_inputs_.store(parseBitmask<uint64_t>(params["active_inputs"]), std::memory_order_relaxed);
     node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
     if (params.contains("fps")) {
         node->frame_rate_ = parseRatio(params.at("fps"));

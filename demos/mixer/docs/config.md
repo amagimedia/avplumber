@@ -26,7 +26,7 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
   "renditions":   [ ... ],
   "sources":      [ ... ],
   "wipes":        [ ... ],
-  "wipe_dir":     "/media/wipes",
+  "wipe_dir":     "/media/media_wipes",
   "control":      { "direct": true, "transition": "cut", "fade_seconds": 0.5 },
   "scenes":       [ ... ],
   "initial_scene": "fullscreen_0"
@@ -56,8 +56,8 @@ library and a scene with each fit mode. Paths and URLs are placeholders.
     {"id": "page", "kind": "browser", "url": "https://example.org/lower-third",
      "width": 1920, "height": 1080, "fps": 60, "color": "sdr"}
   ],
-  "wipes": [{"id": "ribbons", "path": "/media/wipes/ribbons.mov", "name": "Ribbons", "duration_seconds": 2.0}],
-  "wipe_dir": "/media/wipes",
+  "wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov", "name": "Ribbons", "duration_seconds": 2.0}],
+  "wipe_dir": "/media/media_wipes",
   "wipe_color": "sdr",
   "control": {"direct": true, "transition": "wipe", "fade_seconds": 0.5, "default_wipe": "ribbons"},
   "renditions": [
@@ -135,6 +135,15 @@ Multiple Janus renditions need separate RTP ports and matching Janus
 mountpoints. Each has its own encoder and RTCP feedback. The first keeps the
 `janus_encoder` name used by cut-latency measurement; additional outputs use
 `janus_<id>_encoder`.
+
+Janus output paces RTP transmission at three times the configured average
+bitrate, with a four-packet burst allowance. Packetization remains RTP; the
+output uses FFmpeg's `udp://` transport because its `rtp://` wrapper does not
+expose UDP pacing. RTCP feedback uses the separate feedback listener. Pacing
+spreads large keyframes over time without changing encoded detail or bitrate;
+their delivery can take tens of milliseconds. See the shared stack's
+[socket buffer guidance](../../../docker-compose/README.md#rtp-burst-headroom)
+if Janus drops packets before forwarding them.
 
 For a P010 HLG canvas, these outputs provide simultaneous HDR and SDR previews:
 
@@ -220,13 +229,19 @@ contract. HDR outputs require 10-bit storage. The `clip` default preserves the
 brightness of SDR embedded in HDR; it clips highlights above SDR white. Select
 another operator explicitly when highlight compression is preferred.
 
+Repeated file/URL declarations are rejected by default. For load testing, mark
+**every declaration of the repeated location** with `"independent": true`:
+each ID then opens its own input chain (or browser window). Referencing one ID
+in several scenes still shares that one chain. The demo recipe uses this opt-in
+to vary the independent input count while reusing cached media files.
+
 ## wipes
 
 The media-wipe library. Every declared clip is decoded once at start and held
 as frames in the clip cache, so a take costs no file open and no decoder.
 
 ```json
-"wipes": [{"id": "ribbons", "path": "/media/wipes/ribbons.mov",
+"wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov",
            "name": "Ribbons", "duration_seconds": 2.03}]
 ```
 
@@ -237,7 +252,7 @@ as frames in the clip cache, so a take costs no file open and no decoder.
 | `name` | the id | label shown on the web UI button and in the TUI picker |
 | `duration_seconds` | probed | how long the take runs |
 
-`"wipe_dir": "/media/wipes"` adds every clip in a directory under its file
+`"wipe_dir": "/media/media_wipes"` adds every clip in a directory under its file
 name; entries declared above keep their own id, label and duration.
 
 ## control
@@ -276,6 +291,7 @@ over earlier ones.
 | `source` | — | a source id |
 | `dst` | — | `x`, `y`, `w`, `h` on the canvas |
 | `fit` | `"contain"` | `stretch`, `contain` (letterbox/pillarbox), `cover` (fill and crop the overflow) |
+| `blend` | `false` | honour source alpha, for example a transparent browser graphic over video; opaque sources remain opaque |
 | `crop` | whole frame | region of the source in source pixels, applied before the fit |
 
 Padding is always black. `cover` needs the source size, which is declared or
@@ -284,8 +300,8 @@ first one).
 
 ## Known limitations
 
-- **32 sources per show.** Every source is a pad on the compositor, and the
-  active-pad mask is a 32-bit word. 8-bit or 10-bit makes no difference;
+- **64 sources per show.** Every source is a pad on the compositor, and the
+  active-pad mask is a 64-bit word. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
   pads are wired at build time. A document with more sources is rejected at load.
 - **16 boxes per scene** in the built-in `--input` layouts; a `--config` scene has no box limit.
@@ -298,8 +314,8 @@ first one).
   every rendition is 4:2:0.
 - **HLG and PQ need a 10-bit canvas.** Browser pages are SDR only.
 
-Lifting the 32-source and runtime-add limits means routing every show
-through the router with per-slot conversion; that is planned, not done.
+Larger config-driven shows and runtime source addition require a different
+pad allocation strategy; they are not supported.
 
 ## Generating one
 
@@ -308,7 +324,7 @@ as a document, so a config-driven run starts from what the demo already does:
 
 ```sh
 python3 demos/mixer/make_config.py --fps 30 --bitrate-kbps 2700 \
-    --wipe /media/wipes/ribbons.mov \
+    --wipe /media/media_wipes/ribbons.mov \
     cam0=/media/camera-0.mp4 page=https://example.org/live@1920x1080 > mixer.json
 ```
 

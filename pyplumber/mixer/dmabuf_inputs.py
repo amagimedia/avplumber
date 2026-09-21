@@ -32,11 +32,13 @@ def window_id(url: str) -> str:
 
 def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height: int, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
-                            processing_group: str, hold: bool = False) -> Tuple[list, str]:
+                            processing_group: str, hold: bool = False,
+                            preserve_alpha: bool = False) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
-    while the page is not painting, so static pages keep feeding the mixer."""
+    while the page is not painting, so static pages keep feeding the mixer.
+    *preserve_alpha* retains alpha-bearing DRM formats for blended scene items."""
     drm_edge, assumed_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
@@ -45,15 +47,18 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
     nodes = [
         api.IpcDmabufSource(source),
         api.AssumeVideoFormat({"width": width, "height": height, "pixel_format": "drm_prime",
-                               "real_pixel_format": "rgb0", "src": drm_edge, "dst": assumed_edge,
+                               "real_pixel_format": "rgba" if preserve_alpha else "rgb0", "src": drm_edge, "dst": assumed_edge,
                                "group": processing_group, "auto_restart": "panic"}),
-        api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": True, "src": assumed_edge,
+        api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group"}),
         api.FilterVideo({
             # Snap the shared host clock to absolute 1/fps boundaries before changing
             # its time base, so independently phased paints coalesce into one tick.
-            "graph": f"setpts=round(PTS*TB*{fps})/(TB*{fps}),settb=expr=1/{fps}",
+            # Chromium exports premultiplied colour. Keep its alpha association
+            # through the GPU graph so the compositor applies opacity only once.
+            "graph": (f"setpts=round(PTS*TB*{fps})/(TB*{fps}),settb=expr=1/{fps}"
+                      + (",setparams=alpha_mode=premultiplied" if preserve_alpha else "")),
             "hwaccel": cuda_hwaccel, "src": raw_edge, "dst": cuda_edge, "dst_width": width,
             "dst_height": height, "dst_pixel_format": "cuda", "dst_frame_rate": f"{fps}/1",
             "group": processing_group, "name": f"{prefix}_timestamp", "auto_restart": "panic"}),

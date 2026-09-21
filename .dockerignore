@@ -2,6 +2,7 @@ README.md
 avplumber
 objs
 tmp/
+media/
 .claude/
 .codex
 .specify/

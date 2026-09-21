@@ -120,7 +120,7 @@ def upload_chain(nodes, tag, path, hwaccel, fmt):
     return f"gpu_{tag}"
 
 
-def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacity=3):
+def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacity=3, pad_offset=0):
     from pyplumber.node import CudaRectOverlay, FilterVideo
 
     gen_frames = FRAMES + margin
@@ -149,10 +149,13 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
     cols, tw, th = grid(n)
     layers_a = [{"dst_x": (s % cols) * tw, "dst_y": (s // cols) * th, "dst_w": tw, "dst_h": th}
                 for s in range(n)]
+    assert 0 <= pad_offset and pad_offset + n <= 64
+    pads = [f"inactive_{i}" for i in range(pad_offset)] + edges[:n]
+    layers_a = [full] * pad_offset + layers_a
     nodes += [
-        CudaRectOverlay({"name": "comp_a", "src": edges[:n], "dst": "scene_a", "hwaccel": "mix_gpu",
+        CudaRectOverlay({"name": "comp_a", "src": pads, "dst": "scene_a", "hwaccel": "mix_gpu",
                          "width": W, "height": H, "sw_format": fmt, "scale": True,
-                         "active_inputs": (1 << n) - 1, "layers": layers_a}),
+                         "active_inputs": ((1 << n) - 1) << pad_offset, "layers": layers_a}),
         CudaRectOverlay({"name": "comp_b", "src": [edges[n]], "dst": "scene_b", "hwaccel": "mix_gpu",
                          "width": W, "height": H, "sw_format": fmt, "scale": True, "active_inputs": 1,
                          "layers": [full]}),
@@ -192,6 +195,7 @@ def main():
     parser.add_argument("--frames", type=int, default=FRAMES)
     parser.add_argument("--grid", type=int, default=16, help="sources in the grid run (0 skips it)")
     parser.add_argument("--capacity", type=int, default=3, help="edge queue capacity")
+    parser.add_argument("--pad-offset", type=int, default=0, help="inactive pads before the scored inputs, to exercise high mask bits")
     parser.add_argument("--no-pairs", action="store_true", help="skip the two-source transition runs")
     args = parser.parse_args()
     FRAMES = args.frames
@@ -199,14 +203,14 @@ def main():
         for family in args.families if not args.no_pairs else ():
             fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
             for mode, coef in TRANSITIONS:
-                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity)
+                run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
         # Many simultaneous full-resolution sources drawn as a grid (16 = 4x4).
         for family in args.families if args.grid else ():
             if family in ("420", "444"):
                 continue  # CPU upload chains add nothing over the v210 grid
             run(root, family, "p210le", "fade", 0.25, args.timeout, n=args.grid,
-                margin=args.tail_margin, capacity=args.capacity)
+                margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
             print(f"PASS {family}/p210le grid of {args.grid}, fade alpha=0.25", flush=True)
 
 

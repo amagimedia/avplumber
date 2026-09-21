@@ -8,6 +8,7 @@
 #include <string>
 #include <optional>
 #include <algorithm>
+#include <limits>
 
 class SharedTimeline : public InstanceShared<SharedTimeline> {
     struct Entry {
@@ -145,15 +146,19 @@ public:
 };
 
 
-inline uint32_t parseBitmask(const Parameters& value) {
+template<typename Mask = uint32_t>
+inline Mask parseBitmask(const Parameters& value) {
+    static_assert(std::numeric_limits<Mask>::is_integer && !std::numeric_limits<Mask>::is_signed);
     if (value.is_string()) {
-        uint32_t mask = 0;
+        Mask mask = 0;
         auto s = value.get<std::string>();
+        if (s.size() > std::numeric_limits<Mask>::digits)
+            throw Error("bitmask string exceeds mask width");
         for (size_t i = 0; i < s.size(); i++)
-            if (s[i] == '1') mask |= (1u << i);
+            if (s[i] == '1') mask |= (Mask{1} << i);
         return mask;
     }
-    return value.get<uint32_t>();
+    return value.get<Mask>();
 }
 
 class TimelineReader {

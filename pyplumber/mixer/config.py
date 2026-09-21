@@ -26,7 +26,7 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 32          # cuda_rect_overlay active_inputs is a 32-bit pad mask
+MAX_SOURCES = 64          # cuda_rect_overlay active_inputs is a 64-bit pad mask
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
 
@@ -117,6 +117,7 @@ class Item:
     dst: Rect
     fit: str = "contain"
     crop: Optional[Rect] = None
+    blend: bool = False           # honour source alpha, e.g. transparent browser graphics
 
 
 @dataclass(frozen=True)
@@ -148,11 +149,15 @@ class MixerConfig:
         return next(s for s in self.sources if s.id == id)
 
     def settings(self) -> Dict[str, Any]:
-        """What a control surface needs: direct mode, fade length, wipe library."""
+        """Canvas format, source counts and operator settings for control surfaces."""
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
                   "duration_seconds": w.duration_seconds} for w in self.wipes]
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
-        return {"direct": self.direct, "fade_seconds": self.fade_seconds,
+        return {"source_count": len(self.sources),
+                "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps},
+                "source_counts": {kind: sum(s.kind == kind for s in self.sources)
+                                  for kind in ("video", "browser", "v210")},
+                "direct": self.direct, "fade_seconds": self.fade_seconds,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
                 "wipes": wipes}
@@ -310,20 +315,23 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
         raise ConfigError(f"canvas: {e}") from e
 
     sources: List[Source] = []
-    locations: Dict[Tuple[str, str], str] = {}
+    locations: Dict[Tuple[str, str], Tuple[str, bool]] = {}
     for i, s in enumerate(doc["sources"]):
         where = f"sources[{i}]"
         sources.append(_parse_source(s, where, fps))
         _unique(sources, where)
         key = (sources[-1].kind, sources[-1].location)
-        if key in locations:
-            raise ConfigError(f"{where}: '{key[1]}' already declared as '{locations[key]}'; "
-                              "reference that id instead (one decode per unique source)")
-        locations[key] = sources[-1].id
+        independent = s.get("independent", False)
+        if not isinstance(independent, bool):
+            raise ConfigError(f"{where}: independent must be a boolean")
+        if key in locations and not (independent and locations[key][1]):
+            raise ConfigError(f"{where}: '{key[1]}' already declared as '{locations[key][0]}'; "
+                              "reference that id instead, or mark both independent for separate input chains")
+        locations[key] = (sources[-1].id, independent)
     if not sources:
         raise ConfigError("sources must not be empty")
     if len(sources) > MAX_SOURCES:
-        raise ConfigError(f"at most {MAX_SOURCES} sources per show: each is a compositor pad and the pad mask is 32 bits")
+        raise ConfigError(f"at most {MAX_SOURCES} sources per show: each is a compositor pad and the pad mask is 64 bits")
 
     renditions: List[Rendition] = []
     for i, r in enumerate(doc.get("renditions", [])):
@@ -358,7 +366,10 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
             if fit not in FITS:
                 raise ConfigError(f"{iw}: fit must be one of {FITS}")
             crop = _rect(it["crop"], iw + ".crop") if "crop" in it else None
-            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop))
+            blend = it.get("blend", False)
+            if not isinstance(blend, bool):
+                raise ConfigError(f"{iw}: blend must be a boolean")
+            items.append(Item(str(it["source"]), _rect(it["dst"], iw + ".dst"), fit, crop, blend))
         scenes.append(Scene(str(sc["id"]), tuple(items)))
         _unique(scenes, where, "scene id")
     if not scenes:
@@ -445,6 +456,8 @@ def scene_layers(cfg: MixerConfig, scene: Scene) -> Dict[str, Dict[str, Any]]:
         name = alias_name(item.source, seen[item.source])
         layer: Dict[str, Any] = {"dst_x": item.dst.x, "dst_y": item.dst.y,
                                  "dst_w": item.dst.w, "dst_h": item.dst.h, "z": z}
+        if item.blend:
+            layer["blend"] = True
         crop = item.crop
         if item.fit == "cover":
             src = cfg.source(item.source)

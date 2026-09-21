@@ -23,6 +23,7 @@ __pycache__/
 /tools/web-ui/frontend/dist/
 /tools/web-ui/node_modules/
 /artifacts/
+/media/
 /.uncommitted-from-old-ai-studio.patch
 /neural-demo/.generated-models*/
 /neural-demo/.docker-build-inputs*/

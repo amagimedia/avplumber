@@ -21,7 +21,8 @@
 
     body {
       margin: 0;
-      min-height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
       background: var(--bg);
       color: var(--text);
       font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -29,8 +30,9 @@
 
     main {
       display: grid;
-      grid-template-rows: 1fr auto;
-      min-height: 100vh;
+      grid-template-rows: minmax(0, 1fr) auto;
+      height: 100dvh;
+      min-height: 0;
     }
 
     footer {
@@ -54,7 +56,8 @@
     video {
       width: 100%;
       height: 100%;
-      max-height: calc(100vh - 49px);
+      min-height: 0;
+      max-height: 100%;
       object-fit: contain;
       background: #050607;
     }
@@ -75,7 +78,7 @@
       font-variant-numeric: tabular-nums;
     }
 
-    .metrics { margin-left: auto; gap: 20px; flex-wrap: wrap; }
+    .metrics { flex: 1 1 auto; min-width: 0; gap: 8px 20px; flex-wrap: wrap; }
     .metric-value { min-width: 48px; text-align: right; }
     .metric-value[data-level="good"] { color: #76c99a; }
     .metric-value[data-level="warn"] { color: #edb264; }
@@ -93,6 +96,11 @@
     </section>
 
     <footer>
+      <label for="codec">Stream</label>
+      <select id="codec">
+        <option value="h264">H.264 / SDR</option>
+        <option value="h265">H.265 / HDR</option>
+      </select>
       <span id="status">Idle</span>
       <span class="metrics">
         <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
@@ -107,7 +115,15 @@
 
   <script type="module" src="cut-latency.mjs?v=combined"></script>
   <script>
-    const MOUNTPOINT_ID = 1;
+    const codecSelect = document.getElementById("codec");
+    const selectedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
+    codecSelect.value = selectedCodec;
+    const MOUNTPOINT_ID = selectedCodec === "h265" ? 2 : 1;
+    codecSelect.addEventListener("change", () => {
+      const url = new URL(location.href);
+      url.searchParams.set("codec", codecSelect.value);
+      location.assign(url);
+    });
     const serverUrl = `${location.origin}/janus`;
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
@@ -176,6 +192,7 @@
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.className = isError ? "error" : "";
+      statusEl.hidden = message === "WebRTC connected" && !isError;
     }
 
     async function post(path, body) {

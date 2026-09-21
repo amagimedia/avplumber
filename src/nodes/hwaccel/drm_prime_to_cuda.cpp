@@ -31,6 +31,7 @@ protected:
     int width_ = 0;
     int height_ = 0;
     AVPixelFormat sw_fmt_ = AV_PIX_FMT_NONE;
+    bool drop_alpha_ = true;
 
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
@@ -202,12 +203,14 @@ protected:
         return true;
     }
 
-    static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc) {
-        // The fourth byte is copied but never meaningful downstream, so advertise
-        // the no-alpha variant in the buffer's own byte order.
+    static AVPixelFormat swfmt_from_fourcc(uint32_t fourcc, bool drop_alpha) {
+        // Alpha is opt-in; X formats have padding rather than alpha even when
+        // requested. The copy preserves all four bytes in their DRM byte order.
         switch (fourcc) {
-            case DRM_FORMAT_ABGR8888: case DRM_FORMAT_XBGR8888: return AV_PIX_FMT_RGB0;
-            case DRM_FORMAT_ARGB8888: case DRM_FORMAT_XRGB8888: return AV_PIX_FMT_BGR0;
+            case DRM_FORMAT_ABGR8888: return drop_alpha ? AV_PIX_FMT_RGB0 : AV_PIX_FMT_RGBA;
+            case DRM_FORMAT_ARGB8888: return drop_alpha ? AV_PIX_FMT_BGR0 : AV_PIX_FMT_BGRA;
+            case DRM_FORMAT_XBGR8888: return AV_PIX_FMT_RGB0;
+            case DRM_FORMAT_XRGB8888: return AV_PIX_FMT_BGR0;
             default: return AV_PIX_FMT_NONE;
         }
     }
@@ -427,7 +430,7 @@ public:
             return;
         }
 
-        AVPixelFormat swfmt = swfmt_from_fourcc(desc->layers[0].format);
+        AVPixelFormat swfmt = swfmt_from_fourcc(desc->layers[0].format, drop_alpha_);
         if (swfmt == AV_PIX_FMT_NONE) {
             logstream << "drm2cuda: unsupported DRM fourcc " << desc->layers[0].format;
             return;
@@ -472,6 +475,7 @@ public:
         std::shared_ptr<Edge<av::VideoFrame>> src = edges.find<av::VideoFrame>(params["src"]);
         std::shared_ptr<Edge<av::VideoFrame>> dst = edges.find<av::VideoFrame>(params["dst"]);
         auto r = std::make_shared<DRMPrimeToCUDA>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<av::VideoFrame>>(dst));
+        r->drop_alpha_ = params.value("drop_alpha", true);
         if (!params.count("hwaccel")) {
             throw Error("drm_prime_to_cuda requires hwaccel parameter (CUDA device)");
         }
@@ -489,4 +493,3 @@ public:
 };
 
 DECLNODE(drm_prime_to_cuda, DRMPrimeToCUDA);
-

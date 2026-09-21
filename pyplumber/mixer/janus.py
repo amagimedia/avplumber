@@ -44,8 +44,14 @@ class JanusVideoConfig:
 
     @property
     def rtp_url(self) -> str:
-        return (f"rtp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
-                f"&rtcp_port={self.rtcp_port_remote}")
+        # The RTP muxer still supplies packetization. Use UDP directly because
+        # FFmpeg's rtp:// wrapper does not forward UDP's pacing options. RTCP
+        # feedback has its own socket in RtcpFeedbackListener below.
+        # Three times the average rate drains keyframe bursts without building
+        # a sustained backlog or reducing the encoder's detail budget.
+        return (f"udp://{self.host}:{self.video_port}?pkt_size={RTP_PACKET_SIZE}"
+                f"&bitrate={self.bitrate_kbps * 3000}&burst_bits={RTP_PACKET_SIZE * 8 * 4}"
+                "&buffer_size=2097152&fifo_size=8192")
 
 
 JANUS_KEYFRAME_NODE = "janus_force_keyframe"

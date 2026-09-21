@@ -7,6 +7,8 @@ namespace avp::mixer {
 void MixerOrchestrator::defineSource(const std::string& name, const std::string& otm_node, int input_index,
                                       const std::string& cs_node_a, const std::string& cs_node_b) {
     std::lock_guard<std::mutex> lock(state_->mutex);
+    if (input_index < 0 || input_index >= 64)
+        throw Error("mixer source input_index must be in 0..63");
     MixerState::SourceInfo info;
     info.otm_node_name = otm_node;
     info.input_index = input_index;
@@ -25,6 +27,8 @@ void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::s
     const int route_output_b = routerOutputIndexFromLabel(nodes_, router_node, route_output_label_b);
 
     std::lock_guard<std::mutex> lock(state_->mutex);
+    if (input_index < 0 || input_index >= 64)
+        throw Error("mixer source input_index must be in 0..63");
     MixerState::SourceInfo info;
     info.input_index = input_index;
     info.cs_node_a = cs_node_a;
@@ -69,7 +73,7 @@ bool MixerOrchestrator::canPrewarmScene(const SceneDefinition& scene) const {
 void MixerOrchestrator::prewarmCuts(const std::vector<std::string>& scenes) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     ensureIdle();
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     for (const auto& name : scenes) {
         const auto scene = state_->scenes.find(name);
         if (scene == state_->scenes.end() || !canPrewarmScene(scene->second))
@@ -164,7 +168,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
 
     const SceneDefinition& scene = scene_it->second;
     const uint32_t pgm_bit = new_pgm_is_slot_a ? 1u : 2u;
-    const uint32_t active = state_->computeActiveInputsMask(scene);
+    const uint64_t active = state_->computeActiveInputsMask(scene);
     const auto& new_slot = new_pgm_is_slot_a ? state_->slot_a : state_->slot_b;
     const auto& old_slot = new_pgm_is_slot_a ? state_->slot_b : state_->slot_a;
 
@@ -191,7 +195,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
         if (info.routed)
             continue;
         const bool in_scene = scene.sources.count(src_name) > 0;
-        const bool active_input = (active & (1u << (unsigned)info.input_index)) != 0;
+        const bool active_input = (active & (uint64_t{1} << (unsigned)info.input_index)) != 0;
         const uint32_t mask = state_->sourceOutputMask(info, (in_scene && active_input) ? pgm_bit : 0u);
         timeline_->clearKey(info.otm_node_name, "outputs");
         setNodeObjectIfCreated(nodes_, info.otm_node_name, "outputs", Parameters(mask));
@@ -209,7 +213,7 @@ void MixerOrchestrator::applyPostTransitionRouting(bool new_pgm_is_slot_a,
 }
 
 void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const SceneDefinition& scene) {
-    uint32_t active = state_->computeActiveInputsMask(scene);
+    uint64_t active = state_->computeActiveInputsMask(scene);
     for (const auto& [src_name, info] : state_->sources) {
         if (info.routed)
             continue;
@@ -218,7 +222,7 @@ void MixerOrchestrator::rewriteCameraOutputsForSlot(uint32_t slot_bit, const Sce
                             ? current_val.get<uint32_t>()
                             : 0u;
         mask &= ~slot_bit;
-        if (scene.sources.count(src_name) && (active & (1u << (unsigned)info.input_index)))
+        if (scene.sources.count(src_name) && (active & (uint64_t{1} << (unsigned)info.input_index)))
             mask |= slot_bit;
         publishCameraOtmOutputs(info.otm_node_name, state_->sourceOutputMask(info, mask));
     }
@@ -273,7 +277,7 @@ void MixerOrchestrator::loadSceneIntoSlot(bool is_slot_a, const std::string& sce
 
     setNodeObject(slot.compositor_name, "layers", compositorLayersFromScene(*state_, scene));
 
-    uint32_t active_mask = state_->computeActiveInputsMask(scene);
+    uint64_t active_mask = state_->computeActiveInputsMask(scene);
     // Same pattern as camera otms: cuda_rect_overlay reads "active_inputs" from timeline only.
     // clearKey does not touch "layers" or other keys on this compositor channel.
     timeline_->clearKey(slot.compositor_name, "active_inputs");

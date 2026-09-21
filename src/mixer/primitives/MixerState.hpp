@@ -54,9 +54,9 @@ struct MixerState : public InstanceShared<MixerState> {
 
     std::unordered_map<std::string, SceneDefinition> scenes;
     std::unordered_set<std::string> prewarm_cut_scenes;
-    uint32_t prewarm_source_mask = 0;
+    uint64_t prewarm_source_mask = 0;
     uint32_t sourceOutputMask(const SourceInfo& source, uint32_t requested) const {
-        return (prewarm_source_mask & (1u << source.input_index)) ? requested | 3u : requested;
+        return (prewarm_source_mask & (uint64_t{1} << source.input_index)) ? requested | 3u : requested;
     }
     std::unordered_map<std::string, int> router_output_counts;
     std::unordered_map<std::string, std::vector<int>> router_routes;
@@ -127,12 +127,12 @@ struct MixerState : public InstanceShared<MixerState> {
     uint32_t pgmOutputBit() const { return pgm_is_slot_a ? 1u : 2u; }
     uint32_t pvwOutputBit() const { return pgm_is_slot_a ? 2u : 1u; }
 
-    uint32_t computeActiveInputsMask(const SceneDefinition& scene) const {
-        uint32_t mask = 0;
+    uint64_t computeActiveInputsMask(const SceneDefinition& scene) const {
+        uint64_t mask = 0;
         for (const auto& [src_name, layout] : scene.sources) {
             auto it = sources.find(src_name);
             if (it != sources.end())
-                mask |= (1u << it->second.input_index);
+                mask |= (uint64_t{1} << it->second.input_index);
         }
         return mask;
     }
