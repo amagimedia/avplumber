@@ -101,30 +101,44 @@ static const char *colorFormatName(CUeglColorFormat format) {
 	}
 }
 
-static bool colorLanes(CUeglColorFormat format, int &red, int &green, int &blue) {
+static bool colorLanes(CUeglColorFormat format, int &red, int &green, int &blue,
+                       int &alpha) {
+	alpha = -1;
 	// cudaEGL.h documents the byte ordering returned for each named format.
 	switch (format) {
 	case CU_EGL_COLOR_FORMAT_RGB:
-	case CU_EGL_COLOR_FORMAT_ARGB:
 		red = 2;
 		green = 1;
 		blue = 0;
 		return true;
 	case CU_EGL_COLOR_FORMAT_BGR:
+		red = 0;
+		green = 1;
+		blue = 2;
+		return true;
+	case CU_EGL_COLOR_FORMAT_ARGB:
+		red = 2;
+		green = 1;
+		blue = 0;
+		alpha = 3;
+		return true;
 	case CU_EGL_COLOR_FORMAT_ABGR:
 		red = 0;
 		green = 1;
 		blue = 2;
+		alpha = 3;
 		return true;
 	case CU_EGL_COLOR_FORMAT_RGBA:
 		red = 3;
 		green = 2;
 		blue = 1;
+		alpha = 0;
 		return true;
 	case CU_EGL_COLOR_FORMAT_BGRA:
 		red = 1;
 		green = 2;
 		blue = 3;
+		alpha = 0;
 		return true;
 	default:
 		return false;
@@ -151,6 +165,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 		int red_lane = 0;
 		int green_lane = 1;
 		int blue_lane = 2;
+		int alpha_lane = -1;
 		int64_t last_used_ms = 0;
 
 		~InteropEntry() {
@@ -186,6 +201,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 	int64_t cache_ttl_ms_ = 3000;
 	size_t max_cache_entries_ = 440;
 	int debug_log_every_n_ = 0;
+	bool output_alpha_ = false;
 
 	av::Rational frame_rate_{60, 1};
 	av::Rational output_time_base_{1, 60};
@@ -285,7 +301,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 			return nullptr;
 		}
 		if (!colorLanes(egl_frame.eglColorFormat, entry->red_lane, entry->green_lane,
-		                entry->blue_lane)) {
+		                entry->blue_lane, entry->alpha_lane)) {
 			logstream << "egl_image_cuda_overlay: unsupported EGL color format "
 			          << static_cast<int>(egl_frame.eglColorFormat);
 			return nullptr;
@@ -334,7 +350,7 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 		          << " color=" << colorFormatName(egl_frame.eglColorFormat)
 		          << " channels=" << egl_frame.numChannels
 		          << " lanes=" << entry->red_lane << "," << entry->green_lane
-		          << "," << entry->blue_lane;
+		          << "," << entry->blue_lane << "," << entry->alpha_lane;
 		return entry;
 	}
 
@@ -433,8 +449,10 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 		CUstream stream = reinterpret_cast<CUstream>(cuda_device_->stream);
 		CUdeviceptr destination = reinterpret_cast<CUdeviceptr>(output.raw()->data[0]);
 		size_t destination_pitch = static_cast<size_t>(output.raw()->linesize[0]);
+		int clear_alpha = output_alpha_ ? 0 : 255;
+		int output_alpha = output_alpha_ ? 1 : 0;
 		void *clear_args[] = {
-			&destination, &destination_pitch, &canvas_width_, &canvas_height_,
+			&destination, &destination_pitch, &canvas_width_, &canvas_height_, &clear_alpha,
 		};
 		const unsigned int block_x = 32;
 		const unsigned int block_y = 8;
@@ -461,6 +479,8 @@ class EglImageCudaOverlay : public NodeMultiInput<EglImageFrame>,
 				&source->red_lane,
 				&source->green_lane,
 				&source->blue_lane,
+				&source->alpha_lane,
+				&output_alpha,
 			};
 			ok = !CHECK_CU(cuLaunchKernel(
 				composite_kernel_,
@@ -529,12 +549,14 @@ public:
 	                    std::shared_ptr<HWAccelDevice> hwaccel,
 	                    int width,
 	                    int height,
-	                    std::vector<LayerSpec> layers)
+	                    std::vector<LayerSpec> layers,
+	                    bool output_alpha)
 		: NodeSingleOutput<av::VideoFrame>(std::move(sink)),
 		  hwaccel_(std::move(hwaccel)),
 		  canvas_width_(width),
 		  canvas_height_(height),
-		  layers_(std::move(layers)) {
+		  layers_(std::move(layers)),
+		  output_alpha_(output_alpha) {
 		AVHWDeviceContext *device_context = reinterpret_cast<AVHWDeviceContext *>(
 			hwaccel_->deviceContext()->data);
 		cuda_device_ = reinterpret_cast<AVCUDADeviceContext *>(device_context->hwctx);
@@ -546,7 +568,7 @@ public:
 			throw Error("egl_image_cuda_overlay: av_hwframe_ctx_alloc failed");
 		auto *frames = reinterpret_cast<AVHWFramesContext *>(out_frames_ref_->data);
 		frames->format = AV_PIX_FMT_CUDA;
-		frames->sw_format = AV_PIX_FMT_RGB0;
+		frames->sw_format = output_alpha_ ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB0;
 		frames->width = canvas_width_;
 		frames->height = canvas_height_;
 		const int result = av_hwframe_ctx_init(out_frames_ref_);
@@ -628,7 +650,9 @@ public:
 	int width() override { return canvas_width_; }
 	int height() override { return canvas_height_; }
 	av::PixelFormat pixelFormat() override { return av::PixelFormat(AV_PIX_FMT_CUDA); }
-	av::PixelFormat realPixelFormat() override { return av::PixelFormat(AV_PIX_FMT_RGB0); }
+	av::PixelFormat realPixelFormat() override {
+		return av::PixelFormat(output_alpha_ ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB0);
+	}
 	av::Rational frameRate() override { return frame_rate_; }
 	av::Rational timeBase() override { return output_time_base_; }
 
@@ -658,9 +682,10 @@ public:
 		if (!hwaccel)
 			throw Error("egl_image_cuda_overlay: failed to resolve hwaccel");
 		auto output = edges.find<av::VideoFrame>(params["dst"]);
+		const bool output_alpha = params.value("output_alpha", false);
 		auto node = std::make_shared<EglImageCudaOverlay>(
 			make_unique<EdgeSink<av::VideoFrame>>(output), std::move(hwaccel), width, height,
-			std::move(layers));
+			std::move(layers), output_alpha);
 		node->createSourcesFromParameters(edges, params);
 		output->setProducer(node);
 
