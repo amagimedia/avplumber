@@ -7,6 +7,7 @@ avplumber is a graph-based real-time processing framework. Graph can be reconfig
 * High performance [GPU video mixer](demos/mixer/README.md)
 * [VOD player](demos/replay/README.md) with frame-accurate playback control and WebRTC output via Janus. [Rust version](https://github.com/amagimedia/avplumber/blob/rust-dev/demos/replay-rust/README.md) also available
 * [DMA-BUF input from Chromium](demos/dmabuf-browser/README.md)
+* [Node+Svelte WebUI](tools/web-ui/README.md) with realtime graph statistics
 
 [All demos](#demos)
 
