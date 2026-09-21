@@ -400,7 +400,7 @@ Reader-side demuxer options:
   sends the PTS back to 0 on a *mid-stream* reset, tripping the
   monotonic-PTS `av_assert0` a few lines below — reproducible in seconds
   with `--writer-pace off --gpu-unpack off`, where the reader cannot keep
-  up with the flood. Patch `0010` now continues from the last delivered
+  up with the flood. Patch `0011` now continues from the last delivered
   PTS instead (see `deps/ffmpeg/mkpatch-fixups/`).
 
 ## Zero-copy grains
@@ -449,7 +449,7 @@ mean `cudaHostRegister`-ing the MXL ring, i.e. a change to the node in
   opened grain, 0.34 ms/frame and the unpaced writer's actual cap. Getting
   rid of it means having the muxer hand out the grain's address before the
   packet is built, so the pack could DMA into the ring itself; that is a
-  change to FFmpeg patch `0010`, and it mirrors the `cudaHostRegister`
+  change to FFmpeg patch `0011`, and it mirrors the `cudaHostRegister`
   note under [Zero-copy grains](#zero-copy-grains) on the read side.
 
 ## References

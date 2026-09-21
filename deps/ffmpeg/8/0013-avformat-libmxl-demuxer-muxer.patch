@@ -1,6 +1,6 @@
-From 3e74ea3f9d721d2cc1013c99a95235e49176d4d7 Mon Sep 17 00:00:00 2001
+From b3e1c3d9516d3d5af85f66f7a4aee3ab1d80862f Mon Sep 17 00:00:00 2001
 From: avplumber mxl builder <avplumber-mxl@local>
-Date: Sun, 20 Sep 2026 15:04:43 +0000
+Date: Mon, 21 Sep 2026 13:22:04 +0000
 Subject: [PATCH] avformat/mxl: add libmxl demuxer and muxer
 
 Adds the MXL demuxer, muxer, URI parser, JSON/diagnostic helpers
@@ -8,13 +8,13 @@ and --enable-libmxl configure glue.
 
 Cherry-picked from https://github.com/cbcrc/FFmpeg (branch
 dmf-mxl/8.1) and squashed onto n8.1 on top of the avplumber
-series 0001-0009, with the configure hunks re-anchored so the
+series 0001-0010, with the configure hunks re-anchored so the
 patch applies to both n8.0 and n8.1.
 
 Original commits:
-  * b099cc6224 avformat/mxldec: keep pts monotonic across a reset_on_drop reset
-  * ff4066273e ffmpeg 8.1 port
-  * 8eda88cfc1 Apply FFmpeg 8 MXL integration to FFmpeg 8.1
+  * 2dc6c6ea57 avformat/mxldec: keep pts monotonic across a reset_on_drop reset
+  * 8797c76db9 ffmpeg 8.1 port
+  * 1a14ce7583 Apply FFmpeg 8 MXL integration to FFmpeg 8.1
 
 Co-authored-by: avplumber mxl builder <avplumber-mxl@local>
 Co-authored-by: jpt <jim.trainor@jptrainor.com>
@@ -99,19 +99,19 @@ Co-authored-by: jpt <james.p.trainor@cbc.ca>
  create mode 100644 tests/ref/fate/mxl-video-probe
 
 diff --git a/configure b/configure
-index 82cdbd27ac..12698a2d27 100755
+index 8f3a2df56f..25a484e6b6 100755
 --- a/configure
 +++ b/configure
 @@ -2066,2 +2066,3 @@ EXTERNAL_LIBRARY_LIST="
      libmp3lame
 +    libmxl
      libmysofa
-@@ -3853,2 +3854,4 @@ libxvid_encoder_deps="libxvid"
+@@ -3854,2 +3855,4 @@ libxvid_encoder_deps="libxvid"
  libzvbi_teletext_decoder_deps="libzvbi"
 +mxl_muxer_deps="libmxl swresample"
 +mxl_demuxer_deps="libmxl swresample"
  vapoursynth_demuxer_deps="vapoursynth"
-@@ -7474,2 +7477,5 @@ enabled mmal              && { check_lib mmal interface/mmal/mmal.h mmal_port_co
+@@ -7475,2 +7478,5 @@ enabled mmal              && { check_lib mmal interface/mmal/mmal.h mmal_port_co
                                 check_func_headers interface/mmal/mmal.h "MMAL_PARAMETER_VIDEO_MAX_NUM_CALLBACKS"; }
 +enabled libmxl            && require_pkg_config libmxl libmxl mxl/mxl.h mxlCreateInstance
 +enabled mxl_demuxer       && prepend avformat_deps "swresample"
