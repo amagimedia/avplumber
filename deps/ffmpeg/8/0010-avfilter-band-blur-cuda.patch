@@ -1,0 +1,798 @@
+From 59657f20d61c0454aafdb0574826f689283dc2cd Mon Sep 17 00:00:00 2001
+From: Jan Pietek <jan.pietek@amagi.com>
+Date: Tue, 15 Sep 2026 09:57:54 +0200
+Subject: [PATCH] avfilter: port reframer CUDA band blur registration to 8.1
+
+---
+ configure                        |   1 +
+ doc/filters.texi                 |  46 ++++
+ libavfilter/Makefile             |   2 +
+ libavfilter/allfilters.c         |   1 +
+ libavfilter/vf_band_blur_cuda.c  | 456 +++++++++++++++++++++++++++++++
+ libavfilter/vf_band_blur_cuda.cu | 220 +++++++++++++++
+ 6 files changed, 726 insertions(+)
+ create mode 100644 libavfilter/vf_band_blur_cuda.c
+ create mode 100644 libavfilter/vf_band_blur_cuda.cu
+
+diff --git a/configure b/configure
+index f086594121..6f7363ace7 100755
+--- a/configure
++++ b/configure
+@@ -3515,6 +3515,7 @@ bilateral_cuda_filter_deps="ffnvcodec"
+ bilateral_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ chromakey_cuda_filter_deps="ffnvcodec"
+ chromakey_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
++band_blur_cuda_filter_deps="ffnvcodec cuda_nvcc"
+ colorspace_cuda_filter_deps="ffnvcodec"
+ colorspace_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ crop_cuda_filter_deps="ffnvcodec"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 5ae2fc5080..59ca97da88 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27915,6 +27915,52 @@ For the alpha plane, a 3x3 box radius will be run 7 times.
+ @end example
+ @end itemize
+ 
++@section band_blur_cuda
++
++Apply configurable blur and luma gradients to a vertical band of an NV12 CUDA
++frame. Pixels outside the band are copied unchanged. The selected band is
++downsampled by two, blurred in two separable passes, and blended back on the
++CUDA device using persistent scratch storage.
++
++It accepts the following options:
++
++@table @option
++@item y_start
++Normalized top coordinate of the band, from 0 to 0.95. The default is 0.70.
++
++@item y_end
++Normalized exclusive lower coordinate of the band, from 0.05 to 1.0. It must
++be greater than @option{y_start}. The default is 1.0.
++
++@item blur_start
++Blurred-image mix at the top of the band, from 0 to 1. The default is 0.
++
++@item blur_end
++Blurred-image mix at the bottom of the band, from 0 to 1. The default is 1.
++
++@item luma_start
++Luma multiplier at the top of the band, from 0 to 2. The default is 1.
++
++@item luma_end
++Luma multiplier at the bottom of the band, from 0 to 2. The default is 0.86.
++
++@item radius
++Blur radius at half resolution, from 1 to 12. The default is 6.
++
++@item gradient
++Interpolation curve. Accepted values are @code{linear} and @code{smoothstep}.
++The default is @code{smoothstep}.
++
++@item gradient_power
++Bias applied after the interpolation curve, from 0.1 to 10. The default is 1.
++@end table
++
++For a top-edge fade, reverse the blur and luma endpoints:
++
++@example
++band_blur_cuda=y_start=0:y_end=.3:blur_start=1:blur_end=0:luma_start=.86:luma_end=1
++@end example
++
+ @section colorkey_opencl
+ RGB colorspace color keying.
+ 
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 2fae9853a6..1b0d1f7738 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -205,6 +205,8 @@ OBJS-$(CONFIG_AVGBLUR_OPENCL_FILTER)         += vf_avgblur_opencl.o opencl.o \
+ OBJS-$(CONFIG_AVGBLUR_VULKAN_FILTER)         += vf_avgblur_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_BACKGROUNDKEY_FILTER)          += vf_backgroundkey.o
+ OBJS-$(CONFIG_BBOX_FILTER)                   += bbox.o vf_bbox.o
++OBJS-$(CONFIG_BAND_BLUR_CUDA_FILTER)       += vf_band_blur_cuda.o vf_band_blur_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_BENCH_FILTER)                  += f_bench.o
+ OBJS-$(CONFIG_BILATERAL_FILTER)              += vf_bilateral.o
+ OBJS-$(CONFIG_BILATERAL_CUDA_FILTER)         += vf_bilateral_cuda.o vf_bilateral_cuda.ptx.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 01c75b2971..2dab8a298e 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -187,6 +187,7 @@ extern const FFFilter ff_vf_avgblur;
+ extern const FFFilter ff_vf_avgblur_opencl;
+ extern const FFFilter ff_vf_avgblur_vulkan;
+ extern const FFFilter ff_vf_backgroundkey;
++extern const FFFilter ff_vf_band_blur_cuda;
+ extern const FFFilter ff_vf_bbox;
+ extern const FFFilter ff_vf_bench;
+ extern const FFFilter ff_vf_bilateral;
+diff --git a/libavfilter/vf_band_blur_cuda.c b/libavfilter/vf_band_blur_cuda.c
+new file mode 100644
+index 0000000000..4380afbca9
+--- /dev/null
++++ b/libavfilter/vf_band_blur_cuda.c
+@@ -0,0 +1,456 @@
++/*
++ * Configurable vertical-band CUDA blur and luma gradient.
++ *
++ * This file is part of FFmpeg.
++ */
++
++#include <stdint.h>
++
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "avfilter_internal.h"
++#include "formats.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++
++#define BLOCK_X 32
++#define BLOCK_Y 8
++#define DIV_UP(a, b) (((a) + (b) - 1) / (b))
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, ctx->hwctx->internal->cuda_dl, x)
++
++typedef struct BandBlurCUDAContext {
++    const AVClass *class;
++
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef *hw_device_ctx;
++    CUcontext cu_ctx;
++    CUmodule cu_module;
++    CUstream cu_stream;
++
++    CUfunction downsample_y;
++    CUfunction downsample_uv;
++    CUfunction blur_horizontal_y;
++    CUfunction blur_horizontal_uv;
++    CUfunction blur_vertical;
++    CUfunction composite_y;
++    CUfunction composite_uv;
++
++    CUdeviceptr scratch_y_a;
++    CUdeviceptr scratch_y_b;
++    CUdeviceptr scratch_uv_a;
++    CUdeviceptr scratch_uv_b;
++
++    float y_start;
++    float y_end;
++    float blur_start;
++    float blur_end;
++    float luma_start;
++    float luma_end;
++    float gradient_power;
++    int radius;
++    int gradient;
++
++    int width;
++    int height;
++    int start_y;
++    int end_y;
++    int down_width;
++    int down_height;
++    int down_uv_height;
++} BandBlurCUDAContext;
++
++static int copy_plane(BandBlurCUDAContext *ctx,
++                      uint8_t *dst, int dst_pitch,
++                      const uint8_t *src, int src_pitch,
++                      int width, int height)
++{
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    CUDA_MEMCPY2D copy = { 0 };
++
++    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
++    copy.srcDevice = (CUdeviceptr)(uintptr_t)src;
++    copy.srcPitch = src_pitch;
++    copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++    copy.dstDevice = (CUdeviceptr)(uintptr_t)dst;
++    copy.dstPitch = dst_pitch;
++    copy.WidthInBytes = width;
++    copy.Height = height;
++    return CHECK_CU(cu->cuMemcpy2DAsync(&copy, ctx->cu_stream));
++}
++
++static int launch(BandBlurCUDAContext *ctx, CUfunction function,
++                  int width, int height, void **args)
++{
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++
++    return CHECK_CU(cu->cuLaunchKernel(
++        function,
++        DIV_UP(width, BLOCK_X), DIV_UP(height, BLOCK_Y), 1,
++        BLOCK_X, BLOCK_Y, 1,
++        0, ctx->cu_stream, args, NULL));
++}
++
++static int band_blur_cuda_filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    AVFilterContext *avctx = inlink->dst;
++    BandBlurCUDAContext *ctx = avctx->priv;
++    AVFilterLink *outlink = avctx->outputs[0];
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    AVFrame *out = NULL;
++    CUcontext dummy;
++    int context_pushed = 0;
++    int ret;
++
++    out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!out) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++    ret = av_frame_copy_props(out, in);
++    if (ret < 0)
++        goto fail;
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++    if (ret < 0)
++        goto fail;
++    context_pushed = 1;
++
++    ret = copy_plane(ctx, out->data[0], out->linesize[0],
++                     in->data[0], in->linesize[0], ctx->width, ctx->height);
++    if (ret < 0)
++        goto pop;
++    ret = copy_plane(ctx, out->data[1], out->linesize[1],
++                     in->data[1], in->linesize[1], ctx->width, ctx->height / 2);
++    if (ret < 0)
++        goto pop;
++
++    {
++        CUdeviceptr src = (CUdeviceptr)(uintptr_t)in->data[0];
++        int src_pitch = in->linesize[0];
++        void *args[] = {
++            &src, &src_pitch, &ctx->width, &ctx->height, &ctx->start_y,
++            &ctx->scratch_y_a, &ctx->down_width, &ctx->down_height,
++        };
++        ret = launch(ctx, ctx->downsample_y,
++                     ctx->down_width, ctx->down_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        CUdeviceptr src = (CUdeviceptr)(uintptr_t)in->data[1];
++        int src_pitch = in->linesize[1];
++        void *args[] = {
++            &src, &src_pitch, &ctx->width, &ctx->height, &ctx->start_y,
++            &ctx->scratch_uv_a, &ctx->down_width, &ctx->down_uv_height,
++        };
++        ret = launch(ctx, ctx->downsample_uv,
++                     ctx->down_width / 2, ctx->down_uv_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        void *args[] = {
++            &ctx->scratch_y_a, &ctx->scratch_y_b,
++            &ctx->down_width, &ctx->down_height, &ctx->radius,
++        };
++        ret = launch(ctx, ctx->blur_horizontal_y,
++                     ctx->down_width, ctx->down_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        void *args[] = {
++            &ctx->scratch_uv_a, &ctx->scratch_uv_b,
++            &ctx->down_width, &ctx->down_uv_height, &ctx->radius,
++        };
++        ret = launch(ctx, ctx->blur_horizontal_uv,
++                     ctx->down_width / 2, ctx->down_uv_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        void *args[] = {
++            &ctx->scratch_y_b, &ctx->scratch_y_a,
++            &ctx->down_width, &ctx->down_height, &ctx->radius,
++        };
++        ret = launch(ctx, ctx->blur_vertical,
++                     ctx->down_width, ctx->down_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        void *args[] = {
++            &ctx->scratch_uv_b, &ctx->scratch_uv_a,
++            &ctx->down_width, &ctx->down_uv_height, &ctx->radius,
++        };
++        ret = launch(ctx, ctx->blur_vertical,
++                     ctx->down_width, ctx->down_uv_height, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        CUdeviceptr src = (CUdeviceptr)(uintptr_t)in->data[0];
++        CUdeviceptr dst = (CUdeviceptr)(uintptr_t)out->data[0];
++        int src_pitch = in->linesize[0];
++        int dst_pitch = out->linesize[0];
++        void *args[] = {
++            &src, &src_pitch, &dst, &dst_pitch,
++            &ctx->scratch_y_a, &ctx->down_width, &ctx->down_height,
++            &ctx->width, &ctx->height, &ctx->start_y, &ctx->end_y,
++            &ctx->blur_start, &ctx->blur_end,
++            &ctx->luma_start, &ctx->luma_end,
++            &ctx->gradient, &ctx->gradient_power,
++        };
++        ret = launch(ctx, ctx->composite_y,
++                     ctx->width, ctx->end_y - ctx->start_y, args);
++        if (ret < 0)
++            goto pop;
++    }
++    {
++        CUdeviceptr src = (CUdeviceptr)(uintptr_t)in->data[1];
++        CUdeviceptr dst = (CUdeviceptr)(uintptr_t)out->data[1];
++        int src_pitch = in->linesize[1];
++        int dst_pitch = out->linesize[1];
++        void *args[] = {
++            &src, &src_pitch, &dst, &dst_pitch,
++            &ctx->scratch_uv_a, &ctx->down_width, &ctx->down_uv_height,
++            &ctx->width, &ctx->height, &ctx->start_y, &ctx->end_y,
++            &ctx->blur_start, &ctx->blur_end,
++            &ctx->gradient, &ctx->gradient_power,
++        };
++        ret = launch(ctx, ctx->composite_uv,
++                     ctx->width / 2, (ctx->end_y - ctx->start_y) / 2, args);
++    }
++
++pop:
++    {
++        int pop_ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        context_pushed = 0;
++        if (ret >= 0)
++            ret = pop_ret;
++    }
++    if (ret < 0)
++        goto fail;
++
++    av_frame_free(&in);
++    return ff_filter_frame(outlink, out);
++
++fail:
++    if (context_pushed)
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    av_frame_free(&in);
++    av_frame_free(&out);
++    return ret;
++}
++
++static av_cold int get_function(BandBlurCUDAContext *ctx,
++                                CUfunction *function, const char *name)
++{
++    CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++    int ret = CHECK_CU(cu->cuModuleGetFunction(function, ctx->cu_module, name));
++
++    if (ret < 0)
++        av_log(ctx, AV_LOG_FATAL, "CUDA function %s is unavailable\n", name);
++    return ret;
++}
++
++static av_cold int band_blur_cuda_config_output(AVFilterLink *outlink)
++{
++    extern const unsigned char ff_vf_band_blur_cuda_ptx_data[];
++    extern const unsigned int ff_vf_band_blur_cuda_ptx_len;
++
++    AVFilterContext *avctx = outlink->src;
++    BandBlurCUDAContext *ctx = avctx->priv;
++    AVFilterLink *inlink = avctx->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    FilterLink *outl = ff_filter_link(outlink);
++    AVHWFramesContext *frames_ctx;
++    CudaFunctions *cu;
++    CUcontext dummy;
++    int context_pushed = 0;
++    int ret;
++
++    if (!inl->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No CUDA hardware frame context on input\n");
++        return AVERROR(EINVAL);
++    }
++    frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
++    if (frames_ctx->sw_format != AV_PIX_FMT_NV12) {
++        av_log(ctx, AV_LOG_ERROR, "band_blur_cuda requires NV12, got %s\n",
++               av_get_pix_fmt_name(frames_ctx->sw_format));
++        return AVERROR(ENOSYS);
++    }
++    if ((inlink->w & 1) || (inlink->h & 1) || inlink->w < 8 || inlink->h < 8) {
++        av_log(ctx, AV_LOG_ERROR, "band_blur_cuda requires even dimensions\n");
++        return AVERROR(EINVAL);
++    }
++    if (ctx->y_end <= ctx->y_start) {
++        av_log(ctx, AV_LOG_ERROR, "y_end must be greater than y_start\n");
++        return AVERROR(EINVAL);
++    }
++
++    ctx->width = inlink->w;
++    ctx->height = inlink->h;
++    ctx->start_y = ((int)(ctx->y_start * ctx->height)) & ~1;
++    ctx->end_y = FFMIN(ctx->height,
++                       FFMAX(ctx->start_y + 2,
++                             ((int)(ctx->y_end * ctx->height)) & ~1));
++    ctx->down_width = ctx->width / 2;
++    ctx->down_height = (ctx->end_y - ctx->start_y + 1) / 2;
++    ctx->down_uv_height = ((ctx->end_y - ctx->start_y) / 2 + 1) / 2;
++    if (ctx->down_uv_height < 1)
++        return AVERROR(EINVAL);
++
++    ctx->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    if (!ctx->hw_device_ctx)
++        return AVERROR(ENOMEM);
++    ctx->hwctx = ((AVHWDeviceContext *)ctx->hw_device_ctx->data)->hwctx;
++    ctx->cu_ctx = ctx->hwctx->cuda_ctx;
++    ctx->cu_stream = ctx->hwctx->stream;
++    cu = ctx->hwctx->internal->cuda_dl;
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx));
++    if (ret < 0)
++        return ret;
++    context_pushed = 1;
++
++    ret = ff_cuda_load_module(ctx, ctx->hwctx, &ctx->cu_module,
++                              ff_vf_band_blur_cuda_ptx_data,
++                              ff_vf_band_blur_cuda_ptx_len);
++    if (ret < 0)
++        goto done;
++    if ((ret = get_function(ctx, &ctx->downsample_y, "BandBlurDownsampleY")) < 0 ||
++        (ret = get_function(ctx, &ctx->downsample_uv, "BandBlurDownsampleUV")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_horizontal_y, "BandBlurHorizontalY")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_horizontal_uv, "BandBlurHorizontalUV")) < 0 ||
++        (ret = get_function(ctx, &ctx->blur_vertical, "BandBlurVertical")) < 0 ||
++        (ret = get_function(ctx, &ctx->composite_y, "BandBlurCompositeY")) < 0 ||
++        (ret = get_function(ctx, &ctx->composite_uv, "BandBlurCompositeUV")) < 0)
++        goto done;
++
++    ret = CHECK_CU(cu->cuMemAlloc(&ctx->scratch_y_a,
++                                  ctx->down_width * ctx->down_height));
++    if (ret < 0)
++        goto done;
++    ret = CHECK_CU(cu->cuMemAlloc(&ctx->scratch_y_b,
++                                  ctx->down_width * ctx->down_height));
++    if (ret < 0)
++        goto done;
++    ret = CHECK_CU(cu->cuMemAlloc(&ctx->scratch_uv_a,
++                                  ctx->down_width * ctx->down_uv_height));
++    if (ret < 0)
++        goto done;
++    ret = CHECK_CU(cu->cuMemAlloc(&ctx->scratch_uv_b,
++                                  ctx->down_width * ctx->down_uv_height));
++
++done:
++    if (context_pushed) {
++        int pop_ret = CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        if (ret >= 0)
++            ret = pop_ret;
++    }
++    if (ret < 0)
++        return ret;
++
++    outlink->w = inlink->w;
++    outlink->h = inlink->h;
++    outlink->time_base = inlink->time_base;
++    outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
++    outl->frame_rate = inl->frame_rate;
++    outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++    if (!outl->hw_frames_ctx)
++        return AVERROR(ENOMEM);
++    return 0;
++}
++
++static av_cold void band_blur_cuda_uninit(AVFilterContext *avctx)
++{
++    BandBlurCUDAContext *ctx = avctx->priv;
++
++    if (ctx->hwctx) {
++        CudaFunctions *cu = ctx->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        if (CHECK_CU(cu->cuCtxPushCurrent(ctx->cu_ctx)) >= 0) {
++            if (ctx->scratch_y_a)
++                CHECK_CU(cu->cuMemFree(ctx->scratch_y_a));
++            if (ctx->scratch_y_b)
++                CHECK_CU(cu->cuMemFree(ctx->scratch_y_b));
++            if (ctx->scratch_uv_a)
++                CHECK_CU(cu->cuMemFree(ctx->scratch_uv_a));
++            if (ctx->scratch_uv_b)
++                CHECK_CU(cu->cuMemFree(ctx->scratch_uv_b));
++            if (ctx->cu_module)
++                CHECK_CU(cu->cuModuleUnload(ctx->cu_module));
++            CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++        }
++    }
++    av_buffer_unref(&ctx->hw_device_ctx);
++    ctx->hwctx = NULL;
++}
++
++#define OFFSET(x) offsetof(BandBlurCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++
++static const AVOption band_blur_cuda_options[] = {
++    { "y_start", "normalized top coordinate of the vertical band", OFFSET(y_start),
++        AV_OPT_TYPE_FLOAT, { .dbl = 0.70 }, 0.0, 0.95, FLAGS },
++    { "y_end", "normalized exclusive lower coordinate of the vertical band", OFFSET(y_end),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.05, 1.0, FLAGS },
++    { "blur_start", "blur mix at the top of the band", OFFSET(blur_start),
++        AV_OPT_TYPE_FLOAT, { .dbl = 0.0 }, 0.0, 1.0, FLAGS },
++    { "blur_end", "blur mix at the bottom of the band", OFFSET(blur_end),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.0, 1.0, FLAGS },
++    { "luma_start", "luma multiplier at the top of the band", OFFSET(luma_start),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.0, 2.0, FLAGS },
++    { "luma_end", "luma multiplier at the bottom of the band", OFFSET(luma_end),
++        AV_OPT_TYPE_FLOAT, { .dbl = 0.86 }, 0.0, 2.0, FLAGS },
++    { "radius", "half-resolution box blur radius", OFFSET(radius),
++        AV_OPT_TYPE_INT, { .i64 = 6 }, 1, 12, FLAGS },
++    { "gradient", "gradient interpolation curve", OFFSET(gradient),
++        AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, FLAGS, .unit = "gradient" },
++    { "linear", "linear interpolation", 0,
++        AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, .unit = "gradient" },
++    { "smoothstep", "smoothstep interpolation", 0,
++        AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "gradient" },
++    { "gradient_power", "bias applied after the gradient curve", OFFSET(gradient_power),
++        AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0.1, 10.0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(band_blur_cuda);
++
++static const AVFilterPad band_blur_cuda_inputs[] = {
++    {
++        .name = "default",
++        .type = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = band_blur_cuda_filter_frame,
++    },
++};
++
++static const AVFilterPad band_blur_cuda_outputs[] = {
++    {
++        .name = "default",
++        .type = AVMEDIA_TYPE_VIDEO,
++        .config_props = band_blur_cuda_config_output,
++    },
++};
++
++const FFFilter ff_vf_band_blur_cuda = {
++    .p.name = "band_blur_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL(
++        "Configurable vertical-band CUDA blur and luma gradient"),
++    .priv_size = sizeof(BandBlurCUDAContext),
++    .p.priv_class = &band_blur_cuda_class,
++    .uninit = band_blur_cuda_uninit,
++    FILTER_INPUTS(band_blur_cuda_inputs),
++    FILTER_OUTPUTS(band_blur_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_band_blur_cuda.cu b/libavfilter/vf_band_blur_cuda.cu
+new file mode 100644
+index 0000000000..9aeabe156b
+--- /dev/null
++++ b/libavfilter/vf_band_blur_cuda.cu
+@@ -0,0 +1,220 @@
++/*
++ * Configurable vertical-band CUDA blur and luma gradient.
++ *
++ * This file is part of FFmpeg.
++ */
++
++#include "cuda/vector_helpers.cuh"
++
++static __device__ __forceinline__ int clamp_int(int value, int low, int high)
++{
++    return max(low, min(value, high));
++}
++
++static __device__ __forceinline__ unsigned char rounded_byte(float value)
++{
++    return (unsigned char)clamp_int((int)(value + 0.5f), 0, 255);
++}
++
++static __device__ __forceinline__ float gradient_value(int index, int count,
++                                                        int gradient,
++                                                        float gradient_power)
++{
++    float value = (float)index / (float)max(1, count - 1);
++    value = fminf(1.0f, fmaxf(0.0f, value));
++    if (gradient == 1)
++        value = value * value * (3.0f - 2.0f * value);
++    return powf(value, gradient_power);
++}
++
++static __device__ float sample_byte(const unsigned char *source,
++                                    int width, int height,
++                                    float x, float y, int step, int component)
++{
++    const int sample_width = width / step;
++    const float bounded_x = fminf((float)(sample_width - 1), fmaxf(0.0f, x));
++    const float bounded_y = fminf((float)(height - 1), fmaxf(0.0f, y));
++    const int x0 = (int)bounded_x;
++    const int y0 = (int)bounded_y;
++    const int x1 = min(x0 + 1, sample_width - 1);
++    const int y1 = min(y0 + 1, height - 1);
++    const float fx = bounded_x - x0;
++    const float fy = bounded_y - y0;
++    const float top = source[y0 * width + x0 * step + component] * (1.0f - fx) +
++                      source[y0 * width + x1 * step + component] * fx;
++    const float bottom = source[y1 * width + x0 * step + component] * (1.0f - fx) +
++                         source[y1 * width + x1 * step + component] * fx;
++    return top * (1.0f - fy) + bottom * fy;
++}
++
++extern "C" {
++
++__global__ void BandBlurDownsampleY(
++    const unsigned char *source, int source_pitch, int source_width,
++    int source_height, int start_y, unsigned char *destination,
++    int destination_width, int destination_height)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= destination_width || y >= destination_height)
++        return;
++
++    const int sx0 = min(source_width - 1, x * 2);
++    const int sx1 = min(source_width - 1, sx0 + 1);
++    const int sy0 = min(source_height - 1, start_y + y * 2);
++    const int sy1 = min(source_height - 1, sy0 + 1);
++    const int sum = source[sy0 * source_pitch + sx0] +
++                    source[sy0 * source_pitch + sx1] +
++                    source[sy1 * source_pitch + sx0] +
++                    source[sy1 * source_pitch + sx1];
++    destination[y * destination_width + x] = (unsigned char)((sum + 2) / 4);
++}
++
++__global__ void BandBlurDownsampleUV(
++    const unsigned char *source, int source_pitch, int source_width,
++    int source_height, int start_y, unsigned char *destination,
++    int destination_width, int destination_height)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int y = blockIdx.y * blockDim.y + threadIdx.y;
++    const int destination_pairs = destination_width / 2;
++    if (x >= destination_pairs || y >= destination_height)
++        return;
++
++    const int source_pairs = source_width / 2;
++    const int source_uv_height = source_height / 2;
++    const int sx0 = min(source_pairs - 1, x * 2);
++    const int sx1 = min(source_pairs - 1, sx0 + 1);
++    const int sy0 = min(source_uv_height - 1, start_y / 2 + y * 2);
++    const int sy1 = min(source_uv_height - 1, sy0 + 1);
++    int sum_u = 0;
++    int sum_v = 0;
++    const int xs[2] = { sx0, sx1 };
++    const int ys[2] = { sy0, sy1 };
++    for (int row = 0; row < 2; row++) {
++        for (int column = 0; column < 2; column++) {
++            const int offset = ys[row] * source_pitch + xs[column] * 2;
++            sum_u += source[offset];
++            sum_v += source[offset + 1];
++        }
++    }
++    const int destination_offset = y * destination_width + x * 2;
++    destination[destination_offset] = (unsigned char)((sum_u + 2) / 4);
++    destination[destination_offset + 1] = (unsigned char)((sum_v + 2) / 4);
++}
++
++__global__ void BandBlurHorizontalY(
++    const unsigned char *source, unsigned char *destination,
++    int width, int height, int radius)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= width || y >= height)
++        return;
++
++    int sum = 0;
++    for (int offset = -radius; offset <= radius; offset++)
++        sum += source[y * width + clamp_int(x + offset, 0, width - 1)];
++    destination[y * width + x] =
++        (unsigned char)((sum + radius) / (radius * 2 + 1));
++}
++
++__global__ void BandBlurHorizontalUV(
++    const unsigned char *source, unsigned char *destination,
++    int width, int height, int radius)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int y = blockIdx.y * blockDim.y + threadIdx.y;
++    const int pairs = width / 2;
++    if (x >= pairs || y >= height)
++        return;
++
++    int sum_u = 0;
++    int sum_v = 0;
++    for (int offset = -radius; offset <= radius; offset++) {
++        const int source_offset =
++            y * width + clamp_int(x + offset, 0, pairs - 1) * 2;
++        sum_u += source[source_offset];
++        sum_v += source[source_offset + 1];
++    }
++    const int count = radius * 2 + 1;
++    const int destination_offset = y * width + x * 2;
++    destination[destination_offset] = (unsigned char)((sum_u + radius) / count);
++    destination[destination_offset + 1] =
++        (unsigned char)((sum_v + radius) / count);
++}
++
++__global__ void BandBlurVertical(
++    const unsigned char *source, unsigned char *destination,
++    int width, int height, int radius)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= width || y >= height)
++        return;
++
++    int sum = 0;
++    for (int offset = -radius; offset <= radius; offset++)
++        sum += source[clamp_int(y + offset, 0, height - 1) * width + x];
++    destination[y * width + x] =
++        (unsigned char)((sum + radius) / (radius * 2 + 1));
++}
++
++__global__ void BandBlurCompositeY(
++    const unsigned char *source, int source_pitch,
++    unsigned char *destination, int destination_pitch,
++    const unsigned char *blurred, int blurred_width, int blurred_height,
++    int width, int height, int start_y, int end_y,
++    float blur_start, float blur_end,
++    float luma_start, float luma_end,
++    int gradient, float gradient_power)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int band_y = blockIdx.y * blockDim.y + threadIdx.y;
++    const int y = start_y + band_y;
++    if (x >= width || y >= height || y >= end_y)
++        return;
++
++    const float position = gradient_value(
++        band_y, end_y - start_y, gradient, gradient_power);
++    const float blur_mix = blur_start + (blur_end - blur_start) * position;
++    const float luma = luma_start + (luma_end - luma_start) * position;
++    const float blur = sample_byte(blurred, blurred_width, blurred_height,
++                                   x * 0.5f, band_y * 0.5f, 1, 0);
++    const float sharp = source[y * source_pitch + x];
++    const float mixed = sharp + (blur - sharp) * blur_mix;
++    destination[y * destination_pitch + x] = rounded_byte(mixed * luma);
++}
++
++__global__ void BandBlurCompositeUV(
++    const unsigned char *source, int source_pitch,
++    unsigned char *destination, int destination_pitch,
++    const unsigned char *blurred, int blurred_width, int blurred_height,
++    int width, int height, int start_y, int end_y,
++    float blur_start, float blur_end,
++    int gradient, float gradient_power)
++{
++    const int x = blockIdx.x * blockDim.x + threadIdx.x;
++    const int band_y = blockIdx.y * blockDim.y + threadIdx.y;
++    const int pairs = width / 2;
++    const int source_y = start_y / 2 + band_y;
++    const int band_height = (end_y - start_y) / 2;
++    if (x >= pairs || band_y >= band_height || source_y >= height / 2)
++        return;
++
++    const float position = gradient_value(
++        band_y, band_height, gradient, gradient_power);
++    const float blur_mix = blur_start + (blur_end - blur_start) * position;
++    const int source_offset = source_y * source_pitch + x * 2;
++    const int destination_offset = source_y * destination_pitch + x * 2;
++    for (int component = 0; component < 2; component++) {
++        const float blur = sample_byte(
++            blurred, blurred_width, blurred_height,
++            x * 0.5f, band_y * 0.5f, 2, component);
++        const float sharp = source[source_offset + component];
++        destination[destination_offset + component] =
++            rounded_byte(sharp + (blur - sharp) * blur_mix);
++    }
++}
++
++}
