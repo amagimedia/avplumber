@@ -804,6 +804,20 @@ Parameters:
 -   `sw_format` (string) - CUDA storage, `p210le` (default) or `yuv422p10le`
 -   `color_trc`, `color_primaries`, `colorspace`, `color_range`, `chroma_location` (string) - tags stamped on every output frame (libavutil names, e.g. `arib-std-b67`, `bt2020`, `bt2020nc`, `tv`)
 
+### `cuda_to_v210`
+
+Packs CUDA 10-bit 4:2:2 frames into headerless `v210` packets with a CUDA kernel, one packet per frame, and DMAs each one into pinned memory the muxer reads directly - so a GPU graph can publish uncompressed video (an MXL flow, an SDI-style feed) without `hwdownload` and without the CPU `v210` encoder.
+
+The node acts as the encoder for the muxer below it, so no `enc_video` belongs in between. Geometry, frame rate and time base are taken from the nodes above at creation time, because the `output` node opens its format context then; the parameters override them, or stand in when the node above reports none.
+
+1 input: `av::VideoFrame` (hardware "pixel format" `cuda`, `p210le` or `yuv422p10le`), 1 output: `av::Packet` (`stride * height` bytes each)
+
+Parameters:
+-   `width`, `height` (int) - even width, default the geometry reported from above
+-   `stride` (int) - row pitch in bytes, default the 128-byte aligned v210 pitch
+-   `fps` (rational string) - stream frame rate, default the frame rate reported from above; required if nothing above reports one, because the MXL muxer derives the flow's grain rate from it
+-   `timebase` (rational string) - default the time base reported from above, else `1/fps`
+
 ### `cuda_infer_yolo`
 
 Run YOLO object detection on preprocessed CUDA frames using a prebuilt TensorRT engine (`.plan` / `.engine`).

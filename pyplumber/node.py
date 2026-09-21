@@ -129,6 +129,10 @@ class V210ToCuda(InternalNode):
     TYPE = "v210_to_cuda"
 
 
+class CudaToV210(InternalNode):
+    TYPE = "cuda_to_v210"
+
+
 class DecAudio(InternalNode):
     TYPE = "dec_audio"
 
