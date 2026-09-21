@@ -142,12 +142,29 @@ class DrawTrail : public CudaOverlayBase {
             return;
         }
 
+        // Every painted pixel lies within the segment endpoints' union plus
+        // the stroke radius. Keep the exact distance/rasterization test, but
+        // do not launch threads over the rest of the video surface.
+        int origin_x = output.width(), origin_y = output.height();
+        int width = 0, height = 0;
+        const int64_t radius = std::abs(static_cast<int64_t>(thickness_));
+        for (const auto& segment : segments) {
+            origin_x = std::min(origin_x, static_cast<int>(std::clamp<int64_t>(
+                std::min(segment.x0, segment.x1) - radius, 0, output.width())));
+            origin_y = std::min(origin_y, static_cast<int>(std::clamp<int64_t>(
+                std::min(segment.y0, segment.y1) - radius, 0, output.height())));
+            width = std::max(width, static_cast<int>(std::clamp<int64_t>(
+                std::max(segment.x0, segment.x1) + radius + 1, 0, output.width())));
+            height = std::max(height, static_cast<int>(std::clamp<int64_t>(
+                std::max(segment.y0, segment.y1) + radius + 1, 0, output.height())));
+        }
+        if (origin_x >= width || origin_y >= height) return;
         const unsigned int block_x = 32;
         const unsigned int block_y = 8;
-        const unsigned int grid_x = ((unsigned int)output.width() + block_x - 1) / block_x;
-        const unsigned int grid_y = ((unsigned int)output.height() + block_y - 1) / block_y;
-        const int uv_width = (output.width() + 1) / 2;
-        const int uv_height = (output.height() + 1) / 2;
+        const unsigned int grid_x = ((unsigned int)(width - origin_x) + block_x - 1) / block_x;
+        const unsigned int grid_y = ((unsigned int)(height - origin_y) + block_y - 1) / block_y;
+        const int uv_width = (width + 1) / 2 - origin_x / 2;
+        const int uv_height = (height + 1) / 2 - origin_y / 2;
         const unsigned int uv_grid_x = ((unsigned int)uv_width + block_x - 1) / block_x;
         const unsigned int uv_grid_y = ((unsigned int)uv_height + block_y - 1) / block_y;
 
@@ -155,8 +172,6 @@ class DrawTrail : public CudaOverlayBase {
         size_t pitch_y = (size_t)output.raw()->linesize[0];
         CUdeviceptr uv_plane = (CUdeviceptr)(uintptr_t)output.raw()->data[1];
         size_t pitch_uv = (size_t)output.raw()->linesize[1];
-        int width = output.width();
-        int height = output.height();
         CUdeviceptr seg_ptr = d_segments_;
         int num_segments = (int)segments.size();
         float thickness_sq = (float)(thickness_ * thickness_);
@@ -167,6 +182,7 @@ class DrawTrail : public CudaOverlayBase {
         void* y_args[] = {
             (void*)&y_plane, (void*)&pitch_y,
             (void*)&width, (void*)&height,
+            (void*)&origin_x, (void*)&origin_y,
             (void*)&seg_ptr, (void*)&num_segments,
             (void*)&thickness_sq, (void*)&y_color
         };
@@ -181,6 +197,7 @@ class DrawTrail : public CudaOverlayBase {
         void* uv_args[] = {
             (void*)&uv_plane, (void*)&pitch_uv,
             (void*)&width, (void*)&height,
+            (void*)&origin_x, (void*)&origin_y,
             (void*)&seg_ptr, (void*)&num_segments,
             (void*)&thickness_sq, (void*)&u_color, (void*)&v_color
         };

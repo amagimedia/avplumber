@@ -187,6 +187,7 @@ struct ModelRunner {
     // Preprocess
     CUfunction preprocess_kernel = nullptr;
     CUstream stream = nullptr;
+    CUevent input_ready = nullptr;
     std::vector<cudaStream_t> aux_streams;
 
     // Optional CUDA graph for replaying fixed-shape TensorRT inference.
@@ -264,6 +265,7 @@ protected:
     bool preinitializeFromHWAccel();
 
     bool runPreprocessNV12(const av::VideoFrame& frm, ModelRunner& model);
+    bool waitForFrameReady(const av::VideoFrame& frm, ModelRunner& model);
     bool runInference(ModelRunner& model);
     bool syncModel(ModelRunner& model);
     bool enqueueInference(ModelRunner& model);

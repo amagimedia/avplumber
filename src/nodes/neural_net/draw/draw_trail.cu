@@ -46,12 +46,13 @@ __device__ __forceinline__ bool on_trail(int px, int py,
 extern "C" __global__ void kDrawTrailNV12Luma(
     uint8_t* __restrict__ y_plane, size_t pitch_y,
     int width, int height,
+    int origin_x, int origin_y,
     const LineSegment* __restrict__ segments, int num_segments,
     float thickness_sq,
     int y_color)
 {
-    const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    const int x = origin_x + (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = origin_y + (int)(blockIdx.y * blockDim.y + threadIdx.y);
     if (x >= width || y >= height) return;
 
     if (on_trail(x, y, segments, num_segments, thickness_sq)) {
@@ -62,12 +63,13 @@ extern "C" __global__ void kDrawTrailNV12Luma(
 extern "C" __global__ void kDrawTrailNV12Chroma(
     uint8_t* __restrict__ uv_plane, size_t pitch_uv,
     int width, int height,
+    int origin_x, int origin_y,
     const LineSegment* __restrict__ segments, int num_segments,
     float thickness_sq,
     int u_color, int v_color)
 {
-    const int uv_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    const int uv_y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    const int uv_x = (origin_x >> 1) + (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int uv_y = (origin_y >> 1) + (int)(blockIdx.y * blockDim.y + threadIdx.y);
     const int uv_width = (width + 1) >> 1;
     const int uv_height = (height + 1) >> 1;
     if (uv_x >= uv_width || uv_y >= uv_height) return;
