@@ -106,6 +106,29 @@ def _parse_args() -> argparse.Namespace:
         help="Flow frame rate, '25' or '30000/1001'. Must match the source.",
     )
     p.add_argument(
+        "--reader-tail",
+        choices=("encode", "unpack", "demux"),
+        default=os.environ.get("AVP_READER_TAIL", "encode"),
+        help=(
+            "What the reader does with each grain. 'encode' (default) "
+            "writes --output. The two measurement tails drop the data "
+            "instead: 'unpack' after the v210 unpack, 'demux' straight out "
+            "of the demuxer. They isolate the MXL read and the unpack from "
+            "the output encoder, which otherwise dominates the CPU path."
+        ),
+    )
+    p.add_argument(
+        "--sws-flags",
+        default=os.environ.get("AVP_SWS_FLAGS"),
+        help=(
+            "swscale flags for the writer's and the CPU reader's rescale "
+            "nodes, comma-separated: 'fast_bilinear', 'bilinear', "
+            "'neighbor', 'area', ... Unset lets rescale_video choose, which "
+            "for these same-size conversions means area. The choice only "
+            "moves the chroma resampling cost; see README."
+        ),
+    )
+    p.add_argument(
         "--gpu-unpack",
         choices=("auto", "on", "off"),
         default=os.environ.get("AVP_GPU_UNPACK", "auto"),
@@ -184,6 +207,17 @@ def _fps_rounded(fps: str) -> int:
     return max(1, round(float(num) / float(den)))
 
 
+def _sws_flags(spec: str | None) -> list[str]:
+    """'fast_bilinear' -> ['SWS_FAST_BILINEAR'], which rescale_video wants."""
+    if not spec:
+        return []
+    flags = []
+    for name in spec.split(","):
+        name = name.strip().upper()
+        flags.append(name if name.startswith("SWS_") else "SWS_" + name)
+    return flags
+
+
 def _writer_url(domain: str) -> str:
     """MXL muxer wants a plain filesystem path (AVFMT_NOFILE)."""
     return domain
@@ -227,6 +261,7 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "src": "w_in",
         "routing": {"v:0": "w_vpkt"},
         "group": "w_in",
+        "name": "w_demux",
         "auto_restart": "off",
     }))
     avp.addNode(DecVideo({
@@ -263,8 +298,9 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
     else:
         paced_src = "w_vframe"
     # v210 requires 10-bit 4:2:2 planar. Convert explicitly so the
-    # encoder's metadata chain is unambiguous.
-    avp.addNode(RescaleVideo({
+    # encoder's metadata chain is unambiguous. This up-convert is the
+    # writer's single most expensive step, so it takes --sws-flags.
+    scale_params = {
         "src": paced_src,
         "dst": "w_vscaled",
         "group": "w_in",
@@ -276,11 +312,15 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "dst_width": args.width,
         "dst_height": args.height,
         "auto_restart": "off",
-    }))
+    }
+    if flags := _sws_flags(args.sws_flags):
+        scale_params["flags"] = flags
+    avp.addNode(RescaleVideo(scale_params))
     avp.addNode(AssumeVideoFormat({
         "src": "w_vscaled",
         "dst": "w_vscaled_assumed",
         "group": "w_in",
+        "name": "w_assume",
         "width": args.width,
         "height": args.height,
         "pixel_format": "yuv422p10le",
@@ -299,6 +339,7 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "src": ["w_venc"],
         "dst": "w_mux",
         "group": "w_in",
+        "name": "w_mux",
     }))
     mxl_options: dict[str, str] = {}
     if args.video_flow_id:
@@ -311,6 +352,7 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "format": "mxl",
         "options": mxl_options,
         "group": "w_in",
+        "name": "w_output",
         "auto_restart": "off",
     }))
 
@@ -320,9 +362,11 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
 
     With `--gpu-unpack` the packed grains go straight to the GPU
     (`v210_to_cuda`) and NVENC writes the file; otherwise the CPU v210
-    decoder plus swscale feed the mpeg4 encoder.
+    decoder plus swscale feed the mpeg4 encoder. `--reader-tail` cuts the
+    chain short after the demuxer or the unpack, for measuring those in
+    isolation.
     """
-    from pyplumber.node import RescaleVideo, AssumeVideoFormat
+    from pyplumber.node import NullSink
 
     if args.zero_copy:
         # Zero-copy hands out AVPackets pointing straight into the MXL
@@ -365,16 +409,36 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "src": "r_in",
         "routing": {"v:0": "r_vpkt"},
         "group": "r_in",
+        "name": "r_demux",
         "auto_restart": "off",
     }))
+    if args.reader_tail == "demux":
+        avp.addNode(NullSink({
+            "src": "r_vpkt",
+            "group": "r_in",
+            "name": "r_sink",
+            "auto_restart": "off",
+        }))
+        return
+    unpacked = (_build_gpu_unpack(avp, args) if args.gpu_unpack
+                else _build_cpu_unpack(avp, args))
+    if args.reader_tail == "unpack":
+        avp.addNode(NullSink({
+            "src": unpacked,
+            "group": "r_in",
+            "name": "r_sink",
+            "auto_restart": "off",
+        }))
+        return
     if args.gpu_unpack:
-        _build_gpu_reader_tail(avp, args)
+        _build_gpu_encode_tail(avp, args, unpacked)
     else:
-        _build_cpu_reader_tail(avp, args, RescaleVideo, AssumeVideoFormat)
+        _build_cpu_encode_tail(avp, args, unpacked)
     avp.addNode(Mux({
         "src": ["r_venc"],
         "dst": "r_mux",
         "group": "r_in",
+        "name": "r_mux",
     }))
     avp.addNode(Output({
         "src": "r_mux",
@@ -391,20 +455,20 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
             "flush_packets": "1",
         },
         "group": "r_in",
+        "name": "r_output",
         "auto_restart": "off",
     }))
 
 
-def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
-    """r_vpkt -> v210_to_cuda -> scale_cuda -> NVENC -> r_venc.
+def _build_gpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str:
+    """r_vpkt -> v210_to_cuda -> r_vcuda, returning the frame edge.
 
     One packed frame per grain is exactly `v210_to_cuda`'s input
     contract, so the whole CPU v210 decoder and swscale drop out: the
     grain is copied once into pinned memory, unpacked to CUDA P210 by
-    the PTX kernel, and never touches host memory again. NVENC also
-    sidesteps the CPU path's mpeg4 fallback (the image has no libx264).
+    the PTX kernel, and never touches host memory again.
     """
-    from pyplumber.node import AssumeVideoFormat, FilterVideo, V210ToCuda
+    from pyplumber.node import V210ToCuda
 
     avp.addNode(V210ToCuda({
         "src": "r_vpkt",
@@ -425,10 +489,22 @@ def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -
         "color_range": "tv",
         "auto_restart": "off",
     }))
+    return "r_vcuda"
+
+
+def _build_gpu_encode_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
+                           src: str) -> None:
+    """CUDA frames -> scale_cuda -> NVENC -> r_venc.
+
+    NVENC sidesteps the CPU path's mpeg4 fallback (the image has no
+    libx264) and keeps the frames on the GPU end to end.
+    """
+    from pyplumber.node import AssumeVideoFormat, FilterVideo
+
     # NVENC only takes 4:2:2 10-bit on Blackwell-class hardware, so
     # convert on the GPU to 8-bit 4:2:0 for the demo's output file.
     avp.addNode(FilterVideo({
-        "src": "r_vcuda",
+        "src": src,
         "dst": "r_vnv12",
         "group": "r_in",
         "name": "r_filter",
@@ -440,6 +516,7 @@ def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -
         "src": "r_vnv12",
         "dst": "r_vassumed",
         "group": "r_in",
+        "name": "r_assume",
         "width": args.width,
         "height": args.height,
         "pixel_format": "cuda",
@@ -462,9 +539,8 @@ def _build_gpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace) -
     }))
 
 
-def _build_cpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
-                           RescaleVideo, AssumeVideoFormat) -> None:
-    """r_vpkt -> CPU v210 decode -> swscale -> mpeg4 -> r_venc."""
+def _build_cpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str:
+    """r_vpkt -> libavcodec v210 decoder -> r_vframe (yuv422p10le)."""
     avp.addNode(DecVideo({
         "src": "r_vpkt",
         "dst": "r_vframe",
@@ -472,19 +548,33 @@ def _build_cpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
         "name": "r_dec",
         "auto_restart": "off",
     }))
-    # mpeg4 needs yuv420p — rescale from the 10-bit 4:2:2 flow.
-    avp.addNode(RescaleVideo({
-        "src": "r_vframe",
+    return "r_vframe"
+
+
+def _build_cpu_encode_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
+                           src: str) -> None:
+    """yuv422p10le frames -> swscale -> mpeg4 -> r_venc."""
+    from pyplumber.node import RescaleVideo, AssumeVideoFormat
+
+    # mpeg4 needs yuv420p — rescale from the 10-bit 4:2:2 flow. This
+    # conversion is the reader's most expensive step after the encoder
+    # itself, so it takes --sws-flags.
+    scale_params = {
+        "src": src,
         "dst": "r_vscaled",
         "group": "r_in",
         "name": "r_scale",
         "dst_pixel_format": "yuv420p",
         "auto_restart": "off",
-    }))
+    }
+    if flags := _sws_flags(args.sws_flags):
+        scale_params["flags"] = flags
+    avp.addNode(RescaleVideo(scale_params))
     avp.addNode(AssumeVideoFormat({
         "src": "r_vscaled",
         "dst": "r_vscaled_assumed",
         "group": "r_in",
+        "name": "r_assume",
         "width": args.width,
         "height": args.height,
         "pixel_format": "yuv420p",
@@ -501,18 +591,87 @@ def _build_cpu_reader_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
     }))
 
 
-def _edge_counter(avp: pyplumber.AVPlumber, name: str):
-    """Total-enqueued reader for an edge, or None if it does not exist.
+def _edge_counter(avp: pyplumber.AVPlumber, name: str, timeout: float = 30.0):
+    """Total-enqueued reader for an edge, or None if it never appears.
 
-    Edges materialize with their producing node, so this is called after
-    the groups have started.
+    `startNodes()` only queues the group's state change, so the edges
+    materialize on an avplumber worker thread some time after it returns —
+    CUDA and NVENC init keep the reader busy for seconds. Wait for the
+    edge instead of asking `getEdge()` for it: with no edge of that name
+    yet, `getEdge()` *creates* one of the requested type, and the real
+    node then fails forever with "Edge r_vcuda has type av::Packet, not
+    av::VideoFrame". The stats JSON is the type-agnostic view, so it
+    neither creates an edge nor has to guess the queue type.
     """
-    try:
-        edge = avp.getEdge(name, "packet")
-    except Exception as exc:                    # edge missing: node failed
-        print(f"bench: no edge {name}: {exc}")
-        return None
+    deadline = time.monotonic() + timeout
+    while not any(edge["name"] == name for edge in avp.edges.edgesStatsJson()):
+        if time.monotonic() > deadline:
+            print(f"bench: no edge {name} after {timeout:.0f} s: node failed?")
+            return None
+        time.sleep(0.1)
+    edge = avp.getEdge(name)
     return lambda: edge.enqueued_total
+
+
+def _reader_bench_edge(args: argparse.Namespace) -> str:
+    """Last edge of the reader chain, which depends on --reader-tail."""
+    if args.reader_tail == "encode":
+        return "r_venc"
+    if args.reader_tail == "demux":
+        return "r_vpkt"
+    return "r_vcuda" if args.gpu_unpack else "r_vframe"
+
+
+_CLK_TCK = os.sysconf("SC_CLK_TCK")
+
+
+def _thread_cpu() -> dict[str, float]:
+    """CPU seconds consumed so far, per thread name.
+
+    Every avplumber node runs in a thread named after the node, so
+    /proc/self/task is a per-node profiler that costs nothing on the media
+    path. Linux keeps 15 characters of each name; nodes created without a
+    "name" show up as "<type>@<address>".
+    """
+    totals: dict[str, float] = {}
+    for task in os.scandir("/proc/self/task"):
+        try:
+            with open(os.path.join(task.path, "stat")) as stat_file:
+                stat = stat_file.read()
+        except OSError:                 # thread exited while we were reading
+            continue
+        name = stat[stat.index("(") + 1:stat.rindex(")")]
+        # Fields after comm: state is 3, so utime (14) and stime (15) are
+        # at index 11 and 12.
+        fields = stat[stat.rindex(")") + 2:].split()
+        cpu = (int(fields[11]) + int(fields[12])) / _CLK_TCK
+        totals[name] = totals.get(name, 0.0) + cpu
+    return totals
+
+
+def _print_thread_cpu(before: dict[str, float], elapsed: float,
+                      frames: dict[str, int]) -> None:
+    """Per-node CPU over the measured window, most expensive node first.
+
+    `frames` maps a node name prefix ("w_", "r_") to the number of frames
+    that half of the demo produced in the window, which turns CPU seconds
+    into the per-frame cost of each node.
+    """
+    rows = []
+    after = _thread_cpu()
+    for name, cpu in after.items():
+        delta = cpu - before.get(name, 0.0)
+        if delta >= 0.01:
+            rows.append((name, delta))
+    rows.sort(key=lambda row: -row[1])
+    total = sum(delta for _, delta in rows)
+    print(f"bench: per-node CPU over {elapsed:.1f} s, "
+          f"{total:.1f} s total = {total / elapsed:.2f} cores")
+    for name, delta in rows:
+        count = frames.get(name[:2], 0)
+        per_frame = f", {delta / count * 1000:6.2f} ms/frame" if count else ""
+        print(f"bench:   {name:<16} {delta:6.2f} s, "
+              f"{delta / elapsed:5.2f} cores{per_frame}")
 
 
 def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
@@ -523,26 +682,32 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
     which would take the GIL per packet.
     """
     target = _fps_rounded(args.fps)
-    counters = [(n, c) for n, c in (
-        ("writer", None if args.reader_only else _edge_counter(avp, "w_venc")),
-        ("reader", None if args.writer_only else _edge_counter(avp, "r_venc")),
+    counters = [(n, p, c) for n, p, c in (
+        ("writer", "w_", None if args.reader_only else _edge_counter(avp, "w_venc")),
+        ("reader", "r_", None if args.writer_only
+         else _edge_counter(avp, _reader_bench_edge(args))),
     ) if c is not None]
     if not counters:
         print("bench: nothing to measure", file=sys.stderr)
         return 1
 
-    print("bench: elapsed_s," + ",".join(f"{n}_fps" for n, _ in counters), flush=True)
-    samples: dict[str, list[float]] = {n: [] for n, _ in counters}
+    print("bench: elapsed_s," + ",".join(f"{n}_fps" for n, _, _ in counters), flush=True)
+    samples: dict[str, list[float]] = {n: [] for n, _, _ in counters}
     start = time.monotonic()
     prev_t = start
-    prev = {n: c() for n, c in counters}
+    prev = {n: c() for n, _, c in counters}
+    # The per-node CPU window opens once the warmup is over, so that CUDA,
+    # NVENC and MXL attach do not land in the per-frame figures.
+    cpu_before: dict[str, float] | None = None
+    frames_before: dict[str, int] = {}
+    window_start = start
     while (elapsed := time.monotonic() - start) < args.bench_seconds:
         time.sleep(1.0)
         avp.heartbeat()
         now = time.monotonic()
         dt = now - prev_t
         row = []
-        for name, counter in counters:
+        for name, _, counter in counters:
             total = counter()
             fps = (total - prev[name]) / dt
             prev[name] = total
@@ -553,6 +718,10 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
             if now - start > args.bench_warmup and (fps > 0 or samples[name]):
                 samples[name].append(fps)
         prev_t = now
+        if cpu_before is None and now - start > args.bench_warmup:
+            cpu_before = _thread_cpu()
+            frames_before = {p: c() for _, p, c in counters}
+            window_start = now
         print(f"bench: {now - start:6.1f}," +
               ",".join(f"{fps:8.2f}" for fps in row), flush=True)
 
@@ -560,8 +729,10 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
           f"{args.width}x{args.height}, "
           f"pace {args.writer_pace}, "
           f"gpu_unpack {'on' if args.gpu_unpack else 'off'}, "
-          f"zero_copy {'on' if args.zero_copy else 'off'}")
-    for name, counter in counters:
+          f"zero_copy {'on' if args.zero_copy else 'off'}, "
+          f"reader_tail {args.reader_tail}, "
+          f"sws_flags {args.sws_flags or 'default'}")
+    for name, _, counter in counters:
         got = samples[name]
         if not got:
             continue
@@ -571,6 +742,10 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
               f"over {len(got)} s, "
               f"{mean / target * 100:.1f}% of target, "
               f"{counter()} frames total")
+    if cpu_before is not None:
+        window = time.monotonic() - window_start
+        _print_thread_cpu(cpu_before, window,
+                          {p: c() - frames_before[p] for _, p, c in counters})
     # Teardown hangs (see README); the mp4 is flushed per packet, so the
     # output is complete without it.
     sys.stdout.flush()
@@ -591,7 +766,8 @@ def main() -> int:
     if not args.reader_only:
         _build_writer(avp, args)
     if not args.writer_only:
-        if args.gpu_unpack:
+        # The demux-only tail never unpacks, so it needs no CUDA device.
+        if args.gpu_unpack and args.reader_tail != "demux":
             avp.executeCommandsFromString(
                 'hwaccel.init { "name": "%s", "type": "cuda" }' % _HWACCEL
             )

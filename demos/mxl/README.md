@@ -96,6 +96,20 @@ exits without teardown. `--writer-pace off` drops `realtime` +
 `force_fps` so the writer publishes as fast as it can — throughput
 measurement only, since it starves readers of history.
 
+The summary ends with a per-node CPU table. Every avplumber node runs in
+a thread named after the node, so reading `/proc/self/task` before and
+after the measured window and dividing by the frames that crossed the
+last edge gives the CPU cost of each node in milliseconds per frame —
+no profiler, and nothing on the media path.
+
+`--reader-tail` shortens the reader for such measurements: `demux` drops
+each grain as it leaves the demuxer, `unpack` drops the unpacked frame,
+and the default `encode` writes `--output`. The output encoder is the
+most expensive node of the CPU reader by a factor of two, so with the
+full tail a measurement of "the MXL reader" is mostly a measurement of
+mpeg4. `--sws-flags` picks the swscale algorithm for the writer's and the
+CPU reader's `rescale_video` nodes (`fast_bilinear`, `neighbor`, ...).
+
 Stop the demo with `docker kill` — Ctrl-C hangs in teardown (see
 [Known gaps](#known-gaps)). The output stays playable regardless: the
 reader's output sets `movflags=frag_keyframe+empty_moov+default_base_moof`
@@ -119,15 +133,74 @@ warmup, via `--bench-seconds`:
 | `--writer-pace off`, GPU, `--no-zero-copy` | 483 fps | 483 fps | 1.80 cores | 15% | 40% |
 | `--writer-pace off`, CPU unpack | 419 fps | 192 fps | 3.05 cores | — | — |
 | `--writer-pace off`, `--writer-only` | 567 fps | — | 1.33 cores | — | — |
+| `--writer-pace off`, `--writer-only`, `--sws-flags fast_bilinear` | 707 fps | — | 1.41 cores | — | — |
 
 Realtime 1080p59.94 is not demanding: about a tenth of a core per side
 and an idle GPU. The writer — swscale to yuv422p10le plus the CPU `v210`
 encoder — reaches 567 fps (3.0 GB/s into `/dev/shm`) on its own, and the
 GPU reader keeps up with it, so unpaced both sides settle at 507 fps on
 1.7 of the 4 vCPU. Zero-copy buys 5% throughput at that rate for less
-CPU; the unpack itself matters more, halving realtime CPU (0.51 → 0.27
-cores) and, unpaced, capping the CPU reader at 192 fps against the
-writer's 419 while saturating all four cores.
+CPU. The GPU reader halves realtime CPU (0.51 → 0.27 cores) and, unpaced,
+lets the reader follow the writer instead of capping at 192 fps against
+its 419 while saturating all four cores — but that is the output encoder
+talking, not the unpack; see below.
+
+## Where the CPU goes
+
+Per-node CPU from the same paced case (1080p59.94, 20 s window, two runs
+agreeing within 2%), in milliseconds of CPU per frame:
+
+| node | work | ms/frame |
+|---|---|---|
+| `r_enc` | `mpeg4` encoder, the demo's output | 3.58 |
+| `r_scale` | swscale yuv422p10le → yuv420p | 1.79 |
+| `w_scale` | swscale yuv420p → yuv422p10le | 1.67 |
+| `r_unpack` | `v210_to_cuda`: stage into pinned host memory, PTX unpack | 0.40 |
+| `r_dec` | `v210` decoder, the CPU unpack | 0.37 |
+| `w_enc` | `v210` encoder, the pack | 0.30 |
+| `w_output` | MXL muxer: `memcpy` into the opened grain | 0.27 |
+| `r_input` | MXL demuxer, `--no-zero-copy` | 0.38 |
+| `r_input` | MXL demuxer, `zero_copy=1` | 0.07 |
+
+Everything else — demux, mux, `realtime`, `force_fps`,
+`assume_video_format`, the mp4 output — stays under 0.1 ms/frame together.
+
+So MXL itself is not where the time goes. Publishing costs one 5.5 MB
+`memcpy` into the grain (0.27 ms), and reading costs nothing measurable
+as long as `zero_copy` is on: 0.07 against 0.38 ms/frame, the difference
+being exactly one more copy of the same 5.5 MB (three runs each way,
+spread under 0.02 ms). Everything expensive is per-byte pixel work in
+libswscale and libavcodec.
+
+That reframes the GPU reader too. `v210_to_cuda` spends as much *host*
+CPU as the libavcodec `v210` decoder it replaces (0.40 vs 0.37 ms/frame),
+because it still stages every grain through pinned memory and waits on
+the stream; its win is what comes after — no swscale, no CPU encoder.
+
+The unpaced ladder makes the cap explicit. With `--reader-tail demux` the
+reader follows the writer at 554 fps; adding the CPU unpack costs 38 fps
+(516), and the GPU unpack lands in the same place (511) — in all three
+cases the *writer* is the limit. Only the full tail caps the reader, at
+195 fps, with `r_enc` pinned at exactly 1.00 core: mpeg4 gets no useful
+thread parallelism here, so a quarter of this host is the ceiling.
+
+Of the remaining per-frame cost, the swscale flag matters more than one
+would expect for a conversion that does not resize. Left to
+`rescale_video`'s default (area), the writer's 4:2:0 → 4:2:2 upsample
+takes 1.67 ms/frame and the reader's 4:2:2 → 4:2:0 downsample 1.79;
+`--sws-flags fast_bilinear` takes the writer's to 1.31 (and raises peak
+writer throughput from 561 to 707 fps) while leaving the reader's alone,
+and `--sws-flags neighbor` takes the reader's to 1.55 and the writer's to
+1.57. Each is a chroma-quality trade, so the demo keeps the default and
+leaves the choice to the flag.
+
+Reproducing these numbers needs this branch's `rescale_video`: the node
+parsed its `flags` parameter and then built the rescaler without it, so
+every graph in the tree was scaling with the default algorithm. It also
+now hands a frame straight through when it already has the requested
+geometry and format, instead of paying swscale a full-frame copy — worth
+1.0 ms/frame at 1080p 10-bit 4:2:2, which is what a writer fed by a
+source that is already 10-bit 4:2:2 would otherwise burn for nothing.
 
 ## Codec choices
 
@@ -186,6 +259,9 @@ grain, and `history_duration` of 1 s (25 grains) leaves a wide margin
 over that. A reader stalled longer than the ring depth silently sees
 overwritten pixels rather than an error, which is why the FFmpeg option
 is marked experimental.
+
+The copy it removes is worth 0.31 ms of CPU per frame at 1080p59.94 — see
+[Where the CPU goes](#where-the-cpu-goes).
 
 Zero-copy removes the shm→packet copy only: `v210_to_cuda` still stages
 each grain through pinned host memory. Making that leg copy-free would
