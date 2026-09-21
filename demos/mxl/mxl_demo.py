@@ -107,14 +107,16 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--reader-tail",
-        choices=("encode", "unpack", "demux"),
+        choices=("encode", "scale", "unpack", "demux"),
         default=os.environ.get("AVP_READER_TAIL", "encode"),
         help=(
             "What the reader does with each grain. 'encode' (default) "
-            "writes --output. The two measurement tails drop the data "
-            "instead: 'unpack' after the v210 unpack, 'demux' straight out "
-            "of the demuxer. They isolate the MXL read and the unpack from "
-            "the output encoder, which otherwise dominates the CPU path."
+            "writes --output. The three measurement tails drop the data "
+            "instead: 'scale' after the conversion to the encoder's format, "
+            "'unpack' after the v210 unpack, 'demux' straight out of the "
+            "demuxer. They isolate the MXL read, the unpack and the "
+            "conversion from the output encoder, which otherwise dominates "
+            "the CPU path."
         ),
     )
     p.add_argument(
@@ -129,6 +131,27 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--gpu-scale",
+        choices=("off", "writer", "reader", "both"),
+        default=os.environ.get("AVP_GPU_SCALE", "off"),
+        help=(
+            "Do the scaling and color conversion on the GPU instead of in "
+            "swscale: the rescale_video node is replaced by "
+            "hwupload,scale_cuda,hwdownload. Frames that are already on the "
+            "GPU (--gpu-unpack) skip the upload, and frames headed for NVENC "
+            "skip the download."
+        ),
+    )
+    p.add_argument(
+        "--cuda-interp",
+        choices=("nearest", "bilinear", "bicubic", "lanczos"),
+        default=os.environ.get("AVP_CUDA_INTERP"),
+        help=(
+            "scale_cuda interpolation algorithm, the GPU counterpart of "
+            "--sws-flags. Unset leaves the filter's default."
+        ),
+    )
+    p.add_argument(
         "--gpu-unpack",
         choices=("auto", "on", "off"),
         default=os.environ.get("AVP_GPU_UNPACK", "auto"),
@@ -137,6 +160,18 @@ def _parse_args() -> argparse.Namespace:
             "grain into CUDA P210 frames and NVENC encodes the output. "
             "'auto' (default) uses it when a CUDA device is present, else "
             "falls back to the CPU v210 decoder and mpeg4."
+        ),
+    )
+    p.add_argument(
+        "--reader-encoder",
+        choices=("auto", "mpeg4", "nvenc"),
+        default=os.environ.get("AVP_READER_ENCODER", "auto"),
+        help=(
+            "Output encoder of the reader. 'auto' (default) follows "
+            "--gpu-unpack: NVENC for GPU frames, mpeg4 otherwise. Naming one "
+            "crosses the paths, which is what measures the download and the "
+            "upload: GPU unpack into mpeg4 pays one hwdownload, CPU unpack "
+            "into NVENC one hwupload."
         ),
     )
     p.add_argument(
@@ -183,6 +218,8 @@ def _parse_args() -> argparse.Namespace:
         print(f"gpu unpack: {'on' if args.gpu_unpack else 'off'} (auto-detected)")
     else:
         args.gpu_unpack = args.gpu_unpack == "on"
+    if args.reader_encoder == "auto":
+        args.reader_encoder = "nvenc" if args.gpu_unpack else "mpeg4"
     return args
 
 
@@ -201,10 +238,59 @@ def _fps_ratio(fps: str) -> str:
     return fps if "/" in fps else f"{fps}/1"
 
 
+def _fps_period(fps: str) -> str:
+    """Frame period as a timebase: '60000/1001' -> '1001/60000'."""
+    num, _, den = _fps_ratio(fps).partition("/")
+    return f"{den}/{num}"
+
+
 def _fps_rounded(fps: str) -> int:
     """Nearest whole frame rate, for options that want one (GOP length)."""
     num, _, den = _fps_ratio(fps).partition("/")
     return max(1, round(float(num) / float(den)))
+
+
+def _cuda_convert_graph(args: argparse.Namespace, dst_format: str, *,
+                        upload: bool, download: bool,
+                        width: int = 0, height: int = 0) -> str:
+    """A libavfilter graph that converts on the GPU, as filter_video wants.
+
+    `upload` and `download` bracket the conversion when the frames live in
+    host memory on that side. Each is one PCIe transfer of a whole frame,
+    in the format on that side of the conversion, so which of the two a
+    leg pays for shows up directly in its CPU cost.
+    """
+    opts = []
+    if width:
+        opts.append(f"w={width}")
+    if height:
+        opts.append(f"h={height}")
+    opts.append(f"format={dst_format}")
+    if args.cuda_interp:
+        opts.append(f"interp_algo={args.cuda_interp}")
+    scale = "scale_cuda=" + ":".join(opts)
+    stages = (["hwupload"] if upload else []) + [scale]
+    if download:
+        # hwdownload alone yields the frames context's sw_format, which is
+        # what scale_cuda just produced; name it anyway so the graph fails
+        # loudly rather than silently handing on another layout.
+        stages += ["hwdownload", f"format={dst_format}"]
+    return ",".join(stages)
+
+
+def _needs_cuda(args: argparse.Namespace) -> bool:
+    """Whether any node of the chosen graph wants the CUDA device."""
+    if not args.reader_only and args.gpu_scale in ("writer", "both"):
+        return True
+    if args.writer_only:
+        return False
+    if args.reader_tail == "demux":         # never unpacks
+        return False
+    if args.gpu_unpack:
+        return True
+    if args.reader_tail == "unpack":        # CPU unpack, no tail to run
+        return False
+    return args.gpu_scale in ("reader", "both") or args.reader_encoder == "nvenc"
 
 
 def _sws_flags(spec: str | None) -> list[str]:
@@ -299,23 +385,40 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         paced_src = "w_vframe"
     # v210 requires 10-bit 4:2:2 planar. Convert explicitly so the
     # encoder's metadata chain is unambiguous. This up-convert is the
-    # writer's single most expensive step, so it takes --sws-flags.
-    scale_params = {
-        "src": paced_src,
-        "dst": "w_vscaled",
-        "group": "w_in",
-        "name": "w_scale",
-        "dst_pixel_format": "yuv422p10le",
-        # Force the declared geometry: the reader derives the v210 row
-        # stride from --width, and packed v210 carries no dimensions, so
-        # a source of another size would silently break the contract.
-        "dst_width": args.width,
-        "dst_height": args.height,
-        "auto_restart": "off",
-    }
-    if flags := _sws_flags(args.sws_flags):
-        scale_params["flags"] = flags
-    avp.addNode(RescaleVideo(scale_params))
+    # writer's single most expensive step, so it takes --sws-flags — or
+    # --gpu-scale, which hands the whole conversion to scale_cuda.
+    #
+    # Either way the declared geometry is forced: the reader derives the
+    # v210 row stride from --width, and packed v210 carries no dimensions,
+    # so a source of another size would silently break the contract.
+    if args.gpu_scale in ("writer", "both"):
+        from pyplumber.node import FilterVideo
+
+        avp.addNode(FilterVideo({
+            "src": paced_src,
+            "dst": "w_vscaled",
+            "group": "w_in",
+            "name": "w_scale",
+            "graph": _cuda_convert_graph(args, "yuv422p10le",
+                                         upload=True, download=True,
+                                         width=args.width, height=args.height),
+            "hwaccel": _HWACCEL,
+            "auto_restart": "off",
+        }))
+    else:
+        scale_params = {
+            "src": paced_src,
+            "dst": "w_vscaled",
+            "group": "w_in",
+            "name": "w_scale",
+            "dst_pixel_format": "yuv422p10le",
+            "dst_width": args.width,
+            "dst_height": args.height,
+            "auto_restart": "off",
+        }
+        if flags := _sws_flags(args.sws_flags):
+            scale_params["flags"] = flags
+        avp.addNode(RescaleVideo(scale_params))
     avp.addNode(AssumeVideoFormat({
         "src": "w_vscaled",
         "dst": "w_vscaled_assumed",
@@ -357,17 +460,28 @@ def _build_writer(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
     }))
 
 
+def _drop(avp: pyplumber.AVPlumber, src: str) -> None:
+    """Sink an edge into nothing, which is what the measurement tails do."""
+    from pyplumber.node import NullSink
+
+    avp.addNode(NullSink({
+        "src": src,
+        "group": "r_in",
+        "name": "r_sink",
+        "auto_restart": "off",
+    }))
+
+
 def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
-    """mxl:// -> demux -> v210 unpack -> encode -> file.
+    """mxl:// -> demux -> v210 unpack -> convert -> encode -> file.
 
     With `--gpu-unpack` the packed grains go straight to the GPU
     (`v210_to_cuda`) and NVENC writes the file; otherwise the CPU v210
-    decoder plus swscale feed the mpeg4 encoder. `--reader-tail` cuts the
-    chain short after the demuxer or the unpack, for measuring those in
-    isolation.
+    decoder plus swscale feed the mpeg4 encoder. `--gpu-unpack` and
+    `--reader-encoder` pick those two ends independently, and the
+    conversion in between follows from them. `--reader-tail` cuts the
+    chain short after any of the three, for measuring them in isolation.
     """
-    from pyplumber.node import NullSink
-
     if args.zero_copy:
         # Zero-copy hands out AVPackets pointing straight into the MXL
         # ring buffer in /dev/shm, with no refcount held on the grain: the
@@ -413,27 +527,18 @@ def _build_reader(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> None:
         "auto_restart": "off",
     }))
     if args.reader_tail == "demux":
-        avp.addNode(NullSink({
-            "src": "r_vpkt",
-            "group": "r_in",
-            "name": "r_sink",
-            "auto_restart": "off",
-        }))
+        _drop(avp, "r_vpkt")
         return
     unpacked = (_build_gpu_unpack(avp, args) if args.gpu_unpack
                 else _build_cpu_unpack(avp, args))
     if args.reader_tail == "unpack":
-        avp.addNode(NullSink({
-            "src": unpacked,
-            "group": "r_in",
-            "name": "r_sink",
-            "auto_restart": "off",
-        }))
+        _drop(avp, unpacked)
         return
-    if args.gpu_unpack:
-        _build_gpu_encode_tail(avp, args, unpacked)
-    else:
-        _build_cpu_encode_tail(avp, args, unpacked)
+    converted = _build_convert(avp, args, unpacked)
+    if args.reader_tail == "scale":
+        _drop(avp, converted)
+        return
+    _build_encoder(avp, args, converted)
     avp.addNode(Mux({
         "src": ["r_venc"],
         "dst": "r_mux",
@@ -480,7 +585,11 @@ def _build_gpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str
         "height": args.height,
         "stride": v210_row_stride(args.width),
         "fps": _fps_ratio(args.fps),
-        "timebase": "1/90000",
+        # Packed v210 has no timebase either, so the node picks one. 90 kHz
+        # is the usual choice, but mpeg4 refuses any denominator above
+        # 65535, so stamp the frame period when it is the output encoder.
+        "timebase": ("1/90000" if args.reader_encoder == "nvenc"
+                     else _fps_period(args.fps)),
         "format": "p210le",
         # Packed v210 carries no metadata at all, so the node stamps it.
         "colorspace": "bt709",
@@ -490,53 +599,6 @@ def _build_gpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str
         "auto_restart": "off",
     }))
     return "r_vcuda"
-
-
-def _build_gpu_encode_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
-                           src: str) -> None:
-    """CUDA frames -> scale_cuda -> NVENC -> r_venc.
-
-    NVENC sidesteps the CPU path's mpeg4 fallback (the image has no
-    libx264) and keeps the frames on the GPU end to end.
-    """
-    from pyplumber.node import AssumeVideoFormat, FilterVideo
-
-    # NVENC only takes 4:2:2 10-bit on Blackwell-class hardware, so
-    # convert on the GPU to 8-bit 4:2:0 for the demo's output file.
-    avp.addNode(FilterVideo({
-        "src": src,
-        "dst": "r_vnv12",
-        "group": "r_in",
-        "name": "r_filter",
-        "graph": "scale_cuda=format=nv12",
-        "hwaccel": _HWACCEL,
-        "auto_restart": "off",
-    }))
-    avp.addNode(AssumeVideoFormat({
-        "src": "r_vnv12",
-        "dst": "r_vassumed",
-        "group": "r_in",
-        "name": "r_assume",
-        "width": args.width,
-        "height": args.height,
-        "pixel_format": "cuda",
-        "real_pixel_format": "nv12",
-        "auto_restart": "off",
-    }))
-    avp.addNode(EncVideo({
-        "src": "r_vassumed",
-        "dst": "r_venc",
-        "group": "r_in",
-        "name": "r_enc",
-        "codec": "h264_nvenc",
-        "hwaccel": _HWACCEL,
-        # One keyframe per second: movflags=frag_keyframe cuts a fragment
-        # per keyframe, so the output file becomes playable a second in
-        # instead of after NVENC's default 250-frame GOP.
-        "options": {"preset": "p4", "profile": "high", "bf": 0,
-                    "g": _fps_rounded(args.fps)},
-        "auto_restart": "off",
-    }))
 
 
 def _build_cpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str:
@@ -551,42 +613,91 @@ def _build_cpu_unpack(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> str
     return "r_vframe"
 
 
-def _build_cpu_encode_tail(avp: pyplumber.AVPlumber, args: argparse.Namespace,
-                           src: str) -> None:
-    """yuv422p10le frames -> swscale -> mpeg4 -> r_venc."""
-    from pyplumber.node import RescaleVideo, AssumeVideoFormat
+def _build_convert(avp: pyplumber.AVPlumber, args: argparse.Namespace,
+                   src: str) -> str:
+    """Bring the unpacked frames to what the output encoder takes.
 
-    # mpeg4 needs yuv420p — rescale from the 10-bit 4:2:2 flow. This
-    # conversion is the reader's most expensive step after the encoder
-    # itself, so it takes --sws-flags.
-    scale_params = {
-        "src": src,
-        "dst": "r_vscaled",
-        "group": "r_in",
-        "name": "r_scale",
-        "dst_pixel_format": "yuv420p",
-        "auto_restart": "off",
-    }
-    if flags := _sws_flags(args.sws_flags):
-        scale_params["flags"] = flags
-    avp.addNode(RescaleVideo(scale_params))
+    NVENC wants CUDA nv12 -- it only accepts 4:2:2 10-bit on
+    Blackwell-class hardware -- and mpeg4 wants host yuv420p, so either
+    way the 10-bit 4:2:2 flow is converted here. The frames arrive either
+    on the GPU (`v210_to_cuda`) or in host memory (the `v210` decoder),
+    which leaves four shapes for the same step: swscale, scale_cuda with
+    an upload and a download around it (`--gpu-scale reader`), scale_cuda
+    plus one download, or scale_cuda alone. It is the reader's most
+    expensive step after the encoder itself.
+    """
+    from pyplumber.node import RescaleVideo, AssumeVideoFormat, FilterVideo
+
+    gpu_in = args.gpu_unpack
+    gpu_out = args.reader_encoder == "nvenc"
+    dst_format = "nv12" if gpu_out else "yuv420p"
+    if gpu_in or gpu_out or args.gpu_scale in ("reader", "both"):
+        avp.addNode(FilterVideo({
+            "src": src,
+            "dst": "r_vconv",
+            "group": "r_in",
+            "name": "r_scale",
+            "graph": _cuda_convert_graph(args, dst_format,
+                                         upload=not gpu_in,
+                                         download=not gpu_out),
+            "hwaccel": _HWACCEL,
+            "auto_restart": "off",
+        }))
+    else:
+        scale_params = {
+            "src": src,
+            "dst": "r_vconv",
+            "group": "r_in",
+            "name": "r_scale",
+            "dst_pixel_format": dst_format,
+            "auto_restart": "off",
+        }
+        if flags := _sws_flags(args.sws_flags):
+            scale_params["flags"] = flags
+        avp.addNode(RescaleVideo(scale_params))
     avp.addNode(AssumeVideoFormat({
-        "src": "r_vscaled",
-        "dst": "r_vscaled_assumed",
+        "src": "r_vconv",
+        "dst": "r_vassumed",
         "group": "r_in",
         "name": "r_assume",
         "width": args.width,
         "height": args.height,
-        "pixel_format": "yuv420p",
-        "real_pixel_format": "yuv420p",
+        "pixel_format": "cuda" if gpu_out else dst_format,
+        "real_pixel_format": dst_format,
         "auto_restart": "off",
     }))
+    return "r_vassumed"
+
+
+def _build_encoder(avp: pyplumber.AVPlumber, args: argparse.Namespace,
+                   src: str) -> None:
+    """The reader's output encoder: NVENC on the GPU, else mpeg4.
+
+    NVENC sidesteps the CPU path's mpeg4 fallback, which the demo uses
+    only because the image does not link libx264.
+    """
+    if args.reader_encoder != "nvenc":
+        avp.addNode(EncVideo({
+            "src": src,
+            "dst": "r_venc",
+            "group": "r_in",
+            "name": "r_enc",
+            "codec": "mpeg4",
+            "auto_restart": "off",
+        }))
+        return
     avp.addNode(EncVideo({
-        "src": "r_vscaled_assumed",
+        "src": src,
         "dst": "r_venc",
         "group": "r_in",
         "name": "r_enc",
-        "codec": "mpeg4",
+        "codec": "h264_nvenc",
+        "hwaccel": _HWACCEL,
+        # One keyframe per second: movflags=frag_keyframe cuts a fragment
+        # per keyframe, so the output file becomes playable a second in
+        # instead of after NVENC's default 250-frame GOP.
+        "options": {"preset": "p4", "profile": "high", "bf": 0,
+                    "g": _fps_rounded(args.fps)},
         "auto_restart": "off",
     }))
 
@@ -617,6 +728,8 @@ def _reader_bench_edge(args: argparse.Namespace) -> str:
     """Last edge of the reader chain, which depends on --reader-tail."""
     if args.reader_tail == "encode":
         return "r_venc"
+    if args.reader_tail == "scale":
+        return "r_vassumed"
     if args.reader_tail == "demux":
         return "r_vpkt"
     return "r_vcuda" if args.gpu_unpack else "r_vframe"
@@ -731,6 +844,9 @@ def _bench(avp: pyplumber.AVPlumber, args: argparse.Namespace) -> int:
           f"gpu_unpack {'on' if args.gpu_unpack else 'off'}, "
           f"zero_copy {'on' if args.zero_copy else 'off'}, "
           f"reader_tail {args.reader_tail}, "
+          f"reader_encoder {args.reader_encoder}, "
+          f"gpu_scale {args.gpu_scale}, "
+          f"cuda_interp {args.cuda_interp or 'default'}, "
           f"sws_flags {args.sws_flags or 'default'}")
     for name, _, counter in counters:
         got = samples[name]
@@ -763,14 +879,15 @@ def main() -> int:
 
     avp = pyplumber.AVPlumber()
 
+    # Before either half is built: --gpu-scale puts CUDA filters in the
+    # writer too, and a node's create() resolves the device by name.
+    if _needs_cuda(args):
+        avp.executeCommandsFromString(
+            'hwaccel.init { "name": "%s", "type": "cuda" }' % _HWACCEL
+        )
     if not args.reader_only:
         _build_writer(avp, args)
     if not args.writer_only:
-        # The demux-only tail never unpacks, so it needs no CUDA device.
-        if args.gpu_unpack and args.reader_tail != "demux":
-            avp.executeCommandsFromString(
-                'hwaccel.init { "name": "%s", "type": "cuda" }' % _HWACCEL
-            )
         _build_reader(avp, args)
 
     if not args.reader_only:
