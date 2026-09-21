@@ -4,7 +4,7 @@
 
 ## Features
 
-This demo manually mixes any positive number of video inputs into one
+This demo manually mixes up to 64 video inputs into one
 1080x1920 portrait program. It provides a separate terminal interface for
 choosing what is on air, preparing the next view, and changing between views.
 
@@ -64,9 +64,9 @@ The mixer backend requires:
 - FFmpeg with the patched CUDA overlay and transition filters; and
 - at least one video input and one output.
 
-The graph accepts only an NVENC encoder and keeps frames on the GPU from decode
-through output. There is no software-encoder fallback or CPU
-`hwdownload`/`hwupload` path.
+The graph accepts only an NVENC encoder and keeps hardware-decoded inputs on
+the GPU through output. Raw v210 recipes explicitly exercise software decode
+and upload for 4:2:2 inputs; media wipes also upload their alpha frames.
 
 The control TUI requires Textual but may run in a separate terminal or on
 another host that can reach the backend's TCP control port:
@@ -192,8 +192,9 @@ groups without reordering sources.
 
 ## Docker
 
-Follow the [shared NVIDIA setup guide](../../README.md) first. It also provides
-a local Janus preview if you want WebRTC output.
+For recipes with generated media, browser sources and WebRTC, use the
+[Compose quick start](../README.md#run). The commands below run the mixer alone
+with your own video files, after the [shared NVIDIA setup](../../README.md).
 
 The demo image defaults to FFmpeg 8.1 with the shared `deps/ffmpeg/8` series, verifies the
 patched CUDA overlay and transition filters, and builds the CUDA-enabled

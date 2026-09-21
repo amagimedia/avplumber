@@ -4,6 +4,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG AVPLUMBER_REVISION=workspace
 ARG FFMPEG_TAG=n8.1
 ARG NV_CODEC_HEADERS_TAG=n13.0.19.0
+ARG BUILD_JOBS=4
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -16,6 +17,10 @@ RUN apt-get update \
         git \
         libboost-all-dev \
         libcurl4-openssl-dev \
+        libdrm-dev \
+        libegl-dev \
+        libgles-dev \
+        libglvnd-dev \
         libgnutls28-dev \
         libssl-dev \
         libtool \
@@ -58,6 +63,7 @@ RUN cd /tmp/ffmpeg \
         --enable-cuda-nvcc \
         --enable-cuvid \
         --enable-ffnvcodec \
+        --enable-libdrm \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
@@ -71,7 +77,7 @@ RUN cd /tmp/ffmpeg \
         --extra-ldexeflags=-Wl,--disable-new-dtags,-rpath,/usr/local/lib \
         --nvcc=/usr/local/cuda/bin/nvcc \
         --nvccflags='-gencode arch=compute_70,code=compute_70 -O2' \
-    && make -j"$(nproc)" \
+    && make -j"${BUILD_JOBS}" \
     && make install \
     && ldconfig \
     && rm -rf /tmp/ffmpeg
@@ -92,11 +98,11 @@ RUN git init --quiet /build \
     && git -C /build config user.email "mixer-demo@local" \
     && git -C /build commit --quiet --allow-empty -m "workspace ${AVPLUMBER_REVISION}"
 
-RUN make -j"$(nproc)" python_module \
+RUN make -j"${BUILD_JOBS}" python_module \
         BUILD_TYPE=Release \
         HAVE_CUDA=1 \
-        HAVE_DRM=0 \
-        HAVE_GL=0 \
+        HAVE_DRM=1 \
+        HAVE_GL=1 \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
         HAVE_NVJPEG=0 \

@@ -335,6 +335,11 @@
 
     async function connect() {
       if (sessionId || connecting) return;
+      const codecs = RTCRtpReceiver.getCapabilities?.("video")?.codecs;
+      if (selectedCodec === "h265" && codecs && !codecs.some(c => c.mimeType.toLowerCase() === "video/h265")) {
+        setStatus("This browser cannot play H.265. Choose H.264 / SDR.", true);
+        return;
+      }
       connecting = true;
       stopping = false;
       try {

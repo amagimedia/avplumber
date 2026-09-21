@@ -351,7 +351,7 @@ addEventListener("keydown", (event) => {
 // Share the existing WebRTC player, including its latency/RTT display. Assign
 // once so control polling and scene changes never restart the connection.
 const programUrl = new URL(location.href);
-programUrl.port = "8080";
+programUrl.port = new URLSearchParams(location.search).get("preview_port") || "8080";
 programUrl.pathname = "/";
 programUrl.search = "";
 programUrl.hash = "";

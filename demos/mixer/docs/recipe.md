@@ -1,11 +1,11 @@
 # Demo recipe
 
 A recipe describes the workload to generate. The preparer creates missing media,
-then writes an ordinary [mixer show](config.md). Start with
-[`demo.example.json`](../demo.example.json):
+then writes an ordinary [mixer show](config.md). The [Compose quick start](../README.md#run)
+prepares it automatically. For a standalone NVIDIA environment:
 
 ```sh
-python3 demos/mixer/prepare_demo.py demos/mixer/demo.example.json --media-dir media
+python3 demos/mixer/prepare_demo.py media/demo.json --media-dir media
 python3 demos/mixer/mixer.py --config media/mixer.demo.json --janus-output
 ```
 
@@ -66,24 +66,9 @@ in each recipe. Downloads are cached under `media/assets/downloads/`.
 
 ## Custom preset
 
-A preset is an ordinary JSON recipe; there is no registry or required filename.
-Copy either example and edit the copy:
-
-```sh
-mkdir -p media
-cp demos/mixer/demo.cinematic.json media/demo.custom.json
-```
-
-Keep its source definitions, URLs, patterns and output settings. Change these
-fields independently:
-
-| Field | Example choices |
-| --- | --- |
-| `source_count` | 8, 16, 32, 42; any integer from 1 to 64 is supported. |
-| `scene_count` | 16, 32, 64; any positive integer is supported. |
-| `canvas.fps` | 25, 30, 50, 60. This also sets synthetic clip cadence; downloaded files retain their native cadence and are adapted during playback. |
-| Each input's `weight` | Relative proportion of independent sources, not screen area or time on air. |
-| Each layout's weight | Relative proportion of scene definitions. |
+Copy either preset to `media/demo.json` and edit `source_count`, `scene_count`,
+`canvas.fps` and the source/layout weights. Apply it with
+`docker compose -f demos/mixer/compose.yaml restart mixer`.
 
 For example, set `source_count` to **42**, `scene_count` to **64**, keep
 `canvas.fps` at **60**, and change the existing input weights to:
@@ -114,28 +99,16 @@ steady bars. If you disable browsers, also set `layouts.alpha_overlay` to zero.
 Remove `alpha_background` if its source entry is disabled. Allocated alpha
 scenes always need at least one browser and one video source.
 
-On the NVIDIA host:
-
-```sh
-python3 demos/mixer/prepare_demo.py media/demo.custom.json --media-dir media
-```
-
-Or prepare in the mixer image built in the [quick start](../README.md#run):
+The generated show is `media/mixer.demo.json`; keep your editable recipe separate.
+Scene-only changes reuse cached assets; changing FPS creates new synthetic clips
+and wipes. Downloaded films retain their original cadence and are adapted at playback.
+To prepare media without starting the services, use the image from the quick start:
 
 ```sh
 docker run --rm --gpus all --entrypoint python3 \
   -v "$PWD/media:/media:rw,z" avplumber-mixer:local \
-  demos/mixer/prepare_demo.py /media/demo.custom.json --media-dir /media
+  demos/mixer/prepare_demo.py /media/demo.json --media-dir /media
 ```
-
-Preparation prints the allocated counts and writes `media/mixer.demo.json`.
-Use that generated show with the existing mixer startup command, then restart
-the mixer to apply source-count or FPS changes. For browser recipes, the DMA-BUF
-service must have capacity for the allocated browser count; the plain mixer
-image alone cannot play them. Different recipes share the media cache, and each
-preparation replaces the generated show. Keep custom recipe JSON separate from
-`mixer.demo.json`. Scene-only changes reuse cached media; FPS changes create
-separately cached synthetic clips and wipes.
 
 ## Input entries
 
@@ -184,8 +157,8 @@ If only one source is allocated, PiP/random layouts reduce to fullscreen.
 Scenes have distinct IDs, but repeated geometric arrangements are possible.
 `alpha_overlay` needs a page with an actually transparent background; an ordinary
 opaque website stays opaque. It uses source alpha, not adjustable video opacity.
-The default recipe disables browsers and alpha-overlay scenes because the plain
-mixer image does not include the DMA-BUF browser stack.
+The synthetic-only `demo.example.json` disables browsers and alpha-overlay scenes.
+The Compose stack supplies browser capture for the two mixed presets.
 
 For a browser transparency check, [`demo.browser-alpha.json`](../demo.browser-alpha.json)
 creates SDR and HLG backgrounds and one transparent browser source, with four
@@ -193,23 +166,11 @@ scenes to compare the backgrounds with and without the overlay. The page shows
 0/25/50/75/100% opacity patches and a moving half-opacity marker. Empty areas
 should show the background unchanged; 100% patches should hide it completely.
 
-[`demo.equal.json`](../demo.equal.json) expands to **16 independent sources and
-32 scenes on a 1080×1920 (9:16), 60 fps canvas**, with landscape source assets
-and equal weights across all six input entries. Rounding gives
-three of each synthetic category, two Bunny inputs, and two browser inputs.
-Eight scenes use transparent overlays over steady colour bars. This recipe needs the DMA-BUF browser
-stack and downloads the short public Bunny clip once.
-
-```sh
-python3 demos/mixer/prepare_demo.py demos/mixer/demo.equal.json --media-dir media
-python3 demos/mixer/mixer.py --config media/mixer.demo.json --janus-output --wipe-cache-mb 2048
-```
-
 ## Public movie examples
 
-The recipe contains a disabled short Big Buck Bunny MP4 from
-[test-videos.co.uk](https://test-videos.co.uk/bigbuckbunny/mp4-h264). Set its weight
-above zero to include it. The film is public under CC BY 3.0; retain the
+The mixed presets include a short Big Buck Bunny MP4 from
+[test-videos.co.uk](https://test-videos.co.uk/bigbuckbunny/mp4-h264). Its weight
+controls how many independent inputs read the cached file. The film is public under CC BY 3.0; retain the
 [Blender Foundation attribution](https://peach.blender.org/about/) when sharing
 it. The recipe records the attribution and license beside the URL.
 

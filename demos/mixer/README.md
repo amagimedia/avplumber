@@ -7,99 +7,80 @@
 </tr>
 </table>
 
-Sixteen sources — **live browser pages and video files together** — composited
-on one GPU canvas into a 1080×1920 portrait program, cut, faded and wiped from
-the browser control surface on the left, with the whole show described by one
-JSON document.
+Mix up to **64 independent video and browser sources** on one GPU canvas.
+A JSON recipe chooses their proportions, the scene count and frame rate.
+The control page places scene buttons beside the live program.
 
 [**Watch it run** (21 s)](https://github.com/amagimedia/avplumber/releases/download/mixer-demo-media-2026-09/mixer-webui-demo.mp4) ·
 [Demo page](https://amagimedia.github.io/avplumber/demos/mixer/docs/) ·
 [Configuration reference](docs/config.md) ·
 [Processing graph](https://amagimedia.github.io/avplumber/demos/graph.html?demo=mixer)
 
-On a Tesla T4, that run costs **17–18% GPU** with the canvas at 30 fps and
+The recorded 16-source example on a Tesla T4 costs **17–18% GPU** with the canvas at 30 fps and
 sends **2.86 Mbit/s** from a 2 700 kbit/s WebRTC rendition, with five media
 wipes held decoded in GPU memory.
 
 ## Run
 
-A Linux NVIDIA host with hardware decode and NVENC; see the
-[shared Docker/NVIDIA setup](../README.md). Nothing private is needed.
-
-Build the image and start the Janus preview:
-
-```sh
-docker build -f demos/mixer/Dockerfile -t avplumber-mixer:local .
-docker compose --env-file demos/dmabuf-browser/.env.example \
-  -f demos/dmabuf-browser/compose.yaml up -d --build janus janus-preview
-```
-
-Prepare the default recipe, then run its generated show. Preparation creates
-synthetic SDR/HDR clips and an alpha wipe; no private assets or downloads are needed.
+Use a Linux NVIDIA host with hardware decode, NVENC and `/dev/dri` browser
+capture support. Follow the [Docker/NVIDIA setup](../README.md#nvidia-host-setup),
+including the recursive submodule checkout. Run from the repository root:
 
 ```sh
 mkdir -p media
-docker run --rm --gpus all --entrypoint python3 \
-  -v "$PWD/media:/media:rw,z" avplumber-mixer:local \
-  demos/mixer/prepare_demo.py demos/mixer/demo.example.json --media-dir /media
-
-docker run --rm --gpus all --network host \
-  -v "$PWD/media:/media:ro,z" avplumber-mixer:local \
-  --config /media/mixer.demo.json --janus-output --remote-control-port 7777
+cp demos/mixer/demo.equal.json media/demo.json
+docker compose -f demos/mixer/compose.yaml up --build
 ```
 
-The SDR program plays at <http://127.0.0.1:8080>. The recipe also emits HDR HEVC
-on RTP port 5006; viewing that output needs a matching HEVC Janus mountpoint and
-compatible client. Synthetic media is cached in `media/assets/`, and wipes in
-`media/media_wipes/`. Rerunning preparation reuses the media and replaces the
-expanded `media/mixer.demo.json`.
+Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
+in the player if your browser cannot decode HEVC. The standalone player remains
+at <http://127.0.0.1:8080>.
 
-### Choose or customize a preset
+The first run builds the runtime, generates synthetic clips and a wipe, and
+downloads the short public Bunny clip. It then starts 16 independent sources
+and 32 scenes on a **1080×1920p60 HLG** canvas. Both Janus mountpoints and browser
+capture are included; no private assets or host Python packages are needed.
+Later starts reuse `media/assets/` and `media/media_wipes/`.
 
-Two mixed-source example presets are provided:
+On a remote host, prefix the Compose command with `JANUS_HOST_IP=<host>` and
+open `http://<host>:7681`. Allow TCP 7681/8080 and UDP 20000–20100. For large
+grids, apply the [Janus socket-buffer settings](../../docker-compose/README.md#rtp-burst-headroom)
+before starting the stack. Stop it with
+`docker compose -f demos/mixer/compose.yaml down`; the media cache stays on disk.
+
+## Choose a recipe
+
+Copy either preset to `media/demo.json`:
 
 | Preset | Source proportions |
 | --- | --- |
 | [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422, Bunny and browser sources. |
-| [`demo.cinematic.json`](demo.cinematic.json) | The same source types, with two generated HLG 420 inputs replaced by public PQ and HLG movie clips at the default count. |
+| [`demo.cinematic.json`](demo.cinematic.json) | The same categories, with two generated HLG 420 inputs replaced by public PQ and HLG movie clips at the default count. |
 
-Both make **16 independent sources and 32 scenes at 1080×1920, 60 fps**,
-retain the existing synthetic patterns, and use steady colour bars behind
-transparent browser overlays. Both need the
-[DMA-BUF browser stack](docs/guide.md#docker) and `--wipe-cache-mb 2048` for
-the 1080p60 wipe. The synthetic-only `demo.example.json` used above is the
-minimal startup example for the plain mixer image; it makes 16 sources and
-24 scenes without downloads or browsers.
+Edit that copy to make your own preset; no registration or Python changes are needed:
 
-To add your own preset, copy either mixed-source recipe:
+| Field | Examples |
+| --- | --- |
+| `source_count` | 8, 16, 32, 42, 54, 64 independent input chains |
+| `scene_count` | 16, 32, 64 scene definitions |
+| `canvas.fps` | 25, 30, 50, 60 |
+| `inputs[].weight` | Relative source proportions; zero disables an entry |
+| `layouts` | Relative scene proportions; enable `grid_32` or `grid_64` for larger grids |
 
-```sh
-mkdir -p media
-cp demos/mixer/demo.cinematic.json media/demo.custom.json
-```
+Apply edits with `docker compose -f demos/mixer/compose.yaml restart mixer`.
+The mixer prepares missing assets and prints the allocated source counts before
+starting. Edit **`media/demo.json`**; `media/mixer.demo.json` is generated and
+overwritten on startup. Independent inputs may read the same cached clip.
 
-Edit **`inputs[].weight`** for source proportions, **`source_count`** for the
-total (for example 8, 16, 32 or 42), **`scene_count`** for the number of scenes,
-and **`canvas.fps`** for 25, 30, 50 or 60 fps. Weights are relative; zero
-disables an input entry. URLs and pattern definitions stay in the copied JSON.
-No Python changes or preset registration are needed.
-
-Prepare it with the same Docker command above, replacing the recipe argument
-with `/media/demo.custom.json`, then run the generated show in the browser-capable
-mixer environment. See the [worked custom preset](docs/recipe.md#custom-preset)
-for exact proportions, commands and transparency background requirements.
-
-With the build and dependencies already installed on an NVIDIA host:
-
-```sh
-python3 demos/mixer/prepare_demo.py demos/mixer/demo.example.json
-python3 demos/mixer/mixer.py --config media/mixer.demo.json --janus-output --remote-control-port 7777
-```
+Both mixed presets use steady bars behind transparent overlays. For a run with
+no media downloads, copy `demo.example.json` instead; it uses synthetic sources
+only. See the [recipe reference](docs/recipe.md) for custom proportions, asset
+URLs and preparation without Compose.
 
 ## Faster cuts and latency
 
-For a catalogue of fixed, filter-free scenes, append these options to the
-Janus mixer command:
+Compose already prewarms cuts across the generated scenes. For a standalone
+run with fixed, filter-free scenes, append:
 
 ```sh
 --prewarm-cut-scene '*' --cut-latency-encoder janus_encoder
@@ -121,8 +102,9 @@ for the WebUI connection and deployment-local `metrics.json` configuration.
 The web page puts scene controls on the left and the portrait WebRTC player on
 the right. Drag the divider to resize the panes; the split persists in your
 browser. The player uses port 8080 on the same host and defaults to H.265/HDR;
-open the control page with `?codec=h264` for SDR. Port 8080 remains available
-as a standalone preview, including the latency and RTT readouts.
+open the control page with `?codec=h264` for SDR. If you change
+`JANUS_PREVIEW_PORT`, pass that port as `?preview_port=8084` on the control page.
+The standalone preview includes the latency and RTT readouts.
 
 Two surfaces speak the same protocol and can run at once. Cut is the default
 transition; explicit show settings and operator choices can select Fade or Wipe.
@@ -151,25 +133,15 @@ wipe is as quick as the tenth; use a clip with alpha (QTRLE/ARGB, ProRes 4444).
 
 ## Browser pages as sources
 
-Any input can be a live page rendered by the
-[DMA-BUF browser demo](../dmabuf-browser/README.md) instead of a clip:
-`--input dmabuf://<window-id>` takes the window's frames straight into the
-compositor with no decoder. Pages and files mix freely and share every layout,
-transition and control. Pages that only paint once are held, so a static
-graphic keeps feeding the mixer.
+Recipe entries with `kind: "browser"` open their own DMA-BUF windows. Pages and
+files share every layout and transition; a page that stops painting holds its
+last frame. The included alpha page needs no external website.
 
-The compose override runs the mixer inside the DMA-BUF stack and opens the
-pages itself:
-
-```sh
-cd demos/dmabuf-browser && cp .env.example .env
-MIXER_SOURCE_COUNT=4 docker compose --env-file .env \
-  -f compose.yaml -f compose.mixer.yaml up --build
-```
-
-`HTML_OVERLAY_URL` picks the page, `MIXER_SOURCE_COUNT` the number of windows,
-`MIXER_SOURCE_WIDTH`/`MIXER_SOURCE_HEIGHT` their size. Outside compose:
-`--dmabuf-open URL`, `--dmabuf-size WxH`, `--dmabuf-socket-dir`.
+The stack allows 16 browser windows across two processes. This covers both
+presets even at 64 total sources. For a custom mix with more browsers, set
+`MIXER_BROWSER_CAPACITY` when starting Compose. This is browser capacity, not
+the recipe's total source count. Lower-level browser-only setup remains in the
+[DMA-BUF demo](../dmabuf-browser/README.md).
 
 ## Describe a show in one file
 
@@ -207,21 +179,6 @@ Eight colorful SDR patterns (bars, mandelbrot, life, ...) as NVENC clips:
 ```sh
 python3 demos/mixer/tests/sdr_patterns.py media/assets/patterns --fps 60 --seconds 20
 ```
-
-## An HDR show
-
-The [default recipe](demo.example.json) uses an HLG P210 (10-bit 4:2:2) canvas,
-synthetic H.264 SDR 4:2:0, HEVC HLG 4:2:0 and raw SDR/HLG 4:2:2 inputs.
-It outputs a tone-mapped H.264 SDR preview on port 5004 and HEVC Main10 HDR
-on port 5006. Change their proportions and total source count in the recipe;
-there is no separate asset list to assemble on the command line.
-
-Optional movie inputs can be downloaded from HTTP(S) or read from
-`media/assets/`. A disabled Big Buck Bunny download is included as an example.
-HDR movie downloads are optional too: specify a direct playable media URL and
-its `pq` or `hlg` color contract. See [public assets and recipe options](docs/recipe.md).
-Browser inputs require the `dma-page` service and DMA-BUF container flags from
-[docs/guide.md](docs/guide.md#docker); their default weight is zero.
 
 ## Under the hood
 
