@@ -47,6 +47,10 @@ and the filter changes) is base-independent.
    white and HDR peak, HDR-to-SDR operators with a knee parameter, automatic
    per-frame contract resolution (untagged frames are BT.709 SDR), zero-copy
    identity frames and fixed NV12/P010 output storage.
+10. **`band_blur_cuda`** — configurable vertical-band blur and luma gradient
+    on NV12 CUDA frames; pixels outside the band are unchanged. Carries forward
+    the filter from `1876208` and its FFmpeg 8.1 adaptation in `6dcda46` without
+    changing its kernel or option defaults. The same patch applies to 8.0 and 8.1.
 
 ## FFmpeg 8 notes
 
@@ -73,3 +77,14 @@ WebRTC browser; the `demos/cuda-overlay` 45-case pixel-reference matrix; and
 the live recorder surviving SRT disconnects (`ignore_eof` on the pre-sentinel
 format nodes, opt-in). NPP, NDI and AArch64 paths are not compiled in the demo
 images.
+
+For the band-blur pixel smoke on an NVIDIA host (requires NumPy):
+
+```bash
+python3 tests/cuda/smoke_band_blur.py /path/to/patched/ffmpeg
+```
+
+This synthetic-input test intentionally uploads/downloads frames to compare
+identity, band boundaries, luma gradients, neutral chroma and blur-radius
+endpoints. For a GPU-native decode/crop/filter/encode check, use
+`tests/cuda/smoke_crop_filter_chain.py --band-blur` with a bounded video fixture.
