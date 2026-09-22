@@ -111,7 +111,7 @@ const types = [
  {id:'hlg420',name:'HDR · 4:2:0',detail:'HLG patterns · NVDEC',color:'#5a87b5'},
  {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce',max:4},
  {id:'sdr422',name:'SDR · 4:2:2',detail:'10-bit v210 bars · GPU unpack',color:'#d5a35f'},
- {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 16',color:'#d47f95',max:16}
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 32',color:'#d47f95',max:32}
 ];
 const presets = {balanced:[8,4,2,0,2],equal:[1,1,1,1,1],light:[2,1,0,0,0]};
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
@@ -180,7 +180,7 @@ function update(){
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts]};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(t.max??limit,limit-sourceCount+counts[i]);});
  $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
- $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. Maximum 4 HDR 4:2:2 and 16 browser sources.`;
+ $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. Maximum 4 HDR 4:2:2 and 32 browser sources.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;

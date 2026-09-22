@@ -20,7 +20,7 @@ DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, 
 
 def source_counts(total, weights):
     counts = allocate(total, weights)
-    for index, limit, name in ((2, 4, "HDR 4:2:2"), (4, 16, "Browser")):
+    for index, limit, name in ((2, 4, "HDR 4:2:2"), (4, 32, "Browser")):
         if counts[index] > limit:
             remaining = [w if i != index else 0 for i, w in enumerate(weights)]
             if not any(remaining):

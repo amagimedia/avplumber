@@ -197,9 +197,9 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 
 
 @pytest.mark.parametrize('weights, expected', [
-    ([1, 0, 0, 0, 100], [48, 0, 0, 0, 16]),
-    ([1, 0, 100, 0, 100], [44, 0, 4, 0, 16]),
-    ([1, 0, 1, 0, 100], [44, 0, 4, 0, 16]),
+    ([1, 0, 0, 0, 100], [32, 0, 0, 0, 32]),
+    ([1, 0, 100, 0, 100], [28, 0, 4, 0, 32]),
+    ([1, 0, 1, 0, 100], [28, 0, 4, 0, 32]),
 ])
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
@@ -208,12 +208,12 @@ def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expecte
 
 
 def test_browser_only_limit():
-    settings = {**DEFAULT_SETTINGS, 'source_count': 16, 'weights': [0, 0, 0, 0, 1]}
-    assert recipe_for(settings)['inputs'][-1]['weight'] == 16
-    with pytest.raises(ValueError, match='Browser is limited to 16'):
-        recipe_for({**settings, 'source_count': 17})
+    settings = {**DEFAULT_SETTINGS, 'fps': 30, 'source_count': 32, 'weights': [0, 0, 0, 0, 1]}
+    assert recipe_for(settings)['inputs'][-1]['weight'] == 32
+    with pytest.raises(ValueError, match='Browser is limited to 32'):
+        recipe_for({**settings, 'source_count': 33})
     with pytest.raises(ValueError, match='enable another source type'):
-        source_counts(21, [0, 0, 1, 0, 1])
+        source_counts(37, [0, 0, 1, 0, 1])
 
 
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
