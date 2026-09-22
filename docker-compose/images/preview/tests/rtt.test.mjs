@@ -32,7 +32,7 @@ const context = createContext({
 runInContext(script, context);
 assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
-for (const [usage, level] of [[0, "good"], [89, "good"], [90, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
+for (const [usage, level] of [[0, "good"], [92, "good"], [94, "good"], [95, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
   context.renderGpuStats([{index: 0, gpu: usage, decoder: usage, memory_used_mib: 4096, memory_total_mib: 15360}]);
   for (const label of ["GPU", "NVDEC"]) {
     assert(elements.get("gpu-stats").innerHTML.includes(`>${label}</span><span class="metric-value" data-level="${level}">`));

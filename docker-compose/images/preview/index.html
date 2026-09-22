@@ -125,7 +125,7 @@
         <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
           <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
         </span>
-        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥90%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
+        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
       </span>
     </footer>
   </main>
@@ -140,7 +140,7 @@
       const metric = (label, value, color) => `<span class="metric"><span>${label}</span><span class="metric-value" data-level="${color}">${value}</span></span>`;
       document.getElementById("gpu-stats").innerHTML = (gpus || []).map(gpu => {
         const suffix = gpus.length > 1 ? ` ${gpu.index}` : "";
-        const percent = (label, value) => metric(label + suffix, Number.isFinite(value) ? `${value}%` : "—", level(value, 90, 99));
+        const percent = (label, value) => metric(label + suffix, Number.isFinite(value) ? `${value}%` : "—", level(value, 95, 99));
         const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
         const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
           ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
