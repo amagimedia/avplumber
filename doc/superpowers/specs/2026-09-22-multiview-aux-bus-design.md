@@ -1,6 +1,7 @@
 # Multiview aux bus
 
-Status: approved 2026-09-22, ready for implementation. Companions: proposal
+Status: approved 2026-09-22, ready for implementation. Step 0 is done and
+the text below matches `mixer-improv` at 6f584c2 (same day). Companions: proposal
 https://claude.ai/artifact/5RLau7GkWSHPuWnv3q59QG and control UI mock
 https://claude.ai/artifact/1K4ZuwSxcJAP6hAgN3Nm3o.
 
@@ -47,10 +48,12 @@ crop, fit, blend and relative z carry over
 ```
 
 Sixteen previews are `rows: 2, cols: 8`; 32 are `rows: 4, cols: 8`. The
-canvas decides how big they come out. Draw cost grows per layer (one kernel launch each), so a
-16 x grid_16 multiview is 256 launches per frame: measure at 60 fps on the
-T4 before promising it, and batch layers per input in `cuda_rect_draw` if it
-bites. A 4K aux canvas also means a 4K NVENC session.
+canvas decides how big they come out. Every layer is drawn in one kernel
+launch per frame (step 0, done), so draw cost follows canvas pixels, not
+layer count. The rect table caps a frame at 256 layers
+(`AVP_RECT_MAX_LAYERS`; `cuda_rect_draw` throws above it): sixteen grid_16
+tiles plus PVW and PGM exceed it, so the bus builder rejects such a bus
+unless the cap is raised. A 4K aux canvas also means a 4K NVENC session.
 
 Each source is scaled once, straight into its final tile rect. There is no
 intermediate frame per tile, no extra latency and no extra GPU pass per scene.
@@ -122,13 +125,16 @@ intermediate frame per tile, no extra latency and no extra GPU pass per scene.
     PGM/PVW colouring.
   - Every change sends one `aux` command with the full slot list, so the
     strip is the single source of truth and reconnects re-sync from
-    `mixer.status`, which gains an `aux` section per bus.
+    `/api/state`, whose bridge adds an `aux` section per bus from a
+    demo-registered command (like `mixer.settings`); `mixer.status` is
+    native and cannot be extended from Python.
   - The monitor is the existing preview page in an iframe. Its `Stream`
     select (H.264/SDR, H.265/HDR) gains a `Multiview` entry; the footer
     metrics (cut latency, RTT, playback fps, buffer, GPU/NVDEC/VRAM) stay
-    as they are. Extend `preview_codecs` in `mixer.settings` to a list of
-    watchable outputs (id, codec, port) so the aux rendition appears there
-    without special-casing. Choosing Multiview keeps the last program color
+    as they are. Add `preview_outputs: [{id, codec, port}]` to
+    `mixer.settings` next to `preview_codecs` (the flat codec list both
+    pages consume today) so the aux rendition appears there without
+    special-casing. Choosing Multiview keeps the last program color
     choice; the aux rendition follows it (see Config).
 
 ## Config
@@ -144,7 +150,8 @@ at runtime).
    "layout": {"preset": "pgm_pvw_grid", "rows": 2, "cols": 4},
    "scenes": ["cam1_full", "two_up", "grid_4", "pip_cam2",
               "grid_8", "grid_16", "cam1_with_graphics", "cam3_full"],
-   "renditions": [{"id": "monitor", "target": "janus", "port": 5008, "color": "follow"}]},
+   "renditions": [{"id": "monitor", "target": "janus", "color": "follow",
+                   "ports": {"h264": 5008, "h265": 5009}}]},
   {"id": "wall", "width": 3840, "height": 2160,
    "places": [
      {"kind": "pgm",   "dst": {"x": 0,    "y": 0,    "w": 2560, "h": 1440}},
@@ -172,12 +179,17 @@ for SDR, HEVC Main10 for HDR.
 Default for the multiview: one rendition that follows the operator's monitor
 choice. Switching Program SDR/HDR in the UI sends `aux.rendition {bus,
 color}`; the demo stops the aux rendition group, rebuilds scale/format and
-encoder for that color and codec on the same Janus port, and restarts it.
-The bus compositor and the program path are upstream and keep running; the
-monitor shows about a second of black and reconnects with the new codec as
-it already does for program. NVENC cannot change codec or bit depth on a
-live session, so the only glitch-free alternative is two renditions and a
-second NVENC session, which the list allows when a show needs it.
+encoder for that color and codec, and restarts it. A Janus mountpoint pins
+its codec and port (`janus.plugin.streaming.jcfg`: id 1 = H.264, id 2 =
+H.265), so a follow rendition declares one port per codec (`ports`) and the
+restarted encoder targets the port matching the codec; the preview page
+reloads onto that mountpoint as it does today when the program Stream
+select changes. The bus compositor and the program path are upstream and
+keep running (program renditions all run at once and are never rebuilt);
+the monitor shows about a second of black. NVENC cannot change codec or bit
+depth on a live session, so the only glitch-free alternative is two
+renditions and a second NVENC session, which the list allows when a show
+needs it.
 
 Parsing lives in `pyplumber/mixer/config.py`; the flattening and preset
 expansion are pure functions next to `scene_layers`.
@@ -191,17 +203,18 @@ expansion are pure functions next to `scene_layers`.
 | Multiview latency | main + 3 frames |
 | Main program | unchanged |
 
-Estimates for the T4 at 1080x1920p30, to be replaced by measurements. The
-compositor scale kernel is bilinear, four taps per output pixel
-(`cuda_rect_scale.cu`), so compositor cost scales with output pixels and
-launch count, not with source size or how many tiles a source appears in.
+Estimates for the T4 at 1080x1920p30; measured compositor numbers are in
+implementation step 0. The composite kernel (`composite_planes` in
+`cuda_rect_scale.cu`, one launch per frame) samples bilinearly, four taps
+per output sample, so compositor cost scales with output pixels, not with
+source size or how many tiles a source appears in.
 
 | Per bus per frame | Amount | Share of T4 at 30 fps |
 |---|---|---|
 | canvas write, NV12 | 3.1 MB | 0.03% of 320 GB/s |
 | bilinear reads | ~12 MB, mostly cached | ~0.1% |
 | arithmetic | ~2 MP x tens of FLOPs | ~0.01% of 8 TFLOPS |
-| kernel launches, one per layer today | 30-60 x ~10 us | 1-2% GPU util |
+| kernel launch, one per frame plus the rect-table upload | measured 0.108 ms for grid-16 at 1080x1920 | ~0.3% of the 30 fps frame budget |
 | NVENC session | H.264 5-8%, HEVC Main10 10-15% of the encoder engine | separate engine |
 | VRAM | 250-550 MB: pool 25-65, retention 150-300, filter 10-30, NVENC 60-200 | |
 
@@ -214,25 +227,27 @@ longer than PGM, so a tight decoder pool shows up as decoder stalls.
 
 ### Keeping the impact minimal
 
-Required in v1:
+Done before any aux code (step 0):
 
-1. **One launch per frame.** A tile-based draw kernel resolves the topmost
-   layer per canvas block from a z-sorted rect table and writes background
-   where nothing covers it: no clear pass, no per-layer launch, no overdraw.
-   Launches fall from layer count plus clear to one. Applies to PGM slots and
-   the wipe overlay as well, so it is implemented and measured on the program
-   path first (implementation step 0). Target: under 1% SM per bus.
+1. **One launch per frame.** `composite_planes` draws the whole canvas in
+   one launch from a host z-sorted rect table: each 128x8 tile masks the
+   layers touching it, every thread walks those layers bottom to top
+   starting from the clear value (opaque layers overwrite, RGBA blends) and
+   stores once per sample. No clear pass, no per-layer launch. Launches
+   fell from two per layer plus two memsets to one; grid-16 on the program
+   path went from 0.160 to 0.108 ms per frame, under 1% of the mixer's GPU
+   time. Every `cuda_rect_overlay` instance, so every aux bus, gets it.
 
 Sources are assumed to deliver a new frame every tick, so no static-tick
 skipping is planned.
 
 Config options, off by default:
 
-3. Per-bus `fps` (integer divisor of the program rate): halves SM and NVENC
+2. Per-bus `fps` (integer divisor of the program rate): halves SM and NVENC
    at half rate.
-4. Per-bus `width`/`height`: cost is proportional to area; 720x1280 is 45%
+3. Per-bus `width`/`height`: cost is proportional to area; 720x1280 is 45%
    of 1080x1920 for compositor and encoder alike.
-5. Aux renditions default to NVENC preset `p1`.
+4. Aux renditions default to NVENC preset `p1`.
 
 Later, if more than two buses become normal: **wall mode**, one compositor
 drawing all bus canvases side by side and one crop per rendition. One
@@ -247,8 +262,9 @@ T4, render a shared quarter-res thumbnail per source once per frame (about
 | Change | Where | Size |
 |---|---|---|
 | `aux_output_mask` ORed into every camera OTM mask | `MixerState.hpp`, `avplumber.cpp` (`mixer.init`) | ~10 lines, required |
+| several layers per compositor pad | `compositor_layers.hpp`, `cuda_rect_overlay.cpp`, `routing.hpp`, `SceneDefinition` | moderate, required, see below |
+| rect table cap | `AVP_RECT_MAX_LAYERS` is 256 ops per frame (`cuda_rect_table.h`; `CudaRectDraw::draw` throws above it): raise it for the largest bus, and the Python bus builder rejects a bus whose flattened layer count exceeds it | small |
 | nothing else | `one_to_many` masks are 32-bit; `cuda_rect_overlay` already takes `layers` and `active_inputs` at runtime; `node.object.set` exists; `split` has a `drop` option | |
-| several layers per compositor pad | `compositor_layers.hpp`, `cuda_rect_draw`, `routing.hpp`, `SceneDefinition` | moderate, required, see below |
 
 ### Multi-layer pads instead of aliases
 
@@ -266,10 +282,13 @@ masks and `active_inputs` stay per source. Touch points:
 
 - `SceneDefinition.sources` map to an ordered item list (`MixerState.hpp`),
   and the `mixer.scene` JSON accordingly.
-- `compositorLayersFromScene` groups items by input index (`routing.hpp:938`).
-- `parseLayersArray` and the draw loop iterate layers per input
-  (`compositor_layers.hpp`, `cuda_rect_draw.cpp`). Playout is untouched;
-  frame selection is per input.
+- `compositorLayersFromScene` groups items by input index
+  (`src/mixer/routing.hpp:81`).
+- `parseLayersArray`, `applyLayerMetadata` and `resolveDrawOps` iterate
+  layers per input (`compositor_layers.hpp`), as do `default_layers_` and
+  `mergeLayersForTick` in `cuda_rect_overlay.cpp`. `CudaRectDraw::draw`
+  only fills the rect table from the resolved ops and is untouched. Playout
+  is untouched; frame selection is per input.
 - `scene_layers` in `config.py` can stop generating alias names for main
   scenes too, in a follow-up; the main mixer keeps working with aliases
   meanwhile because a one-element layer list is the current behaviour.
@@ -290,8 +309,10 @@ it; then `aux_output_mask`; then the Python bus builder and control.
 
 ## Verification
 
-- Unit: flattening math (contain/stretch, crop and z carried, alias
-  allocation, 64-pad rejection) in `demos/mixer/tests/test_graph.py`.
+- Unit: flattening math (contain/stretch, crop and z carried, a repeated
+  source yields one pad with several layers, per-bus pad-limit and rect
+  table cap rejection) in `demos/mixer/tests/test_graph.py`; the per-show
+  64-source limit is already covered by `test_source_mask_capacity`.
 - Graph: builder test that every `otm_<pad>` has three dsts with bit 2 set
   and that a cut/fade leaves bit 2 set.
 - Live on the T4 host: record program and multiview together, confirm the PGM
@@ -306,59 +327,64 @@ One PR per step is fine; steps 3 to 6 may be combined.
 
 ### 0. Single-launch compositor draw, validated on PGM alone (native)
 
-DONE 2026-09-22 on branch `compositor-single-launch` (two commits on top of
-`mixer-improv`). Measured on the T4 with `tests/cuda/test_rect_composite.cu`
-(parity against the old per-layer kernels, kept in
-`tests/cuda/legacy_rect_kernels.cuh`): grid-16 at 1080x1920, old 0.160 ms
-per frame (2 memsets + 32 launches) vs new 0.108 ms (1 launch); with one
-RGBA layer 0.170 vs 0.129 ms. Output identical except ±1 code on a few
-blended samples (FMA contraction). Live 64-source show: mixer process SM
-28.0% before, 28.5% after, i.e. no visible change, because the compositor
-is under 1% of the mixer's GPU time. `nsys` on the live show (110 s):
-84% of kernel time is the NVDEC surface unmap kernel `ConvertNV12BLtoNV12`
-(38 streams), 11% the compositor, 5% NVENC-side conversions; kernels total
-only ~4% of wall time. Memory copies dominate: 26 DMA-BUF browsers x 8.3 MB
-RGBA x 30 fps = 5 GB/s of array-to-device copies (78 µs each) plus the
-decoder's per-plane copies (1.7 MB, 187k per 110 s). NVDEC sits at 92%.
-So the levers for that show are the browser import and decode count, not
-compositing.
+DONE 2026-09-22 on `mixer-improv`: commits 7a23cdd and 29a34cd (single
+launch), bbfdb73 and 470bd58 (zero-copy browser frames), 6f584c2 (cleanup).
+Every `cuda_rect_overlay` instance (slot A/B, wipe overlay, later each aux
+bus) draws through `CudaRectDraw::draw`, so the existing 9:16 demo was the
+test bed and no aux-bus code was involved.
 
-DONE 2026-09-22, zero-copy browser frames (commit "dmabuf: zero-copy browser
-frames sampled by the compositor"): `drm_prime_to_cuda` `zero_copy` hands
-out frames referencing the cached EGL mapping through a texture object
-(`cuda_rect_texture.h`), the frame pins the DRM input so the producer's
-release ack follows the last consumer, and the compositor samples
-`AVP_RECT_KIND_RGB_TEX`/`RGBA_TEX` layers with the same taps. Live on the
-same 64-source show: card 48% -> 39%, mixer process SM 28.0% -> 15.4%, mem
-19.3% -> 10.9%, VRAM 7.36 -> 7.06 GB, NVDEC/NVENC unchanged. Producer pool
-`DMA_BROWSER_DMABUF_POOL_SIZE=11` bounds outstanding buffers; the playout
-keeps at most 8 queued + 1 held per input, and the producer drops rather
-than overwrites when the pool is exhausted.
+As built (`cuda_rect_scale.cu`, `cuda_rect_draw.{hpp,cpp}`,
+`cuda_rect_table.h`): the host resolves the z-sorted layer list into a rect
+table (`AvpRectLayer`: source planes or texture, crop, destination rect per
+canvas plane, kind and blend flags), uploads it once per frame and launches
+`composite_planes` once (`composite_planes_yuv` when no packed-RGB layer is
+present, `composite_planes_packed4` for rgb0 canvases), with `gridDim.z`
+spanning the planes. Each 128x8 tile masks the layers touching it; each
+thread owns four lane groups of one row and walks those layers in draw
+order from the clear value: YUV and promoted layers overwrite with bilinear
+samples, opaque RGB converts in place, RGBA blends over what is below; one
+vector store per sample. No clear pass, no per-layer launch, no per-layer
+stream sync. The per-layer path and its `draw=layered` flag were removed
+once parity held (29a34cd); the old kernels live in
+`tests/cuda/legacy_rect_kernels.cuh` as the oracle for
+`tests/cuda/test_rect_composite.cu` (mixed, clear, odd-width, grid16, P210
+HLG, P010 PQ, packed RGB0 and texture-backed RGBA layer sets, ±1 code on a
+few blended samples from FMA contraction, plus grid16 timing).
 
-Ships first, on its own, with no aux-bus code. Every `cuda_rect_overlay`
-instance (slot A/B, wipe overlay, later each aux bus) uses `cuda_rect_draw`,
-so the existing 9:16 demo is the test bed.
+Measured on the T4: grid-16 at 1080x1920, old 0.160 ms per frame (2
+memsets + 32 launches) vs new 0.108 ms (1 launch); with one RGBA layer
+0.170 vs 0.129 ms. Live 64-source show: mixer process SM 28.0% before,
+28.5% after, i.e. no visible change, because the compositor is under 1% of
+the mixer's GPU time. `nsys` on the live show (110 s): 84% of kernel time
+is the NVDEC surface unmap kernel `ConvertNV12BLtoNV12` (38 streams), 11%
+the compositor, 5% NVENC-side conversions; kernels total only ~4% of wall
+time. Memory copies dominated: 26 DMA-BUF browsers x 8.3 MB RGBA x 30 fps =
+5 GB/s of array-to-device copies (78 µs each) plus the decoder's per-plane
+copies (1.7 MB, 187k per 110 s). NVDEC sits at 92%. So the levers for that
+show are the browser import and decode count, not compositing.
 
-- `src/nodes/hwaccel/cuda_rect_scale.cu`, `cuda_rect_draw.{hpp,cpp}`: one
-  kernel launch per frame. The host resolves the z-sorted layer list into a
-  compact rect table (dst rect, src plane pointers/pitches, crop, scale
-  factors, format/blend flags) uploaded once per frame; each thread block
-  owns a canvas tile, finds the topmost layer covering it (or background),
-  and samples bilinearly. RGBA browser layers keep their existing blend
-  math inside the same kernel. No clear pass: uncovered blocks write
-  background. No per-layer stream sync.
-- Keep the per-layer path behind a flag for A/B comparison until the
-  single-launch path is proven on the T4.
-- Tests: `tests/cpp` geometry/layout tests unchanged; add a golden-image
-  comparison between per-layer and single-launch output for the demo's
-  fullscreen, grid_4, grid_16, pip and alpha-overlay scenes (max abs diff
-  within rounding); `tests/cuda/smoke_mixer_10bit.py` for P210.
-- Measure on the T4 with PGM only: `nvidia-smi` SM utilisation and the
-  compositor's per-frame draw time before/after for grid_16 at 30 and 60
-  fps. Expected: launches from 16 + clear to 1; draw time bounded by one
-  2 MP canvas write.
-- Acceptance: identical pictures, lower or equal SM time, transitions,
-  wipes and the snapshot hold unaffected.
+Zero-copy browser frames (bbfdb73): `drm_prime_to_cuda` `zero_copy` hands
+out frames that reference the cached EGL mapping, pitch-linear imports as
+plain device-pointer frames and tiled imports through a texture object
+described in `opaque_ref` (`cuda_rect_texture.h`; descriptor built by
+`rectTextureDesc` in `cuda_rect_sampler.h`). The frame pins the DRM input
+so the producer's release ack follows the last consumer, and the compositor
+samples `AVP_RECT_KIND_RGB_TEX`/`RGBA_TEX` layers with the same taps. Live
+on the same 64-source show: card 48% -> 39%, mixer process SM 28.0% ->
+15.4%, mem 19.3% -> 10.9%, VRAM 7.36 -> 7.06 GB, NVDEC/NVENC unchanged.
+Producer pool `DMA_BROWSER_DMABUF_POOL_SIZE=11` bounds outstanding buffers;
+the playout keeps at most 8 queued + 1 held per input, and the producer
+drops rather than overwrites when the pool is exhausted.
+
+Follow-ups the same day: 470bd58 sets `CU_TRSF_READ_AS_INTEGER` on the
+zero-copy texture (flags 0 made the `uchar4` fetch return bytes of the
+float bit pattern: 255 read as 0, 127 as 255, so opaque white vanished and
+Chrome's 50% dither became a dot grid); the parity test now builds its
+textures through the production descriptor and fails without the flag.
+6f584c2 drops the `scale` parameter from `cuda_rect_overlay` (kernels load
+at init), keeps the canvas contract only in `CudaRectDraw::canvas()`, and
+stops the DRM node's destructor from terminating the process-global EGL
+display. Live after both: card 37-38%, mixer SM 16-18%, VRAM 6.9 GB.
 
 ### 1. Multi-layer compositor pads (native)
 
@@ -367,14 +393,17 @@ so the existing 9:16 demo is the test bed.
   `resolveDrawOps` emits one `DrawOp` per layer, in array order, still
   sorted by `z`. `LayerSpec` gains nothing.
 - Draw path already single-launch from step 0; multi-layer pads only
-  change how the rect table is built.
+  change how the op list is resolved (`resolveDrawOps`), not the rect table
+  or the kernel.
 - `src/nodes/hwaccel/cuda_rect_overlay.cpp`: `default_layers_` becomes
   `std::vector<std::vector<LayerSpec>>`; `input_eof_`, `held_` and friends
   stay per input. The `layers` `setObject` path and the composite loop use
   the nested form. A one-element array is exactly today's behaviour.
 - `src/mixer/primitives/MixerState.hpp`: `SceneDefinition.sources` becomes an
-  ordered `std::vector<SceneItem{source, SourceLayout}>`; helpers
-  `usesSource(name)` and `computeActiveInputsMask` adapt. `mixer.scene` JSON
+  ordered `std::vector<SceneItem{source, SourceLayout}>`;
+  `computeActiveInputsMask` and the inline `scene.sources.count(name)`
+  checks (`scene.cpp`, `fade.cpp`, `wipe.cpp`, `routing.hpp`) adapt, behind
+  a new `usesSource(name)` helper. `mixer.scene` JSON
   accepts the current object form and a new `items` array form.
 - `src/mixer/routing.hpp`: `compositorLayersFromScene` groups items by input
   index into arrays.
@@ -432,8 +461,10 @@ so the existing 9:16 demo is the test bed.
   `bus_layers` and issues `node.object.set` `layers` then `active_inputs`
   on `aux_<id>_comp`; `aux.rendition {"bus", "color"}` stops the bus
   rendition group, rebuilds it for the color, restarts it.
-- `mixer.status` gains `aux: {<id>: {scenes, pvw_scene, color}}` from the
-  demo's own state (the native side does not know about buses).
+- `/api/state` gains `aux: {<id>: {scenes, pvw_scene, color}}` from a
+  demo-registered command (`mixer.aux_status`, registered like
+  `mixer.settings`); `mixer.status` is native (`MixerOrchestrator::status`)
+  and stays unchanged.
 - PVW place refresh after `preview`, `cut`, `fade`, `wipe`.
 - `mixer.settings`: `preview_outputs: [{id, codec, port}]` replacing
   `preview_codecs` (keep the old key for one release).
@@ -461,8 +492,8 @@ so the existing 9:16 demo is the test bed.
   during a fade leaves program timing untouched.
 - Record `nvidia-smi` VRAM and SM/NVENC utilisation before and after
   enabling the bus; replace the estimates in Cost with the numbers. Target
-  under 1% SM per bus at 1080x1920p30 with batched launches; note the
-  static-tick skip rate with browser sources.
+  under 1% SM per bus at 1080x1920p30; record the aux playout
+  `repeats`/`discarded` counters with browser sources.
 - Judge tile aliasing on grid_16 tiles; decide on the shared thumbnail.
 - Switch the rendition SDR/HDR/SDR three times; confirm the program never
   glitches and the multiview returns within about a second.
