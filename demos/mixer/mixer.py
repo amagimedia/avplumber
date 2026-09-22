@@ -350,7 +350,8 @@ def _init_avp(avp_options, api):
     if avp_options.remote_control_port:
         avp.enableControlServer(avp_options.remote_control_port)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
-    avp.edges.planCapacity("*", 4)
+    # The queue rounds to 2**n - 1 slots: requesting 4 retains up to 7 frames.
+    avp.edges.planCapacity("*", 3)
     return avp
 
 

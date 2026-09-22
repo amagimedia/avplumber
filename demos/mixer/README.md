@@ -91,6 +91,13 @@ queues across scene definitions without rendering every hidden scene. It is
 off by default; repeat `--prewarm-cut-scene SCENE` to select only some scenes.
 The cost is extra queue handling and potentially more retained GPU surfaces.
 
+The demo uses three-slot graph queues; requesting four would round up to seven.
+These queues are separate from the mixer's two-frame jitter tolerance and the
+decoder's reference buffers. Scene definitions share source frames, so adding
+scenes does not create more decoders. For large source counts, use media encoded
+at the intended input resolution and frame rate: pacing a 60 fps file to 30 fps
+after decoding still decodes all 60 frames per second.
+
 The preview can show **avplumber latency** beside **WebRTC RTT**, outside the
 video. The AVP value is the median of the last up to three measured CUTs, from
 command receipt to the first matching encoded frame—not capture-to-browser

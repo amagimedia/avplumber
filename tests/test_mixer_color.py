@@ -63,6 +63,15 @@ def test_tonemap_converts_storage_in_the_same_pass():
         conversion_graph("hlg", "p010le", source_format="rgba")
 
 
+@pytest.mark.parametrize("source", (None, "sdr", "hlg", "pq"))
+def test_auto_storage_preserves_chroma_without_a_second_conversion(source):
+    graph = conversion_graph("hlg", None, source=source)
+    assert "transfer_in=auto:transfer_out=hlg" in graph
+    assert ":format=" not in graph
+    assert "scale_cuda" not in graph
+    assert graph.count("tonemap_cuda=") == 1
+
+
 @pytest.mark.parametrize("canvas", ("sdr", "hlg", "pq"))
 def test_output_codec_defaults_have_correct_color(canvas):
     assert rendition_color(canvas, "h264_nvenc") == Color("sdr")
@@ -151,6 +160,22 @@ def test_rgb_keeps_alpha_and_uses_hdr_compositor(builder):
     assert nodes["mixer_color_page"]["graph"] == Color().setparams
     assert nodes["mixer_comp_a"]["color"] == "hlg"
     assert nodes["mixer_comp_a"]["layers"][0]["blend"]
+
+
+@pytest.mark.parametrize("transfer", ("hlg", "pq"))
+def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
+    builder.working_format = "p210le"
+    builder.color = Color(transfer)
+    builder.add_source("decoded", "nvdec", "input", default_graph="", color="sdr")
+    builder.add_source("raw422", "v210", "input", default_graph="", color=transfer, pixel_format="p210le")
+    builder.add_scene("mixed", {"decoded": {}, "raw422": {}})
+    builder.set_initial_scene("mixed")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert nodes["mixer_color_decoded"]["graph"] == conversion_graph(transfer, None, source="sdr")
+    assert nodes["mixer_color_raw422"]["graph"] == Color(transfer).setparams
+    assert nodes["mixer_comp_a"]["sw_format"] == "p210le"
+    assert not any("scale_cuda" in n.get("graph", "") for n in nodes.values())
 
 
 @pytest.mark.parametrize("wipe_color", (None, "sdr"))

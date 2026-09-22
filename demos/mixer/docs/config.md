@@ -210,8 +210,11 @@ For SDR Bunny on an HLG canvas, no manual tone-map filter is needed:
 Supported video contracts are limited-range BT.709/BT.1886 SDR and BT.2020
 non-constant-luminance HLG/PQ. Full-range YUV, other gamuts/matrices and missing
 metadata fail explicitly. SDR uses a 203-nit reference white and HLG a 1000-nit
-peak. Frames already in the canvas storage (NV12, NV16, P010, P210) pass without GPU copies. Other declared CUDA YUV
-storage uses `scale_cuda` around conversion. Custom source filters receive the
+peak. On an HLG/PQ P210 canvas, 4:2:0 video stays P010 after colour conversion;
+the compositor resamples chroma while scaling into the 4:2:2 canvas, without an
+extra conversion pass. Native 4:2:2 inputs stay P210. Matching colour and storage
+pass without GPU copies. Other declared CUDA YUV storage uses `scale_cuda`
+around conversion. Custom source filters receive the
 explicit source override first; their output metadata drives normalization, so
 a manually converted source is not converted from its original transfer again.
 
