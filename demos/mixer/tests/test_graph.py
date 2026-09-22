@@ -616,7 +616,8 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
         "source_count": 2,
-        "canvas": {"width": 1920, "height": 1080, "fps": 60},
+        "preview_codecs": [],
+        "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
         "source_counts": {"video": 1, "browser": 1, "v210": 0},
         "direct": False, "fade_seconds": 0.8, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",

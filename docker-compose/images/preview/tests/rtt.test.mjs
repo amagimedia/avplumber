@@ -4,18 +4,22 @@ import { createContext, runInContext } from "node:vm";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
-  .replace(/^\s*import .*;$/m, "");
+  .replace(/^\s*import .*;$/m, "")
+  // Inject the fetched setup state; transport is exercised by the server/live tests.
+  .replace("const initialMixerState = await mixerState();", "const initialMixerState = fixtureState; monitorMixer = fixtureState !== null;");
 const elements = new Map();
 const timers = new Map();
 let timerId = 0;
 const context = createContext({
+  fixtureState: null, setTimeout() {},
   createReceiverMonitor: () => ({ update() {}, stop() {} }),
   URL,
   location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {
     readyState: "loading",
+    querySelector() { return this.getElementById("codec-label"); },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { dataset: {}, setAttribute() {}, addEventListener() {} });
+      if (!elements.has(id)) elements.set(id, { options: [{value:"h264"}, {value:"h265"}], dataset: {}, setAttribute() {}, addEventListener() {} });
       return elements.get(id);
     },
   },
@@ -30,12 +34,26 @@ assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
 for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
   const other = createContext({
+    fixtureState: null, setTimeout() {},
     URL, location: { origin: "http://127.0.0.1", href: `http://127.0.0.1/${suffix}` },
     document: context.document, window: context.window,
   });
   runInContext(script, other);
   assert.equal(runInContext("MOUNTPOINT_ID", other), 1);
   assert.equal(elements.get("codec").value, "h264");
+}
+
+for (const codecs of [["h264"], ["h264", "h265"]]) {
+  const other = createContext({
+    fixtureState: {settings: {preview_codecs: codecs}, setup_revision: 1}, setTimeout() {},
+    URL, location: {origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265"},
+    document: context.document, window: context.window,
+  });
+  runInContext(script, other);
+  assert.equal(runInContext("MOUNTPOINT_ID", other), codecs.length === 1 ? 1 : 2);
+  assert.equal(elements.get("codec").hidden, codecs.length === 1);
+  assert.equal(elements.get("codec").disabled, codecs.length === 1);
+  assert.equal(elements.get("codec-label").hidden, codecs.length === 1);
 }
 
 function report(seconds, state = "succeeded") {

@@ -96,6 +96,7 @@
       padding: 5px 8px;
       font: inherit;
     }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -135,7 +136,39 @@
   <script type="module">
     import { createReceiverMonitor } from "./receiver-stats.mjs";
     const codecSelect = document.getElementById("codec");
-    const selectedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
+    let monitorMixer = true;
+    async function mixerState() {
+      try {
+        const response = await fetch(new URL("mixer-state", location.href), {signal: AbortSignal.timeout(4000)});
+        if (response.status === 404) monitorMixer = false;
+        return response.ok ? await response.json() : null;
+      } catch { return null; }
+    }
+    const initialMixerState = await mixerState();
+    const declaredOutputs = new URL(location.href).searchParams.get("outputs")?.split(",")
+      .filter(codec => codec === "h264" || codec === "h265");
+    const availableCodecs = initialMixerState?.settings?.preview_codecs ||
+      (declaredOutputs?.length ? declaredOutputs : monitorMixer ? ["h264"] : ["h264", "h265"]);
+    const requestedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
+    const selectedCodec = availableCodecs.includes(requestedCodec) ? requestedCodec : availableCodecs[0] || "h264";
+    codecSelect.hidden = availableCodecs.length < 2;
+    codecSelect.disabled = codecSelect.hidden;
+    document.querySelector('label[for="codec"]').hidden = codecSelect.hidden;
+    for (const option of codecSelect.options) option.disabled = !availableCodecs.includes(option.value);
+    let mixerRevision = initialMixerState?.setup_revision;
+    async function watchMixer() {
+      const state = await mixerState();
+      if (state?.settings?.preview_codecs) {
+        if (JSON.stringify(state.settings.preview_codecs) !== JSON.stringify(availableCodecs) ||
+            (mixerRevision !== undefined && state.setup_revision !== mixerRevision)) {
+          location.reload();
+          return;
+        }
+        mixerRevision = state.setup_revision;
+      }
+      if (monitorMixer) setTimeout(watchMixer, 2000);
+    }
+    if (monitorMixer) setTimeout(watchMixer, 2000);
     codecSelect.value = selectedCodec;
     const MOUNTPOINT_ID = selectedCodec === "h265" ? 2 : 1;
     codecSelect.addEventListener("change", () => {

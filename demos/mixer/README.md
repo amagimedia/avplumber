@@ -27,20 +27,37 @@ capture support. Follow the [Docker/NVIDIA setup](../README.md#nvidia-host-setup
 including the recursive submodule checkout. Run from the repository root:
 
 ```sh
-mkdir -p media
-cp demos/mixer/demo.equal.json media/demo.json
 docker compose -f demos/mixer/compose.yaml up --build
 ```
+
+Open **<http://127.0.0.1:7681/setup/>**, choose resolution, FPS, unique sources,
+scenes, mode and source counts, then click **Apply setup**. The instance generates
+its assets and starts the mixer. No JSON editing or downloads are required.
+**8-bit** uses an SDR NV12 canvas and H.264 output only; the player hides its
+stream selector. **10-bit HDR** offers **4:2:2** (P210, default) or **4:2:0** (P010),
+with H.264 SDR and H.265 HDR outputs. Switching to HDR selects the balanced mix,
+including HDR inputs; each source type has an editable count. Editing a type
+updates the total; changing the total redistributes the current mix. HDR 4:2:2 inputs are capped
+at **four**, redistributing the remainder among the other enabled types.
+4:2:0 mode excludes 4:2:2 inputs. Switching to SDR reallocates video weights to
+SDR 4:2:0; 8-bit 4:2:2 is not offered.
+
+The same page changes an existing instance: it prepares missing assets, restarts
+the mixer, then refreshes the control page and player. Output pauses during the
+restart. If startup fails, the service attempts to restore the previous show.
 
 Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
 in the player if your browser cannot decode HEVC. The standalone player remains
 at <http://127.0.0.1:8080>.
 
-The first run builds the runtime, generates synthetic clips and a wipe, and
-downloads the short public Bunny clip. It then starts 16 independent sources
-and 32 scenes on a **1080×1920p60 HLG** canvas. Both Janus mountpoints and browser
-capture are included; no private assets or host Python packages are needed.
-Later starts reuse `media/assets/` and `media/media_wipes/`.
+The setup limits unique sources to **32 at 50/60 fps** and **64 at 25/30 fps**,
+and scenes to **128**.
+
+Settings persist in `media/demo.json`; later starts restore them and reuse
+`media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
+mixer child restarts, without access to the Docker socket. The generic setup
+includes generated clips and two moving alpha wipes, with no media downloads.
+Custom files and explicit scene geometry remain advanced recipe options below.
 
 On a remote host, prefix the Compose command with `JANUS_HOST_IP=<host>` and
 open `http://<host>:7681`. Allow TCP 7681/8080 and UDP 20000–20100. For large
@@ -50,10 +67,11 @@ before starting the stack. Stop it with
 
 ## Choose a recipe
 
-Copy either preset to `media/demo.json`:
+Start with generic media, then optionally choose a mixed-source preset:
 
 | Preset | Source proportions |
 | --- | --- |
+| [`demo.example.json`](demo.example.json) | Generated SDR/HLG 420/422 sources only, plus generated wipes. No media downloads. |
 | [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422, Bunny and browser sources. |
 | [`demo.cinematic.json`](demo.cinematic.json) | The same categories, with two generated HLG 420 inputs replaced by public PQ and HLG movie clips at the default count. |
 

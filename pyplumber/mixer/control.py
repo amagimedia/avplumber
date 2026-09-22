@@ -27,7 +27,9 @@ class AvpConnection:
 
     async def connect(self) -> None:
         await self.disconnect()
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
+        self.reader, self.writer = await asyncio.open_connection(
+            self.host, self.port, limit=4 * 1024 * 1024)
         code, status, _ = await self._read_response()
         if code != 100:
             await self.disconnect()

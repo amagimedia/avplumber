@@ -14,6 +14,7 @@ JANUS_REST = os.environ.get(
     "JANUS_REST",
     f"http://127.0.0.1:{os.environ.get('JANUS_HTTP_PORT', '8088')}/janus",
 )
+MIXER_STATE_URL = os.environ.get("MIXER_STATE_URL", "")
 PREVIEW_PORT = int(os.environ.get("JANUS_PREVIEW_PORT", "8080"))
 
 
@@ -78,6 +79,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        if self.path == "/mixer-state" and MIXER_STATE_URL:
+            self._proxy(MIXER_STATE_URL, timeout=3)
+            return
         if self.path == "/receiver-stats":
             payload = json.dumps(receiver_samples.snapshot(), allow_nan=False).encode()
             self.send_response(200)
@@ -113,6 +117,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
     def _proxy_janus(self):
         suffix = self.path[len("/janus"):]
         upstream_url = f"{JANUS_REST}{suffix}"
+        self._proxy(upstream_url)
+
+    def _proxy(self, upstream_url, timeout=65):
         body = None
         if self.command in ("POST", "PUT", "PATCH"):
             length = int(self.headers.get("content-length", "0") or "0")
@@ -127,7 +134,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             method=self.command,
         )
         try:
-            with urllib.request.urlopen(request, timeout=65) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read()
                 self.send_response(response.status)
                 self.send_header(

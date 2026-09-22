@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AVPlumber mixer setup</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0b0d10; --panel: #14181d; --edge: #232b34; --edge-soft: #1b222a;
+  --text: #e8edf2; --muted: #8b98a5; --accent: #f5a524; --error: #e5484d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 14px; background: var(--bg); color: var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header, main { max-width: 1320px; margin: auto; }
+header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+h1 { font-size: 15px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; margin: 0; }
+h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; margin: 0; }
+p { margin: 6px 0; color: var(--muted); }
+a { color: var(--accent); }
+button, input, select { font: inherit; color: var(--text); border: 1px solid var(--edge); border-radius: 6px; padding: 7px 9px; }
+input, select { background: #0e1216; }
+button { background: #1b2129; cursor: pointer; }
+.primary { border-color: var(--accent); color: var(--accent); }
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.workspace { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(345px,1fr); gap: 14px; align-items: start; }
+.workspace > * { min-width: 0; }
+.stack { display: grid; gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 14px 16px; }
+.card-title { margin-bottom: 14px; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+label { display: block; font-size: 12px; color: var(--muted); }
+label input, label select { display: block; width: 100%; margin-top: 5px; }
+.hint, details p { font-size: 12px; }
+.canvas-row { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--edge); }
+.canvas-row p { font-size: 12px; }
+.presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.presets button { font-size: 12px; }
+.source { display: grid; grid-template-columns: minmax(130px,1fr) 76px; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--edge-soft); }
+.source small { font-size: 11px; color: var(--muted); display: block; }
+.source b { font-size: 13px; }
+.source input[type=number] { width: 76px; padding: 6px; text-align: right; }
+.dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 6px; }
+.allocation { display: flex; height: 5px; overflow: hidden; background: var(--edge); margin: 10px 0; }
+.right { position: sticky; top: 14px; }
+.summary h2 { margin-bottom: 12px; }
+.stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+.stats b { display: block; font-size: 24px; font-weight: 600; }
+.stats span, .summary p { font-size: 12px; color: var(--muted); }
+.summary p { margin-top: 12px; }
+.notice { font-size: 12px; color: var(--muted); margin-top: 12px; }
+.error { color: var(--error); }
+.error:empty { display: none; }
+details { margin-top: 14px; font-size: 13px; }
+summary { cursor: pointer; }
+@media (max-width: 880px) { .workspace { grid-template-columns: 1fr; } .right { position: static; } }
+@media (max-width: 560px) {
+  .fields { grid-template-columns: 1fr; }
+}
+</style>
+<header><h1>AVPlumber mixer setup</h1></header>
+<main>
+<div class="workspace">
+<div class="stack">
+<section class="card"><div class="card-title"><h2>Mixer</h2></div>
+<div class="fields">
+<label>Program resolution<select id="resolution"><option value="1920x1080">1080p · 1920 × 1080</option><option value="1280x720">720p · 1280 × 720</option></select></label>
+<label>Orientation<select id="orientation"><option value="portrait">Portrait · 9:16</option><option value="landscape">Landscape · 16:9</option></select></label>
+<label>Frames per second<select id="fps"><option>25</option><option>30</option><option>50</option><option selected>60</option></select></label>
+<label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
+<label>Unique sources<input id="sources" type="number" min="1" max="64" step="1" value="16"></label>
+<label>Scenes<input id="scenes" type="number" min="1" max="128" step="1" value="32"></label>
+<label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
+</div>
+<div class="canvas-row"><div><b id="canvas-label"></b><p id="canvas-format"></p><p id="input-size"></p></div></div>
+<p class="hint" id="source-limit"></p>
+<p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
+</section>
+<section class="card"><div class="card-title"><h2>Sources</h2></div>
+<p class="hint">Edit source counts directly. Changing the total redistributes the mix. Switching to HDR selects the balanced mix.</p>
+<div class="presets"><button data-preset="balanced">Balanced</button><button data-preset="equal">Equal mix</button><button data-preset="light">4:2:0 only</button></div>
+<div id="source-controls"></div><div class="allocation" id="allocation" aria-hidden="true"></div>
+<p class="hint" id="allocation-note"></p>
+<details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars. HLG uses HDR bars and moving highlights. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
+</section>
+<section class="card"><div class="card-title"><h2>Included with every setup</h2></div>
+<p class="hint">Two generated wipes: diagonal sweep and sliding panels. Each lasts two seconds at the selected FPS. Wipe caching is off.</p>
+<p class="hint" id="scene-description"></p>
+<details><summary>Outputs and operating limits</summary><p id="output-description"></p><p>Sources and program use the chosen FPS. Source clips stay landscape, even with a portrait program.</p><p>Playback requires a Linux NVIDIA host with hardware decode/encode and DMA-BUF support. More sources increase decoder, memory and GPU load; this page does not predict host capacity. Building Docker images needs internet, but these generic assets require no media downloads.</p></details>
+</section>
+</div>
+<aside class="stack right">
+<section class="card summary"><h2 id="summary-title"></h2><div class="stats"><div><b id="source-total"></b><span>unique sources</span></div><div><b id="scene-total"></b><span>scenes</span></div><div><b id="fps-total"></b><span>frames / second</span></div></div><p id="engine-split"></p></section>
+<section class="card">
+<button class="primary" id="apply">Apply setup</button>
+<p class="hint">Prepares assets and restarts this instance’s mixer. Output pauses during the restart.</p>
+<div id="error" class="notice error" role="alert"></div>
+<div id="feedback" class="notice" role="status">Connecting to instance…</div>
+<p><a href="/" id="open-controls">Open mixer controls</a></p>
+</section>
+</aside>
+</div>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const types = [
+ {id:'sdr420',name:'SDR · 4:2:0',detail:'H.264 patterns · NVDEC',color:'#439a86'},
+ {id:'hlg420',name:'HDR · 4:2:0',detail:'HLG patterns · NVDEC',color:'#5a87b5'},
+ {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce'},
+ {id:'sdr422',name:'SDR · 4:2:2',detail:'10-bit v210 bars · GPU unpack',color:'#d5a35f'},
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page',color:'#d47f95'}
+];
+const presets = {balanced:[8,4,2,0,2],equal:[1,1,1,1,1],light:[2,1,0,0,0]};
+let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
+let resizeValues=null, submitting=false, submission=0;
+const sourceLimit = () => Number($('fps').value)>=50?32:64;
+function outputMode(){
+ const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
+}
+function sourceEnabled(i){
+ const {bit_depth,chroma}=outputMode();
+ return i===0||i===4||(bit_depth===10&&(i===1||chroma==='422'));
+}
+const controls=$('source-controls');
+types.forEach((t,i)=>{
+ const row=document.createElement('div');row.className='source';
+ row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${i===2?4:64}" step="1" aria-label="${t.name} sources">`;
+ const input=row.querySelector('input');
+ input.addEventListener('input',()=>{
+  const limit=sourceLimit();
+  const other=sourceValues.reduce((sum,n,index)=>sum+(index===i?0:n),0);
+  const maximum=Math.min(i===2?4:limit,limit-other);
+  if(Number(input.value)>maximum)input.value=maximum;
+  sourceValues[i]=Number(input.value);
+  $('sources').value=sourceValues.reduce((sum,n)=>sum+n,0);
+  update();
+ });controls.append(row);
+});
+function allocate(total,values){
+ const scale=Math.max(...values);if(!scale)throw Error('Add at least one source.');
+ const normalized=values.map(w=>w/scale),sum=normalized.reduce((a,b)=>a+b,0);
+ const quotas=normalized.map(w=>total*w/sum),counts=quotas.map(Math.floor);
+ const order=values.map((_,i)=>i).sort((a,b)=>(quotas[b]-counts[b])-(quotas[a]-counts[a])||a-b);
+ for(let n=total-counts.reduce((a,b)=>a+b,0),i=0;i<n;i++)counts[order[i]]++;
+ return counts;
+}
+function sourceCounts(total,values){
+ let counts=allocate(total,values);
+ if(counts[2]>4){
+  const remaining=values.map((w,i)=>i===2?0:w);
+  if(!remaining.some(Boolean))throw Error('HDR 4:2:2 is limited to four sources; enable another source type.');
+  counts=allocate(total-4,remaining);counts[2]=4;
+ }
+ return counts;
+}
+function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${id==='sources'?'Unique sources':'Scenes'} must be a whole number from ${min} to ${max}.`);return v;}
+function update(){
+ try{
+ const fps=Number($('fps').value),limit=sourceLimit();
+ $('sources').max=limit;
+ if(Number($('sources').value)>limit)$('sources').value=limit;
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.`;
+ if(Number($('scenes').value)>128)$('scenes').value=128;
+ const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128);
+ if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
+ if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||sourceValues[2]>4)sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
+ const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
+ const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
+ const video=counts.slice(0,4).reduce((a,b)=>a+b,0),browser=counts[4],mode=$('layout').value;
+ const layouts={fullscreen:2};
+ if(mode!=='fullscreen'){
+  for(const n of [2,4,8,16,32,64])if(n<=sourceCount)layouts[`grid_${n}`]=mode==='grids'?2:1;
+  if(mode==='balanced'){layouts.pip=3;layouts.random=3;if(video&&browser)layouts.alpha_overlay=2;}
+ }
+ currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
+   source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts]};
+ types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(i===2?4:limit,limit-sourceCount+counts[i]);});
+ $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
+ $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. HDR 4:2:2 is capped at four.`;
+ $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
+ const eight=currentSettings.bit_depth===8;
+ $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;
+ $('output-description').textContent=eight?'H.264 / SDR at 6 Mbit/s. HDR encoding is off.':'H.264 / SDR at 6 Mbit/s and H.265 / HLG at 8 Mbit/s.';
+ $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${fps} fps`;
+ $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${fps}`;
+ $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=fps;
+ $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${browser} browser. ${eight?'H.264 only.':'Two encoded outputs.'}`;
+ const sceneCounts=allocate(sceneCount,Object.values(layouts));
+ $('scene-description').textContent=Object.keys(layouts).map((name,i)=>`${sceneCounts[i]} ${name.replaceAll('_',' ')}`).filter((_,i)=>sceneCounts[i]>0).join(' · ');
+ $('error').textContent='';
+ }catch(error){
+  currentSettings=null;$('error').textContent=error.message;
+  $('source-total').textContent=sourceValues.every(n=>Number.isInteger(n)&&n>=0)?sourceValues.reduce((a,b)=>a+b,0):'—';
+  $('allocation-note').textContent=error.message;
+ }
+ setBusy(busy);
+}
+function setBusy(value){
+ busy=value||submitting;
+ document.querySelectorAll('.fields input,.fields select,[data-preset]').forEach(el=>el.disabled=busy);
+ types.forEach((t,i)=>{$(`count-${t.id}`).disabled=busy||!sourceEnabled(i)});
+ $('apply').disabled=!currentSettings||busy||!online;
+}
+function showStatus(status){
+ $('feedback').textContent=status.message;
+ setBusy(['preparing','starting'].includes(status.phase));
+}
+async function refresh(){
+ const requestedSubmission=submission;
+ try{
+  if(submitting)return;
+  const response=await fetch('/api/setup',{signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw Error('Setup backend unavailable. Open this page on the running demo instance.');
+  const status=await response.json();
+  if(submitting||requestedSubmission!==submission)return;
+  online=true;
+  if(!loaded&&!['preparing','starting'].includes(status.phase)){
+   if(status.settings){
+    const s=status.settings;
+    previousDepth=s.bit_depth??10;
+    $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
+    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout'}))$(id).value=s[key];
+    sourceValues=[...s.weights];syncCounts();
+   }
+   loaded=true;update();
+  }
+  showStatus(status);
+ }catch(error){
+  if(submitting||requestedSubmission!==submission)return;
+  online=false;$('feedback').textContent=error.message;$('apply').disabled=true;
+ }finally{setTimeout(refresh,1500);}
+}
+function syncCounts(){
+ if(outputMode().bit_depth===8){
+  sourceValues[0]+=sourceValues[1]+sourceValues[2]+sourceValues[3];sourceValues[1]=sourceValues[2]=sourceValues[3]=0;
+ }else if(outputMode().chroma==='420'){
+  sourceValues[0]+=sourceValues[3];sourceValues[1]+=sourceValues[2];sourceValues[2]=sourceValues[3]=0;
+ }
+ const total=sourceValues.some(n=>n>0)?Math.min(sourceLimit(),Math.max(1,Number($('sources').value)||1)):0;
+ $('sources').value=total;
+ resizeValues=null;
+}
+$('apply').onclick=async()=>{
+ if(!currentSettings||busy||!online)return;
+ submitting=true;submission++;
+ let pending=false;
+ setBusy(true);$('feedback').textContent='Submitting setup…';
+ try{
+  const response=await fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentSettings),signal:AbortSignal.timeout(10000)});
+  const status=await response.json();
+  if(!response.ok)throw Error(status.error||'Setup failed');
+  pending=['preparing','starting'].includes(status.phase);
+  showStatus(status);
+ }catch(error){$('feedback').textContent=error.message;}
+ finally{submitting=false;setBusy(pending);}
+};
+document.querySelectorAll('[data-preset]').forEach(button=>button.onclick=()=>{
+ const preset=button.dataset.preset;
+ sourceValues=presets[preset].map((n,i)=>preset==='equal'&&!sourceEnabled(i)?0:n);
+ syncCounts();update();
+});
+$('mode').addEventListener('input',()=>{
+ const {bit_depth,chroma}=outputMode();
+ if(bit_depth===10&&previousDepth===8)sourceValues=Number($('sources').value)===1?[0,1,0,0,0]:[...presets.balanced];
+ if(chroma==='422'&&!sourceValues[2])sourceValues[2]=Math.min(4,Math.max(1,Math.round(Number($('sources').value)/8)));
+ previousDepth=bit_depth;
+ syncCounts();update();
+});
+for(const id of ['resolution','orientation','fps','sources','scenes','layout'])$(id).addEventListener('input',update);
+$('sources').addEventListener('focus',()=>{resizeValues=[...sourceValues]});
+$('sources').addEventListener('blur',()=>{resizeValues=null});
+setBusy(true);update();refresh();
+</script>
+</html>

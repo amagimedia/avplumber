@@ -12,6 +12,8 @@ services:
 
   janus-preview:
     extends: {file: ../dmabuf-browser/compose.yaml, service: janus-preview}
+    environment:
+      MIXER_STATE_URL: http://127.0.0.1:${MIXER_HTTP_PORT:-7681}/api/state
 
   wayland:
     extends: {file: ../dmabuf-browser/compose.yaml, service: wayland}
@@ -20,7 +22,7 @@ services:
     extends: {file: ../dmabuf-browser/compose.yaml, service: dma-browser}
     environment:
       DMA_BROWSER_AUTO_OPEN_URL: ""
-      DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-16}
+      DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-64}
       DMA_BROWSER_WINDOWS_PER_PROCESS: 8
       DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1280x720
 
@@ -28,25 +30,23 @@ services:
     extends: {file: ../dmabuf-browser/compose.yaml, service: avplumber}
     <<: *mixer-image
     restart: "no"
-    entrypoint: [/bin/sh, -ec]
-    environment:
-      MIXER_RECIPE: ${MIXER_RECIPE:-/media/demo.json}
+    entrypoint: [python3, demos/mixer/webui.py]
     volumes:
       - ../../media:/media:rw,z
     command:
-      - |
-        python3 demos/mixer/prepare_demo.py "$$MIXER_RECIPE" --media-dir /media
-        exec python3 demos/mixer/mixer.py --config /media/mixer.demo.json \
-          --janus-output --remote-control-port ${MIXER_CONTROL_PORT:-7777} \
-          --dmabuf-rest http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009} \
-          --prewarm-cut-scene '*'
-
-  controls:
-    <<: *mixer-image
-    network_mode: host
-    depends_on: [mixer]
-    entrypoint: [python3, demos/mixer/webui.py]
-    command: [--port, "${MIXER_CONTROL_PORT:-7777}", --http-port, "${MIXER_HTTP_PORT:-7681}"]
+      - --manage-setup
+      - --recipe
+      - ${MIXER_RECIPE:-/media/demo.json}
+      - --port
+      - "${MIXER_CONTROL_PORT:-7777}"
+      - --http-port
+      - "${MIXER_HTTP_PORT:-7681}"
+      - --dmabuf-rest
+      - http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}
+      - --mixer-args
+      - --janus-output
+      - --prewarm-cut-scene
+      - '*'
 
 volumes:
   wayland-runtime:
