@@ -1029,12 +1029,12 @@ def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path
     assert FakeMixer.instances[-1].parameters["latency_ms"] == 20.0
 
 
-@pytest.mark.parametrize("count", [33, 45, 64, 65])
+@pytest.mark.parametrize("count", [33, 45, 64, 65, 96, 128, 129])
 def test_source_mask_capacity(count):
     sources = [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 16, "height": 16} for i in range(count)]
     doc = {**CONFIG, "initial_scene": "s", "sources": sources, "scenes": [{"id": "s", "items": [{"source": "s0", "dst": {"x": 0, "y": 0, "w": 16, "h": 16}}]}]}
-    if count > 64:
-        with pytest.raises(mixer_config.ConfigError, match="64 sources"):
+    if count > mixer_config.MAX_SOURCES:
+        with pytest.raises(mixer_config.ConfigError, match="at most 128 sources"):
             mixer_config.parse(doc)
     else:
         assert len(mixer_config.parse(doc).sources) == count

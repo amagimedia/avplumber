@@ -26,7 +26,7 @@ TRANSITIONS = ("cut", "fade", "wipe")
 # onto them, so they only fail later.
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
-MAX_SOURCES = 64          # cuda_rect_overlay active_inputs is a 64-bit pad mask
+MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
 
@@ -336,7 +336,8 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     if not sources:
         raise ConfigError("sources must not be empty")
     if len(sources) > MAX_SOURCES:
-        raise ConfigError(f"at most {MAX_SOURCES} sources per show: each is a compositor pad and the pad mask is 64 bits")
+        raise ConfigError(f"at most {MAX_SOURCES} sources per show: each is a compositor pad "
+                          f"and the pad mask is {MAX_SOURCES} bits")
 
     renditions: List[Rendition] = []
     for i, r in enumerate(doc.get("renditions", [])):

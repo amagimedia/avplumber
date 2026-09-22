@@ -12,7 +12,7 @@ from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, recipe_for, source_cou
 from webui import serve
 
 
-@pytest.mark.parametrize('count', [1, 8, 16, 32, 42, 48, 64])
+@pytest.mark.parametrize('count', [1, 8, 16, 32, 42, 48, 64, 96])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
     if fps >= 50 and count > 48:
@@ -26,7 +26,7 @@ def test_generic_setups_expand(tmp_path, count, fps):
     assert show['canvas']['fps'] == fps
 
 
-@pytest.mark.parametrize('changes', [{'source_count': 65}, {'scene_count': 0}, {'scene_count': 129}, {'fps': 24},
+@pytest.mark.parametrize('changes', [{'source_count': 97}, {'scene_count': 0}, {'scene_count': 129}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
@@ -146,7 +146,7 @@ def test_old_setup_defaults_to_ten_bit():
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 64), (30, 64), (50, 48), (60, 48)])
+@pytest.mark.parametrize("fps, maximum", [(25, 96), (30, 96), (50, 48), (60, 48)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
                 "chroma": "420" if bit_depth == 8 else "422",

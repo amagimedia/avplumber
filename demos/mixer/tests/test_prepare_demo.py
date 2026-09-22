@@ -204,7 +204,7 @@ def test_cinematic_recipe_keeps_http_hdr_and_smooth_422_inputs(tmp_path):
     assert all(source["url"].startswith("https://") for source in recipe["inputs"][:2])
 
 
-@pytest.mark.parametrize("field,value", [("source_count", 65), ("source_count", 0), ("scene_count", 0)])
+@pytest.mark.parametrize("field,value", [("source_count", 129), ("source_count", 0), ("scene_count", 0)])
 def test_invalid_counts_fail_before_creating_assets(recipe, tmp_path, field, value):
     recipe[field] = value
     with pytest.raises(ValueError):

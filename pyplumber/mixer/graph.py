@@ -471,6 +471,14 @@ class MixerGraphBuilder:
             mask |= 1 << idx
         return mask
 
+    @staticmethod
+    def _mask_param(mask: int):
+        """A pad mask as the node reads it: a number while it fits in 64 bits, otherwise the
+        least-significant-bit-first '0'/'1' string, since JSON numbers stop there."""
+        if mask < (1 << 64):
+            return mask
+        return "".join("1" if mask >> bit & 1 else "0" for bit in range(mask.bit_length()))
+
     def _prepare_source_edges(self):
         shared = {}
         result = {}
@@ -601,7 +609,7 @@ class MixerGraphBuilder:
                     {k: v for k, v in self._initial_scene_def().sources.get(source.name, {}).items() if k != "graph"}
                     if is_program else {} for source in self._sources
                 ],
-                "active_inputs": active_pgm if is_program else 0,
+                "active_inputs": self._mask_param(active_pgm) if is_program else 0,
                 "timeline": self.timeline,
                 "group": f"{self.name}_{slot}",
             }))

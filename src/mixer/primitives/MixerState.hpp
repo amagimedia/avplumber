@@ -9,6 +9,7 @@
 #include <vector>
 #include <atomic>
 #include "CutLatencyProbe.hpp"
+#include "source_mask.hpp"
 
 namespace avp::mixer {
 
@@ -41,7 +42,7 @@ struct MixerState : public InstanceShared<MixerState> {
 
     struct SourceInfo {
         std::string otm_node_name;          // "otm_cam1"
-        int input_index;                    // index within compositor src array
+        int input_index;                    // index within compositor src array (0..SourceMask::kBits-1)
         std::string cs_node_a, cs_node_b;   // "cs_cam1_a", "cs_cam1_b"
         bool routed = false;
         std::string router_node_name;
@@ -54,9 +55,9 @@ struct MixerState : public InstanceShared<MixerState> {
 
     std::unordered_map<std::string, SceneDefinition> scenes;
     std::unordered_set<std::string> prewarm_cut_scenes;
-    uint64_t prewarm_source_mask = 0;
+    SourceMask prewarm_source_mask;
     uint32_t sourceOutputMask(const SourceInfo& source, uint32_t requested) const {
-        return (prewarm_source_mask & (uint64_t{1} << source.input_index)) ? requested | 3u : requested;
+        return prewarm_source_mask.test(source.input_index) ? requested | 3u : requested;
     }
     std::unordered_map<std::string, int> router_output_counts;
     std::unordered_map<std::string, std::vector<int>> router_routes;
@@ -127,12 +128,12 @@ struct MixerState : public InstanceShared<MixerState> {
     uint32_t pgmOutputBit() const { return pgm_is_slot_a ? 1u : 2u; }
     uint32_t pvwOutputBit() const { return pgm_is_slot_a ? 2u : 1u; }
 
-    uint64_t computeActiveInputsMask(const SceneDefinition& scene) const {
-        uint64_t mask = 0;
+    SourceMask computeActiveInputsMask(const SceneDefinition& scene) const {
+        SourceMask mask;
         for (const auto& [src_name, layout] : scene.sources) {
             auto it = sources.find(src_name);
             if (it != sources.end())
-                mask |= (uint64_t{1} << it->second.input_index);
+                mask.set(it->second.input_index);
         }
         return mask;
     }

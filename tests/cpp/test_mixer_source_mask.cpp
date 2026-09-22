@@ -7,30 +7,40 @@ int main() {
     using namespace avp::mixer;
     MixerState state;
     SceneDefinition scene;
-    uint64_t expected = 0;
-    for (int index : {0, 31, 32, 44, 63}) {
+    SourceMask expected;
+    for (int index : {0, 31, 32, 44, 63, 64, 95, 127}) {
         auto name = std::to_string(index);
         state.sources[name].input_index = index;
         scene.sources[name] = {};
-        expected |= uint64_t{1} << index;
+        expected.set(index);
     }
     assert(state.computeActiveInputsMask(scene) == expected);
-    state.prewarm_source_mask = uint64_t{1} << 63;
-    assert(state.sourceOutputMask(state.sources.at("63"), 0) == 3);
-    assert(state.sourceOutputMask(state.sources.at("31"), 0) == 0);
+
+    // Prewarm forces both slot bits on, for pads above 64 as well.
+    state.prewarm_source_mask = SourceMask::bit(127);
+    assert(state.sourceOutputMask(state.sources.at("127"), 0) == 3);
+    assert(state.sourceOutputMask(state.sources.at("63"), 0) == 0);
     assert(state.sourceOutputMask(state.sources.at("32"), 1) == 1);
 
-    assert(parseBitmask<uint64_t>(Parameters(expected)) == expected);
-    std::string bits(64, '0');
-    bits[0] = bits[32] = bits[63] = '1';
-    assert(parseBitmask<uint64_t>(Parameters(bits)) ==
-           ((uint64_t{1} << 63) | (uint64_t{1} << 32) | 1));
-    assert(parseBitmask<uint64_t>(Parameters(std::string(64, '1'))) ==
-           std::numeric_limits<uint64_t>::max());
-    assert(parseBitmask(Parameters(std::string(32, '1'))) ==
-           std::numeric_limits<uint32_t>::max());
+    // Wire form: a number while it fits in 64 bits, a bit string above that.
+    const SourceMask low = SourceMask::bit(0) | SourceMask::bit(63);
+    assert(toParameters(low).is_number());
+    assert(parseSourceMask(toParameters(low)) == low);
+    assert(toParameters(expected).is_string());
+    assert(parseSourceMask(toParameters(expected)) == expected);
+    assert(parseSourceMask(Parameters(std::string(96, '1'))).test(95));
+    assert(!parseSourceMask(Parameters(std::string(96, '1'))).test(96));
+    // A 64-bit number still means pads 0..63, as older mixers sent it.
+    const SourceMask all_low{{std::numeric_limits<uint64_t>::max(), 0}};
+    assert(parseSourceMask(Parameters(std::numeric_limits<uint64_t>::max())) == all_low);
+    assert(all_low.test(63) && !all_low.test(64));
     bool rejected = false;
-    try { parseBitmask<uint64_t>(Parameters(std::string(65, '1'))); }
+    try { parseSourceMask(Parameters(std::string(129, '1'))); }
     catch (const Error&) { rejected = true; }
     assert(rejected);
+
+    // The narrow parser other nodes use (one_to_many outputs) is unchanged.
+    assert(parseBitmask<uint64_t>(Parameters(std::string(64, '1'))) ==
+           std::numeric_limits<uint64_t>::max());
+    assert(parseBitmask(Parameters(std::string(32, '1'))) == std::numeric_limits<uint32_t>::max());
 }

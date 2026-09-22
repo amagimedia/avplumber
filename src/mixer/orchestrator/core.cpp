@@ -288,7 +288,7 @@ Parameters MixerOrchestrator::status() const {
     s["now_pts_ms"] = wallclock.pts();
     s["cut_latency"] = state_->cut_latency ? state_->cut_latency->status() : Parameters(nullptr);
     s["prewarm_cut_scenes"] = state_->prewarm_cut_scenes;
-    s["prewarm_source_mask"] = state_->prewarm_source_mask;
+    s["prewarm_source_mask"] = toParameters(state_->prewarm_source_mask);
     if (!state_->overlay_selector_name.empty()) {
         s["overlay_enabled"] = state_->overlay_enabled;
         s["overlay_selector"] = state_->overlay_selector_name;
