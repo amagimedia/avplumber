@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 pytest.importorskip("numpy")
-from prepare_demo import ensure_asset, plan, prepare, download
+from prepare_demo import ensure_asset, plan, prepare, download, render_wipe, WIPE_NAMES
 from demo_recipe import allocate
 from pyplumber.mixer.config import load, parse, scene_layers
 from v210_fixture import frame_stride
@@ -37,6 +37,26 @@ def test_failed_generation_does_not_leave_a_cached_asset(tmp_path):
     ensure_asset(path, lambda staged: staged.write_bytes(b"complete"))
     ensure_asset(path, fail)
     assert path.read_bytes() == b"complete"
+
+
+@pytest.mark.parametrize("fps", [25, 30, 50, 60])
+@pytest.mark.parametrize("pattern", WIPE_NAMES)
+def test_wipes_move_and_cover_the_midpoint(tmp_path, fps, pattern):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("requires FFmpeg")
+    import numpy as np
+
+    path = tmp_path / "wipe.mov"
+    render_wipe(path, "96x64", fps, "ffmpeg", pattern)
+    raw = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", str(path), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
+    frames = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 64, 96, 4)
+    assert len(frames) == 2 * fps
+    assert not frames[0, :, :, 3].any() and not frames[-1, :, :, 3].any()
+    assert (frames[fps, :, :, 3] == 255).all()
+    # Adjacent opaque frames still move; alpha alone must not hide a frozen graphic.
+    assert not np.array_equal(frames[fps, :, :, :3], frames[fps + 1, :, :, :3])
+    assert 0 < np.count_nonzero(frames[fps // 2, :, :, 3]) < 64 * 96
 
 
 def test_source_counts_layout_counts_and_reproducible_geometry(recipe, tmp_path):

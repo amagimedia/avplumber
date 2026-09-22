@@ -39,7 +39,7 @@ services:
         exec python3 demos/mixer/mixer.py --config /media/mixer.demo.json \
           --janus-output --remote-control-port ${MIXER_CONTROL_PORT:-7777} \
           --dmabuf-rest http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009} \
-          --wipe-cache-mb 2048 --prewarm-cut-scene '*'
+          --prewarm-cut-scene '*'
 
   controls:
     <<: *mixer-image

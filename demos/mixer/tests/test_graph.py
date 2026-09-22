@@ -419,11 +419,11 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
 def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     FakeMixer.instances.clear()
     application = build_application(
-        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov"), api=fake_api())
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_file="/media/wipe.mov", wipe_cache_mb=256), api=fake_api())
     monkeypatch.setattr(application, "_wait_for_edges", lambda *a, **k: None)
     monkeypatch.setattr(application, "_wait_for_node", lambda *a, **k: None)
     application.start()
-    # Cached by default: the clip is armed on the loader and decoded once, so
+    # Caching opted in: the clip is armed on the loader and decoded once, so
     # mixer.wipe.warmup (which only compiles the filter) is not used.
     armed = "\n".join(application.avp.commands)
     assert 'node.param.set mixer_wipe_input url "/media/wipe.mov"' in armed
@@ -746,17 +746,17 @@ def test_wipe_cache_is_optional_and_splits_the_chain(tmp_path):
 
     FakeMixer.instances.clear()
     default = build_application(GraphOptions(inputs=("a.mp4",), output="p.mp4"), api=fake_api())
-    assert default.wipe_cache_mb == 768.0            # on by default
-    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 768.0
-
-    FakeMixer.instances.clear()
-    off = build_application(
-        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=0), api=fake_api())
-    assert not off.wipe_cache_mb
+    assert default.wipe_cache_mb == 0
     assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] is None
 
-    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 768.0
-    assert parse_args(["--input", "a.mp4", "--janus-output", "--wipe-cache-mb", "0"]).wipe_cache_mb == 0
+    FakeMixer.instances.clear()
+    cached = build_application(
+        GraphOptions(inputs=("a.mp4",), output="p.mp4", wipe_cache_mb=256), api=fake_api())
+    assert cached.wipe_cache_mb == 256
+    assert FakeMixer.instances[-1].parameters["cache_wipes_mb"] == 256
+
+    assert parse_args(["--input", "a.mp4", "--janus-output"]).wipe_cache_mb == 0
+    assert parse_args(["--input", "a.mp4", "--janus-output", "--wipe-cache-mb", "256"]).wipe_cache_mb == 256
     assert clipcache.loader_group("mixer") == "mixer_wipe_load"
 
 

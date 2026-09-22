@@ -137,9 +137,11 @@ backend uses the clip's duration, independently of **Fade seconds**. Use a clip
 that covers the picture at its midpoint to hide the scene cut.
 
 MOV is a container: the video codec must preserve alpha, for example QTRLE/ARGB
-or ProRes 4444. The wipe branch decodes and scales these assets on the CPU,
-uploads the alpha frames, and composites them on the GPU. Program inputs stay
-on the GPU. Supply media separately; clips are not stored in Git.
+or ProRes 4444. The wipe branch decodes these assets on the CPU and uploads
+alpha frames at their native size; scaling and compositing happen together
+on the GPU. Wipe caching is off by default; `--wipe-cache-mb 256` opts into a
+256 MiB GPU cache. The recipe generates its own moving alpha wipes; custom
+clips are supplied separately.
 
 The TUI polls Program, Preview, and transition state twice per second. If the
 connection fails or is lost, it shows the error in the connection bar; use

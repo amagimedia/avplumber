@@ -1,7 +1,7 @@
 # Mixer configuration file
 
 One JSON document describes a mixer run: the sources it opens, the wipe clips
-it caches, the scenes an operator can take, the defaults its control surfaces
+it plays, the scenes an operator can take, the defaults its control surfaces
 start from, and the encoded outputs it produces. Nothing about 2/4/8/16-box
 layouts lives in code — a grid is a scene somebody wrote or generated.
 
@@ -240,8 +240,10 @@ to vary the independent input count while reusing cached media files.
 
 ## wipes
 
-The media-wipe library. Every declared clip is decoded once at start and held
-as frames in the clip cache, so a take costs no file open and no decoder.
+The media-wipe library. Clips decode on each take by default, keeping GPU
+memory bounded by the playback queues. Startup warms the wipe path but does
+not retain whole decoded clips. Opt in with `--wipe-cache-mb 256` to retain
+clips in a GPU cache with a 256 MiB budget; `0` disables caching.
 
 ```json
 "wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov",

@@ -2,7 +2,7 @@
 
 <table>
 <tr>
-<td width="74%" valign="top"><img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and take buttons — Cut, Fade, one per cached wipe clip, the Direct toggle and the fade length."></td>
+<td width="74%" valign="top"><img src="docs/webui.png" alt="The mixer web UI: program and preview panels, a tile per scene with the one on air lit, and take buttons — Cut, Fade, one per wipe clip, the Direct toggle and the fade length."></td>
 <td width="26%" valign="top"><img src="docs/program-16box.png" alt="The 1080x1920 program: a sixteen-box grid, two columns of eight, each cell a different source — live browser pages down the left, video clips down the right."></td>
 </tr>
 </table>
@@ -134,9 +134,13 @@ python3 -m venv .venv-tui && .venv-tui/bin/python -m pip install -r demos/mixer/
 | Direct / `d` (`t` in the TUI) | Picks go straight to Program |
 | `1`–`9` | Pick one of the first nine scenes |
 
-A new take interrupts a running transition from the current picture. Wipe
-clips are decoded once at start and replayed from GPU memory, so the first
-wipe is as quick as the tenth; use a clip with alpha (QTRLE/ARGB, ProRes 4444).
+A new take interrupts a running transition from the current picture. Wipes
+decode on each take by default; decoded clips are not retained in GPU memory.
+Use `--wipe-cache-mb 256` to opt into a GPU cache with a 256 MiB budget.
+The recipe generates a diagonal sweep and sliding panels with moving colour
+bands at the selected FPS. No external wipe files are needed. Custom clips
+must preserve alpha (for example QTRLE/ARGB or ProRes 4444) and cover the
+canvas at their midpoint to hide the scene switch.
 
 ## Browser pages as sources
 

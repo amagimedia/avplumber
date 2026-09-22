@@ -136,7 +136,13 @@ per 1280×720 input at 30 fps. Short loops limit disk space, not playback load.
 Only allocated input categories are prepared. Changing layout weights or scene
 count reuses media; size, cadence, duration and encoder choices have separate
 cache paths. Delete an asset to regenerate it. An interrupted preparation does
-not publish a partial asset. `media/media_wipes/` holds the generated alpha wipe.
+not publish a partial asset. `media/media_wipes/` holds two generated alpha
+wipes: **Diagonal sweep** and **Sliding panels**. Moving colour bands make
+frame pacing visible even while the graphic covers the scene-switch midpoint.
+Both last two seconds, use the selected FPS and preserve the canvas aspect
+ratio, with the longer edge capped at 960 pixels to limit decode and upload
+cost. The compositor scales them to the canvas. No external wipe assets or
+downloads are required, and GPU wipe caching is off by default.
 
 ## Scene compositions
 

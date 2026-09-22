@@ -64,7 +64,9 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
     }
 
     // --- Phase 2: wipe end – tear down and flip ---
-    // Stage 2a: wait for the wipe source to EOF (or until the planned duration elapses).
+    // Stage 2a: keep the overlay selected for the planned duration. Input EOF
+    // only means the demuxer has read ahead to the end; queued decoded frames
+    // can still contain much of the exit animation.
     bool hit_input_eof = false;
     if (remaining_ms > 0) {
         int64_t waited_ms = 0;
@@ -72,11 +74,10 @@ void MixerOrchestrator::runWipeMidpointAndCleanup(
         while (waited_ms < remaining_ms) {
             if (!transitionIsCurrent(state, transition_generation, MixerState::TransitionMode::Wipe))
                 return;
-            if (!nodeWorkingIfExists(nodes, state->wipe_input_node_name)) {
-                logstream << "mixer wipe: cleanup pulled to wipe EOF after " << waited_ms
-                          << "ms of remaining tail";
+            if (!hit_input_eof && !nodeWorkingIfExists(nodes, state->wipe_input_node_name)) {
+                logstream << "mixer wipe: input EOF after " << waited_ms
+                          << "ms of remaining tail; waiting for planned end";
                 hit_input_eof = true;
-                break;
             }
             int64_t step_ms = std::min<int64_t>(kTailPollMs, remaining_ms - waited_ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
