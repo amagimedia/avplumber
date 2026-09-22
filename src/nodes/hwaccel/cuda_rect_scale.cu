@@ -149,6 +149,42 @@ __device__ __forceinline__ float sample_alpha(const unsigned char *src, int src_
 // Each thread owns AVP_RECT_PX consecutive lane groups of one row (4 luma samples, or 2 chroma
 // pairs): layer geometry is fetched once per thread, the per-sample math is exactly the
 // per-layer kernels', and the results leave in one vector store.
+// Texture-backed packed RGBA (zero-copy DMA-BUF): the same four taps as sample_rgb /
+// sample_alpha, fetched as exact texels (point sampling, unnormalized coordinates), so the
+// result matches the pointer path bit for bit.
+__device__ __forceinline__ float texel_channel(uchar4 v, int off) {
+    return off == 0 ? float(v.x) : off == 1 ? float(v.y) : off == 2 ? float(v.z) : float(v.w);
+}
+__device__ __forceinline__ void sample_rgb_tex(unsigned long long tex, int sx, int sy, int sw, int sh,
+                                               int r_off, int g_off, int b_off, float fx, float fy, float *rgb) {
+    const int ix = int(floorf(fx)), iy = int(floorf(fy));
+    const float tx = fx - ix, ty = fy - iy;
+    const int x0 = sx + max(0, min(ix, sw - 1)), x1 = sx + max(0, min(ix + 1, sw - 1));
+    const int y0 = sy + max(0, min(iy, sh - 1)), y1 = sy + max(0, min(iy + 1, sh - 1));
+    const uchar4 p00 = tex2D<uchar4>(tex, x0 + 0.5f, y0 + 0.5f), p01 = tex2D<uchar4>(tex, x1 + 0.5f, y0 + 0.5f);
+    const uchar4 p10 = tex2D<uchar4>(tex, x0 + 0.5f, y1 + 0.5f), p11 = tex2D<uchar4>(tex, x1 + 0.5f, y1 + 0.5f);
+    const int offs[3] = {r_off, g_off, b_off};
+    for (int c = 0; c < 3; ++c) {
+        const float a = texel_channel(p00, offs[c]), b = texel_channel(p01, offs[c]);
+        const float d = texel_channel(p10, offs[c]), e = texel_channel(p11, offs[c]);
+        const float top = a + tx * (b - a);
+        const float bottom = d + tx * (e - d);
+        rgb[c] = top + ty * (bottom - top);
+    }
+}
+__device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx, int sy, int sw, int sh,
+                                                  int a_off, float fx, float fy) {
+    const int ix = int(floorf(fx)), iy = int(floorf(fy));
+    const float tx = fx - ix, ty = fy - iy;
+    const int x0 = sx + max(0, min(ix, sw - 1)), x1 = sx + max(0, min(ix + 1, sw - 1));
+    const int y0 = sy + max(0, min(iy, sh - 1)), y1 = sy + max(0, min(iy + 1, sh - 1));
+    const float a00 = texel_channel(tex2D<uchar4>(tex, x0 + 0.5f, y0 + 0.5f), a_off);
+    const float a01 = texel_channel(tex2D<uchar4>(tex, x1 + 0.5f, y0 + 0.5f), a_off);
+    const float a10 = texel_channel(tex2D<uchar4>(tex, x0 + 0.5f, y1 + 0.5f), a_off);
+    const float a11 = texel_channel(tex2D<uchar4>(tex, x1 + 0.5f, y1 + 0.5f), a_off);
+    return ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
+}
+
 // kLanes and kChroma are compile-time so the per-sample loops unroll and the accumulators
 // stay in registers: <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas.
 template <bool kRgb, int kLanes, bool kChroma>
@@ -225,7 +261,9 @@ __device__ __forceinline__ void composite_body(
             if (!kRgb) continue;   // host never puts RGB entries in a YUV-only table
             // Packed RGB(A): plane 0 is one luma sample; plane 1 is one chroma block of bw x bh luma
             // positions averaged, with the same skip rules as rgb_to_yuv / rgba_over_yuv.
-            const bool blend = L.kind == AVP_RECT_KIND_RGBA;
+            const bool blend = L.kind == AVP_RECT_KIND_RGBA || L.kind == AVP_RECT_KIND_RGBA_TEX;
+            const bool textured = L.kind >= AVP_RECT_KIND_RGB_TEX;
+            const unsigned long long tex = L.src[0];
             const unsigned char *src = (const unsigned char *)L.src[0];   // packed RGB: one plane for both passes
             const int pitch = L.src_pitch[0];
             const int sx = L.sx[0], sy = L.sy[0], sw = L.sw[0], sh = L.sh[0];
@@ -241,13 +279,15 @@ __device__ __forceinline__ void composite_body(
                 if (!kChroma) {
                     float rgb[3];
                     const float fx = (ox + 0.5f) * xs - 0.5f, fy = (oy + 0.5f) * ys - 0.5f;
-                    sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
+                    if (textured) sample_rgb_tex(tex, sx, sy, sw, sh, r_off, g_off, b_off, fx, fy, rgb);
+                    else sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
                     if (!blend) {
                         convert_graphic_rgb(rgb, transfer, white, peak);
                         const float luma = graphic_luma(rgb, transfer) * dst_scale;
                         acc[p][0] = stored_code(min(max(luma, 0.f), maxv));
                     } else {
-                        const float a = sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
+                        const float a = textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
+                                                 : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
                         if (premultiplied)
                             for (int c = 0; c < 3; ++c)
                                 rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
@@ -267,12 +307,14 @@ __device__ __forceinline__ void composite_body(
                         if (box + i2 >= dw || boy + j >= dh || x + i2 >= canvas_w || y + j >= canvas_h) continue;
                         float rgb[3];
                         const float fx = (box + i2 + 0.5f) * xs - 0.5f, fy = (boy + j + 0.5f) * ys - 0.5f;
-                        sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
+                        if (textured) sample_rgb_tex(tex, sx, sy, sw, sh, r_off, g_off, b_off, fx, fy, rgb);
+                        else sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
                         if (!blend) {
                             convert_graphic_rgb(rgb, transfer, white, peak);
                             sum[0] += rgb[0]; sum[1] += rgb[1]; sum[2] += rgb[2];
                         } else {
-                            const float a = sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
+                            const float a = textured ? sample_alpha_tex(tex, sx, sy, sw, sh, a_off, fx, fy)
+                                                     : sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
                             if (premultiplied)
                                 for (int c = 0; c < 3; ++c)
                                     rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;

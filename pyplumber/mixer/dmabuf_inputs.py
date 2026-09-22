@@ -49,9 +49,10 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
         api.AssumeVideoFormat({"width": width, "height": height, "pixel_format": "drm_prime",
                                "real_pixel_format": "rgba" if preserve_alpha else "rgb0", "src": drm_edge, "dst": assumed_edge,
                                "group": processing_group, "auto_restart": "panic"}),
+        # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group"}),
+                            "auto_restart": "group", "zero_copy": True}),
         api.FilterVideo({
             # Snap the shared host clock to absolute 1/fps boundaries before changing
             # its time base, so independently phased paints coalesce into one tick.

@@ -7,12 +7,14 @@
 #include "../../hwaccel.hpp"
 #include "../../cuda.hpp"
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
+#include "cuda_rect_texture.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <memory>
 
 extern "C" {
 #include <libavutil/buffer.h>
@@ -32,6 +34,13 @@ protected:
     int height_ = 0;
     AVPixelFormat sw_fmt_ = AV_PIX_FMT_NONE;
     bool drop_alpha_ = true;
+    // zero_copy: hand the mapped EGL frame to consumers instead of copying it into a pool
+    // frame. Pitch-linear imports become ordinary device-pointer frames; tiled (array)
+    // imports carry a texture object (cuda_rect_texture.h) that only the compositor reads.
+    // The output frame keeps the DRM input frame alive, so the producer's release ack goes
+    // out when the last consumer lets go, not when the copy would have landed.
+    bool zero_copy_ = false;
+    bool zero_copy_warned_ = false;
 
     // EGL state
     EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
@@ -66,9 +75,35 @@ protected:
         EGLImageKHR image = EGL_NO_IMAGE_KHR;
         CUgraphicsResource resource = nullptr;
         CUeglFrame frame{};
+        CUtexObject tex = 0;                // zero_copy on an array frame: sampling handle
         int64_t last_used_ms = 0;
+        // Release happens when the cache AND every zero-copy frame referencing the entry are gone.
+        CUcontext cuda_ctx = nullptr;
+        EGLDisplay egl_dpy = EGL_NO_DISPLAY;
+        PFNEGLDESTROYIMAGEKHRPROC destroy_image = nullptr;
+        ~ImportEntry() {
+            if (resource || tex) {
+                cuCtxPushCurrent(cuda_ctx);
+                if (tex) cuTexObjectDestroy(tex);
+                if (resource) cuGraphicsUnregisterResource(resource);
+                CUcontext dummy; cuCtxPopCurrent(&dummy);
+            }
+            if (image != EGL_NO_IMAGE_KHR && egl_dpy != EGL_NO_DISPLAY && destroy_image)
+                destroy_image(egl_dpy, image);
+            if (dup_fd >= 0) close(dup_fd);
+        }
     };
-    std::vector<ImportEntry> imports_;
+    std::vector<std::shared_ptr<ImportEntry>> imports_;
+    // Owner of a zero-copy output frame's buffer: pins the import entry and the DRM input frame.
+    struct ZeroCopyOwner {
+        std::shared_ptr<ImportEntry> entry;
+        AVBufferRef *input = nullptr;
+    };
+    static void freeZeroCopyOwner(void *opaque, uint8_t *) {
+        auto *owner = static_cast<ZeroCopyOwner *>(opaque);
+        av_buffer_unref(&owner->input);   // closes the fds and queues the release ack
+        delete owner;                     // may be the entry's last reference
+    }
     size_t max_imports_ = 64;
     int64_t import_ttl_ms_ = 3000;
     int64_t last_purge_ms_ = 0;
@@ -254,34 +289,18 @@ protected:
         return true;
     }
 
-    void releaseEntry(ImportEntry &e) {
-        if (e.resource) {
-            cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx);
-            cuGraphicsUnregisterResource(e.resource);
-            CUcontext dummy; cuCtxPopCurrent(&dummy);
-            e.resource = nullptr;
-        }
-        if (e.image != EGL_NO_IMAGE_KHR && egl_dpy_ != EGL_NO_DISPLAY && p_eglDestroyImageKHR_)
-            p_eglDestroyImageKHR_(egl_dpy_, e.image);
-        e.image = EGL_NO_IMAGE_KHR;
-        if (e.dup_fd >= 0) close(e.dup_fd);
-        e.dup_fd = -1;
-    }
-
     void purgeImports(int64_t now_ms, bool all) {
         if (!all && last_purge_ms_ && now_ms - last_purge_ms_ < 1000) return;
         last_purge_ms_ = now_ms;
         for (auto it = imports_.begin(); it != imports_.end();) {
-            if (all || now_ms - it->last_used_ms >= import_ttl_ms_) {
-                releaseEntry(*it);
-                it = imports_.erase(it);
-            } else {
+            if (all || now_ms - (*it)->last_used_ms >= import_ttl_ms_)
+                it = imports_.erase(it);   // released now, or when the last zero-copy frame dies
+            else
                 ++it;
-            }
         }
     }
 
-    ImportEntry *findOrImport(const AVDRMFrameDescriptor *desc, int width, int height, int64_t now_ms) {
+    std::shared_ptr<ImportEntry> findOrImport(const AVDRMFrameDescriptor *desc, int width, int height, int64_t now_ms) {
         const AVDRMLayerDescriptor &layer = desc->layers[0];
         const AVDRMPlaneDescriptor &pl = layer.planes[0];
         if (pl.object_index < 0 || pl.object_index >= desc->nb_objects) return nullptr;
@@ -295,17 +314,21 @@ protected:
                       layer.format, obj.format_modifier, (uint64_t)pl.offset};
         purgeImports(now_ms, false);
         for (auto &e : imports_) {
-            if (e.key == key) {
-                e.last_used_ms = now_ms;
+            if (e->key == key) {
+                e->last_used_ms = now_ms;
                 ++cache_hits_;
-                return &e;
+                return e;
             }
         }
         if (!ensureEGL()) return nullptr;
 
-        ImportEntry e;
+        auto entry = std::make_shared<ImportEntry>();
+        ImportEntry &e = *entry;
         e.key = key;
         e.last_used_ms = now_ms;
+        e.cuda_ctx = cuda_dev_ctx_->cuda_ctx;
+        e.egl_dpy = egl_dpy_;
+        e.destroy_image = p_eglDestroyImageKHR_;
         e.dup_fd = dup(obj.fd);
         if (e.dup_fd < 0) {
             logstream << "drm2cuda: dup(fd) failed: " << std::strerror(errno);
@@ -328,7 +351,6 @@ protected:
         if (e.image == EGL_NO_IMAGE_KHR) {
             logstream << "drm2cuda: eglCreateImage failed width=" << width << " height=" << height
                       << " EGL error=" << eglGetError();
-            releaseEntry(e);
             return nullptr;
         }
 
@@ -346,30 +368,82 @@ protected:
                       << " type=" << (int)e.frame.frameType;
             ok = false;
         }
-        if (!ok) {
-            releaseEntry(e);
-            return nullptr;
+        if (ok && zero_copy_ && e.frame.frameType == CU_EGL_FRAME_TYPE_ARRAY) {
+            // Sampling handle for the compositor: exact texels, unnormalized coordinates.
+            CUDA_RESOURCE_DESC res{};
+            res.resType = CU_RESOURCE_TYPE_ARRAY;
+            res.res.array.hArray = e.frame.frame.pArray[0];
+            CUDA_TEXTURE_DESC td{};
+            td.addressMode[0] = td.addressMode[1] = td.addressMode[2] = CU_TR_ADDRESS_MODE_CLAMP;
+            td.filterMode = CU_TR_FILTER_MODE_POINT;
+            td.flags = 0;   // element reads, integer coordinates
+            cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx);
+            const bool made = !CHECK_CU(cuTexObjectCreate(&e.tex, &res, &td, nullptr));
+            CUcontext dummy; cuCtxPopCurrent(&dummy);
+            if (!made) {
+                e.tex = 0;
+                if (!zero_copy_warned_) {
+                    zero_copy_warned_ = true;
+                    logstream << "drm2cuda: texture object creation failed; copying this allocation instead";
+                }
+            }
         }
+        if (!ok)
+            return nullptr;
         if (imports_.size() >= max_imports_) {
             auto oldest = std::min_element(imports_.begin(), imports_.end(),
-                [](const ImportEntry &l, const ImportEntry &r) { return l.last_used_ms < r.last_used_ms; });
-            releaseEntry(*oldest);
+                [](const std::shared_ptr<ImportEntry> &l, const std::shared_ptr<ImportEntry> &r) {
+                    return l->last_used_ms < r->last_used_ms; });
             imports_.erase(oldest);
         }
         ++fresh_imports_;
         if (fresh_imports_ <= 2 || fresh_imports_ % 64 == 0)
             logstream << "drm2cuda: imported allocation " << width << "x" << height << " type="
                       << (e.frame.frameType == CU_EGL_FRAME_TYPE_PITCH ? "pitch" : "array")
+                      << (zero_copy_ ? " zero-copy" : "")
                       << " cached=" << imports_.size() + 1 << " hits=" << cache_hits_ << " imports=" << fresh_imports_;
-        imports_.push_back(e);
-        return &imports_.back();
+        imports_.push_back(entry);
+        return entry;
+    }
+
+    // Zero-copy output: the frame points at the mapped EGL frame and pins the input DRM frame.
+    bool wrap_mapped(const std::shared_ptr<ImportEntry> &e, const av::VideoFrame &in, int width, int height,
+                     av::VideoFrame &dst) {
+        if (!in.raw()->buf[0]) return false;
+        const bool pitch = e->frame.frameType == CU_EGL_FRAME_TYPE_PITCH;
+        if (!pitch && !e->tex) return false;
+        auto *owner = new ZeroCopyOwner{e, av_buffer_ref(in.raw()->buf[0])};
+        if (!owner->input) { delete owner; return false; }
+        AVFrame *f = dst.raw();
+        f->buf[0] = av_buffer_create(reinterpret_cast<uint8_t *>(owner), 0, freeZeroCopyOwner, owner, AV_BUFFER_FLAG_READONLY);
+        if (!f->buf[0]) { freeZeroCopyOwner(owner, nullptr); return false; }
+        f->format = AV_PIX_FMT_CUDA;
+        f->width = width;
+        f->height = height;
+        if (pitch) {
+            f->data[0] = reinterpret_cast<uint8_t *>(e->frame.frame.pPitch[0]);
+            f->linesize[0] = (int)e->frame.pitch;
+            return true;
+        }
+        f->opaque_ref = av_buffer_alloc(sizeof(avp::mixer::TextureFrameDesc));
+        if (!f->opaque_ref) return false;
+        auto *d = reinterpret_cast<avp::mixer::TextureFrameDesc *>(f->opaque_ref->data);
+        *d = avp::mixer::TextureFrameDesc{};
+        d->tex = e->tex;
+        d->width = width;
+        d->height = height;
+        f->data[0] = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(e->tex));   // handle, not memory
+        f->linesize[0] = width * 4;
+        return true;
     }
 
     bool import_to_cuda(const AVDRMFrameDescriptor* desc, int width, int height, AVPixelFormat swfmt,
-                        av::VideoFrame &dst) {
+                        const av::VideoFrame &in, av::VideoFrame &dst) {
         if (!ensureCudaFramesCtx(width, height, swfmt)) return false;
-        ImportEntry *e = findOrImport(desc, width, height, wallclock.pts());
+        std::shared_ptr<ImportEntry> e = findOrImport(desc, width, height, wallclock.pts());
         if (!e) return false;
+        if (zero_copy_ && wrap_mapped(e, in, width, height, dst))
+            return true;
 
         int cuda_error = CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
         if (cuda_error) return false;
@@ -444,7 +518,7 @@ public:
 
         int w = in.width();
         int h = in.height();
-        bool ok = import_to_cuda(desc, w, h, swfmt, out);
+        bool ok = import_to_cuda(desc, w, h, swfmt, in, out);
         if (!ok) return;
 
         if (hw_frames_ctx_) {
@@ -476,6 +550,7 @@ public:
         std::shared_ptr<Edge<av::VideoFrame>> dst = edges.find<av::VideoFrame>(params["dst"]);
         auto r = std::make_shared<DRMPrimeToCUDA>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<av::VideoFrame>>(dst));
         r->drop_alpha_ = params.value("drop_alpha", true);
+        r->zero_copy_ = params.value("zero_copy", false);
         if (!params.count("hwaccel")) {
             throw Error("drm_prime_to_cuda requires hwaccel parameter (CUDA device)");
         }

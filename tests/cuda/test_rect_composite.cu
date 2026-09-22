@@ -82,10 +82,26 @@ struct Rgba {   // packed 8-bit RGBA (bgra-like order chosen by offsets)
     Rgba(int w_, int h_, std::mt19937 *rng) : w(w_), h(h_), px(w_ * 4, h_, rng) {}
 };
 
+// Packed RGBA in a CUDA array behind a texture object, as a zero-copy DMA-BUF import presents it.
+struct RgbaTex {
+    cudaArray_t array = nullptr; cudaTextureObject_t tex = 0;
+    RgbaTex(const Rgba &src) {
+        cudaChannelFormatDesc ch = cudaCreateChannelDesc<uchar4>();
+        check(cudaMallocArray(&array, &ch, src.w, src.h), "cudaMallocArray");
+        check(cudaMemcpy2DToArray(array, 0, 0, src.px.dev, src.px.pitch, src.w * 4, src.h, cudaMemcpyDeviceToDevice), "to array");
+        cudaResourceDesc res{}; res.resType = cudaResourceTypeArray; res.res.array.array = array;
+        cudaTextureDesc td{}; td.addressMode[0] = td.addressMode[1] = cudaAddressModeClamp;
+        td.filterMode = cudaFilterModePoint; td.readMode = cudaReadModeElementType; td.normalizedCoords = 0;
+        check(cudaCreateTextureObject(&tex, &res, &td, nullptr), "texture");
+    }
+    ~RgbaTex() { if (tex) cudaDestroyTextureObject(tex); if (array) cudaFreeArray(array); }
+};
+
 struct Layer {
     int kind;                 // AVP_RECT_KIND_*
     const Frame *yuv = nullptr;
     const Rgba *rgb = nullptr;
+    const RgbaTex *tex = nullptr;   // *_TEX kinds: same pixels as rgb, fetched through the texture
     int cx, cy, cw, ch;       // crop (source pixels)
     int dx, dy, dw, dh;       // destination on the canvas (luma pixels), chroma-aligned
 };
@@ -109,10 +125,10 @@ static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &
     }
     const int dst_scale = 1 << (cf.depth - 8);
     for (const Layer &L : layers) {
-        if (L.kind == AVP_RECT_KIND_RGB || L.kind == AVP_RECT_KIND_RGBA) {
+        if (L.kind >= AVP_RECT_KIND_RGB) {
             const int bw = 1 << cf.sub_x, bh = 1 << cf.sub_y;
             const dim3 grid(((L.dw + bw - 1) / bw + 31) / 32, ((L.dh + bh - 1) / bh + 7) / 8), block(32, 8);
-            if (L.kind == AVP_RECT_KIND_RGB)
+            if (L.kind == AVP_RECT_KIND_RGB || L.kind == AVP_RECT_KIND_RGB_TEX)
                 rgb_to_yuv<<<grid, block>>>(L.rgb->px.dev, L.rgb->px.pitch, L.cx, L.cy, L.cw, L.ch,
                     L.rgb->step, L.rgb->r_off, L.rgb->g_off, L.rgb->b_off,
                     canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
@@ -157,9 +173,10 @@ static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vect
     table.clear();
     for (const Layer &L : layers) {
         AvpRectLayer e{};
-        if (L.kind == AVP_RECT_KIND_RGB || L.kind == AVP_RECT_KIND_RGBA) {
+        if (L.kind >= AVP_RECT_KIND_RGB) {
             e.kind = L.kind; e.step = L.rgb->step; e.r_off = L.rgb->r_off; e.g_off = L.rgb->g_off; e.b_off = L.rgb->b_off; e.a_off = L.rgb->a_off;
-            e.src[0] = (unsigned long long)(uintptr_t)L.rgb->px.dev; e.src_pitch[0] = L.rgb->px.pitch;
+            if (L.tex) { e.src[0] = L.tex->tex; e.src_pitch[0] = 0; }
+            else { e.src[0] = (unsigned long long)(uintptr_t)L.rgb->px.dev; e.src_pitch[0] = L.rgb->px.pitch; }
             e.sx[0] = L.cx; e.sy[0] = L.cy; e.sw[0] = L.cw; e.sh[0] = L.ch;
             e.dx[0] = L.dx; e.dy[0] = L.dy; e.dw[0] = L.dw; e.dh[0] = L.dh;
             const int bw = 1 << cf.sub_x, bh = 1 << cf.sub_y;
@@ -196,7 +213,7 @@ static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectL
     if (cf.planes > 1) { planeRegion(cf, 0, 0, canvas.w, canvas.h, 1, ox, oy, chroma_w, chroma_h); chroma_w /= 2 * cf.bytes; }
     const dim3 grid((canvas.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas.h + 7) / 8, cf.planes), block(32, 8);
     bool any_rgb = false;
-    for (const auto &e : table) any_rgb = any_rgb || e.kind == AVP_RECT_KIND_RGB || e.kind == AVP_RECT_KIND_RGBA;
+    for (const auto &e : table) any_rgb = any_rgb || e.kind >= AVP_RECT_KIND_RGB;
     const int clear0 = cf.planes == 1 ? 0 : clearValue(cf, 0);
     if (cf.planes == 1)
         composite_planes_packed4<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
@@ -260,21 +277,21 @@ int main() {
 
     // 1. NV12 canvas: blit, up/down scale, overlaps in order, crop, partial off right/bottom edge.
     scenario("nv12 mixed", NV12, 1080, 1920, {
-        {AVP_RECT_KIND_YUV, &b, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
-        {AVP_RECT_KIND_YUV, &a, nullptr, 0, 0, 640, 360, 0, 0, 640, 360},          // exact blit
-        {AVP_RECT_KIND_YUV, &c, nullptr, 10, 6, 280, 150, 100, 700, 980, 520},     // crop + upscale
-        {AVP_RECT_KIND_YUV, &b, nullptr, 0, 0, 1280, 720, 540, 1500, 900, 506},    // off the right/bottom edge
-        {AVP_RECT_KIND_YUV, &a, nullptr, 0, 0, 640, 360, 200, 200, 320, 180},      // on top of the first
-        {AVP_RECT_KIND_RGB, nullptr, &g, 0, 0, 400, 300, 640, 1200, 400, 300},     // opaque graphic
-        {AVP_RECT_KIND_RGBA, nullptr, &g2, 0, 0, 128, 64, 300, 1000, 512, 256},    // blended over video
-        {AVP_RECT_KIND_RGBA, nullptr, &g, 0, 0, 400, 300, 0, 0, 1080, 1920},       // blended over everything
+        {AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+        {AVP_RECT_KIND_YUV, &a, nullptr, nullptr, 0, 0, 640, 360, 0, 0, 640, 360},          // exact blit
+        {AVP_RECT_KIND_YUV, &c, nullptr, nullptr, 10, 6, 280, 150, 100, 700, 980, 520},     // crop + upscale
+        {AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, 540, 1500, 900, 506},    // off the right/bottom edge
+        {AVP_RECT_KIND_YUV, &a, nullptr, nullptr, 0, 0, 640, 360, 200, 200, 320, 180},      // on top of the first
+        {AVP_RECT_KIND_RGB, nullptr, &g, nullptr, 0, 0, 400, 300, 640, 1200, 400, 300},     // opaque graphic
+        {AVP_RECT_KIND_RGBA, nullptr, &g2, nullptr, 0, 0, 128, 64, 300, 1000, 512, 256},    // blended over video
+        {AVP_RECT_KIND_RGBA, nullptr, &g, nullptr, 0, 0, 400, 300, 0, 0, 1080, 1920},       // blended over everything
     }, 2, dev_table);
 
     // 2. Empty canvas: only the clear; and an odd width for the tail-store path.
     scenario("nv12 clear", NV12, 720, 480, {}, 2, dev_table);
     scenario("nv12 odd width", NV12, 1082, 606, {
-        {AVP_RECT_KIND_YUV, &b, nullptr, 0, 0, 1280, 720, 0, 0, 1082, 606},
-        {AVP_RECT_KIND_YUV, &a, nullptr, 0, 0, 640, 360, 542, 300, 540, 304},
+        {AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1082, 606},
+        {AVP_RECT_KIND_YUV, &a, nullptr, nullptr, 0, 0, 640, 360, 542, 300, 540, 304},
     }, 2, dev_table);
 
     // 3. Sixteen-box grid, the demo's heaviest scene.
@@ -282,7 +299,7 @@ int main() {
         std::vector<Layer> grid;
         for (int i = 0; i < 16; ++i) {
             const int col = i % 2, row = i / 2;
-            grid.push_back({AVP_RECT_KIND_YUV, (i % 3) ? &b : &a, nullptr, 0, 0, (i % 3) ? 1280 : 640, (i % 3) ? 720 : 360,
+            grid.push_back({AVP_RECT_KIND_YUV, (i % 3) ? &b : &a, nullptr, nullptr, 0, 0, (i % 3) ? 1280 : 640, (i % 3) ? 720 : 360,
                             col * 540, row * 240, 540, 240});
         }
         scenario("nv12 grid16", NV12, 1080, 1920, grid, 2, dev_table);
@@ -290,36 +307,53 @@ int main() {
 
     // 4. P210 canvas (HLG): P210 sources, NV12 promoted, graphics converted with the HLG transfer.
     scenario("p210 hlg", P210, 1080, 1920, {
-        {AVP_RECT_KIND_YUV, &pb, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
-        {AVP_RECT_KIND_PROMOTE, &a, nullptr, 0, 0, 640, 360, 0, 700, 1080, 608},
-        {AVP_RECT_KIND_PROMOTE, &c, nullptr, 20, 10, 260, 150, 100, 1400, 520, 300},
-        {AVP_RECT_KIND_YUV, &pa, nullptr, 0, 0, 640, 360, 540, 1400, 540, 304},
-        {AVP_RECT_KIND_RGB, nullptr, &g, 0, 0, 400, 300, 640, 40, 400, 300},
-        {AVP_RECT_KIND_RGBA, nullptr, &g2, 0, 0, 128, 64, 0, 0, 1080, 1920},
+        {AVP_RECT_KIND_YUV, &pb, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+        {AVP_RECT_KIND_PROMOTE, &a, nullptr, nullptr, 0, 0, 640, 360, 0, 700, 1080, 608},
+        {AVP_RECT_KIND_PROMOTE, &c, nullptr, nullptr, 20, 10, 260, 150, 100, 1400, 520, 300},
+        {AVP_RECT_KIND_YUV, &pa, nullptr, nullptr, 0, 0, 640, 360, 540, 1400, 540, 304},
+        {AVP_RECT_KIND_RGB, nullptr, &g, nullptr, 0, 0, 400, 300, 640, 40, 400, 300},
+        {AVP_RECT_KIND_RGBA, nullptr, &g2, nullptr, 0, 0, 128, 64, 0, 0, 1080, 1920},
     }, 0, dev_table);
 
     // 5. P010 canvas: 4:2:0 10-bit, promotion from NV12, PQ graphics.
     scenario("p010 pq", P010, 960, 540, {
-        {AVP_RECT_KIND_YUV, &qa, nullptr, 0, 0, 640, 360, 0, 0, 960, 540},
-        {AVP_RECT_KIND_PROMOTE, &b, nullptr, 0, 0, 1280, 720, 480, 270, 480, 270},
-        {AVP_RECT_KIND_RGBA, nullptr, &g, 0, 0, 400, 300, 100, 100, 400, 300},
+        {AVP_RECT_KIND_YUV, &qa, nullptr, nullptr, 0, 0, 640, 360, 0, 0, 960, 540},
+        {AVP_RECT_KIND_PROMOTE, &b, nullptr, nullptr, 0, 0, 1280, 720, 480, 270, 480, 270},
+        {AVP_RECT_KIND_RGBA, nullptr, &g, nullptr, 0, 0, 400, 300, 100, 100, 400, 300},
     }, 1, dev_table);
 
     // 6. Packed RGB canvas (DMA-BUF browser scale test): rgb0 sources scaled and blitted.
     {
         Frame ra(RGB0, 640, 360, &rng), rb(RGB0, 1280, 720, &rng);
         scenario("rgb0 packed", RGB0, 1920, 1080, {
-            {AVP_RECT_KIND_YUV, &rb, nullptr, 0, 0, 1280, 720, 0, 0, 1920, 1080},
-            {AVP_RECT_KIND_YUV, &ra, nullptr, 0, 0, 640, 360, 1280, 720, 640, 360},
-            {AVP_RECT_KIND_YUV, &ra, nullptr, 10, 10, 300, 200, 100, 100, 900, 600},
+            {AVP_RECT_KIND_YUV, &rb, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1920, 1080},
+            {AVP_RECT_KIND_YUV, &ra, nullptr, nullptr, 0, 0, 640, 360, 1280, 720, 640, 360},
+            {AVP_RECT_KIND_YUV, &ra, nullptr, nullptr, 10, 10, 300, 200, 100, 100, 900, 600},
         }, 2, dev_table);
+    }
+
+    // 7. Texture-backed RGBA (zero-copy DMA-BUF): opaque and blended, NV12 and P210 HLG canvases.
+    {
+        RgbaTex tg(g), tg2(g2);
+        scenario("nv12 texture rgba", NV12, 1080, 1920, {
+            {AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+            {AVP_RECT_KIND_RGB_TEX, nullptr, &g, &tg, 0, 0, 400, 300, 640, 1200, 400, 300},
+            {AVP_RECT_KIND_RGB_TEX, nullptr, &g2, &tg2, 10, 8, 100, 50, 0, 700, 1080, 540},
+            {AVP_RECT_KIND_RGBA_TEX, nullptr, &g2, &tg2, 0, 0, 128, 64, 300, 100, 512, 256},
+            {AVP_RECT_KIND_RGBA_TEX, nullptr, &g, &tg, 0, 0, 400, 300, 0, 0, 1080, 1920},
+        }, 2, dev_table);
+        scenario("p210 hlg texture rgba", P210, 1080, 1920, {
+            {AVP_RECT_KIND_YUV, &pb, nullptr, nullptr, 0, 0, 1280, 720, 0, 0, 1080, 608},
+            {AVP_RECT_KIND_RGB_TEX, nullptr, &g, &tg, 0, 0, 400, 300, 640, 40, 400, 300},
+            {AVP_RECT_KIND_RGBA_TEX, nullptr, &g2, &tg2, 0, 0, 128, 64, 0, 0, 1080, 1920},
+        }, 0, dev_table);
     }
 
     // Timing: grid16 on 1080x1920 NV12, both paths, median of runs.
     {
         std::vector<Layer> grid;
         for (int i = 0; i < 16; ++i)
-            grid.push_back({AVP_RECT_KIND_YUV, &b, nullptr, 0, 0, 1280, 720, (i % 2) * 540, (i / 2) * 240, 540, 240});
+            grid.push_back({AVP_RECT_KIND_YUV, &b, nullptr, nullptr, 0, 0, 1280, 720, (i % 2) * 540, (i / 2) * 240, 540, 240});
         Frame canvas(NV12, 1080, 1920, nullptr);
         std::vector<AvpRectLayer> table;
         fillTable(NV12, grid, table);
@@ -342,7 +376,7 @@ int main() {
         timeIt([&] { drawLayered(NV12, canvas, grid, 2); }, "per-layer (2 memset + 32)");
         timeIt([&] { drawBatched(NV12, canvas, table, dev_table, 2); }, "batched yuv (1 launch)");
         std::vector<Layer> mixed = grid;
-        mixed.push_back({AVP_RECT_KIND_RGBA, nullptr, &g2, 0, 0, 128, 64, 0, 0, 256, 128});
+        mixed.push_back({AVP_RECT_KIND_RGBA, nullptr, &g2, nullptr, 0, 0, 128, 64, 0, 0, 256, 128});
         std::vector<AvpRectLayer> mixed_table;
         fillTable(NV12, mixed, mixed_table);
         timeIt([&] { drawLayered(NV12, canvas, mixed, 2); }, "per-layer +1 rgba");

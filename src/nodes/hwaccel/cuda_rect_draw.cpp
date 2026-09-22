@@ -1,4 +1,5 @@
 #include "cuda_rect_draw.hpp"
+#include "cuda_rect_texture.h"
 #include "../../mixer/primitives/compositor_color.hpp"
 #ifdef HAVE_CUDA_RECT_SCALE
 #include "../../../objs/src/nodes/hwaccel/cuda_rect_scale.ptx.h"
@@ -139,13 +140,23 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     if (src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt) &&
         isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
         const int a_off = packedAlphaOffset(src_sw_fmt);
-        out.kind = (L.blend && a_off >= 0) ? AVP_RECT_KIND_RGBA : AVP_RECT_KIND_RGB;
+        const bool blend = L.blend && a_off >= 0;
         out.step = rgb_step; out.r_off = r_off; out.g_off = g_off; out.b_off = b_off; out.a_off = a_off;
 #if LIBAVUTIL_VERSION_MAJOR >= 60
         out.premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
 #endif
-        out.src[0] = (unsigned long long)(uintptr_t)src->data[0];
-        out.src_pitch[0] = src->linesize[0];
+        if (const TextureFrameDesc *tex = textureFrameDesc(src)) {
+            // Zero-copy DMA-BUF import: sample the mapped array through its texture object.
+            if (rgb_step != 4 || tex->width != src->width || tex->height != src->height)
+                throw Error("cuda_rect_overlay: texture-backed source must be 4-byte packed RGB at frame size");
+            out.kind = blend ? AVP_RECT_KIND_RGBA_TEX : AVP_RECT_KIND_RGB_TEX;
+            out.src[0] = tex->tex;
+            out.src_pitch[0] = 0;
+        } else {
+            out.kind = blend ? AVP_RECT_KIND_RGBA : AVP_RECT_KIND_RGB;
+            out.src[0] = (unsigned long long)(uintptr_t)src->data[0];
+            out.src_pitch[0] = src->linesize[0];
+        }
         out.sx[0] = L.crop_x; out.sy[0] = L.crop_y; out.sw[0] = L.crop_w; out.sh[0] = L.crop_h;
         out.dx[0] = L.dst_x; out.dy[0] = L.dst_y; out.dw[0] = dstw; out.dh[0] = dsth;
         // Chroma sites owned by this layer: the blocks whose (aligned) luma origin lies in the rect.
@@ -195,7 +206,7 @@ void CudaRectDraw::draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame
         if (n >= AVP_RECT_MAX_LAYERS)
             throw Error("cuda_rect_overlay: more than " + std::to_string(AVP_RECT_MAX_LAYERS) + " layers in one frame");
         fillTableEntry(op, canvas, table_host_[n]);
-        any_rgb = any_rgb || table_host_[n].kind == AVP_RECT_KIND_RGB || table_host_[n].kind == AVP_RECT_KIND_RGBA;
+        any_rgb = any_rgb || table_host_[n].kind >= AVP_RECT_KIND_RGB;
         ++n;
     }
     const int planes = av_pix_fmt_count_planes(sw_fmt);
