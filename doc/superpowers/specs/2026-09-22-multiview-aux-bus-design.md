@@ -320,9 +320,20 @@ is under 1% of the mixer's GPU time. `nsys` on the live show (110 s):
 only ~4% of wall time. Memory copies dominate: 26 DMA-BUF browsers x 8.3 MB
 RGBA x 30 fps = 5 GB/s of array-to-device copies (78 µs each) plus the
 decoder's per-plane copies (1.7 MB, 187k per 110 s). NVDEC sits at 92%.
-So the levers for that show are the browser import (skip the copy for
-browsers no scene uses, or sample the mapped array directly) and decode
-count, not compositing.
+So the levers for that show are the browser import and decode count, not
+compositing.
+
+DONE 2026-09-22, zero-copy browser frames (commit "dmabuf: zero-copy browser
+frames sampled by the compositor"): `drm_prime_to_cuda` `zero_copy` hands
+out frames referencing the cached EGL mapping through a texture object
+(`cuda_rect_texture.h`), the frame pins the DRM input so the producer's
+release ack follows the last consumer, and the compositor samples
+`AVP_RECT_KIND_RGB_TEX`/`RGBA_TEX` layers with the same taps. Live on the
+same 64-source show: card 48% -> 39%, mixer process SM 28.0% -> 15.4%, mem
+19.3% -> 10.9%, VRAM 7.36 -> 7.06 GB, NVDEC/NVENC unchanged. Producer pool
+`DMA_BROWSER_DMABUF_POOL_SIZE=11` bounds outstanding buffers; the playout
+keeps at most 8 queued + 1 held per input, and the producer drops rather
+than overwrites when the pool is exhausted.
 
 Ships first, on its own, with no aux-bus code. Every `cuda_rect_overlay`
 instance (slot A/B, wipe overlay, later each aux bus) uses `cuda_rect_draw`,
