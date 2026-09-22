@@ -7,6 +7,7 @@
 #include "../../hwaccel.hpp"
 #include "../../cuda.hpp"
 #include "../../../deps/cuda_loader/cuda_drvapi_dynlink_gl.h"
+#include "cuda_rect_sampler.h"
 #include "cuda_rect_texture.h"
 
 #include <sys/stat.h>
@@ -371,12 +372,8 @@ protected:
         if (ok && zero_copy_ && e.frame.frameType == CU_EGL_FRAME_TYPE_ARRAY) {
             // Sampling handle for the compositor: exact texels, unnormalized coordinates.
             CUDA_RESOURCE_DESC res{};
-            res.resType = CU_RESOURCE_TYPE_ARRAY;
-            res.res.array.hArray = e.frame.frame.pArray[0];
             CUDA_TEXTURE_DESC td{};
-            td.addressMode[0] = td.addressMode[1] = td.addressMode[2] = CU_TR_ADDRESS_MODE_CLAMP;
-            td.filterMode = CU_TR_FILTER_MODE_POINT;
-            td.flags = 0;   // element reads, integer coordinates
+            avp::mixer::rectTextureDesc(e.frame.frame.pArray[0], res, td);
             cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx);
             const bool made = !CHECK_CU(cuTexObjectCreate(&e.tex, &res, &td, nullptr));
             CUcontext dummy; cuCtxPopCurrent(&dummy);

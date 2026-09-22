@@ -3,7 +3,7 @@
 // drawn both ways must give identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
 // opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects).
 // Then times both paths on a 1080x1920 sixteen-box grid.
-//   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -o /tmp/test_rect_composite
+//   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -lcuda -o /tmp/test_rect_composite
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -14,7 +14,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cuda.h>
 #include "../../src/nodes/hwaccel/cuda_rect_scale.cu"
+#include "../../src/nodes/hwaccel/cuda_rect_sampler.h"
 #include "legacy_rect_kernels.cuh"
 
 static void check(cudaError_t r, const char *what) {
@@ -83,18 +85,19 @@ struct Rgba {   // packed 8-bit RGBA (bgra-like order chosen by offsets)
 };
 
 // Packed RGBA in a CUDA array behind a texture object, as a zero-copy DMA-BUF import presents it.
+// The texture is created with the production descriptor (rectTextureDesc), so a wrong read mode
+// there shows up here as a parity failure instead of on the live output.
 struct RgbaTex {
-    cudaArray_t array = nullptr; cudaTextureObject_t tex = 0;
+    cudaArray_t array = nullptr; CUtexObject tex = 0;
     RgbaTex(const Rgba &src) {
         cudaChannelFormatDesc ch = cudaCreateChannelDesc<uchar4>();
         check(cudaMallocArray(&array, &ch, src.w, src.h), "cudaMallocArray");
         check(cudaMemcpy2DToArray(array, 0, 0, src.px.dev, src.px.pitch, src.w * 4, src.h, cudaMemcpyDeviceToDevice), "to array");
-        cudaResourceDesc res{}; res.resType = cudaResourceTypeArray; res.res.array.array = array;
-        cudaTextureDesc td{}; td.addressMode[0] = td.addressMode[1] = cudaAddressModeClamp;
-        td.filterMode = cudaFilterModePoint; td.readMode = cudaReadModeElementType; td.normalizedCoords = 0;
-        check(cudaCreateTextureObject(&tex, &res, &td, nullptr), "texture");
+        CUDA_RESOURCE_DESC res; CUDA_TEXTURE_DESC td;
+        avp::mixer::rectTextureDesc((CUarray)array, res, td);
+        if (cuTexObjectCreate(&tex, &res, &td, nullptr) != CUDA_SUCCESS) throw std::runtime_error("cuTexObjectCreate");
     }
-    ~RgbaTex() { if (tex) cudaDestroyTextureObject(tex); if (array) cudaFreeArray(array); }
+    ~RgbaTex() { if (tex) cuTexObjectDestroy(tex); if (array) cudaFreeArray(array); }
 };
 
 struct Layer {
