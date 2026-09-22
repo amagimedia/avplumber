@@ -32,6 +32,20 @@ const context = createContext({
 runInContext(script, context);
 assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
+for (const [usage, level] of [[0, "good"], [89, "good"], [90, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: usage, decoder: usage, memory_used_mib: 4096, memory_total_mib: 15360}]);
+  for (const label of ["GPU", "NVDEC"]) {
+    assert(elements.get("gpu-stats").innerHTML.includes(`>${label}</span><span class="metric-value" data-level="${level}">`));
+  }
+}
+for (const [used, level] of [[14335, "good"], [14336, "warn"], [15103, "warn"], [15104, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: 30, decoder: 90, memory_used_mib: used, memory_total_mib: 15360}]);
+  assert(elements.get("gpu-stats").innerHTML.includes(`>VRAM</span><span class="metric-value" data-level="${level}">`));
+}
+context.renderGpuStats([{index: 0, gpu: 0, decoder: null, memory_used_mib: 4096, memory_total_mib: 15360}]);
+assert(elements.get("gpu-stats").innerHTML.includes("4.00 / 15.00 GiB"));
+context.renderGpuStats(null);
+assert.equal(elements.get("gpu-stats").innerHTML, "GPU —");
 for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
   const other = createContext({
     fixtureState: null, setTimeout() {},

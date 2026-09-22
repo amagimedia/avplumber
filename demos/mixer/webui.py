@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
+import subprocess
 import threading
 import signal
+import time
 from urllib.parse import urlsplit
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +31,38 @@ from pyplumber.mixer.control import AvpConnection, mixer_command
 
 PAGE = Path(__file__).with_name("webui") / "index.html"
 TAKE_COMMANDS = ("cut", "fade", "wipe", "preview", "interrupt")
+
+
+class GpuStats:
+    """Share one bounded nvidia-smi sample across all viewers each second."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.next_sample = 0
+        self.values = []
+
+    def snapshot(self):
+        if not self.lock.acquire(blocking=False):
+            return self.values
+        try:
+            if time.monotonic() < self.next_sample:
+                return self.values
+            self.next_sample = time.monotonic() + 1
+            output = subprocess.check_output([
+                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,memory.used,memory.total",
+                "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
+            keys = ("index", "gpu", "decoder", "memory_used_mib", "memory_total_mib")
+            values = []
+            for row in csv.reader(output.splitlines()):
+                if len(row) != len(keys) or not row[0].strip().isdigit():
+                    continue
+                values.append(dict(zip(keys, (int(v) if v.strip().isdigit() else None for v in row))))
+            self.values = values
+        except (OSError, subprocess.SubprocessError):
+            self.values = []
+        finally:
+            self.lock.release()
+        return self.values
 
 
 class MixerBridge:
@@ -91,9 +126,10 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "avplumber-mixer-webui"
 
-    def __init__(self, bridge: MixerBridge, *args, setup=None, **kwargs):
+    def __init__(self, bridge: MixerBridge, *args, setup=None, gpu=None, **kwargs):
         self.bridge = bridge
         self.setup_manager = setup
+        self.gpu = gpu
         super().__init__(*args, **kwargs)
 
     def log_message(self, *_args) -> None:
@@ -126,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
             try:
                 state = self.bridge.state()
+                state["gpus"] = self.gpu.snapshot()
                 if self.setup_manager:
                     state["setup_revision"] = self.setup_manager.status()["revision"]
                 self._send_json(200, state)
@@ -171,7 +208,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(bridge: MixerBridge, bind: str, port: int, setup=None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup))
+    server = ThreadingHTTPServer((bind, port), partial(Handler, bridge, setup=setup, gpu=GpuStats()))
     server.daemon_threads = True
     return server
 

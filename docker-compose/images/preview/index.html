@@ -125,9 +125,7 @@
         <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
           <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
         </span>
-        <span class="metric" title="Video frames dropped by this WebRTC receiver; a dash means the browser does not expose this counter.">
-          <span>Dropped frames</span><span id="receiver-dropped" class="metric-value">—</span>
-        </span>
+        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥90%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
       </span>
     </footer>
   </main>
@@ -136,6 +134,19 @@
   <script type="module">
     import { createReceiverMonitor } from "./receiver-stats.mjs";
     const codecSelect = document.getElementById("codec");
+    function renderGpuStats(gpus) {
+      const level = (value, orange, red) => !Number.isFinite(value) ? "unknown"
+        : value >= red ? "bad" : value >= orange ? "warn" : "good";
+      const metric = (label, value, color) => `<span class="metric"><span>${label}</span><span class="metric-value" data-level="${color}">${value}</span></span>`;
+      document.getElementById("gpu-stats").innerHTML = (gpus || []).map(gpu => {
+        const suffix = gpus.length > 1 ? ` ${gpu.index}` : "";
+        const percent = (label, value) => metric(label + suffix, Number.isFinite(value) ? `${value}%` : "—", level(value, 90, 99));
+        const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
+        const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
+          ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
+        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + metric("VRAM" + suffix, memory, level(used, 14, 14.75));
+      }).join("") || "GPU —";
+    }
     let monitorMixer = true;
     async function mixerState() {
       try {
@@ -145,6 +156,7 @@
       } catch { return null; }
     }
     const initialMixerState = await mixerState();
+    renderGpuStats(initialMixerState?.gpus);
     const declaredOutputs = new URL(location.href).searchParams.get("outputs")?.split(",")
       .filter(codec => codec === "h264" || codec === "h265");
     const availableCodecs = initialMixerState?.settings?.preview_codecs ||
@@ -158,6 +170,7 @@
     let mixerRevision = initialMixerState?.setup_revision;
     async function watchMixer() {
       const state = await mixerState();
+      renderGpuStats(state?.gpus);
       if (state?.settings?.preview_codecs) {
         if (JSON.stringify(state.settings.preview_codecs) !== JSON.stringify(availableCodecs) ||
             (mixerRevision !== undefined && state.setup_revision !== mixerRevision)) {
@@ -166,9 +179,9 @@
         }
         mixerRevision = state.setup_revision;
       }
-      if (monitorMixer) setTimeout(watchMixer, 2000);
+      if (monitorMixer) setTimeout(watchMixer, 1000);
     }
-    if (monitorMixer) setTimeout(watchMixer, 2000);
+    if (monitorMixer) setTimeout(watchMixer, 1000);
     codecSelect.value = selectedCodec;
     const MOUNTPOINT_ID = selectedCodec === "h265" ? 2 : 1;
     codecSelect.addEventListener("change", () => {

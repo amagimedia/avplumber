@@ -50,6 +50,10 @@ Open **<http://127.0.0.1:7681>** for controls and HDR playback. Choose **SDR**
 in the player if your browser cannot decode HEVC. The standalone player remains
 at <http://127.0.0.1:8080>.
 
+The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`,
+sampled once per second. Usage turns orange at 90% and red at 99%; VRAM turns
+orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
+
 The setup limits unique sources to **32 at 50/60 fps** and **64 at 25/30 fps**,
 including at most **32 browser sources**, and scenes to **128**. The browser
 service defaults to four workers with eight windows each.

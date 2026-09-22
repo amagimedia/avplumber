@@ -384,6 +384,6 @@ programUrl.hash = "";
 programUrl.searchParams.set("codec", new URLSearchParams(location.search).get("codec") === "h264" ? "h264" : "h265");
 $("program-output").src = programUrl.href;
 refresh();
-setInterval(refresh, 500);
+setInterval(refresh, 1000);
 addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>

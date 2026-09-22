@@ -90,7 +90,6 @@ export function createReceiverMonitor(video) {
     for (const [id, value, unit] of [
       ["receiver-fps", sample?.fps, "fps"],
       ["receiver-buffer", sample?.jitterBufferMs, "ms"],
-      ["receiver-dropped", sample?.framesDropped, ""],
     ]) {
       const element = document.getElementById(id);
       if (element) element.textContent = Number.isFinite(value)

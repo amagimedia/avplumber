@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import urllib.error
 import urllib.request
 
 import pytest
 
-from webui import MixerBridge, serve
+from webui import GpuStats, MixerBridge, serve
 
 
 class FakeBridge(MixerBridge):
@@ -34,7 +35,8 @@ class FakeBridge(MixerBridge):
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(GpuStats, 'snapshot', lambda _: [])
     bridges = []
 
     def start(bridge):
@@ -44,6 +46,43 @@ def client():
         return f"http://127.0.0.1:{server.server_address[1]}", server
 
     yield start
+
+
+def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
+    now = [0]
+    calls = []
+    monkeypatch.setattr('webui.time.monotonic', lambda: now[0])
+    def query(*args, **kwargs):
+        calls.append(args)
+        return '0, 93, [N/A], 14336, 15360\n1, 0, 99, 15104, 24576\n'
+    monkeypatch.setattr('webui.subprocess.check_output', query)
+    stats = GpuStats()
+    first = stats.snapshot()
+    assert first[0] == dict(index=0, gpu=93, decoder=None, memory_used_mib=14336, memory_total_mib=15360)
+    assert first[1]['index'] == 1 and first[1]['gpu'] == 0
+    now[0] = .5
+    assert stats.snapshot() == first and len(calls) == 1
+    now[0] = 1
+    stats.lock.acquire()
+    try:
+        assert stats.snapshot() == first and len(calls) == 1
+    finally:
+        stats.lock.release()
+    stats.snapshot()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('error', [FileNotFoundError(), subprocess.TimeoutExpired('nvidia-smi', 1)])
+def test_gpu_query_failure_clears_old_sample_and_is_cached(monkeypatch, error):
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(args)
+        raise error
+    monkeypatch.setattr('webui.subprocess.check_output', fail)
+    stats = GpuStats()
+    stats.values = [{'gpu': 90}]
+    assert stats.snapshot() == []
+    assert stats.snapshot() == [] and len(calls) == 1
 
 
 def get(url, path):
