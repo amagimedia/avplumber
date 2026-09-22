@@ -83,9 +83,7 @@ class GraphOptions:
     webui_url: str = ""                  # AVPlumber web UI to register the graph with
     cut_latency_encoder: str = ""        # opt-in cut-to-output observer on this encoder
     prewarm_cut_scenes: tuple[str, ...] = ()  # '*' selects all scene definitions
-    # Wipe clips are held decoded in GPU memory by default: a take then costs no
-    # file open, no decoder and no thread startup. 0 turns it off.
-    wipe_cache_mb: float = 768.0
+    wipe_cache_mb: float = 0.0          # opt-in GPU clip cache; otherwise decode per take
     # Browser pages from the DMA-BUF demo as sources: --input dmabuf://<window-id>
     dmabuf_socket_dir: str = "/tmp/dma-page"
     dmabuf_size: tuple[int, int] = (1280, 720)
@@ -350,7 +348,8 @@ def _init_avp(avp_options, api):
     if avp_options.remote_control_port:
         avp.enableControlServer(avp_options.remote_control_port)
     avp.executeCommandsFromString(f'hwaccel.init {{ "name": "{HWACCEL}", "type": "cuda" }}')
-    avp.edges.planCapacity("*", 4)
+    # The queue rounds to 2**n - 1 slots: requesting 4 retains up to 7 frames.
+    avp.edges.planCapacity("*", 3)
     return avp
 
 
@@ -703,8 +702,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--preheat-timeout", dest="preheat_timeout_sec", type=float, default=60.0)
     add("--wipe-file", help="Alpha wipe clip to warm the media-wipe chain up with at start "
                             "(the TUI still selects the clip for each wipe)")
-    add("--wipe-cache-mb", type=float, default=768.0,
-        help="Hold decoded wipe clips in GPU memory, up to this many MiB (0 decodes each wipe on every take)")
+    add("--wipe-cache-mb", type=float, default=GraphOptions.wipe_cache_mb,
+        help="Opt-in GPU wipe cache budget in MiB (default: 0, decode on each take)")
     add("--webui-url", default="", help="Register the graph with an AVPlumber web UI, e.g. http://127.0.0.1:22222")
     add("--cut-latency-encoder", default="", metavar="NODE",
         help="Measure CUT receipt to matching encoded frame at NODE (e.g. janus_encoder)")

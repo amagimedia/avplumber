@@ -10,6 +10,8 @@ readonly audio_port="${JANUS_AUDIO_PORT:-5002}"
 readonly audio_rtcp_port="${JANUS_AUDIO_RTCP_PORT:-5003}"
 readonly video_port="${JANUS_VIDEO_PORT:-5004}"
 readonly video_rtcp_port="${JANUS_VIDEO_RTCP_PORT:-5005}"
+readonly hdr_video_port="${JANUS_HDR_VIDEO_PORT:-5006}"
+readonly hdr_video_rtcp_port="${JANUS_HDR_VIDEO_RTCP_PORT:-5007}"
 readonly rtp_port_range="${JANUS_RTP_PORT_RANGE:-20000-20100}"
 readonly debug_level="${JANUS_DEBUG_LEVEL:-4}"
 
@@ -40,6 +42,8 @@ sed \
     -e "s/__JANUS_AUDIO_RTCP_PORT__/${audio_rtcp_port}/g" \
     -e "s/__JANUS_VIDEO_PORT__/${video_port}/g" \
     -e "s/__JANUS_VIDEO_RTCP_PORT__/${video_rtcp_port}/g" \
+    -e "s/__JANUS_HDR_VIDEO_PORT__/${hdr_video_port}/g" \
+    -e "s/__JANUS_HDR_VIDEO_RTCP_PORT__/${hdr_video_rtcp_port}/g" \
     "${config_dir}/janus.plugin.streaming.jcfg.template" > "${config_dir}/janus.plugin.streaming.jcfg.rendered"
 mv "${config_dir}/janus.plugin.streaming.jcfg.rendered" "${config_dir}/janus.plugin.streaming.jcfg"
 

@@ -4,7 +4,7 @@
 
 ## Features
 
-This demo manually mixes any positive number of video inputs into one
+This demo manually mixes up to 64 video inputs into one
 1080x1920 portrait program. It provides a separate terminal interface for
 choosing what is on air, preparing the next view, and changing between views.
 
@@ -64,9 +64,9 @@ The mixer backend requires:
 - FFmpeg with the patched CUDA overlay and transition filters; and
 - at least one video input and one output.
 
-The graph accepts only an NVENC encoder and keeps frames on the GPU from decode
-through output. There is no software-encoder fallback or CPU
-`hwdownload`/`hwupload` path.
+The graph accepts only an NVENC encoder and keeps hardware-decoded inputs on
+the GPU through output. Raw v210 recipes explicitly exercise software decode
+and upload for 4:2:2 inputs; media wipes also upload their alpha frames.
 
 The control TUI requires Textual but may run in a separate terminal or on
 another host that can reach the backend's TCP control port:
@@ -137,9 +137,11 @@ backend uses the clip's duration, independently of **Fade seconds**. Use a clip
 that covers the picture at its midpoint to hide the scene cut.
 
 MOV is a container: the video codec must preserve alpha, for example QTRLE/ARGB
-or ProRes 4444. The wipe branch decodes and scales these assets on the CPU,
-uploads the alpha frames, and composites them on the GPU. Program inputs stay
-on the GPU. Supply media separately; clips are not stored in Git.
+or ProRes 4444. The wipe branch decodes these assets on the CPU and uploads
+alpha frames at their native size; scaling and compositing happen together
+on the GPU. Wipe caching is off by default; `--wipe-cache-mb 256` opts into a
+256 MiB GPU cache. The recipe generates its own moving alpha wipes; custom
+clips are supplied separately.
 
 The TUI polls Program, Preview, and transition state twice per second. If the
 connection fails or is lost, it shows the error in the connection bar; use
@@ -192,8 +194,9 @@ groups without reordering sources.
 
 ## Docker
 
-Follow the [shared NVIDIA setup guide](../../README.md) first. It also provides
-a local Janus preview if you want WebRTC output.
+For recipes with generated media, browser sources and WebRTC, use the
+[Compose quick start](../README.md#run). The commands below run the mixer alone
+with your own video files, after the [shared NVIDIA setup](../../README.md).
 
 The demo image defaults to FFmpeg 8.1 with the shared `deps/ffmpeg/8` series, verifies the
 patched CUDA overlay and transition filters, and builds the CUDA-enabled

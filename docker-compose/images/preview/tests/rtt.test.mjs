@@ -4,18 +4,22 @@ import { createContext, runInContext } from "node:vm";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
-  .replace(/^\s*import .*;$/m, "");
+  .replace(/^\s*import .*;$/m, "")
+  // Inject the fetched setup state; transport is exercised by the server/live tests.
+  .replace("const initialMixerState = await mixerState();", "const initialMixerState = fixtureState; monitorMixer = fixtureState !== null;");
 const elements = new Map();
 const timers = new Map();
 let timerId = 0;
 const context = createContext({
+  fixtureState: null, setTimeout() {},
   createReceiverMonitor: () => ({ update() {}, stop() {} }),
   URL,
   location: { origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265" },
   document: {
     readyState: "loading",
+    querySelector() { return this.getElementById("codec-label"); },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, { dataset: {}, setAttribute() {}, addEventListener() {} });
+      if (!elements.has(id)) elements.set(id, { options: [{value:"h264"}, {value:"h265"}], dataset: {}, setAttribute() {}, addEventListener() {} });
       return elements.get(id);
     },
   },
@@ -28,14 +32,42 @@ const context = createContext({
 runInContext(script, context);
 assert.equal(runInContext("MOUNTPOINT_ID", context), 2);
 assert.equal(elements.get("codec").value, "h265");
+for (const [usage, level] of [[0, "good"], [92, "good"], [94, "good"], [95, "warn"], [98, "warn"], [99, "bad"], [100, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: usage, decoder: usage, memory_used_mib: 4096, memory_total_mib: 15360}]);
+  for (const label of ["GPU", "NVDEC"]) {
+    assert(elements.get("gpu-stats").innerHTML.includes(`>${label}</span><span class="metric-value" data-level="${level}">`));
+  }
+}
+for (const [used, level] of [[14335, "good"], [14336, "warn"], [15103, "warn"], [15104, "bad"], [null, "unknown"]]) {
+  context.renderGpuStats([{index: 0, gpu: 30, decoder: 90, memory_used_mib: used, memory_total_mib: 15360}]);
+  assert(elements.get("gpu-stats").innerHTML.includes(`>VRAM</span><span class="metric-value" data-level="${level}">`));
+}
+context.renderGpuStats([{index: 0, gpu: 0, decoder: null, memory_used_mib: 4096, memory_total_mib: 15360}]);
+assert(elements.get("gpu-stats").innerHTML.includes("4.00 / 15.00 GiB"));
+context.renderGpuStats(null);
+assert.equal(elements.get("gpu-stats").innerHTML, "GPU —");
 for (const suffix of ["", "?codec=h264", "?codec=invalid"]) {
   const other = createContext({
+    fixtureState: null, setTimeout() {},
     URL, location: { origin: "http://127.0.0.1", href: `http://127.0.0.1/${suffix}` },
     document: context.document, window: context.window,
   });
   runInContext(script, other);
   assert.equal(runInContext("MOUNTPOINT_ID", other), 1);
   assert.equal(elements.get("codec").value, "h264");
+}
+
+for (const codecs of [["h264"], ["h264", "h265"]]) {
+  const other = createContext({
+    fixtureState: {settings: {preview_codecs: codecs}, setup_revision: 1}, setTimeout() {},
+    URL, location: {origin: "http://127.0.0.1", href: "http://127.0.0.1/?codec=h265"},
+    document: context.document, window: context.window,
+  });
+  runInContext(script, other);
+  assert.equal(runInContext("MOUNTPOINT_ID", other), codecs.length === 1 ? 1 : 2);
+  assert.equal(elements.get("codec").hidden, codecs.length === 1);
+  assert.equal(elements.get("codec").disabled, codecs.length === 1);
+  assert.equal(elements.get("codec-label").hidden, codecs.length === 1);
 }
 
 function report(seconds, state = "succeeded") {

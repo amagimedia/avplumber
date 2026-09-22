@@ -504,7 +504,13 @@ class MixerGraphBuilder:
                 raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
             graph = source.color.setparams
         else:
-            graph = conversion_graph(self.color, self.working_format,
+            pixel_format = self.working_format
+            if (pixel_format == "p210le" and self.color.transfer != "sdr" and
+                    source.pixel_format not in ("nv16", "p210le", "yuv422p", "yuv422p10le")):
+                # Resolve chroma from the actual frames. The compositor samples
+                # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
+                pixel_format = None
+            graph = conversion_graph(self.color, pixel_format,
                                      source=source.color, source_format=source.pixel_format)
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({

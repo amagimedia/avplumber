@@ -93,16 +93,19 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
     NVDEC emits NV12/P010. Callers with other CUDA storage must declare it so
     the required chroma conversion precedes tone mapping. Custom source filters
     run before this graph: their output frame metadata is authoritative.
+    With pixel_format=None, tonemap_cuda preserves input chroma subsampling and
+    selects depth from the target transfer. Renditions need an explicit format.
     """
     target = Color.parse(target)
-    target.validate_format(pixel_format)
+    if pixel_format is not None:
+        target.validate_format(pixel_format)
     if tonemap not in OPERATORS:
         raise ValueError(f"unsupported tone-map operator {tonemap!r}")
     if not all(isfinite(v) for v in (sdr_white, hdr_peak, desat, param)) or not (1 <= sdr_white <= hdr_peak <= 10000 and hdr_peak >= 100 and desat >= 0 and param >= 0):
         raise ValueError("require finite 1 <= sdr_white <= hdr_peak <= 10000, hdr_peak >= 100, desat >= 0 and param >= 0")
     if source_format and source_format not in YUV_FORMATS:
         raise ValueError(f"unsupported source pixel format {source_format!r}; color conversion requires CUDA YUV")
-    if source is not None and Color.parse(source) == target:
+    if pixel_format is not None and source is not None and Color.parse(source) == target:
         # Same contract: stamp it and only change storage, so 4:2:2 (P210) content
         # never round-trips through the 4:2:0-only tone mapper.
         parts = [target.setparams]
@@ -115,7 +118,8 @@ def conversion_graph(target, pixel_format, *, source=None, source_format=None,
     # param is the operator knee in reference-white units (mobius/reinhard; 0 keeps the
     # filter default 0.3). mobius at 0.9 keeps 0..90% of SDR white linear and folds
     # everything brighter into the top 10% of the SDR range; 1.0 would be a plain clip.
-    parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}:format={pixel_format}"
+    storage = f":format={pixel_format}" if pixel_format is not None else ""
+    parts.append(f"tonemap_cuda=transfer_in=auto:transfer_out={target.transfer}{storage}"
                  f":tonemap={tonemap}:sdr_white={sdr_white:g}:hdr_peak={hdr_peak:g}:desat={desat:g}"
                  + (f":param={param:g}" if param else ""))
     return ",".join(parts)

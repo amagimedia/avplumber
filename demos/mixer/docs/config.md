@@ -1,7 +1,7 @@
 # Mixer configuration file
 
 One JSON document describes a mixer run: the sources it opens, the wipe clips
-it caches, the scenes an operator can take, the defaults its control surfaces
+it plays, the scenes an operator can take, the defaults its control surfaces
 start from, and the encoded outputs it produces. Nothing about 2/4/8/16-box
 layouts lives in code — a grid is a scene somebody wrote or generated.
 
@@ -210,8 +210,11 @@ For SDR Bunny on an HLG canvas, no manual tone-map filter is needed:
 Supported video contracts are limited-range BT.709/BT.1886 SDR and BT.2020
 non-constant-luminance HLG/PQ. Full-range YUV, other gamuts/matrices and missing
 metadata fail explicitly. SDR uses a 203-nit reference white and HLG a 1000-nit
-peak. Frames already in the canvas storage (NV12, NV16, P010, P210) pass without GPU copies. Other declared CUDA YUV
-storage uses `scale_cuda` around conversion. Custom source filters receive the
+peak. On an HLG/PQ P210 canvas, 4:2:0 video stays P010 after colour conversion;
+the compositor resamples chroma while scaling into the 4:2:2 canvas, without an
+extra conversion pass. Native 4:2:2 inputs stay P210. Matching colour and storage
+pass without GPU copies. Other declared CUDA YUV storage uses `scale_cuda`
+around conversion. Custom source filters receive the
 explicit source override first; their output metadata drives normalization, so
 a manually converted source is not converted from its original transfer again.
 
@@ -237,8 +240,10 @@ to vary the independent input count while reusing cached media files.
 
 ## wipes
 
-The media-wipe library. Every declared clip is decoded once at start and held
-as frames in the clip cache, so a take costs no file open and no decoder.
+The media-wipe library. Clips decode on each take by default, keeping GPU
+memory bounded by the playback queues. Startup warms the wipe path but does
+not retain whole decoded clips. Opt in with `--wipe-cache-mb 256` to retain
+clips in a GPU cache with a 256 MiB budget; `0` disables caching.
 
 ```json
 "wipes": [{"id": "ribbons", "path": "/media/media_wipes/ribbons.mov",

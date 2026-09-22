@@ -46,23 +46,29 @@ def write_flat(path, fmt):
         s.write(y.tobytes()); s.write(uv.tobytes())
 
 
-def run(root, src_fmt, canvas, timeout):
+def run(root, src_fmt, canvas, timeout, *, transfer=None, reduction=1):
     from pyplumber.node import CudaRectOverlay, DecVideo, Demux, FilterVideo, Input
+    from pyplumber.mixer.color import conversion_graph
 
     path = Path(root) / f"{src_fmt}.raw"
     if not path.exists():
         write_flat(path, src_fmt)
     avp, errors = make_avp("ix_gpu")
+    upload = "hwupload"
+    if transfer:
+        upload += "," + conversion_graph(transfer, None, source=transfer)
+    width, height = W // reduction, H // reduction
     nodes = [
         Input({"name": "in", "url": str(path), "format": "rawvideo", "dst": "pkt",
                "options": {"pixel_format": src_fmt, "video_size": f"{W}x{H}", "framerate": "60"}}),
         Demux({"name": "dx", "src": "pkt", "routing": {"v:0": "raw"}}),
         DecVideo({"name": "dec", "src": "raw", "dst": "cpu"}),
-        FilterVideo({"name": "up", "src": "cpu", "dst": "gpu", "hwaccel": "ix_gpu", "graph": "hwupload"}),
+        FilterVideo({"name": "up", "src": "cpu", "dst": "gpu", "hwaccel": "ix_gpu", "graph": upload}),
         CudaRectOverlay({"name": "comp", "src": ["gpu"], "dst": "scene", "hwaccel": "ix_gpu",
                          "width": W, "height": H, "sw_format": canvas, "scale": True,
+                         **({"color": transfer} if transfer else {}),
                          "active_inputs": 1,
-                         "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H}]}),
+                         "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": width, "dst_h": height}]}),
         FilterVideo({"name": "down", "src": "scene", "dst": "out", "hwaccel": "ix_gpu",
                      "graph": f"hwdownload,format={canvas}"}),
     ]
@@ -76,12 +82,16 @@ def run(root, src_fmt, canvas, timeout):
         for frame in drain(out, errors, timeout, 1, state):
             y = np.frombuffer(frame.data[0], dt).reshape(H, frame.linesize[0] // f["sb"])[:, :W] >> shift
             uv = np.frombuffer(frame.data[1], dt).reshape(H >> f["ch"], frame.linesize[1] // f["sb"])[:, :W] >> shift
-            cy, cx = (H >> f["ch"]) // 2, (W // 2) & ~1     # centre: no edge taps on a flat field
-            assert abs(int(y[H // 2, W // 2]) - ey) <= 1, f"Y {int(y[H//2, W//2])} != {ey}"
+            cy, cx = (height >> f["ch"]) // 2, (width // 2) & ~1
+            assert abs(int(y[height // 2, width // 2]) - ey) <= 1, "luma mismatch"
             assert abs(int(uv[cy, cx]) - eu) <= 1 and abs(int(uv[cy, cx + 1]) - ev) <= 1, "chroma mismatch"
+            if reduction > 1:
+                assert np.all(y[height:, :] == 16 * scale), "background luma changed"
+                assert np.all(uv[height >> f["ch"]:, :] == 128 * scale), "background chroma changed"
         assert not errors, errors
         assert state["count"] == 1, "no frame"
-        print(f"PASS {src_fmt:>7} -> {canvas:<7} (Y {ey} Cb {eu} Cr {ev})", flush=True)
+        print(f"PASS {src_fmt:>7} -> {canvas:<7} {transfer or 'untagged'} /{reduction} "
+              f"(Y {ey} Cb {eu} Cr {ev})", flush=True)
     finally:
         finish(avp, nodes)
 
@@ -93,6 +103,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="avp-ix-") as root:
         for src, canvas in MATRIX:
             run(root, src, canvas, args.timeout)
+        for transfer in ("hlg", "pq"):
+            for reduction in (1, 4):
+                run(root, "p010le", "p210le", args.timeout, transfer=transfer, reduction=reduction)
     print("interop matrix OK")
 
 

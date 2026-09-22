@@ -1,0 +1,56 @@
+name: avplumber-mixer-demo
+
+x-mixer-image: &mixer-image
+  build:
+    context: ../..
+    dockerfile: demos/mixer/Dockerfile
+  image: avplumber-mixer:local
+
+services:
+  janus:
+    extends: {file: ../dmabuf-browser/compose.yaml, service: janus}
+
+  janus-preview:
+    extends: {file: ../dmabuf-browser/compose.yaml, service: janus-preview}
+    environment:
+      MIXER_STATE_URL: http://127.0.0.1:${MIXER_HTTP_PORT:-7681}/api/state
+
+  wayland:
+    extends: {file: ../dmabuf-browser/compose.yaml, service: wayland}
+
+  dma-browser:
+    extends: {file: ../dmabuf-browser/compose.yaml, service: dma-browser}
+    environment:
+      DMA_BROWSER_AUTO_OPEN_URL: ""
+      DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-32}
+      DMA_BROWSER_WINDOWS_PER_PROCESS: 8
+      DMA_BROWSER_ALLOWED_DIMS: 1920x1080,1080x1920,1280x720
+
+  mixer:
+    extends: {file: ../dmabuf-browser/compose.yaml, service: avplumber}
+    <<: *mixer-image
+    restart: "no"
+    # CUDA, DMA-BUF and graph queues need more than 1024 descriptors at 64 sources.
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    entrypoint: [python3, demos/mixer/webui.py]
+    volumes:
+      - ../../media:/media:rw,z
+    command:
+      - --manage-setup
+      - --recipe
+      - ${MIXER_RECIPE:-/media/demo.json}
+      - --port
+      - "${MIXER_CONTROL_PORT:-7777}"
+      - --http-port
+      - "${MIXER_HTTP_PORT:-7681}"
+      - --dmabuf-rest
+      - http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}
+      - --mixer-args
+      - --janus-output
+      - --prewarm-cut-scene
+      - '*'
+
+volumes:
+  wayland-runtime:
+  dma-browser-sockets:

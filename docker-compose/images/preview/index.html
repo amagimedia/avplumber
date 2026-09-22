@@ -96,6 +96,7 @@
       padding: 5px 8px;
       font: inherit;
     }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -124,9 +125,7 @@
         <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
           <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
         </span>
-        <span class="metric" title="Browser-reported freezes since this connection started; a dash means the browser does not expose this counter.">
-          <span>Freezes</span><span id="receiver-freezes" class="metric-value">—</span>
-        </span>
+        <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
       </span>
     </footer>
   </main>
@@ -135,7 +134,54 @@
   <script type="module">
     import { createReceiverMonitor } from "./receiver-stats.mjs";
     const codecSelect = document.getElementById("codec");
-    const selectedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
+    function renderGpuStats(gpus) {
+      const level = (value, orange, red) => !Number.isFinite(value) ? "unknown"
+        : value >= red ? "bad" : value >= orange ? "warn" : "good";
+      const metric = (label, value, color) => `<span class="metric"><span>${label}</span><span class="metric-value" data-level="${color}">${value}</span></span>`;
+      document.getElementById("gpu-stats").innerHTML = (gpus || []).map(gpu => {
+        const suffix = gpus.length > 1 ? ` ${gpu.index}` : "";
+        const percent = (label, value) => metric(label + suffix, Number.isFinite(value) ? `${value}%` : "—", level(value, 95, 99));
+        const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
+        const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
+          ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
+        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + metric("VRAM" + suffix, memory, level(used, 14, 14.75));
+      }).join("") || "GPU —";
+    }
+    let monitorMixer = true;
+    async function mixerState() {
+      try {
+        const response = await fetch(new URL("mixer-state", location.href), {signal: AbortSignal.timeout(4000)});
+        if (response.status === 404) monitorMixer = false;
+        return response.ok ? await response.json() : null;
+      } catch { return null; }
+    }
+    const initialMixerState = await mixerState();
+    renderGpuStats(initialMixerState?.gpus);
+    const declaredOutputs = new URL(location.href).searchParams.get("outputs")?.split(",")
+      .filter(codec => codec === "h264" || codec === "h265");
+    const availableCodecs = initialMixerState?.settings?.preview_codecs ||
+      (declaredOutputs?.length ? declaredOutputs : monitorMixer ? ["h264"] : ["h264", "h265"]);
+    const requestedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
+    const selectedCodec = availableCodecs.includes(requestedCodec) ? requestedCodec : availableCodecs[0] || "h264";
+    codecSelect.hidden = availableCodecs.length < 2;
+    codecSelect.disabled = codecSelect.hidden;
+    document.querySelector('label[for="codec"]').hidden = codecSelect.hidden;
+    for (const option of codecSelect.options) option.disabled = !availableCodecs.includes(option.value);
+    let mixerRevision = initialMixerState?.setup_revision;
+    async function watchMixer() {
+      const state = await mixerState();
+      renderGpuStats(state?.gpus);
+      if (state?.settings?.preview_codecs) {
+        if (JSON.stringify(state.settings.preview_codecs) !== JSON.stringify(availableCodecs) ||
+            (mixerRevision !== undefined && state.setup_revision !== mixerRevision)) {
+          location.reload();
+          return;
+        }
+        mixerRevision = state.setup_revision;
+      }
+      if (monitorMixer) setTimeout(watchMixer, 1000);
+    }
+    if (monitorMixer) setTimeout(watchMixer, 1000);
     codecSelect.value = selectedCodec;
     const MOUNTPOINT_ID = selectedCodec === "h265" ? 2 : 1;
     codecSelect.addEventListener("change", () => {
@@ -335,6 +381,11 @@
 
     async function connect() {
       if (sessionId || connecting) return;
+      const codecs = RTCRtpReceiver.getCapabilities?.("video")?.codecs;
+      if (selectedCodec === "h265" && codecs && !codecs.some(c => c.mimeType.toLowerCase() === "video/h265")) {
+        setStatus("This browser cannot play H.265. Choose H.264 / SDR.", true);
+        return;
+      }
       connecting = true;
       stopping = false;
       try {

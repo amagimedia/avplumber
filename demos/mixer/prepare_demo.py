@@ -47,10 +47,19 @@ def ensure_asset(path: Path, writer) -> None:
         staged.replace(path)
 
 
-def render_wipe(path: Path, size: str, fps: int, ffmpeg: str) -> None:
+WIPE_NAMES = {"diagonal": "Diagonal sweep", "panels": "Sliding panels"}
+
+
+def render_wipe(path: Path, size: str, fps: int, ffmpeg: str, pattern: str = "diagonal") -> None:
     # CPU generation is preparation only; playback uses the existing RGBA wipe chain.
-    graph = (f"color=c=DodgerBlue:size={size}:rate={fps}:duration=2,format=rgba,"
-             "fade=t=in:st=0:d=0.5:alpha=1,fade=t=out:st=1.5:d=0.5:alpha=1")
+    position = {"diagonal": "(X/W+0.3*Y/H)/1.3",
+                "panels": "if(mod(floor(6*Y/H),2),1-X/W,X/W)"}[pattern]
+    # Overshoot both ends: transparent first/last frames, fully opaque around
+    # the midpoint cut. Moving colour bands expose repeated frames even there.
+    alpha = f"255*if(lt(T,1),lte({position},1.2*T-0.1),gte({position},1.2*(T-1)-0.1))"
+    graph = (f"color=size={size}:rate={fps}:duration=2,format=rgba,"
+             "geq=r='48+32*floor(5*mod(X/W+T/2,1))':g='64+144*Y/H':"
+             f"b='if(lt(mod(X/W+Y/H/4+2-T/2,0.2),0.035),240,128)':a='{alpha}'")
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "lavfi", "-i", graph,
                     "-an", "-c:v", "qtrle", "-pix_fmt", "argb", str(path)], check=True)
 
@@ -200,15 +209,21 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                         raise ValueError(f"{name}: file path must exist under --media-dir")
                 source.update(kind="video", path=runtime_path(path))
             sources.append(source)
-    canvas_size = f"{width}x{height}"
-    wipe = media_dir / "media_wipes" / f"synthetic_fade_{canvas_size}_{fps}fps.mov"
-    jobs[wipe] = lambda out: render_wipe(out, canvas_size, fps, ffmpeg)
+    # Graphics need fewer pixels than the program; the compositor scales them
+    # in its draw pass. Bound decode/upload cost independently of canvas size.
+    wipe_scale = min(1, 960 / max(width, height))
+    wipe_size = f"{max(2, round(width * wipe_scale / 2) * 2)}x{max(2, round(height * wipe_scale / 2) * 2)}"
+    wipes = []
+    for pattern, name in WIPE_NAMES.items():
+        wipe = media_dir / "media_wipes" / f"synthetic_v2_{pattern}_{wipe_size}_{fps}fps.mov"
+        jobs[wipe] = lambda out, pattern=pattern: render_wipe(out, wipe_size, fps, ffmpeg, pattern)
+        wipes.append({"id": pattern, "name": name, "path": runtime_path(wipe), "duration_seconds": 2})
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
                         alpha_background=recipe.get("alpha_background"))
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
            "initial_scene": scene_list[0]["id"], "renditions": recipe["renditions"],
-           "wipes": [{"id": "synthetic_fade", "path": runtime_path(wipe), "duration_seconds": 2}],
-           "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "synthetic_fade"}}
+           "wipes": wipes,
+           "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "diagonal"}}
     cfg = parse(doc)
     # Include RTCP's adjacent port in conflict checks.
     used_ports = set()

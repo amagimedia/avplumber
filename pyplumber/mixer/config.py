@@ -153,8 +153,13 @@ class MixerConfig:
         wipes = [{"id": w.id, "name": w.label, "path": w.path,
                   "duration_seconds": w.duration_seconds} for w in self.wipes]
         default = next((w for w in self.wipes if w.id == self.default_wipe), None)
+        preview_codecs = list(dict.fromkeys(
+            "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
+            for r in self.renditions if r.target == "janus"))
         return {"source_count": len(self.sources),
-                "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps},
+                "preview_codecs": preview_codecs,
+                "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
+                           "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
                                   for kind in ("video", "browser", "v210")},
                 "direct": self.direct, "fade_seconds": self.fade_seconds,

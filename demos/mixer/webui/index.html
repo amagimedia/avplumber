@@ -98,6 +98,7 @@
 <section id="controls" aria-label="Mixer controls">
 <header>
   <h1>AVPlumber mixer</h1>
+  <a href="/setup/" style="color:var(--muted);font-size:12px">Setup</a>
   <span id="counts">— unique sources · — scenes</span>
   <span id="conn" hidden></span>
 </header>
@@ -128,8 +129,8 @@
      aria-orientation="vertical" aria-controls="controls program-panel"
      title="Drag to resize panes. Arrow keys resize when focused."></div>
 <aside id="program-panel" aria-label="Live program preview">
-  <header><h2>Program</h2><span class="format">9:16 · Live</span></header>
-  <iframe id="program-output" title="Live mixer program, 9:16"
+  <header><h2>Program</h2><span class="format">Live</span></header>
+  <iframe id="program-output" title="Live mixer program"
           allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
 </aside>
 </main>
@@ -300,9 +301,22 @@ function setDirect(value) {
   $("pvw_state").textContent = value ? `picks take to program with ${currentTransition}` : "ready";
 }
 
+let setupRevision;
+let refreshing = false;
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   try {
     const state = await api("/api/state");
+    if (state.setup_revision !== undefined) {
+      if (setupRevision !== undefined && setupRevision !== state.setup_revision) {
+        selected = ""; tookTransition = false;
+        delete $("direct").dataset.user;
+        touched.fade = touched.wipe = false;
+        $("program-output").src = $("program-output").src;
+      }
+      setupRevision = state.setup_revision;
+    }
     const status = state.status || {};
     pgm = status.pgm_scene || ""; pvw = status.pvw_scene || ""; transition = status.transition || "idle";
     const named = (state.settings && state.settings.scenes) || null;
@@ -310,8 +324,18 @@ async function refresh() {
     scenes.sort((a, b) => sceneGroup(a.id) - sceneGroup(b.id) || a.id.localeCompare(b.id, undefined, { numeric: true }));
     $("counts").textContent = `${state.settings?.source_count ?? "—"} unique sources · ${scenes.length} scenes`;
     const canvas = state.settings?.canvas;
+    const codecs = state.settings?.preview_codecs;
+    if (codecs?.length) {
+      const url = new URL($("program-output").src);
+      url.searchParams.set("outputs", codecs.join(","));
+      if (!codecs.includes(url.searchParams.get("codec"))) url.searchParams.set("codec", codecs[0]);
+      if (url.href !== $("program-output").src) $("program-output").src = url.href;
+    }
     if (canvas) {
-      $("counts").textContent = `${canvas.width}×${canvas.height}p${canvas.fps} · ` + $("counts").textContent;
+      const mode = canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit";
+      const format = `${canvas.width}×${canvas.height}p${canvas.fps} · ${mode}`;
+      document.querySelector("#program-panel .format").textContent = format;
+      $("counts").textContent = `${format} · ` + $("counts").textContent;
     }
     const sourceCounts = state.settings?.source_counts;
     if (sourceCounts) {
@@ -328,6 +352,8 @@ async function refresh() {
     $("conn").textContent = `no mixer: ${exc.message || exc}`;
     $("conn").classList.add("bad");
     $("conn").hidden = false;
+  } finally {
+    refreshing = false;
   }
 }
 
@@ -349,14 +375,15 @@ addEventListener("keydown", (event) => {
 });
 
 // Share the existing WebRTC player, including its latency/RTT display. Assign
-// once so control polling and scene changes never restart the connection.
+// once; only a setup restart needs to reconnect the player.
 const programUrl = new URL(location.href);
-programUrl.port = "8080";
+programUrl.port = new URLSearchParams(location.search).get("preview_port") || "8080";
 programUrl.pathname = "/";
 programUrl.search = "";
 programUrl.hash = "";
 programUrl.searchParams.set("codec", new URLSearchParams(location.search).get("codec") === "h264" ? "h264" : "h265");
 $("program-output").src = programUrl.href;
 refresh();
-setInterval(refresh, 500);
+setInterval(refresh, 1000);
+addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>

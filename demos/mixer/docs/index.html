@@ -66,7 +66,7 @@
     <li><b>5</b><span>media wipes held decoded in GPU memory, ~482 MiB</span></li>
   </ul>
 
-  <p class="closing">Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips are decoded once at start and replayed from GPU memory, drawn as one alpha-blended layer by the compositor kernel the scenes use — no CPU scaling anywhere. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
+  <p class="closing">Browser pages arrive as DMA-BUFs from the <a href="https://github.com/amagimedia/avplumber/tree/develop/demos/dmabuf-browser">dma-browser demo</a> and are imported straight into CUDA; the compositor converts packed RGB to the NV12 canvas in its own draw pass, so pages and NVDEC video mix with no separate conversion. Wipe clips decode on each take by default and are drawn as one alpha-blended layer by the compositor kernel the scenes use, including GPU scaling. GPU clip caching is optional; the recorded example above used it. Fresh setups generate their own moving alpha wipes. The program is composited once and each <code>rendition</code> re-times and rescales it, so a second output costs an encode, not another composite.</p>
 
   <footer>
     <a href="https://github.com/amagimedia/avplumber/blob/develop/demos/mixer/docs/config.md">Configuration reference</a> — sources, scenes, wipes, renditions, control defaults<br>

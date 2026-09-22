@@ -79,3 +79,36 @@ def test_invalid_response_shapes_are_rejected():
         parse_mixer_status("[]")
     with pytest.raises(ValueError, match="list"):
         parse_scene_list("{}")
+
+
+@pytest.mark.parametrize("reply_size", [128_000, 1_000_000])
+def test_large_json_reply_keeps_the_next_command_in_sync(reply_size):
+    async def exercise():
+        payload = json.dumps({"queues": "x" * reply_size})
+
+        async def serve(reader, writer):
+            try:
+                writer.write(b"100 ready\n")
+                await writer.drain()
+                assert await reader.readline() == b"queues.json\n"
+                writer.write(b"201 OK\n" + payload.encode() + b"\n\n")
+                await writer.drain()
+                if await reader.readline():
+                    writer.write(b"200 OK\n")
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        connection = AvpConnection("127.0.0.1", server.sockets[0].getsockname()[1])
+        try:
+            await connection.connect()
+            assert json.loads(await connection.command("queues.json")) == json.loads(payload)
+            assert await connection.command("mixer.status mixer") is None
+        finally:
+            await connection.disconnect()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(exercise())

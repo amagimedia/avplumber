@@ -2,6 +2,20 @@ general: {
 	events = true
 }
 
+avplumber-hdr: {
+	type = "rtp"
+	id = 2
+	description = "avplumber HDR program WebRTC preview"
+	audio = false
+	video = true
+	videoport = __JANUS_HDR_VIDEO_PORT__
+	videortcpport = __JANUS_HDR_VIDEO_RTCP_PORT__
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h265"
+	videofmtp = "profile-id=2"
+}
+
 avplumber-program: {
 	type = "rtp"
 	id = 1

@@ -149,13 +149,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             }
         }
         setCanvasColor(outf.raw());
-        draw_.clearCanvas(outf.raw(), hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
-
-        for (const DrawOp &op : ops) {
-            if (!op.src)
-                continue;
-            draw_.drawLayer(stream, *op.src, outf.raw(), op.layer);
-        }
+        // Background and every layer in one kernel launch.
+        draw_.draw(stream, ops, outf.raw(), hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
 
         if (metadata_src && metadata_src->raw()) {
             const int cpy = av_frame_copy_props(outf.raw(), metadata_src->raw());
@@ -654,6 +649,8 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     const AVPixelFormat sw_fmt = av_get_pix_fmt(sw_name.c_str());
     if (sw_fmt == AV_PIX_FMT_NONE)
         throw Error("cuda_rect_overlay: unknown sw_format");
+    if (!CudaRectDraw::canvasSupported(sw_fmt))
+        throw Error("cuda_rect_overlay: sw_format must be semiplanar YUV (nv12, p010le, p210le) or packed 8-bit RGB");
 
     auto out_edge = edges.find<av::VideoFrame>(params["dst"]);
 
