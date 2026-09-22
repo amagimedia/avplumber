@@ -1,10 +1,12 @@
-// NVIDIA integration test of the production scaler, including UV lane isolation.
+// NVIDIA integration test of the bilinear sampler (the reference kernels in
+// legacy_rect_kernels.cuh share load/store/sampling code with composite_planes).
 // nvcc -std=c++17 tests/cuda/test_rect_scale.cu -o /tmp/test_rect_scale
 #include <array>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
 #include "../../src/nodes/hwaccel/cuda_rect_scale.cu"
+#include "legacy_rect_kernels.cuh"
 
 void check(cudaError_t result) {
     if (result != cudaSuccess) throw std::runtime_error(cudaGetErrorString(result));

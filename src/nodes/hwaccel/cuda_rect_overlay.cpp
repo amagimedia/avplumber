@@ -96,8 +96,6 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     // output that has not yet been wired) and no timeout is set.
     int64_t warmup_timeout_ms_ = 0;
     int64_t warmup_started_pts_ = -1;
-    bool batched_draw_ = true;    // "draw": "batched" (default) or "layered"
-    int last_batched_ = -1;
 
     void freeHwContexts() {
         draw_.unload();
@@ -151,22 +149,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
             }
         }
         setCanvasColor(outf.raw());
-        const AVFrame *clear_color_src = hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr);
-        // One launch for background and every layer; the per-layer path stays as the fallback for
-        // canvases and sources the batched kernel does not cover.
-        const bool batched = batched_draw_ && draw_.drawBatched(stream, ops, outf.raw(), clear_color_src);
-        if (!batched) {
-            draw_.clearCanvas(outf.raw(), clear_color_src);
-            for (const DrawOp &op : ops) {
-                if (!op.src)
-                    continue;
-                draw_.drawLayer(stream, *op.src, outf.raw(), op.layer);
-            }
-        }
-        if (batched != last_batched_) {
-            last_batched_ = batched;
-            logstream << "cuda_rect_overlay: draw path " << (batched ? "batched (one launch)" : "per layer");
-        }
+        // Background and every layer in one kernel launch.
+        draw_.draw(stream, ops, outf.raw(), hasCanvasColor() ? outf.raw() : (metadata_src ? metadata_src->raw() : nullptr));
 
         if (metadata_src && metadata_src->raw()) {
             const int cpy = av_frame_copy_props(outf.raw(), metadata_src->raw());
@@ -661,6 +645,8 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     const AVPixelFormat sw_fmt = av_get_pix_fmt(sw_name.c_str());
     if (sw_fmt == AV_PIX_FMT_NONE)
         throw Error("cuda_rect_overlay: unknown sw_format");
+    if (!CudaRectDraw::canvasSupported(sw_fmt))
+        throw Error("cuda_rect_overlay: sw_format must be semiplanar YUV (nv12, p010le, p210le) or packed 8-bit RGB");
 
     auto out_edge = edges.find<av::VideoFrame>(params["dst"]);
 
@@ -690,10 +676,6 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
     if (params.count("active_inputs"))
         node->active_inputs_.store(parseBitmask<uint64_t>(params["active_inputs"]), std::memory_order_relaxed);
     node->warmup_timeout_ms_ = params.value("warmup_timeout_ms", (int64_t)0);
-    const std::string draw_mode = params.value("draw", std::string("batched"));
-    if (draw_mode != "batched" && draw_mode != "layered")
-        throw Error("cuda_rect_overlay: draw must be batched or layered");
-    node->batched_draw_ = draw_mode == "batched";
     if (params.contains("fps")) {
         node->frame_rate_ = parseRatio(params.at("fps"));
         std::optional<double> latency_ms;

@@ -1,6 +1,6 @@
 // NVIDIA integration test of the single-launch composite kernel against the
-// per-layer kernels it replaces: the same layer set drawn both ways must give
-// bit-identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
+// per-layer kernels it replaced (legacy_rect_kernels.cuh): the same layer set
+// drawn both ways must give identical canvases (NV12 and P210, scale/blit, NV12->P210 promotion,
 // opaque RGB and blended RGBA, overlapping z-order, partial off-canvas rects).
 // Then times both paths on a 1080x1920 sixteen-box grid.
 //   nvcc -std=c++17 -O2 tests/cuda/test_rect_composite.cu -o /tmp/test_rect_composite
@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #include "../../src/nodes/hwaccel/cuda_rect_scale.cu"
+#include "legacy_rect_kernels.cuh"
 
 static void check(cudaError_t r, const char *what) {
     if (r != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(r));
@@ -44,14 +45,15 @@ struct Plane {
 
 // Semiplanar formats only: NV12 (8-bit 4:2:0), P010 (10-bit 4:2:0), P210 (10-bit 4:2:2).
 struct Fmt {
-    const char *name; int bytes; int shift; int depth; int sub_x; int sub_y;
+    const char *name; int bytes; int shift; int depth; int sub_x; int sub_y; int planes; int lanes0;
 };
-static const Fmt NV12{"nv12", 1, 0, 8, 1, 1}, P010{"p010", 2, 6, 10, 1, 1}, P210{"p210", 2, 6, 10, 1, 0};
+static const Fmt NV12{"nv12", 1, 0, 8, 1, 1, 2, 1}, P010{"p010", 2, 6, 10, 1, 1, 2, 1}, P210{"p210", 2, 6, 10, 1, 0, 2, 1},
+                 RGB0{"rgb0", 1, 0, 8, 0, 0, 1, 4};
 
 // libavutil's lumaRectToPlaneRegion for semiplanar: plane 0 bytes = x*bytes; plane 1 bytes = ceil(x/2)*2*bytes.
 static void planeRegion(const Fmt &f, int lx, int ly, int lw, int lh, int plane, int &bx, int &by, int &bw, int &bh) {
     if (lx < 0 || lx + lw < 0) { bx = by = bw = bh = 0; return; }   // av_image_get_linesize errors on negative widths
-    auto linesize = [&](int w) { return plane ? ((w + 1) >> 1) * 2 * f.bytes : w * f.bytes; };
+    auto linesize = [&](int w) { return plane ? ((w + 1) >> 1) * 2 * f.bytes : w * f.bytes * f.lanes0; };
     const int sy = plane ? f.sub_y : 0;
     bx = linesize(lx); bw = linesize(lx + lw) - bx;
     by = ly >> sy; bh = ((ly + lh + (1 << sy) - 1) >> sy) - by;
@@ -60,8 +62,8 @@ static void planeRegion(const Fmt &f, int lx, int ly, int lw, int lh, int plane,
 struct Frame {   // a semiplanar surface
     const Fmt *fmt; int w, h; Plane y, uv;
     Frame(const Fmt &f, int w_, int h_, std::mt19937 *rng) : fmt(&f), w(w_), h(h_),
-        y(((w_ * f.bytes + 255) / 256) * 256, h_, rng),
-        uv(((w_ * f.bytes + 255) / 256) * 256, (h_ + (1 << f.sub_y) - 1) >> f.sub_y, rng) {
+        y(((w_ * f.bytes * f.lanes0 + 255) / 256) * 256, h_, rng),
+        uv(((w_ * f.bytes + 255) / 256) * 256, f.planes > 1 ? (h_ + (1 << f.sub_y) - 1) >> f.sub_y : 1, rng) {
         if (rng && f.bytes == 2) {   // keep 10-bit codes in range with zero padding, like real frames
             auto fix = [&](Plane &p) {
                 for (size_t i = 0; i + 1 < p.host.size(); i += 2) {
@@ -92,8 +94,10 @@ static int clearValue(const Fmt &f, int plane) { return plane ? 1 << (f.depth - 
 
 // Reference: memset + one launch per layer per plane, exactly as cuda_rect_draw.cpp does it.
 static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &layers, int transfer) {
-    const int cw_bytes = canvas.w * cf.bytes;
-    if (cf.bytes == 2) {
+    const int cw_bytes = canvas.w * cf.bytes * cf.lanes0;
+    if (cf.planes == 1) {
+        check(cudaMemset2D(canvas.y.dev, canvas.y.pitch, 0, cw_bytes, canvas.y.rows), "memset rgb");
+    } else if (cf.bytes == 2) {
         check(cudaMemset2D(canvas.y.dev, canvas.y.pitch, 0, canvas.y.pitch, canvas.y.rows), "memset");
         std::vector<uint16_t> row(canvas.y.pitch / 2, (uint16_t)(clearValue(cf, 0) << cf.shift));
         for (int r = 0; r < canvas.y.rows; ++r) check(cudaMemcpy(canvas.y.dev + r * canvas.y.pitch, row.data(), cw_bytes, cudaMemcpyHostToDevice), "clear");
@@ -124,8 +128,8 @@ static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &
             continue;
         }
         const Fmt &sf = *L.yuv->fmt;
-        for (int p = 0; p < 2; ++p) {
-            const int lanes = p ? 2 : 1;
+        for (int p = 0; p < cf.planes; ++p) {
+            const int lanes = p ? 2 : cf.lanes0;
             int sx, sy, sw, sh, dx, dy, dw, dh, ox, oy, cwp, chp;
             planeRegion(sf, L.cx, L.cy, L.cw, L.ch, p, sx, sy, sw, sh);
             planeRegion(cf, L.dx, L.dy, L.dw, L.dh, p, dx, dy, dw, dh);
@@ -168,8 +172,8 @@ static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vect
             const Fmt &sf = *L.yuv->fmt;
             e.kind = L.kind; e.src_bytes = sf.bytes; e.src_shift = sf.shift;
             e.mul = L.kind == AVP_RECT_KIND_PROMOTE ? float(1 << (cf.depth - sf.depth)) : 1.f;
-            for (int p = 0; p < 2; ++p) {
-                const int lanes = p ? 2 : 1;
+            for (int p = 0; p < cf.planes; ++p) {
+                const int lanes = p ? 2 : cf.lanes0;
                 int sx, sy, sw, sh, dx, dy, dw, dh;
                 planeRegion(sf, L.cx, L.cy, L.cw, L.ch, p, sx, sy, sw, sh);
                 planeRegion(cf, L.dx, L.dy, L.dw, L.dh, p, dx, dy, dw, dh);
@@ -188,20 +192,24 @@ static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vect
 static void drawBatched(const Fmt &cf, Frame &canvas, const std::vector<AvpRectLayer> &table, AvpRectLayer *dev_table, int transfer) {
     if (!table.empty())
         check(cudaMemcpyAsync(dev_table, table.data(), table.size() * sizeof(AvpRectLayer), cudaMemcpyHostToDevice, 0), "table");
-    int ox, oy, chroma_w, chroma_h;
-    planeRegion(cf, 0, 0, canvas.w, canvas.h, 1, ox, oy, chroma_w, chroma_h);
-    chroma_w /= 2 * cf.bytes;
-    const dim3 grid((canvas.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas.h + 7) / 8, 2), block(32, 8);
+    int ox, oy, chroma_w = 0, chroma_h = 0;
+    if (cf.planes > 1) { planeRegion(cf, 0, 0, canvas.w, canvas.h, 1, ox, oy, chroma_w, chroma_h); chroma_w /= 2 * cf.bytes; }
+    const dim3 grid((canvas.w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas.h + 7) / 8, cf.planes), block(32, 8);
     bool any_rgb = false;
     for (const auto &e : table) any_rgb = any_rgb || e.kind == AVP_RECT_KIND_RGB || e.kind == AVP_RECT_KIND_RGBA;
-    if (any_rgb)
+    const int clear0 = cf.planes == 1 ? 0 : clearValue(cf, 0);
+    if (cf.planes == 1)
+        composite_planes_packed4<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
+            canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
+            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
+    else if (any_rgb)
         composite_planes<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
             canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
-            clearValue(cf, 0), clearValue(cf, 1), transfer, 203.f, 1000.f);
+            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     else
         composite_planes_yuv<<<grid, block>>>(dev_table, (int)table.size(), canvas.y.dev, canvas.y.pitch, canvas.uv.dev, canvas.uv.pitch,
             canvas.w, canvas.h, chroma_w, chroma_h, cf.bytes, cf.shift, 1 << (cf.depth - 8), cf.sub_x, cf.sub_y,
-            clearValue(cf, 0), clearValue(cf, 1), transfer, 203.f, 1000.f);
+            clear0, clearValue(cf, 1), transfer, 203.f, 1000.f);
     check(cudaGetLastError(), "composite launch");
 }
 
@@ -234,8 +242,9 @@ static void scenario(const char *name, const Fmt &cf, int cw, int ch, const std:
     fillTable(cf, layers, table);
     drawBatched(cf, out, table, dev_table, transfer);
     check(cudaDeviceSynchronize(), "sync");
-    comparePlanes(ref.y, out.y, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " luma").c_str());
-    comparePlanes(ref.uv, out.uv, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " chroma").c_str());
+    comparePlanes(ref.y, out.y, cw * cf.bytes * cf.lanes0, cf.bytes, cf.shift, (std::string(name) + " plane0").c_str());
+    if (cf.planes > 1)
+        comparePlanes(ref.uv, out.uv, cw * cf.bytes, cf.bytes, cf.shift, (std::string(name) + " chroma").c_str());
     std::cout << "PASS " << name << " (" << layers.size() << " layers, " << cf.name << " " << cw << "x" << ch << ")\n";
 }
 
@@ -295,6 +304,16 @@ int main() {
         {AVP_RECT_KIND_PROMOTE, &b, nullptr, 0, 0, 1280, 720, 480, 270, 480, 270},
         {AVP_RECT_KIND_RGBA, nullptr, &g, 0, 0, 400, 300, 100, 100, 400, 300},
     }, 1, dev_table);
+
+    // 6. Packed RGB canvas (DMA-BUF browser scale test): rgb0 sources scaled and blitted.
+    {
+        Frame ra(RGB0, 640, 360, &rng), rb(RGB0, 1280, 720, &rng);
+        scenario("rgb0 packed", RGB0, 1920, 1080, {
+            {AVP_RECT_KIND_YUV, &rb, nullptr, 0, 0, 1280, 720, 0, 0, 1920, 1080},
+            {AVP_RECT_KIND_YUV, &ra, nullptr, 0, 0, 640, 360, 1280, 720, 640, 360},
+            {AVP_RECT_KIND_YUV, &ra, nullptr, 10, 10, 300, 200, 100, 100, 900, 600},
+        }, 2, dev_table);
+    }
 
     // Timing: grid16 on 1080x1920 NV12, both paths, median of runs.
     {
