@@ -196,6 +196,26 @@ def test_four_hdr_422_inputs_can_be_used_alone():
     assert source_counts(4, [0, 0, 1, 0, 0]) == [0, 0, 4, 0, 0]
 
 
+@pytest.mark.parametrize('weights, expected', [
+    ([1, 0, 0, 0, 100], [48, 0, 0, 0, 16]),
+    ([1, 0, 100, 0, 100], [44, 0, 4, 0, 16]),
+    ([1, 0, 1, 0, 100], [44, 0, 4, 0, 16]),
+])
+def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
+    assert source_counts(64, weights) == expected
+    recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights})
+    assert [source['weight'] for source in recipe['inputs']] == expected
+
+
+def test_browser_only_limit():
+    settings = {**DEFAULT_SETTINGS, 'source_count': 16, 'weights': [0, 0, 0, 0, 1]}
+    assert recipe_for(settings)['inputs'][-1]['weight'] == 16
+    with pytest.raises(ValueError, match='Browser is limited to 16'):
+        recipe_for({**settings, 'source_count': 17})
+    with pytest.raises(ValueError, match='enable another source type'):
+        source_counts(21, [0, 0, 1, 0, 1])
+
+
 def test_failed_first_start_does_not_leave_show_for_resume(runtime, monkeypatch):
     config = runtime.media_dir / 'mixer.demo.json'
     monkeypatch.setattr(prepare_demo, 'prepare', lambda *_: config.write_text('{"sources": []}'))

@@ -20,12 +20,14 @@ DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, 
 
 def source_counts(total, weights):
     counts = allocate(total, weights)
-    if counts[2] > 4:
-        remaining = [w if i != 2 else 0 for i, w in enumerate(weights)]
-        if not any(remaining):
-            raise ValueError("HDR 4:2:2 is limited to four sources; enable another source type")
-        counts = allocate(total - 4, remaining)
-        counts[2] = 4
+    for index, limit, name in ((2, 4, "HDR 4:2:2"), (4, 16, "Browser")):
+        if counts[index] > limit:
+            remaining = [w if i != index else 0 for i, w in enumerate(weights)]
+            if not any(remaining):
+                raise ValueError(f"{name} is limited to {limit} sources; enable another source type")
+            counts = source_counts(total - limit, remaining)
+            counts[index] = limit
+            break
     return counts
 
 

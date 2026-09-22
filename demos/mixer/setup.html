@@ -109,9 +109,9 @@ const $ = id => document.getElementById(id);
 const types = [
  {id:'sdr420',name:'SDR · 4:2:0',detail:'H.264 patterns · NVDEC',color:'#439a86'},
  {id:'hlg420',name:'HDR · 4:2:0',detail:'HLG patterns · NVDEC',color:'#5a87b5'},
- {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce'},
+ {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce',max:4},
  {id:'sdr422',name:'SDR · 4:2:2',detail:'10-bit v210 bars · GPU unpack',color:'#d5a35f'},
- {id:'browser',name:'Browser',detail:'Bundled transparent test page',color:'#d47f95'}
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 16',color:'#d47f95',max:16}
 ];
 const presets = {balanced:[8,4,2,0,2],equal:[1,1,1,1,1],light:[2,1,0,0,0]};
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
@@ -127,12 +127,12 @@ function sourceEnabled(i){
 const controls=$('source-controls');
 types.forEach((t,i)=>{
  const row=document.createElement('div');row.className='source';
- row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${i===2?4:64}" step="1" aria-label="${t.name} sources">`;
+ row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${t.max??64}" step="1" aria-label="${t.name} sources">`;
  const input=row.querySelector('input');
  input.addEventListener('input',()=>{
   const limit=sourceLimit();
   const other=sourceValues.reduce((sum,n,index)=>sum+(index===i?0:n),0);
-  const maximum=Math.min(i===2?4:limit,limit-other);
+  const maximum=Math.min(t.max??limit,limit-other);
   if(Number(input.value)>maximum)input.value=maximum;
   sourceValues[i]=Number(input.value);
   $('sources').value=sourceValues.reduce((sum,n)=>sum+n,0);
@@ -149,10 +149,11 @@ function allocate(total,values){
 }
 function sourceCounts(total,values){
  let counts=allocate(total,values);
- if(counts[2]>4){
-  const remaining=values.map((w,i)=>i===2?0:w);
-  if(!remaining.some(Boolean))throw Error('HDR 4:2:2 is limited to four sources; enable another source type.');
-  counts=allocate(total-4,remaining);counts[2]=4;
+ const capped=types.findIndex((t,i)=>counts[i]>(t.max??64));
+ if(capped!==-1){
+  const {name,max}=types[capped],remaining=values.map((w,i)=>i===capped?0:w);
+  if(!remaining.some(Boolean))throw Error(`${name} is limited to ${max} sources; enable another source type.`);
+  counts=sourceCounts(total-max,remaining);counts[capped]=max;
  }
  return counts;
 }
@@ -166,7 +167,7 @@ function update(){
  if(Number($('scenes').value)>128)$('scenes').value=128;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
- if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||sourceValues[2]>4)sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
+ if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||types.some((t,i)=>sourceValues[i]>(t.max??64)))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
  const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  const video=counts.slice(0,4).reduce((a,b)=>a+b,0),browser=counts[4],mode=$('layout').value;
@@ -177,9 +178,9 @@ function update(){
  }
  currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts]};
- types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(i===2?4:limit,limit-sourceCount+counts[i]);});
+ types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(t.max??limit,limit-sourceCount+counts[i]);});
  $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
- $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. HDR 4:2:2 is capped at four.`;
+ $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. Maximum 4 HDR 4:2:2 and 16 browser sources.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;

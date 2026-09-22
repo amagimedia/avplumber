@@ -51,7 +51,8 @@ in the player if your browser cannot decode HEVC. The standalone player remains
 at <http://127.0.0.1:8080>.
 
 The setup limits unique sources to **32 at 50/60 fps** and **64 at 25/30 fps**,
-and scenes to **128**.
+including at most **16 browser sources**, and scenes to **128**. The browser
+service defaults to two workers with eight windows each.
 
 Settings persist in `media/demo.json`; later starts restore them and reuse
 `media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
