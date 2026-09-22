@@ -24,7 +24,7 @@ class FakeBridge(MixerBridge):
         self.replies = replies or {}
         self.fail_take = fail_take
 
-    def command(self, line: str):
+    def command(self, line: str, timeout: float | None = None):
         self.sent.append(line)
         if self.fail_take and line.startswith(self.fail_take):
             raise RuntimeError("mixer said no")

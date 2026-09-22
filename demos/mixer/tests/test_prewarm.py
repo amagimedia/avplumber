@@ -230,6 +230,40 @@ def test_program_excludes_frames_from_before_prewarm_finished(native_boundary, m
     assert app.avp.events.index("inspect mixer_final_out") < app.avp.events.index("READY")
 
 
+def test_pad_masks_above_64_travel_as_bit_strings(native_boundary, tmp_path):
+    """A show wider than 64 pads cannot put active_inputs in a JSON number, so the builder sends
+    the least-significant-bit-first bit string cuda_rect_overlay also parses."""
+    count = 70
+    lit = [0, 63, 64, 69]
+    doc = {
+        "canvas": {"width": 320, "height": 180, "fps": 60},
+        "sources": [{"id": f"s{i}", "kind": "video", "path": f"/m/{i}.mp4", "width": 320, "height": 180}
+                    for i in range(count)],
+        "scenes": [{"id": "wide", "items": [{"source": f"s{i}", "dst": {"x": 0, "y": 0, "w": 320, "h": 180}}
+                                            for i in lit]}],
+        "initial_scene": "wide",
+    }
+    path = tmp_path / "wide.json"
+    path.write_text(json.dumps(doc))
+    class ConfigEngine(NativeEngine):   # a config-driven show also registers demo commands
+        def registerControlCommand(self, *args, **kwargs):
+            pass
+
+    nodes, builder = native_boundary
+    api = SimpleNamespace(**{name: getattr(nodes, name) for name in (
+        "AssumeVideoFormat", "Bsf", "DecVideo", "Demux", "EncVideo", "FilterVideo", "ForceFPS",
+        "ForceKeyFrame", "InputRec", "Mux", "Output", "PreheatVideoRouter", "Realtime", "Split")},
+        AVPlumber=ConfigEngine, MixerGraphBuilder=builder)
+    app = build_application(GraphOptions(config=str(path), output="program.ts"), api=api)
+
+    masks = {slot: app.avp.nodes[f"mixer_comp_{slot}"]["active_inputs"] for slot in ("a", "b")}
+    program = [m for m in masks.values() if m != 0]
+    assert len(program) == 1
+    mask = program[0]
+    assert isinstance(mask, str), f"mask past bit 63 must not be a JSON number: {mask!r}"
+    assert [i for i, bit in enumerate(mask) if bit == "1"] == lit
+
+
 def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_boundary):
     app = application(native_boundary)
     nodes = app.avp.nodes

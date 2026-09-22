@@ -45,11 +45,14 @@ class AvpConnection:
         self.reader = None
         self.writer = None
 
-    async def command(self, command: str) -> str | None:
+    async def command(self, command: str, timeout: float = 5.0) -> str | None:
+        """`timeout` bounds one exchange. The default suits the small mixer commands; a reply
+        that grows with the show (queues.json is ~160 KB and one line at 48 sources) needs more
+        while the machine is busy starting up."""
         async with self._lock:
             if self.reader is None or self.writer is None:
                 raise ConnectionError("not connected")
-            request = asyncio.create_task(asyncio.wait_for(self._exchange(command), 5.0))
+            request = asyncio.create_task(asyncio.wait_for(self._exchange(command), timeout))
             try:
                 return await asyncio.shield(request)
             except asyncio.CancelledError:

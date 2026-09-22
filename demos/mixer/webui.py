@@ -79,33 +79,38 @@ class MixerBridge:
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="mixer-bridge").start()
 
-    def _run(self, coro):
+    def _run(self, coro, timeout: float | None = None):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return future.result(self.timeout)
+            return future.result(self.timeout if timeout is None else timeout + 1.0)
         except Exception:
             future.cancel()
             raise
 
-    def command(self, line: str) -> str | None:
-        """Send one command, reconnecting once if the mixer was restarted."""
+    def command(self, line: str, timeout: float | None = None) -> str | None:
+        """Send one command, reconnecting once if the mixer was restarted. `timeout` bounds
+        both the exchange and the wait for it, for replies that outgrow the default."""
+        budget = self.timeout if timeout is None else timeout
         with self._lock:
             try:
                 if not self._connection.connected:
                     self._run(self._connection.connect())
-                return self._run(self._connection.command(line))
+                return self._run(self._connection.command(line, budget), budget)
             except Exception:
                 self._run(self._connection.disconnect())
                 self._run(self._connection.connect())
-                return self._run(self._connection.command(line))
+                return self._run(self._connection.command(line, budget), budget)
 
-    def state(self) -> dict:
-        """Everything the page redraws from, in one poll."""
+    def state(self, timeout: float | None = None) -> dict:
+        """Everything the page redraws from, in one poll. A caller polling a mixer that is still
+        building its graph passes a longer `timeout`: the mixer runs control commands on the
+        thread that is busy starting nodes, so replies stall for seconds during startup even
+        though they take a millisecond once it is running."""
         state: dict = {"mixer": self.mixer}
-        state["status"] = json.loads(self.command(f"mixer.status {self.mixer}") or "{}")
-        state["scenes"] = json.loads(self.command(f"mixer.scenes {self.mixer}") or "[]")
+        state["status"] = json.loads(self.command(f"mixer.status {self.mixer}", timeout) or "{}")
+        state["scenes"] = json.loads(self.command(f"mixer.scenes {self.mixer}", timeout) or "[]")
         try:
-            state["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}") or "{}")
+            state["settings"] = json.loads(self.command(f"mixer.settings {self.mixer}", timeout) or "{}")
         except Exception:
             state["settings"] = {}   # older mixers, or one started without a config
         if self.transition is not None:

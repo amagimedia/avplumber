@@ -170,12 +170,18 @@ class SetupRuntime:
             if self.process.poll() is not None:
                 raise RuntimeError(f"Mixer exited during startup ({self.process.returncode}); see container logs")
             try:
-                state = self.bridge.state()
-                queues = json.loads(self.bridge.command("queues.json") or "[]")
-                encoded = [q for q in queues if q["name"] in ("janus_encoded", "janus_hdr_encoded")]
-                if state.get("status", {}).get("pgm_scene") and encoded and all(q["enqueued_total"] > 0 for q in encoded):
-                    return
-                last_problem = "waiting for encoded output"
+                state = self.bridge.state(timeout=30.0)
+                if not state.get("status", {}).get("pgm_scene"):
+                    last_problem = "waiting for a program scene"
+                else:
+                    # queues.json carries every edge (~160 KB at 48 sources) on one line, and
+                    # the mixer answers it slowly while it is still filling its decoders, so
+                    # give it far more than the default command budget.
+                    queues = json.loads(self.bridge.command("queues.json", timeout=60.0) or "[]")
+                    encoded = [q for q in queues if q["name"] in ("janus_encoded", "janus_hdr_encoded")]
+                    if encoded and all(q["enqueued_total"] > 0 for q in encoded):
+                        return
+                    last_problem = "waiting for encoded output"
             except Exception as exc:
                 last_problem = f"{type(exc).__name__}: {exc}"
             if time.monotonic() > deadline:

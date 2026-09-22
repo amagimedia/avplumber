@@ -325,9 +325,16 @@ $(patsubst %.cpp,objs/%.o,$(CPPSRC_COMPILE)): objs/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c -o $@ $<
 	$(POSTCOMPILE)
 
+# Own dependency files under objs/python: these translation units are compiled twice (once
+# plain, once with -DPYTHON_MODULE) and must not share .d paths with the plain objects.
+# Without this the module silently kept objects built against an older header.
+PYTHON_DEPFLAGS = -MT $@ -MMD -MP -MF objs/python/$*.Td
+PYTHON_POSTCOMPILE = @mv -f objs/python/$*.Td objs/python/$*.d && touch $@
+
 $(PYTHON_MODULE_DEFINE_OBJS): objs/python/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(PYTHON_MODULE_EXTRA_CXXFLAGS) -DPYTHON_MODULE $(PYTHON_DEPFLAGS) -c -o $@ $<
+	$(PYTHON_POSTCOMPILE)
 
 objs/src/app_version.o: src/app_version.cpp builddate $(BUILD_DATE_FILE)
 	@mkdir -p $(dir $@)
@@ -390,3 +397,4 @@ objs/src/rest_client.o: deps/cpr/build/lib/libcpr.a
 .PRECIOUS: objs/%.d
 
 include $(wildcard $(patsubst %.cpp,objs/%.d,$(CPPSRC_COMPILE) $(CPPSRC_PYTHON)))
+include $(wildcard $(patsubst %.o,%.d,$(PYTHON_MODULE_DEFINE_OBJS)))
