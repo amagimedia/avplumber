@@ -252,3 +252,270 @@ extern "C" __global__ void rgba_over_yuv(
     store_sample(uv + dst_sb, dst_sb, dst_shift,
                  min(max(a * cr + (1.f - a) * load_sample(uv + dst_sb, dst_sb, dst_shift), 0.f), maxv));
 }
+
+// ---------------------------------------------------------------------------
+// Single-launch composite. One launch draws the whole canvas: gridDim.z selects
+// the plane (0 luma, 1 interleaved chroma), each thread owns one lane group of
+// that plane, walks the draw-ordered rect table bottom to top and produces the
+// same value the per-layer kernels above would have left there: bilinear scale
+// or blit for canvas-format sources, code promotion for lower-depth sources,
+// fused RGB(A) conversion with the same chroma-block averaging, alpha blending
+// against what lower layers produced, and the clear value where nothing draws.
+// Every intermediate value is rounded exactly as the per-layer store would have
+// been, so the output is bit-identical to clear + N layer launches.
+// ---------------------------------------------------------------------------
+#include "cuda_rect_table.h"
+
+// Emulate store_sample followed by load_sample: the rounded code as a float.
+__device__ __forceinline__ float stored_code(float v) { return truncf(v + 0.5f); }
+
+__device__ __forceinline__ bool rect_overlaps(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+
+// Bilinear sample of lane `c` of a lane-group plane, identical to scale_plane / convert_scale_plane.
+// The vertical terms depend only on the row, so the caller computes them once per thread.
+struct RowTaps { int y0, y1; float ty; };
+__device__ __forceinline__ RowTaps row_taps(int sy, int sh, int oy, int dh) {
+    const float fy = (oy + 0.5f) * sh / dh - 0.5f;
+    const int iy = int(floorf(fy));
+    RowTaps t;
+    t.ty = fy - iy;
+    t.y0 = sy + max(0, min(iy, sh - 1));
+    t.y1 = sy + max(0, min(iy + 1, sh - 1));
+    return t;
+}
+__device__ __forceinline__ float sample_lane(const unsigned char *src, int src_pitch, int sx, int sw,
+                                             int lanes, int c, int bytes, int shift, int ox, int dw, RowTaps t) {
+    const float fx = (ox + 0.5f) * sw / dw - 0.5f;
+    const int ix = int(floorf(fx));
+    const float tx = fx - ix;
+    const int x0 = sx + max(0, min(ix, sw - 1));
+    const int x1 = sx + max(0, min(ix + 1, sw - 1));
+    const float a = load_sample(src + t.y0 * src_pitch + (x0 * lanes + c) * bytes, bytes, shift);
+    const float b = load_sample(src + t.y0 * src_pitch + (x1 * lanes + c) * bytes, bytes, shift);
+    const float d = load_sample(src + t.y1 * src_pitch + (x0 * lanes + c) * bytes, bytes, shift);
+    const float e = load_sample(src + t.y1 * src_pitch + (x1 * lanes + c) * bytes, bytes, shift);
+    const float top = a + tx * (b - a), bottom = d + tx * (e - d);
+    return top + t.ty * (bottom - top);
+}
+
+// Bilinear alpha at the same footprint sample_rgb uses, as rgba_over_yuv computes it.
+__device__ __forceinline__ float sample_alpha(const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
+                                              int step, int a_off, float fx, float fy) {
+    const int ix = int(floorf(fx)), iy = int(floorf(fy));
+    const float tx = fx - ix, ty = fy - iy;
+    const int x0 = sx + max(0, min(ix, sw - 1)), x1 = sx + max(0, min(ix + 1, sw - 1));
+    const int y0 = sy + max(0, min(iy, sh - 1)), y1 = sy + max(0, min(iy + 1, sh - 1));
+    const float a00 = src[y0 * src_pitch + x0 * step + a_off], a01 = src[y0 * src_pitch + x1 * step + a_off];
+    const float a10 = src[y1 * src_pitch + x0 * step + a_off], a11 = src[y1 * src_pitch + x1 * step + a_off];
+    return ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
+}
+
+// kRgb=false compiles a lean YUV-only body (no transfer math, far fewer registers) for the
+// common case of scenes without packed-RGB layers; the host picks the entry point per frame.
+//
+// Each thread owns AVP_RECT_PX consecutive lane groups of one row (4 luma samples, or 2 chroma
+// pairs): layer geometry is fetched once per thread, the per-sample math is exactly the
+// per-layer kernels', and the results leave in one vector store.
+template <bool kRgb>
+__device__ __forceinline__ void composite_body(
+    const AvpRectLayer *__restrict__ layers, int n,
+    unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch,
+    int canvas_w, int canvas_h, int chroma_w, int chroma_h,
+    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y,
+    int clear_y, int clear_uv, int transfer, float white, float peak) {
+    const int plane = blockIdx.z;
+    const int px = plane ? AVP_RECT_PX / 2 : AVP_RECT_PX;          // lane groups per thread
+    const int pw = plane ? chroma_w : canvas_w, ph = plane ? chroma_h : canvas_h;
+    const int tile_w = blockDim.x * px;
+    const int tile_x = blockIdx.x * tile_w, tile_y = blockIdx.y * blockDim.y;
+    if (tile_x >= pw || tile_y >= ph) return;   // block-uniform: no thread reaches the barrier below
+
+    // Per-block culling: one bit per layer whose rect touches this tile.
+    __shared__ unsigned int hit[AVP_RECT_MAX_LAYERS / 32];
+    const int threads = blockDim.x * blockDim.y;
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    for (int w = tid; w < AVP_RECT_MAX_LAYERS / 32; w += threads) hit[w] = 0;
+    __syncthreads();
+    for (int i = tid; i < n; i += threads) {
+        const AvpRectLayer &L = layers[i];
+        if (rect_overlaps(tile_x, tile_y, tile_w, blockDim.y, L.dx[plane], L.dy[plane], L.dw[plane], L.dh[plane]))
+            atomicOr(&hit[i >> 5], 1u << (i & 31));
+    }
+    __syncthreads();
+
+    const int X0 = tile_x + threadIdx.x * px, Y = tile_y + threadIdx.y;
+    if (X0 >= pw || Y >= ph) return;
+    const int lanes = plane ? 2 : 1;
+    const int bw = 1 << sub_x, bh = 1 << sub_y;
+    const float maxv = 256.f * dst_scale - 1.f;
+    float v0[AVP_RECT_PX], v1[AVP_RECT_PX];
+#pragma unroll
+    for (int p = 0; p < AVP_RECT_PX; ++p) { v0[p] = plane ? float(clear_uv) : float(clear_y); v1[p] = float(clear_uv); }
+
+    for (int w = 0; w < AVP_RECT_MAX_LAYERS / 32; ++w) {
+        unsigned int bits = hit[w];
+        while (bits) {
+            const int bit = __ffs(bits) - 1;
+            bits &= bits - 1;
+            const AvpRectLayer &L = layers[w * 32 + bit];
+            const int ldx = L.dx[plane], ldy = L.dy[plane], ldw = L.dw[plane], ldh = L.dh[plane];
+            const int oy = Y - ldy;
+            if (oy < 0 || oy >= ldh || X0 + px <= ldx || X0 >= ldx + ldw) continue;
+
+            if (L.kind == AVP_RECT_KIND_YUV || L.kind == AVP_RECT_KIND_PROMOTE) {
+                const unsigned char *src = (const unsigned char *)L.src[plane];
+                const int pitch = L.src_pitch[plane];
+                const int sx = L.sx[plane], sy = L.sy[plane], sw = L.sw[plane], sh = L.sh[plane];
+                const int bytes = L.kind == AVP_RECT_KIND_YUV ? dst_sb : L.src_bytes;
+                const int shift = L.kind == AVP_RECT_KIND_YUV ? dst_shift : L.src_shift;
+                const float mul = L.mul;
+                const RowTaps taps = row_taps(sy, sh, oy, ldh);
+#pragma unroll
+                for (int p = 0; p < AVP_RECT_PX; ++p) {
+                    if (p >= px) break;
+                    const int ox = X0 + p - ldx;
+                    if (ox < 0 || ox >= ldw) continue;
+                    for (int c = 0; c < lanes; ++c) {
+                        float sv = sample_lane(src, pitch, sx, sw, lanes, c, bytes, shift, ox, ldw, taps);
+                        if (L.kind == AVP_RECT_KIND_PROMOTE) sv *= mul;
+                        if (c == 0) v0[p] = stored_code(sv); else v1[p] = stored_code(sv);
+                    }
+                }
+                continue;
+            }
+
+            if (!kRgb) continue;   // host never puts RGB entries in a YUV-only table
+            // Packed RGB(A): plane 0 is one luma sample; plane 1 is one chroma block of bw x bh luma
+            // positions averaged, with the same skip rules as rgb_to_yuv / rgba_over_yuv.
+            const bool blend = L.kind == AVP_RECT_KIND_RGBA;
+            const unsigned char *src = (const unsigned char *)L.src[0];   // packed RGB: one plane for both passes
+            const int pitch = L.src_pitch[0];
+            const int sx = L.sx[0], sy = L.sy[0], sw = L.sw[0], sh = L.sh[0];
+            const int dx = L.dx[0], dy = L.dy[0], dw = L.dw[0], dh = L.dh[0];
+            const float xs = float(sw) / dw, ys = float(sh) / dh;
+            const int step = L.step, r_off = L.r_off, g_off = L.g_off, b_off = L.b_off, a_off = L.a_off;
+            const int premultiplied = L.premultiplied;
+#pragma unroll 1
+            for (int p = 0; p < px; ++p) {
+                const int X = X0 + p;
+                const int ox = X - ldx;
+                if (ox < 0 || ox >= ldw) continue;
+                if (plane == 0) {
+                    float rgb[3];
+                    const float fx = (ox + 0.5f) * xs - 0.5f, fy = (oy + 0.5f) * ys - 0.5f;
+                    sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
+                    if (!blend) {
+                        convert_graphic_rgb(rgb, transfer, white, peak);
+                        const float luma = graphic_luma(rgb, transfer) * dst_scale;
+                        v0[p] = stored_code(min(max(luma, 0.f), maxv));
+                    } else {
+                        const float a = sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
+                        if (premultiplied)
+                            for (int c = 0; c < 3; ++c)
+                                rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
+                        convert_graphic_rgb(rgb, transfer, white, peak);
+                        const float luma = graphic_luma(rgb, transfer) * dst_scale;
+                        v0[p] = stored_code(min(max(a * luma + (1.f - a) * v0[p], 0.f), maxv));
+                    }
+                    continue;
+                }
+                // Chroma: this thread's block origin in luma coordinates, relative to the layer.
+                const int box = (X << sub_x) - dx, boy = (Y << sub_y) - dy;
+                const int x = dx + box, y = dy + boy;
+                float sum[3] = {0.f, 0.f, 0.f}, sum_a = 0.f;
+                int cnt = 0;
+                for (int j = 0; j < bh; ++j) {
+                    for (int i2 = 0; i2 < bw; ++i2) {
+                        if (box + i2 >= dw || boy + j >= dh || x + i2 >= canvas_w || y + j >= canvas_h) continue;
+                        float rgb[3];
+                        const float fx = (box + i2 + 0.5f) * xs - 0.5f, fy = (boy + j + 0.5f) * ys - 0.5f;
+                        sample_rgb(src, pitch, sx, sy, sw, sh, step, r_off, g_off, b_off, fx, fy, rgb);
+                        if (!blend) {
+                            convert_graphic_rgb(rgb, transfer, white, peak);
+                            sum[0] += rgb[0]; sum[1] += rgb[1]; sum[2] += rgb[2];
+                        } else {
+                            const float a = sample_alpha(src, pitch, sx, sy, sw, sh, step, a_off, fx, fy);
+                            if (premultiplied)
+                                for (int c = 0; c < 3; ++c)
+                                    rgb[c] = a > 0.f ? min(rgb[c] / a, 255.f) : 0.f;
+                            convert_graphic_rgb(rgb, transfer, white, peak);
+                            sum[0] += a * rgb[0]; sum[1] += a * rgb[1]; sum[2] += a * rgb[2];
+                            sum_a += a;
+                        }
+                        ++cnt;
+                    }
+                }
+                float cb, cr;
+                if (!blend) {
+                    const float r = sum[0] / cnt, g = sum[1] / cnt, b = sum[2] / cnt;
+                    graphic_chroma(r, g, b, transfer, cb, cr);
+                    cb *= dst_scale; cr *= dst_scale;
+                    v0[p] = stored_code(min(max(cb, 0.f), maxv));
+                    v1[p] = stored_code(min(max(cr, 0.f), maxv));
+                } else {
+                    if (cnt == 0 || sum_a <= 0.f) continue;
+                    const float r = sum[0] / sum_a, g = sum[1] / sum_a, b = sum[2] / sum_a, a = sum_a / cnt;
+                    graphic_chroma(r, g, b, transfer, cb, cr);
+                    cb *= dst_scale; cr *= dst_scale;
+                    v0[p] = stored_code(min(max(a * cb + (1.f - a) * v0[p], 0.f), maxv));
+                    v1[p] = stored_code(min(max(a * cr + (1.f - a) * v1[p], 0.f), maxv));
+                }
+            }
+        }
+    }
+
+    // Store: 4 consecutive samples (4 luma, or 2 chroma pairs) in one aligned vector write when the
+    // group lies inside the plane; scalar stores for a tail group. Canvas pitches are 256-aligned.
+    unsigned char *row = plane ? dst_uv + Y * uv_pitch : dst_y + Y * y_pitch;
+    const int valid = min(px, pw - X0);
+    if (valid == px) {
+        if (dst_sb == 1) {
+            uchar4 out;
+            if (plane == 0)
+                out = make_uchar4((unsigned char)(v0[0] + 0.5f), (unsigned char)(v0[1] + 0.5f),
+                                  (unsigned char)(v0[2] + 0.5f), (unsigned char)(v0[3] + 0.5f));
+            else
+                out = make_uchar4((unsigned char)(v0[0] + 0.5f), (unsigned char)(v1[0] + 0.5f),
+                                  (unsigned char)(v0[1] + 0.5f), (unsigned char)(v1[1] + 0.5f));
+            *(uchar4 *)(row + X0 * lanes) = out;
+        } else {
+            ushort4 out;
+            if (plane == 0)
+                out = make_ushort4((unsigned short)((unsigned short)(v0[0] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v0[1] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v0[2] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v0[3] + 0.5f) << dst_shift));
+            else
+                out = make_ushort4((unsigned short)((unsigned short)(v0[0] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v1[0] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v0[1] + 0.5f) << dst_shift),
+                                   (unsigned short)((unsigned short)(v1[1] + 0.5f) << dst_shift));
+            *(ushort4 *)(row + X0 * lanes * 2) = out;
+        }
+        return;
+    }
+    for (int p = 0; p < valid; ++p) {
+        unsigned char *at = row + (X0 + p) * lanes * dst_sb;
+        store_sample(at, dst_sb, dst_shift, v0[p]);
+        if (plane) store_sample(at + dst_sb, dst_sb, dst_shift, v1[p]);
+    }
+}
+
+#define AVP_COMPOSITE_ARGS \
+    const AvpRectLayer *__restrict__ layers, int n, \
+    unsigned char *dst_y, int y_pitch, unsigned char *dst_uv, int uv_pitch, \
+    int canvas_w, int canvas_h, int chroma_w, int chroma_h, \
+    int dst_sb, int dst_shift, int dst_scale, int sub_x, int sub_y, \
+    int clear_y, int clear_uv, int transfer, float white, float peak
+#define AVP_COMPOSITE_PASS \
+    layers, n, dst_y, y_pitch, dst_uv, uv_pitch, canvas_w, canvas_h, chroma_w, chroma_h, \
+    dst_sb, dst_shift, dst_scale, sub_x, sub_y, clear_y, clear_uv, transfer, white, peak
+
+extern "C" __global__ void __launch_bounds__(256) composite_planes(AVP_COMPOSITE_ARGS) {
+    composite_body<true>(AVP_COMPOSITE_PASS);
+}
+extern "C" __global__ void __launch_bounds__(256) composite_planes_yuv(AVP_COMPOSITE_ARGS) {
+    composite_body<false>(AVP_COMPOSITE_PASS);
+}

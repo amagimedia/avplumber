@@ -4,6 +4,7 @@
 // conversion). Owns no scheduling state; the node decides what to draw when.
 #include "../../hwaccel.hpp"
 #include "../../mixer/primitives/compositor_layers.hpp"
+#include "cuda_rect_table.h"
 #include <cuda_loader/cuda_drvapi_dynlink_cuda.h>
 
 extern "C" {
@@ -58,6 +59,14 @@ public:
     /// destination alpha opaque on alpha canvases fed by non-alpha sources.
     void drawLayer(CUstream stream, const av::VideoFrame &src, AVFrame *canvas, const LayerSpec &layer);
 
+    /// Draw every resolved op and the background in ONE kernel launch (semiplanar canvases
+    /// without alpha only). Returns false, having touched nothing, when the canvas format or an
+    /// op is outside what the batched kernel covers; the caller then clears and draws per layer.
+    /// Output is bit-identical to clearCanvas + drawLayer for each op in order.
+    bool drawBatched(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
+    /// Whether the canvas format can take the batched path at all.
+    bool batchedSupported() const;
+
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
     static AVPixelFormat frameSwFormat(const av::VideoFrame &f);
 
@@ -70,6 +79,14 @@ private:
     CUfunction convert_kernel_ = nullptr;
     CUfunction rgb_kernel_ = nullptr;
     CUfunction rgba_kernel_ = nullptr;
+    CUfunction composite_kernel_ = nullptr;
+    CUfunction composite_yuv_kernel_ = nullptr;
+    // Rect table for the batched kernel: pinned host staging + device copy, one entry per op.
+    AvpRectLayer *table_host_ = nullptr;
+    CUdeviceptr table_device_ = 0;
+
+    bool fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out);
+    void validateSourceColor(const av::VideoFrame &src, AVPixelFormat src_sw_fmt, const AVFrame *canvas) const;
 
     void convertRgbLayer(CUstream stream, const AVFrame *src, AVFrame *dst, const LayerSpec &layer,
                          int step, int r_off, int g_off, int b_off, int a_off);

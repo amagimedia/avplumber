@@ -133,16 +133,25 @@ void CudaRectDraw::ensureKernels() {
         AVP_CHECK_CU(cuModuleGetFunction(&scale_kernel_, scale_module_, "scale_plane")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&convert_kernel_, scale_module_, "convert_scale_plane")) ||
         AVP_CHECK_CU(cuModuleGetFunction(&rgb_kernel_, scale_module_, "rgb_to_yuv")) ||
-        AVP_CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_yuv")))
+        AVP_CHECK_CU(cuModuleGetFunction(&rgba_kernel_, scale_module_, "rgba_over_yuv")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_kernel_, scale_module_, "composite_planes")) ||
+        AVP_CHECK_CU(cuModuleGetFunction(&composite_yuv_kernel_, scale_module_, "composite_planes_yuv")))
         throw Error("cuda_rect_overlay: cannot load scaling kernel");
+    const size_t bytes = sizeof(AvpRectLayer) * AVP_RECT_MAX_LAYERS;
+    if (AVP_CHECK_CU(cuMemHostAlloc((void **)&table_host_, bytes, 0)) ||
+        AVP_CHECK_CU(cuMemAlloc(&table_device_, bytes)))
+        throw Error("cuda_rect_overlay: cannot allocate the rect table");
 #endif
 }
 
 void CudaRectDraw::unload() {
     if (scale_module_) {
         cuCtxSetCurrent(cuda_dev_->cuda_ctx);
+        if (table_device_) { AVP_CHECK_CU(cuMemFree(table_device_)); table_device_ = 0; }
+        if (table_host_) { AVP_CHECK_CU(cuMemFreeHost(table_host_)); table_host_ = nullptr; }
         AVP_CHECK_CU(cuModuleUnload(scale_module_));
         scale_module_ = nullptr;
+        composite_kernel_ = nullptr;
     }
 }
 
@@ -260,6 +269,147 @@ void CudaRectDraw::convertLayer(CUstream stream, AVPixelFormat src_fmt, const AV
     }
 }
 
+void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, AVPixelFormat src_sw_fmt,
+                                       const AVFrame *canvas) const {
+    if (canvas_.transfer == AVCOL_TRC_UNSPECIFIED)
+        return;
+    int rgb_step, r_off, g_off, b_off;
+    const AVFrame *frame = src.raw();
+    const bool rgb = isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off);
+    const bool valid = rgb
+        ? isSdrGraphicColor(*frame)
+        : frame->color_trc == canvas->color_trc &&
+          frame->color_primaries == canvas->color_primaries &&
+          frame->colorspace == canvas->colorspace && frame->color_range == AVCOL_RANGE_MPEG;
+    if (!valid)
+        throw Error("cuda_rect_overlay: missing or mismatched source color metadata; "
+                    "declare source color and normalize to the canvas before compositing");
+}
+
+bool CudaRectDraw::batchedSupported() const {
+#ifndef HAVE_CUDA_RECT_SCALE
+    return false;
+#else
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(canvas_.sw_fmt);
+    return cd && !(cd->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_ALPHA)) && cd->nb_components == 3 &&
+           av_pix_fmt_count_planes(canvas_.sw_fmt) == 2;
+#endif
+}
+
+// One table entry from a resolved op, with the same per-plane geometry the per-layer paths
+// compute (lumaRectToPlaneRegion in bytes, then lane groups), so the kernel samples identically.
+bool CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) {
+    const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+    const LayerSpec &L = op.layer;
+    const AVFrame *src = op.src->raw();
+    const AVPixelFormat src_sw_fmt = frameSwFormat(*op.src);
+    validateSourceColor(*op.src, src_sw_fmt, canvas);
+    const bool sized = L.dst_w > 0;
+    const int dstw = sized ? L.dst_w : L.crop_w, dsth = sized ? L.dst_h : L.crop_h;
+    const AVPixFmtDescriptor *dd = av_pix_fmt_desc_get(sw_fmt);
+    const int dst_bytes = sampleBytes(sw_fmt);
+    out = AvpRectLayer{};
+
+    int rgb_step, r_off, g_off, b_off;
+    if (src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt) &&
+        isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
+        const int a_off = packedAlphaOffset(src_sw_fmt);
+        out.kind = (L.blend && a_off >= 0) ? AVP_RECT_KIND_RGBA : AVP_RECT_KIND_RGB;
+        out.step = rgb_step; out.r_off = r_off; out.g_off = g_off; out.b_off = b_off; out.a_off = a_off;
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+        out.premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
+#endif
+        out.src[0] = (unsigned long long)(uintptr_t)src->data[0];
+        out.src_pitch[0] = src->linesize[0];
+        out.sx[0] = L.crop_x; out.sy[0] = L.crop_y; out.sw[0] = L.crop_w; out.sh[0] = L.crop_h;
+        out.dx[0] = L.dst_x; out.dy[0] = L.dst_y; out.dw[0] = dstw; out.dh[0] = dsth;
+        // Chroma sites owned by this layer: the blocks whose (aligned) luma origin lies in the rect.
+        const int bw = 1 << dd->log2_chroma_w, bh = 1 << dd->log2_chroma_h;
+        out.dx[1] = L.dst_x >> dd->log2_chroma_w;
+        out.dy[1] = L.dst_y >> dd->log2_chroma_h;
+        out.dw[1] = (L.dst_x + dstw + bw - 1) / bw - out.dx[1];
+        out.dh[1] = (L.dst_y + dsth + bh - 1) / bh - out.dy[1];
+        if (L.dst_x + dstw <= 0) out.dw[1] = 0;
+        if (L.dst_y + dsth <= 0) out.dh[1] = 0;
+        return true;
+    }
+
+    const bool promote = src_sw_fmt != sw_fmt && isYuvPromoteConvertible(src_sw_fmt, sw_fmt);
+    if (!promote && src_sw_fmt != sw_fmt)
+        return false;   // opaque-onto-alpha blits and anything else stay on the per-layer path
+    const AVPixelFormat geometry_fmt = promote ? src_sw_fmt : sw_fmt;
+    out.kind = promote ? AVP_RECT_KIND_PROMOTE : AVP_RECT_KIND_YUV;
+    out.src_bytes = sampleBytes(geometry_fmt);
+    out.src_shift = storageShift(geometry_fmt);
+    const AVPixFmtDescriptor *sd = av_pix_fmt_desc_get(geometry_fmt);
+    out.mul = promote ? float(1 << (dd->comp[0].depth - sd->comp[0].depth)) : 1.f;
+    for (int p = 0; p < 2; ++p) {
+        if (!src->data[p]) return false;
+        const int lanes = p ? 2 : 1;
+        int sx, sy, sw, sh, dx, dy, dw, dh;
+        lumaRectToPlaneRegion(geometry_fmt, L.crop_x, L.crop_y, L.crop_w, L.crop_h, p, sx, sy, sw, sh);
+        lumaRectToPlaneRegion(sw_fmt, L.dst_x, L.dst_y, dstw, dsth, p, dx, dy, dw, dh);
+        sx /= lanes * out.src_bytes; sw /= lanes * out.src_bytes;
+        dx /= lanes * dst_bytes; dw /= lanes * dst_bytes;
+        if (sw <= 0 || sh <= 0) return false;   // the per-layer kernel would index nothing sensible either
+        out.src[p] = (unsigned long long)(uintptr_t)src->data[p];
+        out.src_pitch[p] = src->linesize[p];
+        out.sx[p] = sx; out.sy[p] = sy; out.sw[p] = sw; out.sh[p] = sh;
+        out.dx[p] = dx; out.dy[p] = dy; out.dw[p] = dw; out.dh[p] = dh;
+    }
+    return true;
+}
+
+bool CudaRectDraw::drawBatched(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas,
+                               const AVFrame *color_src) {
+#ifndef HAVE_CUDA_RECT_SCALE
+    (void)stream; (void)ops; (void)canvas; (void)color_src;
+    return false;
+#else
+    if (!batchedSupported()) return false;
+    ensureKernels();
+    if (!composite_kernel_ || !table_host_) return false;
+    const AVPixelFormat sw_fmt = canvas_.sw_fmt;
+    int n = 0;
+    bool any_rgb = false;
+    for (const DrawOp &op : ops) {
+        if (!op.src || !op.src->raw()) continue;
+        if (n >= AVP_RECT_MAX_LAYERS) return false;
+        if (!fillTableEntry(op, canvas, table_host_[n])) return false;
+        any_rgb = any_rgb || table_host_[n].kind == AVP_RECT_KIND_RGB || table_host_[n].kind == AVP_RECT_KIND_RGBA;
+        ++n;
+    }
+    uint16_t clear_y = 0, clear_uv = 0;
+    if (!planeClearValue(sw_fmt, color_src, 0, clear_y) || !planeClearValue(sw_fmt, color_src, 1, clear_uv))
+        return false;
+    if (n > 0 && AVP_CHECK_CU(cuMemcpyHtoDAsync(table_device_, table_host_, sizeof(AvpRectLayer) * n, stream)))
+        throw Error("cuda_rect_overlay: rect table upload failed");
+
+    const AVPixFmtDescriptor *cd = av_pix_fmt_desc_get(sw_fmt);
+    int cx, cy, chroma_w, chroma_h;
+    lumaRectToPlaneRegion(sw_fmt, 0, 0, canvas_.width, canvas_.height, 1, cx, cy, chroma_w, chroma_h);
+    int dst_sb = sampleBytes(sw_fmt), dst_shift = storageShift(sw_fmt);
+    chroma_w /= 2 * dst_sb;
+    int dst_scale = 1 << (cd->comp[0].depth - 8), sub_x = cd->log2_chroma_w, sub_y = cd->log2_chroma_h;
+    int canvas_w = canvas_.width, canvas_h = canvas_.height;
+    int clear_y_i = clear_y, clear_uv_i = clear_uv;
+    int transfer = kernelTransfer(canvas_.transfer);
+    float sdr_white = canvas_.sdr_white, hdr_peak = canvas_.hdr_peak;
+    CUdeviceptr table = table_device_, luma = (CUdeviceptr)canvas->data[0], chroma = (CUdeviceptr)canvas->data[1];
+    int luma_pitch = canvas->linesize[0], chroma_pitch = canvas->linesize[1];
+    void *args[] = {&table, &n, &luma, &luma_pitch, &chroma, &chroma_pitch,
+                    &canvas_w, &canvas_h, &chroma_w, &chroma_h,
+                    &dst_sb, &dst_shift, &dst_scale, &sub_x, &sub_y,
+                    &clear_y_i, &clear_uv_i, &transfer, &sdr_white, &hdr_peak};
+    // Grid covers the luma plane in 128x8 tiles; chroma blocks past their plane return at once.
+    if (AVP_CHECK_CU(cuLaunchKernel(any_rgb ? composite_kernel_ : composite_yuv_kernel_,
+                                    (canvas_w + 32 * AVP_RECT_PX - 1) / (32 * AVP_RECT_PX), (canvas_h + 7) / 8, 2,
+                                    32, 8, 1, 0, stream, args, nullptr)))
+        throw Error("cuda_rect_overlay: composite launch failed");
+    return true;
+#endif
+}
+
 void CudaRectDraw::drawLayer(CUstream stream, const av::VideoFrame &src, AVFrame *canvas, const LayerSpec &L) {
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     const int canvas_w = canvas_.width, canvas_h = canvas_.height;
@@ -268,18 +418,7 @@ void CudaRectDraw::drawLayer(CUstream stream, const av::VideoFrame &src, AVFrame
         L.dst_x >= 0 && L.dst_y >= 0 && L.dst_x + L.dst_w <= canvas_w && L.dst_y + L.dst_h <= canvas_h);
     const AVPixelFormat src_sw_fmt = frameSwFormat(src);
     int rgb_step, r_off, g_off, b_off;
-    if (canvas_.transfer != AVCOL_TRC_UNSPECIFIED) {
-        const AVFrame *frame = src.raw();
-        const bool rgb = isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off);
-        const bool valid = rgb
-            ? isSdrGraphicColor(*frame)
-            : frame->color_trc == canvas->color_trc &&
-              frame->color_primaries == canvas->color_primaries &&
-              frame->colorspace == canvas->colorspace && frame->color_range == AVCOL_RANGE_MPEG;
-        if (!valid)
-            throw Error("cuda_rect_overlay: missing or mismatched source color metadata; "
-                        "declare source color and normalize to the canvas before compositing");
-    }
+    validateSourceColor(src, src_sw_fmt, canvas);
     if (src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt) &&
         isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
         convertRgbLayer(stream, src.raw(), canvas, L, rgb_step, r_off, g_off, b_off,
