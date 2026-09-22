@@ -10,6 +10,7 @@
 #[cfg(all(feature = "ffmpeg", feature = "async"))]
 pub mod player;
 
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -114,6 +115,38 @@ pub fn three_stream_mp4(path: &Path) {
     ]);
 }
 
+/// Video plus mixed linear chirps. A sine is periodic inside one AAC delay
+/// (~23 ms), so it cannot uniquely measure a timestamp-vs-sample shift; white
+/// noise would, but AAC wrecks its phase. Several chirps in AAC-friendly bands
+/// stay identifiable after a lossy round-trip.
+pub fn sweep_av_mp4(path: &Path) {
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=160x120:rate=15:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=(sin(2*PI*(80*t+(400-80)*t*t/4))+sin(2*PI*(500*t+(1500-500)*t*t/4))+sin(2*PI*(2000*t+(5000-2000)*t*t/4))+sin(2*PI*(6000*t+(10000-6000)*t*t/4)))/4:d=2:s=48000",
+        "-map",
+        "0:v",
+        "-map",
+        "1:a",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-g",
+        "15",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        path.to_str().expect("utf-8 path"),
+    ]);
+}
+
 pub fn ffmpeg(args: &[&str]) {
     ffmpeg_log(args);
 }
@@ -159,6 +192,317 @@ pub fn video_psnr(expected: &Path, actual: &Path) -> f64 {
     average
         .parse()
         .unwrap_or_else(|e| panic!("psnr average `{average}`: {e}"))
+}
+
+/// One decoded audio frame: presentation time of sample 0, and the samples.
+///
+/// Built by libavcodec, not the FFmpeg CLI: a PCM dump concatenates frames and
+/// throws the per-frame PTS away, which is exactly the thing a sync check has
+/// to see.
+#[cfg(feature = "ffmpeg")]
+pub struct AudioFrame {
+    pub pts: f64,
+    pub samples: Vec<f32>,
+}
+
+#[cfg(feature = "ffmpeg")]
+pub struct DecodedAudio {
+    pub sample_rate: i32,
+    /// First video packet's PTS, so audio can be placed relative to the picture
+    /// rather than an absolute container time mpegts is free to offset.
+    pub video_start: Option<f64>,
+    pub frames: Vec<AudioFrame>,
+}
+
+#[cfg(feature = "ffmpeg")]
+impl DecodedAudio {
+    pub fn first_pts(&self) -> f64 {
+        self.frames
+            .first()
+            .map(|frame| frame.pts)
+            .expect("decoded audio is not empty")
+    }
+
+    /// Audio start minus video start: the A/V offset a player uses.
+    pub fn pts_from_video(&self) -> f64 {
+        self.first_pts() - self.video_start.unwrap_or(0.0)
+    }
+
+    pub fn concatenated(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for frame in &self.frames {
+            out.extend_from_slice(&frame.samples);
+        }
+        out
+    }
+
+    /// Samples sitting at their PTS, origin `t0`. A sample whose PTS is before
+    /// `t0` is dropped — that is the audio a player starting at `t0` never
+    /// hears. Gaps stay zero.
+    pub fn timeline_from(&self, t0: f64, duration: f64) -> Vec<f32> {
+        let rate = self.sample_rate as f64;
+        let n = (duration * rate).ceil() as usize;
+        let mut buf = vec![0.0; n];
+        for frame in &self.frames {
+            for (i, &sample) in frame.samples.iter().enumerate() {
+                let idx = ((frame.pts - t0) * rate + i as f64).round() as isize;
+                if idx >= 0 && (idx as usize) < n {
+                    buf[idx as usize] = sample;
+                }
+            }
+        }
+        buf
+    }
+}
+
+/// Decode the first audio stream in-process. `AV_CODEC_FLAG2_SKIP_MANUAL`
+/// keeps encoder priming in the frames and leaves their PTS alone — the
+/// decoder would otherwise drop the delay samples and restamp, hiding the
+/// shift the sync check is for.
+#[cfg(feature = "ffmpeg")]
+pub fn decode_audio(path: &Path) -> DecodedAudio {
+    use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecParameters};
+    use rsmpeg::avformat::AVFormatContextInput;
+    use rsmpeg::error::RsmpegError;
+    use rusty_ffmpeg::ffi;
+
+    let url = CString::new(path.to_str().expect("utf-8 path")).expect("path contains a NUL");
+    let mut input = AVFormatContextInput::open(&url).expect("opening the file to decode audio");
+
+    let mut audio_index = None;
+    let mut audio_tb = None;
+    let mut video_index = None;
+    let mut video_tb = None;
+    let mut codecpar = AVCodecParameters::new();
+    for stream in input.streams() {
+        match stream.codecpar().codec_type {
+            t if t == ffi::AVMEDIA_TYPE_AUDIO && audio_index.is_none() => {
+                audio_index = Some(stream.index);
+                audio_tb = Some(stream.time_base);
+                codecpar.copy(&*stream.codecpar());
+            }
+            t if t == ffi::AVMEDIA_TYPE_VIDEO && video_index.is_none() => {
+                video_index = Some(stream.index);
+                video_tb = Some(stream.time_base);
+            }
+            _ => {}
+        }
+    }
+    let audio_index = audio_index.expect("an audio stream");
+    let audio_tb = audio_tb.expect("audio time base");
+    let codec = AVCodec::find_decoder(codecpar.codec_id).expect("an audio decoder");
+    let mut dec = AVCodecContext::new(&codec);
+    dec.apply_codecpar(&codecpar)
+        .expect("applying audio codec parameters");
+    unsafe {
+        let raw = rsmpeg::UnsafeDerefMut::deref_mut(&mut dec);
+        raw.pkt_timebase = audio_tb;
+        raw.flags2 |= ffi::AV_CODEC_FLAG2_SKIP_MANUAL as i32;
+    }
+    dec.open(None).expect("opening the audio decoder");
+
+    let mut frames = Vec::new();
+    let mut sample_rate = 0i32;
+    let mut video_start = None;
+
+    let mut take_frames = |dec: &mut AVCodecContext| loop {
+        match dec.receive_frame() {
+            Ok(frame) => {
+                if sample_rate == 0 {
+                    sample_rate = frame.sample_rate;
+                }
+                let pts = if frame.pts != ffi::AV_NOPTS_VALUE {
+                    frame.pts
+                } else {
+                    frame.best_effort_timestamp
+                };
+                let Some(pts) = ts_seconds(pts, audio_tb) else {
+                    panic!("an audio frame has no PTS");
+                };
+                frames.push(AudioFrame {
+                    pts,
+                    samples: mono_f32(&frame),
+                });
+            }
+            Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,
+            Err(error) => panic!("receiving an audio frame: {error}"),
+        }
+    };
+
+    loop {
+        match input.read_packet() {
+            Ok(Some(packet)) if packet.stream_index == audio_index => {
+                loop {
+                    match dec.send_packet(Some(&packet)) {
+                        Ok(()) => break,
+                        Err(RsmpegError::DecoderFullError) => take_frames(&mut dec),
+                        Err(error) => panic!("sending an audio packet: {error}"),
+                    }
+                }
+                take_frames(&mut dec);
+            }
+            Ok(Some(packet)) => {
+                if video_start.is_none() && video_index == Some(packet.stream_index) {
+                    if let Some(tb) = video_tb {
+                        if let Some(pts) = ts_seconds(packet.pts, tb) {
+                            video_start = Some(pts);
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(error) => panic!("reading packets: {error}"),
+        }
+    }
+    match dec.send_packet(None) {
+        Ok(()) | Err(RsmpegError::DecoderFlushedError) => {}
+        Err(error) => panic!("flushing the audio decoder: {error}"),
+    }
+    take_frames(&mut dec);
+
+    assert!(
+        !frames.is_empty(),
+        "the audio decoder produced no frames from {path:?}"
+    );
+    DecodedAudio {
+        sample_rate,
+        video_start,
+        frames,
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn ts_seconds(ts: i64, tb: rusty_ffmpeg::ffi::AVRational) -> Option<f64> {
+    if ts == rusty_ffmpeg::ffi::AV_NOPTS_VALUE || tb.den == 0 {
+        None
+    } else {
+        Some(ts as f64 * tb.num as f64 / tb.den as f64)
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn mono_f32(frame: &rsmpeg::avutil::AVFrame) -> Vec<f32> {
+    use rusty_ffmpeg::ffi;
+    let n = frame.nb_samples as usize;
+    let channels = {
+        let n = unsafe { (*frame.as_ptr()).ch_layout.nb_channels };
+        if n > 0 { n as usize } else { 1 }
+    };
+    // AAC decodes to planar float; anything else here is a test-bug, not a
+    // format we intend to round-trip.
+    assert_eq!(
+        frame.format,
+        ffi::AV_SAMPLE_FMT_FLTP,
+        "the audio decoder is expected to produce fltp"
+    );
+    let mut acc = vec![0.0f32; n];
+    for c in 0..channels {
+        let plane = unsafe { std::slice::from_raw_parts(frame.data[c] as *const f32, n) };
+        for (i, sample) in plane.iter().enumerate() {
+            acc[i] += *sample;
+        }
+    }
+    if channels > 1 {
+        for sample in &mut acc {
+            *sample /= channels as f32;
+        }
+    }
+    acc
+}
+
+/// Lag in samples of `delayed` versus `reference`. Positive: `delayed` has extra
+/// leading samples (the waveform starts later in the concatenation).
+pub fn sample_lag(reference: &[f32], delayed: &[f32], max_lag: i32) -> i32 {
+    let mut best_lag = 0i32;
+    let mut best_score = f64::NEG_INFINITY;
+    let step = 32;
+    for lag in (-max_lag..=max_lag).step_by(step as usize) {
+        let score = lag_score(reference, delayed, lag);
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+    for lag in (best_lag - step)..=(best_lag + step) {
+        if !(-max_lag..=max_lag).contains(&lag) {
+            continue;
+        }
+        let score = lag_score(reference, delayed, lag);
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+    best_lag
+}
+
+fn lag_score(reference: &[f32], delayed: &[f32], lag: i32) -> f64 {
+    const WIN: usize = 24_000;
+    let (a, b) = if lag >= 0 {
+        let skip = lag as usize;
+        if skip >= delayed.len() {
+            return f64::NEG_INFINITY;
+        }
+        (
+            &reference[..reference.len().min(WIN)],
+            &delayed[skip..],
+        )
+    } else {
+        let skip = (-lag) as usize;
+        if skip >= reference.len() {
+            return f64::NEG_INFINITY;
+        }
+        (
+            &reference[skip..],
+            &delayed[..delayed.len().min(WIN)],
+        )
+    };
+    let n = a.len().min(b.len()).min(WIN);
+    if n < 4_000 {
+        return f64::NEG_INFINITY;
+    }
+    cosine(&a[..n], &b[..n])
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for i in 0..a.len() {
+        let x = a[i] as f64;
+        let y = b[i] as f64;
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+pub fn pearson(a: &[f32], b: &[f32]) -> f64 {
+    let n = a.len().min(b.len());
+    assert!(n > 0, "empty audio comparison");
+    let a = &a[..n];
+    let b = &b[..n];
+    let n = n as f64;
+    let ma = a.iter().map(|x| *x as f64).sum::<f64>() / n;
+    let mb = b.iter().map(|x| *x as f64).sum::<f64>() / n;
+    let mut cov = 0.0;
+    let mut va = 0.0;
+    let mut vb = 0.0;
+    for i in 0..a.len() {
+        let da = a[i] as f64 - ma;
+        let db = b[i] as f64 - mb;
+        cov += da * db;
+        va += da * da;
+        vb += db * db;
+    }
+    if va == 0.0 || vb == 0.0 {
+        return 0.0;
+    }
+    cov / (va.sqrt() * vb.sqrt())
 }
 
 fn ffprobe(args: &[&str]) -> String {

@@ -5,9 +5,9 @@
 //! parameter names, `src`/`dst`/`group` and the demux `routing` map all have to
 //! be spelled the way a `.avplumber` file spells them.
 //!
-//! Ground truth is `ffprobe` on both files, so this is a parity test against the
-//! FFmpeg CLI's own idea of what the container holds. Skipped with a log when the
-//! CLI is missing.
+//! Ground truth is `ffprobe` on both files plus an in-process audio decode that
+//! keeps each frame's PTS — a CLI PCM dump would throw those away. Skipped with
+//! a log when the CLI is missing.
 
 #![cfg(all(feature = "ffmpeg", feature = "async"))]
 
@@ -222,6 +222,63 @@ fn assert_transcode_matches(source: &Source, result: &Transcoded) {
         psnr > MIN_PSNR,
         "the transcoded video is only {psnr} dB from the source"
     );
+
+    assert_audio_in_sync(&source.path, &result.path);
+}
+
+/// Audio content and A/V sync. Timestamps and samples are allowed to move, but
+/// only together and with opposite sign: if the first audio PTS is later by Δ,
+/// the waveform in the frames must start Δ earlier, so a player that places
+/// sample *i* of a frame at `pts + i/sample_rate` still hears the same moment.
+fn assert_audio_in_sync(source: &Path, transcoded: &Path) {
+    let src = common::decode_audio(source);
+    let out = common::decode_audio(transcoded);
+    assert_eq!(
+        src.sample_rate, out.sample_rate,
+        "the transcode must not resample"
+    );
+
+    let dpts = out.pts_from_video() - src.pts_from_video();
+    let max_lag = (src.sample_rate as f64 * 0.1).ceil() as i32;
+    let lag = common::sample_lag(&src.concatenated(), &out.concatenated(), max_lag);
+    let dsamples = lag as f64 / src.sample_rate as f64;
+    const SYNC_TOLERANCE: f64 = 0.002;
+    assert!(
+        (dpts + dsamples).abs() < SYNC_TOLERANCE,
+        "audio PTS shifted by {dpts:.6} s but samples shifted by {dsamples:.6} s \
+         (lag {lag} samples); they must cancel"
+    );
+
+    // Same check in the domain a player actually hears: samples parked at their
+    // PTS, origin = first video packet, so a global mpegts offset drops out.
+    const CLIP: f64 = 2.1;
+    let src_tl = src.timeline_from(src.video_start.unwrap_or(src.first_pts()), CLIP);
+    let out_tl = out.timeline_from(out.video_start.unwrap_or(out.first_pts()), CLIP);
+    const MIN_CORR: f64 = 0.85;
+    let corr = common::pearson(&src_tl, &out_tl);
+    assert!(
+        corr > MIN_CORR,
+        "PTS-placed audio is only correlated {corr:.3} with the source"
+    );
+}
+
+#[test]
+fn sample_lag_of_a_delayed_copy_is_the_delay() {
+    let src: Vec<f32> = (0..8_000)
+        .map(|i| ((i as f32 / 8_000.0) * (i as f32 / 8_000.0) * 40.0).sin())
+        .collect();
+    let mut delayed = vec![0.0; 120];
+    delayed.extend_from_slice(&src);
+    assert_eq!(common::sample_lag(&src, &delayed, 500), 120);
+}
+
+#[test]
+fn sample_lag_of_an_advanced_copy_is_negative() {
+    let src: Vec<f32> = (0..8_000)
+        .map(|i| ((i as f32 / 8_000.0) * (i as f32 / 8_000.0) * 40.0).sin())
+        .collect();
+    let advanced = src[80..].to_vec();
+    assert_eq!(common::sample_lag(&src, &advanced, 500), -80);
 }
 
 #[test]
@@ -231,7 +288,7 @@ fn mp4_to_mp4_matches_the_source() {
     }
     let scratch = common::Scratch::new("transcode-mp4");
     let source = scratch.path("in.mp4");
-    common::three_stream_mp4(&source);
+    common::sweep_av_mp4(&source);
     let probed = probe_source(&source);
 
     // No `format`: the muxer is inferred from the `.mp4` suffix, like C++.
@@ -254,7 +311,7 @@ fn mp4_to_mpegts_uses_the_muxers_own_time_base() {
     }
     let scratch = common::Scratch::new("transcode-ts");
     let source = scratch.path("in.mp4");
-    common::three_stream_mp4(&source);
+    common::sweep_av_mp4(&source);
     let probed = probe_source(&source);
 
     // Named explicitly *and* with a matching suffix, so the `format` parameter is
