@@ -5,15 +5,16 @@
 //
 // One entry per resolved draw op, in draw order (bottom to top). Geometry is
 // precomputed per canvas plane: index 0 is luma, 1 is the interleaved chroma
-// plane, both in lane-group units (luma samples, chroma pairs) exactly as the
-// per-layer kernels receive them, so the batched kernel samples identically.
+// plane, both in lane-group units (luma samples, chroma pairs).
 
 #define AVP_RECT_MAX_LAYERS 256
 // Luma samples per thread in the composite kernel (chroma pairs: half). Block 32x8 threads
 // therefore covers a 128x8 luma tile; the launch grid is sized from this.
 #define AVP_RECT_PX 4
 
-// Draw kinds. Same numbers on both sides.
+// Draw kinds, same numbers on both sides. The order is a contract: kinds >= RGB are
+// packed RGB(A) on one plane, kinds >= RGB_TEX read that plane through src[0] as a
+// texture object.
 #define AVP_RECT_KIND_YUV 0       // source in the canvas format: bilinear scale/blit
 #define AVP_RECT_KIND_PROMOTE 1   // lower-depth semiplanar source: bilinear + code multiply
 #define AVP_RECT_KIND_RGB 2       // packed 8-bit RGB(A) treated opaque: fused convert

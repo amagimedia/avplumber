@@ -36,8 +36,6 @@ struct Plane {
     ~Plane() { if (dev) cudaFree(dev); }
     Plane(const Plane &) = delete;
     Plane &operator=(const Plane &) = delete;
-    Plane(Plane &&o) noexcept { *this = std::move(o); }
-    Plane &operator=(Plane &&o) noexcept { dev = o.dev; pitch = o.pitch; rows = o.rows; host = std::move(o.host); o.dev = nullptr; return *this; }
     std::vector<unsigned char> download() const {
         std::vector<unsigned char> out(host.size());
         check(cudaMemcpy(out.data(), dev, out.size(), cudaMemcpyDeviceToHost), "download");
@@ -111,7 +109,7 @@ struct Layer {
 
 static int clearValue(const Fmt &f, int plane) { return plane ? 1 << (f.depth - 1) : 16 << (f.depth - 8); }
 
-// Reference: memset + one launch per layer per plane, exactly as cuda_rect_draw.cpp does it.
+// Reference: memset + one launch per layer per plane, the production path before batching.
 static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &layers, int transfer) {
     const int cw_bytes = canvas.w * cf.bytes * cf.lanes0;
     if (cf.planes == 1) {
@@ -171,7 +169,7 @@ static void drawLayered(const Fmt &cf, Frame &canvas, const std::vector<Layer> &
     }
 }
 
-// Candidate: the rect table + one launch, exactly as CudaRectDraw::drawBatched builds it.
+// Candidate: the rect table + one launch, mirroring CudaRectDraw::fillTableEntry.
 static void fillTable(const Fmt &cf, const std::vector<Layer> &layers, std::vector<AvpRectLayer> &table) {
     table.clear();
     for (const Layer &L : layers) {

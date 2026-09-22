@@ -25,8 +25,6 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
-
-
 class DRMPrimeToCUDA: public NodeSISO<av::VideoFrame, av::VideoFrame> {
 protected:
     std::shared_ptr<HWAccelDevice> hwaccel_;
@@ -254,15 +252,9 @@ protected:
     bool ensureCudaFramesCtx(int w, int h, AVPixelFormat swfmt) {
         if (!hwaccel_) return false;
         if (w <= 0 || h <= 0) return false;
-        bool need = false;
-        if (!hw_frames_ctx_) need = true;
-        if (!need && (w != width_ || h != height_ || swfmt != sw_fmt_)) need = true;
-        if (!need) return true;
+        if (hw_frames_ctx_ && w == width_ && h == height_ && swfmt == sw_fmt_) return true;
 
-        if (hw_frames_ctx_) {
-            av_buffer_unref(&hw_frames_ctx_);
-            hw_frames_ctx_ = nullptr;
-        }
+        av_buffer_unref(&hw_frames_ctx_);
         hw_frames_ctx_ = av_hwframe_ctx_alloc(hwaccel_->deviceContext());
         if (!hw_frames_ctx_) {
             logstream << "drm2cuda: av_hwframe_ctx_alloc failed";
@@ -277,16 +269,11 @@ protected:
         if (r != 0) {
             logstream << "drm2cuda: av_hwframe_ctx_init failed: " << av::error2string(r);
             av_buffer_unref(&hw_frames_ctx_);
-            hw_frames_ctx_ = nullptr;
             return false;
         }
         width_ = w;
         height_ = h;
         sw_fmt_ = swfmt;
-
-        // Cache CUDA device ctx pointer for stream & context switches
-        AVHWDeviceContext* devctx = (AVHWDeviceContext *)(hwaccel_->deviceContext()->data);
-        cuda_dev_ctx_ = (AVCUDADeviceContext*)(devctx->hwctx);
         return true;
     }
 
@@ -404,7 +391,7 @@ protected:
     }
 
     // Zero-copy output: the frame points at the mapped EGL frame and pins the input DRM frame.
-    bool wrap_mapped(const std::shared_ptr<ImportEntry> &e, const av::VideoFrame &in, int width, int height,
+    bool wrapMapped(const std::shared_ptr<ImportEntry> &e, const av::VideoFrame &in, int width, int height,
                      av::VideoFrame &dst) {
         if (!in.raw()->buf[0]) return false;
         const bool pitch = e->frame.frameType == CU_EGL_FRAME_TYPE_PITCH;
@@ -439,7 +426,7 @@ protected:
         if (!ensureCudaFramesCtx(width, height, swfmt)) return false;
         std::shared_ptr<ImportEntry> e = findOrImport(desc, width, height, wallclock.pts());
         if (!e) return false;
-        if (zero_copy_ && wrap_mapped(e, in, width, height, dst))
+        if (zero_copy_ && wrapMapped(e, in, width, height, dst))
             return true;
 
         int cuda_error = CHECK_CU(cuCtxPushCurrent(cuda_dev_ctx_->cuda_ctx));
@@ -530,14 +517,12 @@ public:
 
     ~DRMPrimeToCUDA() {
         if (cuda_dev_ctx_) purgeImports(0, true);
-        if (hw_frames_ctx_) {
-            av_buffer_unref(&hw_frames_ctx_);
-            hw_frames_ctx_ = nullptr;
-        }
-        if (egl_dpy_ != EGL_NO_DISPLAY) {
-            eglTerminate(egl_dpy_);
-            egl_dpy_ = EGL_NO_DISPLAY;
-        }
+        av_buffer_unref(&hw_frames_ctx_);
+        // The default EGLDisplay is process-global: other nodes and zero-copy frames still in
+        // flight own images on it, so release only this node's context and surface and never
+        // eglTerminate (same rule as drm_prime_to_egl_image).
+        if (egl_ctx_ != EGL_NO_CONTEXT) eglDestroyContext(egl_dpy_, egl_ctx_);
+        if (egl_surf_ != EGL_NO_SURFACE) eglDestroySurface(egl_dpy_, egl_surf_);
     }
 
     static std::shared_ptr<DRMPrimeToCUDA> create(NodeCreationInfo &nci) {

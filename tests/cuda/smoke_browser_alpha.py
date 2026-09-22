@@ -46,7 +46,7 @@ def main():
             nodes.append(api.CudaRectOverlay({
                 "name": "blend", "src": [edge], "dst": "blended", "hwaccel": "alpha_gpu",
                 "width": width, "height": height, "fps": "30/1", "sw_format": "p210le", "color": "sdr",
-                "scale": True, "active_inputs": 1,
+                "active_inputs": 1,
                 "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": width, "dst_h": height, "blend": True}]}))
             edge = "blended"
         fmt = "p210le" if args.composite else args.format

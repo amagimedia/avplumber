@@ -597,7 +597,6 @@ class MixerGraphBuilder:
                 "color": self.color.transfer,
                 "fps": self._fps_str(),
                 **timing,
-                "scale": any(source.default_graph == "" for source in self._sources),
                 "layers": [
                     {k: v for k, v in self._initial_scene_def().sources.get(source.name, {}).items() if k != "graph"}
                     if is_program else {} for source in self._sources
@@ -758,7 +757,7 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
             "width": W, "height": H, "sw_format": self.working_format,
-            "color": self.color.transfer, "fps": fps_str, "scale": True,
+            "color": self.color.transfer, "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],
             "active_inputs": 3,

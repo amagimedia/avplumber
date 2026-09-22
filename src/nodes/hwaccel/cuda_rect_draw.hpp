@@ -58,7 +58,7 @@ public:
 
     /// Compose the frame: background where nothing draws, then every resolved op in order, in one
     /// kernel launch. Validates each source's color tags against the canvas contract first.
-    /// `color_src` decides the clear level (JPEG-range sources clear to 0), as before.
+    /// `color_src` decides the clear level (JPEG-range sources clear to 0).
     void draw(CUstream stream, const std::vector<DrawOp> &ops, AVFrame *canvas, const AVFrame *color_src);
 
     /// sw_format of a hardware frame, AV_PIX_FMT_NONE when it has no frames context.
@@ -78,7 +78,7 @@ private:
     CUdeviceptr table_device_ = 0;
 
     void fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) const;
-    void validateSourceColor(const av::VideoFrame &src, AVPixelFormat src_sw_fmt, const AVFrame *canvas) const;
+    void validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const;
 };
 
 }

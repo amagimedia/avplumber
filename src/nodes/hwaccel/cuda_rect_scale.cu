@@ -3,6 +3,7 @@
 // P010, P210) take same-format YUV, lower-depth semiplanar and packed RGB(A)
 // sources; packed 8-bit canvases (rgb0, rgba) take same-format sources.
 #include <cuda_runtime.h>
+#include "cuda_rect_table.h"
 
 // Logical-sample access shared by every kernel here: a plane holds either
 // bytes or little-endian 16-bit words whose meaningful bits sit above `shift`
@@ -19,10 +20,8 @@ __device__ __forceinline__ void store_sample(unsigned char *p, int sample_bytes,
         *p = (unsigned char)(v + 0.5f);
 }
 
-// Cb/Cr pair (BT.709 limited range), sampling RGB bilinearly like scale_plane.
-// The 8-bit matrix result is scaled by dst_scale on deeper canvases, so SDR
-// graphics promote exactly like SDR video (16 -> 64); this path stays SDR.
-// dst_y/dst_uv are the canvas planes at their own pitches.
+// Bilinear RGB (8-bit codes) of a packed source; the caller converts to the
+// canvas transfer and depth.
 __device__ __forceinline__ void sample_rgb(
     const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
     int step, int r_off, int g_off, int b_off, float fx, float fy, float *rgb) {
@@ -95,7 +94,6 @@ __device__ static inline void graphic_chroma(float r, float g, float b, int tran
 // Every intermediate value is rounded as a stored sample would be, so the result
 // equals clear + one launch per layer (tests/cuda/legacy_rect_kernels.cuh).
 // ---------------------------------------------------------------------------
-#include "cuda_rect_table.h"
 
 // Emulate store_sample followed by load_sample: the rounded code as a float.
 __device__ __forceinline__ float stored_code(float v) { return truncf(v + 0.5f); }
@@ -104,7 +102,7 @@ __device__ __forceinline__ bool rect_overlaps(int ax, int ay, int aw, int ah, in
     return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
 }
 
-// Bilinear sample of lane `c` of a lane-group plane, identical to scale_plane / convert_scale_plane.
+// Bilinear sample of lane `c` of a lane-group plane (canvas-format and promoted sources).
 // The vertical terms depend only on the row, so the caller computes them once per thread.
 struct RowTaps { int y0, y1; float ty; };
 __device__ __forceinline__ RowTaps row_taps(int sy, int sh, int oy, int dh) {
@@ -131,7 +129,7 @@ __device__ __forceinline__ float sample_lane(const unsigned char *src, int src_p
     return top + t.ty * (bottom - top);
 }
 
-// Bilinear alpha at the same footprint sample_rgb uses, as rgba_over_yuv computes it.
+// Bilinear alpha at the footprint sample_rgb uses.
 __device__ __forceinline__ float sample_alpha(const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
                                               int step, int a_off, float fx, float fy) {
     const int ix = int(floorf(fx)), iy = int(floorf(fy));
@@ -143,12 +141,6 @@ __device__ __forceinline__ float sample_alpha(const unsigned char *src, int src_
     return ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
 }
 
-// kRgb=false compiles a lean YUV-only body (no transfer math, far fewer registers) for the
-// common case of scenes without packed-RGB layers; the host picks the entry point per frame.
-//
-// Each thread owns AVP_RECT_PX consecutive lane groups of one row (4 luma samples, or 2 chroma
-// pairs): layer geometry is fetched once per thread, the per-sample math is exactly the
-// per-layer kernels', and the results leave in one vector store.
 // Texture-backed packed RGBA (zero-copy DMA-BUF): the same four taps as sample_rgb /
 // sample_alpha, fetched as exact texels (point sampling, unnormalized coordinates), so the
 // result matches the pointer path bit for bit.
@@ -185,8 +177,12 @@ __device__ __forceinline__ float sample_alpha_tex(unsigned long long tex, int sx
     return ((a00 + tx * (a01 - a00)) + ty * ((a10 + tx * (a11 - a10)) - (a00 + tx * (a01 - a00)))) / 255.f;
 }
 
-// kLanes and kChroma are compile-time so the per-sample loops unroll and the accumulators
-// stay in registers: <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas.
+// Each thread owns AVP_RECT_PX consecutive lane groups of one row (4 luma samples, or 2 chroma
+// pairs): layer geometry is fetched once per thread and the results leave in one vector store.
+// kRgb=false compiles a lean YUV-only body (no transfer math, far fewer registers) for scenes
+// without packed-RGB layers; the host picks the entry point per frame. kLanes and kChroma are
+// compile-time so the per-sample loops unroll and the accumulators stay in registers:
+// <1,false> luma, <2,true> chroma pairs, <4,false> packed RGB canvas.
 template <bool kRgb, int kLanes, bool kChroma>
 __device__ __forceinline__ void composite_body(
     const AvpRectLayer *__restrict__ layers, int n,
@@ -260,7 +256,7 @@ __device__ __forceinline__ void composite_body(
 
             if (!kRgb) continue;   // host never puts RGB entries in a YUV-only table
             // Packed RGB(A): plane 0 is one luma sample; plane 1 is one chroma block of bw x bh luma
-            // positions averaged, with the same skip rules as rgb_to_yuv / rgba_over_yuv.
+            // positions averaged, skipping positions outside the rect or the canvas.
             const bool blend = L.kind == AVP_RECT_KIND_RGBA || L.kind == AVP_RECT_KIND_RGBA_TEX;
             const bool textured = L.kind >= AVP_RECT_KIND_RGB_TEX;
             const unsigned long long tex = L.src[0];

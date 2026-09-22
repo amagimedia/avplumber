@@ -394,7 +394,6 @@ else:
                 "height": canvas_height,
                 "sw_format": "rgb0",
                 "fps": f"{fps}/1",
-                "scale": True,
                 "layers": layers,
                 "active_inputs": (1 << source_count) - 1,
                 "warmup_timeout_ms": 5000,

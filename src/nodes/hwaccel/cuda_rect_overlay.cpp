@@ -44,20 +44,16 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
                         public TimelineReader,
                         public IInputsObjects {
     AVBufferRef *out_frames_ref_ = nullptr;
+    CudaRectDraw draw_;   // owns the canvas geometry, format and color contract
 
-    int canvas_w_ = 0;
-    int canvas_h_ = 0;
-    AVPixelFormat sw_fmt_ = AV_PIX_FMT_NONE;
-    // Canvas color contract; unspecified preserves the node's metadata inheritance for non-mixer callers.
-    AVColorTransferCharacteristic canvas_trc_ = AVCOL_TRC_UNSPECIFIED;
-    CudaRectDraw draw_;
-
-    bool hasCanvasColor() const { return canvas_trc_ != AVCOL_TRC_UNSPECIFIED; }
+    // An unspecified canvas color preserves the node's metadata inheritance for non-mixer callers.
+    bool hasCanvasColor() const { return draw_.canvas().transfer != AVCOL_TRC_UNSPECIFIED; }
 
     void setCanvasColor(AVFrame *frame) const {
         if (!hasCanvasColor()) return;
-        const bool sdr = canvas_trc_ == AVCOL_TRC_BT709;
-        frame->color_trc = canvas_trc_;
+        const AVColorTransferCharacteristic trc = draw_.canvas().transfer;
+        const bool sdr = trc == AVCOL_TRC_BT709;
+        frame->color_trc = trc;
         frame->color_primaries = sdr ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
         frame->colorspace = sdr ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL;
         frame->color_range = AVCOL_RANGE_MPEG;
@@ -122,9 +118,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
     }
 
     bool hwSwFormatMatch(const av::VideoFrame &f) const {
-        if (!f.raw() || !f.raw()->hw_frames_ctx || !f.raw()->hw_frames_ctx->data)
-            return false;
-        return avp::mixer::canvasAccepts(CudaRectDraw::frameSwFormat(f), sw_fmt_);
+        const AVPixelFormat fmt = CudaRectDraw::frameSwFormat(f);
+        return fmt != AV_PIX_FMT_NONE && avp::mixer::canvasAccepts(fmt, draw_.canvas().sw_fmt);
     }
 
     void processComposite(av::Timestamp pts, const std::vector<const av::VideoFrame *> &sources,
@@ -139,7 +134,8 @@ class CudaRectOverlay : public NodeMultiInput<av::VideoFrame>,
         outf.setComplete(true);   // av_hwframe_get_buffer set hw_frames_ctx, format and size
 
         std::vector<LayerSpec> layers = mergeLayersForTick(metadata_src);
-        std::vector<DrawOp> ops = avp::mixer::resolveDrawOps(sources, layers, canvas_w_, canvas_h_, sw_fmt_);
+        const CudaRectDraw::Canvas &cv = draw_.canvas();
+        std::vector<DrawOp> ops = avp::mixer::resolveDrawOps(sources, layers, cv.width, cv.height, cv.sw_fmt);
         {
             // Log the resolved layer set whenever it changes (scene switches), not per tick.
             std::string desc = avp::mixer::describeDrawOps(ops);
@@ -179,9 +175,6 @@ public:
     CudaRectOverlay(std::unique_ptr<Sink<av::VideoFrame>> &&sink, std::shared_ptr<HWAccelDevice> hw, int cw, int ch,
                     AVPixelFormat sw_fmt, std::vector<LayerSpec> layers, std::string metadata_key, int dbg_n)
         : NodeSingleOutput<av::VideoFrame>(std::move(sink)),
-          canvas_w_(cw),
-          canvas_h_(ch),
-          sw_fmt_(sw_fmt),
           draw_(hw, CudaRectDraw::Canvas{cw, ch, sw_fmt}),
           default_layers_(std::move(layers)),
           metadata_key_(std::move(metadata_key)),
@@ -191,9 +184,9 @@ public:
             throw Error("cuda_rect_overlay: av_hwframe_ctx_alloc failed");
         AVHWFramesContext *fc = (AVHWFramesContext *)out_frames_ref_->data;
         fc->format = AV_PIX_FMT_CUDA;
-        fc->sw_format = sw_fmt_;
-        fc->width = canvas_w_;
-        fc->height = canvas_h_;
+        fc->sw_format = sw_fmt;
+        fc->width = cw;
+        fc->height = ch;
         int err = av_hwframe_ctx_init(out_frames_ref_);
         if (err < 0)
             throw Error(std::string("cuda_rect_overlay: av_hwframe_ctx_init (output) failed: ") +
@@ -208,9 +201,7 @@ public:
     ~CudaRectOverlay() override { freeHwContexts(); }
 
     void init(EdgeManager &edges, const Parameters &params) override {
-        if (params.value("scale", false)) draw_.ensureKernels();
-        (void)edges;
-        (void)params;
+        draw_.ensureKernels();   // fail at graph build, not on the first frame
         NodeSingleOutput<av::VideoFrame>::init(edges, params);
     }
 
@@ -612,10 +603,10 @@ public:
         return {0, 1};
     }
 
-    int width() override { return canvas_w_; }
-    int height() override { return canvas_h_; }
+    int width() override { return draw_.canvas().width; }
+    int height() override { return draw_.canvas().height; }
     av::PixelFormat pixelFormat() override { return av::PixelFormat(AV_PIX_FMT_CUDA); }
-    av::PixelFormat realPixelFormat() override { return av::PixelFormat(sw_fmt_); }
+    av::PixelFormat realPixelFormat() override { return av::PixelFormat(draw_.canvas().sw_fmt); }
 
     static std::shared_ptr<CudaRectOverlay> create(NodeCreationInfo &nci);
 };
@@ -658,17 +649,17 @@ std::shared_ptr<CudaRectOverlay> CudaRectOverlay::create(NodeCreationInfo &nci) 
         dbg);
     if (params.contains("color")) {
         const auto color = params.at("color").get<std::string>();
-        node->canvas_trc_ = color == "sdr" ? AVCOL_TRC_BT709 : color == "hlg" ? AVCOL_TRC_ARIB_STD_B67 :
-                            color == "pq" ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_UNSPECIFIED;
-        if (!node->hasCanvasColor())
+        const AVColorTransferCharacteristic trc = color == "sdr" ? AVCOL_TRC_BT709 :
+            color == "hlg" ? AVCOL_TRC_ARIB_STD_B67 : color == "pq" ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_UNSPECIFIED;
+        if (trc == AVCOL_TRC_UNSPECIFIED)
             throw Error("cuda_rect_overlay: color must be sdr, hlg or pq");
-        if (node->canvas_trc_ != AVCOL_TRC_BT709 && av_pix_fmt_desc_get(sw_fmt)->comp[0].depth < 10)
+        if (trc != AVCOL_TRC_BT709 && av_pix_fmt_desc_get(sw_fmt)->comp[0].depth < 10)
             throw Error("cuda_rect_overlay: HDR canvas requires 10-bit storage");
         const float sdr_white = params.value("sdr_white", 203.f);
         const float hdr_peak = params.value("hdr_peak", 1000.f);
         if (!(sdr_white >= 1.f && sdr_white <= hdr_peak && hdr_peak >= 100.f && hdr_peak <= 10000.f))
             throw Error("cuda_rect_overlay: invalid display white/peak");
-        node->draw_.setColor(node->canvas_trc_, sdr_white, hdr_peak);
+        node->draw_.setColor(trc, sdr_white, hdr_peak);
     }
     node->createSourcesFromParameters(edges, params);
     out_edge->setProducer(node);

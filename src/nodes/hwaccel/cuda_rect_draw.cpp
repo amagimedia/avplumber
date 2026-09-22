@@ -103,14 +103,11 @@ void CudaRectDraw::unload() {
     }
 }
 
-void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, AVPixelFormat src_sw_fmt,
-                                       const AVFrame *canvas) const {
+void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, bool packed_rgb, const AVFrame *canvas) const {
     if (canvas_.transfer == AVCOL_TRC_UNSPECIFIED)
         return;
-    int rgb_step, r_off, g_off, b_off;
     const AVFrame *frame = src.raw();
-    const bool rgb = isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off);
-    const bool valid = rgb
+    const bool valid = packed_rgb
         ? isSdrGraphicColor(*frame)
         : frame->color_trc == canvas->color_trc &&
           frame->color_primaries == canvas->color_primaries &&
@@ -121,14 +118,15 @@ void CudaRectDraw::validateSourceColor(const av::VideoFrame &src, AVPixelFormat 
 }
 
 // One table entry from a resolved op. Per-plane geometry goes through lumaRectToPlaneRegion in
-// bytes and then lane groups, exactly as the per-layer kernels received it, so the composite
-// kernel samples the same taps.
+// bytes and then lane groups.
 void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRectLayer &out) const {
     const AVPixelFormat sw_fmt = canvas_.sw_fmt;
     const LayerSpec &L = op.layer;
     const AVFrame *src = op.src->raw();
     const AVPixelFormat src_sw_fmt = frameSwFormat(*op.src);
-    validateSourceColor(*op.src, src_sw_fmt, canvas);
+    int rgb_step, r_off, g_off, b_off;
+    const bool packed_rgb = isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off);
+    validateSourceColor(*op.src, packed_rgb, canvas);
     const bool sized = L.dst_w > 0;
     const int dstw = sized ? L.dst_w : L.crop_w, dsth = sized ? L.dst_h : L.crop_h;
     const AVPixFmtDescriptor *dd = av_pix_fmt_desc_get(sw_fmt);
@@ -136,9 +134,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     out = AvpRectLayer{};
 
-    int rgb_step, r_off, g_off, b_off;
-    if (src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt) &&
-        isPackedRgb8(src_sw_fmt, rgb_step, r_off, g_off, b_off)) {
+    if (packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)) {
         const int a_off = packedAlphaOffset(src_sw_fmt);
         const bool blend = L.blend && a_off >= 0;
         out.step = rgb_step; out.r_off = r_off; out.g_off = g_off; out.b_off = b_off; out.a_off = a_off;
@@ -151,7 +147,6 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
                 throw Error("cuda_rect_overlay: texture-backed source must be 4-byte packed RGB at frame size");
             out.kind = blend ? AVP_RECT_KIND_RGBA_TEX : AVP_RECT_KIND_RGB_TEX;
             out.src[0] = tex->tex;
-            out.src_pitch[0] = 0;
         } else {
             out.kind = blend ? AVP_RECT_KIND_RGBA : AVP_RECT_KIND_RGB;
             out.src[0] = (unsigned long long)(uintptr_t)src->data[0];
@@ -191,7 +186,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
         dx /= lanes * dst_bytes; dw /= lanes * dst_bytes;
         out.src[p] = (unsigned long long)(uintptr_t)src->data[p];
         out.src_pitch[p] = src->linesize[p];
-        out.sx[p] = sx; out.sy[p] = sy; out.sw[p] = std::max(sw, 1); out.sh[p] = std::max(sh, 1);
+        out.sx[p] = sx; out.sy[p] = sy; out.sw[p] = sw; out.sh[p] = sh;
         out.dx[p] = dx; out.dy[p] = dy; out.dw[p] = dw; out.dh[p] = dh;
     }
 }

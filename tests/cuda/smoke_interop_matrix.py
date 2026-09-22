@@ -65,7 +65,7 @@ def run(root, src_fmt, canvas, timeout, *, transfer=None, reduction=1):
         DecVideo({"name": "dec", "src": "raw", "dst": "cpu"}),
         FilterVideo({"name": "up", "src": "cpu", "dst": "gpu", "hwaccel": "ix_gpu", "graph": upload}),
         CudaRectOverlay({"name": "comp", "src": ["gpu"], "dst": "scene", "hwaccel": "ix_gpu",
-                         "width": W, "height": H, "sw_format": canvas, "scale": True,
+                         "width": W, "height": H, "sw_format": canvas,
                          **({"color": transfer} if transfer else {}),
                          "active_inputs": 1,
                          "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": width, "dst_h": height}]}),

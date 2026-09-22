@@ -72,6 +72,7 @@ extern "C" __global__ void convert_scale_plane(
 // Packed 8-bit RGB source (any channel order, 3 or 4 bytes per pixel) onto a
 // semiplanar YUV canvas in one pass: each thread produces one chroma-footprint
 // block of luma (2x2 for NV12, 2x1 for P210, 1x1 for 444) and its interleaved
+// chroma pair.
 extern "C" __global__ void rgb_to_yuv(
     const unsigned char *src, int src_pitch, int sx, int sy, int sw, int sh,
     int step, int r_off, int g_off, int b_off,

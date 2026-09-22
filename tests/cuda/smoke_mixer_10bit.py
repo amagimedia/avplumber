@@ -154,10 +154,10 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
     layers_a = [full] * pad_offset + layers_a
     nodes += [
         CudaRectOverlay({"name": "comp_a", "src": pads, "dst": "scene_a", "hwaccel": "mix_gpu",
-                         "width": W, "height": H, "sw_format": fmt, "scale": True,
+                         "width": W, "height": H, "sw_format": fmt,
                          "active_inputs": ((1 << n) - 1) << pad_offset, "layers": layers_a}),
         CudaRectOverlay({"name": "comp_b", "src": [edges[n]], "dst": "scene_b", "hwaccel": "mix_gpu",
-                         "width": W, "height": H, "sw_format": fmt, "scale": True, "active_inputs": 1,
+                         "width": W, "height": H, "sw_format": fmt, "active_inputs": 1,
                          "layers": [full]}),
         FilterVideo({"name": "trans", "src": ["scene_a", "scene_b"], "dst": "mixed",
                      "hwaccel": "mix_gpu", "dst_frame_rate": "60/1",

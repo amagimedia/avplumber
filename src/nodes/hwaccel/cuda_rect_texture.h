@@ -21,6 +21,7 @@ struct TextureFrameDesc {
     int height = 0;
     static constexpr uint32_t kMagic = 0x58545641u;   // "AVTX"
 };
+static_assert(sizeof(TextureFrameDesc) == 24, "opaque_ref layout");
 
 /// The descriptor of a texture-backed frame, or nullptr for ordinary device-memory frames.
 inline const TextureFrameDesc *textureFrameDesc(const AVFrame *f) {
