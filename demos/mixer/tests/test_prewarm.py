@@ -236,7 +236,7 @@ def test_geometry_is_resolved_by_two_compositors_without_filter_branches(native_
     assert not any(name.startswith(("mixer_cs_", "layout_preheat_")) for name in nodes)
     for slot in ("a", "b"):
         compositor = nodes[f"mixer_comp_{slot}"]
-        assert compositor["scale"] is True
+        assert "scale" not in compositor   # kernels load at init; the parameter is gone
         assert compositor["src"] == [f"mixer_source_{i}_{slot}" for i in range(2)]
         for i in range(2):
             assert f"mixer_source_{i}_{slot}" in nodes[f"mixer_otm_source_{i}"]["dst"]

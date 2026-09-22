@@ -45,7 +45,7 @@ def recipe_for(settings):
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices:
             raise ValueError(f"Unsupported {key}")
-    source_limit = 32 if settings["fps"] in (50, 60) else 64
+    source_limit = 48 if settings["fps"] in (50, 60) else 64
     for key, maximum in (("source_count", source_limit), ("scene_count", 128)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:

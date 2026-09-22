@@ -116,7 +116,7 @@ const types = [
 const presets = {balanced:[8,4,2,0,2],equal:[1,1,1,1,1],light:[2,1,0,0,0]};
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-const sourceLimit = () => Number($('fps').value)>=50?32:64;
+const sourceLimit = () => Number($('fps').value)>=50?48:64;
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
 }

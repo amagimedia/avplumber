@@ -12,11 +12,11 @@ from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, recipe_for, source_cou
 from webui import serve
 
 
-@pytest.mark.parametrize('count', [1, 8, 16, 32, 42, 64])
+@pytest.mark.parametrize('count', [1, 8, 16, 32, 42, 48, 64])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
-    if fps >= 50 and count > 32:
-        with pytest.raises(ValueError, match="source_count must be an integer from 1 to 32"):
+    if fps >= 50 and count > 48:
+        with pytest.raises(ValueError, match="source_count must be an integer from 1 to 48"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
     recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': count, 'fps': fps})
@@ -146,7 +146,7 @@ def test_old_setup_defaults_to_ten_bit():
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 64), (30, 64), (50, 32), (60, 32)])
+@pytest.mark.parametrize("fps, maximum", [(25, 64), (30, 64), (50, 48), (60, 48)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
                 "chroma": "420" if bit_depth == 8 else "422",

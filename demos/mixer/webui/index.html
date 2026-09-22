@@ -332,10 +332,10 @@ async function refresh() {
       if (url.href !== $("program-output").src) $("program-output").src = url.href;
     }
     if (canvas) {
-      const mode = canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit";
+      const chroma = canvas.working_format === "p210le" ? "4:2:2" : "4:2:0";
+      const mode = `${canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit"} · ${chroma}`;
       const format = `${canvas.width}×${canvas.height}p${canvas.fps} · ${mode}`;
       document.querySelector("#program-panel .format").textContent = format;
-      $("counts").textContent = `${format} · ` + $("counts").textContent;
     }
     const sourceCounts = state.settings?.source_counts;
     if (sourceCounts) {
