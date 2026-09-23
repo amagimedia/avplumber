@@ -130,8 +130,8 @@ intermediate frame per tile, no extra latency and no extra GPU pass per scene.
     native and cannot be extended from Python.
   - The monitor is the existing preview page in an iframe. Its `Stream`
     select (H.264/SDR, H.265/HDR) gains a `Multiview` entry; the footer
-    metrics (cut latency, RTT, playback fps, buffer, GPU/NVDEC/VRAM) stay
-    as they are. Add `preview_outputs: [{id, codec, port}]` to
+    groups (Graph: latency; WebRTC: RTT, FPS, buffer; GPU, NVDEC, NVENC,
+    VRAM) stay as they are, and NVENC shows the aux session's load too. Add `preview_outputs: [{id, codec, port}]` to
     `mixer.settings` next to `preview_codecs` (the flat codec list both
     pages consume today) so the aux rendition appears there without
     special-casing. Choosing Multiview keeps the last program color
@@ -199,7 +199,7 @@ expansion are pure functions next to `scene_layers`.
 | Item | Value |
 |---|---|
 | GPU | one compositor tick per frame at the bus canvas size, one NVENC session |
-| Pads per aux bus | distinct sources + 1 (PGM), hard limit 64 |
+| Pads per aux bus | distinct sources + 1 (PGM), hard limit 128 (`SourceMask`) |
 | Multiview latency | main + 3 frames |
 | Main program | unchanged |
 
@@ -224,6 +224,16 @@ two sessions, four to six aux buses fit on a T4.
 
 Retention is the VRAM item to watch: the aux playout holds decoder frames
 longer than PGM, so a tight decoder pool shows up as decoder stalls.
+
+Ingest is the CPU item to watch (measured 2026-09-23, 64 sources at 30 fps,
+128 scenes). With `--prewarm-cut-scene '*'` the prewarm mask covers every
+source, so every source already feeds both slot compositors: 1920 frames/s
+into slot A and another 1920 into the idle slot B. An aux bus adds a third
+consumer on bit 2, so its compositor ingests every pad it draws on top of
+that. Every edge holds 3 frames and the output chain blocks rather than
+drops, which is why the aux branch must drop on full (Graph changes, 3).
+The same measurement found no frame loss on the program path today: 29.99
+fps at every output stage, all 64 pads at 30.0 fps, no refused puts.
 
 ### Keeping the impact minimal
 
@@ -272,7 +282,7 @@ An alias is Python-only today: `cam1#2` is an unrelated source to the
 orchestrator, and the sharing is graph plumbing (one color filter, one
 `color_alias_cam1` fan-out). With several aux buses the alias count would be
 the max occurrences across every bus's tiles, every compositor would pay for
-pads it never draws, and 64 is reached with a handful of grids. Porting the
+pads it never draws, and the 128-pad mask is reached with a handful of grids. Porting the
 alias concept to C++ would not fix that: a pad per occurrence is the cost.
 
 So aux buses use a different mechanism: one compositor input carries a list
@@ -312,7 +322,7 @@ it; then `aux_output_mask`; then the Python bus builder and control.
 - Unit: flattening math (contain/stretch, crop and z carried, a repeated
   source yields one pad with several layers, per-bus pad-limit and rect
   table cap rejection) in `demos/mixer/tests/test_graph.py`; the per-show
-  64-source limit is already covered by `test_source_mask_capacity`.
+  128-source limit is already covered by `test_source_mask_capacity`.
 - Graph: builder test that every `otm_<pad>` has three dsts with bit 2 set
   and that a cut/fade leaves bit 2 set.
 - Live on the T4 host: record program and multiview together, confirm the PGM
@@ -429,7 +439,7 @@ display. Live after both: card 37-38%, mixer SM 16-18%, VRAM 6.9 GB.
   `aux_buses`, `layout.preset` expansion (`pgm_pvw_grid`, fractional, even
   pixels), explicit `places`, per-bus `renditions` with `color: "follow"`,
   `latency_ms` default main + 3 frames. Validate scene ids, distinct
-  sources + 1 <= 64 per bus, at most one `pgm`/`pvw` place per bus.
+  sources + 1 <= 128 per bus, at most one `pgm`/`pvw` place per bus.
 - Pure functions next to `scene_layers`: `flatten_scene(cfg, scene, dst)`
   and `bus_layers(cfg, bus, slots, pvw_scene)` returning the per-input
   layer arrays and the active mask.
