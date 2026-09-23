@@ -1,5 +1,6 @@
 #include "node_common.hpp"
 #include "../SharedTimeline.hpp"
+#include "../mixer/primitives/frame_subscription.hpp"
 
 static uint32_t parseOutputsMask(const Parameters& value) { return parseBitmask(value); }
 
@@ -9,6 +10,7 @@ class OneToMany : public NodeSingleInput<T>, public NodeMultiOutput<T>,
     std::atomic<uint32_t> outputs_mask_{1};
     bool drop_ = false;
     bool drop_dynamic_ = false;
+    std::vector<std::shared_ptr<avp::mixer::FrameSubscription>> subscriptions_;
 
 public:
     using NodeSingleInput<T>::NodeSingleInput;
@@ -25,7 +27,9 @@ public:
 
         bool drop = drop_ || drop_dynamic_;
         for (size_t i = 0; i < this->sink_edges_.size(); i++) {
-            if (mask & (1u << i))
+            if (subscriptions_[i])
+                subscriptions_[i]->publish(*data, [&] { EdgeSink<T>(this->sink_edges_[i]).put(*data, true); });
+            else if (mask & (1u << i))
                 EdgeSink<T>(this->sink_edges_[i]).put(*data, drop);
         }
         this->source_->pop();
@@ -52,6 +56,18 @@ public:
         auto in_edge = edges.find<T>(params["src"]);
         auto r = std::make_shared<OneToMany>(make_unique<EdgeSource<T>>(in_edge));
         r->createSinksFromParameters(edges, params);
+        if (r->sink_edges_.size() > 32) throw Error("one_to_many: at most 32 destinations");
+        r->subscriptions_.resize(r->sink_edges_.size());
+        if (params.contains("subscribed_outputs")) {
+            const auto names = jsonToStringList(params.at("dst"));
+            size_t i = 0;
+            for (const auto &name : names) {
+                if (params.at("subscribed_outputs").contains(name))
+                    r->subscriptions_[i] = InstanceSharedObjects<avp::mixer::FrameSubscription>::get(
+                        nci.instance, params.at("subscribed_outputs").at(name).get<std::string>());
+                ++i;
+            }
+        }
         in_edge->setConsumer(r);
         r->initTimeline(nci);
         if (params.count("outputs"))

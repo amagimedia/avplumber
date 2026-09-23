@@ -115,10 +115,18 @@ class MixerBridge:
             state["settings"] = {}   # older mixers, or one started without a config
         if self.transition is not None:
             state["settings"]["transition"] = self.transition
+        if state["settings"].get("aux_buses"):
+            state["aux_buses"] = json.loads(self.command("mixer.aux_status", timeout) or "[]")
         return state
 
     def take(self, request: dict) -> None:
         command = request.get("command")
+        if command == "aux":
+            payload = {k: v for k, v in request.items() if k != "command"}
+            result = json.loads(self.command("mixer.aux " + json.dumps(payload)) or "{}")
+            if result.get("error"):
+                raise ValueError(result["error"])
+            return
         if command not in TAKE_COMMANDS:
             raise ValueError(f"command must be one of {', '.join(TAKE_COMMANDS)}")
         payload = {k: v for k, v in request.items() if k not in ("command", "mixer")}

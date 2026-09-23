@@ -83,6 +83,13 @@
   #hint { color: var(--muted); font-size: 12px; }
   #error { color: var(--pgm); min-height: 1.2em; font-size: 13px; }
   #error:empty { display: none; }
+  #aux-slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  #aux-slots > div { display: flex; min-width: 0; }
+  #aux-slots button { background: var(--panel); color: var(--text); border: 1px solid var(--edge);
+                      border-radius: 5px; padding: 6px; cursor: pointer; }
+  #aux-slots button:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #aux-slots button[aria-pressed="true"] { border-color: var(--accent); }
+  #output-choice { background: var(--panel); color: var(--text); border: 1px solid var(--edge); }
   @media (max-width: 820px) {
     body { height: auto; min-height: 100dvh; overflow: auto; }
     #workspace { grid-template-columns: 1fr; height: auto; gap: 16px; }
@@ -110,6 +117,7 @@
     <div class="state" id="pvw_state">ready</div></section>
 </div>
 
+<div id="aux-slots" hidden aria-label="Multiview assignments"></div>
 <div id="scenes"></div>
 
 <footer>
@@ -129,7 +137,7 @@
      aria-orientation="vertical" aria-controls="controls program-panel"
      title="Drag to resize panes. Arrow keys resize when focused."></div>
 <aside id="program-panel" aria-label="Live program preview">
-  <header><h2>Program</h2><span class="format">Live</span></header>
+  <header><h2>Program</h2><select id="output-choice" hidden aria-label="View output"></select><span class="format">Live</span></header>
   <iframe id="program-output" title="Live mixer program"
           allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
 </aside>
@@ -203,6 +211,35 @@ let tookTransition = false;      // once the operator picks one, stop following 
 let wipes = [];                  // the library published by the mixer
 let currentWipe = null;          // the clip a direct-mode wipe uses
 
+let aux = null, armedSlot = null;
+async function assignAux(slot, scene) {
+  if (!aux) return;
+  const assignments = [...aux.scenes];
+  assignments[slot] = scene;
+  try {
+    await api("/api/command", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({command: "aux", bus: aux.id, expected_revision: aux.revision, scenes: assignments})});
+    armedSlot = null;
+    showError("");
+  } catch (exc) { showError(exc.message); }
+  await refresh();
+}
+function renderAux(state) {
+  aux = state.aux_buses?.[0] || null;
+  $("aux-slots").hidden = !aux;
+  if (!aux) return;
+  $("aux-slots").replaceChildren(...aux.scenes.map((scene, i) => {
+    const cell = document.createElement("div"), button = document.createElement("button"), clear = document.createElement("button");
+    button.textContent = `M${i + 1} · ${scene || "empty"}`;
+    button.title = aux.suspended ? "Aux suspended; assign a scene to resume" : "Click, then choose a scene";
+    button.setAttribute("aria-pressed", String(armedSlot === i));
+    button.onclick = () => { armedSlot = armedSlot === i ? null : i; renderAux(state); };
+    clear.textContent = "×"; clear.title = `Clear M${i+1}`;
+    clear.onclick = () => assignAux(i, null);
+    cell.append(button, clear); return cell;
+  }));
+}
+
 function showError(message) {
   $("error").textContent = message || "";
 }
@@ -233,6 +270,7 @@ async function take(command, scene, wipe) {
 }
 
 function pick(scene) {
+  if (armedSlot !== null && aux) return assignAux(armedSlot, scene);
   selected = scene;
   return take(direct ? currentTransition : "preview", scene, currentWipe);
 }
@@ -325,16 +363,35 @@ async function refresh() {
     $("counts").textContent = `${state.settings?.source_count ?? "—"} unique sources · ${scenes.length} scenes`;
     const canvas = state.settings?.canvas;
     const codecs = state.settings?.preview_codecs;
+    const outputs = state.settings?.preview_outputs || [];
+    const choices = [{bus: "program", label: "Program"}, ...outputs.map(o => ({...o, label: `Multiview · ${o.color.toUpperCase()}`}))];
+    const selector = $("output-choice");
+    if (selector.dataset.signature !== JSON.stringify(choices)) {
+      const old = selector.value;
+      selector.replaceChildren(...choices.map(o => { const option = document.createElement("option"); option.value = o.bus; option.textContent = o.label; return option; }));
+      selector.value = choices.some(o => o.bus === old) ? old : "program";
+      selector.dataset.signature = JSON.stringify(choices);
+    }
+    selector.hidden = choices.length < 2;
     if (codecs?.length) {
       const url = new URL($("program-output").src);
-      url.searchParams.set("outputs", codecs.join(","));
-      if (!codecs.includes(url.searchParams.get("codec"))) url.searchParams.set("codec", codecs[0]);
+      const output = outputs.find(o => o.bus === selector.value);
+      if (output) {
+        url.searchParams.set("mountpoint", output.mountpoint);
+        url.searchParams.set("codec", "h264"); url.searchParams.set("outputs", "h264");
+      } else {
+        url.searchParams.delete("mountpoint");
+        url.searchParams.set("outputs", codecs.join(","));
+        if (!codecs.includes(url.searchParams.get("codec"))) url.searchParams.set("codec", codecs[0]);
+      }
       if (url.href !== $("program-output").src) $("program-output").src = url.href;
+      document.querySelector("#program-panel h2").textContent = output ? "Multiview" : "Program";
     }
     if (canvas) {
+      const viewingAux = outputs.find(o => o.bus === selector.value);
       const chroma = canvas.working_format === "p210le" ? "4:2:2" : "4:2:0";
       const mode = `${canvas.working_format === "nv12" ? "SDR · 8-bit" : "HDR · 10-bit"} · ${chroma}`;
-      const format = `${canvas.width}×${canvas.height}p${canvas.fps} · ${mode}`;
+      const format = `${canvas.width}×${canvas.height}p${viewingAux?.fps || canvas.fps} · ${viewingAux ? "SDR · 8-bit · 4:2:0" : mode}`;
       document.querySelector("#program-panel .format").textContent = format;
     }
     const sourceCounts = state.settings?.source_counts;
@@ -348,6 +405,7 @@ async function refresh() {
     $("pgm_state").textContent = transition === "idle" ? "on air" : `on air · ${transition}`;
     $("conn").hidden = true;
     renderScenes();
+    renderAux(state);
   } catch (exc) {
     $("conn").textContent = `no mixer: ${exc.message || exc}`;
     $("conn").classList.add("bad");
@@ -358,6 +416,7 @@ async function refresh() {
 }
 
 $("cut").onclick = () => take("cut");
+$("output-choice").onchange = () => refresh();
 $("fade").onclick = () => take("fade");
 $("direct").onclick = () => { $("direct").dataset.user = "1"; setDirect(!direct); };
 $("fade_seconds").oninput = () => { touched.fade = true; };
@@ -366,6 +425,10 @@ $("wipe_file").oninput = () => { touched.wipe = true; };
 addEventListener("keydown", (event) => {
   if (event.target.tagName === "INPUT" || event.metaKey || event.ctrlKey || event.altKey) return;
   const digit = Number(event.key);
+  const shiftedDigit = Number(event.code.replace("Digit", ""));
+  if (event.shiftKey && aux && shiftedDigit >= 1 && shiftedDigit <= 8) {
+    event.preventDefault(); assignAux(shiftedDigit - 1, selected || null); return;
+  }
   if (digit >= 1 && digit <= 9 && scenes[digit - 1]) { event.preventDefault(); pick(scenes[digit - 1].id); return; }
   const keys = { c: "cut", f: "fade" };
   const command = keys[event.key.toLowerCase()];

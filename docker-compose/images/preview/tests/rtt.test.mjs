@@ -129,3 +129,21 @@ await Promise.resolve();
 assert.equal(value.textContent, "—");
 assert.equal(timers.size, 0, "a stopped request must not restart sampling");
 console.log("RTT selection, thresholds, unavailable data, failures and stop-race checks passed");
+
+const timeoutSignal = {};
+context.AbortSignal = { timeout(ms) { assert.equal(ms, 10000); return timeoutSignal; } };
+context.fetch = async (_url, options) => {
+  assert.equal(options.signal, timeoutSignal);
+  return { ok: true, json: async () => ({ janus: "error", error: { reason: "No such session" } }) };
+};
+await assert.rejects(context.post("/old-session", {}), /No such session/);
+await assert.rejects(context.handleEvent({ janus: "event", plugindata: { data: { error: "No such stream" } } }), /No such stream/);
+await assert.rejects(context.handleEvent({ janus: "hangup", reason: "ICE failed" }), /ICE failed/);
+const recovered = [];
+context.recover = async error => recovered.push(error.message);
+context.watchConnection();
+context.watchConnection();
+assert.equal(timers.size, 1, "rearming must replace the previous connection deadline");
+await [...timers.values()][0]();
+assert.deepEqual(recovered, ["No video received within 12 seconds"]);
+console.log("Connection deadline and Janus failure recovery checks passed");

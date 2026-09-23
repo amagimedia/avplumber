@@ -127,6 +127,13 @@ class Scene:
 
 
 @dataclass(frozen=True)
+class AuxBus:
+    id: str
+    scenes: Tuple[Optional[str], ...]
+    renditions: Tuple[Rendition, ...]
+
+
+@dataclass(frozen=True)
 class MixerConfig:
     canvas_w: int
     canvas_h: int
@@ -144,6 +151,7 @@ class MixerConfig:
     latency_ms: Optional[float] = None   # canvas.latency_ms: playout buffer, default two output frames
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
+    aux_buses: Tuple[AuxBus, ...] = ()
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -387,9 +395,11 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     wipe_color = str(doc.get("wipe_color", ""))
     if wipe_color and wipe_color not in TRANSFER_TAGS:
         raise ConfigError("wipe_color must be sdr, hlg or pq")
-    return MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
+    cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
                        initial_scene=initial, working_format=working_format, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
+    from .aux import parse_aux_buses
+    return replace(cfg, aux_buses=parse_aux_buses(doc.get("aux_buses", []), cfg))
 
 
 WIPE_SUFFIXES = (".mov", ".webm", ".mkv", ".mp4", ".avi", ".png", ".gif")

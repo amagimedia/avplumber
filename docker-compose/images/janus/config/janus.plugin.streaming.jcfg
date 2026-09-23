@@ -2,6 +2,20 @@ general: {
 	events = true
 }
 
+avplumber-multiview: {
+	type = "rtp"
+	id = 5008
+	description = "avplumber SDR multiview"
+	audio = false
+	video = true
+	videoport = 5008
+	videortcpport = 5009
+	videoiface = "127.0.0.1"
+	videopt = 96
+	videocodec = "h264"
+	videofmtp = "profile-level-id=640028;packetization-mode=1"
+}
+
 avplumber-hdr: {
 	type = "rtp"
 	id = 2

@@ -54,6 +54,7 @@ struct MixerState : public InstanceShared<MixerState> {
     std::unordered_map<std::string, SourceInfo> sources;
 
     std::unordered_map<std::string, SceneDefinition> scenes;
+    bool scene_definitions_frozen = false;
     std::unordered_set<std::string> prewarm_cut_scenes;
     SourceMask prewarm_source_mask;
     uint32_t sourceOutputMask(const SourceInfo& source, uint32_t requested) const {

@@ -151,6 +151,7 @@ class MixerApplication:
     wipe_files: tuple[str, ...] = ()
     browser_windows: tuple[str, ...] = ()   # reloaded after the chains start: static pages paint only on load
     dmabuf_rest: str = ""
+    aux_buses: tuple = ()
     wipe_cache_mb: float = 0.0              # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
@@ -259,12 +260,16 @@ class MixerApplication:
             scenes = self.mixer.scenes() if self.prewarm_cut_scenes == ("*",) else list(self.prewarm_cut_scenes)
             self.avp.executeCommandsFromString("mixer.prewarm " + json.dumps({"mixer": MIXER_NAME, "scenes": scenes}))
         self.avp.setReady()
+        for bus in self.aux_buses:
+            bus.start()
         print(
             "Generic mixer preheat complete: compositors and transition ready",
             flush=True,
         )
 
     def stop(self) -> None:
+        for bus in self.aux_buses:
+            bus.stop()
         if self.rtcp_feedback_listener is not None:
             self.rtcp_feedback_listener.stop()
         self.avp.shutdown()
@@ -276,6 +281,7 @@ def load_avp_api():
     from pyplumber.node import (
         AssumeVideoFormat,
         Bsf,
+        CudaRectOverlay,
         DecVideo,
         Demux,
         DrmPrimeToCuda,
@@ -302,6 +308,7 @@ def load_avp_api():
         MixerGraphBuilder=MixerGraphBuilder,
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
+        CudaRectOverlay=CudaRectOverlay,
         DecVideo=DecVideo,
         Demux=Demux,
         DrmPrimeToCuda=DrmPrimeToCuda,
@@ -651,12 +658,31 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
-    settings = json.dumps(cfg.settings(), separators=(",", ":")) + "\n"
+    from pyplumber.mixer.aux import AuxMultiview, register_aux_commands
+    aux = tuple(AuxMultiview(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses)
+    program = mixer.build()
+    if aux:
+        tapped = "program_after_aux_tap"
+        avp.addNode(api.OneToMany({
+            "name": "program_aux_tap", "src": program, "dst": [tapped, *(b.pgm_edge for b in aux)],
+            "outputs": 1, "subscribed_outputs": {b.pgm_edge: b.pgm_edge for b in aux}, "group": OUTPUT_GROUP,
+        }))
+        program = tapped
+        for bus in aux:
+            bus.build(options)
+        register_aux_commands(avp, aux)
+    settings_data = cfg.settings()
+    if aux:
+        settings_data["aux_buses"] = [b.bus.id for b in aux]
+        settings_data["preview_outputs"] = [
+            {"bus": b.bus.id, "rendition": r.id, "codec": "h264", "color": "sdr", "port": r.port,
+             "mountpoint": r.port, "fps": r.fps} for b in aux for r in b.bus.renditions]
+    settings = json.dumps(settings_data, separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     listener = _build_renditions(avp, api, options, cfg.renditions or _flag_renditions(options, *canvas),
-                                 mixer.build(), canvas=canvas, working_format=cfg.working_format, color=cfg.out_color)
+                                 program, canvas=canvas, working_format=cfg.working_format, color=cfg.out_color)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers))
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
 
 
 def parse_args(argv: list[str] | None = None) -> GraphOptions:

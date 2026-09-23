@@ -8,6 +8,8 @@ class HWAccelDevice: public InstanceShared<HWAccelDevice> {
 protected:
     AVBufferRef* device_ctx_;
 public:
+    // Adopt an initialized device reference (e.g. a stream sharing an existing CUDA context).
+    explicit HWAccelDevice(AVBufferRef *device): device_ctx_(device) {}
     HWAccelDevice(Parameters &params) {
         std::string typestr = params["type"];
         AVHWDeviceType devtype = av_hwdevice_find_type_by_name(typestr.c_str());

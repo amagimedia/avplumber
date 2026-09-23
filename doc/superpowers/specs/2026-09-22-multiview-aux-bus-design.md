@@ -1,148 +1,312 @@
 # Multiview aux bus
 
-Status: approved 2026-09-22, ready for implementation. Step 0 is done and
-the text below matches `mixer-improv` at 6f584c2 (same day). Companions: proposal
-https://claude.ai/artifact/5RLau7GkWSHPuWnv3q59QG and control UI mock
-https://claude.ai/artifact/1K4ZuwSxcJAP6hAgN3Nm3o.
+Status: v1 scope agreed; implementation plan revised 2026-09-23 against
+`mixer-improv` at cff498d. The completed compositor work is recorded in the
+appendix. This document supersedes the earlier follow-color, drag/drop and
+main-scene migration proposals; it is the implementation handoff.
 
-Design constraint: multiple aux buses from the start. One bus ships first,
-but nothing may assume there is only one.
+Companions: [original proposal](https://claude.ai/artifact/5RLau7GkWSHPuWnv3q59QG)
+and [control UI mock](https://claude.ai/artifact/1K4ZuwSxcJAP6hAgN3Nm3o).
+The decisions below take precedence over those mockups.
 
-## Goal
+## Agreed v1
 
-Encode a second, differently composed picture at the same time as the program:
-one or more aux buses, each with its own NVENC session. The first bus is a
-multiview with PGM and PVW in the top row and eight operator-selected scene
-previews below. The existing two-slot mixer, its
-transitions, snapshot, cut-latency probe and renditions stay untouched.
+- Ship one multiview: PVW and PGM above eight operator-selected **scenes**.
+  Lower tiles can contain grids, PiP and alpha compositions, not just sources.
+- Only the PGM tile shows live transitions and program overlays. PVW and
+  lower tiles show scene compositions and change by cuts.
+- One fixed SDR/H.264 aux rendition. Program SDR/HDR viewing changes never
+  restart it. On an HDR show, tonemap the composed aux output to SDR.
+- Program 50/60 fps produces aux 25/30 fps respectively; program 25/30 fps
+  keeps the same aux rate. Same canvas size/aspect as program by default.
+- PGM frame pacing and render performance are the top priority, ahead of aux
+  smoothness or throughput. Aux may drop/repeat or be suspended under overload; it
+  must not introduce blocking dependencies into the program path.
+- Two rendering streams in v1: the existing M/E/PGM stream and one dedicated
+  nonblocking aux stream, sharing the CUDA context and source frames. Aux may
+  wait for source/program readiness; PGM never waits for aux completion or
+  queue space. Do not split the existing M/E internals into further streams.
+- Click a slot, then a scene to assign it; x clears it. With a scene
+  selected, Shift+1..8 assigns it to that slot. No drag/drop.
+- Keep the 256 draw-layer ceiling for v1 and reject invalid assignments
+  before changing the running composition.
+- No layout editor, bus selector, Master DSK, extra M/E, nested-scene
+  authoring or rendered-scene cache in this implementation.
 
-A single M/E cannot do this today: every rendition re-times and rescales the
-one `final_out` picture (`demos/mixer/mixer.py`, `_build_renditions`).
+## Architectural boundaries
 
-## Layout
+The fixed v1 UI must not become a singleton assumption in the graph.
 
-The bus canvas follows the program canvas: same size and aspect unless the
-config says otherwise. The `pgm_pvw_grid` preset is fractional, so every
-place has the program aspect and the picture fills the monitor pane, which
-is sized to that aspect like the program pane is today. For a bus canvas
-`W x H` with `rows` and `cols`:
+1. **Sources own ingest.** Decode/upload/normalize each configured source
+   once, then share reference-counted GPU frames. Aliases or occurrences do
+   not create decoders. A scene, M/E or aux bus does not own the source.
+2. **Scenes are definitions.** A scene reference resolves to ordered source
+   placements. Flattening means drawing instructions, not a rendered texture.
+   Render it directly at the tile size; no full-canvas intermediate per tile.
+   Repeated occurrences share frames but still incur drawing work.
+3. **Outputs are finished frames.** Keep an output reference distinct from a
+   scene reference. The PGM tile reuses the actual program output, including
+   transitions, rather than reconstructing its scene.
+4. **M/E state is independent of scenes.** A future M/E owns its own PGM/PVW
+   selection and transitions while sharing sources and scene definitions.
+   Do not put transition state into a scene or the aux tile renderer.
+5. **Aux buses own presentation.** Keep `aux_buses[]`, stable bus/place IDs,
+   layout expansion, timing and renditions per bus. Multiple layouts and
+   buses should require extending configuration/UI, not replacing the model.
+6. **Routing indices are plumbing.** For v1, destinations 0/1 are the existing
+   M/E slots and bus i uses bit 2+i. Allocate these in the builder, not in
+   public references or render kernels. Future M/Es need additional named
+   destinations. Validate the current 32-bit routing limit (30 aux buses)
+   rather than implying unlimited capacity; multiple live buses remain deferred.
 
-| Place | Rect | Content |
+Use a small content resolver with tagged references: a named scene, the
+current preview scene of a named M/E, or a named rendered output. V1 registers
+only the existing M/E and program output. Logical examples are
+`scene(cam1_full)`, `preview(main)` and `output(program)`; finalize their JSON
+spelling in config work, without introducing a general graph framework.
+
+Future Master DSK is a branch after the M/E: the base output is clean, the
+DSK composition yields dirty. Both share the base render and decoding. Named
+output taps can then expose clean/dirty or another M/E's PGM. A clean feed
+still includes scene content and M/E transitions; only downstream layers are
+excluded. Do not implement those taps/controllers now or equate an output
+reference with a scene. Future nested scene references belong in the resolver
+with cycle detection and expanded-layer accounting, not recursive GPU callbacks.
+
+### Future Vulkan backend
+
+V1 remains CUDA-only. Preserve a replaceable rendering boundary without
+building a universal GPU framework or adding a Vulkan implementation now:
+
+- Keep scene/reference resolution, M/E state, transition timing, geometry,
+  playout deadlines, routing and overload policy independent of GPU APIs.
+  Existing configurations, control commands and UI should survive a backend change.
+- Pass ordered draw descriptions to the renderer: source references,
+  destination/crop geometry, draw order, blend and color requirements. Keep
+  CUDA pointers, texture handles and streams inside the CUDA implementation.
+- The backend owns GPU allocation/import, sampling/composition, conversion
+  and readiness/completion synchronization. Retain shared frames until GPU
+  consumers finish; do not assume CPU submission means a buffer can be reused.
+  Reuse existing frame ownership and scheduling interfaces where sufficient.
+- Express independent output submission and one-way dependencies as the
+  contract. The two CUDA rendering streams implement it today; a future
+  Vulkan backend may use queues, semaphores and barriers without exposing
+  their arrangement in scene or aux configuration. PGM priority and bounded
+  aux retention/work remain mandatory for either backend.
+- Preserve the existing separation between playout/geometry and CUDA draw
+  code. Introduce only small interfaces needed by this implementation; do not
+  refactor unrelated nodes, add backend switches, or generalize the framework
+  merely to anticipate Vulkan. Decoder/encoder integration and browser frame
+  imports will still require backend-specific work and capability validation.
+
+Backend parity would be tested on identical geometry, color, alpha and timing
+semantics. Do not assume CUDA is intrinsically faster or that Vulkan removes
+shared-resource contention; performance comparisons require matched workloads.
+
+## Layout and composition
+
+`pgm_pvw_grid` expands to ordinary places, not a special compositor mode.
+V1 uses rows=2, cols=4:
+
+| Place | Rectangle on W x H canvas | Content |
 |---|---|---|
-| PVW | 0, 0, W/2, H/2 | current PVW scene, flattened |
-| PGM | W/2, 0, W/2, H/2 | real `final_out` picture, one compositor pad |
-| grid r,c | c*W/cols, H/2 + r*H/(2*rows), W/cols, H/(2*rows) | selected scenes, flattened |
+| PVW | 0, 0, W/2, H/2 | current preview scene |
+| PGM | W/2, 0, W/2, H/2 | named program output |
+| M1..M8 | c*W/4, H/2+r*H/4, W/4, H/4 | assigned scene or empty |
 
-Today's 9:16 demo at 1080x1920 gets PVW/PGM at 540x960 and eight tiles at
-270x480; a 16:9 show gets 960x540 and 480x270. Rects are rounded to even
-pixels. Explicit `places` bypass the preset. Nothing assumes an aspect.
+For 1080x1920: PVW/PGM are 540x960; lower tiles are 270x480.
+For 1920x1080: 960x540 and 480x270. Round shared boundaries to chroma
+alignment so adjacent rectangles do not acquire gaps or overlap.
 
-"Flattened" means the referenced scene's layer list remapped into the tile:
+A referenced scene's destination rectangles are transformed into the tile:
 
 ```
-s  = min(tile.w / canvas.w, tile.h / canvas.h)
-ox = tile.x + (tile.w - canvas.w * s) / 2
-oy = tile.y + (tile.h - canvas.h * s) / 2
-dst_x' = ox + dst_x * s,  dst_w' = dst_w * s   (same for y/h)
-crop, fit, blend and relative z carry over
+s = min(tile.w / scene_canvas.w, tile.h / scene_canvas.h)
+ox = tile.x + (tile.w - scene_canvas.w * s) / 2
+oy = tile.y + (tile.h - scene_canvas.h * s) / 2
+dst_x' = ox + dst_x * s; dst_w' = dst_w * s  # likewise y/h
 ```
 
-Sixteen previews are `rows: 2, cols: 8`; 32 are `rows: 4, cols: 8`. The
-canvas decides how big they come out. Every layer is drawn in one kernel
-launch per frame (step 0, done), so draw cost follows canvas pixels, not
-layer count. The rect table caps a frame at 256 layers
-(`AVP_RECT_MAX_LAYERS`; `cuda_rect_draw` throws above it): sixteen grid_16
-tiles plus PVW and PGM exceed it, so the bus builder rejects such a bus
-unless the cap is raised. A 4K aux canvas also means a 4K NVENC session.
+Preserve source crop, fit, blend and scene draw order. Resolve omitted sizes
+and fit against the original scene geometry before remapping. Clip at the
+scene/tile boundary with corresponding sampling coordinates: an off-canvas
+layer must not spill into the next tile. Define place order and stable layer
+order separately so future overlapping places do not interleave scene layers.
+Empty/letterbox regions use the compositor background. Custom geometry needs
+no v1 editor; keep the normalized place representation able to express it.
 
-Each source is scaled once, straight into its final tile rect. There is no
-intermediate frame per tile, no extra latency and no extra GPU pass per scene.
+Same source in several tiles uses **one input pad with several layers**.
+PGM uses one pad/layer regardless of its internal scene complexity. No
+intermediate scene texture is required. Shared rendered thumbnails are a
+possible later optimization, not a prerequisite or an automatic cache.
 
-## Graph changes
+## Capacity and validation
 
-1. **Fan-out.** Every source pad's `one_to_many` (`otm_<pad>`, dsts `[a, b]`)
-   gains a third dst `mv`, bit 2, enabled at build time for every pad.
-   - Needs one native change. Only `rewriteCameraOutputsForSlot`
-     (`scene.cpp:224`) does read-modify-write; `applyPostTransitionRouting`
-     (`scene.cpp:199`), fade cleanup (`fade.cpp:162`) and the wipe midpoint
-     (`wipe.cpp:147`) write absolute masks and would clear bit 2 on every
-     take. All four go through `MixerState::sourceOutputMask`, which already
-     ORs the prewarm bits in. Add `uint32_t aux_output_mask` to `MixerState`,
-     OR it there, and accept it as `aux_outputs` in `mixer.init`
-     (`src/avplumber.cpp:1079`). About ten lines.
-   - `one_to_many` drops on a full unconsumed edge when a timeline is set, so
-     a pad the multiview is not drawing cannot stall the program.
-2. **Compositor.** One new `cuda_rect_overlay` `aux_<id>_comp` at the bus
-   canvas size (defaults to the program canvas), same working format and
-   color as the canvas, inputs = the bus's source pads plus one PGM pad. `layers` and `active_inputs` are set at runtime; both are already
-   accepted by `setObject`.
-3. **PGM pad.** The finished 1080p program frame is reused as-is: the
-   rendition `Split` on `final_out` gains one more output feeding the aux
-   compositor, which scales it into the PGM box like any other source. Fades,
-   wipes and the HTML overlay show because it is the real output.
-   - Timing: a `final_out` frame for tick `q` leaves the main compositor at
-     about `q + D_main`; the aux playout accepts it only if
-     `arrival + C <= q + D_aux`. Set the aux bus `latency_ms` to
-     `D_main + 3 frames` (about 166 ms at 30 fps with the default two-frame
-     main delay). Verify with the playout repeat/discard counters.
-   - Escape hatch if the extra delay is unwanted: a metadata-only
-     `setpts=PTS+<D_main in ticks>` on the aux branch keeps the default
-     delay at the cost of the PGM tile trailing the other tiles by D_main.
-   - The aux branch must drop on full so a stalled aux compositor can never
-     backpressure the program encoders.
-   - Not chosen: flattening the PGM scene from source pads. No timing
-     issue, but no transitions or overlays in the tile.
-4. **Output.** `_build_renditions` on the bus compositor's output, one
-   chain per bus rendition (`scale/format -> NVENC -> janus or file`),
-   nodes named `aux_<bus>_<rendition>_*`.
-5. **Same source in several tiles.** Required native change: one compositor
-   input carries a list of layers (see below). An aux bus then has one pad
-   per distinct source plus the PGM pad, whatever the tiles repeat. Python
-   aliases stay for the main mixer's existing scenes but are not used by aux
-   buses.
-6. **Start order.** Unchanged main sequence (sources, preheat, routes, slots,
-   transition warm-up, `start_output`), then start the multiview group. It
-   needs no preheat; first output appears once all active pads delivered.
+There are two different limits:
 
-## Control
+- Current main scenes have up to 128 input pads, including occurrence aliases.
+  The show's complete pad allocation can constrain a scene further.
+- A compositor draws at most 256 layers (`AVP_RECT_MAX_LAYERS`). Multi-layer
+  pads decouple draw count from input count; drawing remains bounded.
 
-- New demo command `aux {"bus": id, "scenes": [ids]}` (web UI
-  `POST /api/command`, TUI key later). It fills the bus's `scene` places in
-  order, computes the flattened layer array and active mask and issues
-  `node.object.set` for `layers` then `active_inputs` on that bus's
-  compositor.
-- The PVW tile is refreshed by the control surface after `preview`, `cut`,
-  `fade` and `wipe`, from the scene it just requested. It is the flattened
-  scene, not the slot compositor's pixels; outside a transition these are the
-  same picture.
-- Changing what a tile shows is a cut; only the PGM tile shows fades and wipes.
-- Web UI (mock: https://claude.ai/artifact/1K4ZuwSxcJAP6hAgN3Nm3o):
-  - A "Multiview" strip under the PGM/PVW buses with one slot per `scene`
-    place (`M1`..`M8`). Assign by dragging a scene tile onto a slot, or by
-    clicking a slot (armed, amber) then a scene, or `Shift+1..8` for the
-    selected scene. A scene sits in one slot at a time; `x` clears a slot.
-    Scene tiles show an `M<n>` badge when assigned, next to the existing
-    PGM/PVW colouring.
-  - Every change sends one `aux` command with the full slot list, so the
-    strip is the single source of truth and reconnects re-sync from
-    `/api/state`, whose bridge adds an `aux` section per bus from a
-    demo-registered command (like `mixer.settings`); `mixer.status` is
-    native and cannot be extended from Python.
-  - The monitor is the existing preview page in an iframe. Its `Stream`
-    select (H.264/SDR, H.265/HDR) gains a `Multiview` entry; the footer
-    groups (Graph: latency; WebRTC: RTT, FPS, buffer; GPU, NVDEC, NVENC,
-    VRAM) stay as they are, and NVENC shows the aux session's load too. Add `preview_outputs: [{id, codec, port}]` to
-    `mixer.settings` next to `preview_codecs` (the flat codec list both
-    pages consume today) so the aux rendition appears there without
-    special-casing. Choosing Multiview keeps the last program color
-    choice; the aux rendition follows it (see Config).
+For aux, count all lower scene layers + PVW scene layers + one PGM layer.
+Repeated placements count even when they share a decoder. Reserve the maximum
+expanded PVW layer count across scenes selectable by the existing M/E so a
+normal preview/take cannot invalidate aux:
 
-## Config
+- 8 grid-16 tiles + grid-64 PVW + PGM = 193: fits.
+- 8 grid-16 tiles + grid-128 PVW + PGM = 257: rejected.
+- 8 grid-64 tiles + grid-64 PVW + PGM = 577: rejected.
 
-A bus is a list of places; the standard multiview is a preset that expands
-to places. Place kinds: `pgm` (the real output pad), `pvw` (flattened current
-PVW scene), `scene` (flattened, filled from `scenes` in order, re-targetable
-at runtime).
+Do not raise the cap in v1. Report the required count, reserved PVW count and
+limit, leaving the old assignment active on rejection. Revalidate definitions
+on setup reload. 256 is an implementation ceiling, not a permanent schema
+restriction or a promise that every valid layout meets the frame budget.
+
+For v1, scene definitions are fixed for the lifetime of a setup with aux enabled.
+Build native scenes and aux resolution from the same validated configuration;
+geometry/source-placement changes require setup reload. Enforce this in native
+scene mutation handling, including `mixer.scene` calls from other clients, with
+a clear reload-required error. Reject additions/replacements/removals before
+changing state. Establish the guard during setup before exposing control, and
+keep it across aux suspension or restart. No-aux setups retain existing scene
+editing behavior. Cuts, PVW selection and aux tile assignments remain dynamic.
+Live definition synchronization and scene revision tracking are deferred.
+
+Separately validate the bus's source universe: distinct decoded source pads
+plus referenced output pads must fit the 128-bit `SourceMask`. Map them to
+stable bus-local indices, deduplicating main-scene aliases. Reserve all sources
+needed by permitted assignments/PVW; do not silently grow/reindex a running
+compositor. A show with 128 distinct sources plus PGM cannot all fit this bus
+without a later mask/capacity change or an explicit restricted source universe.
+
+## Graph, timing and PGM isolation
+
+1. Add a destination per aux bus to existing per-source `one_to_many` nodes.
+   Keep live aux subscriptions separate from the existing A/B timeline masks:
+   apply them at fan-out execution, not in scheduled `sourceOutputMask()`
+   values that a later fade/wipe cleanup could restore. Subscribe each bus to
+   the union of sources in its current PVW and assigned scene tiles; subscribe
+   its PGM tap while the bus runs. Default to no aux subscriptions. Aux changes
+   must never modify main A/B routing, `prewarm_source_mask`, main playout
+   history or source lifecycle. Existing main prewarming remains unchanged.
+2. Build one `aux_<id>_comp` with the program color/working-format contract,
+   source frames shared after their existing conversion, and a PGM output pad.
+   One source pad can resolve to multiple draw operations. Only active pads
+   should retain frames; exclude main aliases from aux pad accounting.
+3. Tap the real program output. Existing `Split::drop` and `OneToMany::drop`
+   apply to every destination, not per destination. Merely enabling `drop`
+   on the shared program split changes program semantics. Specify and test
+   the smallest reusable fan-out change supporting a nonblocking aux destination
+   while preserving current program destinations. A downstream dropping node
+   alone does not prove isolation if its upstream queue can fill. Cover EOF
+   and shutdown too; they must not block behind a stopped aux consumer.
+4. Lower aux cadence before expensive drawing and bound retained references.
+   Validate PTS-based 50->25 and 60->30 selection for sources and PGM. At a
+   lower output rate, intentionally discarded input frames are not failures.
+   Do not feed full-rate frames into an eight-entry playout buffer with an
+   unexamined longer delay: it can evict needed frames or pin producer pools.
+   Use reference-only rate selection/decimation if needed, with no decode,
+   pixel conversion, upload or full-size intermediate added.
+5. Implemented latency: `D_aux = D_main + T_aux`, in wall-clock units,
+   where a bus consumes program output. The initial three-frame allowance
+   retained unnecessary source frames; one aux frame passed the live 60/30 fps
+   run and compositor restart check. This is not a universal no-repeat
+   guarantee. Current playout allows six output-frame
+   periods with eight queue entries. Also budget input-rate retention and
+   producer/decoder surfaces. Larger configured main delay may exceed that
+   budget and must produce a validation error, not silent eviction.
+6. Give aux composition its own nonblocking CUDA stream. Keep the existing
+   M/E/PGM stream and shared CUDA context. Preserve existing producer-readiness
+   guarantees; where a producer is asynchronous, use frame-ready events for
+   cross-stream dependencies. The program-ready event is recorded on the
+   program stream and waited on by aux, never the reverse. Keep input frames
+   and draw-table storage alive until aux GPU work completes. A wait on the
+   aux stream by its own CPU worker is acceptable in v1; never synchronize the
+   entire context or introduce a PGM wait for aux. Audit aux filters/conversion
+   paths for accidental submission back onto the program/default stream.
+7. Feed aux output through its own SDR/H.264 rendition. Use per-bus names and
+   an independent lifecycle and a bounded, nonblocking encoder handoff. Skip
+   aux work on congestion; sustained congestion suspends the bus and closes
+   its subscriptions. Aux renderer/encoder failures or stalls release references
+   safely as below and do not stop program. Start it after existing program
+   startup; bound missing-input warmup rather than waiting forever for every tile.
+
+Aux input ownership must follow subscription lifetime. On removal, suspension
+or stop, first disable delivery and acknowledge that the fan-out has applied
+the change, then drain that aux input's edge and clear its playout history and
+held frame. Serialize this with the aux consumer; a publisher already in flight
+must not repopulate the queue after cleanup. Keep references used by submitted
+draws until their CUDA completion, handled by the aux worker without making
+PGM wait. Re-enabling an input must not revive frames from its old subscription.
+New inputs may warm up with background in their tiles; main cuts stay warm.
+
+An inactive aux input owns zero producer frames after outstanding GPU use
+completes. An active input has a fixed retention budget covering its edge,
+playout history, held frame and in-flight draws. Nonblocking writes alone do
+not satisfy this: dropping new frames leaves old queued surfaces pinned.
+Decimate before retaining aux history, but preserve enough timestamp history
+for the chosen PGM alignment delay; a latest-frame slot alone cannot replace it.
+Release only aux-owned references, never main-mixer prewarm references.
+
+Default main playout tolerance remains unchanged. Aux may repeat the last
+available tile or show background for a missing source, while other tiles
+continue. Never overwrite producer buffers still in GPU use to meet a budget.
+Use measurements to reduce aux workload or refuse activation if PGM cannot
+be protected; a shared GPU has no absolute real-time isolation guarantee.
+Compare PGM p50/p95/p99/max frame times, missed deadlines, repeats and cut latency
+against an aux-off baseline under the same source/scene load. Average FPS or GPU
+utilization alone is insufficient. Reproducible aux-induced deadline misses or
+frame-time tail regressions beyond baseline variability fail acceptance: bound
+aux work in flight, skip work or suspend aux before sacrificing PGM pacing.
+An overloaded aux must not build a GPU submission backlog ahead of PGM.
+
+## Control and output discovery
+
+Keep commands scoped by bus, even with only one exposed:
+
+```
+aux {"bus":"multiview","expected_revision":12,"scenes":["cam1_full","two_up",null,null,null,null,null,null]}
+```
+
+The complete eight-slot list makes replacement and clearing unambiguous.
+Require `expected_revision` for assignment commands. The backend owns a revision
+per bus; atomically compare it with the current revision, accept the validated
+assignment and increment the revision. Concurrent requests based on the same
+revision cannot both succeed. Missing/stale revisions leave state unchanged and
+return an error with current assignments and revision. Clients refresh on
+conflict rather than automatically resubmitting a stale eight-slot list.
+Expose assignments/revision in command responses and `/api/state`; reconnect
+reads them before editing. Invalidate old revision tokens on setup reload or
+backend restart so requests from an earlier instance cannot match fresh state.
+Automatic PVW changes do not increment the assignment revision.
+
+Validate/resolve the entire update, then atomically publish layers and active
+inputs as one composition snapshot at a frame boundary. Two separate
+`node.object.set` calls are not sufficient: current masks and layers have
+separate locks and the render thread can see an intermediate combination.
+Keep critical sections short; do not hold configuration locks while drawing,
+waiting for CUDA, making HTTP calls, rebuilding encoders or sending frames.
+
+PVW follows authoritative M/E status, including transition completion and
+commands from other clients; it must not be inferred only from UI clicks or
+from the last requested destination. Backend state is authoritative for aux
+assignments too. Invalid commands leave existing state/output unchanged.
+`/api/state` adds per-bus state from a demo-registered status command; native
+`mixer.status` is not a Python extension point.
+
+UI has M1..M8 assignment slots, click-to-arm, click-to-assign, clear, scene
+badges and Shift+1..8. Reconnect reads backend state. No drag/drop, bus selector
+or layout editor. Preserve assignments while the backend remains running;
+restart defaults come from the config unless existing persistence provides more.
+
+`mixer.settings.preview_outputs` identifies bus/rendition, codec, color and
+mountpoint/port. Keep `preview_codecs` during migration. The v1 selector adds
+one SDR multiview entry without changing program HDR/SDR selection. Provision
+its distinct Janus mountpoint; a new RTP port alone does not create one.
+There is no `aux.rendition` color-follow command or encoder rebuild in v1.
+
+## Config outline
 
 ```json
 "aux_buses": [
@@ -150,192 +314,165 @@ at runtime).
    "layout": {"preset": "pgm_pvw_grid", "rows": 2, "cols": 4},
    "scenes": ["cam1_full", "two_up", "grid_4", "pip_cam2",
               "grid_8", "grid_16", "cam1_with_graphics", "cam3_full"],
-   "renditions": [{"id": "monitor", "target": "janus", "color": "follow",
-                   "ports": {"h264": 5008, "h265": 5009}}]},
-  {"id": "wall", "width": 3840, "height": 2160,
-   "places": [
-     {"kind": "pgm",   "dst": {"x": 0,    "y": 0,    "w": 2560, "h": 1440}},
-     {"kind": "scene", "dst": {"x": 2560, "y": 0,    "w": 1280, "h": 720}},
-     {"kind": "scene", "dst": {"x": 2560, "y": 720,  "w": 1280, "h": 720}},
-     {"kind": "scene", "dst": {"x": 0,    "y": 1440, "w": 1280, "h": 720}},
-     {"kind": "scene", "dst": {"x": 1280, "y": 1440, "w": 1280, "h": 720}},
-     {"kind": "scene", "dst": {"x": 2560, "y": 1440, "w": 1280, "h": 720}}],
-   "scenes": ["grid_16", "cam2_full", "cam3_full", "two_up", "pip_cam2"],
-   "renditions": [{"id": "rec", "target": "/rec/wall.mp4", "bitrate_kbps": 20000}]}
+   "renditions": [{"id": "monitor", "target": "janus", "color": "sdr",
+                   "codec": "h264", "port": 5008}]}
 ]
 ```
 
-`width`/`height` default to the program canvas. A list from day one, even
-if the first implementation ships the multiview bus only. Bus `i` owns OTM bit `2 + i`, nodes are named `aux_<id>_*`, and
-the `aux` command takes the bus id. Each bus has its own compositor size,
-source subset, `latency_ms`, renditions and, if it shows PGM, its own output
-on the `final_out` split.
+This is a schema outline; align rendition fields with the existing parser
+rather than introducing a second output schema. Canvas defaults to program,
+fps follows the agreed mapping. Normalize the preset to stable place IDs,
+rectangles and tagged content references. Keep bus IDs, rendition IDs and
+output/port uniqueness validated. The model accepts a list; only the agreed
+single-bus layout is exposed/tested live in v1. No hardcoded single-bus storage.
 
-Color: the aux compositor uses the canvas working format and color contract
-(HLG P210 on an HLG show), fed by the same per-source conversion as PGM. SDR
-or HDR is decided per rendition exactly as for program: H.264 with tonemap
-for SDR, HEVC Main10 for HDR.
+## CUDA versus libobs: synchronization review
 
-Default for the multiview: one rendition that follows the operator's monitor
-choice. Switching Program SDR/HDR in the UI sends `aux.rendition {bus,
-color}`; the demo stops the aux rendition group, rebuilds scale/format and
-encoder for that color and codec, and restarts it. A Janus mountpoint pins
-its codec and port (`janus.plugin.streaming.jcfg`: id 1 = H.264, id 2 =
-H.265), so a follow rendition declares one port per codec (`ports`) and the
-restarted encoder targets the port matching the codec; the preview page
-reloads onto that mountpoint as it does today when the program Stream
-select changes. The bus compositor and the program path are upstream and
-keep running (program renditions all run at once and are never rebuilt);
-the monitor shows about a second of black. NVENC cannot change codec or bit
-depth on a live session, so the only glitch-free alternative is two
-renditions and a second NVENC session, which the list allows when a show
-needs it.
+Source review on 2026-09-23 used latest stable OBS **32.2.2**, confirmed by
+[the release](https://github.com/obsproject/obs-studio/releases/tag/32.2.2).
+This is a code comparison, not a matched performance benchmark or a diagnosis
+of any historical OBS incident.
 
-Parsing lives in `pyplumber/mixer/config.py`; the flattening and preset
-expansion are pure functions next to `scene_layers`.
+- In [libobs graphics.c](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/graphics/graphics.c),
+  `gs_enter_context` takes the graphics object's mutex until the matching outer
+  leave. In [obs-video.c](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/obs-video.c),
+  one graphics loop renders output mixes, then displays; output mixes are
+  traversed under `mixes_mutex`. Slow work on that path can delay other work.
+- [obs-scene.c](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/obs-scene.c)
+  holds a scene video lock while traversing/rendering items.
+  [obs-display.c](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/obs-display.c)
+  invokes display callbacks under their mutex. Linux
+  [X11/EGL](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs-opengl/gl-x11-egl.c)
+  and [Wayland/EGL](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs-opengl/gl-wayland-egl.c)
+  bind/unbind the GL context on context entry/exit. These are serialization
+  points; their existence does not prove an observed stall was mutex contention.
+- OBS also reuses compatible mix textures (`can_reuse_mix_texture`); do not
+  characterize it as always rerendering or decoding each reference.
+- Our `cuda_rect_overlay.cpp` snapshots layer/mask state with short locks and
+  draws without holding those locks. Compositors are separate graph nodes;
+  flat draw operations avoid recursive scene/plugin rendering callbacks.
+- However, `CudaRectDraw::stream()` in `cuda_rect_draw.hpp` returns the shared
+  `AVCUDADeviceContext::stream`. Compositors using the same hardware device
+  therefore submit to the same stream. `processComposite` synchronizes it
+  every frame before a blocking sink put. We do **not** currently have fully
+  independent GPU scheduling merely because nodes have independent threads.
+- Shared stream work, default-stream interactions, driver waits, output queues
+  and retained NVDEC/DMA-BUF surfaces can still couple aux to PGM. Browser
+  capture still uses Chromium/GL; CUDA composition does not remove its stalls.
 
-## Cost
+V1 must separate aux from the existing M/E/PGM rendering stream as specified
+above; this is an agreed requirement, not an optional optimization. Measure
+kernel execution separately from CUDA queue/wait time and CPU mutex/queue
+waits with aux on/off and stalled. Validate producer readiness, consumer
+completion and DMA-BUF release lifetime before enabling the new stream. Do not
+remove synchronization or add `glFinish` / `cuCtxSynchronize` as a workaround.
+Stream priorities alone do not guarantee preemption or protect against
+exhausted shared frame pools. "PGM never waits for aux" is the dependency and
+backpressure contract, not a claim that shared GPU execution/memory resources
+provide hard real-time isolation.
 
-| Item | Value |
-|---|---|
-| GPU | one compositor tick per frame at the bus canvas size, one NVENC session |
-| Pads per aux bus | distinct sources + 1 (PGM), hard limit 128 (`SourceMask`) |
-| Multiview latency | main + 3 frames |
-| Main program | unchanged |
+## Cost and current jitter evidence
 
-Estimates for the T4 at 1080x1920p30; measured compositor numbers are in
-implementation step 0. The composite kernel (`composite_planes` in
-`cuda_rect_scale.cu`, one launch per frame) samples bilinearly, four taps
-per output sample, so compositor cost scales with output pixels, not with
-source size or how many tiles a source appears in.
+Per bus: one canvas composition at aux fps, one SDR conversion when required,
+and one H.264 NVENC session. Source decoding/conversion are shared; each
+placement is sampled again at its final tile size. A single launch does not
+make layers free: layer-table scanning, overlap, blending and source format
+matter in addition to canvas area. Keep the 256 cap and profile worst valid
+layouts. Additional live bus count and VRAM cost require measurement; do not
+promise a fixed number of buses from rough FLOP or encoder percentages.
 
-| Per bus per frame | Amount | Share of T4 at 30 fps |
+The passive five-minute 20-NVDEC/28-browser, 60-fps capture found:
+
+| Metric | p99 | Maximum |
 |---|---|---|
-| canvas write, NV12 | 3.1 MB | 0.03% of 320 GB/s |
-| bilinear reads | ~12 MB, mostly cached | ~0.1% |
-| arithmetic | ~2 MP x tens of FLOPs | ~0.01% of 8 TFLOPS |
-| kernel launch, one per frame plus the rect-table upload | measured 0.108 ms for grid-16 at 1080x1920 | ~0.3% of the 30 fps frame budget |
-| NVENC session | H.264 5-8%, HEVC Main10 10-15% of the encoder engine | separate engine |
-| VRAM | 250-550 MB: pool 25-65, retention 150-300, filter 10-30, NVENC 60-200 | |
+| Browser frame arrival spacing | 21.80 ms | 101.50 ms |
+| Browser handoff-to-receipt transport | 0.30 ms | 2.99 ms |
+| Decoder frame-return spacing, before pacing | 29.06 ms | 47.71 ms |
+| Encoded output spacing | 20.15 ms | 35.46 ms |
 
-Scaling: linear per bus in SM time and one NVENC session each. Buses share
-decode, conversion and frames. NVENC saturates first: with program holding
-two sessions, four to six aux buses fit on a T4.
+Browsers averaged 60 fps with zero transport sequence gaps/reported drops,
+but 437 per-source gaps over 50 ms formed 114 clusters, each confined to one
+Electron worker (four workers, seven pages each). Catch-up bursts hide stalls
+in average FPS. The exact blocked operation was not established. NVDEC was
+92-96%; file pacers repeated 0.52% of output frames overall. This was a single
+fullscreen program scene, not proof of smooth all-source grid rendering.
 
-Retention is the VRAM item to watch: the aux playout holds decoder frames
-longer than PGM, so a tight decoder pool shows up as decoder stalls.
+Do not promise zero aux repeats in browser tests or attribute all discards
+to overload: half-rate selection deliberately discards frames. Compare against
+baseline, separate transport loss, timestamp corrections, intended decimation,
+late frames and repeated output. Do not increase global mixer latency just to
+hide upstream browser stalls. Adding aux must not create another decoder.
 
-Ingest is the CPU item to watch (measured 2026-09-23, 64 sources at 30 fps,
-128 scenes). With `--prewarm-cut-scene '*'` the prewarm mask covers every
-source, so every source already feeds both slot compositors: 1920 frames/s
-into slot A and another 1920 into the idle slot B. An aux bus adds a third
-consumer on bit 2, so its compositor ingests every pad it draws on top of
-that. Every edge holds 3 frames and the output chain blocks rather than
-drops, which is why the aux branch must drop on full (Graph changes, 3).
-The same measurement found no frame loss on the program path today: 29.99
-fps at every output stage, all 64 pads at 30.0 fps, no refused puts.
+## Implementation sequence and acceptance
 
-### Keeping the impact minimal
+1. **Native compositor support.** Accept one or several layers per input,
+   preserve the existing single-layer form and deterministic global draw order.
+   Implement one atomic composition update for layers + active mask, plus tile
+   clipping support if current geometry cannot express it safely. Keep frame
+   selection per input. Do not migrate `SceneDefinition.sources`, native
+   `mixer.scene` or main aliases merely to support Python-generated aux layers.
+2. **Routing/isolation.** Add independent live aux subscriptions and tested
+   per-destination nonblocking fan-out as above. These are reusable node/control
+   changes, not a graph-management framework workaround. Test cut/fade/wipe
+   paths and stopped/slow aux consumers; default no-aux behavior stays unchanged.
+3. **Config/resolver.** Add bus/place data and typed content resolution in
+   `pyplumber/mixer/config.py`, normalized geometry, source/output deduplication,
+   128-pad and 256-layer validation with PVW reserve. Keep presets outside the
+   renderer. Enforce fixed native scene definitions for aux-enabled setups.
+   Update the existing mixer config-schema document.
+4. **Graph builder.** Build per-bus compositor/rendition groups, shared-source
+   routes and named program tap in `pyplumber/mixer/graph.py` and the demo.
+   Implement the dedicated nonblocking aux stream and one-way readiness
+   dependencies. Establish rate selection, bounded warmup/retention, latency
+   validation and independent stop/restart before exposing the control UI.
+5. **Control/UI.** Implement validated full-slot replacement with per-bus
+   revision checks and conflict refresh, authoritative PVW synchronization,
+   state/discovery and one Janus SDR output. Add clicks, clear, badges and
+   keyboard shortcuts only; no drag/drop or color-follow path.
+6. **Remote validation.** Use the configured NVIDIA host, not local GPU builds
+   or local tests. Run relevant Python mixer/demo tests and native compositor
+   tests. No live changes during unrelated monitoring without coordination.
 
-Done before any aux code (step 0):
+Required tests:
 
-1. **One launch per frame.** `composite_planes` draws the whole canvas in
-   one launch from a host z-sorted rect table: each 128x8 tile masks the
-   layers touching it, every thread walks those layers bottom to top
-   starting from the clear value (opaque layers overwrite, RGBA blends) and
-   stores once per sample. No clear pass, no per-layer launch. Launches
-   fell from two per layer plus two memsets to one; grid-16 on the program
-   path went from 0.160 to 0.108 ms per frame, under 1% of the mixer's GPU
-   time. Every `cuda_rect_overlay` instance, so every aux bus, gets it.
+- Old single-layer configs render identically; repeated references share one
+  decoder/pad but yield the expected drawing operations. Test z ties, crop,
+  contain/stretch, omitted geometry, negative/off-canvas layers and tile bounds.
+- Boundary cases at 128 pads / 256 layers, PVW reservation, invalid assignments
+  leaving state intact, and reload validation of changed scene definitions.
+- Direct native scene mutations are rejected without changing main or aux
+  definitions while aux is configured, including during suspension/restart.
+  No-aux scene editing and normal cuts/PVW selection remain functional.
+- 50->25, 60->30, 25->25, 30->30 PTS cadence; count intended selection separately.
+  PGM tile shows fade/wipe/overlays while PVW/lower tiles remain direct scenes.
+- Live SDR and HDR programs both yield SDR/H.264 multiview. Changing program
+  viewer color does not restart aux. Existing program controls still work.
+- Aux off/on/stopped/encoder-stalled: compare program frame times, cut latency,
+  missed deadlines, decoder pool availability, browser retained/quarantined
+  buffers and memory. Release aux references safely on failure/stop after GPU
+  use completes. Verify the two distinct rendering streams and absence of any
+  program-stream wait on an aux event. Profile event/stream waits and accidental
+  shared-stream work; address measured coupling before declaring PGM protected.
+- Repeatedly subscribe/unsubscribe while sources publish and fade/wipe cleanup
+  runs. Verify no delivery after unsubscribe acknowledgement, no stale frames
+  on reactivation, bounded active retention and zero inactive aux references
+  after GPU completion. Main A/B routing, prewarm history and source lifecycle
+  must remain unchanged. Include full aux queues and EOF during shutdown.
+- Assign tiles during a transition and from two clients; reject invalid changes
+  atomically, track actual PVW after completion, and restore state on reconnect.
+- Two clients replacing assignments from the same revision: exactly one
+  succeeds; the other receives current state without overwriting it. Cover
+  missing revisions, reconnect and stale requests after setup/backend restart.
+- A two-bus graph test proves distinct IDs, destination bits, layouts and output
+  names without singleton assumptions. Live multi-bus and editable-layout UI
+  validation remain deferred. No requirement to implement extra M/Es or DSK.
 
-Sources are assumed to deliver a new frame every tick, so no static-tick
-skipping is planned.
+Done when the agreed single multiview works, no-aux configurations stay intact,
+program isolation is measured under aux failure/load, and actual incremental
+GPU/CPU/VRAM/frame-time costs are recorded. Historical numbers below are not
+acceptance results for aux.
 
-Config options, off by default:
-
-2. Per-bus `fps` (integer divisor of the program rate): halves SM and NVENC
-   at half rate.
-3. Per-bus `width`/`height`: cost is proportional to area; 720x1280 is 45%
-   of 1080x1920 for compositor and encoder alike.
-4. Aux renditions default to NVENC preset `p1`.
-
-Later, if more than two buses become normal: **wall mode**, one compositor
-drawing all bus canvases side by side and one crop per rendition. One
-thread and one launch set for all buses; encoders unchanged.
-
-Quality: bilinear at 4-16x downscale aliases. If grid tiles shimmer on the
-T4, render a shared quarter-res thumbnail per source once per frame (about
-1% more) and let aux layers read it. Decide after the live test.
-
-## Native changes, complete list
-
-| Change | Where | Size |
-|---|---|---|
-| `aux_output_mask` ORed into every camera OTM mask | `MixerState.hpp`, `avplumber.cpp` (`mixer.init`) | ~10 lines, required |
-| several layers per compositor pad | `compositor_layers.hpp`, `cuda_rect_overlay.cpp`, `routing.hpp`, `SceneDefinition` | moderate, required, see below |
-| rect table cap | `AVP_RECT_MAX_LAYERS` is 256 ops per frame (`cuda_rect_table.h`; `CudaRectDraw::draw` throws above it): raise it for the largest bus, and the Python bus builder rejects a bus whose flattened layer count exceeds it | small |
-| nothing else | `one_to_many` masks are 32-bit; `cuda_rect_overlay` already takes `layers` and `active_inputs` at runtime; `node.object.set` exists; `split` has a `drop` option | |
-
-### Multi-layer pads instead of aliases
-
-An alias is Python-only today: `cam1#2` is an unrelated source to the
-orchestrator, and the sharing is graph plumbing (one color filter, one
-`color_alias_cam1` fan-out). With several aux buses the alias count would be
-the max occurrences across every bus's tiles, every compositor would pay for
-pads it never draws, and the 128-pad mask is reached with a handful of grids. Porting the
-alias concept to C++ would not fix that: a pad per occurrence is the cost.
-
-So aux buses use a different mechanism: one compositor input carries a list
-of layers. A scene is an ordered list of `(source, rect)` items, the
-compositor draws a pad as many times as it is referenced, and pads, OTM
-masks and `active_inputs` stay per source. Touch points:
-
-- `SceneDefinition.sources` map to an ordered item list (`MixerState.hpp`),
-  and the `mixer.scene` JSON accordingly.
-- `compositorLayersFromScene` groups items by input index
-  (`src/mixer/routing.hpp:81`).
-- `parseLayersArray`, `applyLayerMetadata` and `resolveDrawOps` iterate
-  layers per input (`compositor_layers.hpp`), as do `default_layers_` and
-  `mergeLayersForTick` in `cuda_rect_overlay.cpp`. `CudaRectDraw::draw`
-  only fills the rect table from the resolved ops and is untouched. Playout
-  is untouched; frame selection is per input.
-- `scene_layers` in `config.py` can stop generating alias names for main
-  scenes too, in a follow-up; the main mixer keeps working with aliases
-  meanwhile because a one-element layer list is the current behaviour.
-
-Order of work: multi-layer pads first, since the aux compositor is built on
-it; then `aux_output_mask`; then the Python bus builder and control.
-
-## Out of scope for v1
-
-- A second bus is built and tested in v1 only as a graph test (two entries
-  in `aux_buses`, distinct bits, distinct encoders); live validation of two
-  buses on the T4 is a follow-up. Each bus costs one compositor tick and one
-  NVENC session; bits are 32-bit so up to 30 buses fit.
-- Tally borders. Needs a solid-color source or a compositor fill layer; the
-  compositor has no rect-fill primitive today.
-- Transitions inside tiles, or feeding the multiview back into PGM.
-- Snapshot and cut-latency measurement on the aux bus.
-
-## Verification
-
-- Unit: flattening math (contain/stretch, crop and z carried, a repeated
-  source yields one pad with several layers, per-bus pad-limit and rect
-  table cap rejection) in `demos/mixer/tests/test_graph.py`; the per-show
-  128-source limit is already covered by `test_source_mask_capacity`.
-- Graph: builder test that every `otm_<pad>` has three dsts with bit 2 set
-  and that a cut/fade leaves bit 2 set.
-- Live on the T4 host: record program and multiview together, confirm the PGM
-  tile follows a fade with no repeats in the multiview's playout counters,
-  and that re-targeting tiles does not disturb program timing.
-
-## Implementation plan
-
-Ordered so that every step leaves the tree green and the existing demo
-unchanged in behaviour. Steps 1 and 2 are native, 3 to 7 Python and web.
-One PR per step is fine; steps 3 to 6 may be combined.
-
-### 0. Single-launch compositor draw, validated on PGM alone (native)
+## Appendix: completed compositor work and historical measurements
 
 DONE 2026-09-22 on `mixer-improv`: commits 7a23cdd and 29a34cd (single
 launch), bbfdb73 and 470bd58 (zero-copy browser frames), 6f584c2 (cleanup).
@@ -395,123 +532,3 @@ textures through the production descriptor and fails without the flag.
 at init), keeps the canvas contract only in `CudaRectDraw::canvas()`, and
 stops the DRM node's destructor from terminating the process-global EGL
 display. Live after both: card 37-38%, mixer SM 16-18%, VRAM 6.9 GB.
-
-### 1. Multi-layer compositor pads (native)
-
-- `src/mixer/primitives/compositor_layers.hpp`: `parseLayersArray` accepts,
-  per input, either one layer object (today) or an array of layer objects;
-  `resolveDrawOps` emits one `DrawOp` per layer, in array order, still
-  sorted by `z`. `LayerSpec` gains nothing.
-- Draw path already single-launch from step 0; multi-layer pads only
-  change how the op list is resolved (`resolveDrawOps`), not the rect table
-  or the kernel.
-- `src/nodes/hwaccel/cuda_rect_overlay.cpp`: `default_layers_` becomes
-  `std::vector<std::vector<LayerSpec>>`; `input_eof_`, `held_` and friends
-  stay per input. The `layers` `setObject` path and the composite loop use
-  the nested form. A one-element array is exactly today's behaviour.
-- `src/mixer/primitives/MixerState.hpp`: `SceneDefinition.sources` becomes an
-  ordered `std::vector<SceneItem{source, SourceLayout}>`;
-  `computeActiveInputsMask` and the inline `scene.sources.count(name)`
-  checks (`scene.cpp`, `fade.cpp`, `wipe.cpp`, `routing.hpp`) adapt, behind
-  a new `usesSource(name)` helper. `mixer.scene` JSON
-  accepts the current object form and a new `items` array form.
-- `src/mixer/routing.hpp`: `compositorLayersFromScene` groups items by input
-  index into arrays.
-- Tests: `tests/cpp/test_mixer_source_mask.cpp` and a new
-  `tests/cpp/test_compositor_layers.cpp` covering one-vs-many layers per
-  input, z order across inputs, and unchanged output for the object form.
-- Acceptance: existing demo configs render identically; `pytest tests` and
-  the C++ tests pass.
-
-### 2. Aux output mask (native)
-
-- `MixerState.hpp`: `uint32_t aux_output_mask = 0;` and
-  `sourceOutputMask()` ORs it in.
-- `src/avplumber.cpp` `mixer.init`: accept `aux_outputs` (integer mask);
-  `mixer.status` reports it.
-- Test: `tests/cpp/test_mixer_source_mask.cpp` asserts the mask survives
-  `applyPostTransitionRouting`, fade cleanup and wipe midpoint values.
-- Acceptance: with `aux_outputs: 0` nothing changes.
-
-### 3. Config: `aux_buses`, places, preset, flattening (Python)
-
-- `pyplumber/mixer/config.py`: dataclasses `AuxBus`, `Place`, parse
-  `aux_buses`, `layout.preset` expansion (`pgm_pvw_grid`, fractional, even
-  pixels), explicit `places`, per-bus `renditions` with `color: "follow"`,
-  `latency_ms` default main + 3 frames. Validate scene ids, distinct
-  sources + 1 <= 128 per bus, at most one `pgm`/`pvw` place per bus.
-- Pure functions next to `scene_layers`: `flatten_scene(cfg, scene, dst)`
-  and `bus_layers(cfg, bus, slots, pvw_scene)` returning the per-input
-  layer arrays and the active mask.
-- Update `doc/research/2026-09-08-mixer-config-schema.md`.
-- Tests in `demos/mixer/tests/test_graph.py`: preset geometry for 9:16 and
-  16:9, remap math with crop/fit/blend/z, repeated source across tiles
-  yields one pad with several layers, pad-limit rejection, bad references.
-
-### 4. Graph builder (Python)
-
-- `pyplumber/mixer/graph.py`: `add_aux_bus(bus)` before `build()`. Per
-  source pad, `otm_<pad>` gets one more dst per bus; initial `outputs` and
-  `mixer.init` `aux_outputs` carry the bus bits. Per bus: `CudaRectOverlay`
-  `aux_<id>_comp` (bus size, canvas format/color, `latency_ms`, timeline,
-  group `aux_<id>`), initial `layers` from `bus_layers`, `active_inputs`.
-  The PGM pad edge is returned so the demo can wire the split.
-- `demos/mixer/mixer.py` `_build_from_config`: call `add_aux_bus`, extend
-  the `final_out` split (or add a `one_to_many` with `drop: true` on the aux
-  branch) with one output per bus that has a `pgm` place, run
-  `_build_renditions` on each bus output with names `aux_<bus>_<rendition>_*`,
-  and start group `aux_<id>` after `start_output` in `MixerApplication.start`.
-- Tests: builder test that every `otm_<pad>` has 2 + N dsts and the init
-  carries `aux_outputs`; a two-bus config yields distinct bits, compositors
-  and encoders; the split has one extra output per PGM-showing bus.
-
-### 5. Control (Python)
-
-- `pyplumber/mixer/control.py` / demo: `aux {"bus", "scenes"}` computes
-  `bus_layers` and issues `node.object.set` `layers` then `active_inputs`
-  on `aux_<id>_comp`; `aux.rendition {"bus", "color"}` stops the bus
-  rendition group, rebuilds it for the color, restarts it.
-- `/api/state` gains `aux: {<id>: {scenes, pvw_scene, color}}` from a
-  demo-registered command (`mixer.aux_status`, registered like
-  `mixer.settings`); `mixer.status` is native (`MixerOrchestrator::status`)
-  and stays unchanged.
-- PVW place refresh after `preview`, `cut`, `fade`, `wipe`.
-- `mixer.settings`: `preview_outputs: [{id, codec, port}]` replacing
-  `preview_codecs` (keep the old key for one release).
-- Tests: `demos/mixer/tests/test_control.py` for command payloads, order
-  of object sets, and PVW refresh.
-
-### 6. Web UI
-
-- `demos/mixer/webui/index.html`: multiview strip (slots `M1..Mn` from the
-  bus's `scene` places), drag/drop, armed-slot click, `Shift+1..8`, `x` to
-  clear, `M<n>` badges on scene tiles, one `aux` command per change, state
-  re-sync from `/api/state`.
-- `docker-compose/images/preview/index.html`: `Stream` select lists
-  `preview_outputs`; choosing the multiview keeps the program color choice
-  and the UI sends `aux.rendition` when the program color changes.
-- Tests: `demos/mixer/tests/test_webui.py` for `/api/state` shape and the
-  `aux` command path; `docker-compose/images/preview/tests` for the select.
-
-### 7. Live validation on the T4
-
-- Run the 9:16 demo with one multiview bus, SDR rendition. Record program
-  and multiview; verify the PGM tile follows a fade and a wipe, no repeats
-  or discards in the aux playout counters at `latency_ms = main + 3
-  frames`, program cut latency unchanged, re-targeting all eight slots
-  during a fade leaves program timing untouched.
-- Record `nvidia-smi` VRAM and SM/NVENC utilisation before and after
-  enabling the bus; replace the estimates in Cost with the numbers. Target
-  under 1% SM per bus at 1080x1920p30; record the aux playout
-  `repeats`/`discarded` counters with browser sources.
-- Judge tile aliasing on grid_16 tiles; decide on the shared thumbnail.
-- Switch the rendition SDR/HDR/SDR three times; confirm the program never
-  glitches and the multiview returns within about a second.
-- Two-bus config: graph test only in v1.
-
-### Done when
-
-- `demos/mixer` runs with and without `aux_buses` and all tests pass.
-- The multiview shows PGM with transitions, PVW, and eight operator-chosen
-  scenes on its own Janus port, selectable in the preview page.
-- The spec's Cost table carries measured numbers.

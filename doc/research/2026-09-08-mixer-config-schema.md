@@ -97,6 +97,46 @@ unique source, `mixer.scene` per scene, `mixer.wipe` with the named clip.
 }
 ```
 
+## Optional multiview
+
+Add `aux_buses` to an existing mixer config; omit it to keep the program-only graph:
+
+```json
+"aux_buses": [{
+  "id": "multiview",
+  "layout": {"preset": "pgm_pvw_grid", "rows": 2, "cols": 4},
+  "scenes": ["cam1_full", "two_up", null, null, null, null, null, null],
+  "renditions": [{"id": "monitor", "target": "janus", "port": 5008,
+                  "codec": "h264_nvenc", "color": "sdr", "bitrate_kbps": 4500}]
+}]
+```
+
+Replace the scene IDs with definitions in the same config. The upper tiles show
+native preview and actual program output; eight lower slots show assigned scenes.
+Preview may be empty in direct mode. Each source is decoded once, including when
+it appears in multiple tiles. Aux keeps the program canvas size and uses 25/30 fps
+for a 50/60 fps program, otherwise the program rate. Its output is always SDR/H.264.
+Program and aux encoders run concurrently; the page's output selector changes
+only the displayed stream. Both streams can be viewed in separate players.
+
+The bundled Janus config reserves mountpoint/RTP port 5008 and RTCP port 5009.
+Custom ports require corresponding Janus mountpoints whose IDs equal their RTP
+ports. Each bus needs a distinct port pair. The control page adds a multiview
+output choice and M1–M8 assignment buttons: arm a slot then click a scene, clear
+with ×, or use Shift+1–8 with a selected scene. Assignments are checked against
+the 256-layer limit, reserving capacity for any selectable preview scene.
+
+With aux configured, scene definitions are fixed until setup reload, including
+native `mixer.scene` edits. Preview selection, cuts and tile assignments remain
+live. `mixer.aux_status` returns assignments and an opaque revision per bus;
+`mixer.aux` requires `bus`, `expected_revision` and the complete eight-slot `scenes`
+list. Stale commands return current state without applying changes.
+
+Aux suspends after sustained encoder backpressure. Reapply an assignment to
+resume after resolving it; PGM routing and prewarming remain unchanged. Aux uses
+bounded input histories and a separate CUDA stream, but shares GPU capacity:
+validate program frame pacing with aux enabled for the intended source load.
+
 ## Example
 
 ```json

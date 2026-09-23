@@ -140,6 +140,13 @@ class MixerGraphBuilder:
         self._routes_initialized = False
         self._current_pgm: Optional[str] = None
         self._built = False
+        self._aux_routes: Dict[str, List[str]] = {}
+
+    def add_aux_destination(self, source: str, edge: str) -> None:
+        """Add an independently subscribed destination before materializing the graph."""
+        if self._built or source not in self._source_index:
+            raise ValueError("Aux destinations need a registered source before build")
+        self._aux_routes.setdefault(source, []).append(edge)
 
     # ------------------------------------------------------------------
     # Graph construction API
@@ -543,11 +550,13 @@ class MixerGraphBuilder:
             outputs_init = (1 << pgm_slot_bit) if is_in_initial else 0
 
             if src.route_router is None:
+                aux_edges = self._aux_routes.get(src.name, [])
                 self.avp.addNode(OneToMany({
                     "type": "one_to_many",
                     "name": self._n(f"otm_{src.name}"),
                     "src": prepared_edges[src.name],
-                    "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b")],
+                    "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
+                    **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     "outputs": outputs_init,
                     "timeline": self.timeline,
                     "group": src.input_group,

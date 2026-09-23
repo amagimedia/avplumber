@@ -91,7 +91,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        width: int, height: int, hwaccel: str = "@gpu", fps_den: int = 1,
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
-                       hdr_metadata=None, prefix: str = "janus"):
+                       hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic"):
     """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -135,11 +135,11 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         ("Bsf", {"name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),
                  "bsf": "dump_extra=freq=keyframe"}),
         ("Mux", {"name": node_name("mux"), "src": [node_name("repeat_headers")], "dst": node_name("video_rtp_mux"),
-                 "ts_sort_wait": 0, "auto_restart": "on", "on_error": "panic"}),
+                 "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
         ("Output", {"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
-                    "format": "rtp", "auto_restart": "on", "on_error": "panic",
+                    "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
                     "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc}}),
-    ], group=group, auto_restart="panic")
+    ], group=group, auto_restart=failure_mode)
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
         janus_rtcp_port=janus.rtcp_port_remote, media_ssrc=janus.ssrc,

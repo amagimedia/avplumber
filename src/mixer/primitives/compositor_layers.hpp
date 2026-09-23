@@ -14,6 +14,9 @@
 namespace avp::mixer {
 
 struct LayerSpec {
+    int input = -1; // omitted: legacy one-layer-per-input order
+    Rect tile;
+    int scene_w = 0, scene_h = 0;
     int dst_x = 0;
     int dst_y = 0;
     int crop_x = 0;
@@ -29,7 +32,9 @@ struct LayerSpec {
     bool blend = false;   // honour the source's alpha instead of overwriting
 
     bool operator==(const LayerSpec &other) const {
-        return dst_x == other.dst_x && dst_y == other.dst_y && z == other.z && blend == other.blend &&
+        return input == other.input && tile.x == other.tile.x && tile.y == other.tile.y &&
+               tile.w == other.tile.w && tile.h == other.tile.h && scene_w == other.scene_w && scene_h == other.scene_h &&
+               dst_x == other.dst_x && dst_y == other.dst_y && z == other.z && blend == other.blend &&
                crop_x == other.crop_x && crop_y == other.crop_y &&
                crop_w == other.crop_w && crop_h == other.crop_h &&
                dst_w == other.dst_w && dst_h == other.dst_h && fit == other.fit &&
@@ -51,6 +56,16 @@ struct DrawOp {
 };
 
 inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
+    out.input = obj.value("input", -1);
+    if (out.input < -1) throw Error("cuda_rect_overlay: invalid input index");
+    if (obj.contains("tile")) {
+        const auto &t = obj.at("tile");
+        out.tile = {t.at("x"), t.at("y"), t.at("w"), t.at("h")};
+        out.scene_w = obj.at("scene_canvas").at("w");
+        out.scene_h = obj.at("scene_canvas").at("h");
+        if (out.tile.w <= 0 || out.tile.h <= 0 || out.scene_w <= 0 || out.scene_h <= 0)
+            throw Error("cuda_rect_overlay: invalid tile or scene canvas");
+    }
     out.dst_x = obj.value("dst_x", 0);
     out.dst_y = obj.value("dst_y", 0);
     out.dst_w = obj.value("dst_w", 0);
@@ -133,9 +148,10 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
                                           const std::vector<LayerSpec> &layers,
                                           int canvas_w, int canvas_h, AVPixelFormat canvas_fmt) {
     std::vector<DrawOp> ops;
-    ops.reserve(std::min(sources.size(), layers.size()));
-    for (size_t i = 0; i < sources.size() && i < layers.size(); ++i) {
-        const av::VideoFrame *srcp = sources[i];
+    ops.reserve(layers.size());
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const size_t input = layers[i].input < 0 ? i : size_t(layers[i].input);
+        const av::VideoFrame *srcp = input < sources.size() ? sources[input] : nullptr;
         if (!srcp || !srcp->raw()) {
             ops.push_back({});
             continue;
@@ -187,6 +203,33 @@ inline std::vector<DrawOp> resolveDrawOps(const std::vector<const av::VideoFrame
             continue;
         }
         ops.push_back({srcp, srcp->width(), srcp->height(), L});
+    }
+    for (auto &op : ops) {
+        auto &l = op.layer;
+        if (!op.src || !l.tile.w) continue;
+        const int ax = chromaXAlign(canvas_fmt), ay = chromaYAlign(canvas_fmt);
+        const auto mapped = place(l.scene_w, l.scene_h, {}, l.tile, true, ax, ay);
+        if (!mapped) { op.src = nullptr; continue; }
+        const auto &t = mapped->destination;
+        auto map = [](int v, int extent, int original, int alignment) {
+            const int n = int(av_rescale(v, extent, original));
+            return n - (n % alignment + alignment) % alignment;
+        };
+        const int w = l.dst_w ? l.dst_w : l.crop_w, h = l.dst_h ? l.dst_h : l.crop_h;
+        const int x = t.x + map(l.dst_x, t.w, l.scene_w, ax);
+        const int y = t.y + map(l.dst_y, t.h, l.scene_h, ay);
+        const int right = t.x + map(l.dst_x + w, t.w, l.scene_w, ax);
+        const int bottom = t.y + map(l.dst_y + h, t.h, l.scene_h, ay);
+        const int cx = std::max(x, t.x), cy = std::max(y, t.y);
+        const int cr = std::min(right, t.x + t.w), cb = std::min(bottom, t.y + t.h);
+        if (cr <= cx || cb <= cy) { op.src = nullptr; continue; }
+        // Clip after fitting in the original scene, before drawing into its tile.
+        const int sx = l.crop_x, sy = l.crop_y, sw = l.crop_w, sh = l.crop_h;
+        l.crop_x = sx + map(cx - x, sw, right - x, 1);
+        l.crop_y = sy + map(cy - y, sh, bottom - y, 1);
+        l.crop_w = sx + map(cr - x, sw, right - x, 1) - l.crop_x;
+        l.crop_h = sy + map(cb - y, sh, bottom - y, 1) - l.crop_y;
+        l.dst_x = cx; l.dst_y = cy; l.dst_w = cr - cx; l.dst_h = cb - cy;
     }
     // z decides who draws on top; equal z keeps source order (stable).
     std::stable_sort(ops.begin(), ops.end(),

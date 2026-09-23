@@ -53,6 +53,8 @@ void MixerOrchestrator::defineRoutedSource(const std::string& name, const std::s
 
 void MixerOrchestrator::defineScene(const std::string& name, const SceneDefinition& def) {
     std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->scene_definitions_frozen)
+        throw Error("mixer.scene: aux-enabled setup has fixed scene definitions; reload setup to edit");
     if (state_->prewarm_cut_scenes.count(name) &&
             (!canPrewarmScene(def) || (state_->computeActiveInputsMask(def) & ~state_->prewarm_source_mask).any()))
         state_->prewarm_cut_scenes.erase(name); // Edited source identity takes the ordinary cold path.

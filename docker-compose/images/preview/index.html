@@ -166,10 +166,11 @@
       } catch { return null; }
     }
     const initialMixerState = await mixerState();
+    const auxMountpoint = Number(new URL(location.href).searchParams.get("mountpoint")) || 0;
     renderGpuStats(initialMixerState?.gpus);
     const declaredOutputs = new URL(location.href).searchParams.get("outputs")?.split(",")
       .filter(codec => codec === "h264" || codec === "h265");
-    const availableCodecs = initialMixerState?.settings?.preview_codecs ||
+    const availableCodecs = auxMountpoint ? ["h264"] : initialMixerState?.settings?.preview_codecs ||
       (declaredOutputs?.length ? declaredOutputs : monitorMixer ? ["h264"] : ["h264", "h265"]);
     const requestedCodec = new URL(location.href).searchParams.get("codec") === "h265" ? "h265" : "h264";
     const selectedCodec = availableCodecs.includes(requestedCodec) ? requestedCodec : availableCodecs[0] || "h264";
@@ -182,7 +183,7 @@
       const state = await mixerState();
       renderGpuStats(state?.gpus);
       if (state?.settings?.preview_codecs) {
-        if (JSON.stringify(state.settings.preview_codecs) !== JSON.stringify(availableCodecs) ||
+        if ((!auxMountpoint && JSON.stringify(state.settings.preview_codecs) !== JSON.stringify(availableCodecs)) ||
             (mixerRevision !== undefined && state.setup_revision !== mixerRevision)) {
           location.reload();
           return;
@@ -193,7 +194,7 @@
     }
     if (monitorMixer) setTimeout(watchMixer, 1000);
     codecSelect.value = selectedCodec;
-    const MOUNTPOINT_ID = selectedCodec === "h265" ? 2 : 1;
+    const MOUNTPOINT_ID = auxMountpoint || (selectedCodec === "h265" ? 2 : 1);
     codecSelect.addEventListener("change", () => {
       const url = new URL(location.href);
       url.searchParams.set("codec", codecSelect.value);
@@ -210,6 +211,7 @@
     let pollAbort = null;
     let keepaliveTimer = null;
     let retryTimer = null;
+    let connectionTimer = null;
     let transactionId = 0;
     let connecting = false;
     let stopping = false;
@@ -282,11 +284,19 @@
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ transaction: transaction(), ...body }),
+        signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      return response.json();
+      const result = await response.json();
+      if (result.janus === "error") throw new Error(result.error?.reason || "Janus error");
+      return result;
+    }
+
+    function watchConnection() {
+      window.clearTimeout(connectionTimer);
+      connectionTimer = window.setTimeout(() => recover(new Error("No video received within 12 seconds")), 12000);
     }
 
     async function createSession() {
@@ -315,6 +325,7 @@
 
     async function startPeerConnection(offer) {
       peer = new RTCPeerConnection({ iceServers: [] });
+      const connection = peer;
       peer.ontrack = event => {
         const [stream] = event.streams;
         if (preview.srcObject !== stream) {
@@ -325,13 +336,21 @@
             setStatus(error.message, true);
           }
         });
+        preview.requestVideoFrameCallback(() => {
+          if (peer === connection) window.clearTimeout(connectionTimer);
+        });
       };
       peer.onicecandidate = event => {
         sendTrickle(event.candidate).catch(error => setStatus(error.message, true));
       };
       peer.onconnectionstatechange = () => {
+        if (peer !== connection) return;
         setStatus(`WebRTC ${peer.connectionState}`);
         if (peer.connectionState !== "connected") renderRtt(null);
+        if (peer.connectionState === "failed") recover(new Error("WebRTC connection failed"));
+        else if (peer.connectionState === "disconnected") watchConnection();
+        else if (peer.connectionState === "connected" && preview.readyState >= 2)
+          window.clearTimeout(connectionTimer);
       };
       startRttMeter(peer);
       await peer.setRemoteDescription(offer);
@@ -345,6 +364,7 @@
     }
 
     async function handleEvent(event) {
+      if (event.plugindata?.data?.error) throw new Error(event.plugindata.data.error);
       if (event.janus === "event" && event.jsep) {
         await startPeerConnection(event.jsep);
       } else if (event.janus === "trickle" && peer) {
@@ -352,7 +372,7 @@
       } else if (event.janus === "webrtcup") {
         setStatus("WebRTC connected");
       } else if (event.janus === "hangup") {
-        setStatus(event.reason || "WebRTC hung up", true);
+        throw new Error(event.reason || "WebRTC hung up");
       } else if (event.janus === "error") {
         throw new Error(event.error?.reason || "Janus error");
       }
@@ -400,9 +420,10 @@
       stopping = false;
       try {
         setStatus("Creating Janus session");
+        watchConnection();
         await createSession();
         pollEvents().catch(error => {
-          recover(error);
+          if (error.name !== "AbortError") recover(error);
         });
         setStatus("Attaching streaming plugin");
         await attachStreamingPlugin();
@@ -420,6 +441,7 @@
 
     async function disconnect(showIdle = true) {
       stopping = true;
+      window.clearTimeout(connectionTimer);
       stopRttMeter();
       if (pollAbort) pollAbort.abort();
       window.clearInterval(keepaliveTimer);
@@ -454,8 +476,12 @@
       stopping = true;
       stopRttMeter();
       window.clearTimeout(retryTimer);
+      window.clearTimeout(connectionTimer);
       if (pollAbort) pollAbort.abort();
       if (peer) peer.close();
+      if (sessionId) navigator.sendBeacon(`${serverUrl}/${sessionId}`, new Blob([
+        JSON.stringify({ janus: "destroy", transaction: transaction() }),
+      ], { type: "application/json" }));
     });
   </script>
 </body>
