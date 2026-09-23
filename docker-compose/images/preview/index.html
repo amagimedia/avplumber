@@ -80,6 +80,10 @@
 
     .metrics { flex: 1 1 auto; min-width: 0; gap: 8px 20px; flex-wrap: wrap; }
     .metric-value { min-width: 48px; text-align: right; }
+    /* A labelled group: the heading names the layer the numbers come from. */
+    .metric-group { display: inline-flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; }
+    .metric-group-label { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+      text-transform: uppercase; opacity: .6; }
     .metric-value[data-level="good"] { color: #76c99a; }
     .metric-value[data-level="warn"] { color: #edb264; }
     .metric-value[data-level="bad"] { color: #ef8585; }
@@ -113,17 +117,23 @@
       </select>
       <span id="status">Idle</span>
       <span class="metrics">
-        <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
-          <span>avplumber latency</span><span id="cut-latency" class="metric-value" aria-label="avplumber median cut latency unavailable">—</span>
+        <span class="metric-group" role="group" aria-label="Graph">
+          <span class="metric-group-label">Graph</span>
+          <span class="metric" title="Median of the last up to 3 measured CUTs: AVP command receipt to first matching encoded frame. Excludes earlier preview preparation. Not command ACK, frame age, or browser display latency.">
+            <span>Latency</span><span id="cut-latency" class="metric-value" aria-label="Graph median cut latency unavailable">—</span>
+          </span>
         </span>
-        <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
-          <span>WebRTC RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
-        </span>
-        <span class="metric" title="Video frames decoded per second during the latest sample.">
-          <span>Playback</span><span id="receiver-fps" class="metric-value">—</span>
-        </span>
-        <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
-          <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
+        <span class="metric-group" role="group" aria-label="WebRTC">
+          <span class="metric-group-label">WebRTC</span>
+          <span class="metric rtt" title="WebRTC network round trip, not video latency. Green: ≤200 ms; orange: >200–400 ms; red: >400 ms.">
+            <span>RTT</span><span id="rtt-value" class="metric-value" aria-label="WebRTC RTT unavailable">—</span>
+          </span>
+          <span class="metric" title="Frames this browser decoded per second during the latest sample (receiver side, not the mixer's output rate).">
+            <span>FPS</span><span id="receiver-fps" class="metric-value">—</span>
+          </span>
+          <span class="metric" title="Average receiver jitter-buffer residence during the latest sample; not end-to-end latency.">
+            <span>Buffer</span><span id="receiver-buffer" class="metric-value">—</span>
+          </span>
         </span>
         <span id="gpu-stats" class="metrics" title="Host GPU totals from nvidia-smi, sampled once per second. Usage: orange ≥95%, red ≥99%. VRAM: orange ≥14 GiB, red ≥14.75 GiB.">GPU —</span>
       </span>
@@ -144,7 +154,7 @@
         const used = Number.isFinite(gpu.memory_used_mib) ? gpu.memory_used_mib / 1024 : null;
         const memory = used !== null && Number.isFinite(gpu.memory_total_mib)
           ? `${used.toFixed(2)} / ${(gpu.memory_total_mib / 1024).toFixed(2)} GiB` : "—";
-        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + metric("VRAM" + suffix, memory, level(used, 14, 14.75));
+        return percent("GPU", gpu.gpu) + percent("NVDEC", gpu.decoder) + percent("NVENC", gpu.encoder) + metric("VRAM" + suffix, memory, level(used, 14, 14.75));
       }).join("") || "GPU —";
     }
     let monitorMixer = true;

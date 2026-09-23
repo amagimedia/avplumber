@@ -49,9 +49,9 @@ class GpuStats:
                 return self.values
             self.next_sample = time.monotonic() + 1
             output = subprocess.check_output([
-                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,memory.used,memory.total",
+                "nvidia-smi", "--query-gpu=index,utilization.gpu,utilization.decoder,utilization.encoder,memory.used,memory.total",
                 "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1)
-            keys = ("index", "gpu", "decoder", "memory_used_mib", "memory_total_mib")
+            keys = ("index", "gpu", "decoder", "encoder", "memory_used_mib", "memory_total_mib")
             values = []
             for row in csv.reader(output.splitlines()):
                 if len(row) != len(keys) or not row[0].strip().isdigit():

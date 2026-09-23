@@ -54,11 +54,12 @@ def test_gpu_samples_are_cached_and_missing_metrics_stay_unknown(monkeypatch):
     monkeypatch.setattr('webui.time.monotonic', lambda: now[0])
     def query(*args, **kwargs):
         calls.append(args)
-        return '0, 93, [N/A], 14336, 15360\n1, 0, 99, 15104, 24576\n'
+        return '0, 93, [N/A], 12, 14336, 15360\n1, 0, 99, [N/A], 15104, 24576\n'
     monkeypatch.setattr('webui.subprocess.check_output', query)
     stats = GpuStats()
     first = stats.snapshot()
-    assert first[0] == dict(index=0, gpu=93, decoder=None, memory_used_mib=14336, memory_total_mib=15360)
+    assert first[0] == dict(index=0, gpu=93, decoder=None, encoder=12, memory_used_mib=14336, memory_total_mib=15360)
+    assert first[1]['encoder'] is None
     assert first[1]['index'] == 1 and first[1]['gpu'] == 0
     now[0] = .5
     assert stats.snapshot() == first and len(calls) == 1

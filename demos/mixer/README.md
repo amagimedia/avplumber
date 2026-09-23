@@ -121,7 +121,7 @@ scenes does not create more decoders. For large source counts, use media encoded
 at the intended input resolution and frame rate: pacing a 60 fps file to 30 fps
 after decoding still decodes all 60 frames per second.
 
-The preview can show **avplumber latency** beside **WebRTC RTT**, outside the
+The preview can show **Graph latency** beside **WebRTC RTT**, outside the
 video. The AVP value is the median of the last up to three measured CUTs, from
 command receipt to the first matching encoded frame—not capture-to-browser
 latency. See [measurement setup and prewarm limits](../../doc/mixer_cut_latency.md)
