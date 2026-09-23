@@ -89,6 +89,27 @@ must cover `DMA_BROWSER_MAX_WINDOWS`. The public API always enforces
 Frames go to `/tmp/dma-page/{id}.sock` (dmabuf FD + 48-byte TexInfo header).
 Audio (when `audio: true`) goes to `/tmp/dma-page/{id}-audio.sock` (raw interleaved float32 PCM).
 
+### Frame lifetime and transport counters
+
+Rebuild the `fdpass` addon and avplumber together when updating the DMA-BUF
+protocol. A consumer sends 16-byte little-endian `ACK1` records: kind `0` at
+offset 4 releases the frame number at offset 8; kind `1` stops new deliveries;
+kind `2` confirms that all received frames have finished their GPU reads.
+`ipc_dmabuf_source` keeps the connection alive until its last frame is released,
+then sends kind `2`. Shut down consumers before closing browser windows.
+
+An unexpected disconnect cannot prove GPU reads have finished. The browser pins
+unacknowledged textures, pauses the affected source, and reports
+`quarantinedFrameCount` in `/status`. After stopping the affected consumer,
+restart its browser worker to recover; reopening the window alone is refused.
+Other windows in that worker also restart. This protocol controls buffer reuse;
+it does not supply a producer-ready GPU fence.
+
+`txFrameCount` counts paints delivered to at least one consumer. `droppedFrames`
+counts paints with no consumer or any failed delivery, so a partial broadcast
+increments both counters. `fdpass_backpressure`, `fdpass_disconnected`, and
+`fdpass_errors` in `droppedReasons` count failed deliveries per consumer.
+
 The DMA-BUF socket is bidirectional. The browser retains every transmitted
 shared texture until the consumer acknowledges its frame number. The maximum
 sent-but-unacknowledged count is `DMA_BROWSER_DMABUF_POOL_SIZE` (default 11,

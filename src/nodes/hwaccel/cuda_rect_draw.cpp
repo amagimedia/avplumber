@@ -133,6 +133,10 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
     const int dst_bytes = sampleBytes(sw_fmt);
     const int planes = av_pix_fmt_count_planes(sw_fmt);
     out = AvpRectLayer{};
+    const TextureFrameDesc *texture = textureFrameDesc(src);
+    if (texture && !(packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)))
+        throw Error("cuda_rect_overlay: texture-backed inputs require RGB-to-YUV composition; "
+                    "disable zero_copy at the importer for other canvas formats");
 
     if (packed_rgb && src_sw_fmt != sw_fmt && isRgbToYuvConvertible(src_sw_fmt, sw_fmt)) {
         const int a_off = packedAlphaOffset(src_sw_fmt);
@@ -141,7 +145,7 @@ void CudaRectDraw::fillTableEntry(const DrawOp &op, const AVFrame *canvas, AvpRe
 #if LIBAVUTIL_VERSION_MAJOR >= 60
         out.premultiplied = src->alpha_mode == AVALPHA_MODE_PREMULTIPLIED;
 #endif
-        if (const TextureFrameDesc *tex = textureFrameDesc(src)) {
+        if (const TextureFrameDesc *tex = texture) {
             // Zero-copy DMA-BUF import: sample the mapped array through its texture object.
             if (rgb_step != 4 || tex->width != src->width || tex->height != src->height)
                 throw Error("cuda_rect_overlay: texture-backed source must be 4-byte packed RGB at frame size");

@@ -32,18 +32,10 @@ function createServer(socketPath) {
 }
 
 async function broadcastFd(socketPath, fd, texInfoBuffer) {
-  return new Promise((resolve, reject) => {
-    try {
-      if (texInfoBuffer && typeof addon.broadcastFdWithInfo === 'function') {
-        addon.broadcastFdWithInfo(socketPath, fd, texInfoBuffer);
-      } else {
-        addon.broadcastFd(socketPath, fd, texInfoBuffer);
-      }
-      resolve();
-    } catch (err) {
-      reject(err);
-    }
-  });
+  if (texInfoBuffer && typeof addon.broadcastFdWithInfo === 'function') {
+    return addon.broadcastFdWithInfo(socketPath, fd, texInfoBuffer);
+  }
+  return addon.broadcastFd(socketPath, fd, texInfoBuffer);
 }
 
 function closeServer(socketPath) {

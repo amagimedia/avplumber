@@ -8,7 +8,6 @@ extern "C" {
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/poll.h>
-#include <sys/eventfd.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -16,14 +15,11 @@ extern "C" {
 #include <sys/stat.h>
 #include <time.h>
 #include <stdint.h>
-#include <array>
 #include <atomic>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <new>
 #include "../../hwaccel.hpp"
-#include "../../../deps/dma-browser/addons/fdpass/dmabuf_ack.h"
+#include "DmabufReleaseQueue.hpp"
 
 #pragma pack(push, 1)
 struct TexInfo {
@@ -38,131 +34,23 @@ struct TexInfo {
 };
 #pragma pack(pop)
 
-class DmabufReleaseAckQueue {
-    struct PendingAck {
-        uint64_t connection_generation;
-        std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES> bytes;
-    };
-
-    int wake_fd_ = -1;
-    mutable std::mutex mutex_;
-    std::deque<PendingAck> pending_;
-    size_t front_offset_ = 0;
-    uint64_t active_generation_ = 0;
-    uint64_t next_generation_ = 1;
-    std::atomic<bool> interrupted_{false};
-
-    void wake() const {
-        const uint64_t value = 1;
-        if (wake_fd_ >= 0) {
-            (void)::write(wake_fd_, &value, sizeof(value));
-        }
-    }
-
-public:
-    DmabufReleaseAckQueue(): wake_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
-        if (wake_fd_ < 0) throw Error("eventfd() failed for DMA-BUF release acknowledgements");
-    }
-
-    ~DmabufReleaseAckQueue() {
-        if (wake_fd_ >= 0) ::close(wake_fd_);
-    }
-
-    int wakeFd() const { return wake_fd_; }
-    bool interrupted() const { return interrupted_.load(); }
-
-    uint64_t beginConnection() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_.clear();
-        front_offset_ = 0;
-        active_generation_ = next_generation_++;
-        return active_generation_;
-    }
-
-    void endConnection(uint64_t generation) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (active_generation_ != generation) return;
-        active_generation_ = 0;
-        pending_.clear();
-        front_offset_ = 0;
-    }
-
-    void enqueue(uint64_t generation, uint64_t frame_count) {
-        if (interrupted()) return;
-        PendingAck ack{};
-        ack.connection_generation = generation;
-        dmabufEncodeReleaseAck(ack.bytes.data(), frame_count);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (generation == 0 || generation != active_generation_) return;
-            pending_.push_back(ack);
-        }
-        wake();
-    }
-
-    void interrupt() {
-        interrupted_.store(true);
-        wake();
-    }
-
-    void drainWakeFd() const {
-        uint64_t value;
-        while (::read(wake_fd_, &value, sizeof(value)) == sizeof(value)) {}
-    }
-
-    bool hasPending() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return !pending_.empty();
-    }
-
-    bool flush(int socket_fd, uint64_t generation) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (generation == 0 || generation != active_generation_) return true;
-        while (!pending_.empty()) {
-            PendingAck &ack = pending_.front();
-            if (ack.connection_generation != generation) {
-                pending_.pop_front();
-                front_offset_ = 0;
-                continue;
-            }
-            const uint8_t *data = ack.bytes.data() + front_offset_;
-            const size_t remaining = ack.bytes.size() - front_offset_;
-            const ssize_t sent = ::send(socket_fd, data, remaining, MSG_DONTWAIT | MSG_NOSIGNAL);
-            if (sent > 0) {
-                front_offset_ += static_cast<size_t>(sent);
-                if (front_offset_ == ack.bytes.size()) {
-                    pending_.pop_front();
-                    front_offset_ = 0;
-                }
-                continue;
-            }
-            if (sent < 0 && errno == EINTR) continue;
-            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
-            return false;
-        }
-        return true;
-    }
-};
-
 class UnixFdpassClient {
 protected:
     std::string path_;
     int conn_fd_ = -2;
     std::shared_ptr<DmabufReleaseAckQueue> ack_queue_;
-    uint64_t connection_generation_ = 0;
     struct pollfd pollfds_[2];
     static constexpr size_t CONN_INDEX = 0;
     static constexpr size_t EVENT_INDEX = 1;
     bool connecting_ = false;
+    std::atomic<bool> interrupted_{false};
 
     void closeConnection() {
-        if (conn_fd_ >= 0) ::close(conn_fd_);
+        if (conn_fd_ >= 0) ack_queue_->retire();
         conn_fd_ = -1;
         pollfds_[CONN_INDEX].fd = -1;
         pollfds_[CONN_INDEX].events = POLLIN;
         connecting_ = false;
-        ack_queue_->endConnection(connection_generation_);
-        connection_generation_ = 0;
     }
 public:
     UnixFdpassClient(const std::string &path):
@@ -178,10 +66,11 @@ public:
         closeConnection();
     }
     void interrupt() {
-        ack_queue_->interrupt();
+        interrupted_.store(true);
+        std::atomic_load(&ack_queue_)->interrupt();
     }
-    void releaseFrame(uint64_t generation, uint64_t frame_count) {
-        ack_queue_->enqueue(generation, frame_count);
+    void releaseFrame(uint64_t frame_count) {
+        ack_queue_->enqueue(frame_count);
     }
     std::shared_ptr<DmabufReleaseAckQueue> releaseQueue() const {
         return ack_queue_;
@@ -210,16 +99,16 @@ public:
             close(fd);
             return false;
         }
+        std::atomic_store(&ack_queue_, std::make_shared<DmabufReleaseAckQueue>(fd));
         conn_fd_ = fd;
-        connection_generation_ = ack_queue_->beginConnection();
+        pollfds_[EVENT_INDEX].fd = ack_queue_->wakeFd();
         pollfds_[CONN_INDEX].fd = conn_fd_;
         connecting_ = (rc < 0); // EINPROGRESS
         pollfds_[CONN_INDEX].events = connecting_ ? (POLLIN | POLLOUT) : POLLIN;
         return true;
     }
-    bool recvTexInfoAndFD(TexInfo &info, int &received_fd, uint64_t &connection_generation) {
+    bool recvTexInfoAndFD(TexInfo &info, int &received_fd) {
         received_fd = -1;
-        connection_generation = 0;
         // Prepare to receive payload + a single FD via SCM_RIGHTS
         char control[CMSG_SPACE(sizeof(int))];
         struct iovec iov;
@@ -227,6 +116,7 @@ public:
         iov.iov_len = sizeof(info);
         struct msghdr msg;
         while (true) {
+            if (interrupted_.load()) return false;
             // Ensure we have a connection
             if (conn_fd_ < 0) {
                 if (!ensureConnected()) {
@@ -272,7 +162,7 @@ public:
                 connecting_ = false;
                 pollfds_[CONN_INDEX].events = POLLIN;
             }
-            if (!connecting_ && !ack_queue_->flush(conn_fd_, connection_generation_)) {
+            if (!connecting_ && !ack_queue_->flush()) {
                 closeConnection();
                 continue;
             }
@@ -310,7 +200,6 @@ public:
                     closeConnection();
                     return false;
                 }
-                connection_generation = connection_generation_;
                 return true;
             }
             if (pollfds_[CONN_INDEX].revents & (POLLHUP | POLLERR | POLLNVAL)) {
@@ -323,7 +212,6 @@ public:
 struct DmabufFrameOwner {
     AVDRMFrameDescriptor descriptor{};
     std::shared_ptr<DmabufReleaseAckQueue> ack_queue;
-    uint64_t connection_generation = 0;
     uint64_t frame_count = 0;
 };
 
@@ -336,7 +224,7 @@ static void releaseDmabufFrameOwner(DmabufFrameOwner *owner) {
         }
     }
     if (owner->ack_queue) {
-        owner->ack_queue->enqueue(owner->connection_generation, owner->frame_count);
+        owner->ack_queue->enqueue(owner->frame_count);
     }
     delete owner;
 }
@@ -420,8 +308,7 @@ public:
     virtual void process() {
         TexInfo ti{};
         int dmabuf_fd = -1;
-        uint64_t connection_generation = 0;
-        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd, connection_generation)) {
+        if (!receiver_.recvTexInfoAndFD(ti, dmabuf_fd)) {
             wallclock.sleepms(5);
             return;
         }
@@ -429,7 +316,7 @@ public:
         uint64_t object_size = 0;
         if (!validateTexInfo(ti, object_size)) {
             close(dmabuf_fd);
-            receiver_.releaseFrame(connection_generation, ti.frame_count);
+            receiver_.releaseFrame(ti.frame_count);
             return;
         }
 
@@ -472,12 +359,11 @@ public:
         DmabufFrameOwner *owner = new (std::nothrow) DmabufFrameOwner;
         if (!owner) {
             if (dmabuf_fd >= 0) close(dmabuf_fd);
-            receiver_.releaseFrame(connection_generation, ti.frame_count);
+            receiver_.releaseFrame(ti.frame_count);
             logstream << "allocation failed for DRM descriptor";
             return;
         }
         owner->ack_queue = receiver_.releaseQueue();
-        owner->connection_generation = connection_generation;
         owner->frame_count = ti.frame_count;
         AVDRMFrameDescriptor *desc = &owner->descriptor;
 

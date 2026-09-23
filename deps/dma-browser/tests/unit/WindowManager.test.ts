@@ -20,6 +20,7 @@ function fakeWindow(config: WindowConfig, overrides: Partial<IManagedWindow> = {
       txFrameCount: 0,
       releasedFrameCount: 0,
       retainedFrameCount: 0,
+      quarantinedFrameCount: 0,
       lastPaintTsMs: null,
     },
   };

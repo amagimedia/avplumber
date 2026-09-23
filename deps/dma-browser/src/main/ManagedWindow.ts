@@ -265,6 +265,7 @@ export class ManagedWindow implements IManagedWindow {
           txFrameCount: channelStats.txFrameCount,
           releasedFrameCount: channelStats.releasedFrameCount,
           retainedFrameCount: channelStats.retainedFrameCount,
+          quarantinedFrameCount: channelStats.quarantinedFrameCount,
           lastPaintTsMs: channelStats.lastPaintTsMs,
         }
       : {
@@ -274,6 +275,7 @@ export class ManagedWindow implements IManagedWindow {
           txFrameCount: 0,
           releasedFrameCount: 0,
           retainedFrameCount: 0,
+          quarantinedFrameCount: 0,
           lastPaintTsMs: null,
         };
     return {

@@ -5,12 +5,19 @@ export function sendFdWithInfo(
   texInfoBuffer: Buffer,
 ): Promise<void>;
 export function createServer(socketPath: string): boolean;
-export function broadcastFd(socketPath: string, fd: number, texInfoBuffer: Buffer): Promise<void>;
-export function closeServer(socketPath: string): void;
+export interface SendResult {
+  clients: number;
+  sent: number;
+  backpressure: number;
+  disconnected: number;
+  errors: number;
+}
+export function broadcastFd(socketPath: string, fd: number, texInfoBuffer: Buffer): Promise<SendResult>;
+export function closeServer(socketPath: string): bigint[];
 export function setServerLogger(socketPath: string, callback: (line: string) => void): void;
 export function setReleaseCallback(
   socketPath: string,
-  callback: (frameNumber: bigint) => void,
+  callback: (frameNumber: bigint, reusable: boolean) => void,
 ): void;
 export function monotonicTimeNs(): bigint;
 export function close(): void;

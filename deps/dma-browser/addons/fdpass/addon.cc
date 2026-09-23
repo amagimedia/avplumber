@@ -57,14 +57,15 @@ static void emit_log(const std::string &path, const std::string &line) {
   });
 }
 
-static void emit_release(const std::string &path, uint64_t frame_count) {
+static void emit_release(const std::string &path, uint64_t frame_count, bool reusable = true) {
   std::lock_guard<std::mutex> lk(g_release_callback_mu);
   auto it = g_release_callbacks.find(path);
   if (it == g_release_callbacks.end()) return;
-  uint64_t *heap = new uint64_t(frame_count);
+  struct Release { uint64_t frame; bool reusable; };
+  auto *heap = new Release{frame_count, reusable};
   const napi_status status = it->second.NonBlockingCall(
-      heap, [](Napi::Env env, Napi::Function cb, uint64_t *value) {
-    cb.Call({Napi::BigInt::New(env, *value)});
+      heap, [](Napi::Env env, Napi::Function cb, Release *value) {
+    cb.Call({Napi::BigInt::New(env, value->frame), Napi::Boolean::New(env, value->reusable)});
     delete value;
   });
   if (status != napi_ok) delete heap;
@@ -99,6 +100,9 @@ Napi::Value Close(const Napi::CallbackInfo &info) {
 
 class Server {
  public:
+  struct SendResult {
+    size_t clients = 0, sent = 0, backpressure = 0, disconnected = 0, errors = 0;
+  };
   explicit Server(const std::string &path)
     : path_(path), listen_fd_(-1), running_(false), unlink_on_stop_(false) {}
 
@@ -130,9 +134,9 @@ class Server {
     return true;
   }
 
-  void stop() {
+  std::vector<uint64_t> stop() {
     bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false)) return;
+    if (!running_.compare_exchange_strong(expected, false)) return {};
     if (listen_fd_ >= 0) { ::shutdown(listen_fd_, SHUT_RDWR); }
     if (accept_thread_.joinable()) accept_thread_.join();
     std::vector<int> clients;
@@ -140,6 +144,7 @@ class Server {
       std::lock_guard<std::mutex> lk(clients_mu_);
       clients.swap(clients_);
       ack_states_.clear();
+      draining_clients_.clear();
     }
     for (int fd : clients) {
       if (fd >= 0) ::close(fd);
@@ -150,20 +155,35 @@ class Server {
       std::lock_guard<std::mutex> lk(pending_mu_);
       for (const auto &item : pending_frames_) abandoned.push_back(item.first);
       pending_frames_.clear();
+      abandoned.insert(abandoned.end(), quarantined_frames_.begin(), quarantined_frames_.end());
+      quarantined_frames_.clear();
     }
     for (uint64_t frame_count : abandoned) {
-      emit_release(path_, frame_count);
+      emit_release(path_, frame_count, false);
     }
     if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
     if (unlink_on_stop_ && !path_.empty()) { ::unlink(path_.c_str()); }
+    return abandoned;
   }
 
-  void sendToAll(int send_fd, const std::vector<uint8_t> &meta) {
+  SendResult sendToAll(int send_fd, const std::vector<uint8_t> &meta) {
+    SendResult result;
     const bool track_release = meta.size() >= sizeof(TexInfo);
     const uint64_t frame_count = track_release ? dmabufLoadLe64(meta.data() + 40) : 0;
     if (!running_.load()) {
       if (track_release) emit_release(path_, frame_count);
-      return;
+      return result;
+    }
+    std::vector<std::pair<int, uint64_t>> clients;
+    {
+      std::lock_guard<std::mutex> lk(clients_mu_);
+      for (int fd : clients_) if (!draining_clients_.count(fd))
+        clients.emplace_back(fd, ack_states_.at(fd).generation);
+    }
+    result.clients = clients.size();
+    if (clients.empty()) {
+      if (track_release) emit_release(path_, frame_count);
+      return result;
     }
     const int s_log_frames = fdpass_log_frames_enabled();
     // Duplicate once with CLOEXEC so we can reuse across clients safely
@@ -172,7 +192,8 @@ class Server {
     dup_fd = ::fcntl(send_fd, F_DUPFD_CLOEXEC, 3);
     if (dup_fd < 0) {
       if (track_release) emit_release(path_, frame_count);
-      return;
+      result.errors = clients.size();
+      return result;
     }
 
     char control[CMSG_SPACE(sizeof(int))];
@@ -187,12 +208,6 @@ class Server {
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgh);
     cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_RIGHTS; cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     *reinterpret_cast<int *>(CMSG_DATA(cmsg)) = dup_fd;
-
-    std::vector<int> clients;
-    {
-      std::lock_guard<std::mutex> lk(clients_mu_);
-      clients = clients_;
-    }
 
     if (track_release) beginFrameBroadcast(frame_count);
 
@@ -213,18 +228,23 @@ class Server {
       }
     }
 
-    size_t ok_count = 0;
-    size_t drop_backpressure = 0;
-    size_t drop_error = 0;
-    for (int cfd : clients) {
+    for (const auto &[cfd, generation] : clients) {
       if (cfd < 0) continue;
+      // Do not send through a descriptor concurrently closed/reused by the ACK thread.
+      std::unique_lock<std::mutex> client_lock(clients_mu_);
+      auto client = ack_states_.find(cfd);
+      if (client == ack_states_.end() || client->second.generation != generation || draining_clients_.count(cfd)) {
+        result.disconnected++;
+        continue;
+      }
       if (track_release) addFrameRecipient(frame_count, cfd);
       for (;;) {
         ssize_t n = ::sendmsg(cfd, &msgh, MSG_DONTWAIT);
-        if (n == static_cast<ssize_t>(iov.iov_len)) { ok_count++; break; }
+        if (n == static_cast<ssize_t>(iov.iov_len)) { result.sent++; break; }
         if (n >= 0) {
-          drop_error++;
-          removeClient(cfd);
+          result.errors++;
+          client_lock.unlock();
+          removeClient(cfd, false, generation);
           break;
         }
         int e = errno;
@@ -232,23 +252,25 @@ class Server {
         if (e == EAGAIN || e == EWOULDBLOCK) {
           // skip this client for this frame to maintain pacing
           emit_log(path_, std::string("[fdpass] sendmsg backpressure drop path=") + path_);
-          drop_backpressure++;
+          result.backpressure++;
           if (track_release) releaseFrameRecipient(frame_count, cfd);
           break;
         }
         std::fprintf(stderr, "[fdpass] sendmsg to client fd=%d failed errno=%d (%s); dropping client\n", cfd, e, strerror(e)); std::fflush(stderr);
         emit_log(path_, std::string("[fdpass] sendmsg drop client path=") + path_);
-        drop_error++;
-        removeClient(cfd);
+        result.disconnected++;
+        client_lock.unlock();
+        removeClient(cfd, false, generation);
         break;
       }
     }
     if (track_release) finishFrameBroadcast(frame_count);
     if (s_log_frames) {
       logf(path_, "[fdpass] frame tx summary path=%s ok=%zu backpressure=%zu dropped=%zu clients=%zu",
-           path_.c_str(), ok_count, drop_backpressure, drop_error, clients.size());
+           path_.c_str(), result.sent, result.backpressure, result.disconnected + result.errors, clients.size());
     }
     ::close(dup_fd);
+    return result;
   }
 
   ~Server() { stop(); }
@@ -257,11 +279,13 @@ class Server {
   struct PendingFrame {
     std::unordered_set<int> recipients;
     bool broadcast_complete = false;
+    bool quarantined = false;
   };
 
   struct AckState {
     std::array<uint8_t, DMABUF_RELEASE_ACK_BYTES> bytes{};
     size_t used = 0;
+    uint64_t generation = 0;
   };
 
   void beginFrameBroadcast(uint64_t frame_count) {
@@ -276,49 +300,57 @@ class Server {
 
   void finishFrameBroadcast(uint64_t frame_count) {
     bool complete = false;
+    bool reusable = true;
     {
       std::lock_guard<std::mutex> lk(pending_mu_);
       auto it = pending_frames_.find(frame_count);
       if (it == pending_frames_.end()) return;
       it->second.broadcast_complete = true;
       if (it->second.recipients.empty()) {
+        reusable = !it->second.quarantined;
+        if (!reusable) quarantined_frames_.insert(frame_count);
         pending_frames_.erase(it);
         complete = true;
       }
     }
-    if (complete) emit_release(path_, frame_count);
+    if (complete) emit_release(path_, frame_count, reusable);
   }
 
   void releaseFrameRecipient(uint64_t frame_count, int fd) {
     bool complete = false;
+    bool reusable = true;
     {
       std::lock_guard<std::mutex> lk(pending_mu_);
       auto it = pending_frames_.find(frame_count);
       if (it == pending_frames_.end()) return;
       it->second.recipients.erase(fd);
       if (it->second.broadcast_complete && it->second.recipients.empty()) {
+        reusable = !it->second.quarantined;
+        if (!reusable) quarantined_frames_.insert(frame_count);
         pending_frames_.erase(it);
         complete = true;
       }
     }
-    if (complete) emit_release(path_, frame_count);
+    if (complete) emit_release(path_, frame_count, reusable);
   }
 
-  void releaseClientFrames(int fd) {
-    std::vector<uint64_t> complete;
+  void releaseClientFrames(int fd, bool drained = false) {
+    std::vector<std::pair<uint64_t, bool>> complete;
     {
       std::lock_guard<std::mutex> lk(pending_mu_);
       for (auto it = pending_frames_.begin(); it != pending_frames_.end();) {
-        it->second.recipients.erase(fd);
+        if (it->second.recipients.erase(fd) && !drained) it->second.quarantined = true;
         if (it->second.broadcast_complete && it->second.recipients.empty()) {
-          complete.push_back(it->first);
+          const bool reusable = !it->second.quarantined;
+          if (!reusable) quarantined_frames_.insert(it->first);
+          complete.emplace_back(it->first, reusable);
           it = pending_frames_.erase(it);
         } else {
           ++it;
         }
       }
     }
-    for (uint64_t frame_count : complete) emit_release(path_, frame_count);
+    for (const auto &frame : complete) emit_release(path_, frame.first, frame.second);
   }
 
   void readClientAcks(int fd) {
@@ -327,6 +359,7 @@ class Server {
       uint64_t acknowledged = 0;
       bool have_ack = false;
       bool malformed = false;
+      DmabufAckKind kind = DmabufAckKind::Frame;
       {
         std::lock_guard<std::mutex> lk(clients_mu_);
         auto client = std::find(clients_.begin(), clients_.end(), fd);
@@ -337,9 +370,11 @@ class Server {
         if (received > 0) {
           state.used += static_cast<size_t>(received);
           if (state.used == state.bytes.size()) {
-            have_ack = dmabufDecodeReleaseAck(state.bytes.data(), acknowledged);
+            have_ack = dmabufDecodeReleaseAck(state.bytes.data(), acknowledged, &kind);
             malformed = !have_ack;
             state.used = 0;
+            if (have_ack && kind == DmabufAckKind::Drain) draining_clients_.insert(fd);
+            if (have_ack && kind == DmabufAckKind::Drained && !draining_clients_.count(fd)) malformed = true;
           }
         } else if (received == 0) {
           disconnected = true;
@@ -347,7 +382,10 @@ class Server {
           disconnected = true;
         }
       }
-      if (have_ack) releaseFrameRecipient(acknowledged, fd);
+      if (have_ack && !malformed) {
+        if (kind == DmabufAckKind::Frame) releaseFrameRecipient(acknowledged, fd);
+        else if (kind == DmabufAckKind::Drained) { removeClient(fd, true); return; }
+      }
       if (malformed) {
         emit_log(path_, std::string("[fdpass] malformed release acknowledgement path=") + path_);
         disconnected = true;
@@ -388,29 +426,23 @@ class Server {
       {
         std::lock_guard<std::mutex> lk(clients_mu_);
         clients_.push_back(cfd);
-        ack_states_.try_emplace(cfd);
+        ack_states_[cfd].generation = ++next_client_generation_;
       }
       std::fprintf(stderr, "[fdpass] client accepted fd=%d (path=%s)\n", cfd, path_.c_str()); std::fflush(stderr);
       emit_log(path_, std::string("[fdpass] client accepted path=") + path_);
     }
   }
 
-  void removeClient(int fd) {
-    bool removed = false;
-    {
-      std::lock_guard<std::mutex> lk(clients_mu_);
-      for (auto it = clients_.begin(); it != clients_.end(); ++it) {
-        if (*it == fd) {
-          clients_.erase(it);
-          ack_states_.erase(fd);
-          removed = true;
-          break;
-        }
-      }
-    }
-    if (!removed) return;
-    if (fd >= 0) ::close(fd);
-    releaseClientFrames(fd);
+  void removeClient(int fd, bool drained = false, uint64_t generation = 0) {
+    std::lock_guard<std::mutex> lk(clients_mu_);
+    auto state = ack_states_.find(fd);
+    if (state == ack_states_.end() || (generation && state->second.generation != generation)) return;
+    clients_.erase(std::find(clients_.begin(), clients_.end(), fd));
+    ack_states_.erase(state);
+    draining_clients_.erase(fd);
+    // Retire recipients before accept() can reuse this descriptor.
+    releaseClientFrames(fd, drained);
+    ::close(fd);
   }
 
   std::string path_;
@@ -420,8 +452,11 @@ class Server {
   std::mutex clients_mu_;
   std::vector<int> clients_;
   std::unordered_map<int, AckState> ack_states_;
+  std::unordered_set<int> draining_clients_;
+  uint64_t next_client_generation_ = 0;
   std::mutex pending_mu_;
   std::unordered_map<uint64_t, PendingFrame> pending_frames_;
+  std::unordered_set<uint64_t> quarantined_frames_;
   public: bool unlink_on_stop_;
 };
 
@@ -455,29 +490,37 @@ Napi::Value BroadcastFd(const Napi::CallbackInfo &info) {
     meta.assign(buf.Data(), buf.Data() + buf.Length());
   }
   auto it = g_servers.find(path);
+  Server::SendResult result;
   if (it == g_servers.end()) {
     // If the caller is trying to broadcast without a server, make that visible when frame logging is enabled.
     if (fdpass_log_frames_enabled()) {
       logf(path, "[fdpass] WARN: broadcastFd called but no server exists for path=%s fd=%d meta=%zu", path.c_str(), fd, meta.size());
     }
     if (meta.size() >= sizeof(TexInfo)) emit_release(path, dmabufLoadLe64(meta.data() + 40));
-    return env.Undefined();
+  } else {
+    result = it->second->sendToAll(fd, meta);
   }
-
-  it->second->sendToAll(fd, meta);
-  return env.Undefined();
+  auto value = Napi::Object::New(env);
+  value.Set("clients", Napi::Number::New(env, result.clients));
+  value.Set("sent", Napi::Number::New(env, result.sent));
+  value.Set("backpressure", Napi::Number::New(env, result.backpressure));
+  value.Set("disconnected", Napi::Number::New(env, result.disconnected));
+  value.Set("errors", Napi::Number::New(env, result.errors));
+  return value;
 }
 
 Napi::Value CloseServer(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsString()) return env.Undefined();
   std::string path = info[0].As<Napi::String>().Utf8Value();
+  auto quarantined = Napi::Array::New(env);
   auto it = g_servers.find(path);
   if (it != g_servers.end()) {
     if (it->second) {
       // Only unlink on explicit CloseServer
       it->second->unlink_on_stop_ = true;
-      it->second->stop();
+      for (uint64_t frame : it->second->stop())
+        quarantined.Set(quarantined.Length(), Napi::BigInt::New(env, frame));
     }
     g_servers.erase(it);
   }
@@ -495,7 +538,7 @@ Napi::Value CloseServer(const Napi::CallbackInfo &info) {
       g_release_callbacks.erase(callback);
     }
   }
-  return env.Undefined();
+  return quarantined;
 }
 
 Napi::Value SetServerLogger(const Napi::CallbackInfo &info) {

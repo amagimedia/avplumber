@@ -40,6 +40,9 @@ interface RetainedFrame {
 }
 
 const SOCKET_MONITOR_INTERVAL_MS = 1000;
+// Unclean disconnects cannot prove that CUDA has finished reading. Pin these
+// textures until the worker exits, and prevent repeated recreation leaking pools.
+const quarantinedTextures = new Map<string, Set<PaintTextureLike>>();
 export const DEFAULT_RETAINED_FRAME_POOL_SIZE = 11;
 
 export interface FrameCaptureChannelOptions {
@@ -84,9 +87,16 @@ export class FrameCaptureChannel implements ICaptureChannel {
   }
 
   public start(): Promise<void> {
+    if (quarantinedTextures.has(this.opts.socketPath)) {
+      return Promise.reject(new Error('DMA-BUF buffers quarantined; restart this browser worker'));
+    }
     fdpass.setServerLogger(this.opts.socketPath, (line) => this.opts.log.write(line));
-    fdpass.setReleaseCallback(this.opts.socketPath, (frameNumber) => {
-      this.releaseRetainedFrameNumber(frameNumber);
+    fdpass.setReleaseCallback(this.opts.socketPath, (frameNumber, reusable) => {
+      const frame = this.retainedFrames.get(frameNumber);
+      if (frame) {
+        if (reusable) this.releaseRetainedFrame(frame);
+        else this.quarantineFrame(frame);
+      }
     });
     const ok = fdpass.createServer(this.opts.socketPath);
     this.opts.log.write(
@@ -125,11 +135,15 @@ export class FrameCaptureChannel implements ICaptureChannel {
       this.boundContents = null;
     }
     try {
-      fdpass.closeServer(this.opts.socketPath);
+      const outstanding = new Set(fdpass.closeServer(this.opts.socketPath));
+      for (const frame of [...this.retainedFrames.values()]) {
+        if (outstanding.has(frame.frameNumber)) this.quarantineFrame(frame);
+        else this.releaseRetainedFrame(frame);
+      }
     } catch (err) {
       this.opts.log.write(`fdpass.closeServer failed: ${String(err)}`);
+      for (const frame of [...this.retainedFrames.values()]) this.quarantineFrame(frame);
     }
-    this.releaseAllRetainedFrames();
     return Promise.resolve();
   }
 
@@ -141,6 +155,7 @@ export class FrameCaptureChannel implements ICaptureChannel {
       txFrameCount: this.stats.txFrameCount,
       releasedFrameCount: this.stats.releasedFrameCount,
       retainedFrameCount: this.retainedFrames.size,
+      quarantinedFrameCount: quarantinedTextures.get(this.opts.socketPath)?.size ?? 0,
       lastPaintTsMs: this.stats.lastPaintTsMs,
     };
   }
@@ -154,6 +169,11 @@ export class FrameCaptureChannel implements ICaptureChannel {
       tex = event.texture;
       if (!tex) {
         this.dropFrame('no_texture');
+        return;
+      }
+      if (quarantinedTextures.has(this.opts.socketPath)) {
+        this.dropFrame('transport_quarantined');
+        this.releaseTexture(tex);
         return;
       }
       if (this.retainedFrames.size >= this.retainedFramePoolSize) {
@@ -239,8 +259,19 @@ export class FrameCaptureChannel implements ICaptureChannel {
 
         retained = this.retainTexture(tex, frameNumber);
         fdpass.broadcastFd(this.opts.socketPath, meta.fd, header).then(
-          () => {
-            this.stats.txFrameCount++;
+          (result) => {
+            if (result.sent > 0) this.stats.txFrameCount++;
+            // A partial broadcast is both a delivery and a dropped frame for another client.
+            if (!result.clients) this.dropFrame('no_consumer');
+            else if (result.sent < result.clients) {
+              this.stats.droppedFrames++;
+              for (const reason of ['backpressure', 'disconnected', 'errors'] as const) {
+                if (result[reason]) {
+                  const key = `fdpass_${reason}`;
+                  this.stats.droppedReasons[key] = (this.stats.droppedReasons[key] ?? 0) + result[reason];
+                }
+              }
+            }
           },
           (err: unknown) => {
             this.dropFrame('fdpass_error');
@@ -367,9 +398,21 @@ export class FrameCaptureChannel implements ICaptureChannel {
     return retained;
   }
 
-  private releaseRetainedFrameNumber(frameNumber: bigint): void {
-    const retained = this.retainedFrames.get(frameNumber);
-    if (retained) this.releaseRetainedFrame(retained);
+  private quarantineFrame(frame: RetainedFrame): void {
+    this.retainedFrames.delete(frame.frameNumber);
+    let textures = quarantinedTextures.get(this.opts.socketPath);
+    if (!textures) {
+      textures = new Set();
+      quarantinedTextures.set(this.opts.socketPath, textures);
+      textures.add(frame.texture);
+      try {
+        this.boundContents?.stopPainting();
+      } catch (err) {
+        this.opts.log.write(`stopPainting failed: ${String(err)}`);
+      }
+      this.opts.log.write('DMA-BUF consumer disconnected with outstanding frames; source paused, restart this browser worker');
+    }
+    textures.add(frame.texture);
   }
 
   private releaseRetainedFrame(retained: RetainedFrame): void {
@@ -378,12 +421,6 @@ export class FrameCaptureChannel implements ICaptureChannel {
     this.retainedFrames.delete(retained.frameNumber);
     this.stats.releasedFrameCount++;
     this.releaseTexture(retained.texture);
-  }
-
-  private releaseAllRetainedFrames(): void {
-    for (const retained of [...this.retainedFrames.values()]) {
-      this.releaseRetainedFrame(retained);
-    }
   }
 }
 

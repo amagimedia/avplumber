@@ -745,6 +745,12 @@ no parameters
 
 Receive GPU frames via a UNIX domain socket with FD passing (DMA-BUF). Produces DRM PRIME frames with metadata taken from the sender.
 
+Frame references retain their release-ACK connection through node shutdown or
+reconnection. The matching dma-browser sender stops deliveries on `Drain` and
+reclaims outstanding frames on `Drained`, sent after the last reference is freed.
+An unclean disconnect quarantines unacknowledged browser textures; see
+[DMA-BUF recovery and counters](../deps/dma-browser/README.md#frame-lifetime-and-transport-counters).
+
 1 output: `av::VideoFrame` (hardware "pixel format" `DRM_PRIME`)
 
 Parameters:
@@ -783,6 +789,10 @@ Import DRM PRIME frames into CUDA frames via EGL/GL interop. Non-DRM PRIME frame
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
+-   `zero_copy` (bool, default `false`) - expose a texture-backed frame for direct
+    sampling by the CUDA compositor's RGB-to-YUV path. Other consumers, including
+    packed RGB canvases, require `false`; the compositor rejects unsupported
+    texture-backed combinations before submitting draw work.
 
 ### `v210_to_cuda`
 

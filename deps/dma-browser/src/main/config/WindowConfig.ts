@@ -35,5 +35,6 @@ export interface WindowStats {
   readonly txFrameCount: number;
   readonly releasedFrameCount: number;
   readonly retainedFrameCount: number;
+  readonly quarantinedFrameCount: number;
   readonly lastPaintTsMs: number | null;
 }
