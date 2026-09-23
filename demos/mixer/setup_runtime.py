@@ -14,8 +14,13 @@ import time
 from demo_recipe import allocate
 
 DEMO_DIR = Path(__file__).resolve().parent
+# bitrate_kbps is the SDR (H.264) program bitrate. The recipe's other renditions keep their
+# ratio to it, so an HDR output stays proportionally richer without a second control.
+DEFAULT_BITRATE_KBPS = 6000
+MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
 DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, bit_depth=10, chroma="422",
-                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2])
+                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2],
+                        bitrate_kbps=DEFAULT_BITRATE_KBPS)
 
 
 def source_counts(total, weights):
@@ -34,7 +39,8 @@ def source_counts(total, weights):
 def recipe_for(settings):
     """Accept only the bounded generic setup controls, never paths or commands."""
     if isinstance(settings, dict):
-        settings = {"bit_depth": 10, "chroma": "420" if settings.get("bit_depth") == 8 else "422", **settings}
+        settings = {"bit_depth": 10, "chroma": "420" if settings.get("bit_depth") == 8 else "422",
+                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, **settings}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected resolution, orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("resolution", ("1920x1080", "1280x720")),
@@ -50,6 +56,9 @@ def recipe_for(settings):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
+    bitrate = settings["bitrate_kbps"]
+    if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
+        raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
     weights = settings["weights"]
     if not isinstance(weights, list) or len(weights) != 5 or any(type(w) is not int or not 0 <= w <= 100 for w in weights):
         raise ValueError("Provide five integer source weights from 0 to 100")
@@ -63,6 +72,11 @@ def recipe_for(settings):
     width, height = map(int, settings["resolution"].split("x"))
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
+    # Scale every rendition by what the SDR one was asked to change by, so their relative
+    # quality is preserved and the recipe's own numbers stay the reference.
+    reference = recipe["renditions"][0]["bitrate_kbps"]
+    for rendition in recipe["renditions"]:
+        rendition["bitrate_kbps"] = max(1, round(rendition["bitrate_kbps"] * bitrate / reference))
     canvas_width, canvas_height = (height, width) if settings["orientation"] == "portrait" else (width, height)
     recipe["canvas"].update(width=canvas_width, height=canvas_height, fps=settings["fps"])
     if settings["bit_depth"] == 8:

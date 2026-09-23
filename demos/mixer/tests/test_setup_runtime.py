@@ -145,6 +145,26 @@ def test_old_setup_defaults_to_ten_bit():
     assert recipe_for(old)["setup"]["chroma"] == "420"
 
 
+def test_bitrate_is_configurable_and_scales_every_rendition():
+    """One control sets the SDR bitrate; other renditions keep their ratio to it."""
+    base = recipe_for(DEFAULT_SETTINGS)["renditions"]
+    assert [r["bitrate_kbps"] for r in base] == [6000, 8000]
+
+    halved = recipe_for({**DEFAULT_SETTINGS, "bitrate_kbps": 3000})["renditions"]
+    assert [r["bitrate_kbps"] for r in halved] == [3000, 4000]
+
+    # The setting is optional: an older stored setup still expands, at the recipe's own numbers.
+    legacy = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "bitrate_kbps"}
+    assert recipe_for(legacy)["renditions"][0]["bitrate_kbps"] == 6000
+    assert recipe_for(legacy)["setup"]["bitrate_kbps"] == 6000
+
+
+@pytest.mark.parametrize("value", [499, 40001, 0, -1, 6000.0, "6000", True])
+def test_bitrate_outside_the_range_is_rejected(value):
+    with pytest.raises(ValueError, match="bitrate_kbps"):
+        recipe_for({**DEFAULT_SETTINGS, "bitrate_kbps": value})
+
+
 @pytest.mark.parametrize("bit_depth", [8, 10])
 @pytest.mark.parametrize("fps, maximum", [(25, 96), (30, 96), (50, 48), (60, 48)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):

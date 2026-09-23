@@ -72,6 +72,7 @@ summary { cursor: pointer; }
 <label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
 <label>Unique sources<input id="sources" type="number" min="1" max="64" step="1" value="16"></label>
 <label>Scenes<input id="scenes" type="number" min="1" max="128" step="1" value="32"></label>
+<label>Program bitrate<input id="bitrate" type="number" min="500" max="40000" step="500" value="6000"> <small>kbit/s</small></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
 </div>
 <div class="canvas-row"><div><b id="canvas-label"></b><p id="canvas-format"></p><p id="input-size"></p></div></div>
@@ -157,7 +158,8 @@ function sourceCounts(total,values){
  }
  return counts;
 }
-function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${id==='sources'?'Unique sources':'Scenes'} must be a whole number from ${min} to ${max}.`);return v;}
+const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes',bitrate:'Program bitrate'};
+function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${FIELD_NAMES[id]??id} must be a whole number from ${min} to ${max}.`);return v;}
 function update(){
  try{
  const fps=Number($('fps').value),limit=sourceLimit();
@@ -165,7 +167,7 @@ function update(){
  if(Number($('sources').value)>limit)$('sources').value=limit;
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.`;
  if(Number($('scenes').value)>128)$('scenes').value=128;
- const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128);
+ const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
  if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||types.some((t,i)=>sourceValues[i]>(t.max??64)))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
  const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
@@ -177,14 +179,17 @@ function update(){
   if(mode==='balanced'){layouts.pip=3;layouts.random=3;if(video&&browser)layouts.alpha_overlay=2;}
  }
  currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
-   source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts]};
+   source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
+   bitrate_kbps:bitrate};
  types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(t.max??limit,limit-sourceCount+counts[i]);});
  $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. Maximum 4 HDR 4:2:2 and 32 browser sources.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;
- $('output-description').textContent=eight?'H.264 / SDR at 6 Mbit/s. HDR encoding is off.':'H.264 / SDR at 6 Mbit/s and H.265 / HLG at 8 Mbit/s.';
+ const hdrKbps=Math.max(1,Math.round(bitrate*8000/6000));
+ $('output-description').textContent=eight?`H.264 / SDR at ${bitrate} kbit/s. HDR encoding is off.`
+   :`H.264 / SDR at ${bitrate} kbit/s and H.265 / HLG at ${hdrKbps} kbit/s.`;
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${fps} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${fps}`;
  $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=fps;
@@ -223,7 +228,7 @@ async function refresh(){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout'}))$(id).value=s[key];
+    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps'}))if(s[key]!==undefined)$(id).value=s[key];
     sourceValues=[...s.weights];syncCounts();
    }
    loaded=true;update();
