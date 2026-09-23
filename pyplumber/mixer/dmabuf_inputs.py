@@ -52,9 +52,12 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
                                "real_pixel_format": "rgba" if preserve_alpha else "rgb0", "src": drm_edge, "dst": assumed_edge,
                                "group": processing_group, "auto_restart": "panic"}),
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
+        # Match the browser's 11-frame ring and expire retired imports promptly.
+        # Frames in flight retain their own import reference after cache eviction.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
-                            "auto_restart": "group", "zero_copy": True}),
+                            "auto_restart": "group", "zero_copy": True,
+                            "max_imports": 11, "import_ttl_ms": 250}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two

@@ -278,7 +278,7 @@ protected:
     }
 
     void purgeImports(int64_t now_ms, bool all) {
-        if (!all && last_purge_ms_ && now_ms - last_purge_ms_ < 1000) return;
+        if (!all && last_purge_ms_ && now_ms - last_purge_ms_ < std::min<int64_t>(1000, import_ttl_ms_)) return;
         last_purge_ms_ = now_ms;
         for (auto it = imports_.begin(); it != imports_.end();) {
             if (all || now_ms - (*it)->last_used_ms >= import_ttl_ms_)
@@ -377,6 +377,9 @@ protected:
         if (imports_.size() >= max_imports_) {
             auto oldest = std::min_element(imports_.begin(), imports_.end(),
                 [](const std::shared_ptr<ImportEntry> &l, const std::shared_ptr<ImportEntry> &r) {
+                    // Prefer dropping idle imports; live frames still own their
+                    // entry even if every cached allocation is currently in use.
+                    if ((l.use_count() == 1) != (r.use_count() == 1)) return l.use_count() == 1;
                     return l->last_used_ms < r->last_used_ms; });
             imports_.erase(oldest);
         }
@@ -533,6 +536,11 @@ public:
         auto r = std::make_shared<DRMPrimeToCUDA>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<av::VideoFrame>>(dst));
         r->drop_alpha_ = params.value("drop_alpha", true);
         r->zero_copy_ = params.value("zero_copy", false);
+        const int max_imports = params.value("max_imports", 64);
+        r->import_ttl_ms_ = params.value("import_ttl_ms", int64_t(3000));
+        if (max_imports <= 0 || r->import_ttl_ms_ <= 0)
+            throw Error("drm_prime_to_cuda: max_imports and import_ttl_ms must be positive");
+        r->max_imports_ = size_t(max_imports);
         if (!params.count("hwaccel")) {
             throw Error("drm_prime_to_cuda requires hwaccel parameter (CUDA device)");
         }
