@@ -10,8 +10,12 @@
   .column { flex: 1; position: relative; }
   .swatch { height: 80%; background: linear-gradient(to bottom, white 0% 25%, red 25% 50%, lime 50% 75%, blue 75%); }
   .label { position: absolute; top: 85%; width: 100%; text-align: center; text-shadow: 0 1px 3px black; }
-  #marker { position: absolute; bottom: 8%; width: 8%; height: 6%; background: #ffffff80; animation: slide 4s linear infinite alternate; }
-  @keyframes slide { from { left: 5%; } to { left: 87%; } }
+  /* Slide with transform, not left: left snaps to whole pixels and runs layout and paint
+     on the main thread each frame, which reads as judder; a transform moves in sub-pixel
+     steps on the compositor. The page spans the viewport, so 82vw is the old 5%..87% travel. */
+  #marker { position: absolute; left: 5%; bottom: 8%; width: 8%; height: 6%; background: #ffffff80;
+            will-change: transform; animation: slide 4s linear infinite alternate; }
+  @keyframes slide { from { transform: translateX(0); } to { transform: translateX(82vw); } }
 </style>
 <header>Browser alpha over video</header>
 <div id="patches"></div>
