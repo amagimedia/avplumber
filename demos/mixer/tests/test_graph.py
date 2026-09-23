@@ -156,6 +156,7 @@ def fake_api():
         "preheat_video_router",
         "realtime",
         "repeat_last_frame",
+        "smooth_timestamps",
         "split",
         "v210_to_cuda",
     )
@@ -184,6 +185,7 @@ def fake_api():
             "preheat_video_router": "PreheatVideoRouter",
             "realtime": "Realtime",
             "repeat_last_frame": "RepeatLastFrame",
+            "smooth_timestamps": "SmoothTimestamps",
             "split": "Split",
             "v210_to_cuda": "V210ToCuda",
         }[name]: node_type(name)
@@ -363,9 +365,13 @@ def test_dmabuf_input_builds_browser_chain_next_to_files(tmp_path):
     assert receive["socket"] == str(tmp_path / "page_00.sock")
     assert receive["fps"] == "60/1" and receive["group"] == "input_1"
     assert nodes["input_1_to_cuda"]["type"] == "drm_prime_to_cuda"
+    smooth = nodes["input_1_smooth"]
+    assert (smooth["type"], smooth["src"], smooth["dst"]) == ("smooth_timestamps", "input_1_cuda_raw", "input_1_cuda_smooth")
+    assert smooth["fps"] == "60/1" and smooth["discontinuity_threshold"] == 0.1
     stamp = nodes["input_1_timestamp"]
     assert (stamp["dst_width"], stamp["dst_height"], stamp["dst_frame_rate"]) == (480, 270, "60/1")
-    assert stamp["dst"] == "input_1_cuda"
+    assert (stamp["src"], stamp["dst"]) == ("input_1_cuda_smooth", "input_1_cuda")
+    assert "round(PTS" not in stamp["graph"]   # arrival times are numbered, not rounded
     hold = nodes["input_1_hold"]
     assert (hold["type"], hold["src"], hold["dst"], hold["fps"]) == ("repeat_last_frame", "input_1_cuda", "input_1_held", "60/1")
     assert "decode_1" not in nodes and "decode_0" in nodes

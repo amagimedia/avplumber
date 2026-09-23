@@ -39,7 +39,8 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
     while the page is not painting, so static pages keep feeding the mixer.
     *preserve_alpha* retains alpha-bearing DRM formats for blended scene items."""
-    drm_edge, assumed_edge, raw_edge, cuda_edge = (f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda"))
+    drm_edge, assumed_edge, raw_edge, smooth_edge, cuda_edge = (
+        f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda_smooth", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
               "auto_restart": "group", "fps": f"{fps}/1"}
     if drm_hwaccel:
@@ -53,14 +54,24 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True}),
+        # Number paints on the canvas grid instead of rounding each arrival time to it.
+        # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
+        # an arrival near the middle of a slot flipped between two slots, putting two
+        # paints in one tick and none in the next (one discard plus one repeat, up to
+        # 4 per second on an unlucky browser). smooth_timestamps gives each paint the
+        # previous slot plus one and resyncs only when the average drift passes 20 ms.
+        # A paint gap longer than 100 ms (a page that stopped painting) resyncs at once,
+        # so the next paint is not stamped late and discarded as stale.
+        api.SmoothTimestamps({
+            "fps": f"{fps}/1", "discontinuity_threshold": 0.1,
+            "src": raw_edge, "dst": smooth_edge, "group": processing_group,
+            "name": f"{prefix}_smooth", "auto_restart": "panic"}),
         api.FilterVideo({
-            # Snap the shared host clock to absolute 1/fps boundaries before changing
-            # its time base, so independently phased paints coalesce into one tick.
             # Chromium exports premultiplied colour. Keep its alpha association
             # through the GPU graph so the compositor applies opacity only once.
-            "graph": (f"setpts=round(PTS*TB*{fps})/(TB*{fps}),settb=expr=1/{fps}"
+            "graph": (f"settb=expr=1/{fps}"
                       + (",setparams=alpha_mode=premultiplied" if preserve_alpha else "")),
-            "hwaccel": cuda_hwaccel, "src": raw_edge, "dst": cuda_edge, "dst_width": width,
+            "hwaccel": cuda_hwaccel, "src": smooth_edge, "dst": cuda_edge, "dst_width": width,
             "dst_height": height, "dst_pixel_format": "cuda", "dst_frame_rate": f"{fps}/1",
             "group": processing_group, "name": f"{prefix}_timestamp", "auto_restart": "panic"}),
     ]

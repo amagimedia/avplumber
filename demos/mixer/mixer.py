@@ -291,6 +291,7 @@ def load_avp_api():
         PreheatVideoRouter,
         Realtime,
         RepeatLastFrame,
+        SmoothTimestamps,
         Split,
         V210ToCuda,
     )
@@ -317,6 +318,7 @@ def load_avp_api():
         Realtime=Realtime,
         RepeatLastFrame=RepeatLastFrame,
         RtcpFeedbackListener=RtcpFeedbackListener,
+        SmoothTimestamps=SmoothTimestamps,
         Split=Split,
         V210ToCuda=V210ToCuda,
     )
