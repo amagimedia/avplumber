@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from typing import List, Tuple
 
@@ -88,26 +89,36 @@ def rest_request(base_url: str, method: str, path: str, body=None):
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = urllib.request.Request(f"{base_url}{path}", data=data, method=method,
                                      headers={"content-type": "application/json"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        payload = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(2048).decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Browser {method} {path}: HTTP {exc.code}: {detail or exc.reason}") from exc
     return json.loads(payload) if payload else None
 
 
 def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: int, height: int,
                          fps: int) -> None:
-    """Open (or reopen) the named windows on one page; other windows are left alone."""
+    """Ensure the named windows match the requested page and capture settings."""
     open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps}
                             for name in ids])
 
 
 def open_windows(base_url: str, windows: List[dict]) -> None:
-    """Open (or reopen) windows given as {id, url, width, height, fps} dicts."""
+    """Reuse matching windows; recreate only pages whose capture settings changed."""
     status = rest_request(base_url, "GET", "/status") or {}
-    existing = {w.get("id") for w in status.get("windows", [])}
+    existing = {w["id"]: w for w in status.get("windows", [])}
     for spec in windows:
-        if spec["id"] in existing:
+        wanted = {**spec, "audio": False}
+        current = existing.get(spec["id"])
+        if current and current.get("stats", {}).get("quarantinedFrameCount", 0):
+            raise RuntimeError(f"Browser {spec['id']} has quarantined DMA-BUF frames; restart its browser worker")
+        if current and all(current.get(key) == value for key, value in wanted.items()):
+            continue
+        if current:
             rest_request(base_url, "POST", "/window/close", {"id": spec["id"]})
-        rest_request(base_url, "POST", "/window/open", {**spec, "audio": False})
+        rest_request(base_url, "POST", "/window/open", wanted)
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:

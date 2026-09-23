@@ -562,7 +562,6 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     api = api or load_avp_api()
     if options.config:
         return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(options.config)), api)
-    avp = _init_avp(options, api)
     dmabuf_ids = options.dmabuf_inputs
     if dmabuf_ids:
         if options.dmabuf_open:
@@ -572,6 +571,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
 
+    avp = _init_avp(options, api)
     input_edges = [
         _build_input(avp, api, index, url, loop=options.loop_inputs, fps=options.fps,
                      normalize=len(options.inputs) > 32, options=options)
@@ -594,7 +594,6 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
     if options.mixer_latency_ms is None and cfg.latency_ms is not None:
         options = replace(options, mixer_latency_ms=cfg.latency_ms)
-    avp = _init_avp(options, api)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
@@ -602,6 +601,9 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
 
+    # Browser REST failures must occur before native control threads exist;
+    # otherwise Python can print a traceback yet hang during interpreter exit.
+    avp = _init_avp(options, api)
     canvas = (cfg.canvas_w, cfg.canvas_h)
     mixer = _make_builder(avp, api, options, canvas=canvas, fps=cfg.fps, working_format=cfg.working_format,
                           color=cfg.out_color, wipe_color=cfg.wipe_color or None)
@@ -730,6 +732,15 @@ def parse_size(text: str) -> tuple[int, int]:
 def main(argv: list[str] | None = None) -> None:
     options = parse_args(argv)
     application = build_application(options)
+    try:
+        _run_application(application, options)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        application.stop()
+
+
+def _run_application(application: MixerApplication, options: GraphOptions) -> None:
     if options.webui_url:
         application.avp.registerWithWebUI(options.webui_url, "mixer", "")
     application.start()
@@ -745,15 +756,10 @@ def main(argv: list[str] | None = None) -> None:
         f"{', '.join(targets)} at {options.fps} fps; control port "
         f"{options.remote_control_port or 'disabled'}"
     )
-    try:
-        while True:
-            time.sleep(1)
-            if options.webui_url:
-                application.avp.heartbeat()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        application.stop()
+    while True:
+        time.sleep(1)
+        if options.webui_url:
+            application.avp.heartbeat()
 
 
 if __name__ == "__main__":

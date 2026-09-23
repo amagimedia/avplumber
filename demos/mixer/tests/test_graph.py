@@ -422,6 +422,85 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
                            "audio": False}
 
 
+def test_unchanged_browser_windows_survive_reconfiguration(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    unchanged = dict(id="page_00", url="http://p", width=480, height=270, fps=60, audio=False)
+    calls = []
+
+    def fake_rest(base_url, method, path, body=None):
+        calls.append((method, path, body))
+        if path == "/status":
+            return {"windows": [unchanged, {**unchanged, "id": "page_01", "fps": 30}]}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01", "page_02"], "http://p", 480, 270, 60)
+    assert calls == [
+        ("GET", "/status", None),
+        ("POST", "/window/close", {"id": "page_01"}),
+        ("POST", "/window/open", {**unchanged, "id": "page_01"}),
+        ("POST", "/window/open", {**unchanged, "id": "page_02"}),
+    ]
+
+
+def test_quarantined_browser_is_not_reused_or_recreated(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+
+    calls = []
+    def fake_rest(base_url, method, path, body=None):
+        calls.append(path)
+        return {"windows": [{"id": "page_00", "stats": {"quarantinedFrameCount": 1}}]}
+
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
+    with pytest.raises(RuntimeError, match="quarantined DMA-BUF"):
+        dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 60)
+    assert calls == ["/status"]
+
+
+def test_browser_failure_precedes_native_initialization(monkeypatch):
+    import mixer
+
+    def fail(*args):
+        raise RuntimeError("browser unavailable")
+
+    monkeypatch.setattr(mixer, "open_browser_windows", fail)
+    monkeypatch.setattr(mixer, "_init_avp", lambda *args: pytest.fail("native threads started before browser preparation"))
+    with pytest.raises(RuntimeError, match="browser unavailable"):
+        build_application(GraphOptions(inputs=("dmabuf://page_00",), output="p.mp4", dmabuf_open="http://p"), api=fake_api())
+    monkeypatch.setattr(mixer, "open_windows", fail)
+    cfg = SimpleNamespace(fps=60, latency_ms=None, sources=[SimpleNamespace(
+        kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60)])
+    with pytest.raises(RuntimeError, match="browser unavailable"):
+        mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api())
+
+
+def test_startup_failure_shuts_down_application(monkeypatch):
+    import mixer
+
+    stopped = []
+    app = SimpleNamespace(stop=lambda: stopped.append(True))
+    monkeypatch.setattr(mixer, "build_application", lambda options: app)
+    def fail(*args):
+        raise RuntimeError("preheat failed")
+    monkeypatch.setattr(mixer, "_run_application", fail)
+    with pytest.raises(RuntimeError, match="preheat failed"):
+        mixer.main(["--input", "a.mp4", "--output", "out.mp4"])
+    assert stopped == [True]
+
+
+def test_browser_http_error_includes_worker_reason(monkeypatch):
+    import io
+    import urllib.error
+    from pyplumber.mixer import dmabuf_inputs
+
+    def unavailable(*args, **kwargs):
+        raise urllib.error.HTTPError("http://b/window/open", 503, "Service Unavailable", {},
+                                     io.BytesIO(b'{"error":"Electron worker 0 is not ready"}'))
+    monkeypatch.setattr(dmabuf_inputs.urllib.request, "urlopen", unavailable)
+    with pytest.raises(RuntimeError, match="HTTP 503.*Electron worker 0 is not ready"):
+        dmabuf_inputs.rest_request("http://b", "POST", "/window/open", {"id": "page_00"})
+
+
 def test_wipe_file_preloads_into_the_clip_cache_at_start(monkeypatch):
     FakeMixer.instances.clear()
     application = build_application(
