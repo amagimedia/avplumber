@@ -19,6 +19,8 @@ public:
 	~BYTETracker();
 
 	vector<STrack> update(const vector<Object>& objects);
+	// Advance motion/time without treating an unsampled frame as a detector miss.
+	vector<STrack> predict_only();
 
 	// Access internal state for predict-on-empty and emit-lost features
 	const vector<STrack>& get_tracked_stracks() const { return tracked_stracks; }

@@ -19,6 +19,19 @@ BYTETracker::~BYTETracker()
 {
 }
 
+vector<STrack> BYTETracker::predict_only()
+{
+	++frame_id;
+	vector<STrack*> pool;
+	for (auto& track : tracked_stracks) pool.push_back(&track);
+	for (auto& track : lost_stracks) pool.push_back(&track);
+	STrack::multi_predict(pool, kalman_filter);
+	vector<STrack> output;
+	for (const auto& track : tracked_stracks)
+		if (track.is_activated) output.push_back(track);
+	return output;
+}
+
 vector<STrack> BYTETracker::update(const vector<Object>& objects)
 {
 
