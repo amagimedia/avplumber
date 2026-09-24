@@ -118,6 +118,10 @@ it appears in multiple tiles. Aux keeps the program canvas size and uses 25/30 f
 for a 50/60 fps program, otherwise the program rate. Its output is always SDR/H.264.
 Program and aux encoders run concurrently; the page's output selector changes
 only the displayed stream. Both streams can be viewed in separate players.
+Recipes may include the same `aux_buses` block. Applying generic setup controls
+preserves configured aux buses and their live assignments, including SDR/HDR
+changes. Aux stays SDR/H.264 and follows the new canvas size and aux frame rate.
+Slots referencing removed scenes or exceeding the new draw budget are cleared.
 
 The bundled Janus config reserves mountpoint/RTP port 5008 and RTCP port 5009.
 Custom ports require corresponding Janus mountpoints whose IDs equal their RTP

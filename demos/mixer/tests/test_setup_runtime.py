@@ -272,3 +272,98 @@ def test_restart_changes_revision(tmp_path, monkeypatch):
     restarted = SetupRuntime(tmp_path, tmp_path / 'demo.json', SimpleNamespace(port=7777))
     assert first.status()['revision'] != restarted.status()['revision']
     assert restarted.status()['revision'] < 2 ** 53
+
+
+@pytest.mark.parametrize("before,after", [(8, 10), (10, 8)])
+def test_setup_preserves_live_aux_through_color_change_and_resume(runtime, monkeypatch, before, after):
+    def settings(depth):
+        return {**DEFAULT_SETTINGS, "bit_depth": depth, "chroma": "420",
+                "weights": [4, 0, 0, 0, 1]}
+    config = runtime.media_dir / "mixer.demo.json"
+    show, _, _ = prepare_demo.plan(recipe_for(settings(before)), runtime.media_dir)
+    scene_ids = [s["id"] for s in show["scenes"]]
+    show["aux_buses"] = [{"id": "mv", "scenes": [scene_ids[0]] * 8,
+                          "renditions": [{"id": "monitor", "port": 5008}]}]
+    config.write_text(json.dumps(show))
+    live = [scene_ids[1], scene_ids[-1], *([None] * 6)]
+    runtime.bridge.command = lambda cmd: json.dumps([{"id": "mv", "scenes": live}])
+    def prepare(recipe, directory):
+        generated, _, _ = prepare_demo.plan(recipe, directory)
+        config.write_text(json.dumps(generated))
+    monkeypatch.setattr(prepare_demo, "prepare", prepare)
+    runtime.apply(settings(after))
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    changed = json.loads(config.read_text())
+    assert changed["canvas"]["color"] == ("sdr" if after == 8 else "hlg")
+    assert changed["aux_buses"][0]["scenes"] == live
+    from pyplumber.mixer.config import parse
+    rendition = parse(changed).aux_buses[0].renditions[0]
+    assert (rendition.codec, rendition.color, rendition.port) == ("h264_nvenc", "sdr", 5008)
+    assert json.loads(runtime.recipe_path.read_text())["aux_buses"] == changed["aux_buses"]
+    runtime.apply()  # same path as resuming the saved recipe after server restart
+    runtime.worker.join(3)
+    assert runtime.status()["phase"] == "running", runtime.status()
+    assert json.loads(config.read_text())["aux_buses"] == changed["aux_buses"]
+
+
+def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
+    from pyplumber.mixer.config import parse
+    old, _, _ = prepare_demo.plan(recipe_for(DEFAULT_SETTINGS), runtime.media_dir)
+    old["aux_buses"] = [{"id": "mv", "scenes": [old["scenes"][0]["id"], "removed", *([None] * 6)],
+                         "renditions": [{"id": "monitor", "port": 5008, "width": 1080,
+                                         "height": 1920, "fps": 30, "bitrate_kbps": 4500}]}]
+    (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(old))
+    runtime.process = None
+    recipe = recipe_for({**DEFAULT_SETTINGS, "resolution": "1280x720", "orientation": "landscape",
+                         "fps": 50, "scene_count": 1, "layout": "fullscreen"})
+    show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    runtime._preserve_aux(recipe, show)
+    cfg = parse(prepare_demo.plan(recipe, runtime.media_dir)[0])
+    assert cfg.aux_buses[0].scenes == (old["scenes"][0]["id"], *([None] * 7))
+    r = cfg.aux_buses[0].renditions[0]
+    assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1280, 720, 25, 4500)
+
+
+def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime):
+    recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64,
+                         "weights": [1, 0, 0, 0, 0], "layout": "grids"})
+    show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    grid = next(s["id"] for s in show["scenes"] if s["id"].startswith("grid_64_"))
+    show["aux_buses"] = [{"id": "mv", "scenes": [grid] * 8,
+                          "renditions": [{"id": "monitor", "port": 5008}]}]
+    (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(show))
+    runtime.process = None
+    del show["aux_buses"]
+    runtime._preserve_aux(recipe, show)
+    result, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
+    assert result["aux_buses"][0]["scenes"] == [grid, grid, *([None] * 6)]
+
+
+def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch):
+    config = runtime.media_dir / "mixer.demo.json"
+    config.write_text(json.dumps({"aux_buses": [{"id": "mv", "scenes": [None] * 8,
+                                              "renditions": [{"id": "monitor", "port": 5004}]}]}))
+    runtime.process = None
+    monkeypatch.setattr(prepare_demo, "prepare", lambda *_: pytest.fail("must validate first"))
+    with pytest.raises(ValueError, match="port"):
+        runtime.apply(DEFAULT_SETTINGS)
+    assert runtime.worker is None
+
+
+@pytest.mark.parametrize("hdr", [False, True])
+def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
+    monkeypatch.setattr("setup_runtime.subprocess.Popen", lambda *a, **kw: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(runtime.closing, "wait", lambda _: False)
+    runtime.bridge.state = lambda **kw: {"status": {"pgm_scene": "full"},
+        "settings": {"preview_codecs": ["h264", "h265"] if hdr else ["h264"], "aux_buses": ["mv"]}}
+    expected = ["janus_encoded", "aux_mv_encoded", *(["janus_hdr_encoded"] if hdr else [])]
+    calls = []
+    def queues(command, **kw):
+        calls.append(command)
+        assert len(calls) <= len(expected)
+        return json.dumps([{"name": name, "enqueued_total": int(i < len(calls))}
+                           for i, name in enumerate(expected)])
+    runtime.bridge.command = queues
+    SetupRuntime._start(runtime, runtime.media_dir / "mixer.demo.json")
+    assert len(calls) == len(expected)

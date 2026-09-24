@@ -155,13 +155,45 @@ class SetupRuntime:
         recipe = recipe_for(settings) if settings is not None else json.loads(self.recipe_path.read_text())
         # Plan validation happens before stopping the live mixer or writing files.
         from prepare_demo import plan
-        plan(recipe, self.media_dir)
+        show, _, _ = plan(recipe, self.media_dir)
+        if settings is not None:
+            self._preserve_aux(recipe, show)
+            plan(recipe, self.media_dir)
         with self.lock:
             if self.closing.is_set() or (self.worker and self.worker.is_alive()):
                 raise RuntimeError("A setup change is already in progress")
             self.phase, self.message = "preparing", "Preparing assets…"
             self.worker = threading.Thread(target=self._apply, args=(recipe, settings), daemon=True)
             self.worker.start()
+
+    def _preserve_aux(self, recipe, show):
+        """Keep instance outputs while replacing the generic sources and scenes."""
+        from pyplumber.mixer.aux import aux_fps, validate_assignments
+        from pyplumber.mixer.config import ConfigError, parse
+        config = self.media_dir / "mixer.demo.json"
+        buses = json.loads(config.read_text()).get("aux_buses", []) if config.exists() else []
+        if not buses:
+            return
+        live = {}
+        if self.process and self.process.poll() is None:
+            live = {b["id"]: b["scenes"] for b in json.loads(self.bridge.command("mixer.aux_status"))}
+        cfg = parse(show)
+        scene_ids = {s.id for s in cfg.scenes}
+        for bus in buses:
+            assignments = [None] * 8
+            for i, scene in enumerate(live.get(bus["id"], bus.get("scenes", [None] * 8))):
+                if scene not in scene_ids:
+                    continue
+                assignments[i] = scene
+                try:
+                    validate_assignments(cfg, assignments)
+                except ConfigError:
+                    # A retained scene may have grown beyond the tile draw budget.
+                    assignments[i] = None
+            bus["scenes"] = assignments
+            for rendition in bus["renditions"]:
+                rendition.update(width=cfg.canvas_w, height=cfg.canvas_h, fps=aux_fps(cfg.fps))
+        recipe["aux_buses"] = buses
 
     def _stop(self):
         if self.process and self.process.poll() is None:
@@ -192,8 +224,12 @@ class SetupRuntime:
                     # the mixer answers it slowly while it is still filling its decoders, so
                     # give it far more than the default command budget.
                     queues = json.loads(self.bridge.command("queues.json", timeout=60.0) or "[]")
-                    encoded = [q for q in queues if q["name"] in ("janus_encoded", "janus_hdr_encoded")]
-                    if encoded and all(q["enqueued_total"] > 0 for q in encoded):
+                    expected = {"janus_encoded"}
+                    if "h265" in state.get("settings", {}).get("preview_codecs", []):
+                        expected.add("janus_hdr_encoded")
+                    expected.update(f"aux_{bid}_encoded" for bid in state.get("settings", {}).get("aux_buses", []))
+                    encoded = {q["name"] for q in queues if q["enqueued_total"] > 0}
+                    if expected <= encoded:
                         return
                     last_problem = "waiting for encoded output"
             except Exception as exc:

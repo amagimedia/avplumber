@@ -224,10 +224,12 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
            "initial_scene": scene_list[0]["id"], "renditions": recipe["renditions"],
            "wipes": wipes,
            "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "diagonal"}}
+    if "aux_buses" in recipe:
+        doc["aux_buses"] = recipe["aux_buses"]
     cfg = parse(doc)
     # Include RTCP's adjacent port in conflict checks.
     used_ports = set()
-    for rendition in cfg.renditions:
+    for rendition in (*cfg.renditions, *(r for b in cfg.aux_buses for r in b.renditions)):
         if rendition.target != "janus":
             continue
         port = rendition.port or 5004
