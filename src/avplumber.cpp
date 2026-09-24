@@ -1084,8 +1084,12 @@ public:
             config_str = strutils::trim(config_str);
             json cfg = json::parse(config_str);
 
+            auto transition_control = avp::mixer::transitionControl(cfg.value("backend", std::string("cuda")));
+
             auto state = InstanceSharedObjects<MixerState>::get(manager_->instanceData(), mixer_name);
             std::lock_guard<std::mutex> lock(state->mutex);
+            state->transition_control = transition_control;
+            state->transition_node_name = cfg.value("transition_node", std::string(""));
 
             if (cfg.contains("timeline")) state->timeline_name = cfg["timeline"].get<std::string>();
             if (cfg.contains("hwaccel")) state->hwaccel_name = cfg["hwaccel"].get<std::string>();

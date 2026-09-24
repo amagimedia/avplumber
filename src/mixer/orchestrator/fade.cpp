@@ -1,4 +1,4 @@
-// Crossfade through the preheated transition_cuda filter, with the deferred
+// Crossfade through the preheated transition node, with the deferred
 // routing flip once the last blended frame has been presented.
 #include "internal.hpp"
 
@@ -53,7 +53,7 @@ void MixerOrchestrator::deferredCleanup(
 }
 
 // ---------------------------------------------------------------------------
-// fade: crossfade transition through the permanent preheated CUDA filter.
+// fade: crossfade transition through the permanent preheated node.
 // All timeline values are computed from the pre-flip state.
 // ---------------------------------------------------------------------------
 void MixerOrchestrator::fade(const std::string& scene_name, double duration_sec,
@@ -116,21 +116,15 @@ void MixerOrchestrator::startFade(const std::string& scene_name, double duration
     auto& target_scene = state_->scenes.at(scene_name);
     scheduleSceneControls(target_scene, start_ms);
 
-    // 2. Update the preheated transition_cuda expression while its input
-    // branches are idle. The filter graph itself remains running.
-    std::string progress_expr = "clip((t-" + std::to_string(start_ms / 1000.0) +
-        ")/" + std::to_string(duration_sec) + ",0,1)";
-    std::string alpha_expr = pvw_is_slot_a ? "1-" + progress_expr : progress_expr;
-
-    std::string transition_node_name = state_->source_switcher_name.empty()
-        ? transition_node_name_
-        : state_->source_switcher_name + "_transition";
-    Parameters alpha_command = {
-        {"target", "transition_cuda"},
-        {"command", "alpha"},
-        {"argument", alpha_expr},
-    };
-    setNodeObject(transition_node_name, "filter_command", alpha_command);
+    // 2. Update the preheated transition while its input branches are idle.
+    // Legacy callers may construct MixerState without mixer.init.
+    const auto control = state_->transition_control ? state_->transition_control : transitionControl("cuda");
+    const auto command = control({start_ms, duration_sec, pvw_is_slot_a});
+    const std::string transition_node_name = !state_->transition_node_name.empty()
+        ? state_->transition_node_name
+        : (state_->source_switcher_name.empty() ? transition_node_name_
+                                               : state_->source_switcher_name + "_transition");
+    setNodeObject(transition_node_name, command.key, command.value);
 
     // 3. Camera routing: applied in loadSceneIntoSlot via rewriteCameraOutputsForSlot
 
