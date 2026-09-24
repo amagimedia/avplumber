@@ -35,7 +35,6 @@
   let logs = [];
   let consoleLines = [];
   let autoRefreshQueues = true;
-  let autoRefreshQueuesUserSet = false;
   let autoRefreshMs = 1000;
   let autoRefreshISOs = true;
   let syncGroups = [];
@@ -52,7 +51,6 @@
     selectedNodeName = name ? String(name) : '';
   }
   function setAutoRefreshQueues(v) {
-    autoRefreshQueuesUserSet = true;
     autoRefreshQueues = !!v;
   }
 
@@ -157,9 +155,6 @@
     currentInstanceId && statsByInstance[currentInstanceId]
       ? JSON.stringify(statsByInstance[currentInstanceId], null, 2)
       : '';
-  $: if (!autoRefreshQueuesUserSet && Array.isArray(queues) && queues.length >= 150) {
-    autoRefreshQueues = false;
-  }
 
   function updateInstances(list) {
     instances = Array.isArray(list) ? list : [];
