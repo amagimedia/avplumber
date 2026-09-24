@@ -73,20 +73,20 @@
   $: flow = q?.flowSummary || summarizeQueueFlow(q ? [q] : []);
   $: stroke = {flowing: '#60a5fa', backlog: '#fbbf24', dropped: '#f87171', idle: '#64748b', unknown: '#475569'}[flow.state];
   $: flowText = `${flow.active}/${flow.total} active · ${flow.growing} accumulating · ${flow.held} not draining · ${flow.dropped} new drops · ${flow.total - flow.known} unknown`;
-  $: detail = `${label}${q ? `\n${flowText}\nEnqueue ${Number(q.enq_pps || 0).toFixed(1)} / dequeue ${pps.toFixed(1)} items/s\nFullest queue ${Math.round(flow.maxFill * 100)}%` : '\nNo fresh queue samples'}`;
+  $: detail = `${label}${q ? `\n${flowText}${flow.subscriptions ? `\nSubscriptions: ${flow.subscribed}/${flow.subscriptions} active` : ''}\nEnqueue ${Number(q.enq_pps || 0).toFixed(1)} / dequeue ${pps.toFixed(1)} items/s\nFullest queue ${Math.round(flow.maxFill * 100)}%` : '\nNo fresh queue samples'}`;
   // Reuse the destination segment; never measure paths during telemetry updates.
   $: lastRoute = __route[__route.length - 1] || [start, end];
   $: tip = lastRoute[lastRoute.length - 1] || end;
   $: approach = lastRoute[lastRoute.length - 2] || start;
   $: angle = Math.atan2(tip.y - approach.y, tip.x - approach.x) * 180 / Math.PI;
-  $: width = hovered ? 5 : 2.5;
+  $: width = flow.subscribed > 0 ? 4.5 : 1.5;
   $: mid = {
     x: (start.x + end.x) / 2,
     y: (start.y + end.y) / 2
   };
 </script>
 
-<svg data-testid="connection" data-flow-state={flow.state}>
+<svg data-testid="connection" data-flow-state={flow.state} data-subscribed={flow.subscribed > 0}>
   <defs><marker id={`arrow-${id}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
     <path d="M 0 0 L 10 5 L 0 10 z" style={`fill: ${stroke}; pointer-events: none`} />
   </marker></defs>
@@ -176,4 +176,3 @@
     text-shadow: 0 0 2px #000;
   }
 </style>
-

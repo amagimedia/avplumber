@@ -20,6 +20,7 @@
 #include "stats.hpp"
 #include "logger_impls.hpp"
 #include "output_control.hpp"
+#include "output_subscriptions.hpp"
 #include "hwaccel_mgmt.hpp"
 #include "named_event.hpp"
 #include "RealTimeTeam.hpp"
@@ -499,6 +500,18 @@ public:
         // ]
         commands_["queues.json"] = [this](ClientStream &cs, std::string&) {
             json j = manager_->edges()->edgesStatsJson();
+            std::map<std::string, bool> subscriptions;
+            for (const auto &entry : manager_->allNodes()) {
+                if (!entry.second) continue;
+                if (auto source = std::dynamic_pointer_cast<IOutputSubscriptions>(entry.second->node())) {
+                    const auto states = source->outputSubscriptions();
+                    subscriptions.insert(states.begin(), states.end());
+                }
+            }
+            for (auto &queue : j) {
+                const auto state = subscriptions.find(queue.at("name").get<std::string>());
+                if (state != subscriptions.end()) queue["subscription_active"] = state->second;
+            }
             cs << j << "\n";
         };
         // Reset per-queue occupancy statistics used by queues.json (frames_in_queue.* fields).

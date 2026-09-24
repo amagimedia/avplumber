@@ -10,6 +10,8 @@ A web UI made in Node & Svelte, for viewing:
 
 Graph arrows show direction. Blue indicates observed dequeue activity; gray indicates idle or unknown activity. Amber indicates a queue accumulating or not draining across consecutive samples, which may be intentional buffering. Red indicates newly observed drops. The small fill marker shows current occupancy, or the fullest queue in a grouped connection; hover shows rates and affected queue counts. Grouped rates are totals in items/second.
 
+With live queue stats enabled, bold arrows indicate an active frame subscription, independently of traffic. A grouped arrow is bold if any member is subscribed; hover shows the active/total subscription count. Ordinary queues and older instances without subscription telemetry remain thin. This uses the existing queue refresh interval and does not change frame routing.
+
 Indicators use the existing queue polling interval (one second by default), with no continuous animation. Paused, disconnected or stale telemetry is neutral. These sampled counters do not prove frame uniqueness, frame-perfect timing or an expected frame rate.
 
 ## How to use

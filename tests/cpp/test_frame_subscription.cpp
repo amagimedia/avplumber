@@ -15,14 +15,17 @@ struct TestFrame { TestPTS stamp; TestPTS pts() const { return stamp; } };
 int main() {
     avp::mixer::FrameSubscription subscription;
     subscription.configure({30, 1});
+    assert(!subscription.enabled());
     int count = 0;
     auto publish = [&](int64_t ns) { subscription.publish(TestFrame{{ns}}, [&] { ++count; }); };
     publish(0);
     assert(count == 0);
     subscription.enable(true);
+    assert(subscription.enabled());
     for (int i = 0; i < 60; ++i) publish(avp::mixer::TickGrid({60, 1}).time(i));
     assert(count == 30);
     subscription.enable(false);
+    assert(!subscription.enabled());
     publish(2000000000);
     assert(count == 30);
     subscription.enable(true);
@@ -44,6 +47,7 @@ int main() {
     subscription.close();
     const int before = delivered;
     subscription.enable(true); // a racing composition must not reopen a stopped consumer
+    assert(!subscription.enabled());
     std::this_thread::yield();
     running = false;
     producer.join();

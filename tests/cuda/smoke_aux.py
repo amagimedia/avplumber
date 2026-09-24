@@ -3,6 +3,7 @@
 Run from the repository root with its CUDA Python module on PYTHONPATH.
 Generates two small clips; uses private UDP ports and never changes a live show.
 """
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos/mixer"))
 from mixer import GraphOptions, build_application, load_avp_api
 from pyplumber.node import PythonNode
+from pyplumber.mixer.control import AvpConnection
 
 
 class ConsumerGate(PythonNode):
@@ -35,6 +37,19 @@ def wait_for(predicate, timeout=10):
             return
         time.sleep(0.05)
     raise AssertionError("aux condition timed out")
+
+
+def subscription_flags():
+    async def read():
+        connection = AvpConnection("127.0.0.1", 18777)
+        await connection.connect()
+        try:
+            queues = json.loads(await connection.command("queues.json"))
+            assert all("subscription_active" not in q for q in queues if q["name"] == "mixer_final_out")
+            return {q["name"]: q["subscription_active"] for q in queues if "subscription_active" in q}
+        finally:
+            await connection.disconnect()
+    return asyncio.run(read())
 
 
 def main():
@@ -76,17 +91,22 @@ def main():
             edge = app.avp.getEdge(bus.output_edge)
             main_edge = app.avp.getEdge("mixer_final_out")
             wait_for(lambda: edge.enqueued_total >= 30)
+            assert subscription_flags() == {name: True for name in [*bus.edges, bus.pgm_edge]}
             app.mixer.preview("blue")
             wait_for(lambda: bus.state()["pvw_scene"] == "blue")
             initial = bus.state()
             bus.assign({"expected_revision": initial["revision"], "scenes": ["repeat"] * 8})
             assert bus.assign({"expected_revision": initial["revision"], "scenes": [None] * 8})["conflict"]
             app.mixer.cut("blue")
+            app.mixer.preview("red")
+            expected = {bus.edges[0]: True, bus.edges[1]: False, bus.pgm_edge: True}
+            wait_for(lambda: subscription_flags() == expected)
             time.sleep(1)
             # Stall the first consumer: the compositor must suspend, unsubscribe
             # every input, and let the main program keep advancing.
             gate.blocked = True
             wait_for(lambda: bus.state()["suspended"])
+            assert subscription_flags() == {name: False for name in [*bus.edges, bus.pgm_edge]}
             before = main_edge.enqueued_total
             time.sleep(1)
             assert main_edge.enqueued_total - before >= 40
@@ -96,6 +116,7 @@ def main():
             before = edge.enqueued_total
             bus.assign({"expected_revision": current["revision"], "scenes": current["scenes"]})
             wait_for(lambda: edge.enqueued_total >= before + 15)
+            assert subscription_flags() == expected
             # Restart only the aux compositor. The main
             # program and the aux encoder must survive this independently.
             app.avp.node(bus.node_name).stopAndWait()

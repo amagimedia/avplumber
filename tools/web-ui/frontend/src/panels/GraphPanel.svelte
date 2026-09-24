@@ -73,7 +73,7 @@
   </div>
 
   <div class="hint breadcrumb">
-    <span class="flow-legend" title="Sampled queue activity, not frame uniqueness or timing. Amber can be intentional buffering. Fill marker shows the fullest constituent queue.">{liveQueueStats && c.queueStatsFresh ? 'Flow: blue active · gray idle/unknown · amber accumulating/not draining · red new drops' : 'Flow: paused or awaiting fresh queue samples'}</span>
+    <span class="flow-legend" title="Sampled queue activity, not frame uniqueness or timing. Amber can be intentional buffering. Fill marker shows the fullest constituent queue. Bold arrows indicate an active subscription, independent of traffic.">{liveQueueStats && c.queueStatsFresh ? 'Flow: blue active · gray idle/unknown · amber accumulating/not draining · red new drops · bold subscribed' : 'Flow: paused or awaiting fresh queue samples'}</span>
   </div>
   <div class="hint breadcrumb">
     <span class="graph-native-counts" data-nodes={overview.nodeCount} data-queues={overview.queueCount}>{overview.nodeCount} native nodes · {overview.queueCount} defined queues</span>
