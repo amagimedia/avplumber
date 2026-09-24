@@ -3,6 +3,7 @@
 use avplumber_f7k::graph::media::AvpRational;
 use avplumber_f7k::graph::timestamp::Ts;
 use avplumber_f7k::services::correction::{Convergence, CorrectionGroup, GroupPolicy};
+use avplumber_f7k::util::parse_iso8601_ms;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct CorrectionParams {
@@ -139,7 +140,9 @@ impl CorrectionParams {
             return Ok(Some(ms));
         }
         match &self.hold_until_iso {
-            Some(text) => Ok(Some(parse_iso8601_ms(text)?)),
+            Some(text) => parse_iso8601_ms(text)
+                .map(Some)
+                .map_err(|err| format!("hold_until_iso {err}")),
             None => Ok(None),
         }
     }
@@ -165,46 +168,4 @@ pub fn seconds_to_ticks(seconds: f64, tb: AvpRational) -> i64 {
         return 1;
     }
     (seconds * tb.den as f64 / tb.num as f64).round() as i64
-}
-
-/// `YYYY-MM-DDTHH:MM:SSZ`, the form C++ `parseIso8601ToMs` is given in scripts.
-pub fn parse_iso8601_ms(text: &str) -> Result<i64, String> {
-    let text = text.trim();
-    let (date, time) = text
-        .split_once('T')
-        .ok_or_else(|| format!("hold_until_iso `{text}` is not YYYY-MM-DDTHH:MM:SSZ"))?;
-    let time = time.strip_suffix('Z').unwrap_or(time);
-    let mut date = date.split('-');
-    let year: i64 = next_num(&mut date, "year")?;
-    let month: i64 = next_num(&mut date, "month")?;
-    let day: i64 = next_num(&mut date, "day")?;
-    let mut time = time.split(':');
-    let hour: i64 = next_num(&mut time, "hour")?;
-    let minute: i64 = next_num(&mut time, "minute")?;
-    let second: i64 = next_num(&mut time, "second")?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60
-    {
-        return Err(format!("hold_until_iso `{text}` is out of range"));
-    }
-    let days = days_from_civil(year, month, day);
-    Ok(days * 86_400_000 + hour * 3_600_000 + minute * 60_000 + second * 1_000)
-}
-
-fn next_num<'a>(parts: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<i64, String> {
-    let text = parts
-        .next()
-        .ok_or_else(|| format!("hold_until_iso is missing {what}"))?;
-    text.parse()
-        .map_err(|_| format!("hold_until_iso {what} `{text}` is not a number"))
-}
-
-/// Days since 1970-01-01, Howard Hinnant's civil-from-days inverse.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
 }

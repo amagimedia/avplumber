@@ -26,6 +26,7 @@ pub mod libav;
 pub mod node_api;
 pub mod services;
 pub mod supervisor;
+pub mod util;
 
 use std::collections::HashMap;
 use std::ffi::c_void;

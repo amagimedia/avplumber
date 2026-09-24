@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use crate::graph::timebase::MILLISECONDS;
 use crate::graph::timestamp::Ts;
 use crate::services::clock::{ClockService, SyncGroup};
+use crate::util::parse_iso8601_ms;
 
 /// [`Playback::released`] before any frame was released.
 pub const NO_POSITION: i64 = i64::MIN;
@@ -270,7 +271,8 @@ pub enum Target {
 
 impl Target {
     /// C++ `StreamTarget::from_string`: `12000`, `+500`, `-500`, `01:02:03`,
-    /// `01:00.150`, `+0:10`, `2026-08-10T12:00:00.000`, and `live`, `end`.
+    /// `01:00.150`, `+0:10`, `2026-08-10T12:00:00.000Z`, and `live`, `end`.
+    /// A wallclock needs `Z` or a numeric offset.
     pub fn parse(text: &str) -> Result<Target, String> {
         let text = text.trim();
         if text.is_empty() {
@@ -282,7 +284,7 @@ impl Target {
             _ => {}
         }
         if text.contains('T') {
-            return parse_wallclock(text).map(Target::Wallclock);
+            return parse_iso8601_ms(text).map(Target::Wallclock);
         }
         let (relative, sign, body) = match text.as_bytes()[0] {
             b'+' => (true, 1, &text[1..]),
@@ -333,68 +335,6 @@ fn parse_millis(frac: &str) -> Result<i64, String> {
         .map_err(|_| format!("`{frac}` is not a fraction"))?;
     let scale = 10i64.pow(digits.len() as u32);
     Ok(value * 1000 / scale)
-}
-
-/// `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]` to UTC milliseconds. No offset means
-/// UTC, as C++ `timegm` did.
-fn parse_wallclock(text: &str) -> Result<i64, String> {
-    let invalid = || format!("`{text}` is not an ISO 8601 timestamp");
-    let (date, rest) = text.split_once('T').ok_or_else(invalid)?;
-    let mut date_parts = date.split('-');
-    let year: i64 = date_parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(invalid)?;
-    let month: i64 = date_parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(invalid)?;
-    let day: i64 = date_parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(invalid)?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return Err(invalid());
-    }
-    // Split the zone suffix off the time.
-    let (time, offset_minutes) = if let Some(time) = rest.strip_suffix('Z') {
-        (time, 0)
-    } else if let Some(pos) = rest.rfind(['+', '-']).filter(|&pos| pos > 0) {
-        let (time, zone) = rest.split_at(pos);
-        let sign = if zone.starts_with('-') { -1 } else { 1 };
-        let (zh, zm) = zone[1..].split_once(':').unwrap_or((&zone[1..], "0"));
-        let hours: i64 = zh.parse().map_err(|_| invalid())?;
-        let minutes: i64 = zm.parse().map_err(|_| invalid())?;
-        (time, sign * (hours * 60 + minutes))
-    } else {
-        (rest, 0)
-    };
-    let (clock, frac) = match time.split_once('.') {
-        Some((clock, frac)) => (clock, Some(frac)),
-        None => (time, None),
-    };
-    let parts: Vec<i64> = clock
-        .split(':')
-        .map(|p| p.parse::<i64>().map_err(|_| invalid()))
-        .collect::<Result<_, _>>()?;
-    let [hour, minute, second] = parts.as_slice() else {
-        return Err(invalid());
-    };
-    let days = days_from_civil(year, month, day);
-    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset_minutes * 60;
-    Ok(seconds * 1000 + frac.map(parse_millis).transpose()?.unwrap_or(0))
-}
-
-/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's
-/// algorithm).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 // -------------------------------------------------------------- Playback
@@ -1037,7 +977,7 @@ mod tests {
         assert_eq!(Target::parse("+0:10").unwrap(), Target::RelativeMs(10_000));
         assert_eq!(Target::parse("-0:00.5").unwrap(), Target::RelativeMs(-500));
         assert_eq!(
-            Target::parse("2026-08-10T12:00:00.250").unwrap(),
+            Target::parse("2026-08-10T12:00:00.250Z").unwrap(),
             Target::Wallclock(1_786_363_200_250)
         );
         assert_eq!(
@@ -1049,9 +989,10 @@ mod tests {
             Target::Wallclock(1_786_363_200_000)
         );
         assert_eq!(
-            Target::parse("1970-01-01T00:00:00").unwrap(),
+            Target::parse("1970-01-01T00:00:00Z").unwrap(),
             Target::Wallclock(0)
         );
+        assert!(Target::parse("1970-01-01T00:00:00").is_err());
         assert_eq!(Target::parse("live").unwrap(), Target::Live);
         assert_eq!(Target::parse("end").unwrap(), Target::End);
         assert!(Target::parse("").is_err());
