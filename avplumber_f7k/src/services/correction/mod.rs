@@ -1,4 +1,7 @@
-//! CorrectionGroup: shared reference timeline + per-member cursors. No Sentinel policy.
+//! CorrectionGroup: shared reference timeline, per-member cursors, and the
+//! shift consensus in [`converge`]. Frame construction stays in the nodes.
+
+pub mod converge;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -6,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use crate::graph::AvpRational;
 use crate::graph::timestamp::{self, Ts, ts_cmp};
 use crate::services::clock::SyncGroup;
+
+pub use converge::{Action, Convergence, Decision, MemberKind, Policy};
 
 #[derive(Clone, Debug)]
 pub struct CorrectionSnapshot {
@@ -37,6 +42,46 @@ struct Inner {
     live_driven: bool,
     generation: u64,
     members: HashMap<String, Member>,
+    converge: converge::ConvergeState,
+    /// Slew limits in seconds. Reapplied in [`Self::propose`] so they track the
+    /// output timebase.
+    rates: Option<Rates>,
+}
+
+#[derive(Clone, Debug)]
+struct Rates {
+    max_slew: f64,
+    rebase_s: f64,
+    deadband_s: f64,
+}
+
+/// What a node asks the group for. Thresholds are seconds; [`ConvergeState`]
+/// stores the same limits as ticks of the group's timebase.
+#[derive(Clone, Debug)]
+pub struct GroupPolicy {
+    pub mode: Convergence,
+    pub max_slew: f64,
+    pub rebase_threshold: f64,
+    pub deadband: f64,
+    pub anchor: Option<String>,
+    pub locked: bool,
+}
+
+fn seconds_to_ticks(seconds: f64, tb: AvpRational) -> i64 {
+    if tb.num <= 0 || tb.den <= 0 {
+        return 1;
+    }
+    (seconds * tb.den as f64 / tb.num as f64).round() as i64
+}
+
+fn apply_rates(g: &mut Inner) {
+    if let Some(rates) = g.rates.clone() {
+        g.converge.set_rates(
+            rates.max_slew,
+            seconds_to_ticks(rates.rebase_s, g.output_tb),
+            seconds_to_ticks(rates.deadband_s, g.output_tb),
+        );
+    }
 }
 
 pub struct CorrectionGroup {
@@ -60,6 +105,8 @@ impl CorrectionGroup {
                 live_driven: false,
                 generation: 0,
                 members: HashMap::new(),
+                converge: converge::ConvergeState::unconfigured(),
+                rates: None,
             }),
         }
     }
@@ -69,17 +116,139 @@ impl CorrectionGroup {
     }
 
     pub fn register(&self, member: &str) {
+        self.register_stream(member, MemberKind::Video, 0);
+    }
+
+    /// Join the shared shift. `quantum` is one drop or repeat, in the group's
+    /// timebase; `0` uses each proposal's duration.
+    pub fn register_stream(&self, member: &str, kind: MemberKind, quantum: i64) {
         let mut g = self.inner.lock().unwrap();
         g.members.entry(member.to_string()).or_insert(Member {
             next_ts: Ts::invalid(),
         });
+        g.converge.register(member, kind, quantum);
         g.generation += 1;
     }
 
     pub fn unregister(&self, member: &str) {
         let mut g = self.inner.lock().unwrap();
         g.members.remove(member);
+        g.converge.unregister(member);
         g.generation += 1;
+    }
+
+    pub fn output_tb(&self) -> AvpRational {
+        self.inner.lock().unwrap().output_tb
+    }
+
+    /// First call sets the mode. A later member with a different mode is an error.
+    pub fn configure(&self, policy: GroupPolicy) -> Result<(), String> {
+        let mut g = self.inner.lock().unwrap();
+        g.rates = Some(Rates {
+            max_slew: policy.max_slew,
+            rebase_s: policy.rebase_threshold,
+            deadband_s: policy.deadband,
+        });
+        let tb = g.output_tb;
+        g.converge.configure(Policy {
+            mode: policy.mode,
+            max_slew: policy.max_slew,
+            rebase_threshold: seconds_to_ticks(policy.rebase_threshold, tb),
+            deadband: seconds_to_ticks(policy.deadband, tb),
+            anchor: policy.anchor,
+            locked: policy.locked,
+        })
+    }
+
+    pub fn lock_shift(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.converge.lock();
+        g.locked_shift = true;
+    }
+
+    pub fn group_shift(&self) -> Option<Ts> {
+        let g = self.inner.lock().unwrap();
+        g.converge.group_shift().map(|val| Ts {
+            val,
+            tb: g.output_tb,
+        })
+    }
+
+    pub fn local_shift(&self, member: &str) -> Option<Ts> {
+        let g = self.inner.lock().unwrap();
+        g.converge.local_shift(member).map(|val| Ts {
+            val,
+            tb: g.output_tb,
+        })
+    }
+
+    /// One correction step. Timestamps are rescaled into the group's timebase.
+    /// The returned decision is in that timebase too.
+    pub fn propose(
+        &self,
+        member: &str,
+        input_pts: Ts,
+        next_ts: Ts,
+        duration: Ts,
+        dt: Ts,
+    ) -> Result<Decision, String> {
+        let mut g = self.inner.lock().unwrap();
+        apply_rates(&mut g);
+        let tb = g.output_tb;
+        let ticks = |ts: Ts| -> Result<i64, String> {
+            if !ts.is_valid() {
+                return Err("invalid correction timestamp".into());
+            }
+            Ok(ts.rescale(tb).val)
+        };
+        let proposal = converge::Proposal {
+            member: member.to_string(),
+            input_pts: ticks(input_pts)?,
+            next_ts: ticks(next_ts)?,
+            duration: ticks(duration)?,
+            dt: if dt.is_valid() { ticks(dt)? } else { 0 },
+        };
+        let decision = g.converge.propose(&proposal)?;
+        if let Some(m) = g.members.get_mut(member) {
+            m.next_ts = Ts {
+                val: decision.next_ts,
+                tb,
+            };
+        }
+        Ok(decision)
+    }
+
+    /// Backup slots while `expected` is more than `timeout` ahead of `cursor`.
+    /// Does not move the shift. `timeout` and `quantum` are in the group's timebase.
+    pub fn conceal(
+        &self,
+        member: &str,
+        cursor: Ts,
+        timeout: i64,
+        quantum: i64,
+    ) -> Result<Vec<Ts>, String> {
+        let mut g = self.inner.lock().unwrap();
+        let tb = g.output_tb;
+        if !g.expected_ts.is_valid() || !cursor.is_valid() {
+            return Ok(Vec::new());
+        }
+        let expected = g.expected_ts.rescale(tb).val;
+        let cursor_ticks = cursor.rescale(tb).val;
+        let pts = g
+            .converge
+            .fill(member, cursor_ticks, expected, timeout, quantum, 5)?;
+        if let Some(last) = pts.last() {
+            if let Some(m) = g.members.get_mut(member) {
+                m.next_ts = Ts {
+                    val: last + quantum,
+                    tb,
+                };
+            }
+        }
+        Ok(pts
+            .into_iter()
+            .map(|val| Ts { val, tb })
+            .collect())
     }
 
     pub fn set_output_tb(&self, tb: AvpRational) {

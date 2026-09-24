@@ -47,9 +47,12 @@ pub mod null_sink;
 #[cfg(feature = "ffmpeg")]
 pub mod output;
 pub mod realtime;
+pub mod sentinel;
 
 /// Registers every media node type. Separate from `Instance::new` so an
 /// embedder that only wants the substrate does not pay for libav.
+mod correction_cfg;
+
 pub fn register_media_nodes(inst: &Instance) {
     avplumber_f7k::register_spec::<null_sink::NullSinkSpec>(inst);
     // `mux` only orders timestamps and describes the container, so it needs no
@@ -59,6 +62,7 @@ pub fn register_media_nodes(inst: &Instance) {
     avplumber_f7k::register_spec::<force_fps::ForceFpsSpec>(inst);
     // Likewise `realtime`: it paces by a clock and restamps, nothing more.
     avplumber_f7k::register_spec::<realtime::RealtimeSpec>(inst);
+    avplumber_f7k::register_spec::<sentinel::SentinelSpec>(inst);
     #[cfg(feature = "ffmpeg")]
     {
         avplumber_f7k::register_spec::<force_keyframe::ForceKeyframeSpec>(inst);
@@ -70,5 +74,9 @@ pub fn register_media_nodes(inst: &Instance) {
         avplumber_f7k::register_spec::<encode::AudioEncoderSpec>(inst);
         avplumber_f7k::register_spec::<output::OutputSpec>(inst);
         avplumber_f7k::register_spec::<bsf::BsfSpec>(inst);
+        avplumber_f7k::register_spec::<resample::ResampleSpec>(inst);
     }
 }
+
+#[cfg(feature = "ffmpeg")]
+pub mod resample;
