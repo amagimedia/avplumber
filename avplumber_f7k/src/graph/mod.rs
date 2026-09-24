@@ -31,7 +31,7 @@ pub use node::{Node, NodeBody, NodeFuture, NodeKind, Polled, Processed};
 pub use pad::{In, NodePads, Out, PadDecl, check_pad_media};
 pub use poll_ctx::NodePollContext;
 pub use spec::{CatalogStream, ChannelLayout, MuxStream, PacketSpec, Spec, StreamSelection};
-pub use timestamp::Ts;
+pub use timestamp::{Ts, TsDelta};
 
 use std::collections::HashMap;
 use std::sync::Arc;

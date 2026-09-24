@@ -639,7 +639,7 @@ mod tests {
         let mut pts = Vec::new();
         while let Some(item) = edge.try_take() {
             if let EdgeItem::Buffer(buf) = item {
-                pts.push(buf.ts().val);
+                pts.push(buf.ts().ticks());
             }
         }
         pts
@@ -814,7 +814,7 @@ mod tests {
             match item {
                 EdgeItem::Buffer(buf) => {
                     kinds.push("buffer");
-                    pts.push(buf.ts().val);
+                    pts.push(buf.ts().ticks());
                 }
                 EdgeItem::Event(EdgeEvent::Spec(_)) => kinds.push("spec"),
                 EdgeItem::Event(EdgeEvent::Eof) => kinds.push("eof"),
@@ -954,7 +954,7 @@ mod tests {
 
     fn take_one(edge: &dyn Edge) -> Option<i64> {
         match edge.try_take() {
-            Some(EdgeItem::Buffer(buf)) => Some(buf.ts().val),
+            Some(EdgeItem::Buffer(buf)) => Some(buf.ts().ticks()),
             _ => None,
         }
     }

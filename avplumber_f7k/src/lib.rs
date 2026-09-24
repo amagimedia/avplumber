@@ -46,7 +46,8 @@ pub use graph::{
     BufferedEdge, CatalogStream, ChannelLayout, DirectEdge, Edge, EdgeEvent, EdgeHint,
     EdgeHintCell, EdgeItem, EdgeKind, EdgeLink, EdgeRestart, EdgeWaker, Grain, Graph, MuxStream,
     Node, NodeBody, NodeError, NodeKind, NodePads, NodePhase, NodePollContext, PacketSpec, Pad,
-    PadDecl, Polled, Processed, Push, Spec, StreamSelection, Ts, Vertex, Wakeup, generation_reader,
+    PadDecl, Polled, Processed, Push, Spec, StreamSelection, Ts, TsDelta, Vertex, Wakeup,
+    generation_reader,
     generation_writer, pending_generation_reader, pending_generation_writer,
 };
 pub use node_api::{

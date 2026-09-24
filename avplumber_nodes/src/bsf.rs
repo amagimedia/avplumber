@@ -113,7 +113,7 @@ impl SisoNode for BitstreamFilter {
             return Ok(Vec::new());
         };
         let (pts, dts) = (packet.ts(), packet.dts());
-        if pts.tb.den != 0 && pts.tb != inner.time_base_in {
+        if pts.timebase().den != 0 && pts.timebase() != inner.time_base_in {
             packet.set_ts_dts(
                 pts.rescale(inner.time_base_in),
                 dts.rescale(inner.time_base_in),
@@ -142,7 +142,7 @@ fn stamp(tb: AvpRational, packets: Vec<AVPacket>) -> Vec<Grain> {
         .into_iter()
         .map(|mut packet| {
             let (pts, dts) = (packet.pts, packet.dts);
-            packet.set_ts_dts(Ts { val: pts, tb }, Ts { val: dts, tb });
+            packet.set_ts_dts(Ts::new(pts, tb), Ts::new(dts, tb));
             Grain::Packet(packet)
         })
         .collect()

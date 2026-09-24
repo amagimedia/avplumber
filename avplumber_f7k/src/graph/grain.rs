@@ -106,30 +106,24 @@ impl Grain {
     pub fn ts(&self) -> Ts {
         match self {
             #[cfg(feature = "ffmpeg")]
-            Grain::Packet(p) => Ts {
-                val: p.pts,
-                tb: AvpRational {
+            Grain::Packet(p) => Ts::new(
+                p.pts,
+                AvpRational {
                     num: p.time_base.num,
                     den: p.time_base.den,
                 },
-            },
+            ),
             #[cfg(feature = "ffmpeg")]
-            Grain::Video(f) | Grain::Audio(f) => Ts {
-                val: f.pts,
-                tb: AvpRational {
+            Grain::Video(f) | Grain::Audio(f) => Ts::new(
+                f.pts,
+                AvpRational {
                     num: f.time_base.num,
                     den: f.time_base.den,
                 },
-            },
-            Grain::Opaque(o) => Ts {
-                val: o.pts(),
-                tb: o.time_base(),
-            },
+            ),
+            Grain::Opaque(o) => Ts::new(o.pts(), o.time_base()),
             #[cfg(not(feature = "ffmpeg"))]
-            Grain::Stub { pts, .. } => Ts {
-                val: *pts,
-                tb: AvpRational { num: 1, den: 1000 },
-            },
+            Grain::Stub { pts, .. } => Ts::new(*pts, AvpRational { num: 1, den: 1000 }),
         }
     }
 
@@ -142,10 +136,7 @@ impl Grain {
             #[cfg(feature = "ffmpeg")]
             Grain::Packet(p) => {
                 let dts = if p.dts != AVP_NOPTS && p.pts != AVP_NOPTS {
-                    Ts {
-                        val: ts.val - (p.pts - p.dts),
-                        tb: ts.tb,
-                    }
+                    Ts::new(ts.ticks() - (p.pts - p.dts), ts.timebase())
                 } else {
                     Ts::invalid()
                 };
@@ -155,7 +146,9 @@ impl Grain {
             Grain::Video(f) | Grain::Audio(f) => f.set_ts(ts),
             Grain::Opaque(_) => {}
             #[cfg(not(feature = "ffmpeg"))]
-            Grain::Stub { pts, .. } => *pts = ts.rescale(AvpRational { num: 1, den: 1000 }).val,
+            Grain::Stub { pts, .. } => {
+                *pts = ts.rescale(AvpRational { num: 1, den: 1000 }).ticks()
+            }
         }
     }
 }
@@ -179,10 +172,7 @@ pub fn test_media(kind: AvpMediaType, pts: i64) -> Grain {
     use crate::graph::spec::ChannelLayout;
     use rusty_ffmpeg::ffi;
 
-    let ts = Ts {
-        val: pts,
-        tb: AvpRational { num: 1, den: 1_000 },
-    };
+    let ts = Ts::new(pts, AvpRational { num: 1, den: 1_000 });
     // Smallest real buffer of each kind, not an empty one: `av_frame_clone` and
     // `av_packet_ref` need something to reference, and an edge may clone what it
     // carries (`peek_clone`).
@@ -262,19 +252,19 @@ pub trait FrameExt {
 #[cfg(feature = "ffmpeg")]
 impl FrameExt for rsmpeg::avutil::AVFrame {
     fn ts(&self) -> Ts {
-        Ts {
-            val: self.pts,
-            tb: AvpRational {
+        Ts::new(
+            self.pts,
+            AvpRational {
                 num: self.time_base.num,
                 den: self.time_base.den,
             },
-        }
+        )
     }
     fn set_ts(&mut self, ts: Ts) {
-        self.set_pts(ts.val);
+        self.set_pts(ts.ticks());
         self.set_time_base(rusty_ffmpeg::ffi::AVRational {
-            num: ts.tb.num,
-            den: ts.tb.den,
+            num: ts.timebase().num,
+            den: ts.timebase().den,
         });
     }
 }
@@ -304,31 +294,31 @@ impl PacketExt for rsmpeg::avcodec::AVPacket {
         clone_packet(self)
     }
     fn ts(&self) -> Ts {
-        Ts {
-            val: self.pts,
-            tb: AvpRational {
+        Ts::new(
+            self.pts,
+            AvpRational {
                 num: self.time_base.num,
                 den: self.time_base.den,
             },
-        }
+        )
     }
     fn dts(&self) -> Ts {
-        Ts {
-            val: self.dts,
-            tb: AvpRational {
+        Ts::new(
+            self.dts,
+            AvpRational {
                 num: self.time_base.num,
                 den: self.time_base.den,
             },
-        }
+        )
     }
     fn set_ts_dts(&mut self, pts: Ts, dts: Ts) {
-        self.set_pts(pts.val);
-        self.set_dts(dts.rescale(pts.tb).val);
+        self.set_pts(pts.ticks());
+        self.set_dts(dts.rescale(pts.timebase()).ticks());
         // rsmpeg has no `set_time_base` for packets, only for frames.
         unsafe {
             rsmpeg::UnsafeDerefMut::deref_mut(self).time_base = rusty_ffmpeg::ffi::AVRational {
-                num: pts.tb.num,
-                den: pts.tb.den,
+                num: pts.timebase().num,
+                den: pts.timebase().den,
             }
         };
     }

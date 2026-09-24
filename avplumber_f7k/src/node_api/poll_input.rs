@@ -335,7 +335,7 @@ mod tests {
         let mut pts = Vec::new();
         while let Some(item) = output.try_take() {
             if let EdgeItem::Buffer(buf) = item {
-                pts.push(buf.ts().val);
+                pts.push(buf.ts().ticks());
             }
         }
         assert_eq!(pts, vec![1, 1]);

@@ -249,19 +249,19 @@ impl PollNode for Realtime {
                     log::debug!(
                         "{}: dropping late media {}/{}",
                         self.io.name,
-                        media.val,
-                        fmt_tb(media.tb)
+                        media.ticks(),
+                        fmt_tb(media.timebase())
                     );
                     continue;
                 }
                 Due::Reanchor => {
-                    self.clock.reset(media.val, media.tb);
+                    self.clock.reset(media.ticks(), media.timebase());
                     state.anchored = true;
                     log::info!(
                         "{}: re-anchored the clock on media {}/{}",
                         self.io.name,
-                        media.val,
-                        fmt_tb(media.tb)
+                        media.ticks(),
+                        fmt_tb(media.timebase())
                     );
                 }
                 Due::Now => {}
@@ -295,7 +295,7 @@ impl PollNode for Realtime {
             state.release_one = false;
             self.released.fetch_add(1, Ordering::Relaxed);
             self.playback
-                .report_release(media.rescale(MILLISECONDS).val);
+                .report_release(media.rescale(MILLISECONDS).ticks());
             return Ok(Polled::Again);
         }
     }
@@ -400,7 +400,7 @@ impl Realtime {
         if !state.anchored {
             return Due::Reanchor;
         }
-        let wall = self.clock.map_to_wall(media.val, media.tb);
+        let wall = self.clock.map_to_wall(media.ticks(), media.timebase());
         if wall == AVP_NOPTS {
             // Paused between the snapshot and the mapping: hold, as if the
             // snapshot had said so.
@@ -438,10 +438,7 @@ impl Realtime {
             pts = last + 1;
         }
         state.last_out = Some(pts);
-        Ts {
-            val: pts,
-            tb: self.timebase,
-        }
+        Ts::new(pts, self.timebase)
     }
 }
 
@@ -603,7 +600,7 @@ mod tests {
             let mut out = Vec::new();
             while let Some(item) = self.output.try_take() {
                 if let EdgeItem::Buffer(media) = item {
-                    out.push(media.ts().rescale(self.node.timebase).val);
+                    out.push(media.ts().rescale(self.node.timebase).ticks());
                 }
             }
             out

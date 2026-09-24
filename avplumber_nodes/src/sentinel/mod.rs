@@ -25,7 +25,7 @@ use avplumber_f7k::graph::node::Polled;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::Spec;
-use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::{Io, NodeObjects, PollNode, Polling};
 use avplumber_f7k::services::clock::SyncGroup;
 use avplumber_f7k::services::correction::{Action, CorrectionGroup, MemberKind};
@@ -127,7 +127,7 @@ struct State {
     configured: bool,
     next: Option<Ts>,
     last_input: Option<i64>,
-    last_shift: Option<i64>,
+    last_shift: Option<TsDelta>,
     last_frame: Option<Grain>,
     pending: Option<Pending>,
     pending_out: Option<Grain>,
@@ -238,9 +238,9 @@ impl NodeObjects for SentinelVideo {
             "stats" => {
                 let state = self.state.lock().unwrap();
                 Ok(json!({
-                    "group_shift": self.group.group_shift().map(|ts| ts.val),
-                    "local_shift": self.group.local_shift(&self.io.name).map(|ts| ts.val),
-                    "next_ts": state.next.map(|ts| ts.val),
+                    "group_shift": self.group.group_shift().map(|shift| shift.ticks()),
+                    "local_shift": self.group.local_shift(&self.io.name).map(|shift| shift.ticks()),
+                    "next_ts": state.next.map(|ts| ts.ticks()),
                     "card": (self.card.load(Ordering::Relaxed) & 1) == 1,
                 }))
             }
@@ -306,9 +306,9 @@ impl SentinelVideo {
             state.pending = None;
             return Ok(Polled::Again);
         }
-        self.ensure_configured(state, input_ts.tb)?;
+        self.ensure_configured(state, input_ts.timebase())?;
         let tb = state.tb;
-        let input_ticks = input_ts.rescale(tb).val;
+        let input_ticks = input_ts.rescale(tb).ticks();
         let quantum = state.quantum.max(1);
         if state.next.is_none() {
             state.next = Some(if self.params.forward_start_shift {
@@ -321,28 +321,22 @@ impl SentinelVideo {
         // Nominal media time, not the PTS gap. A jump is a shift error (`obs`),
         // and counting it again here would grant a slew step as large as the glitch.
         let dt = if fresh && state.last_input.is_some() {
-            Ts { val: quantum, tb }
+            TsDelta::new(quantum, tb)
         } else {
-            Ts { val: 0, tb }
+            TsDelta::zero(tb)
         };
         let decision = self
             .group
             .propose(
                 &self.io.name,
-                Ts {
-                    val: input_ticks,
-                    tb,
-                },
+                Ts::new(input_ticks, tb),
                 next,
-                Ts { val: quantum, tb },
+                TsDelta::new(quantum, tb),
                 dt,
             )
             .map_err(|e| self.io.error(NodePhase::Poll, e))?;
-        self.note_shift(state, decision.local_shift, Ts { val: decision.next_ts, tb });
-        state.next = Some(Ts {
-            val: decision.next_ts,
-            tb,
-        });
+        self.note_shift(state, decision.local_shift, decision.next_ts);
+        state.next = Some(decision.next_ts);
 
         match decision.action {
             Action::Drop => {
@@ -353,17 +347,17 @@ impl SentinelVideo {
             }
             Action::Repeat { emit_pts } => {
                 let Some(mut picture) = state.last_frame.clone() else {
-                    return self.emit_pending(output, state, ctx, Ts { val: emit_pts, tb });
+                    return self.emit_pending(output, state, ctx, emit_pts);
                 };
                 if let Some(pending) = state.pending.as_mut() {
                     pending.fresh = false;
                 }
-                picture.set_ts(Ts { val: emit_pts, tb });
-                self.set_card(true, Ts { val: emit_pts, tb });
+                picture.set_ts(emit_pts);
+                self.set_card(true, emit_pts);
                 self.push(output, picture, state, ctx)
             }
             Action::Emit { emit_pts } | Action::Stretch { emit_pts, .. } => {
-                self.emit_pending(output, state, ctx, Ts { val: emit_pts, tb })
+                self.emit_pending(output, state, ctx, emit_pts)
             }
         }
     }
@@ -398,7 +392,12 @@ impl SentinelVideo {
         let timeout_ticks = correction_cfg::seconds_to_ticks(self.params.timeout, state.tb).max(0);
         let slots = self
             .group
-            .conceal(&self.io.name, cursor, timeout_ticks, state.quantum)
+            .conceal(
+                &self.io.name,
+                cursor,
+                TsDelta::new(timeout_ticks, state.tb),
+                TsDelta::new(state.quantum, state.tb),
+            )
             .map_err(|e| self.io.error(NodePhase::Poll, e))?;
         if slots.is_empty() {
             state.stall_deadline = Some(Instant::now() + timeout.max(Duration::from_millis(20)));
@@ -409,7 +408,7 @@ impl SentinelVideo {
         let mut frames = VecDeque::new();
         for slot in slots {
             if state.conceal_origin.is_none() {
-                state.conceal_origin = Some(slot.val);
+                state.conceal_origin = Some(slot.ticks());
             }
             if let Some(frame) = self.backup_frame(state, slot) {
                 frames.push_back(frame);
@@ -441,7 +440,7 @@ impl SentinelVideo {
         let Some(pending) = state.pending.take() else {
             return Ok(Polled::Again);
         };
-        let input_ticks = pending.grain.ts().rescale(state.tb).val;
+        let input_ticks = pending.grain.ts().rescale(state.tb).ticks();
         state.last_input = Some(input_ticks);
         let mut grain = pending.grain;
         state.last_frame = Some(grain.clone());
@@ -455,7 +454,7 @@ impl SentinelVideo {
         let freeze_ticks = correction_cfg::seconds_to_ticks(self.freeze_s, state.tb);
         let within_freeze = state
             .conceal_origin
-            .map(|origin| pts.val.saturating_sub(origin) < freeze_ticks)
+            .map(|origin| pts.ticks().saturating_sub(origin) < freeze_ticks)
             .unwrap_or(true);
         let slate = self.slate.lock().unwrap().clone();
         let source = if within_freeze && freeze_ticks > 0 {
@@ -512,7 +511,7 @@ impl SentinelVideo {
         }
         state.start = correction_cfg::configure_member(&self.group, &self.params, frame_tb)
             .map_err(|e| self.io.error(NodePhase::Poll, e))?;
-        state.tb = state.start.tb;
+        state.tb = state.start.timebase();
         let tb = state.tb;
         state.quantum = match self.frame_duration_s.or(state.rate_seconds) {
             Some(seconds) => correction_cfg::seconds_to_ticks(seconds, tb).max(1),
@@ -527,7 +526,7 @@ impl SentinelVideo {
         Ok(())
     }
 
-    fn note_shift(&self, state: &mut State, shift: i64, at: Ts) {
+    fn note_shift(&self, state: &mut State, shift: TsDelta, at: Ts) {
         if state.last_shift == Some(shift) {
             return;
         }
@@ -542,7 +541,7 @@ impl SentinelVideo {
             return;
         }
         let ms = if pts.is_valid() {
-            pts.rescale(avplumber_f7k::graph::timebase::MILLISECONDS).val
+            pts.rescale(avplumber_f7k::graph::timebase::MILLISECONDS).ticks()
         } else {
             0
         };

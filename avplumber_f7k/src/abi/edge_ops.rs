@@ -77,8 +77,8 @@ fn event_to_c(ev: &EdgeEvent) -> AvpEdgeEvent {
         EdgeEvent::FlushStop { resume_at } => {
             let mut event = AvpEdgeEvent::plain(AvpEventType::FlushStop);
             if let Some(ts) = resume_at {
-                event.resume_at = ts.val;
-                event.resume_at_tb = ts.tb;
+                event.resume_at = ts.ticks();
+                event.resume_at_tb = ts.timebase();
             }
             event
         }
@@ -159,10 +159,8 @@ pub extern "C" fn avp_edge_push_event(edge: *mut AvpEdge, ev: *const AvpEdgeEven
         AvpEventType::Drain => EdgeEvent::Drain,
         AvpEventType::FlushStart => EdgeEvent::FlushStart,
         AvpEventType::FlushStop => EdgeEvent::FlushStop {
-            resume_at: (ev_c.resume_at != AVP_NOPTS).then(|| Ts {
-                val: ev_c.resume_at,
-                tb: ev_c.resume_at_tb,
-            }),
+            resume_at: (ev_c.resume_at != AVP_NOPTS)
+                .then(|| Ts::new(ev_c.resume_at, ev_c.resume_at_tb)),
         },
         AvpEventType::Spec => EdgeEvent::Spec(ev_c.spec.to_native()),
     };

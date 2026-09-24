@@ -100,7 +100,7 @@ impl NodeSpec for RestartableInputSpec {
         if build == 1 {
             clock.reset(0, TB);
             correction.set_output_tb(TB);
-            correction.set_start_ts(Ts { val: 0, tb: TB });
+            correction.set_start_ts(Ts::new(0, TB));
         }
         if build == 2 || build == 3 {
             return Err(format!("planned reconstruction failure {build}"));
@@ -248,7 +248,7 @@ impl Node for Sentinel {
             while let Some(item) = input.try_take() {
                 match item {
                     EdgeItem::Buffer(media) => {
-                        let raw = media.ts().val;
+                        let raw = media.ts().ticks();
                         self.state.raw_seen.lock().unwrap().push(raw);
                         self.state.raw_ready.notify_all();
                         let mut pending = self.pending_raw.lock().unwrap();
@@ -270,13 +270,13 @@ impl Node for Sentinel {
         let cursor = self.correction.member_cursor(&self.name).unwrap();
         let expected = self.correction.snapshot().expected_ts;
         let pts = if cursor.next_ts.is_valid() {
-            cursor.next_ts.val
+            cursor.next_ts.ticks()
         } else {
-            expected.val.div_euclid(STEP) * STEP
+            expected.ticks().div_euclid(STEP) * STEP
         };
-        if pts > expected.val {
+        if pts > expected.ticks() {
             let cursor_wall = self.clock.map_to_wall(pts, TB);
-            let expected_wall = self.clock.map_to_wall(expected.val, expected.tb);
+            let expected_wall = self.clock.map_to_wall(expected.ticks(), expected.timebase());
             let delay_us = cursor_wall.saturating_sub(expected_wall).max(1) as u64;
             ctx.wait_readable(video_input.clone());
             ctx.wait_readable(audio_input.clone());
@@ -317,10 +317,7 @@ impl Node for Sentinel {
         self.correction
             .commit(
                 &self.name,
-                Ts {
-                    val: pts + STEP,
-                    tb: TB,
-                },
+                Ts::new(pts + STEP, TB),
                 cursor.generation,
             )
             .expect("Sentinel owns the only correction member");
@@ -417,12 +414,12 @@ impl Node for Mux {
         if self.pending_video.lock().unwrap().is_none()
             && let Some(EdgeItem::Buffer(media)) = self.video.get().unwrap().try_take()
         {
-            *self.pending_video.lock().unwrap() = Some(media.ts().val);
+            *self.pending_video.lock().unwrap() = Some(media.ts().ticks());
         }
         if self.pending_audio.lock().unwrap().is_none()
             && let Some(EdgeItem::Buffer(media)) = self.audio.get().unwrap().try_take()
         {
-            *self.pending_audio.lock().unwrap() = Some(media.ts().val);
+            *self.pending_audio.lock().unwrap() = Some(media.ts().ticks());
         }
         let video = *self.pending_video.lock().unwrap();
         let audio = *self.pending_audio.lock().unwrap();
@@ -477,7 +474,7 @@ impl Node for Output {
         let input = self.input.get().unwrap();
         match input.try_take() {
             Some(EdgeItem::Buffer(media)) => {
-                self.state.output_pts.lock().unwrap().push(media.ts().val);
+                self.state.output_pts.lock().unwrap().push(media.ts().ticks());
                 self.state.output_ready.notify_all();
                 Ok(Tick::Again)
             }
@@ -573,7 +570,7 @@ fn output_continues_across_failed_retries_recovery_and_manual_restart() {
     correction.register("sentinel");
     let initial_cursor = correction.member_cursor("sentinel").unwrap();
     correction
-        .commit("sentinel", Ts { val: 0, tb: TB }, initial_cursor.generation)
+        .commit("sentinel", Ts::new(0, TB), initial_cursor.generation)
         .unwrap();
     {
         let state = state.clone();
@@ -846,7 +843,7 @@ fn output_continues_across_failed_retries_recovery_and_manual_restart() {
     );
     drop(clocks);
     drop(corrections);
-    assert!(correction.snapshot().expected_ts.val > outage_last);
+    assert!(correction.snapshot().expected_ts.ticks() > outage_last);
 
     let pts = state.output_pts.lock().unwrap().clone();
     assert!(pts.len() > 100);

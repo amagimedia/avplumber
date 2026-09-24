@@ -25,7 +25,7 @@ use avplumber_f7k::graph::grain::Grain;
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
-use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::{Blocking, BlockingIo, BlockingNode};
 use avplumber_f7k::services::clock::SyncGroup;
 use avplumber_f7k::services::correction::{Action, CorrectionGroup, MemberKind};
@@ -121,7 +121,7 @@ struct AudioState {
     start: Ts,
     next: Option<Ts>,
     last_input: Option<i64>,
-    last_shift: Option<i64>,
+    last_shift: Option<TsDelta>,
     last_samples: i32,
     /// Standalone cursor. Unused while grouped.
     solo_next: Option<Ts>,
@@ -241,16 +241,13 @@ impl ResampleAudio {
             return Err(self.io.error(NodePhase::Process, "audio frame has no timestamp"));
         }
         self.ensure_engine(&mut state, &frame)?;
-        self.ensure_configured(&mut state, in_ts.tb)?;
+        self.ensure_configured(&mut state, in_ts.timebase())?;
         let tb = state.tb;
         let samples = frame.nb_samples.max(1);
         state.last_samples = samples;
         let duration_ticks = self.duration_ticks(&state, samples);
-        let duration = Ts {
-            val: duration_ticks,
-            tb,
-        };
-        let input_ticks = in_ts.rescale(tb).val;
+        let duration = TsDelta::new(duration_ticks, tb);
+        let input_ticks = in_ts.rescale(tb).ticks();
 
         if self.group.is_some() {
             return self.grouped(input, output, &mut state, frame, input_ticks, duration);
@@ -265,16 +262,13 @@ impl ResampleAudio {
         state: &mut AudioState,
         frame: AVFrame,
         input_ticks: i64,
-        duration: Ts,
+        duration: TsDelta,
     ) -> Result<Processed, NodeError> {
         let group = self.group.as_ref().unwrap();
         let tb = state.tb;
         if state.next.is_none() {
             state.next = Some(if self.params.forward_start_shift {
-                Ts {
-                    val: input_ticks,
-                    tb,
-                }
+                Ts::new(input_ticks, tb)
             } else {
                 state.start
             });
@@ -283,26 +277,22 @@ impl ResampleAudio {
         let dt = if state.last_input.is_some() {
             duration
         } else {
-            Ts { val: 0, tb }
+            TsDelta::zero(tb)
         };
         let decision = group
-            .propose(&self.io.name, Ts { val: input_ticks, tb }, next, duration, dt)
+            .propose(
+                &self.io.name,
+                Ts::new(input_ticks, tb),
+                next,
+                duration,
+                dt,
+            )
             .map_err(|e| self.io.error(NodePhase::Process, e))?;
         if state.last_shift != Some(decision.local_shift) {
             state.last_shift = Some(decision.local_shift);
-            self.reporter.shift_changed(
-                Ts {
-                    val: decision.next_ts,
-                    tb,
-                },
-                decision.local_shift,
-                state.start,
-            );
+            self.reporter.shift_changed(decision.next_ts, decision.local_shift, state.start);
         }
-        state.next = Some(Ts {
-            val: decision.next_ts,
-            tb,
-        });
+        state.next = Some(decision.next_ts);
         state.last_input = Some(input_ticks);
         let engine = state.engine.as_mut().unwrap();
         if decision.rebased {
@@ -312,7 +302,7 @@ impl ResampleAudio {
             Action::Stretch {
                 emit_pts,
                 sample_delta,
-            } => (emit_pts, sample_delta),
+            } => (emit_pts, sample_delta.ticks()),
             Action::Emit { emit_pts } => (emit_pts, 0),
             Action::Drop => return Ok(Processed::Again),
             Action::Repeat { emit_pts } => (emit_pts, 0),
@@ -322,7 +312,7 @@ impl ResampleAudio {
             engine.compensate(sample_delta, frame.nb_samples.max(1))?;
         }
         let mut out = engine.convert(Some(&frame), 0)?;
-        let stamp = Ts { val: emit_pts, tb };
+        let stamp = emit_pts;
         set_frame_ts(&mut out, stamp);
         self.reporter.observe_wallclock(stamp, state.start);
         self.io.push_from(input, output, Grain::Audio(out))
@@ -335,13 +325,13 @@ impl ResampleAudio {
         state: &mut AudioState,
         frame: AVFrame,
         in_ts: Ts,
-        duration: Ts,
+        duration: TsDelta,
     ) -> Result<Processed, NodeError> {
         let tb = state.tb;
-        let input_ticks = in_ts.rescale(tb).val;
+        let input_ticks = in_ts.rescale(tb).ticks();
         let engine = state.engine.as_mut().unwrap();
         if let Some(next) = state.solo_next {
-            let jump = (input_ticks - next.rescale(tb).val).abs();
+            let jump = (input_ticks - next.rescale(tb).ticks()).abs();
             if jump > correction_cfg::seconds_to_ticks(DISCONTINUITY_S, tb) {
                 engine.reset_delay()?;
                 state.solo_next = None;
@@ -349,12 +339,9 @@ impl ResampleAudio {
             }
         }
         if state.solo_next.is_none() {
-            state.solo_next = Some(Ts {
-                val: input_ticks,
-                tb,
-            });
+            state.solo_next = Some(Ts::new(input_ticks, tb));
         }
-        let next_ticks = state.solo_next.unwrap().rescale(tb).val;
+        let next_ticks = state.solo_next.unwrap().rescale(tb).ticks();
         if self.compensation == 0.0 {
             let delay = unsafe { ffi::swr_get_delay(engine.swr, engine.in_rate as i64) };
             let delay_ticks = samples_to_ticks(delay, engine.in_rate, tb);
@@ -377,16 +364,11 @@ impl ResampleAudio {
             }
         }
         let mut out = engine.convert(Some(&frame), 0)?;
-        let stamp = Ts {
-            val: next_ticks,
-            tb,
-        };
+        let stamp = Ts::new(next_ticks, tb);
         set_frame_ts(&mut out, stamp);
-        let produced = samples_to_ticks(out.nb_samples as i64, engine.out_rate, tb).max(duration.val);
-        state.solo_next = Some(Ts {
-            val: next_ticks + produced,
-            tb,
-        });
+        let produced =
+            samples_to_ticks(out.nb_samples as i64, engine.out_rate, tb).max(duration.ticks());
+        state.solo_next = Some(Ts::new(next_ticks + produced, tb));
         self.io.push_from(input, output, Grain::Audio(out))
     }
 
@@ -406,7 +388,12 @@ impl ResampleAudio {
         let timeout_ticks = correction_cfg::seconds_to_ticks(self.params.timeout, state.tb).max(0);
         let quantum = self.duration_ticks(&state, state.last_samples.max(1));
         let slots = group
-            .conceal(&self.io.name, cursor, timeout_ticks, quantum)
+            .conceal(
+                &self.io.name,
+                cursor,
+                TsDelta::new(timeout_ticks, state.tb),
+                TsDelta::new(quantum, state.tb),
+            )
             .map_err(|e| self.io.error(NodePhase::Process, e))?;
         if slots.is_empty() {
             drop(state);
@@ -429,10 +416,7 @@ impl ResampleAudio {
                 let stamp = at;
                 let step = samples_to_ticks(frame.nb_samples as i64, rate, tb).max(1);
                 set_frame_ts(&mut frame, stamp);
-                at = Ts {
-                    val: stamp.val + step,
-                    tb,
-                };
+                at = Ts::new(stamp.ticks() + step, tb);
                 (frame, stamp)
             })
             .collect();
@@ -464,7 +448,7 @@ impl ResampleAudio {
         if let Some(group) = &self.group {
             state.start = correction_cfg::configure_member(group, &self.params, frame_tb)
                 .map_err(|e| self.io.error(NodePhase::Process, e))?;
-            state.tb = state.start.tb;
+            state.tb = state.start.timebase();
         } else {
             state.tb = frame_tb;
             state.start = Ts::invalid();
@@ -724,20 +708,20 @@ impl Engine {
 }
 
 fn frame_ts(frame: &AVFrame) -> Ts {
-    Ts {
-        val: frame.pts,
-        tb: AvpRational {
+    Ts::new(
+        frame.pts,
+        AvpRational {
             num: frame.time_base.num,
             den: frame.time_base.den,
         },
-    }
+    )
 }
 
 fn set_frame_ts(frame: &mut AVFrame, ts: Ts) {
-    frame.set_pts(ts.val);
+    frame.set_pts(ts.ticks());
     frame.set_time_base(ffi::AVRational {
-        num: ts.tb.num,
-        den: ts.tb.den,
+        num: ts.timebase().num,
+        den: ts.timebase().den,
     });
 }
 
@@ -859,7 +843,7 @@ mod tests {
     }
 
     fn pts_of(grain: &Grain) -> i64 {
-        grain.ts().val
+        grain.ts().ticks()
     }
 
     #[test]
@@ -924,14 +908,14 @@ mod tests {
         );
         node.push(audio(0, 960));
         node.step();
-        let shift = node.node.0.group.as_ref().unwrap().group_shift().unwrap().val;
+        let shift = node.node.0.group.as_ref().unwrap().group_shift().unwrap().ticks();
         node.node.0.clock.as_ref().unwrap().reset(5_000, MS);
         let out = node.step();
         assert_eq!(pts_of(&out), 20);
         let Grain::Audio(frame) = &out else { panic!("audio") };
         assert!(frame.nb_samples > 0);
         assert_eq!(
-            node.node.0.group.as_ref().unwrap().group_shift().unwrap().val,
+            node.node.0.group.as_ref().unwrap().group_shift().unwrap().ticks(),
             shift
         );
     }

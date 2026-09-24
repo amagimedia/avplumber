@@ -155,10 +155,7 @@ pub fn configure_member(
     group.set_output_tb(frame_tb);
     let tb = group.output_tb();
     group.configure(params.policy()?)?;
-    let start = Ts {
-        val: seconds_to_ticks(params.start_seconds(), tb),
-        tb,
-    };
+    let start = Ts::new(seconds_to_ticks(params.start_seconds(), tb), tb);
     group.set_start_ts(start);
     Ok(start)
 }

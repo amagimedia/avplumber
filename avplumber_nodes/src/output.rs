@@ -419,20 +419,12 @@ impl StreamOutput {
             stream.source_time_base
         };
         let to = stream.time_base;
-        let mut pts = Ts {
-            val: packet.pts,
-            tb: from,
-        }
-        .rescale(to);
-        let mut dts = Ts {
-            val: packet.dts,
-            tb: from,
-        }
-        .rescale(to);
+        let mut pts = Ts::new(packet.pts, from).rescale(to);
+        let mut dts = Ts::new(packet.dts, from).rescale(to);
 
         if dts.is_valid() {
             if let Some(prev) = stream.prev_dts
-                && dts.val <= prev
+                && dts.ticks() <= prev
             {
                 stream.forced_dts += 1;
                 if stream.forced_dts == 1 {
@@ -440,17 +432,17 @@ impl StreamOutput {
                         "{}: DTS {} of stream {index} is not past the previous {prev} in time base \
                          {}/{}, forcing it forward (further ones are only counted)",
                         self.io.name,
-                        dts.val,
+                        dts.ticks(),
                         to.num,
                         to.den
                     );
                 }
-                dts.val = prev + 1;
+                dts = Ts::new(prev + 1, dts.timebase());
             }
-            stream.prev_dts = Some(dts.val);
+            stream.prev_dts = Some(dts.ticks());
             // Whatever moved DTS must not leave it ahead of PTS.
-            if pts.is_valid() && pts.val < dts.val {
-                pts.val = dts.val;
+            if pts.is_valid() && pts.ticks() < dts.ticks() {
+                pts = Ts::new(dts.ticks(), pts.timebase());
             }
         }
         let duration = if packet.duration > 0 {
@@ -477,7 +469,7 @@ impl StreamOutput {
                 let offset = unsafe { ffi::avio_seek(pb, 0, SEEK_CUR) };
                 let stamp = if dts.is_valid() { dts } else { pts };
                 if offset >= 0 && stamp.is_valid() {
-                    if let Err(error) = table.record(stamp.rescale(MILLISECONDS).val, offset as u64)
+                    if let Err(error) = table.record(stamp.rescale(MILLISECONDS).ticks(), offset as u64)
                     {
                         return Err(self.io.error(
                             NodePhase::Process,

@@ -463,15 +463,7 @@ impl BlockingNode for StreamInput {
             )
         })?;
         let (pts, dts) = (packet.pts, packet.dts);
-        packet.set_ts_dts(
-            Ts {
-                val: pts,
-                tb: time_base,
-            },
-            Ts {
-                val: dts,
-                tb: time_base,
-            },
+        packet.set_ts_dts(Ts::new(pts, time_base), Ts::new(dts, time_base),
         );
 
         if let Some(seekable) = &self.seekable

@@ -562,10 +562,7 @@ impl Playback {
                 media_ms,
                 SeekTo::Time {
                     media_ms,
-                    resume_at: Some(Ts {
-                        val: media_ms,
-                        tb: MILLISECONDS,
-                    }),
+                    resume_at: Some(Ts::new(media_ms, MILLISECONDS)),
                 },
             ),
         };

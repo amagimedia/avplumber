@@ -169,11 +169,12 @@ impl ForceKeyframe {
             return false;
         };
         let ts = buffer.ts();
-        if !ts.is_valid() || ts.tb.num == 0 || ts.tb.den == 0 {
+        let tb = ts.timebase();
+        if !ts.is_valid() || tb.num == 0 || tb.den == 0 {
             return false;
         }
-        let slot = (ts.val as i128 * ts.tb.num as i128 * interval.den as i128)
-            / (ts.tb.den as i128 * interval.num as i128);
+        let slot = (ts.ticks() as i128 * tb.num as i128 * interval.den as i128)
+            / (tb.den as i128 * interval.num as i128);
         let slot = slot as i64;
         if self.last_slot.load(Ordering::Relaxed) == slot {
             return false;

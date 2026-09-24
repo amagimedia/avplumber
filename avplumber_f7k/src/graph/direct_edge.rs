@@ -624,7 +624,7 @@ mod tests {
         let mut pts = Vec::new();
         while let Some(item) = edge.try_take() {
             if let EdgeItem::Buffer(buf) = item {
-                pts.push(buf.ts().val);
+                pts.push(buf.ts().ticks());
             }
         }
         pts
@@ -706,7 +706,7 @@ mod tests {
         hop.set_consumer(node.clone());
 
         match hop.offer(stub(1)) {
-            Err((Push::Full, buf)) => assert_eq!(buf.ts().val, 1),
+            Err((Push::Full, buf)) => assert_eq!(buf.ts().ticks(), 1),
             Ok(()) => panic!("expected Full, offer succeeded"),
             Err((status, _)) => panic!("expected Full, got {status:?}"),
         }
@@ -721,7 +721,7 @@ mod tests {
         assert!(d1.is_full());
         assert!(d2.is_full());
         match d1.offer(stub(9)) {
-            Err((Push::Full, buf)) => assert_eq!(buf.ts().val, 9),
+            Err((Push::Full, buf)) => assert_eq!(buf.ts().ticks(), 9),
             Ok(()) => panic!("expected Full, offer succeeded"),
             Err((status, _)) => panic!("expected Full, got {status:?}"),
         }

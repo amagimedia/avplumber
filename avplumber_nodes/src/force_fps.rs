@@ -19,7 +19,7 @@ use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timebase::rational_from_json;
-use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::{NodeObjects, SisoNode, SisoPollAdapter};
 
 /// C++ prints its drop/duplicate statistics this often.
@@ -52,12 +52,8 @@ impl NodeSpec for ForceFpsSpec {
                         tb.num, tb.den
                     ));
                 }
-                let delta = Ts {
-                    val: 1,
-                    tb: fps.invert(),
-                }
-                .rescale(tb);
-                (tb, delta.val)
+                let delta = TsDelta::new(1, fps.invert()).rescale(tb);
+                (tb, delta.ticks())
             }
             None => (fps.invert(), 1),
         };
@@ -226,7 +222,7 @@ impl ForceFps {
             out.push(buffer);
             return out;
         }
-        let in_ts = ts.rescale(self.timebase).val;
+        let in_ts = ts.rescale(self.timebase).ticks();
 
         if let (Some(last), Some(mut next)) = (grid.last_ts, grid.next_ts) {
             let delta = in_ts - last;
@@ -249,10 +245,7 @@ impl ForceFps {
                                 strip_captions(&mut dup);
                                 self.duplicated.fetch_add(1, Ordering::Relaxed);
                             }
-                            dup.set_ts(Ts {
-                                val: next,
-                                tb: self.timebase,
-                            });
+                            dup.set_ts(Ts::new(next, self.timebase));
                             out.push(dup);
                             grid.last_unused = false;
                             self.total_out.fetch_add(1, Ordering::Relaxed);
@@ -279,10 +272,7 @@ impl ForceFps {
             }
         }
 
-        buffer.set_ts(Ts {
-            val: in_ts,
-            tb: self.timebase,
-        });
+        buffer.set_ts(Ts::new(in_ts, self.timebase));
         self.set_last(grid, buffer.clone(), false);
         grid.last_ts = Some(in_ts);
         grid.next_ts = Some(in_ts + self.frame_delta);
@@ -413,7 +403,7 @@ mod tests {
             let mut out = Vec::new();
             while let Some(item) = self.output.try_take() {
                 if let EdgeItem::Buffer(media) = item {
-                    out.push(media.ts().rescale(self.node.inner().timebase).val);
+                    out.push(media.ts().rescale(self.node.inner().timebase).ticks());
                 }
             }
             out
@@ -495,7 +485,7 @@ mod tests {
         while let Some(item) = h.output.try_take() {
             match item {
                 EdgeItem::Buffer(media) => {
-                    frames.push(media.ts().rescale(h.node.inner().timebase).val)
+                    frames.push(media.ts().rescale(h.node.inner().timebase).ticks())
                 }
                 EdgeItem::Event(EdgeEvent::FlushStart) => events.push("start"),
                 EdgeItem::Event(EdgeEvent::FlushStop { .. }) => events.push("stop"),

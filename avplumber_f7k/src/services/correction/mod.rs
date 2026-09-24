@@ -7,10 +7,64 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::graph::AvpRational;
-use crate::graph::timestamp::{self, Ts, ts_cmp};
+use crate::graph::timestamp::{self, Ts, TsDelta};
 use crate::services::clock::SyncGroup;
 
-pub use converge::{Action, Convergence, Decision, MemberKind, Policy};
+pub use converge::{Convergence, MemberKind, Policy};
+
+/// One correction step, in the group's timebase. Points and spans stay distinct
+/// so a shift cannot be stored as the next presentation time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Stamp the input on the cursor.
+    Emit { emit_pts: Ts },
+    /// Discard the input. The cursor stays.
+    Drop,
+    /// Emit one repeated quantum at the cursor. The input stays pending.
+    Repeat { emit_pts: Ts },
+    /// Stamp the input on the cursor and time-scale it by `sample_delta`.
+    Stretch { emit_pts: Ts, sample_delta: TsDelta },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decision {
+    pub action: Action,
+    pub local_shift: TsDelta,
+    pub group_shift: TsDelta,
+    /// Cursor after this action.
+    pub next_ts: Ts,
+    /// The input jumped past `rebase_threshold`. The audio executor rebuilds
+    /// the resampler instead of stretching across that jump.
+    pub rebased: bool,
+}
+
+fn stamp(tb: AvpRational, decision: converge::Decision) -> Decision {
+    let point = |ticks| Ts::new(ticks, tb);
+    let span = |ticks| TsDelta::new(ticks, tb);
+    let action = match decision.action {
+        converge::Action::Emit { emit_pts } => Action::Emit {
+            emit_pts: point(emit_pts),
+        },
+        converge::Action::Drop => Action::Drop,
+        converge::Action::Repeat { emit_pts } => Action::Repeat {
+            emit_pts: point(emit_pts),
+        },
+        converge::Action::Stretch {
+            emit_pts,
+            sample_delta,
+        } => Action::Stretch {
+            emit_pts: point(emit_pts),
+            sample_delta: span(sample_delta),
+        },
+    };
+    Decision {
+        action,
+        local_shift: span(decision.local_shift),
+        group_shift: span(decision.group_shift),
+        next_ts: point(decision.next_ts),
+        rebased: decision.rebased,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CorrectionSnapshot {
@@ -166,20 +220,18 @@ impl CorrectionGroup {
         g.locked_shift = true;
     }
 
-    pub fn group_shift(&self) -> Option<Ts> {
+    pub fn group_shift(&self) -> Option<TsDelta> {
         let g = self.inner.lock().unwrap();
-        g.converge.group_shift().map(|val| Ts {
-            val,
-            tb: g.output_tb,
-        })
+        g.converge
+            .group_shift()
+            .map(|val| TsDelta::new(val, g.output_tb))
     }
 
-    pub fn local_shift(&self, member: &str) -> Option<Ts> {
+    pub fn local_shift(&self, member: &str) -> Option<TsDelta> {
         let g = self.inner.lock().unwrap();
-        g.converge.local_shift(member).map(|val| Ts {
-            val,
-            tb: g.output_tb,
-        })
+        g.converge
+            .local_shift(member)
+            .map(|val| TsDelta::new(val, g.output_tb))
     }
 
     /// One correction step. Timestamps are rescaled into the group's timebase.
@@ -189,33 +241,36 @@ impl CorrectionGroup {
         member: &str,
         input_pts: Ts,
         next_ts: Ts,
-        duration: Ts,
-        dt: Ts,
+        duration: TsDelta,
+        dt: TsDelta,
     ) -> Result<Decision, String> {
         let mut g = self.inner.lock().unwrap();
         apply_rates(&mut g);
         let tb = g.output_tb;
-        let ticks = |ts: Ts| -> Result<i64, String> {
+        let point = |ts: Ts| -> Result<i64, String> {
             if !ts.is_valid() {
                 return Err("invalid correction timestamp".into());
             }
-            Ok(ts.rescale(tb).val)
+            Ok(ts.rescale(tb).ticks())
+        };
+        let span = |delta: TsDelta| -> Result<i64, String> {
+            if !delta.is_valid() {
+                return Err("invalid correction timestamp".into());
+            }
+            Ok(delta.rescale(tb).ticks())
         };
         let proposal = converge::Proposal {
             member: member.to_string(),
-            input_pts: ticks(input_pts)?,
-            next_ts: ticks(next_ts)?,
-            duration: ticks(duration)?,
-            dt: if dt.is_valid() { ticks(dt)? } else { 0 },
+            input_pts: point(input_pts)?,
+            next_ts: point(next_ts)?,
+            duration: span(duration)?,
+            dt: if dt.is_valid() { span(dt)? } else { 0 },
         };
-        let decision = g.converge.propose(&proposal)?;
+        let raw = g.converge.propose(&proposal)?;
         if let Some(m) = g.members.get_mut(member) {
-            m.next_ts = Ts {
-                val: decision.next_ts,
-                tb,
-            };
+            m.next_ts = Ts::new(raw.next_ts, tb);
         }
-        Ok(decision)
+        Ok(stamp(tb, raw))
     }
 
     /// Backup slots while `expected` is more than `timeout` ahead of `cursor`.
@@ -224,31 +279,35 @@ impl CorrectionGroup {
         &self,
         member: &str,
         cursor: Ts,
-        timeout: i64,
-        quantum: i64,
+        timeout: TsDelta,
+        quantum: TsDelta,
     ) -> Result<Vec<Ts>, String> {
         let mut g = self.inner.lock().unwrap();
         let tb = g.output_tb;
         if !g.expected_ts.is_valid() || !cursor.is_valid() {
             return Ok(Vec::new());
         }
-        let expected = g.expected_ts.rescale(tb).val;
-        let cursor_ticks = cursor.rescale(tb).val;
+        let expected = g.expected_ts.rescale(tb).ticks();
+        let cursor_ticks = cursor.rescale(tb).ticks();
+        let timeout = if timeout.is_valid() {
+            timeout.rescale(tb).ticks()
+        } else {
+            0
+        };
+        let quantum = if quantum.is_valid() {
+            quantum.rescale(tb).ticks()
+        } else {
+            0
+        };
         let pts = g
             .converge
             .fill(member, cursor_ticks, expected, timeout, quantum, 5)?;
         if let Some(last) = pts.last() {
             if let Some(m) = g.members.get_mut(member) {
-                m.next_ts = Ts {
-                    val: last + quantum,
-                    tb,
-                };
+                m.next_ts = Ts::new(last + quantum, tb);
             }
         }
-        Ok(pts
-            .into_iter()
-            .map(|val| Ts { val, tb })
-            .collect())
+        Ok(pts.into_iter().map(|val| Ts::new(val, tb)).collect())
     }
 
     pub fn set_output_tb(&self, tb: AvpRational) {
@@ -314,12 +373,7 @@ impl CorrectionGroup {
             .get_mut(member)
             .ok_or_else(|| format!("unknown member {member}"))?;
         m.next_ts = next_ts;
-        if !g.live_driven
-            && (!g.expected_ts.is_valid()
-                || (next_ts.is_valid()
-                    && ts_cmp(next_ts.val, next_ts.tb, g.expected_ts.val, g.expected_ts.tb)
-                        .is_gt()))
-        {
+        if !g.live_driven && (!g.expected_ts.is_valid() || next_ts > g.expected_ts) {
             g.expected_ts = next_ts;
         }
         g.generation += 1;
@@ -338,10 +392,7 @@ impl CorrectionGroup {
             let Some(position) = clock.live_position(output_tb) else {
                 return;
             };
-            let candidate = Ts {
-                val: position,
-                tb: output_tb,
-            };
+            let candidate = Ts::new(position, output_tb);
 
             let mut g = self.inner.lock().unwrap();
             if g.generation != generation || g.output_tb != output_tb {
@@ -352,15 +403,7 @@ impl CorrectionGroup {
                 g.live_driven = true;
                 changed = true;
             }
-            if !g.expected_ts.is_valid()
-                || ts_cmp(
-                    candidate.val,
-                    candidate.tb,
-                    g.expected_ts.val,
-                    g.expected_ts.tb,
-                )
-                .is_gt()
-            {
+            if !g.expected_ts.is_valid() || candidate > g.expected_ts {
                 g.expected_ts = candidate;
                 changed = true;
             }
@@ -423,17 +466,14 @@ mod tests {
         let clock = SyntheticClock::new();
         clock.reset(1_000, MILLIS);
         correction.set_output_tb(MILLIS);
-        correction.set_start_ts(Ts {
-            val: 1_000,
-            tb: MILLIS,
-        });
+        correction.set_start_ts(Ts::new(1_000, MILLIS));
 
         clock.set_position(1_030);
         correction.advance_live(&clock);
 
         let advanced = correction.snapshot().expected_ts;
-        assert_eq!(advanced.tb, MILLIS);
-        assert_eq!(advanced.val, 1_030);
+        assert_eq!(advanced.timebase(), MILLIS);
+        assert_eq!(advanced.ticks(), 1_030);
     }
 
     #[test]
@@ -442,19 +482,13 @@ mod tests {
         let clock = Arc::new(SyntheticClock::new());
         clock.reset(2_000, MILLIS);
         correction.set_output_tb(MILLIS);
-        correction.set_start_ts(Ts {
-            val: 2_000,
-            tb: MILLIS,
-        });
+        correction.set_start_ts(Ts::new(2_000, MILLIS));
         correction.register("video");
         let cursor = correction.member_cursor("video").unwrap();
         correction
             .commit(
                 "video",
-                Ts {
-                    val: 2_010,
-                    tb: MILLIS,
-                },
+                Ts::new(2_010, MILLIS),
                 cursor.generation,
             )
             .unwrap();
@@ -466,10 +500,10 @@ mod tests {
                 let correction = correction.clone();
                 let clock = clock.clone();
                 thread::spawn(move || {
-                    let mut previous = correction.snapshot().expected_ts.val;
+                    let mut previous = correction.snapshot().expected_ts.ticks();
                     for _ in 0..100 {
                         correction.advance_live(clock.as_ref());
-                        let current = correction.snapshot().expected_ts.val;
+                        let current = correction.snapshot().expected_ts.ticks();
                         assert!(current >= previous);
                         previous = current;
                     }
@@ -485,17 +519,11 @@ mod tests {
         assert_eq!(snapshot.output_tb, MILLIS);
         assert_eq!(
             snapshot.expected_ts,
-            Ts {
-                val: 3_000,
-                tb: MILLIS
-            }
+            Ts::new(3_000, MILLIS)
         );
         assert_eq!(
             correction.member_cursor("video").unwrap().next_ts,
-            Ts {
-                val: 2_010,
-                tb: MILLIS,
-            }
+            Ts::new(2_010, MILLIS)
         );
     }
 
@@ -503,10 +531,7 @@ mod tests {
     fn file_clock_cannot_advance_live_correction() {
         let correction = CorrectionGroup::new("file".into());
         correction.set_output_tb(MILLIS);
-        correction.set_start_ts(Ts {
-            val: 1_000,
-            tb: MILLIS,
-        });
+        correction.set_start_ts(Ts::new(1_000, MILLIS));
         let clock = SourceTimeClock::new();
         clock.reset(1_000, MILLIS);
 
@@ -514,10 +539,7 @@ mod tests {
 
         assert_eq!(
             correction.snapshot().expected_ts,
-            Ts {
-                val: 1_000,
-                tb: MILLIS
-            }
+            Ts::new(1_000, MILLIS)
         );
     }
 
@@ -525,7 +547,7 @@ mod tests {
     fn live_member_cursor_can_run_ahead_without_advancing_wall_expected() {
         let correction = CorrectionGroup::new("live".into());
         correction.set_output_tb(MILLIS);
-        correction.set_start_ts(Ts { val: 0, tb: MILLIS });
+        correction.set_start_ts(Ts::new(0, MILLIS));
         correction.register("sentinel");
         let clock = SyntheticClock::new();
         clock.reset(0, MILLIS);
@@ -536,27 +558,18 @@ mod tests {
         correction
             .commit(
                 "sentinel",
-                Ts {
-                    val: 40,
-                    tb: MILLIS,
-                },
+                Ts::new(40, MILLIS),
                 cursor.generation,
             )
             .unwrap();
 
         assert_eq!(
             correction.snapshot().expected_ts,
-            Ts {
-                val: 30,
-                tb: MILLIS
-            }
+            Ts::new(30, MILLIS)
         );
         assert_eq!(
             correction.member_cursor("sentinel").unwrap().next_ts,
-            Ts {
-                val: 40,
-                tb: MILLIS
-            }
+            Ts::new(40, MILLIS)
         );
     }
 
@@ -596,10 +609,7 @@ mod tests {
     #[test]
     fn output_timebase_change_retries_live_candidate_coherently() {
         let correction = Arc::new(CorrectionGroup::new("race".into()));
-        correction.set_start_ts(Ts {
-            val: 1_000_000,
-            tb: MICROS,
-        });
+        correction.set_start_ts(Ts::new(1_000_000, MICROS));
         let entered = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
         let clock = Arc::new(RacingClock {
@@ -622,10 +632,7 @@ mod tests {
         assert_eq!(snapshot.output_tb, MILLIS);
         assert_eq!(
             snapshot.expected_ts,
-            Ts {
-                val: 3_000,
-                tb: MILLIS
-            }
+            Ts::new(3_000, MILLIS)
         );
         assert_eq!(
             clock.calls.load(std::sync::atomic::Ordering::SeqCst),

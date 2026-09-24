@@ -49,7 +49,7 @@ fn expect_spec_width(edge: &dyn Edge, expected: i32) {
 fn expect_buffer_pts(edge: &dyn Edge, expected: i64) {
     assert!(matches!(
         edge.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == expected
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == expected
     ));
 }
 
@@ -89,11 +89,11 @@ fn egress_keeps_logical_arc_and_accepted_media_while_fencing_old_writer() {
     assert!(!logical.is_closed());
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == 10
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == 10
     ));
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == 12
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == 12
     ));
     assert!(logical.try_take().is_none(), "restart EOF must be removed");
 }
@@ -212,7 +212,7 @@ fn ingress_preserves_bounded_media_and_removes_stale_terminal_state() {
     assert!(logical.is_full());
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == 4
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == 4
     ));
     assert!(logical.try_take().is_none());
 }
@@ -1407,11 +1407,11 @@ fn supervisor_restart_preserves_egress_arc_media_and_suppresses_eof() {
     assert_eq!(fresh.push(media(23)), Push::Accepted);
     assert!(matches!(
         external.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == 21
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == 21
     ));
     assert!(matches!(
         external.try_take(),
-        Some(EdgeItem::Buffer(buf)) if buf.ts().val == 23
+        Some(EdgeItem::Buffer(buf)) if buf.ts().ticks() == 23
     ));
     assert!(external.try_take().is_none());
     inst.stop_group("g").unwrap();
@@ -1468,7 +1468,7 @@ fn buffered_stop_start_and_manual_restart_keep_nodes_edges_and_media_on_one_gene
     assert_eq!(generation_1.push(media(1)), Push::Accepted);
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buffer)) if buffer.ts().val == 1
+        Some(EdgeItem::Buffer(buffer)) if buffer.ts().ticks() == 1
     ));
     inst.stop_group("g").unwrap();
 
@@ -1478,7 +1478,7 @@ fn buffered_stop_start_and_manual_restart_keep_nodes_edges_and_media_on_one_gene
     assert_eq!(generation_2.push(media(2)), Push::Accepted);
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buffer)) if buffer.ts().val == 2
+        Some(EdgeItem::Buffer(buffer)) if buffer.ts().ticks() == 2
     ));
 
     inst.restart_group("g").unwrap();
@@ -1490,7 +1490,7 @@ fn buffered_stop_start_and_manual_restart_keep_nodes_edges_and_media_on_one_gene
     assert_eq!(generation_3.push(media(3)), Push::Accepted);
     assert!(matches!(
         logical.try_take(),
-        Some(EdgeItem::Buffer(buffer)) if buffer.ts().val == 3
+        Some(EdgeItem::Buffer(buffer)) if buffer.ts().ticks() == 3
     ));
     inst.stop_group("g").unwrap();
 }

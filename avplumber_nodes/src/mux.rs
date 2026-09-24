@@ -46,8 +46,7 @@ use avplumber_f7k::graph::pad::{NodePads, PadDecl};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
 use avplumber_f7k::graph::spec::{MuxStream, PacketSpec, Spec};
 use avplumber_f7k::graph::timebase::{MILLISECONDS, tb_cmp};
-use avplumber_f7k::graph::timestamp::Ts;
-use avplumber_f7k::graph::timestamp::ts_cmp;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::{Io, PollNode, Polling};
 
 #[cfg(feature = "ffmpeg")]
@@ -132,7 +131,7 @@ impl NodeSpec for MuxSpec {
                 warned: false,
                 known_to_be_broken: false,
                 prev_dts: Ts::invalid(),
-                shift: 0,
+                shift: TsDelta::zero(AvpRational { num: 1, den: 1 }),
                 shifted_for: 0,
             });
         }
@@ -216,7 +215,7 @@ struct Input {
     /// Last DTS emitted for this stream, for `fix_timestamps`.
     prev_dts: Ts,
     /// How far the last packet had to be moved, in `prev_dts`'s time base.
-    shift: i64,
+    shift: TsDelta,
     /// Consecutive shifted packets.
     shifted_for: u64,
 }
@@ -238,7 +237,7 @@ impl Input {
         self.warned = false;
         self.known_to_be_broken = false;
         self.prev_dts = Ts::invalid();
-        self.shift = 0;
+        self.shift = TsDelta::zero(AvpRational { num: 1, den: 1 });
         self.shifted_for = 0;
     }
 }
@@ -250,7 +249,7 @@ struct State {
     /// Whether the [`Spec::Mux`] description has gone out.
     published: bool,
     /// The amount every stream is moved by, once the fixing turned severe.
-    global_shift: Ts,
+    global_shift: TsDelta,
     /// The deadline armed on the previous poll, i.e. the C++ `wait(max_wait)`
     /// this node is in the middle of.
     wait_until: Option<Instant>,
@@ -263,10 +262,7 @@ impl State {
             inputs,
             pending: None,
             published: false,
-            global_shift: Ts {
-                val: 0,
-                tb: AvpRational { num: 1, den: 1 },
-            },
+            global_shift: TsDelta::zero(AvpRational { num: 1, den: 1 }),
             wait_until: None,
             dropped_nopts: 0,
         }
@@ -321,10 +317,7 @@ impl PollNode for StreamMuxer {
         }
         state.pending = None;
         state.published = false;
-        state.global_shift = Ts {
-            val: 0,
-            tb: AvpRational { num: 1, den: 1 },
-        };
+        state.global_shift = TsDelta::zero(AvpRational { num: 1, den: 1 });
         state.wait_until = None;
         state.dropped_nopts = 0;
     }
@@ -434,7 +427,7 @@ impl PollNode for StreamMuxer {
                     input.warned = false;
                     candidates += 1;
                     if least
-                        .is_none_or(|(_, best)| ts_cmp(ts.val, ts.tb, best.val, best.tb).is_lt())
+                        .is_none_or(|(_, best)| ts < best)
                     {
                         least = Some((i, ts));
                     }
@@ -566,7 +559,7 @@ impl StreamMuxer {
                     // header for these streams, and what a muxer should do with a
                     // flush belongs with seek support (out of scope).
                     input.prev_dts = Ts::invalid();
-                    input.shift = 0;
+                    input.shift = TsDelta::zero(AvpRational { num: 1, den: 1 });
                     input.shifted_for = 0;
                 }
                 Some(EdgeItem::Event(EdgeEvent::FlushStop { .. })) => {}
@@ -637,7 +630,7 @@ impl StreamMuxer {
     ) -> Grace {
         // Anchored in the *media* time of the least packet, like C++: the budget
         // is stream time, and only the waiting itself is wall clock.
-        let now_ms = least_ts.rescale(MILLISECONDS).val;
+        let now_ms = least_ts.rescale(MILLISECONDS).ticks();
         let least_name = state.inputs[least_i].name.clone();
         let total = state.inputs.len();
         let sync_wait = self.sync_wait_max_ms;
@@ -716,42 +709,39 @@ impl StreamMuxer {
         if !dts.is_valid() {
             return;
         }
-        if global_shift.val != 0 {
-            dts = dts + global_shift.rescale(dts.tb);
+        if global_shift.ticks() != 0 {
+            dts = dts + global_shift.rescale(dts.timebase());
             if pts.is_valid() {
-                pts = pts + global_shift.rescale(pts.tb);
+                pts = pts + global_shift.rescale(pts.timebase());
             }
         }
         if input.prev_dts.is_valid() {
-            if ts_cmp(dts.val, dts.tb, input.prev_dts.val, input.prev_dts.tb).is_le() {
+            if dts <= input.prev_dts {
                 // C++ compares raw values, assuming one time base per stream; the
                 // rescale keeps this right if a producer ever changes its own.
-                let forced = input.prev_dts.rescale(dts.tb).val + 1;
+                let forced = input.prev_dts.rescale(dts.timebase()).ticks() + 1;
                 log::info!(
                     "{}: non-increasing DTS on `{}`: {} -> {}, fixing to {forced}",
                     self.io.name,
                     input.name,
-                    input.prev_dts.val,
-                    dts.val
+                    input.prev_dts.ticks(),
+                    dts.ticks()
                 );
-                input.shift = forced - dts.val;
+                input.shift = TsDelta::new(forced - dts.ticks(), dts.timebase());
                 input.shifted_for += 1;
-                dts = Ts {
-                    val: forced,
-                    tb: dts.tb,
-                };
+                dts = Ts::new(forced, dts.timebase());
             } else {
-                input.shift = 0;
+                input.shift = TsDelta::zero(dts.timebase());
                 input.shifted_for = 0;
             }
         }
-        if pts.is_valid() && ts_cmp(pts.val, pts.tb, dts.val, dts.tb).is_lt() {
+        if pts.is_valid() && pts < dts {
             log::info!(
                 "{}: PTS < DTS on `{}`: {} < {}, fixing",
                 self.io.name,
                 input.name,
-                pts.val,
-                dts.val
+                pts.ticks(),
+                dts.ticks()
             );
             pts = dts;
         }
@@ -770,30 +760,24 @@ impl StreamMuxer {
         {
             return;
         }
-        let mut max_shift = Ts {
-            val: 0,
-            tb: AvpRational { num: 1, den: 1 },
-        };
+        let mut max_shift = TsDelta::zero(AvpRational { num: 1, den: 1 });
         let mut coarsest: Option<AvpRational> = None;
         for input in state
             .inputs
             .iter_mut()
             .filter(|input| input.prev_dts.is_valid())
         {
-            let tb = input.prev_dts.tb;
+            let tb = input.prev_dts.timebase();
             log::info!(
                 "{}: `{}` was shifted by {} in {}/{}",
                 self.io.name,
                 input.name,
-                input.shift,
+                input.shift.ticks(),
                 tb.num,
                 tb.den
             );
-            if ts_cmp(input.shift, tb, max_shift.val, max_shift.tb).is_gt() {
-                max_shift = Ts {
-                    val: input.shift,
-                    tb,
-                };
+            if input.shift > max_shift {
+                max_shift = input.shift;
             }
             // The *coarsest* time base wins, so the shared shift cannot be rounded
             // to a different amount per stream — which is the desync this whole
@@ -801,24 +785,21 @@ impl StreamMuxer {
             if coarsest.is_none_or(|best| tb_cmp(tb, best).is_gt()) {
                 coarsest = Some(tb);
             }
-            input.shift = 0;
+            input.shift = TsDelta::zero(tb);
             input.shifted_for = 0;
         }
         let Some(coarsest) = coarsest else { return };
         let target = max_shift + state.global_shift;
         let mut shifted = target.rescale(coarsest);
-        if ts_cmp(shifted.val, shifted.tb, target.val, target.tb).is_lt() {
+        if shifted < target {
             // Never round down: a shift that shrinks re-introduces the collision
             // it was computed to fix.
-            shifted = Ts {
-                val: shifted.val + 1,
-                tb: coarsest,
-            };
+            shifted = TsDelta::new(shifted.ticks() + 1, coarsest);
         }
         log::info!(
             "{}: shifting everything by {} in {}/{}",
             self.io.name,
-            shifted.val,
+            shifted.ticks(),
             coarsest.num,
             coarsest.den
         );
@@ -1030,7 +1011,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(item) = self.out.try_take() {
                 items.push(match item {
-                    EdgeItem::Buffer(buffer) => Out::Buffer(order_ts(&buffer).val),
+                    EdgeItem::Buffer(buffer) => Out::Buffer(order_ts(&buffer).ticks()),
                     EdgeItem::Event(EdgeEvent::Spec(Spec::Mux { streams })) => {
                         Out::Mux(streams.len())
                     }

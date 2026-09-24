@@ -43,7 +43,7 @@ fn drain(edge: &dyn Edge) -> Drained {
     let mut out = Drained::default();
     while let Some(item) = edge.try_take() {
         match item {
-            EdgeItem::Buffer(buf) => out.buffers.push(buf.ts().val),
+            EdgeItem::Buffer(buf) => out.buffers.push(buf.ts().ticks()),
             EdgeItem::Event(EdgeEvent::Spec(_)) => out.specs += 1,
             EdgeItem::Event(_) => out.other_events += 1,
         }

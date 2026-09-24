@@ -306,7 +306,7 @@ mod tests {
 
         fn on_buffer(&self, buffer: Grain) -> Result<Vec<Grain>, NodeError> {
             self.saw("buffer");
-            if buffer.ts().val < 0 {
+            if buffer.ts().ticks() < 0 {
                 return Err(self.io.error(NodePhase::Process, "negative pts"));
             }
             Ok(vec![buffer])
@@ -319,7 +319,7 @@ mod tests {
         fn on_flush_stop(&self, resume_at: Option<Ts>) {
             self.saw("flush-stop");
             self.resume_seen
-                .store(resume_at.map_or(i64::MIN, |ts| ts.val), Ordering::SeqCst);
+                .store(resume_at.map_or(i64::MIN, |ts| ts.ticks()), Ordering::SeqCst);
         }
 
         fn on_eof(&self) -> Result<EofAction, NodeError> {
@@ -405,10 +405,7 @@ mod tests {
 
         input.push_event(EdgeEvent::FlushStart);
         input.push_event(EdgeEvent::FlushStop {
-            resume_at: Some(Ts {
-                val: 42,
-                tb: AvpRational { num: 1, den: 1000 },
-            }),
+            resume_at: Some(Ts::new(42, AvpRational { num: 1, den: 1000 })),
         });
         input.push_event(EdgeEvent::Eof);
         assert_eq!(node.process().unwrap(), Processed::Again, "flush start");

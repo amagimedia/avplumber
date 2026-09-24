@@ -39,7 +39,6 @@ use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::{PacketSpec, Spec};
 use avplumber_f7k::graph::timestamp::Ts;
-use avplumber_f7k::graph::timestamp::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
@@ -369,8 +368,8 @@ impl InputHandler for Decoder {
             log::debug!(
                 "{}: dropping decoded frames before {}/{}",
                 self.io.name,
-                ts.val,
-                fmt_tb(ts.tb)
+                ts.ticks(),
+                fmt_tb(ts.timebase())
             );
         }
         state.resume_at = resume_at;
@@ -520,7 +519,7 @@ impl Decoder {
         if !ts.is_valid() {
             return false;
         }
-        if ts_cmp(ts.val, ts.tb, cutoff.val, cutoff.tb).is_lt() {
+        if ts < cutoff {
             state.dropped_before_resume += 1;
             return true;
         }
@@ -529,9 +528,9 @@ impl Decoder {
                 "{}: dropped {} frame(s) before {}/{}, resuming at {}",
                 self.io.name,
                 state.dropped_before_resume,
-                cutoff.val,
-                fmt_tb(cutoff.tb),
-                ts.val
+                cutoff.ticks(),
+                fmt_tb(cutoff.timebase()),
+                ts.ticks()
             );
         }
         state.resume_at = None;
@@ -545,21 +544,18 @@ impl Decoder {
     fn stamp(&self, state: &mut State, buffer: Grain) -> Grain {
         let mut buffer = buffer;
         if let Grain::Video(frame) | Grain::Audio(frame) = &mut buffer {
-            let ts = Ts {
-                val: frame.pts,
-                tb: state.time_base,
-            };
+            let ts = Ts::new(frame.pts, state.time_base);
             frame.set_ts(ts);
             if !state.last_key
                 && state.last_pts.is_valid()
                 && ts.is_valid()
-                && ts_cmp(ts.val, ts.tb, state.last_pts.val, state.last_pts.tb).is_lt()
+                && ts < state.last_pts
             {
                 log::warn!(
                     "{}: got an out of order frame from the decoder: {} -> {}",
                     self.io.name,
-                    state.last_pts.val,
-                    ts.val
+                    state.last_pts.ticks(),
+                    ts.ticks()
                 );
             }
             if ts.is_valid() {
@@ -755,10 +751,7 @@ mod tests {
     }
 
     fn ms(val: i64) -> Ts {
-        Ts {
-            val,
-            tb: AvpRational { num: 1, den: 1000 },
-        }
+        Ts::new(val, AvpRational { num: 1, den: 1000 })
     }
 
     /// The cutoff drops what lies below it, in any time base, and the first
@@ -768,10 +761,7 @@ mod tests {
         let dec = decoder();
         let state = &mut *dec.state.lock().unwrap();
         // 1/100 s: the same instant as 10 ms, in a coarser base.
-        state.resume_at = Some(Ts {
-            val: 1,
-            tb: AvpRational { num: 1, den: 100 },
-        });
+        state.resume_at = Some(Ts::new(1, AvpRational { num: 1, den: 100 }));
 
         assert!(dec.below_resume_at(state, &test_media(AvpMediaType::VIDEO, 5)));
         assert!(dec.below_resume_at(state, &test_media(AvpMediaType::VIDEO, 9)));
@@ -808,7 +798,7 @@ mod tests {
         let dec = decoder();
         dec.on_flush_stop(Some(ms(200)));
         assert_eq!(
-            dec.state.lock().unwrap().resume_at.map(|ts| ts.val),
+            dec.state.lock().unwrap().resume_at.map(|ts| ts.ticks()),
             Some(200)
         );
         dec.on_flush();

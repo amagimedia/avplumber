@@ -46,7 +46,6 @@ use avplumber_f7k::graph::node::Processed;
 use avplumber_f7k::graph::pad::NodePads;
 use avplumber_f7k::graph::spec::Spec;
 use avplumber_f7k::graph::timestamp::Ts;
-use avplumber_f7k::graph::timestamp::ts_cmp;
 use avplumber_f7k::libav::codec;
 use avplumber_f7k::libav::dict::Options;
 use avplumber_f7k::libav::pump::{Progress, Pump, PumpKind};
@@ -408,13 +407,13 @@ impl Encoder {
         let ts = buffer.ts();
         if state.prev_pts.is_valid()
             && ts.is_valid()
-            && ts_cmp(ts.val, ts.tb, state.prev_pts.val, state.prev_pts.tb).is_lt()
+            && ts < state.prev_pts
         {
             log::warn!(
                 "{}: input PTS went backwards {} -> {}, discarding frame",
                 self.io.name,
-                state.prev_pts.val,
-                ts.val
+                state.prev_pts.ticks(),
+                ts.ticks()
             );
             return;
         }
@@ -423,7 +422,7 @@ impl Encoder {
         // instead of being silently misread.
         if let Grain::Video(frame) | Grain::Audio(frame) = &mut buffer
             && ts.is_valid()
-            && ts.tb != time_base
+            && ts.timebase() != time_base
         {
             frame.set_ts(ts.rescale(time_base));
         }
@@ -480,14 +479,8 @@ impl Encoder {
         let mut buffer = buffer;
         let tb = state.time_base;
         if let Grain::Packet(packet) = &mut buffer {
-            let mut pts = Ts {
-                val: packet.pts,
-                tb,
-            };
-            let mut dts = Ts {
-                val: packet.dts,
-                tb,
-            };
+            let mut pts = Ts::new(packet.pts, tb);
+            let mut dts = Ts::new(packet.dts, tb);
             if self.params.timestamps_passthrough {
                 match state.input_pts.pop_front() {
                     // The HACK C++ has for the `pcm_*` "encoders", which emit one

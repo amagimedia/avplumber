@@ -8,9 +8,8 @@ use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use avplumber_f7k::graph::media::AvpRational;
 use avplumber_f7k::graph::timebase::MILLISECONDS;
-use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 
 pub struct Reporter {
     history: Mutex<Option<std::fs::File>>,
@@ -65,7 +64,7 @@ impl Reporter {
 
     /// A shift change. Offsets are milliseconds relative to `start`, and the
     /// first record is forced to `changed_at = 0`, as the C++ history is.
-    pub fn shift_changed(&self, changed_at: Ts, shift: i64, start: Ts) {
+    pub fn shift_changed(&self, changed_at: Ts, shift: TsDelta, start: Ts) {
         if !self.due() {
             return;
         }
@@ -75,7 +74,7 @@ impl Reporter {
             at_ms = 0;
             state.first = false;
         }
-        let shift_ms = ticks_to_ms(shift, changed_at.tb) - to_ms(start);
+        let shift_ms = to_ms_delta(shift) - to_ms(start);
         let wall_ms = state.wall_offset_ms.unwrap_or(0);
         let start_ms = to_ms(start);
         drop(state);
@@ -176,11 +175,14 @@ fn to_ms(ts: Ts) -> i64 {
     if !ts.is_valid() {
         return 0;
     }
-    ts.rescale(MILLISECONDS).val
+    ts.rescale(MILLISECONDS).ticks()
 }
 
-fn ticks_to_ms(ticks: i64, tb: AvpRational) -> i64 {
-    to_ms(Ts { val: ticks, tb })
+fn to_ms_delta(delta: TsDelta) -> i64 {
+    if !delta.is_valid() {
+        return 0;
+    }
+    delta.rescale(MILLISECONDS).ticks()
 }
 
 fn unix_ms() -> i64 {

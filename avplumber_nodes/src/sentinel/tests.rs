@@ -14,7 +14,7 @@ use avplumber_f7k::graph::grain::{Grain, test_media};
 use avplumber_f7k::graph::media::{AvpMediaType, AvpRational};
 use avplumber_f7k::graph::node::{Node, Polled};
 use avplumber_f7k::graph::poll_ctx::NodePollContext;
-use avplumber_f7k::graph::timestamp::Ts;
+use avplumber_f7k::graph::timestamp::{Ts, TsDelta};
 use avplumber_f7k::node_api::Polling;
 use avplumber_f7k::services::correction::{Action, MemberKind};
 use avplumber_f7k::Instance;
@@ -117,7 +117,11 @@ fn content_of(grain: &Grain) -> i64 {
 }
 
 fn ts(val: i64) -> Ts {
-    Ts { val, tb: MS }
+    Ts::new(val, MS)
+}
+
+fn delta(val: i64) -> TsDelta {
+    TsDelta::new(val, MS)
 }
 
 fn items(audio: bool) -> Vec<(i64, i64)> {
@@ -178,7 +182,7 @@ fn play(mode: &str) -> (Harness, Vec<Out>, Vec<Out>) {
             let (pts, content) = v_items[vi];
             video.feed(pts, content);
             for grain in video.pump() {
-                let output_pts = grain.ts().val;
+                let output_pts = grain.ts().ticks();
                 let produced = content_of(&grain);
                 let input_pts = v_items
                     .iter()
@@ -197,18 +201,18 @@ fn play(mode: &str) -> (Harness, Vec<Out>, Vec<Out>) {
             let (pts, content) = a_items[ai];
             let dt = if audio_last.is_some() { 20 } else { 0 };
             let decision = group
-                .propose("audio", ts(pts), ts(audio_next), ts(20), ts(dt))
+                .propose("audio", ts(pts), ts(audio_next), delta(20), delta(dt))
                 .unwrap();
             audio_last = Some(pts);
             let (emit, duration) = match decision.action {
                 Action::Stretch {
                     emit_pts,
                     sample_delta,
-                } => (emit_pts, 20 + sample_delta),
-                Action::Emit { emit_pts } => (emit_pts, 20),
+                } => (emit_pts.ticks(), 20 + sample_delta.ticks()),
+                Action::Emit { emit_pts } => (emit_pts.ticks(), 20),
                 Action::Drop => {
                     ai += 1;
-                    audio_next = decision.next_ts;
+                    audio_next = decision.next_ts.ticks();
                     continue;
                 }
                 Action::Repeat { .. } => panic!("audio does not repeat"),
@@ -219,7 +223,7 @@ fn play(mode: &str) -> (Harness, Vec<Out>, Vec<Out>) {
                 output_pts: emit,
                 duration,
             });
-            audio_next = decision.next_ts;
+            audio_next = decision.next_ts.ticks();
             ai += 1;
         }
     }
@@ -321,7 +325,7 @@ fn broken_then_good_snap_through_the_video_node() {
 /// deadline, with the live clock ahead of the cursor, five frozen copies of
 /// the last frame continue the grid and the shift stays put.
 fn assert_timeout_backups(node: &mut Harness, last_content: i64) {
-    let shift = node.node.0.group.group_shift().unwrap().val;
+    let shift = node.node.0.group.group_shift().unwrap().ticks();
     let cursor = node
         .node
         .0
@@ -329,7 +333,7 @@ fn assert_timeout_backups(node: &mut Harness, last_content: i64) {
         .member_cursor("video")
         .unwrap()
         .next_ts
-        .val;
+        .ticks();
     assert!(matches!(
         node.node.poll(&mut node.ctx).unwrap(),
         Polled::Idle
@@ -353,10 +357,10 @@ fn assert_timeout_backups(node: &mut Harness, last_content: i64) {
             other => panic!("expected a frozen frame, got {other:?}"),
         }
     }
-    let pts: Vec<i64> = backups.iter().map(|grain| grain.ts().val).collect();
+    let pts: Vec<i64> = backups.iter().map(|grain| grain.ts().ticks()).collect();
     assert_eq!(pts, (0..5).map(|i| cursor + i * 40).collect::<Vec<_>>());
     assert!(backups.iter().all(|grain| content_of(grain) == last_content));
-    assert_eq!(node.node.0.group.group_shift().unwrap().val, shift);
+    assert_eq!(node.node.0.group.group_shift().unwrap().ticks(), shift);
     let status = node.node.get_object("card_status").unwrap();
     assert_eq!(status["card"], json!(true));
 }
@@ -405,7 +409,7 @@ fn stall_emits_at_most_five_frozen_frames_and_raises_the_card() {
             other => panic!("expected a backup frame, got {other:?}"),
         }
         if let Some(EdgeItem::Buffer(grain)) = node.out.try_take() {
-            backups.push(grain.ts().val);
+            backups.push(grain.ts().ticks());
         }
     }
     assert_eq!(backups, vec![40, 80, 120, 160, 200]);
