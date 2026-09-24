@@ -103,7 +103,6 @@ class AuxMultiview:
             mixer.add_aux_destination(source.id, edge)
 
     def build(self, options):
-        from .color import conversion_graph
         from .janus import JanusVideoConfig, build_janus_output
         fps = aux_fps(self.cfg.fps)
         main_latency = self.mixer.latency_ms
@@ -115,7 +114,7 @@ class AuxMultiview:
         for edge in [*inputs, self.output_edge, *(f"{self.prefix}_{suffix}" for suffix in
                       ("sdr", "fps", "keyframed", "video", "encoded", "repeat_headers", "video_rtp_mux"))]:
             self.avp.edges.planCapacity(edge, 1)
-        self.avp.addNode(self.api.CudaRectOverlay({
+        self.avp.addNode(self.mixer.backend.compositor({
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
             "width": self.cfg.canvas_w, "height": self.cfg.canvas_h,
             "sw_format": self.cfg.working_format, "color": self.cfg.out_color.transfer,
@@ -124,13 +123,13 @@ class AuxMultiview:
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **composition(self.cfg, self.scenes, self.preview),
-        }), early_create=True)
+        }, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         converted = f"{self.prefix}_sdr"
         self.avp.addNode(self.api.FilterVideo({
             "name": converted, "src": self.output_edge, "dst": converted,
             "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
-            "graph": conversion_graph("sdr", "nv12", source=self.cfg.out_color,
+            "graph": self.mixer.backend.conversion("sdr", "nv12", source=self.cfg.out_color,
                                       source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
         }))
         self.listener = build_janus_output(

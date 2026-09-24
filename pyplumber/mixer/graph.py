@@ -54,7 +54,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from pyplumber.node import (
     InternalNode,
     ClipCache,
-    CudaRectOverlay,
     FilterVideo,
     ForceFPS,
     InputRec,
@@ -66,7 +65,8 @@ from pyplumber.node import (
 )
 
 
-from .color import Color, conversion_graph
+from .color import Color
+from .backend import mixer_backend
 from . import clipcache
 from .models import MixerScene, MixerSource
 from .prewarm import TransitionPrewarm
@@ -104,6 +104,7 @@ class MixerGraphBuilder:
         working_format: str = "nv12",   # compositor/transition sw_format
         color="sdr",
         wipe_color=None,
+        backend=None,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -112,6 +113,7 @@ class MixerGraphBuilder:
         self.canvas_w, self.canvas_h = canvas
         self.fps_num, self.fps_den = fps
         self.hwaccel = hwaccel
+        self.backend = mixer_backend(backend)
         self.timeline = timeline or f"{name}_tl"
         self.enable_wipe = enable_wipe
         self.switch_margin_ms = switch_margin_ms
@@ -298,7 +300,7 @@ class MixerGraphBuilder:
         Color conversions belong before source fan-out. The compositor checks
         the contract again so a custom scene filter cannot silently retag pixels.
         """
-        suffix = f"scale_cuda=format={self.working_format}"
+        suffix = self.backend.scale(pixel_format=self.working_format)
         return graph if not graph or graph.endswith(suffix) else f"{graph},{suffix}"
 
     def set_initial_scene(self, scene_name: str, slot: str = "A") -> "MixerGraphBuilder":
@@ -525,7 +527,7 @@ class MixerGraphBuilder:
                 # Resolve chroma from the actual frames. The compositor samples
                 # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
                 pixel_format = None
-            graph = conversion_graph(self.color, pixel_format,
+            graph = self.backend.conversion(self.color, pixel_format,
                                      source=source.color, source_format=source.pixel_format)
         output = self._e(f"{label}_color")
         self.avp.addNode(FilterVideo({
@@ -571,9 +573,7 @@ class MixerGraphBuilder:
 
             # Default scale: fit to canvas.  MixerOrchestrator rewrites the
             # graph string on every scene switch via node.param.set + auto_restart.
-            fallback_graph = (
-                f"scale_cuda=w={self.canvas_w}:h={self.canvas_h}:interp_algo=lanczos"
-            )
+            fallback_graph = self.backend.scale(width=self.canvas_w, height=self.canvas_h, interpolation="lanczos")
             default_graph = fallback_graph if src.default_graph is None else src.default_graph
             default_graph = self._normalized_graph(default_graph)
             if not default_graph:
@@ -603,7 +603,7 @@ class MixerGraphBuilder:
         timing = {} if self.latency_ms is None else {"latency_ms": self.latency_ms}
         for slot in ("a", "b"):
             is_program = slot.upper() == self._initial_pgm_slot
-            self.avp.addNode(CudaRectOverlay({
+            self.avp.addNode(self.backend.compositor({
                 "name": self._n(f"comp_{slot}"),
                 "src": [self._source_slot_edge(source, slot) for source in self._sources],
                 "dst": self._e(f"scene_{slot}_composite"),
@@ -650,11 +650,10 @@ class MixerGraphBuilder:
         pgm_is_a = self._initial_pgm_slot == "A"
         initial_active = 0 if pgm_is_a else 1
 
-        self.avp.addNode(FilterVideo({
+        self.avp.addNode(self.backend.transition({
             "name": self._n("out_sel_transition"),
             "src": [self._e("scA_trans"), self._e("scB_trans")],
             "dst": self._e("trans_out"),
-            "graph": "transition_cuda=alpha='0':eval=frame",
             "hwaccel": self.hwaccel,
             "defer_preliminary_init": True,
             "group": self.name,
@@ -728,13 +727,11 @@ class MixerGraphBuilder:
             "name": self._n("wipe_dec"),
             "src": self._e("wipe_v_pkt"),
             "dst": self._e("wipe_dec_out"),
-            "pixel_format": "?cuda",
+            "pixel_format": "?" + self.backend.hardware_format,
             "hwaccel": self.hwaccel,
             "group": load_group,
         }))
-        # Alpha media codecs decode on the CPU. Upload the converted wipe to
-        # the configured mixer device; hwupload_cuda creates a separate CUDA
-        # context that overlay_many_cuda cannot mix with the program frames.
+        # Alpha media codecs decode on the CPU. Upload to the mixer device.
         self.avp.addNode(FilterVideo({
             "name": self._n("wipe_fmt"),
             "src": self._e("wipe_dec_out"),
@@ -742,7 +739,7 @@ class MixerGraphBuilder:
             # Upload the clip at its own size and let the compositor scale it on
             # the GPU. Resizing to the canvas on a CPU thread cost two thirds of
             # this chain and made the compositor miss 60 Hz ticks during a wipe.
-            "graph": (self.wipe_color.setparams + "," if self.wipe_color else "") + "format=rgba,hwupload",
+            "graph": self.backend.wipe_upload(self.wipe_color),
             "hwaccel": self.hwaccel,
             "group": load_group,
         }))
@@ -768,7 +765,7 @@ class MixerGraphBuilder:
         # The wipe is one alpha-blended layer over the program, drawn by the same
         # compositor kernel the scenes use: no format round trip through
         # yuv420p, no second blend pass and no CPU resize.
-        self.avp.addNode(CudaRectOverlay({
+        self.avp.addNode(self.backend.compositor({
             "name": self._n("wipe_overlay"),
             "src": [self._e("final_wipe_in"), self._e("wipe_rt_fps_out")],
             "dst": self._e("wipe_overlay_out"),
@@ -798,6 +795,8 @@ class MixerGraphBuilder:
         ]
 
         init_cfg: Dict[str, Any] = {
+            "backend": self.backend.name,
+            "transition_node": self._n("out_sel_transition"),
             "timeline": self.timeline,
             "hwaccel": self.hwaccel,
             "fps_num": self.fps_num,

@@ -13,7 +13,8 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, conversion_graph, hdr_metadata, rendition_color
+from pyplumber.mixer.color import TEN_BIT_FORMATS, TRANSFER_TAGS, hdr_metadata, rendition_color
+from pyplumber.mixer.backend import mixer_backend
 from pyplumber.mixer import clipcache
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
@@ -509,13 +510,14 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
 
 
 def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: str, *,
-                      canvas, working_format: str, color="sdr"):
+                      canvas, working_format: str, color="sdr", backend=None):
     """One encoder per rendition, all fed from the single composited program.
 
     The compositor renders once at the canvas rate; a rendition converts,
     re-times and rescales that picture for its own target, so extra renditions
     cost an encode, not another composite.
     """
+    backend = mixer_backend(backend)
     edges = [mixer_edge]
     if len(renditions) > 1:
         edges = [f"program_rendition_{r.id}" for r in renditions]
@@ -528,11 +530,11 @@ def _build_renditions(avp, api, options: GraphOptions, renditions, mixer_edge: s
         # 10-bit stays P010 for HEVC (Main10 carries depth and HDR); H.264 and 8-bit encode NV12.
         ten_bit = target.transfer != "sdr" or (working_format in TEN_BIT_FORMATS and "hevc" in codec)
         enc_format = "p010le" if ten_bit else "nv12"
-        scale = f"scale_cuda=w={r.width}:h={r.height}," if (r.width, r.height) != canvas else ""
+        scale = backend.scale(width=r.width, height=r.height) + "," if (r.width, r.height) != canvas else ""
         scaled = f"program_scaled_{r.id}"
         avp.addNode(api.FilterVideo({
             "name": f"scale_{r.id}", "src": edge, "dst": scaled, "hwaccel": HWACCEL, "group": OUTPUT_GROUP,
-            "graph": scale + conversion_graph(target, enc_format, source=color, source_format=working_format,
+            "graph": scale + backend.conversion(target, enc_format, source=color, source_format=working_format,
                                               tonemap=r.tonemap or "clip", hdr_peak=r.tonemap_peak * 100,
                                               desat=r.tonemap_desat, param=r.tonemap_param),
         }))
@@ -591,7 +593,7 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
     listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
-                                 canvas=canvas, working_format=options.working_format)
+                                 canvas=canvas, working_format=options.working_format, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=routed_inputs,
                         browser_windows=tuple(options.dmabuf_inputs))
 
@@ -680,7 +682,8 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
     settings = json.dumps(settings_data, separators=(",", ":")) + "\n"
     avp.registerControlCommand("mixer.settings", lambda _arg: settings, True)
     listener = _build_renditions(avp, api, options, cfg.renditions or _flag_renditions(options, *canvas),
-                                 program, canvas=canvas, working_format=cfg.working_format, color=cfg.out_color)
+                                 program, canvas=canvas, working_format=cfg.working_format, color=cfg.out_color,
+                                 backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
 

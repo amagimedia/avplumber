@@ -83,6 +83,8 @@ class FakeMixer:
     def __init__(self, avp, **parameters):
         self.avp = avp
         self.parameters = parameters
+        from pyplumber.mixer.backend import mixer_backend
+        self.backend = mixer_backend(parameters.get("backend"))
         self.timeline = "mixer_timeline"
         self.routed_sources = []
         self.sources = []
