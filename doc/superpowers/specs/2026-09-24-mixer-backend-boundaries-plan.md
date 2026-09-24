@@ -1,6 +1,6 @@
 # Mixer backend boundaries
 
-Status: implementation plan, not implemented. Based on `mixer-improv` at
+Status: backend boundaries implemented; native renderer extraction remains deferred. Based on `mixer-improv` at
 `3e4b251`. Scope agreed 2026-09-24: prepare mixer composition for a future
 Vulkan implementation and eventual AMD/Intel deployment while preserving the
 working CUDA pipeline.
@@ -288,3 +288,20 @@ Expected preparation cost: roughly 200–400 net new lines including tests, with
 existing construction code moved rather than duplicated. This is an estimate;
 reassess if the fade adapter or compatibility scaffolding materially exceeds it.
 Each commit must remain independently reviewable and revertible.
+
+## Implementation checks
+
+Remote checks passed: 364 mixer/demo/color/native tests, 45 downstream
+graph/layout tests, and 14 before/after graph comparisons. Graph differences
+are limited to explicitly naming the existing CUDA backend and transition node.
+GPU checks covered P010/P210 pixels, alpha, cuts, interrupted fades, aux stalls
+and recovery. No CUDA rendering, allocation or synchronization code changed.
+Repeated old/candidate runs of the same 32-source SDR 1080x1920p60 show with
+30-fps aux measured approximately 38% GPU utilization on both versions. The
+live uncached alpha wipe and rapid-cut checks also passed.
+
+Two existing issues reproduced on the pre-refactor binary and remain separate:
+the unclocked compositor selects metadata from a queue entry that it subsequently
+pops, so per-frame metadata can be lost; the legacy keyframe-limit smoke can
+crash during CUDA context teardown after its rendering assertions pass. Do not
+treat downstream graph tests as proof that the unclocked metadata path is sound.

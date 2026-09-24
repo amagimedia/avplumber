@@ -1,5 +1,5 @@
 #pragma once
-// Layer descriptions for the CUDA compositor: JSON parsing, per-frame metadata
+// Compositor layer descriptions: JSON parsing, per-frame metadata
 // overrides, and the resolution of layers against the actual source frames into
 // an ordered list of draw operations. No CUDA here.
 #include "../../util.hpp"
@@ -86,10 +86,6 @@ inline void parseLayerFromJson(const Parameters &obj, LayerSpec &out) {
     }
     if (out.dst_w < 0 || out.dst_h < 0 || (out.dst_w == 0) != (out.dst_h == 0))
         throw Error("cuda_rect_overlay: dst_w and dst_h must both be positive or both omitted");
-#ifndef HAVE_CUDA_RECT_SCALE
-    if (out.dst_w || out.dst_h)
-        throw Error("cuda_rect_overlay: destination sizing requires HAVE_NVCC=1");
-#endif
     if (obj.contains("crop") && obj["crop"].is_object()) {
         const auto &c = obj["crop"];
         out.crop_x = c.value("x", 0);

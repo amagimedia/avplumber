@@ -1,4 +1,3 @@
-#define HAVE_CUDA_RECT_SCALE 1
 #include "mixer/primitives/compositor_layers.hpp"
 #include <cassert>
 
