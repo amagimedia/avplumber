@@ -8,6 +8,12 @@ from .color import TEN_BIT_FORMATS
 
 RTP_PACKET_SIZE = 1_200
 DEFAULT_KEYFRAME_MIN_INTERVAL_MS = 150
+# Periodic IDR period. Viewers joining or losing packets get an IDR through
+# RTCP PLI (RtcpFeedbackListener) and Janus retransmits on NACK, so a longer
+# period is possible; every IDR is a send burst (11-24 ms at 3x pacing for
+# 1080x1920p60) that also inflates the receiver's jitter estimate. 3 s was
+# validated on the live demo with H.264 and HEVC viewers (2026-09-25).
+DEFAULT_KEYFRAME_INTERVAL_SEC = 3
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,7 @@ class JanusVideoConfig:
     rtcp_bind: str = "0.0.0.0"
     rtcp_port: int = 0
     keyframe_min_interval_ms: int = DEFAULT_KEYFRAME_MIN_INTERVAL_MS
+    keyframe_interval_sec: int = DEFAULT_KEYFRAME_INTERVAL_SEC
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -37,6 +44,8 @@ class JanusVideoConfig:
         if (type(self.keyframe_min_interval_ms) is not int
                 or not 0 <= self.keyframe_min_interval_ms <= 2_147_483_647):
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
+        if type(self.keyframe_interval_sec) is not int or not 1 <= self.keyframe_interval_sec <= 60:
+            raise ValueError("keyframe_interval_sec must be an integer between 1 and 60")
 
     @property
     def rtcp_port_remote(self) -> int:
@@ -112,7 +121,8 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
         ("ForceFPS", {"name": node_name("fps"), "src": src_edge, "dst": node_name("fps"),
                       "fps": f"{fps}/{fps_den}"}),
         ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
-                           "interval_sec": "1/1", "min_interval_ms": janus.keyframe_min_interval_ms}),
+                           "interval_sec": f"{janus.keyframe_interval_sec}/1",
+                           "min_interval_ms": janus.keyframe_min_interval_ms}),
         ("AssumeVideoFormat", {"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
                                "width": width, "height": height, "pixel_format": "cuda",
                                "real_pixel_format": enc_format}),
@@ -121,7 +131,10 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
             "codec": codec, "hwaccel": hwaccel,
             **({"hdr_metadata": hdr_metadata} if hdr_metadata else {}),
             "options": {
-                "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "g": max(1, round(fps / fps_den)), "bf": 0,
+                "b": bitrate, "maxrate": bitrate, "bufsize": bitrate, "bf": 0,
+                # The encoder GOP matches the ForceKeyFrame period; forced-idr lets
+                # PLI-triggered keyframes land in between without restarting the GOP grid.
+                "g": max(1, round(fps / fps_den)) * janus.keyframe_interval_sec,
                 # p5..p7 are NVENC's quality presets; with tune=ull it stays a
                 # one-pass, no-lookahead, no-reordering encode, so the extra quality
                 # costs GPU time rather than latency. B-frames stay off: they need

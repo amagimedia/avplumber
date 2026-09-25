@@ -328,6 +328,16 @@
       const connection = peer;
       peer.ontrack = event => {
         const [stream] = event.streams;
+        // Opt-in (?lowlat=1): render frames as soon as they are complete instead of
+        // through the adaptive jitter buffer (9-34 ms measured on a 38 ms RTT path).
+        // Off by default: slow HEVC decoders drop late frames and lose references.
+        if (new URL(location.href).searchParams.get("lowlat") === "1") {
+          try {
+            if ("jitterBufferTarget" in event.receiver) event.receiver.jitterBufferTarget = 0;
+            if ("playoutDelayHint" in event.receiver) event.receiver.playoutDelayHint = 0;
+          } catch (_) {
+          }
+        }
         if (preview.srcObject !== stream) {
           preview.srcObject = stream;
         }
