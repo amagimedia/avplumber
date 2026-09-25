@@ -634,6 +634,8 @@ public:
             if (!hwSwFormatMatch(*p))
                 throw Error("cuda_rect_overlay: input hw sw_format mismatch node sw_format");
             av::VideoFrame consumed = *p;
+            // Metadata must follow the retained frame before the queue slot is released.
+            if (meta_src == p) meta_src = &held_[i];
             this->source_edges_[i]->pop();
             held_[i] = std::move(consumed);
             held_valid_[i] = true;

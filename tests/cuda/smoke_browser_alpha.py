@@ -6,6 +6,7 @@ The download is solely a verification boundary; the live mixer stays on GPU.
 
 import argparse
 import base64
+import json
 from pathlib import Path
 import uuid
 
@@ -24,7 +25,10 @@ def main():
     parser.add_argument("--format", choices=("rgba", "bgra"), default="bgra",
                         help="Browser buffer byte order (NVIDIA normally uses BGRA)")
     parser.add_argument("--composite", action="store_true", help="Verify opacity over a black P210 canvas")
+    parser.add_argument("--unclocked", action="store_true", help="With --composite, test per-frame layout metadata and upstream pacing")
     args = parser.parse_args()
+    if args.unclocked and not args.composite:
+        parser.error("--unclocked requires --composite")
     from pyplumber import node as api
 
     name = "alpha_probe_" + uuid.uuid4().hex[:8]
@@ -42,10 +46,28 @@ def main():
             drm_hwaccel=None, cuda_hwaccel="alpha_gpu", source_group="probe", processing_group="probe",
             preserve_alpha=True)
         nodes[1].parameters["real_pixel_format"] = args.format
+        if args.unclocked:
+            class Layout(api.PythonNode):
+                count = 0
+
+                def process(self):
+                    frame = self._src.get()
+                    if frame:
+                        shift = 40 if self.count % 2 else 0
+                        self.count += 1
+                        frame.metadata["probe_layout"] = json.dumps({"0": {
+                            "dst_x": shift, "dst_y": 0, "dst_w": width, "dst_h": height,
+                            "fit": "contain", "blend": True}})
+                        frame.metadata["probe_shift"] = str(shift)
+                        self._dst.enqueue(frame)
+
+            nodes.append(Layout({"name": "layout", "src": edge, "dst": "marked"}))
+            edge = "marked"
         if args.composite:
             nodes.append(api.CudaRectOverlay({
                 "name": "blend", "src": [edge], "dst": "blended", "hwaccel": "alpha_gpu",
-                "width": width, "height": height, "fps": "30/1", "sw_format": "p210le", "color": "sdr",
+                "width": width, "height": height, "sw_format": "p210le", "color": "sdr",
+                **({"metadata_key": "probe_layout", "scale": True} if args.unclocked else {"fps": "30/1"}),
                 "active_inputs": 1,
                 "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": width, "dst_h": height, "blend": True}]}))
             edge = "blended"
@@ -58,12 +80,20 @@ def main():
         # Centres of the five white swatches; CSS uses 5% margins and 2% gaps.
         xs = [round(width * (0.05 + i * 0.1836 + 0.0828)) for i in range(5)]
         samples = None
+        shifts = set()
         for frame in drain(output, errors, 15, 60):
             if args.composite:
                 luma = np.frombuffer(frame.data[0], "<u2").reshape(height, frame.linesize[0] // 2) >> 6
-                samples = luma[round(height * 0.33), xs].astype(int)
+                shift = int(frame.metadata["probe_shift"]) if args.unclocked else 0
+                samples = luma[round(height * 0.33), [x + shift for x in xs]].astype(int)
                 reference = np.rint(64 + 876 * expected / 255)
                 if np.max(np.abs(samples - reference)) <= 2:
+                    shifts.add(shift)
+                    if args.unclocked:
+                        if shift:
+                            assert np.all(luma[:, :40] == 64)
+                        if shifts != {0, 40}:
+                            continue
                     print(f"PASS premultiplied browser over P210 black: Y={samples.tolist()}", flush=True)
                     break
                 continue
