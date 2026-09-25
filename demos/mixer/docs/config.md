@@ -305,8 +305,8 @@ first one).
 
 ## Known limitations
 
-- **64 sources per show.** Every source is a pad on the compositor, and the
-  active-pad mask is a 64-bit word. 8-bit or 10-bit makes no difference;
+- **128 sources per show, or 127 with aux.** Every source is a pad on the compositor;
+  aux reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
   pads are wired at build time. A document with more sources is rejected at load.
 - **16 boxes per scene** in the built-in `--input` layouts; a `--config` scene has no box limit.
@@ -319,8 +319,7 @@ first one).
   every rendition is 4:2:0.
 - **HLG and PQ need a 10-bit canvas.** Browser pages are SDR only.
 
-Larger config-driven shows and runtime source addition require a different
-pad allocation strategy; they are not supported.
+More than 128 pads and runtime source addition are not supported.
 
 ## Generating one
 

@@ -20,7 +20,7 @@ lets host preparation write paths for a later `/media` container mount.
 
 | Recipe field | Meaning |
 | --- | --- |
-| `source_count` | Total independent input chains, 1–64. Several may read the same cached clip, but each has its own decoder or browser window. This is separate from boxes visible in a scene. |
+| `source_count` | Total independent input chains, 1–128 (up to 127 with aux). Several may read the same cached clip, but each has its own decoder or browser window. This is separate from boxes visible in a scene. |
 | `scene_count` | Total named scenes to generate, independent of source count. |
 | `inputs[].weight` | Relative share of the input total. Zero disables the entry, including download/preparation. |
 | `layouts` | Layout names mapped to relative shares of the scene total. |
@@ -36,6 +36,10 @@ Weights need not add to 100. Largest-remainder rounding makes counts add to the
 requested total; ties follow recipe order. A positive weight can round to zero
 when the total is small. For exact counts, make weights sum to the desired total.
 Preparation prints the allocated input counts before generating media.
+
+These are graph limits. The setup page applies lower limits: 48 sources at
+50/60 fps or 96 at 25/30 fps, 32 browsers, four HDR 4:2:2 inputs and 128 scenes.
+Custom recipes must fit the host's GPU, decoder and browser capacity.
 
 The synthetic-only startup example's weights 8:4:2:2 at 16 sources give eight SDR 4:2:0, four HLG
 4:2:0, two HLG 4:2:2, and two SDR 4:2:2 inputs. Increasing `scene_count` creates

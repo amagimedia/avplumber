@@ -7,7 +7,7 @@
 </tr>
 </table>
 
-Mix up to **64 independent video and browser sources** on one GPU canvas.
+Mix independent video and browser sources on one GPU canvas.
 A JSON recipe chooses their proportions, the scene count and frame rate.
 The control page places scene buttons beside the live program.
 
@@ -80,11 +80,16 @@ Start with generic media, then optionally choose a mixed-source preset:
 | [`demo.equal.json`](demo.equal.json) | Equal weights for generated SDR 420, HLG 420, HLG 422, SDR 422, Bunny and browser sources. |
 | [`demo.cinematic.json`](demo.cinematic.json) | The same categories, with two generated HLG 420 inputs replaced by public PQ and HLG movie clips at the default count. |
 
-Edit that copy to make your own preset; no registration or Python changes are needed:
+Copy a preset to the media directory, then edit it; no registration or Python changes are needed:
+
+```sh
+mkdir -p media
+cp demos/mixer/demo.equal.json media/demo.json
+```
 
 | Field | Examples |
 | --- | --- |
-| `source_count` | 8, 16, 32, 42, 54, 64 independent input chains |
+| `source_count` | 8, 16, 32, 42, 64, 96 independent input chains |
 | `scene_count` | 16, 32, 64 scene definitions |
 | `canvas.fps` | 25, 30, 50, 60 |
 | `inputs[].weight` | Relative source proportions; zero disables an entry |

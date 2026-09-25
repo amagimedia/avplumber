@@ -70,7 +70,7 @@ summary { cursor: pointer; }
 <label>Orientation<select id="orientation"><option value="portrait">Portrait · 9:16</option><option value="landscape">Landscape · 16:9</option></select></label>
 <label>Frames per second<select id="fps"><option>25</option><option>30</option><option>50</option><option selected>60</option></select></label>
 <label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
-<label>Unique sources<input id="sources" type="number" min="1" max="64" step="1" value="16"></label>
+<label>Unique sources<input id="sources" type="number" min="1" max="48" step="1" value="16"></label>
 <label>Scenes<input id="scenes" type="number" min="1" max="128" step="1" value="32"></label>
 <label>Program bitrate<input id="bitrate" type="number" min="500" max="40000" step="500" value="6000"> <small>kbit/s</small></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
@@ -128,7 +128,7 @@ function sourceEnabled(i){
 const controls=$('source-controls');
 types.forEach((t,i)=>{
  const row=document.createElement('div');row.className='source';
- row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${t.max??64}" step="1" aria-label="${t.name} sources">`;
+ row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${t.max??sourceLimit()}" step="1" aria-label="${t.name} sources">`;
  const input=row.querySelector('input');
  input.addEventListener('input',()=>{
   const limit=sourceLimit();
@@ -150,7 +150,7 @@ function allocate(total,values){
 }
 function sourceCounts(total,values){
  let counts=allocate(total,values);
- const capped=types.findIndex((t,i)=>counts[i]>(t.max??64));
+ const capped=types.findIndex((t,i)=>counts[i]>(t.max??Infinity));
  if(capped!==-1){
   const {name,max}=types[capped],remaining=values.map((w,i)=>i===capped?0:w);
   if(!remaining.some(Boolean))throw Error(`${name} is limited to ${max} sources; enable another source type.`);
@@ -169,7 +169,7 @@ function update(){
  if(Number($('scenes').value)>128)$('scenes').value=128;
  const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
- if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||types.some((t,i)=>sourceValues[i]>(t.max??64)))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
+ if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||types.some((t,i)=>sourceValues[i]>(t.max??Infinity)))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
  const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  const video=counts.slice(0,4).reduce((a,b)=>a+b,0),browser=counts[4],mode=$('layout').value;
@@ -275,7 +275,9 @@ $('mode').addEventListener('input',()=>{
  previousDepth=bit_depth;
  syncCounts();update();
 });
-for(const id of ['resolution','orientation','fps','sources','scenes','layout'])$(id).addEventListener('input',update);
+document.querySelectorAll('.fields input,.fields select').forEach(input=>{
+ if(input.id!=='mode')input.addEventListener('input',update);
+});
 $('sources').addEventListener('focus',()=>{resizeValues=[...sourceValues]});
 $('sources').addEventListener('blur',()=>{resizeValues=null});
 setBusy(true);update();refresh();
