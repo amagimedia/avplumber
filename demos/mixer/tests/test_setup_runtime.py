@@ -12,11 +12,16 @@ from setup_runtime import DEFAULT_SETTINGS, SetupRuntime, recipe_for, source_cou
 from webui import serve
 
 
-@pytest.mark.parametrize('count', [1, 8, 16, 32, 42, 48, 64, 96])
+@pytest.mark.parametrize('count', [1, 8, 16, 32, 41, 42, 48, 50, 64, 83, 96, 100, 110])
 @pytest.mark.parametrize('fps', [25, 30, 50, 60])
 def test_generic_setups_expand(tmp_path, count, fps):
-    if fps >= 50 and count > 48:
-        with pytest.raises(ValueError, match="source_count must be an integer from 1 to 48"):
+    maximum = {25: 110, 30: 83, 50: 50, 60: 41}[fps]
+    if count > maximum:
+        with pytest.raises(ValueError, match=f"source_count must be an integer from 1 to {maximum}"):
+            recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
+        return
+    if count > (40 if fps <= 30 else 20) + 32 + 4:
+        with pytest.raises(ValueError, match="enable another source type"):
             recipe_for({**DEFAULT_SETTINGS, "source_count": count, "fps": fps})
         return
     recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': count, 'fps': fps})
@@ -26,7 +31,7 @@ def test_generic_setups_expand(tmp_path, count, fps):
     assert show['canvas']['fps'] == fps
 
 
-@pytest.mark.parametrize('changes', [{'source_count': 97}, {'scene_count': 0}, {'scene_count': 129}, {'fps': 24},
+@pytest.mark.parametrize('changes', [{'source_count': 97}, {'scene_count': 0}, {'scene_count': 193}, {'fps': 24},
     {'weights': [0] * 5}, {'weights': [True] * 5}, {'resolution': '../../file'}, {'command': 'id'}])
 def test_reject_unbounded_settings(changes):
     with pytest.raises(ValueError):
@@ -159,6 +164,36 @@ def test_bitrate_is_configurable_and_scales_every_rendition():
     assert recipe_for(legacy)["setup"]["bitrate_kbps"] == 6000
 
 
+@pytest.mark.parametrize("fps, size", [(25, 6), (30, 6), (50, 9), (60, 9)])
+def test_browser_ring_default_tracks_fps(tmp_path, fps, size):
+    settings = {k: v for k, v in DEFAULT_SETTINGS.items() if k != "browser_ring_size"}
+    recipe = recipe_for({**settings, "fps": fps})
+    assert recipe["browser_ring_size"] == size
+    del recipe["browser_ring_size"]
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    from pyplumber.mixer.config import parse
+    from mixer import GraphOptions
+    assert show["browser_ring_size"] == size
+    del show["browser_ring_size"]
+    assert parse(show).browser_ring_size == size
+    assert GraphOptions(fps=fps).browser_ring_size == size
+
+
+@pytest.mark.parametrize("size", [6, 9, 11])
+def test_browser_ring_limit_reaches_show(tmp_path, size):
+    recipe = recipe_for({**DEFAULT_SETTINGS, "browser_ring_size": size})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    from pyplumber.mixer.config import parse
+    assert parse(show).browser_ring_size == size
+    assert parse(show).settings()["browser_ring_size"] == size
+
+
+@pytest.mark.parametrize("size", [0, 65, 6.5, True, "6"])
+def test_browser_ring_limit_validation(size):
+    with pytest.raises(ValueError, match="browser_ring_size"):
+        recipe_for({**DEFAULT_SETTINGS, "browser_ring_size": size})
+
+
 @pytest.mark.parametrize("value", [499, 40001, 0, -1, 6000.0, "6000", True])
 def test_bitrate_outside_the_range_is_rejected(value):
     with pytest.raises(ValueError, match="bitrate_kbps"):
@@ -166,16 +201,18 @@ def test_bitrate_outside_the_range_is_rejected(value):
 
 
 @pytest.mark.parametrize("bit_depth", [8, 10])
-@pytest.mark.parametrize("fps, maximum", [(25, 96), (30, 96), (50, 48), (60, 48)])
+@pytest.mark.parametrize("fps, maximum", [(25, 110), (30, 83), (50, 50), (60, 41)])
 def test_setup_limits_in_both_modes(bit_depth, fps, maximum):
     settings = {**DEFAULT_SETTINGS, "bit_depth": bit_depth, "fps": fps,
                 "chroma": "420" if bit_depth == 8 else "422",
-                "source_count": maximum, "scene_count": 128, "weights": [1, 0, 0, 0, 0]}
-    assert recipe_for(settings)["source_count"] == maximum
+                "source_count": maximum, "scene_count": 192,
+                "weights": [1, 0, 0, 0 if bit_depth == 8 else 1, 1, 1, 0]}
+    feasible = min(maximum, (40 if fps <= 30 else 20) + 32 + min(28, 700 // fps))
+    assert recipe_for({**settings, "source_count": feasible})["source_count"] == feasible
     with pytest.raises(ValueError, match="source_count"):
         recipe_for({**settings, "source_count": maximum + 1})
     with pytest.raises(ValueError, match="scene_count"):
-        recipe_for({**settings, "scene_count": 129})
+        recipe_for({**settings, "scene_count": 193})
 
 
 def test_hdr_420_canvas_and_assets(tmp_path):
@@ -186,6 +223,63 @@ def test_hdr_420_canvas_and_assets(tmp_path):
     assert len(show["renditions"]) == 2
     assert any(s["color"] == "hlg" for s in show["sources"] if s["kind"] == "video")
     assert not any(p.suffix == ".v210" for p in jobs)
+
+
+@pytest.mark.parametrize("bit_depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
+def test_raw_sdr_420_mix_in_every_canvas_mode(tmp_path, bit_depth, chroma):
+    settings = {**DEFAULT_SETTINGS, "source_count": 6, "weights": [2, 0, 0, 0, 1, 3],
+                "bit_depth": bit_depth, "chroma": chroma}
+    show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    from collections import Counter
+    assert Counter(s["kind"] for s in show["sources"]) == {"video": 2, "browser": 1, "nv12": 3}
+    assert len({s["id"] for s in show["sources"]}) == 6
+    assert all(s["color"] == "sdr" for s in show["sources"] if s["kind"] == "nv12")
+    assert sum(p.suffix == ".nv12" for p in jobs) == 3
+
+
+def test_legacy_source_weights_get_zero_raw_uploads():
+    settings = recipe_for({**DEFAULT_SETTINGS, "weights": [8, 4, 2, 0, 2]})["setup"]
+    assert settings["weights"] == [8, 4, 2, 0, 2, 0, 0]
+
+
+@pytest.mark.parametrize("chroma", ["420", "422"])
+def test_hdr_raw_420_uses_p010_without_nvdec(tmp_path, chroma):
+    settings = {**DEFAULT_SETTINGS, "fps": 30, "chroma": chroma, "source_count": 6,
+                "weights": [1, 1, 0, 0, 1, 1, 2]}
+    show, jobs, _ = prepare_demo.plan(recipe_for(settings), tmp_path)
+    raw = [s for s in show["sources"] if s["kind"] == "p010"]
+    assert len(raw) == 2 and all(s["color"] == "hlg" for s in raw)
+    assert sum(s["kind"] == "video" for s in show["sources"]) == 2
+    assert sum(path.suffix == ".p010" for path in jobs) == 2
+    from pyplumber.mixer.config import parse
+    assert parse(show).settings()["source_counts"]["p010"] == 2
+    with pytest.raises(ValueError, match="8-bit mode"):
+        recipe_for({**settings, "bit_depth": 8, "chroma": "420"})
+
+
+@pytest.mark.parametrize("fps,limit", [(25, 14), (30, 11), (50, 7), (60, 5)])
+def test_hdr_raw_upload_counts_twice_toward_byte_budget(fps, limit):
+    weights = [0, 0, 0, 0, 0, 0, 1]
+    assert source_counts(limit, weights, fps)[6] == limit
+    with pytest.raises(ValueError, match="upload units"):
+        source_counts(limit + 1, weights, fps)
+    mixed = source_counts(32, [1, 1, 0, 0, 1, 1, 1], fps)
+    assert mixed[5] + 2 * mixed[6] <= min(28, 700 // fps)
+
+
+@pytest.mark.parametrize("fps,limit", [(25, 40), (30, 40), (50, 20), (60, 20)])
+def test_sdr_and_hdr_share_nvdec_budget(fps, limit):
+    counts = source_counts(48, [100, 100, 0, 0, 1, 0, 0], fps)
+    assert counts[0] + counts[1] == limit
+    assert sum(counts) == 48
+
+
+def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
+    recipe = recipe_for({**DEFAULT_SETTINGS, "source_count": 2, "weights": [0, 0, 0, 0, 1, 1]})
+    show, jobs, _ = prepare_demo.plan(recipe, tmp_path)
+    assert recipe["alpha_background"] == "sdr420_raw_000"
+    assert any(path.name == "sdr_420_bars_nv12.nv12" for path in jobs)
+    assert len(show["sources"]) == 2
 
 
 @pytest.mark.parametrize("changes, message", [
@@ -209,7 +303,7 @@ def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights
     assert 0 < counts[2] <= 4
     assert counts[3] == 0
     assert sum(s["kind"] == "v210" for s in show["sources"]) == counts[2]
-    assert recipe["setup"]["weights"] == weights
+    assert recipe["setup"]["weights"] == weights + [0, 0]
 
 
 def test_four_hdr_422_inputs_can_be_used_alone():
@@ -224,12 +318,12 @@ def test_four_hdr_422_inputs_can_be_used_alone():
 def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expected):
     assert source_counts(64, weights) == expected
     recipe = recipe_for({**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights})
-    assert [source['weight'] for source in recipe['inputs']] == expected
+    assert [source['weight'] for source in recipe['inputs']] == expected + [0, 0]
 
 
 def test_browser_only_limit():
     settings = {**DEFAULT_SETTINGS, 'fps': 30, 'source_count': 32, 'weights': [0, 0, 0, 0, 1]}
-    assert recipe_for(settings)['inputs'][-1]['weight'] == 32
+    assert next(s for s in recipe_for(settings)['inputs'] if s['kind'] == 'browser')['weight'] == 32
     with pytest.raises(ValueError, match='Browser is limited to 32'):
         recipe_for({**settings, 'source_count': 33})
     with pytest.raises(ValueError, match='enable another source type'):
@@ -325,19 +419,22 @@ def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     assert (r.width, r.height, r.fps, r.bitrate_kbps) == (1280, 720, 25, 4500)
 
 
-def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime):
+@pytest.mark.parametrize("limit,tiles", [(256, 2), (512, 6)])
+def test_setup_clears_aux_tiles_that_exceed_new_draw_budget(runtime, limit, tiles):
     recipe = recipe_for({**DEFAULT_SETTINGS, "fps": 30, "source_count": 64,
-                         "weights": [1, 0, 0, 0, 0], "layout": "grids"})
+                         "weights": [1, 0, 0, 0, 1], "layout": "grids"})
     show, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
     grid = next(s["id"] for s in show["scenes"] if s["id"].startswith("grid_64_"))
     show["aux_buses"] = [{"id": "mv", "scenes": [grid] * 8,
                           "renditions": [{"id": "monitor", "port": 5008}]}]
+    show["max_compositor_layers"] = limit
     (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(show))
     runtime.process = None
     del show["aux_buses"]
     runtime._preserve_aux(recipe, show)
     result, _, _ = prepare_demo.plan(recipe, runtime.media_dir)
-    assert result["aux_buses"][0]["scenes"] == [grid, grid, *([None] * 6)]
+    assert result["max_compositor_layers"] == limit
+    assert result["aux_buses"][0]["scenes"] == [grid] * tiles + [None] * (8 - tiles)
 
 
 def test_invalid_preserved_aux_rejected_before_preparation(runtime, monkeypatch):
@@ -367,3 +464,26 @@ def test_start_waits_for_program_and_aux_encoders(runtime, monkeypatch, hdr):
     runtime.bridge.command = queues
     SetupRuntime._start(runtime, runtime.media_dir / "mixer.demo.json")
     assert len(calls) == len(expected)
+
+
+@pytest.mark.parametrize("fps, maximum", [(25, 28), (30, 23), (50, 14), (60, 11)])
+def test_raw_upload_budget(fps, maximum):
+    settings = {**DEFAULT_SETTINGS, "fps": fps, "source_count": maximum,
+                "weights": [0, 0, 0, 0, 0, 1]}
+    assert recipe_for(settings)["inputs"][5]["weight"] == maximum
+    with pytest.raises(ValueError, match=f"Raw 4:2:0 upload units is limited to {maximum}"):
+        recipe_for({**settings, "source_count": maximum + 1})
+    counts = source_counts(maximum + 4, [1, 0, 0, 0, 0, 100], fps)
+    assert counts == [4, 0, 0, 0, 0, maximum]
+
+
+def test_combined_source_caps():
+    assert source_counts(100, [1, 0, 100, 0, 100, 100]) == [36, 0, 4, 0, 32, 28]
+    with pytest.raises(ValueError, match="enable another source type"):
+        source_counts(65, [0, 0, 1, 0, 1, 1])
+
+
+def test_192_scenes_expand(tmp_path):
+    recipe = recipe_for({**DEFAULT_SETTINGS, "scene_count": 192})
+    show, _, _ = prepare_demo.plan(recipe, tmp_path)
+    assert len(show["scenes"]) == 192

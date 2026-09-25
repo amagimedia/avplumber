@@ -412,7 +412,7 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
         calls.append((method, path, body))
         if path == "/status":
             return {"windows": [{"id": "page_00"}]}
-        return {"ok": True}
+        return body
 
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
     dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01"], "http://p", 480, 270, 60)
@@ -421,19 +421,20 @@ def test_dmabuf_windows_are_closed_before_reopening(monkeypatch):
         ("GET", "/status"), ("POST", "/window/close"), ("POST", "/window/open"), ("POST", "/window/open")]
     assert calls[1][2] == {"id": "page_00"}
     assert calls[3][2] == {"id": "page_01", "url": "http://p", "width": 480, "height": 270, "fps": 60,
-                           "audio": False}
+                           "audio": False, "ringSize": 9}
 
 
 def test_unchanged_browser_windows_survive_reconfiguration(monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
 
-    unchanged = dict(id="page_00", url="http://p", width=480, height=270, fps=60, audio=False)
+    unchanged = dict(id="page_00", url="http://p", width=480, height=270, fps=60, audio=False, ringSize=9)
     calls = []
 
     def fake_rest(base_url, method, path, body=None):
         calls.append((method, path, body))
         if path == "/status":
             return {"windows": [unchanged, {**unchanged, "id": "page_01", "fps": 30}]}
+        return body
 
     monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_rest)
     dmabuf_inputs.open_browser_windows("http://b", ["page_00", "page_01", "page_02"], "http://p", 480, 270, 60)
@@ -459,6 +460,22 @@ def test_quarantined_browser_is_not_reused_or_recreated(monkeypatch):
     assert calls == ["/status"]
 
 
+def test_browser_ring_change_reopens_window_and_requires_support(monkeypatch):
+    from pyplumber.mixer import dmabuf_inputs
+    window = dict(id="page_00", url="http://p", width=480, height=270, fps=25, audio=False, ringSize=11)
+    calls = []
+    def request(base, method, path, body=None):
+        calls.append((path, body))
+        return {"windows": [window]} if path == "/status" else body
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", request)
+    dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
+    assert calls[-2] == ("/window/close", {"id": "page_00"})
+    assert calls[-1] == ("/window/open", {**window, "ringSize": 6})
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *_: {"windows": []})
+    with pytest.raises(RuntimeError, match="did not apply ringSize"):
+        dmabuf_inputs.open_browser_windows("http://b", ["page_00"], "http://p", 480, 270, 25, 6)
+
+
 def test_browser_failure_precedes_native_initialization(monkeypatch):
     import mixer
 
@@ -470,7 +487,7 @@ def test_browser_failure_precedes_native_initialization(monkeypatch):
     with pytest.raises(RuntimeError, match="browser unavailable"):
         build_application(GraphOptions(inputs=("dmabuf://page_00",), output="p.mp4", dmabuf_open="http://p"), api=fake_api())
     monkeypatch.setattr(mixer, "open_windows", fail)
-    cfg = SimpleNamespace(fps=60, latency_ms=None, sources=[SimpleNamespace(
+    cfg = SimpleNamespace(fps=60, latency_ms=None, browser_ring_size=11, max_compositor_layers=256, sources=[SimpleNamespace(
         kind="browser", id="page_00", location="http://p", width=480, height=270, fps=60)])
     with pytest.raises(RuntimeError, match="browser unavailable"):
         mixer._build_from_config(GraphOptions(output="p.mp4"), cfg, fake_api())
@@ -544,6 +561,41 @@ CONFIG = {
     ],
     "initial_scene": "pip",
 }
+
+
+def fake_browser_rest(base, method, path, body=None):
+    return body if path == "/window/open" else {"windows": []}
+
+
+@pytest.mark.parametrize("kind,fmt,color", [("nv12", "nv12", "sdr"), ("p010", "p010le", "hlg")])
+def test_raw_420_source_uses_cpu_frames_and_one_paced_upload(tmp_path, kind, fmt, color):
+    doc = {"canvas": CONFIG["canvas"], "sources": [{"id": "raw", "kind": kind,
+           "path": str(tmp_path / "pattern.raw"), "width": 320, "height": 180, "color": color}],
+           "scenes": [{"id": "full", "items": [{"source": "raw", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps(doc))
+    app = build_application(GraphOptions(config=str(path), output="p.mp4"), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["input_0"]["format"] == "rawvideo"
+    assert nodes["input_0"]["options"] == {"pixel_format": fmt, "video_size": "320x180", "framerate": "60/1"}
+    assert nodes["decode_0"]["codec"] == "rawvideo"
+    assert "hwaccel" not in nodes["decode_0"]
+    assert nodes["filter_0"]["src"] == "input_0_decoded"
+    assert nodes["filter_0"]["graph"] == "setpts=N*1/(60*TB)"
+    assert nodes["realtime_0"]["src"] == "input_0_filtered"
+    assert nodes["upload_0"]["src"] == "input_0_fps"
+    assert nodes["upload_0"]["graph"] == "hwupload"
+    source = dict(FakeMixer.instances[-1].sources)["raw"]
+    assert source["pre_otm_edge"] == "input_0_uploaded" and source["pixel_format"] == fmt
+
+
+@pytest.mark.parametrize("changes", [{"width": 319}, {"height": 0}, {"color": "hlg"}, {"color": ""}])
+def test_raw_nv12_rejects_invalid_geometry_or_color(changes):
+    doc = {"canvas": CONFIG["canvas"], "sources": [{"id": "raw", "kind": "nv12",
+           "path": "pattern.nv12", "width": 320, "height": 180, "color": "sdr", **changes}],
+           "scenes": [{"id": "full", "items": [{"source": "raw", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    with pytest.raises(mixer_config.ConfigError):
+        mixer_config.parse(doc)
 
 
 def test_config_scene_layers_carry_z_cover_and_aliases():
@@ -642,7 +694,7 @@ def test_scene_blend_rejects_non_boolean_values(value):
 def test_browser_alpha_preservation_follows_scene_blending(tmp_path, monkeypatch, blend):
     from pyplumber.mixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *args, **kwargs: {"windows": []})
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
     scene = {"id": "overlay", "items": [CONFIG["scenes"][0]["items"][0],
              {**CONFIG["scenes"][1]["items"][0], "blend": blend}]}
     path = tmp_path / "show.json"
@@ -661,12 +713,12 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     from pyplumber.mixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
     path = tmp_path / "mixer.json"
-    doc = {**CONFIG, "sources": [{**CONFIG["sources"][0], "filter": source_filter, "filter_output_format": "p210le" if source_filter else ""},
+    doc = {**CONFIG, "browser_ring_size": 6, "sources": [{**CONFIG["sources"][0], "filter": source_filter, "filter_output_format": "p210le" if source_filter else ""},
                                 *CONFIG["sources"][1:]]}
     path.write_text(_json.dumps(doc))
     opened = []
     monkeypatch.setattr(dmabuf_inputs, "rest_request",
-                        lambda base, method, p, body=None: opened.append((method, p, body)) or {"windows": []})
+                        lambda base, method, p, body=None: opened.append((method, p, body)) or fake_browser_rest(base, method, p, body))
     from pyplumber.mixer import config as mc
     monkeypatch.setattr(mc, "probe_video_size", lambda path: (_ for _ in ()).throw(AssertionError("declared sizes must not be probed")))
     FakeMixer.instances.clear()
@@ -691,7 +743,9 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     assert [name for name, _ in mixer.sources] == ["cam", "cam#2", "page"]
     assert dict(mixer.sources)["page"]["pre_otm_edge"] == "input_1_held"
     assert opened[-1][2] == {"id": "page", "url": "https://example.org/", "width": 1280, "height": 720,
-                             "fps": 60, "audio": False}
+                             "fps": 60, "audio": False, "ringSize": 6}
+    assert nodes["input_1_to_cuda"]["max_imports"] == 32
+    assert nodes["input_1_to_cuda"]["import_ttl_ms"] == 1000
     assert mixer.initial_scene == ("pip", "A") and set(mixer.scenes) == {"full", "pip"}
     assert mixer.parameters["canvas"] == (1920, 1080)
     assert application.wipe_files == ("/media/swoosh.mov",)
@@ -702,10 +756,10 @@ def test_config_builds_one_chain_per_source_with_alias_fanout(tmp_path, monkeypa
     application.start()
     assert ("POST", "/window/refresh", {"id": "page"}) in opened      # static pages repaint into the live chain
     assert json.loads(application.avp.commands_registered["mixer.settings"]("")) == {
-        "source_count": 2,
+        "source_count": 2, "browser_ring_size": 6,
         "preview_codecs": [],
         "canvas": {"width": 1920, "height": 1080, "fps": 60, "working_format": "nv12"},
-        "source_counts": {"video": 1, "browser": 1, "v210": 0},
+        "source_counts": {"video": 1, "browser": 1, "v210": 0, "nv12": 0, "p010": 0},
         "direct": False, "fade_seconds": 0.8, "transition": "cut",
         "wipe_file": "/media/swoosh.mov",
         "default_wipe": "swoosh",
@@ -869,7 +923,7 @@ def test_renditions_encode_the_one_composited_program(tmp_path, monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
     from pyplumber.mixer import dmabuf_inputs
     (tmp_path / "page.sock").touch()
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
     doc = {**RENDITION_CONFIG,
            "renditions": [RENDITION_CONFIG["renditions"][0],
                           {"id": "square", "target": "/rec/square.mp4", "width": 1080,
@@ -1042,7 +1096,7 @@ def test_hdr_example_config_parses_and_builds(tmp_path, monkeypatch):
     assert [r.id for r in cfg.renditions] == ["hdr", "sdr", "archive"]
     (tmp_path / "page.sock").touch()
     from pyplumber.mixer import dmabuf_inputs
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
     FakeMixer.instances.clear()
     app = build_application(GraphOptions(config=str(path), janus_output=True, dmabuf_socket_dir=str(tmp_path)),
                             api=fake_api())
@@ -1095,7 +1149,7 @@ def test_generated_ten_bit_sdr_show_uses_hevc_profile():
 
 def test_canvas_latency_reaches_the_builder_unless_the_cli_overrides_it(tmp_path, monkeypatch):
     from pyplumber.mixer import dmabuf_inputs
-    monkeypatch.setattr(dmabuf_inputs, "rest_request", lambda *a, **k: {"windows": []})
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
     (tmp_path / "page.sock").touch()
     doc = {**CONFIG, "canvas": {**CONFIG["canvas"], "latency_ms": 50}}
     assert mixer_config.parse(doc).latency_ms == 50.0
@@ -1186,3 +1240,23 @@ def test_generated_grids_show_every_distinct_source_before_any_repeat():
     assert [i["source"] for i in four_box["items"]] == ["clip0", "clip1", "clip2", "clip3"]
     assert doc["canvas"]["fps"] == 30 and doc["control"]["transition"] == "cut"
     assert doc["renditions"][0]["bitrate_kbps"] == 2700 and doc["renditions"][0]["aspect"] == "9:16"
+
+
+@pytest.mark.parametrize("override,expected", [(None, 384), (512, 512)])
+def test_compositor_layer_budget_json_and_cli(tmp_path, monkeypatch, override, expected):
+    from pyplumber.mixer import dmabuf_inputs
+    (tmp_path / "page.sock").touch()
+    monkeypatch.setattr(dmabuf_inputs, "rest_request", fake_browser_rest)
+    path = tmp_path / "show.json"
+    path.write_text(json.dumps({**CONFIG, "max_compositor_layers": 384}))
+    args = ["--config", str(path), "--output", "p.mp4", "--dmabuf-socket-dir", str(tmp_path)]
+    if override is not None:
+        args += ["--max-compositor-layers", str(override)]
+    build_application(parse_args(args), api=fake_api())
+    assert FakeMixer.instances[-1].parameters["max_compositor_layers"] == expected
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "512", 2**31])
+def test_invalid_compositor_layer_budget(value):
+    with pytest.raises(mixer_config.ConfigError, match="max_compositor_layers"):
+        mixer_config.parse({**CONFIG, "max_compositor_layers": value})

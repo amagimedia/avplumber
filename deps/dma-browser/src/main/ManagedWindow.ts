@@ -285,6 +285,7 @@ export class ManagedWindow implements IManagedWindow {
       height: this.config.height,
       fps: this.config.fps,
       audio: this.config.audio,
+      ringSize: this.opts.retainedFramePoolSize,
       visible: this.visible,
       stats,
     };

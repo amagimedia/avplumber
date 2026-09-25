@@ -35,8 +35,8 @@ scenes, mode and source counts, then click **Apply setup**. The instance generat
 its assets and starts the mixer. No JSON editing or downloads are required.
 **8-bit** uses an SDR NV12 canvas and H.264 output only; the player hides its
 stream selector. **10-bit HDR** offers **4:2:2** (P210, default) or **4:2:0** (P010),
-with H.264 SDR and H.265 HDR outputs. Switching to HDR selects the balanced mix,
-including HDR inputs; each source type has an editable count. Editing a type
+with H.264 SDR and H.265 HDR outputs. Switching to HDR splits the existing NVDEC
+count between SDR and HDR; browser and raw-upload counts are preserved. Each source type has an editable count. Editing a type
 updates the total; changing the total redistributes the current mix. HDR 4:2:2 inputs are capped
 at **four**, redistributing the remainder among the other enabled types.
 4:2:0 mode excludes 4:2:2 inputs. Switching to SDR reallocates video weights to
@@ -54,9 +54,18 @@ The player also shows host GPU/NVDEC usage and used/total VRAM from `nvidia-smi`
 sampled once per second. Usage turns orange at 95% and red at 99%; VRAM turns
 orange at 14 GiB and red at 14.75 GiB. These totals include other GPU applications.
 
-The setup limits unique sources to **48 at 50/60 fps** and **96 at 25/30 fps**,
-including at most **32 browser sources**, and scenes to **128**. The browser
-service defaults to four workers with eight windows each.
+The setup limits unique sources to **110 at 25 fps, 83 at 30 fps, 50 at 50 fps,
+and 41 at 60 fps**. The 25 fps ceiling is experimental above
+the 100-source baseline. Higher rates retain a budget of
+2,500 input frames per second, rounded down. It allows at most **32 browser sources**
+and **192 scenes**. The browser service defaults to four workers with eight windows
+each. Source mix, resolution and bit depth also affect capacity; a mixed-source
+budget does not mean the GPU can decode that many simultaneous videos. Combined
+SDR/HDR NVDEC inputs are capped at **40** for 25/30 fps and **20** for 50/60 fps.
+Raw uploads share **28/23/14/11** units at 25/30/50/60 fps: an SDR NV12 source
+uses one unit and an HDR P010 source uses two. The **HDR · 4:2:0 · raw upload**
+count is available in both 10-bit modes and uses no NVDEC. See the
+[capacity measurements](docs/capacity.md) for tested mixes and limitations.
 
 Settings persist in `media/demo.json`; later starts restore them and reuse
 `media/assets/` and `media/media_wipes/`. The HTTP server stays running while its
@@ -176,9 +185,9 @@ Recipe entries with `kind: "browser"` open their own DMA-BUF windows. Pages and
 files share every layout and transition; a page that stops painting holds its
 last frame. The included alpha page needs no external website.
 
-The stack allows 16 browser windows across two processes. This covers both
-presets even at 64 total sources. For a custom mix with more browsers, set
-`MIXER_BROWSER_CAPACITY` when starting Compose. This is browser capacity, not
+The stack allows 32 browser windows across four processes, eight per process.
+Set `MIXER_BROWSER_CAPACITY` when starting Compose to change the service capacity.
+The generic setup page caps browser inputs at 32. This is browser capacity, not
 the recipe's total source count. Lower-level browser-only setup remains in the
 [DMA-BUF demo](../dmabuf-browser/README.md).
 

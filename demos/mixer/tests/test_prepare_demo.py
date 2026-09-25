@@ -93,6 +93,34 @@ def test_weights_round_to_exact_total_and_zero_disables():
             allocate(16, weights)
 
 
+@pytest.mark.parametrize("storage,color,pattern,bytes_per_pixel", [("nv12", "sdr", "testsrc2", 1.5), ("p010", "hlg", "0", 3)])
+def test_raw_420_assets_are_animated_exact_size_and_cached(recipe, tmp_path, storage, color, pattern, bytes_per_pixel):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("requires FFmpeg")
+    recipe.update(source_count=2, scene_count=1, layouts={"grid_2": 1})
+    recipe["inputs"] = [{"id": "raw", "kind": "generated", "color": color, "chroma": "420",
+                          "storage": storage, "pattern": pattern, "weight": 1}]
+    show, jobs, _ = plan(recipe, tmp_path)
+    assert [s["kind"] for s in show["sources"]] == [storage, storage]
+    raw_jobs = [(p, writer) for p, writer in jobs.items() if p.suffix == f".{storage}"]
+    assert len(raw_jobs) == 1  # distinct chains can reuse the cached clip
+    path, writer = raw_jobs[0]
+    ensure_asset(path, writer)
+    frame_size = int(96 * 64 * bytes_per_pixel)
+    data = path.read_bytes()
+    assert len(data) == frame_size * 4
+    assert data[:frame_size] != data[frame_size:2 * frame_size]
+    ensure_asset(path, lambda _: pytest.fail("cached raw clip must not be regenerated"))
+
+
+@pytest.mark.parametrize("color,chroma", [("hlg", "420"), ("sdr", "422")])
+def test_raw_nv12_storage_rejects_incompatible_color(recipe, tmp_path, color, chroma):
+    recipe["inputs"] = [{"id": "raw", "kind": "generated", "color": color, "chroma": chroma,
+                          "storage": "nv12", "weight": 1}]
+    with pytest.raises(ValueError, match="SDR 4:2:0 only"):
+        plan(recipe, tmp_path)
+
+
 def test_sdr_pattern_pool_keeps_cellauto_opt_in(recipe, tmp_path):
     recipe["inputs"] = [recipe["inputs"][0]]
     recipe.update(source_count=16, scene_count=1, layouts={"grid_16": 1})

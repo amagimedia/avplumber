@@ -16,11 +16,12 @@ INPUT_TIMEOUT_S = 3_942_000_000
 
 
 def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: int = 1,
-                hwaccel: str = "@gpu", loop: bool = False,
+                hwaccel: Optional[str] = "@gpu", loop: bool = False,
                 input_params: Optional[dict] = None,
                 speed_team: Optional[str] = None, speed: float = 1.0,
                 pause_team: Optional[str] = None, sync_team: Optional[str] = None,
                 realtime_params: Optional[dict] = None, decoder_params: Optional[dict] = None,
+                decoded_filter: str = "",
                 pause_params: Optional[dict] = None,
                 auto_restart: Optional[str] = "group") -> str:
     """Add the chain for one source and return its output edge (``input_<tag>_fps``).
@@ -30,6 +31,8 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     adds a ``pause`` node before ``realtime`` and ``sync_team`` names the
     realtime team, so ``pause/resume <pause_team>`` holds the picture and
     ``seek <sync_team> now <ts>`` re-cues the input (the replay demo's wiring).
+    ``hwaccel=None`` keeps decoded frames on the CPU; ``decoded_filter`` runs
+    before speed, pause and realtime pacing.
     """
     edge = lambda suffix: f"input_{tag}_{suffix}"  # noqa: E731
     restart = {} if auto_restart is None else {"auto_restart": auto_restart}
@@ -46,10 +49,18 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     }))
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": edge("video_packets"), "dst": edge("decoded"),
-        "pixel_format": "?cuda", "hwaccel": hwaccel, "group": group, **restart,
+        **({"pixel_format": "?cuda", "hwaccel": hwaccel} if hwaccel else {}),
+        "group": group, **restart,
         **(decoder_params or {}),
     }))
     realtime_src = edge("decoded")
+    if decoded_filter:
+        avp.addNode(api.FilterVideo({
+            "name": f"filter_{tag}", "src": realtime_src, "dst": edge("filtered"),
+            "graph": decoded_filter, "group": group,
+            **({"hwaccel": hwaccel} if hwaccel else {}),
+        }))
+        realtime_src = edge("filtered")
     if speed_team is not None:
         avp.addNode(api.SpeedVideo({
             "name": f"speed_{tag}", "src": realtime_src, "dst": edge("speeded"),
@@ -85,6 +96,31 @@ def _pace(avp, api, tag: str, src: str, *, fps: int, fps_den: int, group: str,
 def v210_row_stride(width: int) -> int:
     """Standard v210 row stride: ceil(width/48) * 128 bytes."""
     return ((width + 47) // 48) * 128
+
+
+def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
+                       pixel_format: str, fps: int, fps_den: int = 1,
+                       hwaccel: str = "@gpu", loop: bool = False) -> str:
+    """CPU/GPU interop source: raw NV12/P010 -> paced CPU frames -> CUDA upload.
+
+    Pacing before upload bounds transfer work to the requested frame rate. No NVDEC
+    or pixel conversion is needed; rawvideo only wraps the existing bytes.
+    """
+    if pixel_format not in ("nv12", "p010le"):
+        raise ValueError("raw 4:2:0 upload requires nv12 or p010le")
+    edge = build_input(avp, api, tag, path, group=group, fps=fps, fps_den=fps_den,
+                       hwaccel=None, loop=loop, auto_restart=None if loop else "group",
+                       input_params={"format": "rawvideo", "options": {
+                           "pixel_format": pixel_format, "video_size": f"{width}x{height}",
+                           "framerate": f"{fps}/{fps_den}"}},
+                       decoder_params={"codec": "rawvideo", "pixel_format": pixel_format},
+                       # InputRec seeks back to PTS zero at each loop. Count frames
+                       # before pacing; setpts changes metadata only, not pixels.
+                       decoded_filter=f"setpts=N*{fps_den}/({fps}*TB)")
+    output = f"input_{tag}_uploaded"
+    avp.addNode(api.FilterVideo({"name": f"upload_{tag}", "src": edge, "dst": output,
+                                "graph": "hwupload", "hwaccel": hwaccel, "group": group}))
+    return output
 
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,

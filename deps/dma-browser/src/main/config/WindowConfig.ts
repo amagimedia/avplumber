@@ -5,6 +5,7 @@ export interface WindowConfig {
   readonly height: number;
   readonly fps: number;
   readonly audio: boolean;
+  readonly ringSize?: number;
 }
 
 export interface UpdateUrlPayload {
@@ -24,6 +25,7 @@ export interface WindowSnapshot {
   readonly height: number;
   readonly fps: number;
   readonly audio: boolean;
+  readonly ringSize?: number;
   readonly visible: boolean;
   readonly stats: WindowStats;
 }

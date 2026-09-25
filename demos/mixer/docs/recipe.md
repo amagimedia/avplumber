@@ -31,15 +31,45 @@ lets host preparation write paths for a later `/media` container mount.
 | `generation.width`, `generation.height` | Optional synthetic source dimensions, independent of the canvas. Defaults to the canvas dimensions. |
 | `generation.sdr_encoder`, `generation.hdr_encoder` | Preparation encoders; default `h264_nvenc`, `hevc_nvenc`. |
 | `renditions` | Normal mixer output definitions, copied to the generated show. Use separate RTP/RTCP port pairs. |
+| `browser_ring_size` | Maximum outstanding DMA-BUF frames per browser; 1–64, default 6 at 25/30 fps and 9 otherwise. The import-cache capacity is at least 32; obsolete idle imports expire. |
 
 Weights need not add to 100. Largest-remainder rounding makes counts add to the
 requested total; ties follow recipe order. A positive weight can round to zero
 when the total is small. For exact counts, make weights sum to the desired total.
 Preparation prints the allocated input counts before generating media.
 
-These are graph limits. The setup page applies lower limits: 48 sources at
-50/60 fps or 96 at 25/30 fps, 32 browsers, four HDR 4:2:2 inputs and 128 scenes.
-Custom recipes must fit the host's GPU, decoder and browser capacity.
+These are graph limits. The setup page allows 110 sources at 25 fps
+(experimental above the 100-source baseline), 83 at 30 fps,
+50 at 50 fps or 41 at 60 fps. Higher rates use a 2,500-input-frames-per-second
+budget. It also limits browsers to 32, HDR 4:2:2 inputs to four and scenes to 192.
+SDR and HDR NVDEC inputs share a limit of 40 at 25/30 fps or 20 at 50/60 fps.
+Raw 4:2:0 uploads share 28/23/14/11 units at 25/30/50/60 fps; NV12 costs one unit
+and P010 costs two, proportional to their bytes per frame.
+See [capacity measurements](capacity.md) for the assumptions. Source mix still
+matters: custom recipes must fit the host's GPU, decoder, upload and browser capacity.
+
+The setup page also offers **SDR · 4:2:0 · raw upload**, separately from the
+H.264/NVDEC count. It works in all three canvas modes. These cached NV12 patterns
+are paced on the CPU, then uploaded once per frame; they use no NVDEC and need no
+pixel-format conversion before upload. Disk traffic and CPU-to-GPU bandwidth
+increase compared with encoded clips. The balanced preset leaves this count at zero.
+In a custom recipe, add an input such as:
+
+```json
+{"id": "sdr420_raw", "kind": "generated", "color": "sdr", "chroma": "420",
+ "storage": "nv12", "weight": 4}
+```
+
+It uses the same SDR pattern pool and asset cache as encoded sources, with separate
+`.nv12` files. The generated show declares these sources as `kind: "nv12"`.
+
+Both 10-bit canvas modes also offer **HDR · 4:2:0 · raw upload**. This generates
+cached HLG P010 patterns and uploads them directly, without NVDEC or a runtime
+SDR-to-HDR conversion. Use `storage: "p010"` and `color: "hlg"` in a generated
+4:2:0 recipe input; the resulting show uses `kind: "p010"` and `.p010` files.
+Assets are prepared only when missing. P010 doubles raw storage and upload bytes
+relative to NV12; the shared upload budget is a conservative estimate, not a
+validated HDR capacity limit.
 
 The synthetic-only startup example's weights 8:4:2:2 at 16 sources give eight SDR 4:2:0, four HLG
 4:2:0, two HLG 4:2:2, and two SDR 4:2:2 inputs. Increasing `scene_count` creates

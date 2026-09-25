@@ -27,8 +27,13 @@ TRANSITIONS = ("cut", "fade", "wipe")
 WORKING_FORMATS = ("nv12", "p010le", "p210le")
 DEFAULT_FPS = 30          # canvas.fps when the document does not say
 MAX_SOURCES = 128         # cuda_rect_overlay active_inputs is a 128-bit pad mask (SourceMask)
+DEFAULT_MAX_COMPOSITOR_LAYERS = 256
 DEFAULT_FADE_SECONDS = 0.5
 DEFAULT_TRANSITION = "cut"
+
+
+def default_browser_ring_size(fps):
+    return 6 if fps in (25, 30) else 9
 
 
 @dataclass(frozen=True)
@@ -42,8 +47,8 @@ class Rect:
 @dataclass(frozen=True)
 class Source:
     id: str
-    kind: str                      # "browser" | "video" | "v210"
-    location: str                  # url (browser) or path (video/v210 raw file)
+    kind: str                      # "browser" | "video" | "v210" | "nv12" | "p010"
+    location: str                  # browser URL or media path (v210/nv12/p010 are raw files)
     width: int = 0
     height: int = 0
     fps: int = 0                   # browser paint rate; 0 = canvas fps
@@ -152,6 +157,14 @@ class MixerConfig:
     out_color: Color = Color()     # canvas color contract; renditions convert from it and signal it (VUI)
     wipe_color: str = ""          # optional explicit override for all alpha wipe clips
     aux_buses: Tuple[AuxBus, ...] = ()
+    browser_ring_size: Optional[int] = None
+    max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS
+
+    def __post_init__(self):
+        if type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647:
+            raise ConfigError("max_compositor_layers must be a positive 32-bit integer")
+        if self.browser_ring_size is None:
+            object.__setattr__(self, "browser_ring_size", default_browser_ring_size(self.fps))
 
     def source(self, id: str) -> Source:
         return next(s for s in self.sources if s.id == id)
@@ -164,12 +177,12 @@ class MixerConfig:
         preview_codecs = list(dict.fromkeys(
             "h265" if "hevc" in (r.codec or ("h264_nvenc" if self.working_format == "nv12" else "hevc_nvenc")) else "h264"
             for r in self.renditions if r.target == "janus"))
-        return {"source_count": len(self.sources),
+        return {"source_count": len(self.sources), "browser_ring_size": self.browser_ring_size,
                 "preview_codecs": preview_codecs,
                 "canvas": {"width": self.canvas_w, "height": self.canvas_h, "fps": self.fps,
                            "working_format": self.working_format},
                 "source_counts": {kind: sum(s.kind == kind for s in self.sources)
-                                  for kind in ("video", "browser", "v210")},
+                                  for kind in ("video", "browser", "v210", "nv12", "p010")},
                 "direct": self.direct, "fade_seconds": self.fade_seconds,
                 "transition": self.transition,
                 "wipe_file": default.path if default else "", "default_wipe": self.default_wipe,
@@ -205,7 +218,8 @@ def _rect(obj: Any, where: str) -> Rect:
     return r
 
 
-_SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",), "v210": ("path", "width", "height")}
+_SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",),
+                **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
 
 
 def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
@@ -213,7 +227,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     if not sid or "#" in sid:
         raise ConfigError(f"{where}: id required (no '#')")
     if kind not in _SOURCE_KEYS:
-        raise ConfigError(f"{where}: kind must be browser, video or v210")
+        raise ConfigError(f"{where}: kind must be one of {', '.join(_SOURCE_KEYS)}")
     if not all(k in s for k in _SOURCE_KEYS[kind]):
         raise ConfigError(f"{where}: {kind} source needs {', '.join(_SOURCE_KEYS[kind])}")
     source_filter = s.get("filter", "")
@@ -230,6 +244,11 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
             raise ValueError("raw input has no color metadata; declare an explicit color setting")
         if kind == "browser" and color != Color():
             raise ValueError("browser input supports SDR only")
+        if kind in ("nv12", "p010"):
+            if kind == "nv12" and color != Color():
+                raise ValueError("nv12 input supports SDR only")
+            if any(type(s[k]) is not int or s[k] <= 0 or s[k] % 2 for k in ("width", "height")):
+                raise ValueError(f"{kind} input needs positive even width and height")
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
     return Source(sid, kind, str(s.get("url", s.get("path"))), width=int(s.get("width", 0)),
@@ -395,7 +414,12 @@ def parse(doc: Dict[str, Any]) -> MixerConfig:
     wipe_color = str(doc.get("wipe_color", ""))
     if wipe_color and wipe_color not in TRANSFER_TAGS:
         raise ConfigError("wipe_color must be sdr, hlg or pq")
+    browser_ring_size = doc.get("browser_ring_size", default_browser_ring_size(fps))
+    if type(browser_ring_size) is not int or not 1 <= browser_ring_size <= 64:
+        raise ConfigError("browser_ring_size must be an integer from 1 to 64")
     cfg = MixerConfig(canvas_w, canvas_h, fps, tuple(sources), tuple(scenes), tuple(wipes), tuple(renditions),
+                       browser_ring_size=browser_ring_size,
+                       max_compositor_layers=doc.get("max_compositor_layers", DEFAULT_MAX_COMPOSITOR_LAYERS),
                        initial_scene=initial, working_format=working_format, latency_ms=latency_ms, out_color=out_color,
                        wipe_color=wipe_color, **_parse_control(doc.get("control", {}), wipes))
     from .aux import parse_aux_buses
@@ -420,9 +444,12 @@ def scan_wipe_dir(directory: str, taken=frozenset(), ids=frozenset()) -> List[Wi
     return found
 
 
-def load(path: str) -> MixerConfig:
+def load(path: str, *, max_compositor_layers: Optional[int] = None) -> MixerConfig:
     with open(path, "r", encoding="utf-8") as f:
-        return parse(json.load(f))
+        doc = json.load(f)
+    if max_compositor_layers is not None:
+        doc["max_compositor_layers"] = max_compositor_layers
+    return parse(doc)
 
 
 def probe_video_size(path: str) -> Tuple[int, int]:

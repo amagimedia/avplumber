@@ -12,6 +12,7 @@ import threading
 import time
 
 from demo_recipe import allocate
+from pyplumber.mixer.config import default_browser_ring_size
 
 DEMO_DIR = Path(__file__).resolve().parent
 # bitrate_kbps is the SDR (H.264) program bitrate. The recipe's other renditions keep their
@@ -19,19 +20,31 @@ DEMO_DIR = Path(__file__).resolve().parent
 DEFAULT_BITRATE_KBPS = 6000
 MIN_BITRATE_KBPS, MAX_BITRATE_KBPS = 500, 40000
 DEFAULT_SETTINGS = dict(resolution="1920x1080", orientation="portrait", fps=60, bit_depth=10, chroma="422",
-                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2],
-                        bitrate_kbps=DEFAULT_BITRATE_KBPS)
+                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
+                        bitrate_kbps=DEFAULT_BITRATE_KBPS, browser_ring_size=default_browser_ring_size(60))
 
 
-def source_counts(total, weights):
+def source_counts(total, weights, fps=25):
     counts = allocate(total, weights)
-    for index, limit, name in ((2, 4, "HDR 4:2:2"), (4, 32, "Browser")):
-        if counts[index] > limit:
-            remaining = [w if i != index else 0 for i, w in enumerate(weights)]
+    # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
+    for indices, costs, limit, name in (
+            ((2,), (1,), 4, "HDR 4:2:2"), ((4,), (1,), 32, "Browser"),
+            ((0, 1), (1, 1), 40 if fps <= 30 else 20, "Combined NVDEC"),
+            ((5, 6), (1, 2), min(28, 700 // fps), "Raw 4:2:0 upload units")):
+        group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
+        if sum(counts[i] * cost for i, cost in group) > limit:
+            size = min(limit, sum(counts[i] for i, _ in group))
+            while True:
+                capped = allocate(size, [weights[i] for i, _ in group])
+                if sum(n * cost for n, (_, cost) in zip(capped, group)) <= limit:
+                    break
+                size -= 1
+            remaining = [0 if i in indices else w for i, w in enumerate(weights)]
             if not any(remaining):
-                raise ValueError(f"{name} is limited to {limit} sources; enable another source type")
-            counts = source_counts(total - limit, remaining)
-            counts[index] = limit
+                raise ValueError(f"{name} is limited to {limit}; enable another source type")
+            counts = source_counts(total - size, remaining, fps)
+            for (i, _), count in zip(group, capped):
+                counts[i] = count
             break
     return counts
 
@@ -40,7 +53,7 @@ def recipe_for(settings):
     """Accept only the bounded generic setup controls, never paths or commands."""
     if isinstance(settings, dict):
         settings = {"bit_depth": 10, "chroma": "420" if settings.get("bit_depth") == 8 else "422",
-                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, **settings}
+                    "bitrate_kbps": DEFAULT_BITRATE_KBPS, "browser_ring_size": default_browser_ring_size(settings.get("fps")), **settings}
     if not isinstance(settings, dict) or set(settings) != set(DEFAULT_SETTINGS):
         raise ValueError("Expected resolution, orientation, fps, source_count, scene_count, bit_depth, chroma, layout and weights")
     for key, choices in (("resolution", ("1920x1080", "1280x720")),
@@ -51,8 +64,9 @@ def recipe_for(settings):
                          ("layout", ("balanced", "grids", "fullscreen"))):
         if settings[key] not in choices:
             raise ValueError(f"Unsupported {key}")
-    source_limit = 48 if settings["fps"] in (50, 60) else 96
-    for key, maximum in (("source_count", source_limit), ("scene_count", 128)):
+    # Higher rates use the 100-at-25-fps baseline; 25 fps retains the experimental 110-input ceiling.
+    source_limit = 110 if settings["fps"] == 25 else 2500 // settings["fps"]
+    for key, maximum in (("source_count", source_limit), ("scene_count", 192), ("browser_ring_size", 64)):
         value = settings[key]
         if type(value) is not int or not 1 <= value <= maximum:
             raise ValueError(f"{key} must be an integer from 1 to {maximum}")
@@ -60,18 +74,21 @@ def recipe_for(settings):
     if type(bitrate) is not int or not MIN_BITRATE_KBPS <= bitrate <= MAX_BITRATE_KBPS:
         raise ValueError(f"bitrate_kbps must be an integer from {MIN_BITRATE_KBPS} to {MAX_BITRATE_KBPS}")
     weights = settings["weights"]
-    if not isinstance(weights, list) or len(weights) != 5 or any(type(w) is not int or not 0 <= w <= 100 for w in weights):
-        raise ValueError("Provide five integer source weights from 0 to 100")
-    if settings["bit_depth"] == 8 and any(weights[1:4]):
+    if not isinstance(weights, list) or len(weights) not in (5, 6, 7) or any(type(w) is not int or not 0 <= w <= 110 for w in weights):
+        raise ValueError("Provide seven integer source weights from 0 to 110")
+    weights = weights + [0] * (7 - len(weights))
+    settings = {**settings, "weights": weights}
+    if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
         raise ValueError("8-bit mode supports a 4:2:0 canvas only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
-    counts = source_counts(settings["source_count"], weights)
+    counts = source_counts(settings["source_count"], weights, settings["fps"])
     width, height = map(int, settings["resolution"].split("x"))
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe.update(source_count=settings["source_count"], scene_count=settings["scene_count"])
+    recipe["browser_ring_size"] = settings["browser_ring_size"]
     # Scale every rendition by what the SDR one was asked to change by, so their relative
     # quality is preserved and the recipe's own numbers stay the reference.
     reference = recipe["renditions"][0]["bitrate_kbps"]
@@ -86,6 +103,10 @@ def recipe_for(settings):
         recipe["canvas"]["working_format"] = "p010le" if settings["chroma"] == "420" else "p210le"
     recipe["generation"].update(width=width, height=height)
     recipe["inputs"] = [source for source in recipe["inputs"] if source["kind"] != "download"]
+    recipe["inputs"].append({"id": "sdr420_raw", "kind": "generated", "color": "sdr",
+                             "chroma": "420", "storage": "nv12"})
+    recipe["inputs"].append({"id": "hlg420_raw", "kind": "generated", "color": "hlg",
+                             "chroma": "420", "storage": "p010"})
     for source, count in zip(recipe["inputs"], counts):
         source["weight"] = count
         if source["kind"] == "browser":
@@ -97,12 +118,15 @@ def recipe_for(settings):
                         for n in (2, 4, 8, 16, 32, 64) if n <= settings["source_count"]})
         if mode == "balanced":
             layouts.update(pip=3, random=3)
-            if counts[4] and sum(counts[:4]):
+            if counts[4] and sum(counts[:4]) + sum(counts[5:]):
                 layouts["alpha_overlay"] = 2
-                if counts[0]:
-                    recipe["alpha_background"] = "sdr420_001" if counts[0] > 1 else "sdr420_000"
-                    if counts[0] == 1:
-                        recipe["inputs"][0]["pattern"] = "bars"
+                for index in (0, 5, 1, 6, 2, 3):
+                    if counts[index]:
+                        source = recipe["inputs"][index]
+                        recipe["alpha_background"] = source["id"] + ("_001" if counts[index] > 1 else "_000")
+                        if counts[index] == 1 and index in (0, 5):
+                            source["pattern"] = "bars"
+                        break
     recipe["setup"] = settings
     recipe["layouts"] = layouts
     return recipe
@@ -171,7 +195,10 @@ class SetupRuntime:
         from pyplumber.mixer.aux import aux_fps, validate_assignments
         from pyplumber.mixer.config import ConfigError, parse
         config = self.media_dir / "mixer.demo.json"
-        buses = json.loads(config.read_text()).get("aux_buses", []) if config.exists() else []
+        previous = json.loads(config.read_text()) if config.exists() else {}
+        if "max_compositor_layers" in previous:
+            recipe["max_compositor_layers"] = show["max_compositor_layers"] = previous["max_compositor_layers"]
+        buses = previous.get("aux_buses", [])
         if not buses:
             return
         live = {}
@@ -199,7 +226,9 @@ class SetupRuntime:
         if self.process and self.process.poll() is None:
             os.killpg(self.process.pid, signal.SIGINT)
             try:
-                self.process.wait(timeout=15)
+                # Large graphs stop input groups serially; killing them early
+                # leaves browser DMA-BUF frames quarantined and blocks restart.
+                self.process.wait(timeout=120)
             except subprocess.TimeoutExpired:
                 os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait()

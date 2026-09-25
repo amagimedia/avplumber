@@ -35,6 +35,35 @@ supplied by that file; the runtime does not depend on the recorded demo's inputs
 
 `canvas`, `sources` and `scenes` are required; everything else has a default.
 
+`max_compositor_layers` is the per-compositor draw budget (default 256).
+Eight 64-input multiview tiles need 577 layers: 512 for the tiles, 64 reserved
+for PVW and one for the already-composited PGM. Set the budget to `640`, or
+override a show with `--max-compositor-layers 640`. Recipes accept the same field; setup changes
+preserve it. Native compositor nodes call this parameter `max_layers`.
+The CUDA layer table allocates 128 bytes per configured layer on both the GPU
+and pinned host memory. The culling mask and per-frame work use the actual
+layer count; raising the budget does not allocate more video frames.
+
+AUX scene changes briefly subscribe to the union of the current and latest requested
+layout. The old layout stays live until new inputs are ready for the output clock,
+then all tiles switch together. Preparation times out after the larger of 250 ms
+and twice the AUX latency budget, keeping the previous layout. Superseded requests
+and unused subscriptions are released; this does not prewarm every source.
+
+`browser_ring_size` is a top-level integer (1–64, default 6 at 25/30 fps and 9
+otherwise) limiting outstanding DMA-BUF frames per browser. The CUDA import cache
+keeps room for at least 32 allocation handles independently of the outstanding
+frame limit. Returning allocations refresh their registrations before expiry;
+frames still in use keep their registration discoverable. Idle imports expire
+after four ring cycles (at least one second), so replaced allocations are not
+pinned indefinitely.
+Cached handles do not withhold frame-release acknowledgments. For example,
+`"browser_ring_size": 6` uses a six-frame ceiling for every browser source.
+Smaller limits can reduce VRAM but drop paints when downstream retains all slots.
+The browser service must support the `ringSize` window option; update it together
+with the mixer. The setup page exposes the same setting and resets it to the default when FPS changes. Without a JSON config,
+use `--browser-ring-size` with `--dmabuf-open`.
+
 ## Complete example
 
 Every meaningful option in one HDR show: three source kinds, two outputs, a wipe
@@ -178,15 +207,15 @@ decoder.
 | field | applies to | meaning |
 | --- | --- | --- |
 | `id` | both | referenced from scenes; no `#` |
-| `kind` | all | `"video"`, `"browser"` or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
-| `path` | video, v210 | file or stream |
-| `width`, `height` | v210 | required: the packed bytes carry no header |
-| `color` | browser, v210 | required color contract (`sdr`, `hlg`, `pq`); browser pages must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
+| `kind` | all | `"video"`, `"browser"`, `"nv12"` (raw SDR 8-bit 4:2:0), `"p010"` (raw 10-bit 4:2:0), or `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content) |
+| `path` | video, v210, nv12, p010 | file or stream |
+| `width`, `height` | v210, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
+| `color` | browser, v210, nv12, p010 | required color contract (`sdr`, `hlg`, `pq`); browser and NV12 sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | paint rate; defaults to the canvas rate |
 | `width`, `height` | video | optional; probed with ffprobe at load when absent |
 | `loop` | both | default `true` |
-| `filter` | video/v210 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
+| `filter` | video/v210/nv12/p010 | optional CUDA source graph, before automatic normalization; preserve dimensions and correct output metadata |
 | `filter_output_format` | custom filters | required CUDA YUV output storage, e.g. `p010le` or `p210le` |
 
 Browser sources arrive over DMA-BUF from the `dma-page` service and are

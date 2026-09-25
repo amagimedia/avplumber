@@ -22,8 +22,8 @@ def validate_assignments(cfg, scenes):
         raise ConfigError("multiview references an unknown scene")
     reserved = max(len(s.items) for s in cfg.scenes)
     count = reserved + 1 + sum(len(definitions[s].items) for s in scenes if s is not None)
-    if count > 256:
-        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is 256")
+    if count > cfg.max_compositor_layers:
+        raise ConfigError(f"multiview needs {count} layers including {reserved} reserved for PVW; limit is {cfg.max_compositor_layers}")
 
 
 def parse_aux_buses(values, cfg):
@@ -122,6 +122,7 @@ class AuxMultiview:
             "fps": str(fps), "latency_ms": latency, "warmup_timeout_ms": 250,
             "hwaccel": self.mixer.hwaccel, "output_hwaccel": self.hwaccel,
             "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
+            "max_layers": self.cfg.max_compositor_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
             **composition(self.cfg, self.scenes, self.preview),
         }, api=self.api), early_create=True)

@@ -14,6 +14,12 @@ const validBody = {
 };
 
 describe('ConfigService.validateWindowConfig', () => {
+  it('accepts an optional per-window ring limit', () => {
+    expect(svc.validateWindowConfig({ ...validBody, ringSize: 6 }).ringSize).toBe(6);
+    for (const ringSize of [0, 65, 6.5, true, '6']) {
+      expect(() => svc.validateWindowConfig({ ...validBody, ringSize })).toThrow(ValidationError);
+    }
+  });
   it('accepts a valid body', () => {
     const cfg = svc.validateWindowConfig(validBody);
     expect(cfg).toEqual(validBody);

@@ -29,7 +29,7 @@ sys.path.insert(0, str(DEMO_DIR.parents[1] / "tests/cuda"))
 from sdr_patterns import GENERATORS, render  # noqa: E402
 from demo_recipe import allocate, scenes  # noqa: E402
 from hdr_patterns import write_hlg  # noqa: E402
-from pyplumber.mixer.config import MAX_SOURCES, parse  # noqa: E402
+from pyplumber.mixer.config import MAX_SOURCES, default_browser_ring_size, parse  # noqa: E402
 
 
 def ensure_asset(path: Path, writer) -> None:
@@ -77,12 +77,14 @@ def render_hlg420(path, width, height, fps, seconds, variant, encoder, ffmpeg):
     # Offline conversion of a native HLG signal, not SDR samples tagged as HDR.
     raw = path.with_suffix(".v210")
     write_hlg(raw, width, height, fps * seconds, source=variant)
-    pixel_format = "p010le" if encoder == "hevc_nvenc" else "yuv420p10le"
+    pixel_format = "yuv420p10le" if encoder == "libx265" else "p010le"
+    options = (["-f", "rawvideo"] if encoder == "rawvideo" else
+               ["-profile:v", "main10", "-b:v", "12M", "-g", str(fps)])
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-f", "v210", "-video_size", f"{width}x{height}",
                     "-framerate", str(fps), "-i", str(raw), "-an",
                     "-vf", "setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc",
                     "-c:v", encoder,
-                    "-profile:v", "main10", "-pix_fmt", pixel_format, "-b:v", "12M", "-g", str(fps),
+                    "-pix_fmt", pixel_format, *options,
                     "-color_range", "tv", "-color_trc", "arib-std-b67", "-color_primaries", "bt2020",
                     "-colorspace", "bt2020nc", str(path)], check=True)
 
@@ -153,6 +155,11 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 chroma = spec.get("chroma")
                 if color not in ("sdr", "hlg") or chroma not in ("420", "422"):
                     raise ValueError(f"{name}: generated inputs need color sdr/hlg and chroma 420/422")
+                raw = spec.get("storage")
+                if raw not in (None, "nv12", "p010"):
+                    raise ValueError(f"{name}: raw storage must be nv12 or p010")
+                if raw and (chroma != "420" or color != ("sdr" if raw == "nv12" else "hlg")):
+                    raise ValueError(f"{name}: storage {raw} is supported for {'SDR' if raw == 'nv12' else 'HLG'} 4:2:0 only")
                 patterns = list(GENERATORS) if color == "sdr" and chroma == "420" else ["0", "1"]
                 # Cellular noise is useful for encoder stress, but produces large
                 # keyframe bursts when prominent in a WebRTC demo composition.
@@ -165,11 +172,11 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if pattern not in patterns:
                     raise ValueError(f"{name}: pattern must be one of {patterns}")
                 encoder = generation.get("sdr_encoder", "h264_nvenc") if color == "sdr" else generation.get("hdr_encoder", "hevc_nvenc")
-                if chroma == "420" and encoder not in (("h264_nvenc", "libx264") if color == "sdr" else ("hevc_nvenc", "libx265")):
+                if not raw and chroma == "420" and encoder not in (("h264_nvenc", "libx264") if color == "sdr" else ("hevc_nvenc", "libx265")):
                     raise ValueError(f"{name}: use h264_nvenc/libx264 for SDR or hevc_nvenc/libx265 for HDR")
-                storage = "v210" if chroma == "422" else encoder
+                storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics.
-                extension = "v210" if chroma == "422" else "mp4"
+                extension = raw or ("v210" if chroma == "422" else "mp4")
                 version = "v2" if color == "hlg" or chroma == "422" else "v1"
                 path = media_dir / "assets" / f"synthetic_{version}_{size}_{fps}fps_{seconds}s" / f"{color}_{chroma}_{pattern}_{storage}.{extension}"
                 if chroma == "422":
@@ -179,13 +186,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                         writer = lambda out, pattern=pattern: render_sdr422(
                             out, asset_width, asset_height, fps, seconds, int(pattern), ffmpeg)
                 elif color == "hlg":
-                    writer = lambda out, pattern=pattern, encoder=encoder: render_hlg420(
+                    writer = lambda out, pattern=pattern, encoder="rawvideo" if raw else encoder: render_hlg420(
                         out, asset_width, asset_height, fps, seconds, int(pattern), encoder, ffmpeg)
                 else:
-                    writer = lambda out, pattern=pattern, encoder=encoder: render(
+                    writer = lambda out, pattern=pattern, encoder="rawvideo" if raw else encoder: render(
                         out.parent, out.stem, GENERATORS[pattern], size, fps, seconds, encoder, ffmpeg)
                 jobs[path] = writer
-                source.update(kind="v210" if chroma == "422" else "video", path=runtime_path(path), width=asset_width, height=asset_height)
+                source.update(kind=raw or ("v210" if chroma == "422" else "video"),
+                              path=runtime_path(path), width=asset_width, height=asset_height)
             elif kind == "browser":
                 if "pattern" in spec:
                     if spec["pattern"] != "alpha" or "url" in spec:
@@ -221,11 +229,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
                         alpha_background=recipe.get("alpha_background"))
     doc = {"canvas": canvas, "sources": sources, "scenes": scene_list,
+           "browser_ring_size": recipe.get("browser_ring_size", default_browser_ring_size(fps)),
            "initial_scene": scene_list[0]["id"], "renditions": recipe["renditions"],
            "wipes": wipes,
            "wipe_color": "sdr", "control": {"direct": True, "transition": "cut", "default_wipe": "diagonal"}}
     if "aux_buses" in recipe:
         doc["aux_buses"] = recipe["aux_buses"]
+    if "max_compositor_layers" in recipe:
+        doc["max_compositor_layers"] = recipe["max_compositor_layers"]
     cfg = parse(doc)
     # Include RTCP's adjacent port in conflict checks.
     used_ports = set()

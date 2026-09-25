@@ -70,9 +70,10 @@ summary { cursor: pointer; }
 <label>Orientation<select id="orientation"><option value="portrait">Portrait · 9:16</option><option value="landscape">Landscape · 16:9</option></select></label>
 <label>Frames per second<select id="fps"><option>25</option><option>30</option><option>50</option><option selected>60</option></select></label>
 <label>Mode<select id="mode"><option value="10:422">HDR · 10-bit · 4:2:2</option><option value="10:420">HDR · 10-bit · 4:2:0</option><option value="8:420">SDR · 8-bit · 4:2:0</option></select></label>
-<label>Unique sources<input id="sources" type="number" min="1" max="48" step="1" value="16"></label>
-<label>Scenes<input id="scenes" type="number" min="1" max="128" step="1" value="32"></label>
+<label>Unique sources<input id="sources" type="number" min="1" max="41" step="1" value="16"></label>
+<label>Scenes<input id="scenes" type="number" min="1" max="192" step="1" value="32"></label>
 <label>Program bitrate<input id="bitrate" type="number" min="500" max="40000" step="500" value="6000"> <small>kbit/s</small></label>
+<label>Browser ring size<input id="browser-ring-size" type="number" min="1" max="64" step="1" value="9"> <small>Default: 6 at 25/30 fps, 9 at 50/60 fps</small></label>
 <label>Scene mix<select id="layout"><option value="balanced">Balanced · grids, fullscreen, PiP, random</option><option value="grids">Grids · up to your source count</option><option value="fullscreen">Fullscreen only</option></select></label>
 </div>
 <div class="canvas-row"><div><b id="canvas-label"></b><p id="canvas-format"></p><p id="input-size"></p></div></div>
@@ -80,11 +81,11 @@ summary { cursor: pointer; }
 <p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
 </section>
 <section class="card"><div class="card-title"><h2>Sources</h2></div>
-<p class="hint">Edit source counts directly. Changing the total redistributes the mix. Switching to HDR selects the balanced mix.</p>
+<p class="hint">Edit source counts directly. Changing the total redistributes the mix. Switching to HDR splits the NVDEC count between SDR and HDR.</p>
 <div class="presets"><button data-preset="balanced">Balanced</button><button data-preset="equal">Equal mix</button><button data-preset="light">4:2:0 only</button></div>
 <div id="source-controls"></div><div class="allocation" id="allocation" aria-hidden="true"></div>
 <p class="hint" id="allocation-note"></p>
-<details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars. HLG uses HDR bars and moving highlights. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
+<details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars. Choose H.264/NVDEC or raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
 </section>
 <section class="card"><div class="card-title"><h2>Included with every setup</h2></div>
 <p class="hint">Two generated wipes: diagonal sweep and sliding panels. Each lasts two seconds at the selected FPS. Wipe caching is off.</p>
@@ -108,22 +109,39 @@ summary { cursor: pointer; }
 'use strict';
 const $ = id => document.getElementById(id);
 const types = [
- {id:'sdr420',name:'SDR · 4:2:0',detail:'H.264 patterns · NVDEC',color:'#439a86'},
- {id:'hlg420',name:'HDR · 4:2:0',detail:'HLG patterns · NVDEC',color:'#5a87b5'},
+ {id:'sdr420',name:'SDR · 4:2:0 · NVDEC',detail:'H.264 patterns · NVDEC',color:'#439a86'},
+ {id:'hlg420',name:'HDR · 4:2:0 · NVDEC',detail:'HEVC 10-bit HLG patterns · NVDEC',color:'#5a87b5'},
  {id:'hlg422',name:'HDR · 4:2:2',detail:'HLG v210 · GPU unpack',color:'#ac8bce',max:4},
  {id:'sdr422',name:'SDR · 4:2:2',detail:'10-bit v210 bars · GPU unpack',color:'#d5a35f'},
- {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 32',color:'#d47f95',max:32}
+ {id:'browser',name:'Browser',detail:'Bundled transparent test page · maximum 32',color:'#d47f95',max:32},
+ {id:'sdr420_raw',name:'SDR · 4:2:0 · raw upload',detail:'Raw NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
+ {id:'hlg420_raw',name:'HDR · 4:2:0 · raw upload',detail:'Raw P010 · CPU → GPU · 2 upload units · no NVDEC',color:'#818bcf'}
 ];
-const presets = {balanced:[8,4,2,0,2],equal:[1,1,1,1,1],light:[2,1,0,0,0]};
+const presets = {balanced:[8,4,2,0,2,0,0],equal:[1,1,1,1,1,1,1],light:[2,1,0,0,0,0,0]};
+const sourceBudgets=()=>[
+ [[2],[1],4,'HDR 4:2:2'],[[4],[1],32,'Browser'],
+ [[0,1],[1,1],Number($('fps').value)<=30?40:20,'Combined NVDEC'],
+ [[5,6],[1,2],Math.min(28,Math.floor(700/Number($('fps').value))),'Raw 4:2:0 upload units']
+];
+const overBudget=counts=>sourceBudgets().some(([indices,costs,limit])=>indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)>limit);
+function sourceMaximum(index){
+ let max=sourceLimit()-sourceValues.reduce((n,v,i)=>n+(i===index?0:v),0);
+ for(const [indices,costs,limit] of sourceBudgets()){
+  const k=indices.indexOf(index);if(k<0)continue;
+  const used=indices.reduce((n,i,j)=>n+(i===index?0:sourceValues[i]*costs[j]),0);
+  max=Math.min(max,Math.floor((limit-used)/costs[k]));
+ }
+ return Math.max(0,max);
+}
 let sourceValues=sourceCounts(Number($('sources').value),presets.balanced), currentSettings=null, busy=false, online=false, loaded=false, previousDepth=10;
 let resizeValues=null, submitting=false, submission=0;
-const sourceLimit = () => Number($('fps').value)>=50?48:96;
+const sourceLimit = () => Number($('fps').value)===25?110:Math.floor(2500/Number($('fps').value));
 function outputMode(){
  const [depth,chroma]=$('mode').value.split(':');return {bit_depth:Number(depth),chroma};
 }
 function sourceEnabled(i){
  const {bit_depth,chroma}=outputMode();
- return i===0||i===4||(bit_depth===10&&(i===1||chroma==='422'));
+ return i===0||i===4||i===5||(bit_depth===10&&(i===1||i===6||chroma==='422'));
 }
 const controls=$('source-controls');
 types.forEach((t,i)=>{
@@ -131,12 +149,14 @@ types.forEach((t,i)=>{
  row.innerHTML=`<div><b><span class="dot" style="background:${t.color}"></span>${t.name}</b><small>${t.detail}</small></div><input id="count-${t.id}" type="number" min="0" max="${t.max??sourceLimit()}" step="1" aria-label="${t.name} sources">`;
  const input=row.querySelector('input');
  input.addEventListener('input',()=>{
-  const limit=sourceLimit();
-  const other=sourceValues.reduce((sum,n,index)=>sum+(index===i?0:n),0);
-  const maximum=Math.min(t.max??limit,limit-other);
+  const maximum=sourceMaximum(i);
   if(Number(input.value)>maximum)input.value=maximum;
   sourceValues[i]=Number(input.value);
   $('sources').value=sourceValues.reduce((sum,n)=>sum+n,0);
+  update();
+ });
+ input.addEventListener('blur',()=>{
+  if(Number.isInteger(sourceValues[i])&&sourceValues[i]>=0)input.value=sourceValues[i];
   update();
  });controls.append(row);
 });
@@ -150,11 +170,13 @@ function allocate(total,values){
 }
 function sourceCounts(total,values){
  let counts=allocate(total,values);
- const capped=types.findIndex((t,i)=>counts[i]>(t.max??Infinity));
- if(capped!==-1){
-  const {name,max}=types[capped],remaining=values.map((w,i)=>i===capped?0:w);
-  if(!remaining.some(Boolean))throw Error(`${name} is limited to ${max} sources; enable another source type.`);
-  counts=sourceCounts(total-max,remaining);counts[capped]=max;
+ for(const [indices,costs,limit,name] of sourceBudgets()){
+  if(indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)<=limit)continue;
+  let size=Math.min(limit,indices.reduce((n,i)=>n+counts[i],0)),capped;
+  do{capped=allocate(size,indices.map(i=>values[i]));if(capped.reduce((n,v,k)=>n+v*costs[k],0)<=limit)break;size--;}while(size>=0);
+  const remaining=values.map((w,i)=>indices.includes(i)?0:w);
+  if(!remaining.some(Boolean))throw Error(`${name} is limited to ${limit}; enable another source type.`);
+  counts=sourceCounts(total-size,remaining);indices.forEach((index,i)=>counts[index]=capped[i]);break;
  }
  return counts;
 }
@@ -165,14 +187,14 @@ function update(){
  const fps=Number($('fps').value),limit=sourceLimit();
  $('sources').max=limit;
  if(Number($('sources').value)>limit)$('sources').value=limit;
- $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.`;
- if(Number($('scenes').value)>128)$('scenes').value=128;
- const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,128),bitrate=integer('bitrate',500,40000);
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${fps} fps.${fps===25?' Above 100 is experimental.':''}`;
+ if(Number($('scenes').value)>192)$('scenes').value=192;
+ const sourceCount=integer('sources',1,limit),sceneCount=integer('scenes',1,192),bitrate=integer('bitrate',500,40000);
  if(sourceValues.some(n=>!Number.isInteger(n)||n<0))throw Error('Source counts must be non-negative whole numbers.');
- if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||types.some((t,i)=>sourceValues[i]>(t.max??Infinity)))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
+ if(resizeValues||sourceValues.reduce((a,b)=>a+b,0)!==sourceCount||overBudget(sourceValues))sourceValues=sourceCounts(sourceCount,resizeValues||sourceValues);
  const counts=sourceValues,[sourceWidth,sourceHeight]=$('resolution').value.split('x').map(Number);
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
- const video=counts.slice(0,4).reduce((a,b)=>a+b,0),browser=counts[4],mode=$('layout').value;
+ const video=sourceCount-counts[4],browser=counts[4],mode=$('layout').value;
  const layouts={fullscreen:2};
  if(mode!=='fullscreen'){
   for(const n of [2,4,8,16,32,64])if(n<=sourceCount)layouts[`grid_${n}`]=mode==='grids'?2:1;
@@ -180,10 +202,10 @@ function update(){
  }
  currentSettings={resolution:$('resolution').value,orientation:$('orientation').value,fps,
    source_count:sourceCount,scene_count:sceneCount,layout:mode,...outputMode(),weights:[...counts],
-   bitrate_kbps:bitrate};
- types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(Number(input.value)!==counts[i]||input.value==='')input.value=counts[i];input.max=Math.min(t.max??limit,limit-sourceCount+counts[i]);});
+   bitrate_kbps:bitrate,browser_ring_size:integer('browser-ring-size',1,64)};
+ types.forEach((t,i)=>{const input=$(`count-${t.id}`);if(document.activeElement!==input&&(Number(input.value)!==counts[i]||input.value===''))input.value=counts[i];input.max=sourceMaximum(i);});
  $('allocation').replaceChildren(...types.map((t,i)=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=t.color;return span}));
- $('allocation-note').textContent=`${sourceCount} independent inputs allocated. Zero disables a type. Maximum 4 HDR 4:2:2 and 32 browser sources.`;
+ $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${fps<=30?40:20} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${Math.min(28,Math.floor(700/fps))} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${fps} fps · ${portrait?'portrait':'landscape'}`;
  const eight=currentSettings.bit_depth===8;
  $('canvas-format').textContent=eight?'BT.709, 8-bit 4:2:0 canvas · SDR output':`HLG, 10-bit ${currentSettings.chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`;
@@ -193,7 +215,7 @@ function update(){
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${fps} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${fps}`;
  $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=fps;
- $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${browser} browser. ${eight?'H.264 only.':'Two encoded outputs.'}`;
+ $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload · ${browser} browser. ${eight?'H.264 only.':'Two encoded outputs.'}`;
  const sceneCounts=allocate(sceneCount,Object.values(layouts));
  $('scene-description').textContent=Object.keys(layouts).map((name,i)=>`${sceneCounts[i]} ${name.replaceAll('_',' ')}`).filter((_,i)=>sceneCounts[i]>0).join(' · ');
  $('error').textContent='';
@@ -228,8 +250,9 @@ async function refresh(){
     const s=status.settings;
     previousDepth=s.bit_depth??10;
     $('mode').value=`${previousDepth}:${s.chroma??(previousDepth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps'}))if(s[key]!==undefined)$(id).value=s[key];
-    sourceValues=[...s.weights];syncCounts();
+    for(const [id,key] of Object.entries({resolution:'resolution',orientation:'orientation',fps:'fps',sources:'source_count',scenes:'scene_count',layout:'layout',bitrate:'bitrate_kbps','browser-ring-size':'browser_ring_size'}))if(s[key]!==undefined)$(id).value=s[key];
+    if(s.browser_ring_size===undefined)$('browser-ring-size').value=Number($('fps').value)<=30?6:9;
+    sourceValues=types.map((_,i)=>s.weights[i]??0);syncCounts();
    }
    loaded=true;update();
   }
@@ -241,7 +264,7 @@ async function refresh(){
 }
 function syncCounts(){
  if(outputMode().bit_depth===8){
-  sourceValues[0]+=sourceValues[1]+sourceValues[2]+sourceValues[3];sourceValues[1]=sourceValues[2]=sourceValues[3]=0;
+  sourceValues[0]+=sourceValues[1]+sourceValues[2]+sourceValues[3];sourceValues[5]+=sourceValues[6];sourceValues[1]=sourceValues[2]=sourceValues[3]=sourceValues[6]=0;
  }else if(outputMode().chroma==='420'){
   sourceValues[0]+=sourceValues[3];sourceValues[1]+=sourceValues[2];sourceValues[2]=sourceValues[3]=0;
  }
@@ -270,13 +293,19 @@ document.querySelectorAll('[data-preset]').forEach(button=>button.onclick=()=>{
 });
 $('mode').addEventListener('input',()=>{
  const {bit_depth,chroma}=outputMode();
- if(bit_depth===10&&previousDepth===8)sourceValues=Number($('sources').value)===1?[0,1,0,0,0]:[...presets.balanced];
+ if(bit_depth===10&&previousDepth===8){
+  const hdr=Math.ceil(sourceValues[0]/2);
+  sourceValues[0]-=hdr;sourceValues[1]+=hdr;
+ }
  if(chroma==='422'&&!sourceValues[2])sourceValues[2]=Math.min(4,Math.max(1,Math.round(Number($('sources').value)/8)));
  previousDepth=bit_depth;
  syncCounts();update();
 });
 document.querySelectorAll('.fields input,.fields select').forEach(input=>{
  if(input.id!=='mode')input.addEventListener('input',update);
+});
+$('fps').addEventListener('input',()=>{
+ $('browser-ring-size').value=Number($('fps').value)<=30?6:9;update();
 });
 $('sources').addEventListener('focus',()=>{resizeValues=[...sourceValues]});
 $('sources').addEventListener('blur',()=>{resizeValues=null});

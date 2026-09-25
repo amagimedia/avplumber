@@ -71,7 +71,7 @@ export class Application {
           logger,
           allowedDims: this.cfg.allowedDims,
           loadWatchdogMs: this.cfg.loadWatchdogMs,
-          retainedFramePoolSize: this.cfg.dmabufPoolSize,
+          retainedFramePoolSize: windowCfg.ringSize ?? this.cfg.dmabufPoolSize,
         }),
     };
 

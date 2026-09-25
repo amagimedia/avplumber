@@ -66,6 +66,7 @@ from pyplumber.node import (
 
 
 from .color import Color
+from .config import DEFAULT_MAX_COMPOSITOR_LAYERS
 from .backend import mixer_backend
 from .control import source_mask_param
 from . import clipcache
@@ -106,6 +107,7 @@ class MixerGraphBuilder:
         color="sdr",
         wipe_color=None,
         backend=None,
+        max_compositor_layers: int = DEFAULT_MAX_COMPOSITOR_LAYERS,
     ):
         if switch_margin_ms < 0:
             raise ValueError("switch_margin_ms must be >= 0")
@@ -126,6 +128,7 @@ class MixerGraphBuilder:
         self.cache_wipes_mb = cache_wipes_mb
         self.defer_initial_routes = defer_initial_routes
         self.latency_ms = latency_ms
+        self.max_compositor_layers = max_compositor_layers
         self.working_format = working_format
         self.color = Color.parse(color)
         self.color.validate_format(working_format)
@@ -604,6 +607,7 @@ class MixerGraphBuilder:
                 "width": self.canvas_w,
                 "height": self.canvas_h,
                 "sw_format": self.working_format,
+                "max_layers": self.max_compositor_layers,
                 "color": self.color.transfer,
                 "fps": self._fps_str(),
                 **timing,
@@ -764,6 +768,7 @@ class MixerGraphBuilder:
             "dst": self._e("wipe_overlay_out"),
             "hwaccel": self.hwaccel,
             "width": W, "height": H, "sw_format": self.working_format,
+            "max_layers": self.max_compositor_layers,
             "color": self.color.transfer, "fps": fps_str,
             "layers": [{"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H},
                        {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H, "z": 1, "blend": True}],

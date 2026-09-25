@@ -235,7 +235,8 @@ function renderAux(state) {
   $("aux-slots").replaceChildren(...aux.scenes.map((scene, i) => {
     const cell = document.createElement("div"), button = document.createElement("button"), clear = document.createElement("button");
     button.textContent = `M${i + 1} · ${scene || "empty"}`;
-    button.title = aux.suspended ? "Aux suspended; assign a scene to resume" : "Click, then choose a scene";
+    button.title = aux.composition_error || (aux.composition_pending ? "Preparing new sources; current multiview stays live" :
+      aux.suspended ? "Aux suspended; assign a scene to resume" : "Click, then choose a scene");
     button.setAttribute("aria-pressed", String(armedSlot === i));
     button.onclick = () => { armedSlot = armedSlot === i ? null : i; renderAux(state); };
     clear.textContent = "×"; clear.title = `Clear M${i+1}`;
@@ -400,7 +401,7 @@ async function refresh() {
     }
     const sourceCounts = state.settings?.source_counts;
     if (sourceCounts) {
-      $("counts").textContent += ` (${sourceCounts.video} NVDEC · ${sourceCounts.browser} browser · ${sourceCounts.v210} raw 422)`;
+      $("counts").textContent += ` (${[[sourceCounts.video, "NVDEC"], [sourceCounts.browser, "browser"], [sourceCounts.v210, "raw 422"], [sourceCounts.nv12, "raw SDR 420"], [sourceCounts.p010, "raw HDR 420"]].filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`).join(" · ")})`;
     }
     if (!selected || !scenes.some((scene) => scene.id === selected)) selected = pvw || pgm;
     applySettings(state.settings || {});
@@ -411,7 +412,7 @@ async function refresh() {
     renderScenes();
     renderAux(state);
   } catch (exc) {
-    $("conn").textContent = `no mixer: ${exc.message || exc}`;
+    $("conn").textContent = exc.message || String(exc);
     $("conn").classList.add("bad");
     $("conn").hidden = false;
   } finally {

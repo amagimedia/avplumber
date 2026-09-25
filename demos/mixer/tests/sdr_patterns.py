@@ -24,10 +24,13 @@ GENERATORS = {
 
 def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, seconds: int,
            encoder: str, ffmpeg: str) -> pathlib.Path:
-    out = directory / f"{name}.mp4"
+    raw = encoder == "rawvideo"
+    out = directory / f"{name}.{'nv12' if raw else 'mp4'}"
     source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps}"
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, "-t", str(seconds),
-                    "-c:v", encoder, "-b:v", "12M", "-maxrate", "16M", "-g", str(fps), "-pix_fmt", "yuv420p", str(out)],
+                    "-c:v", encoder,
+                    *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
+                      ["-b:v", "12M", "-maxrate", "16M", "-g", str(fps), "-pix_fmt", "yuv420p"]), str(out)],
                    check=True)
     return out
 

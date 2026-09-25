@@ -17,6 +17,8 @@ import urllib.error
 import urllib.request
 from typing import List, Tuple
 
+from .config import default_browser_ring_size
+
 SCHEME = "dmabuf://"
 
 
@@ -34,12 +36,14 @@ def window_id(url: str) -> str:
 def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height: int, fps: int,
                             drm_hwaccel: str | None, cuda_hwaccel: str, source_group: str,
                             processing_group: str, hold: bool = False,
-                            preserve_alpha: bool = False) -> Tuple[list, str]:
+                            preserve_alpha: bool = False, browser_ring_size: int | None = None) -> Tuple[list, str]:
     """Return the node list and the final CUDA edge for one browser socket.
 
     With *hold*, a ``repeat_last_frame`` node re-emits the last frame at *fps*
     while the page is not painting, so static pages keep feeding the mixer.
     *preserve_alpha* retains alpha-bearing DRM formats for blended scene items."""
+    if browser_ring_size is None:
+        browser_ring_size = default_browser_ring_size(fps)
     drm_edge, assumed_edge, raw_edge, smooth_edge, cuda_edge = (
         f"{prefix}_{s}" for s in ("drm", "assumed", "cuda_raw", "cuda_smooth", "cuda"))
     source = {"socket": socket, "dst": drm_edge, "group": source_group, "name": f"{prefix}_receive",
@@ -52,12 +56,15 @@ def dmabuf_cuda_input_nodes(api, *, prefix: str, socket: str, width: int, height
                                "real_pixel_format": "rgba" if preserve_alpha else "rgb0", "src": drm_edge, "dst": assumed_edge,
                                "group": processing_group, "auto_restart": "panic"}),
         # zero_copy: the compositor samples the mapped DMA-BUF directly; no 8 MB copy per frame.
-        # Match the browser's 11-frame ring and expire retired imports promptly.
-        # Frames in flight retain their own import reference after cache eviction.
+        # Keep the recycling allocation pool registered, including live frames.
+        # The ring bounds outstanding frames, not retired Chromium allocations:
+        # expire idle imports after several ring cycles instead of pinning them
+        # indefinitely. Lookups refresh returning allocations before expiry.
         api.DrmPrimeToCuda({"hwaccel": cuda_hwaccel, "drop_alpha": not preserve_alpha, "src": assumed_edge,
                             "dst": raw_edge, "group": processing_group, "name": f"{prefix}_to_cuda",
                             "auto_restart": "group", "zero_copy": True,
-                            "max_imports": 11, "import_ttl_ms": 250}),
+                            "max_imports": max(32, browser_ring_size),
+                            "import_ttl_ms": max(1000, (4000 * browser_ring_size + fps - 1) // fps)}),
         # Number paints on the canvas grid instead of rounding each arrival time to it.
         # A browser paints on its own clock, arriving up to ~7 ms early or late; rounding
         # an arrival near the middle of a slot flipped between two slots, putting two
@@ -102,9 +109,12 @@ def rest_request(base_url: str, method: str, path: str, body=None):
 
 
 def open_browser_windows(base_url: str, ids: List[str], page_url: str, width: int, height: int,
-                         fps: int) -> None:
+                         fps: int, browser_ring_size: int | None = None) -> None:
     """Ensure the named windows match the requested page and capture settings."""
-    open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps}
+    if browser_ring_size is None:
+        browser_ring_size = default_browser_ring_size(fps)
+    open_windows(base_url, [{"id": name, "url": page_url, "width": width, "height": height, "fps": fps,
+                            "ringSize": browser_ring_size}
                             for name in ids])
 
 
@@ -121,7 +131,9 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
             continue
         if current:
             rest_request(base_url, "POST", "/window/close", {"id": spec["id"]})
-        rest_request(base_url, "POST", "/window/open", wanted)
+        opened = rest_request(base_url, "POST", "/window/open", wanted)
+        if "ringSize" in wanted and (opened or {}).get("ringSize") != wanted["ringSize"]:
+            raise RuntimeError("Browser service did not apply ringSize; update dma-browser before starting the mixer")
 
 
 def refresh_windows(base_url: str, ids: List[str]) -> None:

@@ -54,9 +54,11 @@ def test_aux_mask_addresses_high_source_and_program_pads(cfg, count):
 
 
 def test_capacity_reserves_any_preview(cfg):
-    validate_assignments(cfg, ["grid64", "grid64", *([None] * 6)])
-    with pytest.raises(ConfigError, match="257"):
-        validate_assignments(cfg, ["grid64"] * 3 + [None] * 5)
+    cfg = replace(cfg, max_compositor_layers=512, scenes=(*cfg.scenes, Scene("grid63", cfg.scenes[-1].items[:-1])))
+    assignments = ["grid64"] * 6 + ["grid63", None]
+    assert len(composition(cfg, assignments, "grid64")["layers"]) == 512
+    with pytest.raises(ConfigError, match="513"):
+        validate_assignments(cfg, assignments[:-1] + ["full"])
 
 
 def test_bus_validation_and_distinct_outputs(cfg):

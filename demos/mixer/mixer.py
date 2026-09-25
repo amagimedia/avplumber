@@ -19,7 +19,7 @@ from pyplumber.mixer import clipcache
 from pyplumber.mixer import config as mixer_config
 from pyplumber.mixer.dmabuf_inputs import (dmabuf_cuda_input_nodes, is_dmabuf_url, open_browser_windows,
                                     open_windows, refresh_windows, wait_for_sockets, window_id)
-from pyplumber.mixer.inputs import build_input, build_v210_input
+from pyplumber.mixer.inputs import build_input, build_v210_input, build_raw420_input
 from pyplumber.mixer.janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE,
                            JanusVideoConfig, RtcpFeedbackGroup, add_nodes, build_janus_output)
 
@@ -90,6 +90,12 @@ class GraphOptions:
     dmabuf_size: tuple[int, int] = (1280, 720)
     dmabuf_open: str | None = None       # page URL: open the named windows before building
     dmabuf_rest: str = "http://127.0.0.1:9009"
+    browser_ring_size: int | None = None
+    max_compositor_layers: int | None = None
+
+    def __post_init__(self):
+        if self.browser_ring_size is None:
+            object.__setattr__(self, "browser_ring_size", mixer_config.default_browser_ring_size(self.fps))
 
     @property
     def dmabuf_inputs(self) -> list[str]:
@@ -123,6 +129,10 @@ class GraphOptions:
             raise ValueError("keyframe_min_interval_ms must be a non-negative integer")
         if any(v <= 0 for v in self.dmabuf_size):
             raise ValueError("--dmabuf-size must be WxH with positive numbers")
+        if type(self.browser_ring_size) is not int or not 1 <= self.browser_ring_size <= 64:
+            raise ValueError("--browser-ring-size must be an integer from 1 to 64")
+        if self.max_compositor_layers is not None and (type(self.max_compositor_layers) is not int or not 1 <= self.max_compositor_layers <= 2_147_483_647):
+            raise ValueError("--max-compositor-layers must be a positive 32-bit integer")
         ids = self.dmabuf_inputs
         if len(ids) != len(set(ids)):
             raise ValueError("dmabuf window ids must be unique")
@@ -369,6 +379,7 @@ def _make_builder(avp, api, options, *, canvas, fps, working_format, color="sdr"
     return api.MixerGraphBuilder(
         avp, name=MIXER_NAME, canvas=canvas, fps=(fps, FPS_DEN),
         latency_ms=options.mixer_latency_ms, hwaccel=HWACCEL, enable_wipe=True,
+        max_compositor_layers=options.max_compositor_layers or mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS,
         defer_initial_routes=True, defer_output=True,
         keyframe_node=JANUS_KEYFRAME_NODE if options.janus_output else None,
         cache_wipes_mb=options.wipe_cache_mb or None, working_format=working_format, color=color,
@@ -388,7 +399,7 @@ def _build_input(
             api, prefix=f"input_{index}",
             socket=f"{options.dmabuf_socket_dir}/{window_id(url)}.sock",
             width=width, height=height, fps=fps, drm_hwaccel=None, cuda_hwaccel=HWACCEL,
-            source_group=group, processing_group=group, hold=True)
+            source_group=group, processing_group=group, hold=True, browser_ring_size=options.browser_ring_size)
         for node in nodes:
             avp.addNode(node)
     else:
@@ -570,13 +581,14 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
     options.validate()
     api = api or load_avp_api()
     if options.config:
-        return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(options.config)), api)
+        return _build_from_config(options, mixer_config.with_probed_sizes(mixer_config.load(
+            options.config, max_compositor_layers=options.max_compositor_layers)), api)
     dmabuf_ids = options.dmabuf_inputs
     if dmabuf_ids:
         if options.dmabuf_open:
             width, height = options.dmabuf_size
             open_browser_windows(options.dmabuf_rest, dmabuf_ids, options.dmabuf_open,
-                                 width, height, options.fps)
+                                 width, height, options.fps, options.browser_ring_size)
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{name}.sock" for name in dmabuf_ids],
                          options.preheat_timeout_sec)
 
@@ -600,13 +612,14 @@ def build_application(options: GraphOptions, api=None) -> MixerApplication:
 
 def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", api) -> MixerApplication:
     """Sources, wipes and scenes from a JSON document; one chain per source."""
-    options = replace(options, fps=cfg.fps)   # the document owns the frame rate, outputs included
+    options = replace(options, fps=cfg.fps, max_compositor_layers=cfg.max_compositor_layers)
     if options.mixer_latency_ms is None and cfg.latency_ms is not None:
         options = replace(options, mixer_latency_ms=cfg.latency_ms)
     browsers = [s for s in cfg.sources if s.kind == "browser"]
     if browsers:
         open_windows(options.dmabuf_rest, [{"id": s.id, "url": s.location, "width": s.width,
-                                            "height": s.height, "fps": s.fps or cfg.fps} for s in browsers])
+                                            "height": s.height, "fps": s.fps or cfg.fps,
+                                            "ringSize": cfg.browser_ring_size} for s in browsers])
         wait_for_sockets([f"{options.dmabuf_socket_dir}/{s.id}.sock" for s in browsers],
                          options.preheat_timeout_sec)
 
@@ -626,7 +639,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 api, prefix=f"input_{index}", socket=f"{options.dmabuf_socket_dir}/{source.id}.sock",
                 width=source.width, height=source.height, fps=cfg.fps, drm_hwaccel=None,
                 cuda_hwaccel=HWACCEL, source_group=group, processing_group=group, hold=True,
-                preserve_alpha=source.id in blended_sources)
+                preserve_alpha=source.id in blended_sources, browser_ring_size=cfg.browser_ring_size)
             for node in nodes:
                 avp.addNode(node)
         elif source.kind == "v210":
@@ -637,6 +650,11 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop,
                 color=source.color.tags)
+        elif source.kind in ("nv12", "p010"):
+            edge = build_raw420_input(
+                avp, api, str(index), source.location, width=source.width, height=source.height,
+                pixel_format="p010le" if source.kind == "p010" else "nv12",
+                group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
         else:
             edge = build_input(avp, api, str(index), source.location, group=group, fps=cfg.fps,
                                fps_den=FPS_DEN, hwaccel=HWACCEL, loop=source.loop)
@@ -656,7 +674,7 @@ def _build_from_config(options: GraphOptions, cfg: "mixer_config.MixerConfig", a
                              color=None if source.filter_graph else source.color,
                              packed_rgb=source.kind == "browser",
                              pixel_format=source.filter_output_format or
-                             ("p210le" if source.kind == "v210" else None))
+                             {"v210": "p210le", "nv12": "nv12", "p010": "p010le"}.get(source.kind))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")
@@ -712,6 +730,7 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         help="compositor/transition sw_format; p210le keeps 10-bit 4:2:2 on the canvas "
              "(renditions subsample to P010/NV12 for NVENC automatically)")
     add("--mixer-latency-ms", type=float, help="Native playout buffer (default: two output frames)")
+    add("--max-compositor-layers", type=int, help="Layer budget per compositor; overrides JSON max_compositor_layers (default: 256)")
     add("--loop-inputs", action="store_true")
     add("--remote-control-port", type=int, default=7777)
     add("--dmabuf-socket-dir", default="/tmp/dma-page",
@@ -721,6 +740,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--dmabuf-open", metavar="URL",
         help="open the dmabuf:// windows with this page through the dma-browser REST API")
     add("--dmabuf-rest", default="http://127.0.0.1:9009")
+    add("--browser-ring-size", type=int,
+        help="maximum outstanding DMA-BUF frames per browser (default 6 at 25/30 fps, 9 otherwise; JSON config owns this in --config mode)")
     add("--janus-output", action="store_true", help="Publish the video-only program to Janus over RTP")
     add("--janus-host", default=JANUS_DEFAULT_HOST)
     add("--janus-video-port", type=int, default=JANUS_DEFAULT_VIDEO_PORT)
